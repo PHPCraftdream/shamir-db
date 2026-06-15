@@ -21,6 +21,10 @@ pub struct MemSink {
     // an `.await`.
     frames: Mutex<Vec<Vec<u8>>>,
     next_seq: AtomicU64,
+    /// Highest `commit_version` ever appended (monotonic `fetch_max`).
+    /// Mirrors [`WalSegment::max_committed`] so the in-RAM sink carries the
+    /// same watermark for future frame-level GC (F6 truncation parity, I7).
+    max_committed: AtomicU64,
 }
 
 impl MemSink {
@@ -28,7 +32,13 @@ impl MemSink {
         Self {
             frames: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
+            max_committed: AtomicU64::new(0),
         }
+    }
+
+    /// Highest `commit_version` ever appended to this in-RAM sink.
+    pub fn max_committed(&self) -> u64 {
+        self.max_committed.load(Ordering::Acquire)
     }
 }
 
@@ -54,10 +64,11 @@ impl WalSink {
         Self::Mem(MemSink::default())
     }
 
-    pub async fn append_batch(&self, payloads: Vec<Vec<u8>>) -> DbResult<u64> {
+    pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
         match self {
-            Self::File(seg) => seg.append_batch(payloads).await,
+            Self::File(seg) => seg.append_batch(payloads, max_version).await,
             Self::Mem(m) => {
+                m.max_committed.fetch_max(max_version, Ordering::AcqRel);
                 if payloads.is_empty() {
                     return Ok(m.next_seq.load(Ordering::Acquire));
                 }
@@ -76,6 +87,15 @@ impl WalSink {
         match self {
             Self::File(seg) => seg.sync().await,
             Self::Mem(_) => Ok(()),
+        }
+    }
+
+    /// Highest `commit_version` ever appended through this sink (monotonic).
+    /// Drives F6 segment-level / frame-level truncation.
+    pub fn max_committed(&self) -> u64 {
+        match self {
+            Self::File(seg) => seg.max_committed(),
+            Self::Mem(m) => m.max_committed(),
         }
     }
 

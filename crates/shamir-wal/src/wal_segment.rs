@@ -39,6 +39,17 @@ pub struct WalSegment {
     path: PathBuf,
     file: Arc<Mutex<File>>,
     next_seq: AtomicU64,
+    /// Highest `commit_version` ever appended to this segment
+    /// (`fetch_max` on every `append_batch`). Drives segment-level
+    /// truncation: a sealed segment whose `max_committed <= durable_watermark`
+    /// is wholly durable in history and may be deleted (F6). Init 0.
+    max_committed: AtomicU64,
+    /// Running count of bytes written through `append_batch` (frame bytes
+    /// only). Cheap rotation trigger — avoids a `metadata()` syscall on every
+    /// append. Tracks exactly what we wrote; matches the on-disk size for a
+    /// freshly created segment (does not account for a pre-existing file's
+    /// bytes, which is fine — rotation only needs a monotonic growth signal).
+    bytes_written: AtomicU64,
 }
 
 #[allow(dead_code)]
@@ -46,13 +57,20 @@ impl WalSegment {
     /// Open (creating if absent) an append-only segment at `path`.
     pub async fn open(path: PathBuf) -> DbResult<Self> {
         let p = path.clone();
-        let file = spawn_blocking(move || -> DbResult<File> {
-            OpenOptions::new()
+        let (file, existing_len) = spawn_blocking(move || -> DbResult<(File, u64)> {
+            let f = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .append(true)
                 .open(&p)
-                .map_err(|e| DbError::Storage(format!("WalSegment open {p:?}: {e}")))
+                .map_err(|e| DbError::Storage(format!("WalSegment open {p:?}: {e}")))?;
+            // Seed bytes_written from the on-disk size so a reopened (non-empty)
+            // segment reports its true length for rotation decisions.
+            let len = f
+                .metadata()
+                .map_err(|e| DbError::Storage(format!("WalSegment open metadata {p:?}: {e}")))?
+                .len();
+            Ok((f, len))
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
@@ -60,6 +78,8 @@ impl WalSegment {
             path,
             file: Arc::new(Mutex::new(file)),
             next_seq: AtomicU64::new(0),
+            max_committed: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(existing_len),
         })
     }
 
@@ -67,14 +87,18 @@ impl WalSegment {
     /// flushing to the OS (level 2) but NOT fsync'ing. Returns the seq
     /// assigned to the LAST entry. Batching amortises the spawn_blocking
     /// hop across all concurrent committers funnelled by the leader.
-    pub async fn append_batch(&self, payloads: Vec<Vec<u8>>) -> DbResult<u64> {
+    pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
         if payloads.is_empty() {
+            // Still fold the version in — an empty batch carrying a watermark
+            // must not regress max_committed (monotonic, fetch_max).
+            self.max_committed.fetch_max(max_version, Ordering::AcqRel);
             return Ok(self.next_seq.load(Ordering::Acquire));
         }
         let n = payloads.len() as u64;
         let last_seq = self.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
+        self.max_committed.fetch_max(max_version, Ordering::AcqRel);
         let file = Arc::clone(&self.file);
-        spawn_blocking(move || -> DbResult<()> {
+        let frame_bytes = spawn_blocking(move || -> DbResult<u64> {
             // Coalesce all frames into one buffer → a single write() syscall
             // instead of 3N (len header + payload + crc per entry).
             // Frame format is unchanged: [u32 len LE][payload][u32 crc32 LE].
@@ -92,11 +116,24 @@ impl WalSegment {
             // Level 2 (OS page cache) is reached by write_all itself — the
             // write() syscall copies data into kernel buffers. std::fs::File
             // is unbuffered, so there is no userspace buffer to flush.
-            Ok(())
+            Ok(buf.len() as u64)
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
+        self.bytes_written.fetch_add(frame_bytes, Ordering::AcqRel);
         Ok(last_seq)
+    }
+
+    /// Highest `commit_version` ever appended to this segment.
+    pub fn max_committed(&self) -> u64 {
+        self.max_committed.load(Ordering::Acquire)
+    }
+
+    /// Approximate on-disk size in bytes (frame bytes written, seeded from the
+    /// file length at open). Read from an atomic counter — no syscall on the
+    /// rotation hot path.
+    pub fn approx_len_bytes(&self) -> u64 {
+        self.bytes_written.load(Ordering::Acquire)
     }
 
     /// fsync the segment (level 3). Uses `sync_all()` (not `sync_data()`)

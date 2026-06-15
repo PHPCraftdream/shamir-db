@@ -66,4 +66,42 @@ pub mod instance_defaults {
     /// entries retained before truncation (recovery-time cost, not
     /// correctness).
     pub const INTERNER_CHECKPOINT_INTERVAL: u64 = 64;
+
+    /// F6 — maximum size of a single WAL segment file before it is sealed
+    /// and a fresh active segment is rotated in.
+    ///
+    /// The WAL is a directory of numbered segments (`NNNNNNNN.wal`); the
+    /// active segment accepts appends until it crosses this threshold, at
+    /// which point it is sealed (closed, replay/delete-only) and a new
+    /// active segment opens. Truncation deletes whole sealed segments once
+    /// every record in them is durable in history
+    /// (`max_commit_version(S) <= durable_watermark`).
+    ///
+    /// Trade-off: larger = rotation is rarer (fewer files, less open/seal
+    /// churn) but the truncation granule is coarser — a segment is only
+    /// reclaimable once its *highest* version drains, so a big segment pins
+    /// more disk for longer. Smaller = finer truncation (disk released
+    /// sooner) at the cost of more files and more frequent rotation. Start
+    /// at 8 MiB — large enough that rotation is infrequent on typical
+    /// workloads. See `docs/perf/f6-subplan.md` §4.
+    ///
+    /// Consumed by `SegmentSet::open` at the call-site (F6b wires
+    /// `repo_instance`); `shamir-wal` itself takes the bound as a parameter
+    /// to avoid a dependency on this crate.
+    pub const WAL_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// D2 P1e — soft backpressure threshold on the undrained version gap
+    /// (`last_committed() - durable_watermark()`).
+    ///
+    /// After the cutover the commit ack-path writes ONLY the in-memory overlay;
+    /// the value becomes durable in `history` only after the background drainer
+    /// replays its WAL entry. Under sustained write pressure faster than the
+    /// disk can drain, the overlay + inflight WAL tail grow unbounded. When the
+    /// gap exceeds this threshold, the committer applies a soft async brake:
+    /// it wakes the drainer and parks on the gate's durable-progress signal
+    /// until the gap falls back below the low-watermark (`/2`, hysteresis).
+    /// This is a YIELD, never a lock — committers pay latency ONLY under
+    /// pressure. Higher = more RAM headroom before braking; lower = tighter
+    /// overlay bound at the cost of earlier latency under bursts.
+    pub const MAX_UNDRAINED_VERSIONS: u64 = 10_000;
 }

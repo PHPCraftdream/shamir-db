@@ -69,8 +69,9 @@ impl RepoWalManager {
         entry: WalEntryV2,
         durability: WalDurability,
     ) -> DbResult<()> {
+        let commit_version = entry.commit_version;
         let encoded = entry.encode()?;
-        self.group.append(encoded, durability).await
+        self.group.append(encoded, commit_version, durability).await
     }
 
     /// Batch WAL begin — appends each entry through the group at the
@@ -82,8 +83,11 @@ impl RepoWalManager {
         durability: WalDurability,
     ) -> DbResult<()> {
         for entry in entries {
+            let commit_version = entry.commit_version;
             let encoded = entry.encode()?;
-            self.group.append(encoded, durability).await?;
+            self.group
+                .append(encoded, commit_version, durability)
+                .await?;
         }
         Ok(())
     }

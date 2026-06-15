@@ -37,8 +37,9 @@ async fn append_then_replay_roundtrips() {
     let entries = [entry(1, 10), entry(2, 20), entry(3, 30)];
     let payloads: Vec<Vec<u8>> = entries.iter().map(|e| e.encode().unwrap()).collect();
 
-    let last_seq = seg.append_batch(payloads).await.unwrap();
+    let last_seq = seg.append_batch(payloads, 30).await.unwrap();
     assert_eq!(last_seq, 2); // seqs 0,1,2
+    assert_eq!(seg.max_committed(), 30);
 
     let replayed = seg.replay().await.unwrap();
     assert_eq!(replayed.len(), 3);
@@ -56,7 +57,7 @@ async fn replay_stops_at_torn_tail() {
 
     let entries = [entry(1, 10), entry(2, 20)];
     let payloads: Vec<Vec<u8>> = entries.iter().map(|e| e.encode().unwrap()).collect();
-    seg.append_batch(payloads).await.unwrap();
+    seg.append_batch(payloads, 20).await.unwrap();
 
     // Append a torn frame: a len header claiming 999 bytes follow, but
     // only a couple of bytes are actually written.
@@ -80,7 +81,9 @@ async fn crc_detects_corruption() {
     let seg = WalSegment::open(path.clone()).await.unwrap();
 
     let e = entry(1, 10);
-    seg.append_batch(vec![e.encode().unwrap()]).await.unwrap();
+    seg.append_batch(vec![e.encode().unwrap()], 10)
+        .await
+        .unwrap();
 
     // Flip a byte inside the payload region (offset 4 + something: skip
     // the len header at [0..4], the magic at [4..8], hit version/body).
@@ -101,7 +104,7 @@ async fn corruption_in_first_frame_stops_replay_entirely() {
 
     let entries = [entry(1, 10), entry(2, 20)];
     let payloads: Vec<Vec<u8>> = entries.iter().map(|e| e.encode().unwrap()).collect();
-    seg.append_batch(payloads).await.unwrap();
+    seg.append_batch(payloads, 20).await.unwrap();
 
     // Corrupt the FIRST frame's payload (flip a byte past the 4-byte len header).
     let mut bytes = std::fs::read(&path).unwrap();
@@ -122,7 +125,7 @@ async fn sync_after_append_succeeds() {
     let dir = TempDir::new().unwrap();
     let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
 
-    seg.append_batch(vec![entry(1, 10).encode().unwrap()])
+    seg.append_batch(vec![entry(1, 10).encode().unwrap()], 10)
         .await
         .unwrap();
     seg.sync().await.unwrap();

@@ -38,7 +38,7 @@ async fn buffered_append_durable() {
     let sink = Arc::new(WalSink::File(seg));
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
-    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
+    gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -54,7 +54,7 @@ async fn synced_append_durable() {
     let sink = Arc::new(WalSink::File(seg));
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
-    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Synced)
+    gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Synced)
         .await
         .unwrap();
 
@@ -81,7 +81,7 @@ async fn concurrent_mixed_tiers_all_durable() {
             WalDurability::Synced
         };
         handles.push(tokio::spawn(async move {
-            gc.append(entry(i, i * 10).encode().unwrap(), tier)
+            gc.append(entry(i, i * 10).encode().unwrap(), i * 10, tier)
                 .await
                 .unwrap();
         }));
@@ -108,9 +108,13 @@ async fn synced_fsyncs_are_batched() {
     for i in 1..=32u64 {
         let gc = Arc::clone(&gc);
         handles.push(tokio::spawn(async move {
-            gc.append(entry(i, i * 10).encode().unwrap(), WalDurability::Synced)
-                .await
-                .unwrap();
+            gc.append(
+                entry(i, i * 10).encode().unwrap(),
+                i * 10,
+                WalDurability::Synced,
+            )
+            .await
+            .unwrap();
         }));
     }
     for h in handles {
@@ -143,9 +147,13 @@ async fn buffered_only_window_issues_no_fsync() {
     for i in 1..=16u64 {
         let gc = Arc::clone(&gc);
         handles.push(tokio::spawn(async move {
-            gc.append(entry(i, i * 10).encode().unwrap(), WalDurability::Buffered)
-                .await
-                .unwrap();
+            gc.append(
+                entry(i, i * 10).encode().unwrap(),
+                i * 10,
+                WalDurability::Buffered,
+            )
+            .await
+            .unwrap();
         }));
     }
     for h in handles {
@@ -162,7 +170,7 @@ async fn mem_append_returns_ok_and_replays() {
     let sink = Arc::new(WalSink::mem());
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
-    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
+    gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -178,7 +186,7 @@ async fn mem_sync_returns_ok() {
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     // Mem sync is a no-op; a Synced append still succeeds.
-    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Synced)
+    gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Synced)
         .await
         .unwrap();
 
@@ -198,7 +206,7 @@ async fn background_fsync_fires_for_buffered() {
     gc.spawn_background_fsync(Duration::from_millis(30));
 
     // Append one Buffered entry (no inline fsync).
-    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
+    gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
         .await
         .unwrap();
 
