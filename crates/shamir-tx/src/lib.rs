@@ -33,6 +33,7 @@
 #[cfg(test)]
 mod tests;
 
+pub mod cell_reservation_guard;
 pub mod changefeed;
 pub mod completion_tracker;
 pub mod id_remap;
@@ -52,6 +53,7 @@ pub mod version_guard;
 pub mod version_provider;
 pub mod versioned_overlay;
 
+pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
     nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, JournalRead,
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,

@@ -1,6 +1,7 @@
 mod helpers;
 mod test_stores;
 
+pub mod cell_reservation_tests;
 pub mod crud_tests;
 pub mod error_tests;
 pub mod gc_tests;
