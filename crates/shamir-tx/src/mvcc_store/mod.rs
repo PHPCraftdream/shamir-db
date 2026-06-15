@@ -250,6 +250,23 @@ impl MvccStore {
         self.test_now_millis.store(ms, Ordering::Release);
     }
 
+    /// F6b (I2): force the durable `history` version-log to disk.
+    ///
+    /// Narrow durability seam for the truncation fsync-gate: before the
+    /// drainer deletes a sealed WAL segment, every record in that segment
+    /// must be `fsync`'d into `history` (not merely written to the page
+    /// cache), else a power-loss after the unlink but before the page-cache
+    /// flush would lose data (I2, power-loss / level-3). `mark_durable` only
+    /// means "written to history"; this makes that write physically durable.
+    ///
+    /// Flushes ONLY this store's `history` — it does NOT drain the WAL
+    /// (calling `drain_all` from the drainer would recurse). The drainer
+    /// gates this on `wal.has_truncatable(durable)`, so it fires only on a
+    /// segment boundary, never per-commit (no `fsync`-on-commit regression).
+    pub async fn flush_history(&self) -> DbResult<()> {
+        self.history.flush().await
+    }
+
     /// T4-purge: the store's current wall-clock millis (test-overridable
     /// via [`Self::set_test_now`]). Exposed so the PurgeHistory executor
     /// can resolve `OlderThanAge { age_secs }` against the SAME clock

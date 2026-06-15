@@ -71,6 +71,28 @@ const REPO_NAME: &str = "crash_repo";
 /// existing single-table tests are unaffected.
 const CHILD_SENTINEL_MULTI: &str = "SHAMIR_TEST_CRASH_CHILD_MULTI";
 
+/// F6c. Env sentinel: when present the child runs the TRUNCATION scenario —
+/// commit many small records (rolling several WAL segments under a tiny
+/// segment cap), then `drain_all`, which replays each into `history`,
+/// advances the durable watermark over the sealed segments, and fires the
+/// truncation crash seam (`pre_truncate` / `post_truncate` in the drainer,
+/// or `wal_mid_delete` inside `SegmentSet::truncate_below`).
+const CHILD_SENTINEL_TRUNC: &str = "SHAMIR_TEST_CRASH_CHILD_TRUNC";
+
+/// F6c. Env var carrying the small WAL segment cap (bytes) parent → child so
+/// `repo_instance::repo_wal` rolls real segments and truncation has sealed
+/// segments to delete. Read by `repo_instance` directly from this name.
+const SEG_MAX_BYTES_ENV: &str = "SHAMIR_WAL_SEGMENT_MAX_BYTES";
+
+/// Number of records the truncation child commits. Large enough (with the
+/// tiny cap below) to seal MULTIPLE segments so `wal_mid_delete` has >= 2
+/// truncatable segments to delete between.
+const TRUNC_RECORDS: usize = 40;
+
+/// Tiny segment cap (bytes) for the truncation scenario — forces a seal
+/// roughly every record so 40 commits produce many sealed segments.
+const TRUNC_SEG_CAP: &str = "4096";
+
 // ---------------------------------------------------------------------------
 // Shared scenario helpers (used by both the child and, on the read side,
 // the parent).
@@ -458,6 +480,140 @@ fn child_entrypoint_multi_table() {
     rt.block_on(run_child_scenario_multi_table(path));
 }
 
+// ---------------------------------------------------------------------------
+// F6c TRUNCATION crash scenarios. Commit many small records under a tiny
+// segment cap, then `drain_all` — the drainer truncates the WAL and the
+// requested seam (`pre_truncate` / `post_truncate` / `wal_mid_delete`) aborts
+// the process mid-truncation. Recovery from the on-disk image must lose
+// NOTHING: every record that reached `history` survives, and the truncation
+// itself never discards undurable data (I1/I2/I6).
+// ---------------------------------------------------------------------------
+
+/// The truncation child: commit `TRUNC_RECORDS` single-field records (each a
+/// separate tx so each gets its own `commit_version`), then `drain_all`. With
+/// the tiny `SHAMIR_WAL_SEGMENT_MAX_BYTES` cap inherited from the parent, the
+/// WAL rolls many sealed segments; `drain_all` replays them all into `history`,
+/// advances `durable_watermark` past them, and the truncation crash seam fires.
+///
+/// On a successful (non-crashing) return — only if the seam label never
+/// matched — the child exits 0 and the parent's `!status.success()` flags it.
+async fn run_child_scenario_trunc(path: PathBuf) {
+    let repo = open_repo(&path).await;
+    let tbl = repo.get_table(TABLE).await.unwrap();
+    let body_id = field_id(&tbl, "body").await;
+    let wal = repo.repo_wal().await.unwrap();
+    let sidecar = path.with_extension("childcount");
+
+    // The truncation crash can fire from EITHER the auto-spawned background
+    // drainer (woken on every `commit_tx`, draining + truncating concurrently)
+    // OR our explicit `drain_all` below — whichever first crosses a truncation
+    // boundary at the armed seam. So the zero-loss oracle cannot be a fixed N:
+    // it is "how many records were DURABLY committed when the process died".
+    //
+    // After each `commit_tx` returns, that record is in the WAL page cache
+    // (Buffered tier) and, after `sync_wal`, fsync'd. We then write+fsync the
+    // running committed count to a sidecar BEFORE the next commit. So at any
+    // abort point the sidecar holds exactly the set of records that are durable
+    // (in `history` if already drained, in the synced WAL otherwise). The
+    // parent asserts recovery reconstructs EXACTLY that many — true zero loss.
+    let write_sidecar = |n: usize| {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&sidecar).expect("create sidecar");
+        write!(f, "{n}").expect("write sidecar");
+        f.sync_all().expect("fsync sidecar");
+    };
+    write_sidecar(0);
+
+    for i in 0..TRUNC_RECORDS {
+        let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        tbl.insert_tx(
+            &text_record(body_id, &format!("trunc record number {i}")),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+        repo.commit_tx(tx).await.unwrap();
+        drop(guard);
+        // Make the just-committed record fsync-durable in the WAL (the segment
+        // files live OUTSIDE the redb backend, so the commit pipeline's redb
+        // flush does not cover them), then record it as durably committed.
+        wal.sync_wal().await.unwrap();
+        write_sidecar(i + 1);
+    }
+
+    // Final explicit drain — replay every committed entry into `history`,
+    // advance durable to visibility, and truncate the sealed WAL segments. If
+    // the background drainer has not already crashed at the armed seam, this
+    // crosses the boundary and aborts here. If no seam matches, this returns
+    // and the child exits cleanly (the parent's `!status.success()` flags it).
+    let _ = repo.drainer().drain_all(&repo).await;
+}
+
+/// Child entrypoint for the truncation scenario. NO-OP in the parent (sentinel
+/// absent); runs the truncation scenario in the spawned child.
+#[test]
+fn child_entrypoint_trunc() {
+    if std::env::var(CHILD_SENTINEL_TRUNC).is_err() {
+        return;
+    }
+    let path = PathBuf::from(std::env::var(REPO_PATH).expect("child needs REPO_PATH"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    rt.block_on(run_child_scenario_trunc(path));
+}
+
+/// Spawn the truncation child at a given crash seam, passing the tiny segment
+/// cap so the child's repo rolls real segments. Returns the child exit status.
+fn spawn_child_trunc(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+    let exe = std::env::current_exe().expect("current_exe");
+    std::process::Command::new(exe)
+        .args(["--exact", "child_entrypoint_trunc", "--nocapture"])
+        .env(CHILD_SENTINEL_TRUNC, "1")
+        .env(CRASH_AFTER, phase)
+        .env(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP)
+        .env(REPO_PATH, repo_path)
+        .output()
+        .expect("spawn truncation crash child")
+        .status
+}
+
+/// One truncation cycle: spawn a child that commits `TRUNC_RECORDS` and
+/// crashes at `phase` mid-truncation, then reopen the same redb image, recover,
+/// and return `(recovered_records, durably_committed_at_crash)`. The segment
+/// cap is passed to the REOPENED repo too (it must read the same `.shamirwal/`
+/// segment layout). Zero loss ⟺ the two are equal.
+async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo.redb");
+
+    let status = spawn_child_trunc(phase, &repo_path);
+    assert!(
+        !status.success(),
+        "truncation child must die abnormally at seam {phase}; got a clean \
+         exit (status {status:?}) — the crash seam did not fire (not enough \
+         sealed segments to truncate?)"
+    );
+
+    // Reopen with the SAME tiny cap so `SegmentSet::open` reads the survivors.
+    std::env::set_var(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP);
+    // The child's sidecar holds the number of records it had DURABLY committed
+    // (WAL-fsync'd) at the instant it died — the zero-loss oracle.
+    let sidecar = repo_path.with_extension("childcount");
+    let durably_committed: usize = std::fs::read_to_string(&sidecar)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .expect("child must have written the durable-committed sidecar before dying");
+
+    let repo = open_repo(&repo_path).await;
+    let _replayed = repo.recover_v2_inflight().await.expect("recovery");
+    let tbl = repo.get_table(TABLE).await.unwrap();
+    let data = store_record_count(&tbl).await;
+    std::env::remove_var(SEG_MAX_BYTES_ENV);
+    (data, durably_committed)
+}
+
 fn spawn_child_multi_table(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
     let exe = std::env::current_exe().expect("current_exe");
     std::process::Command::new(exe)
@@ -531,5 +687,88 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
         store_record_count(&tbl_b).await,
         1,
         "table B unchanged after second replay (idempotent)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F6c truncation crash matrix. Each test = one subprocess that commits
+// `TRUNC_RECORDS` under a tiny segment cap, drains, and aborts mid-truncation.
+// Recovery from the survivors must reconstruct ALL `TRUNC_RECORDS` (zero loss):
+// the truncation only ever deletes segments whose data is already durable in
+// `history` (I1), and it fsyncs `history` before unlinking (I2), so whatever
+// is gone from the WAL is recoverable from `history`, and whatever the WAL
+// still holds replays idempotently (I6).
+// ---------------------------------------------------------------------------
+
+/// Crash at `pre_truncate` — BEFORE history-flush + any unlink. Every sealed
+/// WAL segment is still on disk; recovery replays all of them and reconstructs
+/// every record. Zero loss.
+#[tokio::test]
+async fn crash_at_pre_truncate_recovers_all() {
+    let (recovered, committed) = trunc_crash_then_recover("pre_truncate").await;
+    assert!(
+        committed >= 1,
+        "the child must have durably committed at least one record before the \
+         pre_truncate crash fired"
+    );
+    // Zero loss: every record the child durably committed survives recovery.
+    // `recovered` may exceed `committed` by at most one — the crash can fire
+    // (from the concurrent background drainer) in the tiny window AFTER a
+    // `commit_tx`+`sync_wal` made record k durable but BEFORE the sidecar was
+    // bumped to k. That extra record is a SURVIVOR, not a loss. The upper bound
+    // forbids fabricated records.
+    assert!(
+        recovered >= committed && recovered <= TRUNC_RECORDS,
+        "pre_truncate: nothing unlinked yet → recovery from the (synced) WAL + \
+         flushed history must lose nothing (recovered {recovered}, durably \
+         committed {committed}, max {TRUNC_RECORDS})"
+    );
+}
+
+/// Crash at `wal_mid_delete` — inside `SegmentSet::truncate_below`, between two
+/// segment unlinks (some sealed segments deleted, some surviving). By I2 the
+/// drainer fsync'd `history` up to the truncation watermark BEFORE unlinking,
+/// so the deleted segments' data is durable in `history`; the survivors replay
+/// idempotently. `SegmentSet::open` on reopen picks up whatever survived.
+/// Zero loss.
+#[tokio::test]
+async fn crash_at_mid_delete_recovers_all() {
+    let (recovered, committed) = trunc_crash_then_recover("wal_mid_delete").await;
+    assert!(
+        committed >= 1,
+        "the child must have durably committed at least one record before the \
+         wal_mid_delete crash fired"
+    );
+    // Zero loss (see `pre_truncate` for the +1 survivor window): the unlinked
+    // segments' data is durable in `history` (I2) and the survivors replay
+    // idempotently (I6), so no durably-committed record is lost.
+    assert!(
+        recovered >= committed && recovered <= TRUNC_RECORDS,
+        "wal_mid_delete: deleted segments' data durable in history (I2), \
+         survivors replay (I6) → no durably-committed record lost (recovered \
+         {recovered}, durably committed {committed}, max {TRUNC_RECORDS})"
+    );
+}
+
+/// Crash at `post_truncate` — immediately AFTER a successful `truncate_below`.
+/// The truncated segments are durable in `history` (flushed before the unlink,
+/// I2); the active segment + survivors plus `history` reconstruct every record.
+/// Zero loss.
+#[tokio::test]
+async fn crash_at_post_truncate_recovers_all() {
+    let (recovered, committed) = trunc_crash_then_recover("post_truncate").await;
+    assert!(
+        committed >= 1,
+        "the child must have durably committed at least one record before the \
+         post_truncate crash fired"
+    );
+    // Zero loss (see `pre_truncate` for the +1 survivor window): the truncated
+    // data was flushed to `history` before the unlink (I2), so recovery rebuilds
+    // every durably-committed record.
+    assert!(
+        recovered >= committed && recovered <= TRUNC_RECORDS,
+        "post_truncate: truncated data durable in history (flushed before the \
+         unlink, I2) → no durably-committed record lost (recovered {recovered}, \
+         durably committed {committed}, max {TRUNC_RECORDS})"
     );
 }

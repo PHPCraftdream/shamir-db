@@ -282,16 +282,83 @@ async fn open_recovers_existing_segments() {
     );
 }
 
+/// F6c growth-limit (wal level): under a small `max_bytes`, an append → seal →
+/// `truncate_below(highest_durable)` loop must keep the on-disk `*.wal` file
+/// count BOUNDED — the sealed segments below the durable watermark are reclaimed
+/// every iteration, so the file count tracks `active + O(1)` and does NOT grow
+/// with the iteration count K. Proves truncation actually releases disk under a
+/// steady drain, not just in a one-shot.
+#[tokio::test]
+async fn bounded_segment_count_under_append_truncate_loop() {
+    let dir = TempDir::new().unwrap();
+    // Tiny cap so each batch seals quickly and many segments would accumulate
+    // without truncation.
+    let set = SegmentSet::open(dir.path().to_path_buf(), 64)
+        .await
+        .unwrap();
+
+    const K: u64 = 200;
+    let mut max_pre_trunc = 0usize;
+    let mut max_post_trunc = 0usize;
+    let mut v = 0u64;
+    for k in 1..=K {
+        // A batch of a few records with strictly increasing commit_version.
+        for _ in 0..3 {
+            v += 1;
+            set.append_batch(vec![entry(v % 250, v).encode().unwrap()], v)
+                .await
+                .unwrap();
+        }
+
+        // Before truncation: the just-sealed segments accumulate — confirms
+        // rotation genuinely happened (the cap is exercised).
+        let pre = seg_file_count(dir.path());
+        if pre > max_pre_trunc {
+            max_pre_trunc = pre;
+        }
+
+        // Everything committed so far is "durable" → truncate below the top.
+        set.truncate_below(v).await.unwrap();
+
+        let post = seg_file_count(dir.path());
+        if post > max_post_trunc {
+            max_post_trunc = post;
+        }
+        // The bound is independent of k: after truncation only the active
+        // segment (sealed-but-truncatable below the top are all gone) plus an
+        // O(1) remainder survive. Crucially it must NOT grow with K.
+        assert!(
+            post <= 4,
+            "post-truncate segment count must stay bounded under the loop; \
+             at iter {k} (v={v}) saw {post} files"
+        );
+    }
+
+    // The loop genuinely rotated sealed segments (otherwise the bound proves
+    // nothing — a single active segment trivially stays bounded).
+    assert!(
+        max_pre_trunc >= 2,
+        "loop must have sealed a segment before truncation (max_pre_trunc={max_pre_trunc})"
+    );
+    // Truncation reclaimed them: the post-truncate count never grew with K and
+    // stayed at the steady-state floor (~active).
+    assert!(
+        max_post_trunc <= 4,
+        "post-truncate count must stay at the steady-state floor regardless of \
+         K={K} (max_post_trunc={max_post_trunc})"
+    );
+}
+
 /// Group-commit version flow: after `WalGroupCommit::append(payload, v, tier)`
 /// the underlying segment's `max_committed()` reflects `v` (the watermark
 /// threads end-to-end through the append path).
 #[tokio::test]
 async fn group_commit_threads_version_to_segment() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(dir.path().join("00000000.wal"))
+    let segset = SegmentSet::open(dir.path().to_path_buf(), 64 * 1024 * 1024)
         .await
         .unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(WalSink::File(segset));
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 42).encode().unwrap(), 42, WalDurability::Synced)

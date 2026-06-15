@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use shamir_storage::error::DbResult;
 
+use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::WalEntryV2;
-use crate::wal_segment::WalSegment;
 
 /// In-RAM WAL sink — mirrors [`WalSegment`]'s interface but stores frames
 /// in a `Vec` instead of a file. Used by in-memory repos so the
@@ -19,7 +19,13 @@ pub struct MemSink {
     // group-commit leader, so this lock sees a single writer and is NOT a
     // hot production path. Held only for the O(1) push / clone, never across
     // an `.await`.
-    frames: Mutex<Vec<Vec<u8>>>,
+    //
+    // Each frame is paired with its batch `max_version` so the frame-level
+    // GC (`truncate_below`, I7) can drop the frames a sealed segment would
+    // drop on disk. `0` means "no versioned record" and pins the frame
+    // (never truncated by version, mirrors a sealed segment with
+    // `max_version == 0`, I5).
+    frames: Mutex<Vec<(u64, Vec<u8>)>>,
     next_seq: AtomicU64,
     /// Highest `commit_version` ever appended (monotonic `fetch_max`).
     /// Mirrors [`WalSegment::max_committed`] so the in-RAM sink carries the
@@ -51,8 +57,10 @@ impl Default for MemSink {
 /// WAL storage sink — file-backed (disk repos) or in-RAM (in-memory repos).
 /// Enum, not trait: no dyn dispatch on the hot path.
 pub enum WalSink {
-    /// Real append-only file. write() = level 2, sync_all = level 3.
-    File(WalSegment),
+    /// Real append-only directory of numbered segments (F6b). write() =
+    /// level 2, sync_all = level 3. Truncation deletes whole sealed
+    /// segments once their data is durable in history.
+    File(SegmentSet),
     /// In-RAM Vec-backed segment. append = push, sync = no-op (no fsync in
     /// RAM), replay = decode every stored payload.
     Mem(MemSink),
@@ -75,9 +83,11 @@ impl WalSink {
                 let n = payloads.len() as u64;
                 let last_seq = m.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
                 // CRC / torn-tail handling is unnecessary in RAM — store the
-                // payloads verbatim.
+                // payloads verbatim, each tagged with the batch `max_version`
+                // so frame-level GC (`truncate_below`, I7) mirrors a sealed
+                // segment's per-segment max_version reclaim.
                 let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
-                frames.extend(payloads);
+                frames.extend(payloads.into_iter().map(|p| (max_version, p)));
                 Ok(last_seq)
             }
         }
@@ -105,10 +115,48 @@ impl WalSink {
             Self::Mem(m) => {
                 let frames = m.frames.lock().expect("MemSink frames mutex poisoned");
                 let mut out = Vec::with_capacity(frames.len());
-                for payload in frames.iter() {
+                for (_version, payload) in frames.iter() {
                     out.push(WalEntryV2::decode(payload)?);
                 }
                 Ok(out)
+            }
+        }
+    }
+
+    /// Truncate every record fully durable in history — i.e. whose
+    /// `commit_version` is in `(0, durable]`. Returns the count reclaimed
+    /// (deleted sealed segments for `File`, dropped frames for `Mem`).
+    ///
+    /// `File` delegates to [`SegmentSet::truncate_below`] (deletes whole
+    /// sealed segments; the active segment and any pin are untouched).
+    /// `Mem` drops frames whose batch `max_version` is in `(0, durable]`,
+    /// keeping any pinned (`v == 0`) frame and any frame above the durable
+    /// watermark (I7). fsync-gate (I2) is the caller's responsibility — it
+    /// flushes history before invoking this.
+    pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
+        match self {
+            Self::File(segset) => segset.truncate_below(durable).await,
+            Self::Mem(m) => {
+                let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
+                let before = frames.len();
+                frames.retain(|(v, _)| *v == 0 || *v > durable);
+                Ok(before - frames.len())
+            }
+        }
+    }
+
+    /// Cheap probe: is there anything truncatable at `durable`? Gates the
+    /// (relatively expensive) history-flush + truncate in the drainer so it
+    /// fires only on a segment/frame boundary, never per-commit (I2).
+    ///
+    /// `File`: any sealed segment with `0 < max_version <= durable`.
+    /// `Mem`: any frame with `0 < v <= durable`.
+    pub fn has_truncatable(&self, durable: u64) -> bool {
+        match self {
+            Self::File(segset) => segset.has_truncatable(durable),
+            Self::Mem(m) => {
+                let frames = m.frames.lock().expect("MemSink frames mutex poisoned");
+                frames.iter().any(|(v, _)| *v > 0 && *v <= durable)
             }
         }
     }

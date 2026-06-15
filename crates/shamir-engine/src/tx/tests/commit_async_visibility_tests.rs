@@ -221,35 +221,23 @@ async fn async_commit_background_failure_is_recovered() {
         "a failed Phase 5c on the tail must surface as Deferred"
     );
 
-    // The WAL entry is in the segment → recovery is the guarantor. (The
-    // entry stays replayable: `wal.commit` is a no-op truncation until F6,
-    // so even after the background drainer drains it the entry is still
-    // recoverable.)
-    let wal = repo.repo_wal().await.unwrap();
-    let inflight = wal.recover().await.unwrap();
-    assert_eq!(
-        inflight.len(),
-        1,
-        "the tx's WAL entry must be replayable for recovery"
-    );
-
-    // D2 P1d-2b CONTRACT CHANGE: the deferred index posting is NO LONGER
-    // guaranteed absent here. The background drainer is *generalized recovery*
-    // — woken on commit, it replays the inflight WAL entry (data AND index)
-    // into history/info. On the `current_thread` runtime it gets to run while
-    // this test `.await`s (e.g. inside `bg.join()`), so it may have ALREADY
-    // materialized the posting the injected Phase-5c failure skipped. We no
-    // longer assert "absent before recovery".
+    // F6b CONTRACT CHANGE: the WAL is now segmented with LIVE truncation. The
+    // background drainer (generalized recovery) replays the inflight entry
+    // (data AND index) into history/info, advances `durable_watermark`, and —
+    // because the entry's `commit_version <= durable_watermark` — TRUNCATES it
+    // out of the WAL (a Mem-sink frame drop here). On the `current_thread`
+    // runtime the drainer runs while this test `.await`s (inside `bg.join()`),
+    // so by now the entry may already be drained-and-truncated. We therefore no
+    // longer assert "the entry is still inflight" — pre-F6b that held because
+    // truncation was a no-op; post-F6b a drained entry is reclaimed.
     //
-    // What still holds — and is the point of the test — is that the deferred
-    // posting IS reconciled from the durable WAL entry (by the drainer and/or
-    // the explicit recovery below) and is present afterwards. Drive explicit
-    // recovery to converge deterministically, then assert presence.
-    let count = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(
-        count, 1,
-        "recovery still replays the one inflight entry (idempotent over the drainer)"
-    );
+    // The injected Phase-5c failure was on the COMMIT path's tail, NOT the
+    // drainer's replay (the injection keys on `apply_index_batch`), so the
+    // drainer's independent replay materializes the deferred index posting
+    // regardless of the commit-tail failure. Drive explicit recovery to
+    // converge deterministically (idempotent — a no-op if the drainer already
+    // truncated the entry), then assert the posting is present.
+    let _count = repo.recover_v2_inflight().await.unwrap();
     let recovered = tbl
         .info_store()
         .get(posting_key)
