@@ -4,10 +4,14 @@ use std::sync::Arc;
 use shamir_types::types::record_id::RecordId;
 use tempfile::TempDir;
 
+use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::{WalEntryV2, WalOpV2};
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
-use crate::wal_segment::WalSegment;
 use crate::wal_sink::WalSink;
+
+/// Large per-segment cap (64 MiB) so these tests — none of which are about
+/// rotation — keep the single-segment behaviour they had pre-F6b.
+const BIG_SEG: u64 = 64 * 1024 * 1024;
 
 fn rid(n: u8) -> RecordId {
     let mut a = [0u8; 16];
@@ -27,15 +31,17 @@ fn entry(txn_id: u64, commit_version: u64) -> WalEntryV2 {
     .with_commit_version(commit_version)
 }
 
-fn seg_path(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("segment.wal")
+async fn open_sink(dir: &TempDir) -> WalSink {
+    let segset = SegmentSet::open(dir.path().to_path_buf(), BIG_SEG)
+        .await
+        .unwrap();
+    WalSink::File(segset)
 }
 
 #[tokio::test]
 async fn buffered_append_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Buffered)
@@ -50,8 +56,7 @@ async fn buffered_append_durable() {
 #[tokio::test]
 async fn synced_append_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), 10, WalDurability::Synced)
@@ -67,8 +72,7 @@ async fn synced_append_durable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_mixed_tiers_all_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
@@ -100,8 +104,7 @@ async fn concurrent_mixed_tiers_all_durable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn synced_fsyncs_are_batched() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
@@ -135,8 +138,7 @@ async fn synced_fsyncs_are_batched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn buffered_only_window_issues_no_fsync() {
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     // A workload of ONLY Buffered appends — no matter how the windows
@@ -199,8 +201,7 @@ async fn background_fsync_fires_for_buffered() {
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(30));
@@ -229,8 +230,7 @@ async fn background_fsync_skips_when_idle() {
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(30));
@@ -247,8 +247,7 @@ async fn background_fsync_exits_on_drop() {
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
-    let sink = Arc::new(WalSink::File(seg));
+    let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     gc.spawn_background_fsync(Duration::from_millis(20));

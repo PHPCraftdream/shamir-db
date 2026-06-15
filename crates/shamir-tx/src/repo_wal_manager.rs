@@ -111,4 +111,26 @@ impl RepoWalManager {
     pub async fn recover(&self) -> DbResult<Vec<WalEntryV2>> {
         self.group.replay().await
     }
+
+    /// F6b: truncate the WAL below `durable` — reclaim every record whose
+    /// `commit_version` is in `(0, durable]` (deleted sealed segments for
+    /// disk repos, dropped frames for Mem). Returns the count reclaimed.
+    ///
+    /// Truncation is by VERSION, not txn_id: the drainer advances
+    /// `durable_watermark` as it replays entries into history, and the data
+    /// in a sealed segment is durable iff its highest version is at or below
+    /// that watermark (I1). The caller (drainer) must flush history before
+    /// invoking this (I2). Replaces the old per-txn `commit` truncation —
+    /// `commit(txn_id)` stays a no-op.
+    pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
+        self.group.truncate_below(durable).await
+    }
+
+    /// F6b: cheap probe — is there anything truncatable at `durable`? The
+    /// drainer gates the (relatively expensive) history-flush + truncate on
+    /// this so that work fires only on a segment/frame boundary, never
+    /// per-commit (I2).
+    pub fn has_truncatable(&self, durable: u64) -> bool {
+        self.group.has_truncatable(durable)
+    }
 }

@@ -233,6 +233,20 @@ impl WalGroupCommit {
         self.sink.replay().await
     }
 
+    /// F6b: delegate WAL truncation to the sink — reclaim every record fully
+    /// durable in history (`commit_version` in `(0, durable]`). Returns the
+    /// count reclaimed. The caller (drainer) is responsible for flushing
+    /// history before this (I2).
+    pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
+        self.sink.truncate_below(durable).await
+    }
+
+    /// F6b: cheap probe gating the drainer's history-flush + truncate so it
+    /// fires only on a segment/frame boundary, never per-commit (I2).
+    pub fn has_truncatable(&self, durable: u64) -> bool {
+        self.sink.has_truncatable(durable)
+    }
+
     /// Force a durable `fsync` of the sink (level 2 → level 3). Used by the
     /// `synced` durability tier at batch granularity.
     pub async fn sync_now(&self) -> DbResult<()> {

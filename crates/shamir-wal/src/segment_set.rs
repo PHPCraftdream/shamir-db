@@ -58,7 +58,6 @@ struct Inner {
 /// group-commit leader (the sole appender) plus the truncator (rare); they
 /// do not contend on a hot path. CAPSTONE replaces this with a
 /// single-writer task.
-#[allow(dead_code)]
 pub struct SegmentSet {
     dir: PathBuf,
     max_bytes: u64,
@@ -77,7 +76,6 @@ fn parse_seg_seq(name: &str) -> Option<u64> {
     stem.parse::<u64>().ok()
 }
 
-#[allow(dead_code)]
 impl SegmentSet {
     /// Open (creating if absent) the segment directory `dir`. `max_bytes`
     /// is the seal/rotate threshold (F6b passes
@@ -188,7 +186,7 @@ impl SegmentSet {
     /// keeps the invariant exact).
     async fn seal_and_rotate(&self) -> DbResult<()> {
         // Snapshot the segment to seal under the lock.
-        let (sealed_seq, sealed_path, sealed_max, next_seq) = {
+        let (sealed_seq, sealed_path, sealed_max, next_seq, sealing) = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             // Guard against double-rotation: only the leader that still sees
             // an over-threshold active rotates it.
@@ -200,8 +198,18 @@ impl SegmentSet {
                 self.dir.join(seg_file_name(g.active_seq)),
                 g.active.max_committed(),
                 g.active_seq + 1,
+                Arc::clone(&g.active),
             )
         };
+
+        // Make the segment being sealed durable on disk BEFORE it leaves the
+        // active slot (I4: a sealed segment is fully written — including
+        // fsync'd — so a later torn tail can only occur on the active segment,
+        // and `SegmentSet::sync` need only fsync the active one). Done outside
+        // the lock (it is an fsync syscall). This also underpins truncation
+        // crash-safety (F6c): a sealed segment's records are crash-durable, so
+        // a power-loss before they are drained to `history` still replays them.
+        sealing.sync().await?;
 
         let new_active = Arc::new(WalSegment::open(self.dir.join(seg_file_name(next_seq))).await?);
 
@@ -251,21 +259,35 @@ impl SegmentSet {
     /// is never deleted by version. Each `remove_file` is an atomic FS op;
     /// replay of the survivors after truncation is idempotent (I6).
     pub async fn truncate_below(&self, durable_version: u64) -> DbResult<usize> {
-        // Collect the deletable sealed segments under the lock, but defer the
-        // unlink (a syscall) to a blocking hop without the lock held.
+        // CLAIM-then-delete: under the lock, collect the deletable sealed
+        // segments AND remove them from the sealed list in the SAME critical
+        // section. This makes truncation safe against a CONCURRENT truncator
+        // (the background drainer's interval pass racing an explicit
+        // `drain_all`): a second caller no longer sees these entries in
+        // `sealed`, so it never targets the same files — no double-`remove_file`
+        // race (which on Windows surfaces as `PermissionDenied`, not
+        // `NotFound`). The unlink syscall then runs OUTSIDE the lock. If an
+        // unlink fails, the file lingers on disk but is no longer tracked;
+        // `SegmentSet::open` re-scans the directory on reopen and replays it
+        // idempotently (I6), so a leaked file is harmless, never a data loss.
         let to_delete: Vec<PathBuf> = {
-            let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
-            g.sealed
-                .iter()
-                .filter(|m| m.max_version > 0 && m.max_version <= durable_version)
-                .map(|m| m.path.clone())
-                .collect()
+            let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+            let mut claimed = Vec::new();
+            g.sealed.retain(|m| {
+                if m.max_version > 0 && m.max_version <= durable_version {
+                    claimed.push(m.path.clone());
+                    false // claimed for deletion — drop from sealed now
+                } else {
+                    true
+                }
+            });
+            claimed
         };
         if to_delete.is_empty() {
             return Ok(0);
         }
 
-        let paths = to_delete.clone();
+        let paths = to_delete;
         let deleted = spawn_blocking(move || -> DbResult<usize> {
             let mut n = 0usize;
             for p in &paths {
@@ -273,10 +295,44 @@ impl SegmentSet {
                     Ok(()) => n += 1,
                     // Already gone (idempotent re-truncate) — count as done.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => n += 1,
+                    // Windows: a concurrent `replay()` on another drainer may
+                    // still hold this sealed segment open for reading, so the
+                    // unlink returns `PermissionDenied` ("Access is denied",
+                    // os error 5) instead of succeeding. The entry is ALREADY
+                    // claimed (removed from `sealed` above), so we do not retry
+                    // or fail: the file lingers on disk but is untracked, and
+                    // `SegmentSet::open` re-scans the directory on reopen and
+                    // replays it idempotently (I6) — never a data loss. Count it
+                    // as reclaimed (it will not be re-targeted).
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        n += 1;
+                    }
                     Err(e) => {
                         return Err(DbError::Storage(format!(
                             "SegmentSet truncate remove {p:?}: {e}"
                         )))
+                    }
+                }
+
+                // F6c crash seam — `wal_mid_delete`. This crate cannot reach
+                // the engine's `maybe_crash` (no dependency edge), so the seam
+                // is self-contained: debug-only, env-gated, and a bare
+                // `process::abort()` AFTER the first successful unlink but
+                // BEFORE the rest. Why a bare abort is the correct mid-delete
+                // crash: by the drainer's I2 ordering, `flush_all_history` ran
+                // (and fsync'd) `history` up to the truncation watermark BEFORE
+                // calling `truncate_below`, so every record in every segment we
+                // are unlinking is already durable in `history`. Killing the
+                // process here leaves a torn delete-set — some segments gone,
+                // some surviving — yet zero data loss: `SegmentSet::open` on
+                // reopen picks up whatever survived and replay re-materializes
+                // it idempotently (the deleted segments' data is in `history`).
+                // Needs >= 2 truncatable segments to exercise (the abort fires
+                // after #1, before #2).
+                #[cfg(debug_assertions)]
+                {
+                    if std::env::var("SHAMIR_TEST_CRASH_AFTER").as_deref() == Ok("wal_mid_delete") {
+                        std::process::abort();
                     }
                 }
             }
@@ -285,11 +341,23 @@ impl SegmentSet {
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
 
-        // Drop the deleted entries from the sealed list (by path — the set
-        // we just unlinked).
-        let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
-        g.sealed.retain(|m| !to_delete.contains(&m.path));
+        // The claimed entries were already removed from `sealed` above (under
+        // the lock), so there is nothing more to retract here.
         Ok(deleted)
+    }
+
+    /// Cheap probe (under the lock, no I/O): is any sealed segment
+    /// reclaimable at `durable_version` — i.e. has `0 < max_version <=
+    /// durable_version`? The drainer gates the (more expensive)
+    /// history-flush + `truncate_below` on this so truncation work fires
+    /// only on a segment boundary, never per-commit (I2). The active
+    /// segment is never considered (I3); a `max_version == 0` segment is a
+    /// pin and never reclaimable (I5).
+    pub fn has_truncatable(&self, durable_version: u64) -> bool {
+        let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+        g.sealed
+            .iter()
+            .any(|m| m.max_version > 0 && m.max_version <= durable_version)
     }
 
     /// fsync the active segment (sealed segments are already fully on disk).

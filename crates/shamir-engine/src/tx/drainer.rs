@@ -224,6 +224,42 @@ impl Drainer {
             repo.per_table_mvcc().scan(|_, mvcc| {
                 mvcc.gc_overlay_to(durable);
             });
+
+            // F6b — WAL truncation. Every record with `commit_version <=
+            // durable` is now durable in `history`, so the sealed WAL
+            // segments holding only such records are reclaimable. The
+            // `has_truncatable` gate is CHEAP (a lock-held scan of the short
+            // sealed list, no I/O) and is USUALLY false: segments are large
+            // (`WAL_SEGMENT_MAX_BYTES`), so a sealed segment crosses the
+            // watermark only at a segment boundary, not on every drain pass.
+            //
+            // ORDER (I1/I2): history-flush BEFORE truncate. The drainer
+            // already advanced `durable` only after replaying each entry into
+            // `history` (`mark_durable`), but that write may sit in the page
+            // cache. Before unlinking a sealed segment we `fsync` `history`
+            // (narrow seam — `flush_all_history`, NOT `flush_buffers`, which
+            // would re-enter `drain_all` and recurse) so a power-loss after
+            // the unlink cannot lose the data (I2). Then delete the segments.
+            if wal.has_truncatable(durable) {
+                // F6c crash seam: BEFORE history-flush + unlink. A HARD crash
+                // here leaves EVERY sealed segment on disk (nothing unlinked
+                // yet) — recovery replays all of them idempotently and loses
+                // nothing (the data is also already in `history`).
+                crate::tx::commit::maybe_crash("pre_truncate", repo).await;
+                repo.flush_all_history().await?;
+                let removed = wal.truncate_below(durable).await?;
+                // F6c crash seam: AFTER a successful truncate. The unlinked
+                // segments are durable in `history` (flushed above, I2), so
+                // recovery from the survivors is correct and complete.
+                crate::tx::commit::maybe_crash("post_truncate", repo).await;
+                if removed > 0 {
+                    log::debug!(
+                        "drain_step: truncated {} sealed WAL segment(s) below durable {}",
+                        removed,
+                        durable
+                    );
+                }
+            }
         }
         Ok(drained)
     }

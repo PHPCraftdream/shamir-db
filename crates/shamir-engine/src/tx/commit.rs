@@ -62,7 +62,12 @@ const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_s
 ///   per seam and never crashes or flushes.
 ///
 /// Phase labels: `pre_commit`, `phase4`, `phase5a`, `phase5c`, `phase6`,
-/// `phase6_5`, `phase7`.
+/// `phase6_5`, `phase7`. F6c truncation seams (fired from the drainer, not
+/// the ack-path): `pre_truncate` (before history-flush + segment unlink) and
+/// `post_truncate` (after a successful `truncate_below`). A third truncation
+/// seam, `wal_mid_delete`, lives inside `shamir-wal`'s
+/// `SegmentSet::truncate_below` (it cannot reach this engine hook) and aborts
+/// between two segment unlinks.
 #[cfg(debug_assertions)]
 pub(super) async fn maybe_crash(phase: &str, repo: &RepoInstance) {
     let Ok(target) = std::env::var("SHAMIR_TEST_CRASH_AFTER") else {

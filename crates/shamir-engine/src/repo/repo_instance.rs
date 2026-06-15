@@ -511,8 +511,32 @@ impl RepoInstance {
                         .await
                         .map_err(|e| DbError::Storage(format!("wal dir join: {e}")))?
                         .map_err(|e| DbError::Storage(format!("wal dir create: {e}")))?;
-                        let seg = shamir_wal::WalSegment::open(wal_dir.join("repo.wal")).await?;
-                        let sink = shamir_wal::WalSink::File(seg);
+                        // F6b: the WAL is a DIRECTORY of numbered segments
+                        // (`NNNNNNNN.wal`), not a single `repo.wal`. The
+                        // project is pre-release with an atomic flip (no
+                        // dual-recovery bridge — `wal-refactor.md` §4.4), so
+                        // there is no legacy `repo.wal` migration: `SegmentSet`
+                        // simply owns `<name>.shamirwal/` and rotates/truncates
+                        // segments inside it. `create_dir_all` above already
+                        // made the dir; `SegmentSet::open` opens the first
+                        // active `00000000.wal`.
+                        // F6c: the seal/rotate threshold is the
+                        // `WAL_SEGMENT_MAX_BYTES` tunable (8 MiB), overridable
+                        // per-process via `SHAMIR_WAL_SEGMENT_MAX_BYTES` (parsed
+                        // as `u64`; a malformed value falls back to the const).
+                        // This is a legitimate ops tunable (a small cap forces
+                        // rotation+seal so truncation/growth-limit tests can
+                        // reach segment boundaries without huge data volumes),
+                        // NOT a debug-only seam — left live in every build, but
+                        // the default is always the const. One `env::var` per
+                        // repo open is negligible.
+                        let seg_max_bytes = std::env::var("SHAMIR_WAL_SEGMENT_MAX_BYTES")
+                            .ok()
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(shamir_tunables::instance_defaults::WAL_SEGMENT_MAX_BYTES);
+                        let segset =
+                            shamir_wal::SegmentSet::open(wal_dir.clone(), seg_max_bytes).await?;
+                        let sink = shamir_wal::WalSink::File(segset);
                         let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
                         // RF1: background fsync bounds the power-loss window for
                         // Buffered (level 2) commits. 250 ms = max data-at-risk.
@@ -998,6 +1022,40 @@ impl RepoInstance {
             }
         }
 
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// F6b (I2): flush every per-table `history` version-log to disk WITHOUT
+    /// draining the WAL.
+    ///
+    /// The truncation fsync-gate: the drainer calls this immediately before
+    /// `wal.truncate_below(durable)` so that every record in a to-be-deleted
+    /// sealed segment is physically durable in `history` before its WAL
+    /// segment is unlinked (I2 — closes the power-loss window). Distinct from
+    /// [`flush_buffers`](Self::flush_buffers), which drains the WAL first
+    /// (`drain_all`) and flushes `data_store`/`info_store` — calling that from
+    /// the drainer would recurse. This seam is narrow: it touches ONLY each
+    /// MVCC store's `history`, and never the WAL.
+    ///
+    /// Best-effort over all tables: a per-store flush error is logged and the
+    /// first one returned after attempting them all.
+    pub async fn flush_all_history(&self) -> DbResult<()> {
+        let mut mvccs = Vec::new();
+        self.per_table_mvcc.scan(|_, mvcc| {
+            mvccs.push(Arc::clone(mvcc));
+        });
+        let mut first_err: Option<DbError> = None;
+        for mvcc in mvccs {
+            if let Err(e) = mvcc.flush_history().await {
+                log::warn!("flush_all_history: {}: {}", self.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
