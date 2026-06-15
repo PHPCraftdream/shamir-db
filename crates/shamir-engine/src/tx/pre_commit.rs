@@ -1,11 +1,90 @@
+use bytes::Bytes;
 use shamir_storage::error::DbError;
-use shamir_tx::{IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
+use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use shamir_wal::WalEntryV2;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit::{maybe_crash, TxError};
 
 use super::commit::wal_ops_from_tx;
+
+/// SSI fix S2 — atomically CLAIM every data write-set key of `tx` on its
+/// per-table [`MvccStore`] cell, BEFORE the version is assigned and the WAL
+/// entry is written (Phase 4). This moves the "who won the write-write race"
+/// decision OUT of the post-WAL publish (Phase 5a) and INTO an atomic
+/// pre-WAL claim, so a loser aborts with `SsiConflict` having never touched
+/// the WAL (invariant I-PreWAL).
+///
+/// Scope: **`Serializable` only**. Snapshot is documented last-writer-wins
+/// (no read-set validation, no first-committer-wins), and Pessimistic
+/// already serializes write-write via per-key Level-3 locks — claiming on
+/// either would change documented semantics, so this returns an empty guard
+/// vector (zero overhead) off Serializable, mirroring `build_footprint_from_tx`
+/// and the read-set validation block, both of which are also Serializable-only.
+///
+/// One [`CellReservationGuard`] per touched table (each guard owns ONE
+/// `Arc<MvccStore>` — the abort-path release target). A won key is `add`ed to
+/// its table's guard IMMEDIATELY, so a conflict on a LATER key returns `Err`
+/// and the guards (dropped on that `?`) release every already-won key — no
+/// partial claim survives an abort.
+///
+/// `try_reserve` NEVER blocks (no-wait, invariant I-NoWait): a contended cell
+/// returns `false` → we abort with `SsiConflict` immediately, so multi-key
+/// claim in any order is deadlock-free.
+///
+/// Returns the guards on success (the caller disarms them once the publisher
+/// has finalized every claim), or `Err(SsiConflict)` on the first contended /
+/// stale cell (the partial guards drop here → release).
+async fn claim_write_set(
+    tx: &TxContext,
+    repo: &RepoInstance,
+) -> Result<Vec<CellReservationGuard>, TxError> {
+    // Off Serializable: no claim (Snapshot last-writer-wins / Pessimistic
+    // lock-serialized). Empty vec — zero allocation beyond the Vec header.
+    if tx.isolation != IsolationLevel::Serializable {
+        return Ok(Vec::new());
+    }
+
+    let txn_id = tx.tx_id.0;
+    let snapshot = tx.snapshot_version;
+    let mvcc_map = repo.per_table_mvcc();
+
+    let mut guards: Vec<CellReservationGuard> = Vec::with_capacity(tx.write_set.len());
+    for (table_id, staging) in &tx.write_set {
+        if staging.is_empty() {
+            continue;
+        }
+        // Per-table MvccStore: cells live per-table, and the publish-side
+        // `finalize_reservation` (apply_committed_visible) uses the SAME store,
+        // so claim and finalize meet on the same cell. A table absent from
+        // `per_table_mvcc` (system / unattached table) has no cell to claim —
+        // it also has no overlay/cell finalize, so it is correctly skipped.
+        let Some(store) = mvcc_map
+            .read_async(table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
+            .await
+        else {
+            continue;
+        };
+        let mut guard = CellReservationGuard::new(store.clone(), txn_id);
+        for key in staging.keys() {
+            let key: Bytes = key.clone();
+            if store.try_reserve(key.clone(), snapshot, txn_id) {
+                // Won — register immediately so an abort on a later key (this
+                // table or a subsequent one) releases this claim on drop.
+                guard.add(key);
+            } else {
+                // Contended or stale cell → this committer LOST the race.
+                // Returning drops `guard` (releasing this table's won keys) and
+                // every earlier table's guard in `guards`, then the tx aborts
+                // BEFORE Phase 4 — no WAL is written for a loser.
+                repo.tx_metrics().on_tx_aborted_ssi();
+                return Err(TxError::SsiConflict { key });
+            }
+        }
+        guards.push(guard);
+    }
+    Ok(guards)
+}
 
 /// Outcome of [`pre_commit`]: the assigned MVCC commit version plus the
 /// per-table `unique_write_lock` guards that must stay held through
@@ -20,6 +99,12 @@ pub(super) struct PreCommit {
     /// Materialized — but a panic before `materialize` still drops the guard
     /// → Aborted, closing hole H1.
     pub(super) version_guard: shamir_tx::VersionGuard,
+    /// SSI fix S2 — RAII owners of this committer's pre-WAL cell-reservations
+    /// (one guard per touched table). WAL begin has already succeeded by the
+    /// time this is returned, so on the success path the caller `disarm`s these
+    /// AFTER the publisher finalizes every claim; any panic before that drops
+    /// them → release. Empty off Serializable.
+    pub(super) cell_guards: Vec<CellReservationGuard>,
 }
 
 /// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
@@ -183,6 +268,11 @@ pub(super) struct ValidatedPreCommit {
     /// (→ Aborted) on WAL-begin failure. This makes the assign→mark window
     /// statically leak-proof.
     pub(super) version_guard: shamir_tx::VersionGuard,
+    /// SSI fix S2 — RAII owners of this committer's pre-WAL cell-reservations
+    /// (one per touched table). The caller drops these (→ release) if WAL begin
+    /// fails, or holds them through `materialize` and `disarm`s them once the
+    /// publisher has finalized every claim. Empty off Serializable.
+    pub(super) cell_guards: Vec<CellReservationGuard>,
 }
 
 /// Locked validation phase: Phases 2 + 2-bis + C6 + 3 (assign) + WAL entry build.
@@ -239,6 +329,13 @@ pub(super) async fn pre_commit_locked_validate(
         return Ok(None);
     }
 
+    // SSI fix S2 — CLAIM the write-set (Serializable only), AFTER read-validate
+    // and BEFORE version assign + Phase 4 WAL. A loser aborts here with
+    // `SsiConflict`, never touching the WAL (I-PreWAL). `claim_write_set` builds
+    // the guards holding the won keys; on this `?`-return their drop releases
+    // any partial claim.
+    let cell_guards = claim_write_set(tx, repo).await?;
+
     // Crash seam (test-only).
     maybe_crash("pre_commit", repo).await;
 
@@ -269,6 +366,7 @@ pub(super) async fn pre_commit_locked_validate(
         uwl_guards,
         wal_entry,
         version_guard,
+        cell_guards,
     }))
 }
 
@@ -341,6 +439,12 @@ pub(super) async fn pre_commit_locked(
         return Ok(None);
     }
 
+    // SSI fix S2 — CLAIM the write-set (Serializable only), AFTER read-validate
+    // and BEFORE version assign + Phase 4 WAL. A loser aborts here with
+    // `SsiConflict`, never touching the WAL (I-PreWAL). On this `?`-return the
+    // partial guards drop → release.
+    let cell_guards = claim_write_set(tx, repo).await?;
+
     // Crash seam (test-only): a HARD crash here is BEFORE the commit
     // point — staging is dropped, no WAL entry exists, locks release by
     // RAII. Recovery must find nothing → clean abort.
@@ -384,10 +488,17 @@ pub(super) async fn pre_commit_locked(
         .await
     {
         // version_guard drops here → mark(Aborted): WAL begin failed,
-        // nothing durable, this is a pre-commit abort.
+        // nothing durable, this is a pre-commit abort. SSI fix S2: drop the
+        // cell_guards too → release every claimed cell (the publish that would
+        // have finalized them never runs).
         drop(version_guard);
+        drop(cell_guards);
         return Err(TxError::Storage(e));
     }
+    // SSI fix S2: WAL begin succeeded — the tx is COMMITTED. The claims stay
+    // armed and are handed to the caller via `PreCommit`; the caller `disarm`s
+    // them once the publisher has finalized every claim (`finalize_reservation`
+    // clears `reserved_by`).
 
     // Crash seam (test-only): a HARD crash here is AT the commit point —
     // the WAL entry is durable but no projection (5a..6.5) ran and Phase
@@ -399,5 +510,6 @@ pub(super) async fn pre_commit_locked(
         commit_version,
         uwl_guards,
         version_guard,
+        cell_guards,
     }))
 }

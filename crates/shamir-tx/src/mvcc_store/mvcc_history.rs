@@ -313,14 +313,27 @@ impl MvccStore {
         // Update the in-memory cell for every touched key (CRIT-2: entry_async
         // modify-or-insert). After this, readers at `>= commit_version` resolve
         // the value from the overlay.
+        //
+        // SSI fix S2 — FINALIZE the cell-reservation here instead of a plain
+        // `publish_cell_sync`. `finalize_reservation` sets `version =
+        // commit_version` AND clears `reserved_by` in one atomic `entry`, a
+        // STRICT SUPERSET of `publish_cell_sync` (which only set `version`).
+        // On a cell that was never claimed (`reserved_by == 0` — the Snapshot /
+        // Pessimistic / recovery / drainer paths, which do not run the S2 claim)
+        // the `reserved_by = 0` write is a no-op, so the effect is byte-identical
+        // to the old `publish_cell_sync`. On the Serializable claim path it
+        // releases the winning committer's reservation at the exact instant its
+        // version becomes visible — the publish-time half of the "claim decides
+        // who won" inversion.
         for op in ops {
             let key = match op {
                 KvOp::Set(k, _) => k.clone(),
                 KvOp::Remove(k) => k.clone(),
             };
-            // publish_cell is async only because of scc's entry_async; it does
-            // no I/O. Block-free in practice.
-            self.publish_cell_sync(key, commit_version);
+            // finalize_reservation is synchronous (scc `entry`, no I/O) — the
+            // ack-path stays off `.await` (same rationale as the prior
+            // publish_cell_sync).
+            self.finalize_reservation(key, commit_version);
         }
 
         // R3: advance the reader-visible floor so subsequent `get_current` /

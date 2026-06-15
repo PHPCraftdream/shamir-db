@@ -131,6 +131,11 @@ pub(super) async fn run_leader(
         /// Dropped → Aborted on any abort path / panic; consumed via
         /// `materialize` → `commit()` → Materialized on the success path.
         version_guard: shamir_tx::VersionGuard,
+        /// SSI fix S2 — this survivor's still-armed cell-reservation guards.
+        /// On any abort path that drains `validated` (leader fail, WAL begin
+        /// fail) these drop → release the claimed cells; on the success path
+        /// they move into `PostWork` and are `disarm`ed after `materialize`.
+        cell_guards: Vec<shamir_tx::CellReservationGuard>,
         is_leader: bool,
         /// Index into panic_guard.senders (meaningful only for followers).
         pg_idx: usize,
@@ -229,6 +234,7 @@ pub(super) async fn run_leader(
                     commit_version: vpc.commit_version,
                     wal_entry: vpc.wal_entry,
                     version_guard: vpc.version_guard,
+                    cell_guards: vpc.cell_guards,
                     is_leader: entry.is_leader,
                     pg_idx,
                 });
@@ -318,6 +324,9 @@ pub(super) async fn run_leader(
         commit_version: u64,
         uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         version_guard: shamir_tx::VersionGuard,
+        /// SSI fix S2 — disarmed after this survivor's `materialize` finalizes
+        /// its claimed cells.
+        cell_guards: Vec<shamir_tx::CellReservationGuard>,
         changefeed_event: Option<shamir_tx::ChangelogEvent>,
         is_leader: bool,
     }
@@ -359,6 +368,7 @@ pub(super) async fn run_leader(
             commit_version: v.commit_version,
             uwl_guards: v.uwl_guards,
             version_guard: v.version_guard,
+            cell_guards: v.cell_guards,
             changefeed_event,
             is_leader: v.is_leader,
         });
@@ -373,6 +383,12 @@ pub(super) async fn run_leader(
     for mut work in post_works {
         let post_publish =
             materialize(&mut work.tx, repo, work.version_guard, work.uwl_guards).await;
+        // SSI fix S2 — Phase 5a inside `materialize` finalized this survivor's
+        // claimed cells; disarm so the guards' `Drop` is a no-op.
+        for g in &mut work.cell_guards {
+            g.disarm();
+        }
+        drop(work.cell_guards);
         let mat = post_publish_cleanup(post_publish, repo, gate).await;
         if mat == MaterializationState::Deferred {
             repo.tx_metrics().on_tx_materialization_deferred();
@@ -444,6 +460,9 @@ async fn run_single_tx(
     };
 
     let commit_version = pre.commit_version;
+    // SSI fix S2 — still-armed cell-reservation guards (WAL begin succeeded in
+    // pre_commit_locked). Disarmed after `materialize` finalizes the cells.
+    let mut cell_guards = pre.cell_guards;
     release_pessimistic_locks(&tx, repo).await;
 
     // Phase 6-bis (Phase C): record SSI write footprint UNDER commit_lock
@@ -456,6 +475,12 @@ async fn run_single_tx(
     // uwl_guards. Disjoint-table commits proceed in parallel.
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
     let post_publish = materialize(&mut tx, repo, pre.version_guard, pre.uwl_guards).await;
+    // SSI fix S2 — Phase 5a inside `materialize` finalized every claimed cell;
+    // disarm so the guards' `Drop` is a no-op.
+    for g in &mut cell_guards {
+        g.disarm();
+    }
+    drop(cell_guards);
 
     let materialization = post_publish_cleanup(post_publish, repo, gate).await;
     if materialization == MaterializationState::Deferred {
