@@ -39,6 +39,8 @@ use shamir_storage::types::Store;
 
 use crate::repo_tx_gate::RepoTxGate;
 use crate::version_codec::encode_version_key;
+use crate::version_guard::VersionGuard;
+use crate::versioned_overlay::VersionedOverlay;
 
 use key_lock::KeyLock as KeyLockInner;
 use version_entry::StreamingGroupByState;
@@ -116,6 +118,13 @@ pub struct MvccStore {
     /// Retention is calendar time (wall clock), so `SystemTime` is correct
     /// here — NOT a monotonic clock (we need to reason about "60 seconds ago").
     test_now_millis: AtomicU64,
+    /// P1b: per-table in-memory versioned overlay. Holds `(key, version) →
+    /// value` for the `(durable_watermark, visibility_watermark]` window. The
+    /// three read seams (`resolve_read`, `get_current`, `current_stream`)
+    /// probe it BEFORE the durable `history` log. In P1b it is never populated
+    /// on the production path (filled in P1c), so it stays empty and every
+    /// probe returns `None` → behaviour is byte-identical to history-only.
+    overlay: VersionedOverlay,
 }
 
 impl MvccStore {
@@ -132,7 +141,20 @@ impl MvccStore {
             locks: SccHashMap::with_hasher(THasher::default()),
             retention: ArcSwap::new(Arc::new(Retention::current_only())),
             test_now_millis: AtomicU64::new(0),
+            overlay: VersionedOverlay::new(),
         }
+    }
+
+    /// P1b: borrow the per-table versioned overlay. P1c will use this to
+    /// populate the overlay on the ack-path; tests use it to drive the merge
+    /// logic with hand-placed entries. The read seams consult it internally.
+    ///
+    /// `#[allow(dead_code)]`: in P1b the production write path never calls this
+    /// (the overlay is filled in P1c); only the unit tests exercise it. The lib
+    /// build therefore sees it as unused until P1c wires the populate site.
+    #[allow(dead_code)]
+    pub(crate) fn overlay(&self) -> &VersionedOverlay {
+        &self.overlay
     }
 
     /// T1c: current wall-clock millis. If `test_now_millis` is non-zero
@@ -219,6 +241,14 @@ impl MvccStore {
         cur_v: u64,
     ) -> DbResult<Option<Bytes>> {
         if cur_v > 0 && cur_v <= snapshot_version {
+            // P1b: overlay-probe BEFORE the durable log. The overlay holds the
+            // visible-but-not-yet-drained value for `(key, cur_v)`. A hit
+            // (empty = tombstone → None, non-empty → Some) short-circuits; a
+            // miss falls through to history (the overlay is empty in P1b, so
+            // this always falls through under production load).
+            if let Some(val) = self.overlay.get(key, cur_v) {
+                return Ok(if val.is_empty() { None } else { Some(val) });
+            }
             return match self.history.get(encode_version_key(key, cur_v)).await {
                 Ok(val) if val.is_empty() => Ok(None),
                 Ok(val) => Ok(Some(val)),
@@ -226,7 +256,33 @@ impl MvccStore {
                 Err(e) => Err(e),
             };
         }
-        self.scan_history_for_version(key, snapshot_version).await
+        // Fallback path: newest version ≤ snapshot from EITHER source wins.
+        // The overlay holds the newest versions; history holds the durable
+        // tail. Take the larger version (versions are globally unique, so no
+        // tie). A tombstone winner (newer delete) still beats an older
+        // non-tombstone write — the delete is more recent.
+        let overlay_hit = self.overlay.newest_visible(key, snapshot_version);
+        let history_hit = self.scan_history_newest(key, snapshot_version).await?;
+        match (overlay_hit, history_hit) {
+            (Some((ov_ver, ov_val)), Some((h_ver, h_val))) => {
+                if ov_ver >= h_ver {
+                    Ok(if ov_val.is_empty() {
+                        None
+                    } else {
+                        Some(ov_val)
+                    })
+                } else {
+                    Ok(if h_val.is_empty() { None } else { Some(h_val) })
+                }
+            }
+            (Some((_, ov_val)), None) => Ok(if ov_val.is_empty() {
+                None
+            } else {
+                Some(ov_val)
+            }),
+            (None, Some((_, h_val))) => Ok(if h_val.is_empty() { None } else { Some(h_val) }),
+            (None, None) => Ok(None),
+        }
     }
 
     /// cancel-safe: NO — multi-step state mutation. The log is the sole
@@ -244,19 +300,39 @@ impl MvccStore {
         // write. CRIT-2: `publish_cell` uses entry_async (modify-or-insert)
         // so repeated writes to the same key advance the cached version
         // monotonically.
-        let new_v = self.gate.assign_next_version();
+        // P0b: take a RAII VersionGuard so the non-tx path goes through the
+        // SAME CompletionTracker as tx commits. The guard owns the terminal
+        // mark obligation (Materialized on `commit()`, Aborted on any early
+        // return / `?`-propagated error / panic before commit). This is the
+        // H5 unification: the watermark — not a direct `publish_committed_max`
+        // — is the single source of truth for visibility.
+        let guard = self.gate.assign_next_version_guarded();
+        let new_v = guard.version();
         self.publish_cell(key.clone(), new_v).await;
         let key_snapshot = key.clone();
         // Single log write: the current version goes into the log (sole write).
         self.history
-            .set(encode_version_key(&key_snapshot, new_v), value)
+            .set(encode_version_key(&key_snapshot, new_v), value.clone())
             .await?;
+        // P1c: dual-write — populate the overlay with the SAME (key, version)
+        // → value pair, AFTER the durable history write succeeds but BEFORE
+        // `guard.commit()` advances the reader-visible floor. Ordering rationale:
+        //  • after history.set: a failed history write (`?` above) must NOT leave
+        //    a visible overlay entry — otherwise an aborted write would surface
+        //    via `get_current` (the cell is already bumped). Inserting post-write
+        //    keeps "history.set failed ⇒ nothing written" intact.
+        //  • before guard.commit: by the time the version becomes reader-visible
+        //    (floor advanced / Materialized), the overlay carries its value.
+        //  • no empty-window: between history.set returning and this insert the
+        //    cell reports `new_v` but history already holds the value, so any
+        //    read resolves from history.
+        self.overlay.insert(key.clone(), new_v, value);
         // T1c: record the commit timestamp for the age-retention axis.
         self.record_ts(new_v).await;
-        // Advance the reader-visible floor so a tx/snapshot opened AFTER this
-        // write sees it: `publish_committed_max` is a monotonic fetch_max
-        // (lock-free, safe off `commit_lock`, never moves the floor backwards).
-        self.gate.publish_committed_max(new_v);
+        // Mark the version Materialized and advance the reader-visible floor
+        // from the resulting watermark (mirrors the tx commit path). This
+        // replaces the direct `publish_committed_max(new_v)`.
+        guard.commit();
         // T1b.2: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive).
         self.vacuum_key(&key_snapshot).await;
@@ -296,13 +372,20 @@ impl MvccStore {
         // cached version advances monotonically.
         let mut max_v = 0u64;
         let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
+        // P0b: one VersionGuard per allocated version. If the batched
+        // `history.transact` below fails (`?`), every guard drops un-committed
+        // and marks its version Aborted, so the contiguous watermark advances
+        // past the whole failed batch instead of wedging at the first version.
+        let mut guards: Vec<VersionGuard> = Vec::with_capacity(items.len());
         // Single log write — build history_ops (the sole durable write target).
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len());
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
-            let new_v = self.gate.assign_next_version();
+            let guard = self.gate.assign_next_version_guarded();
+            let new_v = guard.version();
             self.publish_cell(key.clone(), new_v).await;
             new_versions.push(new_v);
+            guards.push(guard);
             max_v = new_v;
             history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
         }
@@ -312,17 +395,28 @@ impl MvccStore {
             self.history.transact(history_ops).await?;
         }
 
+        // P1c: dual-write — populate the overlay with the SAME (key, version) →
+        // value pairs, AFTER the batched `history.transact` succeeds and BEFORE
+        // the `guard.commit()` loop advances the floor. Post-transact so a failed
+        // batch write (`?` above) leaves no visible overlay entries; pre-commit
+        // so the overlay carries every value before any version becomes visible.
+        for ((key, value), &new_v) in items.iter().zip(new_versions.iter()) {
+            self.overlay.insert(key.clone(), new_v, value.clone());
+        }
+
         // T1c: record the commit timestamp for every version in the batch
         // (age-retention axis). Best-effort.
         for &v in &new_versions {
             self.record_ts(v).await;
         }
 
-        // Advance the reader-visible floor to the batch's max version so a
-        // tx/snapshot opened AFTER the batch sees every record in it.
-        // `publish_committed_max` is monotonic (fetch_max) and safe off-lock.
-        if max_v > 0 {
-            self.gate.publish_committed_max(max_v);
+        // Mark every version Materialized and advance the reader-visible floor
+        // from the watermark. Commit order does not matter: each `mark` lands
+        // in the tracker's states-map and `try_advance` resolves contiguity,
+        // so the floor ends at the batch's `max_v`. Replaces the direct
+        // `publish_committed_max(max_v)`.
+        for guard in guards {
+            guard.commit();
         }
         // T1b.2: per-key count-aware vacuum for every key in the batch.
         for key in &keys {
@@ -346,19 +440,31 @@ impl MvccStore {
         // Bump-first: assign version, update cell, then write the tombstone.
         // CRIT-2: `publish_cell` uses entry_async (modify-or-insert) so the
         // cached version advances monotonically.
-        let new_v = self.gate.assign_next_version();
+        // P0b: guarded allocation — unify the non-tx delete onto the
+        // CompletionTracker (see `set_versioned`). Drop before `commit()`
+        // marks the version Aborted, so a `?`-propagated history error never
+        // wedges the watermark at `new_v - 1`.
+        let guard = self.gate.assign_next_version_guarded();
+        let new_v = guard.version();
         self.publish_cell(key.clone(), new_v).await;
         // Single log write: tombstone (empty value — MessagePack records are
         // never zero-length, so empty is unambiguously a delete).
         self.history
             .set(encode_version_key(&key, new_v), Bytes::new())
             .await?;
+        // P1c: dual-write — overlay tombstone (empty `Bytes`, same convention
+        // as history), AFTER the durable tombstone write succeeds and BEFORE
+        // `guard.commit()` advances the floor. Same ordering rationale as
+        // `set_versioned`: a failed tombstone write (`?` above) must not leave a
+        // visible overlay tombstone; the insert is post-write so it carries the
+        // tombstone before the delete version becomes visible, with no empty
+        // window (history holds the tombstone in the interim).
+        self.overlay.insert(key.clone(), new_v, Bytes::new());
         // T1c: record the commit timestamp for the age-retention axis.
         self.record_ts(new_v).await;
-        // Advance the reader-visible floor so a tx/snapshot opened AFTER this
-        // delete sees the post-delete state: `publish_committed_max` is a
-        // monotonic fetch_max (lock-free, safe off `commit_lock`).
-        self.gate.publish_committed_max(new_v);
+        // Mark Materialized and advance the reader-visible floor from the
+        // watermark (replaces the direct `publish_committed_max(new_v)`).
+        guard.commit();
         // T1b.2: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive).
         self.vacuum_key(&key).await;
@@ -401,20 +507,49 @@ impl MvccStore {
         let v = if cur_v > 0 {
             cur_v
         } else {
-            match self.seek_latest_version(&key).await? {
-                Some(v) => {
-                    self.seed_version(key.clone(), v).await;
-                    v
+            // Cold-start: the cell is absent. `seek_latest_version` scans
+            // history; an overlay-only key (committed but not yet drained) is
+            // invisible to that scan. P1b: also consult the overlay so an
+            // overlay-only key is found. Cap the overlay probe at the floor
+            // (visibility gate); floor == 0 means bootstrap → use u64::MAX so
+            // nothing is hidden, matching the R3 "no restriction" semantics.
+            let ov_cap = if floor > 0 { floor } else { u64::MAX };
+            let hist_v = self.seek_latest_version(&key).await?;
+            let ov_v = self
+                .overlay
+                .newest_visible(&key, ov_cap)
+                .map(|(ver, _)| ver);
+            match (hist_v, ov_v) {
+                (Some(h), Some(o)) => {
+                    // Seed the cell from history's max (the durable anchor);
+                    // the overlay value, if newer, wins in resolve_read below.
+                    self.seed_version(key.clone(), h).await;
+                    h.max(o)
                 }
-                None => return Ok(None),
+                (Some(h), None) => {
+                    self.seed_version(key.clone(), h).await;
+                    h
+                }
+                // Overlay-only key: no durable history yet. Do NOT seed the
+                // cell (no durable version to anchor); resolve through the
+                // overlay-aware floor read below.
+                (None, Some(o)) => o,
+                (None, None) => return Ok(None),
             }
         };
         // R3: if the committed floor is non-zero (gate initialized) and the
         // resolved version exceeds it, fall back to snapshot read at the
-        // floor (range-scan for newest <= floor). Floor == 0 means bootstrap
-        // / recovery — no visibility restriction applied.
+        // floor (range-scan for newest <= floor — overlay-aware via
+        // resolve_read). Floor == 0 means bootstrap / recovery — no
+        // visibility restriction applied.
         if floor > 0 && v > floor {
             return self.get_at(&key, floor).await;
+        }
+        // P1b: overlay-probe BEFORE the durable log for the exact `(key, v)`.
+        // A hit (tombstone → None, value → Some) short-circuits; a miss falls
+        // through to history (always so in P1b — overlay is empty).
+        if let Some(val) = self.overlay.get(&key, v) {
+            return Ok(if val.is_empty() { None } else { Some(val) });
         }
         match self.history.get(encode_version_key(&key, v)).await {
             Ok(val) if val.is_empty() => Ok(None),
@@ -441,6 +576,17 @@ impl MvccStore {
         let history = Arc::clone(&self.history);
         // R3: capture committed floor at stream-open time.
         let floor = self.gate.last_committed();
+        // P1b: materialise the overlay's per-key winner ≤ floor at open. The
+        // overlay is the SMALL side of the merge (bounded window), so loading
+        // it into a map and merging during the history group-by is cheap.
+        // `floor == 0` (bootstrap) → `snapshot_le` returns empty → overlay
+        // contributes nothing and the stream is byte-identical to history-only.
+        let overlay: shamir_collections::TMap<Bytes, (u64, Bytes)> = self
+            .overlay
+            .snapshot_le(floor)
+            .into_iter()
+            .map(|(k, v, val)| (k, (v, val)))
+            .collect();
         // Box::pin so the returned stream is `Unpin` — callers (e.g.
         // `TableManager::list_stream`) consume it via `.next()` without
         // pinning, matching the P1 `Pin<Box<dyn Stream>>` contract. A raw
@@ -450,6 +596,7 @@ impl MvccStore {
                 history,
                 batch_size: batch,
                 floor,
+                overlay,
             },
             |state| async move {
                 match state {
@@ -457,6 +604,7 @@ impl MvccStore {
                         history,
                         batch_size,
                         floor,
+                        overlay,
                     } => {
                         let stream = history.iter_stream(batch_size);
                         let pin = Box::pin(stream);
@@ -464,8 +612,10 @@ impl MvccStore {
                             stream: pin,
                             batch_size,
                             floor,
+                            overlay,
                             cur_key: None,
                             last_val: None,
+                            last_ver: 0,
                             out_batch: Vec::new(),
                         };
                         s.drain_and_emit().await
@@ -476,6 +626,8 @@ impl MvccStore {
                     // The previous `unreachable!()` paniced on the second pull
                     // whenever the current-key set exceeded one batch.
                     s @ StreamingGroupByState::Streaming { .. } => s.drain_and_emit().await,
+                    // P1b: overlay-only drain phase (after history exhausted).
+                    s @ StreamingGroupByState::DrainOverlay { .. } => s.drain_and_emit().await,
                     StreamingGroupByState::Done => None,
                 }
             },

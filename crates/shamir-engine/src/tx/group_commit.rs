@@ -15,7 +15,6 @@ use std::collections::HashSet;
 use bytes::Bytes;
 use shamir_collections::THasher;
 use shamir_storage::error::DbError;
-use shamir_tx::completion_tracker::State;
 use shamir_tx::{CommitWriteRecord, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use tokio::sync::oneshot;
 
@@ -33,24 +32,19 @@ pub(crate) fn compute_write_set_keys(tx: &TxContext) -> HashSet<(u64, Bytes), TH
         .collect()
 }
 
-/// RAII guard: on leader panic, marks all assigned versions as Aborted and
-/// notifies all still-pending follower oneshots.
-struct PanicGuard<'g> {
+/// RAII guard: on leader panic, notifies all still-pending follower oneshots.
+///
+/// P0a: the per-version Aborted-on-panic obligation is now owned by each
+/// survivor's [`shamir_tx::VersionGuard`] (held in `Validated.version_guard`).
+/// A panic unwinds through the `validated` vec, dropping every guard and
+/// marking its version Aborted — so this guard no longer tracks versions and
+/// only handles follower notification.
+struct PanicGuard {
     senders: Vec<Option<oneshot::Sender<Result<u64, DbError>>>>,
-    /// Commit versions assigned to entries in this batch (leader + followers).
-    /// Populated BEFORE any panic-risky work so Drop always sees them.
-    versions: Vec<u64>,
-    /// Completion tracker reference (gate outlives the guard).
-    completion: &'g shamir_tx::completion_tracker::CompletionTracker,
 }
 
-impl Drop for PanicGuard<'_> {
+impl Drop for PanicGuard {
     fn drop(&mut self) {
-        if std::thread::panicking() {
-            for &v in &self.versions {
-                self.completion.mark(v, State::Aborted);
-            }
-        }
         for slot in self.senders.iter_mut() {
             if let Some(tx) = slot.take() {
                 let _ = tx.send(Err(DbError::Internal("leader aborted".into())));
@@ -104,8 +98,6 @@ pub(super) async fn run_leader(
     // panic_guard.senders has one slot per accepted follower, in order.
     let mut panic_guard = PanicGuard {
         senders: Vec::with_capacity(followers.len()),
-        versions: Vec::with_capacity(1 + followers.len()),
-        completion: gate.completion(),
     };
 
     for f in followers {
@@ -135,6 +127,10 @@ pub(super) async fn run_leader(
         uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         commit_version: u64,
         wal_entry: shamir_wal::WalEntryV2,
+        /// RAII owner of this survivor's terminal-mark obligation (P0a).
+        /// Dropped → Aborted on any abort path / panic; consumed via
+        /// `materialize` → `commit()` → Materialized on the success path.
+        version_guard: shamir_tx::VersionGuard,
         is_leader: bool,
         /// Index into panic_guard.senders (meaningful only for followers).
         pg_idx: usize,
@@ -187,13 +183,15 @@ pub(super) async fn run_leader(
 
                 if let Some(dep) = phantom_conflict {
                     // Abort this survivor due to intra-batch phantom.
+                    // Dropping `vpc.version_guard` (with the rest of `vpc`)
+                    // marks this version Aborted.
                     repo.tx_metrics().on_tx_aborted_phantom();
-                    gate.completion().mark(vpc.commit_version, State::Aborted);
                     release_pessimistic_locks(&entry.tx, repo).await;
                     if entry.is_leader {
                         // Leader failed — abort all validated followers too.
-                        for v in &validated {
-                            gate.completion().mark(v.commit_version, State::Aborted);
+                        // Draining `validated` drops each peer's
+                        // version_guard → mark(Aborted).
+                        for v in validated.drain(..) {
                             if !v.is_leader {
                                 if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                                     let _ = s.send(Err(DbError::Internal(
@@ -201,8 +199,8 @@ pub(super) async fn run_leader(
                                     )));
                                 }
                             }
+                            // v.version_guard drops here → mark(Aborted).
                         }
-                        panic_guard.versions.clear();
                         drop(panic_guard);
                         drop(commit_guard);
                         return Err(TxError::PhantomConflict { dep });
@@ -215,10 +213,6 @@ pub(super) async fn run_leader(
                     continue;
                 }
 
-                // Record version in panic_guard BEFORE any subsequent
-                // panic-risky work so Drop always marks it Aborted.
-                panic_guard.versions.push(vpc.commit_version);
-
                 // P3a: accumulate this survivor's footprint for subsequent
                 // survivors' phantom checks.
                 let footprint = shamir_tx::build_footprint_from_tx(&entry.tx, vpc.commit_version);
@@ -226,11 +220,15 @@ pub(super) async fn run_leader(
                     batch_footprints.push(footprint);
                 }
 
+                // The survivor's version_guard moves into `validated`; on any
+                // later abort path / panic it drops → Aborted, and on success
+                // `materialize` consumes it → Materialized.
                 validated.push(Validated {
                     tx: entry.tx,
                     uwl_guards: vpc.uwl_guards,
                     commit_version: vpc.commit_version,
                     wal_entry: vpc.wal_entry,
+                    version_guard: vpc.version_guard,
                     is_leader: entry.is_leader,
                     pg_idx,
                 });
@@ -253,14 +251,15 @@ pub(super) async fn run_leader(
             }
             Err(e) => {
                 // Note: the version for THIS entry was already marked
-                // Aborted inside pre_commit_locked_validate on error.
+                // Aborted by its VersionGuard dropping inside
+                // pre_commit_locked_validate on error.
                 release_pessimistic_locks(&entry.tx, repo).await;
                 if entry.is_leader {
                     // Leader failed SSI — abort all validated followers too.
                     // Their versions were assigned successfully but will not
-                    // materialize — mark each Aborted.
-                    for v in &validated {
-                        gate.completion().mark(v.commit_version, State::Aborted);
+                    // materialize — draining `validated` drops each peer's
+                    // version_guard → mark(Aborted).
+                    for v in validated.drain(..) {
                         if !v.is_leader {
                             if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                                 let _ = s.send(Err(DbError::Internal(
@@ -268,9 +267,8 @@ pub(super) async fn run_leader(
                                 )));
                             }
                         }
+                        // v.version_guard drops here → mark(Aborted).
                     }
-                    // Clear panic_guard versions — already marked above.
-                    panic_guard.versions.clear();
                     drop(panic_guard);
                     drop(commit_guard);
                     return Err(e);
@@ -296,13 +294,15 @@ pub(super) async fn run_leader(
         .begin_grouped_many(&wal_entries, shamir_wal::WalDurability::Buffered)
         .await
     {
-        for v in &validated {
-            gate.completion().mark(v.commit_version, State::Aborted);
+        // WAL begin failed — nothing durable. Draining `validated` drops
+        // each survivor's version_guard → mark(Aborted).
+        for v in validated.drain(..) {
             if !v.is_leader {
                 if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                     let _ = s.send(Err(DbError::Storage(e.to_string())));
                 }
             }
+            // v.version_guard drops here → mark(Aborted).
         }
         drop(panic_guard);
         drop(commit_guard);
@@ -317,6 +317,7 @@ pub(super) async fn run_leader(
         tx: TxContext,
         commit_version: u64,
         uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+        version_guard: shamir_tx::VersionGuard,
         changefeed_event: Option<shamir_tx::ChangelogEvent>,
         is_leader: bool,
     }
@@ -344,9 +345,10 @@ pub(super) async fn run_leader(
 
     // Release the commit lock — materialize runs outside it (P2b).
     drop(commit_guard);
-    // Disarm panic guard safely (all followers notified, versions recorded in P1c).
+    // Disarm panic guard safely (all followers notified). The per-version
+    // Aborted obligation now lives in each survivor's version_guard, which
+    // is moved into PostWork below and consumed by materialize → committed.
     panic_guard.senders.clear();
-    panic_guard.versions.clear();
     std::mem::forget(panic_guard);
 
     // Consume validated into post_works (need ownership for materialize's &mut tx).
@@ -356,6 +358,7 @@ pub(super) async fn run_leader(
             tx: v.tx,
             commit_version: v.commit_version,
             uwl_guards: v.uwl_guards,
+            version_guard: v.version_guard,
             changefeed_event,
             is_leader: v.is_leader,
         });
@@ -368,14 +371,8 @@ pub(super) async fn run_leader(
 
     // P2b: materialize each survivor OUTSIDE commit_lock, gated by uwl_guards.
     for mut work in post_works {
-        let post_publish = materialize(
-            &mut work.tx,
-            repo,
-            gate,
-            work.commit_version,
-            work.uwl_guards,
-        )
-        .await;
+        let post_publish =
+            materialize(&mut work.tx, repo, work.version_guard, work.uwl_guards).await;
         let mat = post_publish_cleanup(post_publish, repo, gate, wal).await;
         if mat == MaterializationState::Deferred {
             repo.tx_metrics().on_tx_materialization_deferred();
@@ -453,7 +450,7 @@ async fn run_single_tx(
     // P2b: materialize runs OUTSIDE commit_lock, gated by per-table
     // uwl_guards. Disjoint-table commits proceed in parallel.
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
-    let post_publish = materialize(&mut tx, repo, gate, commit_version, pre.uwl_guards).await;
+    let post_publish = materialize(&mut tx, repo, pre.version_guard, pre.uwl_guards).await;
 
     let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
     if materialization == MaterializationState::Deferred {

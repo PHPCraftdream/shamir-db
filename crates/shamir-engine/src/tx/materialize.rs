@@ -59,11 +59,11 @@ use crate::tx::tx_outcome::MaterializationState;
 pub(super) async fn materialize(
     tx: &mut TxContext,
     repo: &RepoInstance,
-    gate: &RepoTxGate,
-    commit_version: u64,
+    version_guard: shamir_tx::VersionGuard,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> PostPublishState {
     let tx_id = tx.tx_id.0;
+    let commit_version = version_guard.version();
     let mut ok = true;
 
     // Phase 5a: physical data writes per table.
@@ -207,16 +207,13 @@ pub(super) async fn materialize(
     // Phase 6: publish — atomic publish-committed. ALWAYS runs: the
     // version IS committed (the WAL entry is durable) regardless of
     // whether the projections above landed inline.
-    // P1c: mark materialized in completion tracker; the watermark advances
-    // and syncs the atomic last_committed_version via fetch_max.
-    gate.completion().mark(
-        commit_version,
-        shamir_tx::completion_tracker::State::Materialized,
-    );
-    gate.sync_last_committed_from_watermark();
-    // CAS-based publish: safe outside commit_lock (P2b). Moves the
-    // reader-visible floor forward only; never backwards.
-    gate.publish_committed_max(commit_version);
+    // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
+    // last_committed_version from the watermark (fetch_max). This replaces
+    // the prior manual mark + sync_last_committed_from_watermark +
+    // publish_committed_max trio; the watermark advance is the same
+    // monotonic fetch_max, and the guard can no longer be dropped Aborted
+    // once committed here (it is moved into `commit`).
+    version_guard.commit();
 
     // Crash seam (test-only): version published in-memory but lost with
     // the process; markers (6.5) not yet persisted and Phase 7 not run.

@@ -21,6 +21,7 @@ use shamir_collections::THasher;
 
 use crate::completion_tracker::CompletionTracker;
 use crate::pending_commit::PendingCommit;
+use crate::version_guard::VersionGuard;
 use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
@@ -75,7 +76,10 @@ pub struct RepoTxGate {
 
     /// The highest version that has been fully published. Readers
     /// see only versions ≤ this value.
-    last_committed_version: AtomicU64,
+    ///
+    /// `Arc` so a [`VersionGuard`] can hold a clone and advance it on
+    /// `commit()` / `Drop` without a back-reference to the gate.
+    last_committed_version: Arc<AtomicU64>,
 
     /// Monotonic tx-id allocator.
     next_tx_id: AtomicU64,
@@ -107,7 +111,11 @@ pub struct RepoTxGate {
     /// Tracks materialized/aborted state per version and maintains a
     /// contiguous watermark. The watermark drives `last_committed_version`
     /// via [`sync_last_committed_from_watermark`](Self::sync_last_committed_from_watermark).
-    completion: CompletionTracker,
+    ///
+    /// `Arc` so a [`VersionGuard`] can hold a clone and own the terminal
+    /// `mark(version, …)` obligation by RAII without a back-reference to
+    /// the gate.
+    completion: Arc<CompletionTracker>,
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
@@ -146,13 +154,13 @@ impl RepoTxGate {
         Self {
             commit_mutex: tokio::sync::Mutex::new(()),
             version_counter: AtomicU64::new(last_committed),
-            last_committed_version: AtomicU64::new(last_committed),
+            last_committed_version: Arc::new(AtomicU64::new(last_committed)),
             next_tx_id: AtomicU64::new(next_tx_id_seed),
             active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),
-            completion: CompletionTracker::with_watermark(last_committed),
+            completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
         }
     }
 
@@ -246,6 +254,25 @@ impl RepoTxGate {
     /// Allocate the next MVCC version. Called under `commit_lock`.
     pub fn assign_next_version(&self) -> u64 {
         self.version_counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Allocate the next MVCC version and return a RAII [`VersionGuard`]
+    /// that owns the terminal-mark obligation.
+    ///
+    /// The guard's `Drop` marks the version `Aborted` (advancing the
+    /// watermark past it) unless [`VersionGuard::commit`] was called first,
+    /// which marks it `Materialized`. Both paths advance
+    /// `last_committed_version` from the resulting watermark — identical to
+    /// the manual `mark` + [`sync_last_committed_from_watermark`] pair this
+    /// replaces. The compiler thus enforces that every allocated version is
+    /// terminally marked exactly once.
+    pub fn assign_next_version_guarded(&self) -> VersionGuard {
+        let version = self.assign_next_version();
+        VersionGuard::new(
+            version,
+            Arc::clone(&self.completion),
+            Arc::clone(&self.last_committed_version),
+        )
     }
 
     /// Publish: update `last_committed_version` atomically.

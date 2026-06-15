@@ -143,6 +143,9 @@ impl MvccStore {
             // All caps agree + not protected → reclaim the version AND its ts.
             let _ = self.history.remove(phys_key.clone()).await;
             let _ = self.history.remove(ts_key(*version)).await;
+            // P1c: drop the same (key, version) from the overlay in lockstep so
+            // the overlay never serves a value that history just reclaimed.
+            self.overlay.remove(key, *version);
         }
     }
 
@@ -222,6 +225,8 @@ impl MvccStore {
                 // T1c: remove the ts-key in lockstep so timestamps don't
                 // outlive their versions.
                 let _ = self.history.remove(ts_key(*version)).await;
+                // P1c: drop the same (key, version) from the overlay in lockstep.
+                self.overlay.remove(&orig_key, *version);
                 deleted += 1;
             }
         }
@@ -327,6 +332,8 @@ impl MvccStore {
                 // All guards pass → reclaim the version AND its ts-key.
                 let _ = self.history.remove(phys_key.clone()).await;
                 let _ = self.history.remove(ts_key(*version)).await;
+                // P1c: drop the same (key, version) from the overlay in lockstep.
+                self.overlay.remove(&orig_key, *version);
                 deleted += 1;
             }
         }
