@@ -132,6 +132,15 @@ pub struct RepoTxGate {
     /// materialize. P1d-2 will gate Phase-7 WAL truncation on it, and overlay
     /// GC will use it as the lower drain bound.
     durable_completion: Arc<CompletionTracker>,
+
+    /// D2 P1e — durable-progress signal. Notified by
+    /// [`mark_durable`](Self::mark_durable) every time a version is marked
+    /// durable (the drainer's `drain_step` calls it once per drained version).
+    /// Backpressured committers park on [`durable_notified`](Self::durable_notified)
+    /// and re-check the `last_committed() - durable_watermark()` gap when woken,
+    /// so they yield latency ONLY under sustained write pressure and resume the
+    /// instant the drain makes progress. Lock-free / wait-free to signal.
+    durable_progress: Arc<tokio::sync::Notify>,
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
@@ -183,6 +192,7 @@ impl RepoTxGate {
             // current inline path the durable watermark is kept in lock-step
             // with the visibility watermark by `mark_durable` on each commit.
             durable_completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
+            durable_progress: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -532,6 +542,22 @@ impl RepoTxGate {
     pub fn mark_durable(&self, version: u64) {
         self.durable_completion
             .mark(version, crate::completion_tracker::State::Materialized);
+        // D2 P1e: wake any backpressured committer waiting on durable progress.
+        // `notify_waiters` wakes ALL currently-registered waiters without
+        // storing a permit — paired with the committer registering its
+        // `notified()` future BEFORE re-checking the gap (see
+        // `apply_backpressure`), there is no lost-wakeup window.
+        self.durable_progress.notify_waiters();
+    }
+
+    /// D2 P1e — a future that resolves on the next durable-progress signal.
+    ///
+    /// Backpressure callers register this BEFORE re-reading the gap so a
+    /// concurrent [`mark_durable`](Self::mark_durable) cannot slip a wakeup
+    /// between the gap check and the park (no lost wakeup). The returned future
+    /// borrows the gate; await it (optionally under a timeout) and loop.
+    pub fn durable_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.durable_progress.notified()
     }
 
     /// Record that `version` will never be durable (aborted before any

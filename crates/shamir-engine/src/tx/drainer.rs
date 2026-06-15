@@ -210,6 +210,20 @@ impl Drainer {
         if drained > 0 {
             self.drained_total
                 .fetch_add(drained as u64, Ordering::Relaxed);
+
+            // D2 P1e — overlay GC. The durable watermark advanced (each
+            // `mark_durable` above moved it; read the post-pass value once).
+            // Every overlay entry with `version <= durable_watermark` is now
+            // durable in `history`, so its overlay copy is redundant and is
+            // dropped across ALL per-table overlays. This bounds the overlay to
+            // the still-undrained `(durable_watermark, last_committed]` window
+            // instead of letting it grow without limit. Lock-free: each
+            // `gc_overlay_to` is a B+-tree sweep with no `.await` and no shared
+            // mutex (see `MvccStore::gc_overlay_to`).
+            let durable = gate.durable_watermark();
+            repo.per_table_mvcc().scan(|_, mvcc| {
+                mvcc.gc_overlay_to(durable);
+            });
         }
         Ok(drained)
     }

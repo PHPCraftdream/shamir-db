@@ -1,4 +1,5 @@
 use shamir_storage::error::DbError;
+use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::TxContext;
 use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
@@ -238,7 +239,20 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// drain is needed (HIGH-6).
 pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
     match commit_tx_inner(tx, repo).await {
-        Ok(outcome) => Ok(outcome),
+        Ok(outcome) => {
+            // D2 P1e — soft backpressure. The ack-path published only the
+            // in-memory overlay; the value is durable in `history` only after
+            // the background drainer replays its WAL entry. Under sustained
+            // write pressure faster than the disk drains, the overlay + inflight
+            // WAL tail grow unbounded. Park the committer here, AFTER the commit
+            // is published (the tx is COMMITTED and observable on its return),
+            // until the undrained gap falls back under the low-watermark. This
+            // is the single choke point: every live commit path funnels through
+            // this wrapper, and it is on the SUCCESS path only — aborts never
+            // grew the overlay, so they never brake.
+            apply_backpressure(repo, MAX_UNDRAINED_VERSIONS).await;
+            Ok(outcome)
+        }
         Err(e) => {
             if let TxError::Storage(_) = &e {
                 repo.tx_metrics().on_tx_aborted_storage();
@@ -247,6 +261,131 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
         }
     }
 }
+
+/// D2 P1e — soft async backpressure on the undrained version gap.
+///
+/// The gap is `gate.last_committed() - gate.durable_watermark()`: the number
+/// of versions that are visible (published to readers via the overlay) but not
+/// yet durable in `history` (the background [`Drainer`](crate::tx::drainer::Drainer)
+/// has not replayed their WAL entries). Each undrained version pins an overlay
+/// entry + an inflight WAL marker, so an unbounded gap is an unbounded RAM /
+/// WAL-tail leak.
+///
+/// ## Contract
+/// * **Fast path (zero overhead):** if `gap <= high` it returns immediately —
+///   one pair of atomic loads, no allocation, no wake, no await. This is the
+///   common case under any non-pathological load, so a steady committer pays
+///   nothing.
+/// * **Brake (only under pressure):** once `gap > high`, the committer wakes
+///   the drainer and parks on the gate's durable-progress [`Notify`], re-checking
+///   the gap each time the drain makes progress. It resumes the instant the gap
+///   drops below the LOW watermark `high / 2` (hysteresis: braking to exactly
+///   `high` would re-trigger on the very next commit and thrash; draining down
+///   to `high/2` amortizes the brake over many commits).
+///
+/// ## Lost-wakeup safety
+/// Each loop iteration registers `gate.durable_notified()` (a `Notified` future)
+/// BEFORE re-reading the gap, then awaits it. A concurrent `mark_durable`
+/// between the gap read and the await cannot be missed: `notify_waiters` wakes
+/// every already-registered waiter, and the future was registered first. We
+/// also re-wake the drainer each iteration so a drainer that went idle (its own
+/// `notify_one` permit consumed) is nudged back to work.
+///
+/// ## Deadlock safety (the load-bearing guard)
+/// The drainer can get STUCK — a durable-write error (disk full, backend fault)
+/// leaves `durable_watermark` frozen, so the gap never closes and the parking
+/// loop would wait forever. To make a stuck drain a DEGRADATION (more RAM) and
+/// never a HANG, the loop is bounded by a wall-clock budget
+/// ([`BACKPRESSURE_MAX_WAIT`]). When the budget is exhausted it logs a warning
+/// and RETURNS (proceeds without backpressure). Correctness is untouched — the
+/// data is already committed and observable; only the overlay-bounding promise
+/// is relaxed under a faulted drain, which is the right trade (never wedge a
+/// committer on a broken disk). Each individual park is itself capped by a short
+/// `sleep` in the `select!` so a single lost signal cannot stall a whole budget.
+///
+/// Takes `high` as a parameter so tests can drive the state machine with a tiny
+/// artificial gap; production callers pass [`MAX_UNDRAINED_VERSIONS`].
+pub(crate) async fn apply_backpressure(repo: &RepoInstance, high: u64) {
+    let Ok(gate) = repo.tx_gate().await else {
+        // No gate (repo teardown / construction race) — nothing to brake on.
+        return;
+    };
+
+    // Fast path: cheap atomic loads, the overwhelmingly common case.
+    let gap = gate
+        .last_committed()
+        .saturating_sub(gate.durable_watermark());
+    if gap <= high {
+        return;
+    }
+
+    // Hysteresis low-watermark: resume only once the drain has caught up to
+    // half the threshold, so the brake amortizes over many commits instead of
+    // re-firing on every subsequent commit (thrash).
+    let low = high / 2;
+
+    log::warn!(
+        "tx backpressure ENGAGED: undrained gap {gap} > {high} (low-watermark {low}); \
+         parking committer on durable progress"
+    );
+
+    let start = std::time::Instant::now();
+    loop {
+        // Nudge the drainer every iteration: it may have gone idle (its
+        // `notify_one` permit already consumed by a prior pass).
+        repo.drainer().wake();
+
+        // Register the durable-progress future BEFORE re-reading the gap so a
+        // concurrent `mark_durable` cannot slip a wakeup between the check and
+        // the park (no lost wakeup).
+        let notified = gate.durable_notified();
+        tokio::pin!(notified);
+
+        let gap = gate
+            .last_committed()
+            .saturating_sub(gate.durable_watermark());
+        if gap <= low {
+            log::debug!(
+                "tx backpressure RELEASED: gap {gap} <= low-watermark {low} after {:?}",
+                start.elapsed()
+            );
+            return;
+        }
+
+        // Deadlock guard: if the drain has not closed the gap within the
+        // wall-clock budget it is stuck (durable write faulted). Proceed without
+        // backpressure rather than hang the committer forever — RAM grows, data
+        // is unaffected (already committed + observable).
+        if start.elapsed() >= BACKPRESSURE_MAX_WAIT {
+            log::warn!(
+                "tx backpressure ABANDONED after {:?}: undrained gap still {gap} > low {low} — \
+                 drain appears stuck; proceeding (overlay bound relaxed, data unaffected)",
+                start.elapsed()
+            );
+            return;
+        }
+
+        // Park on durable progress, but cap each park with a short sleep so a
+        // single missed signal (or a drainer that needs re-nudging) cannot
+        // stall the whole budget — we loop, re-wake, re-check.
+        tokio::select! {
+            _ = &mut notified => {}
+            _ = tokio::time::sleep(BACKPRESSURE_PARK_SLICE) => {}
+        }
+    }
+}
+
+/// Wall-clock ceiling on a single [`apply_backpressure`] call. Past this the
+/// brake is abandoned (drain presumed stuck) and the committer proceeds — a
+/// RAM-vs-hang trade that always favours liveness. Generous enough that a
+/// healthy-but-slow disk drains within it under normal bursts.
+const BACKPRESSURE_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-park cap inside the backpressure loop. Bounds how long one `select!`
+/// waits on the durable-progress signal before re-checking the gap and
+/// re-nudging the drainer, so a single lost wakeup degrades to a short poll
+/// rather than stalling the whole [`BACKPRESSURE_MAX_WAIT`] budget.
+const BACKPRESSURE_PARK_SLICE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Orchestrates the commit pipeline around the WAL commit point.
 ///

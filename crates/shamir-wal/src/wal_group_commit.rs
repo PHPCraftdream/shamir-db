@@ -84,7 +84,12 @@ impl Waiter {
     }
 }
 
-type Pending = (Vec<u8>, WalDurability, Arc<Waiter>);
+type Pending = (
+    Vec<u8>,
+    u64, /* commit_version */
+    WalDurability,
+    Arc<Waiter>,
+);
 
 /// Lock-free-leader group commit over a [`WalSink`]. See module-level
 /// correctness argument (and `group_fsync.rs`, D1b — identical structure).
@@ -115,12 +120,19 @@ impl WalGroupCommit {
     }
 
     /// Append one encoded payload at the given tier; returns once the
-    /// entry has reached the requested durability level.
-    pub async fn append(&self, payload: Vec<u8>, durability: WalDurability) -> DbResult<()> {
+    /// entry has reached the requested durability level. `commit_version`
+    /// is the MVCC version stamped on the entry — the leader folds the
+    /// window's max into the sink's `max_committed` watermark (F6).
+    pub async fn append(
+        &self,
+        payload: Vec<u8>,
+        commit_version: u64,
+        durability: WalDurability,
+    ) -> DbResult<()> {
         let waiter = Arc::new(Waiter::new());
         {
             let mut p = self.pending.lock().await;
-            p.push((payload, durability, Arc::clone(&waiter)));
+            p.push((payload, commit_version, durability, Arc::clone(&waiter)));
         }
         if self
             .flushing
@@ -164,12 +176,19 @@ impl WalGroupCommit {
             // Split without cloning payloads.
             let mut payloads = Vec::with_capacity(batch.len());
             let mut metas = Vec::with_capacity(batch.len());
-            for (p, tier, w) in batch {
+            let mut batch_max_version = 0u64;
+            for (p, version, tier, w) in batch {
                 payloads.push(p);
+                batch_max_version = batch_max_version.max(version);
                 metas.push((tier, w));
             }
-            // One write() for the whole window (level 2).
-            let write_ok = self.sink.append_batch(payloads).await.is_ok();
+            // One write() for the whole window (level 2). The window's max
+            // commit_version is the watermark folded into the sink (F6).
+            let write_ok = self
+                .sink
+                .append_batch(payloads, batch_max_version)
+                .await
+                .is_ok();
             // Wake Buffered waiters immediately — level 2 reached. (write()
             // success means bytes are in the OS page cache regardless of a
             // later fsync outcome.)

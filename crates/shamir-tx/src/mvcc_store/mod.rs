@@ -170,6 +170,65 @@ impl MvccStore {
         &self.overlay
     }
 
+    /// D2 P1e — drop every overlay entry whose `version <= durable_watermark`.
+    ///
+    /// Called by the background [`Drainer`] after a drain pass advances the
+    /// repo's `durable_watermark`. A version `V <= durable_watermark` is, by
+    /// the drain contract, already durable in the `history` log — so its
+    /// overlay copy is redundant and can be dropped SAFELY regardless of any
+    /// active reader: a snapshot at or above `V` resolves the value from
+    /// history (`resolve_read` / `get_current` / `current_stream` all fall
+    /// back to `history` on an overlay miss), and a snapshot below `V` never
+    /// observed the overlay-only window in the first place. No
+    /// `min_active_snapshot` floor is needed here — that floor governs
+    /// history-retention / vacuum (how long OLD versions stay in `history`),
+    /// not the overlay, which is a pure RYOW read-cache for the
+    /// not-yet-durable tail.
+    ///
+    /// Uses `overlay.gc_upto(durable_watermark, u64::MAX)` so the effective
+    /// threshold is EXACTLY `durable_watermark` (the second `floor` argument
+    /// is redundant for overlay GC — see [`VersionedOverlay::gc_upto`]).
+    ///
+    /// Also evicts any `pending_ts` commit-time stamp for `version <=
+    /// durable_watermark`. On the warm drain path the stamp is already
+    /// consumed (removed) by [`write_committed_to_history`](Self::write_committed_to_history);
+    /// this is a defensive sweep so a stamp that was inserted on the ack-path
+    /// but — for any reason — never consumed by the drain half (e.g. a
+    /// non-drained direct write, or a future code path) cannot accumulate
+    /// unboundedly. Lock-free.
+    pub fn gc_overlay_to(&self, durable_watermark: u64) {
+        if durable_watermark == 0 {
+            return;
+        }
+        // Overlay: drop everything <= durable_watermark (floor irrelevant).
+        self.overlay.gc_upto(durable_watermark, u64::MAX);
+
+        // pending_ts hygiene: remove any stamp for an already-durable version.
+        // `retain` is a lock-free sweep over the (small) map; on the common
+        // path it finds nothing (the drain half already removed each stamp it
+        // consumed), so this is cheap.
+        self.pending_ts.retain(|v, _| *v > durable_watermark);
+    }
+
+    /// D2 P1e — number of entries currently in the in-memory overlay.
+    ///
+    /// Telemetry / cross-crate test accessor: the engine-side overlay-GC tests
+    /// (`shamir-engine`) assert the overlay shrinks to the `(durable_watermark,
+    /// last_committed]` window after a drain pass, and `overlay()` itself is
+    /// `pub(crate)` (not reachable from another crate). Lock-free atomic load.
+    pub fn overlay_len(&self) -> usize {
+        self.overlay.len()
+    }
+
+    /// D2 P1e — number of pending commit-time stamps awaiting drain.
+    ///
+    /// Telemetry / cross-crate test accessor mirroring [`Self::overlay_len`]:
+    /// the overlay-GC tests assert `pending_ts` is also reclaimed once the
+    /// versions it stamps fall at or below the durable watermark. Lock-free.
+    pub fn pending_ts_len(&self) -> usize {
+        self.pending_ts.len()
+    }
+
     /// T1c: current wall-clock millis. If `test_now_millis` is non-zero
     /// (set via [`Self::set_test_now`]) that frozen value is returned;
     /// otherwise the real `SystemTime` since `UNIX_EPOCH` is used. Retention
