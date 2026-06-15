@@ -1,6 +1,6 @@
 use futures::future::join_all;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
-use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
+use shamir_tx::{RepoTxGate, TxContext};
 use shamir_types::types::common::THasher;
 
 use crate::repo::RepoInstance;
@@ -253,28 +253,33 @@ pub(super) struct PostPublishState {
     pub interner_delta_max_ids: Vec<(u64, u64)>,
 }
 
-/// Phase 6.5 (markers) + Phase 7 (WAL cleanup), run OUTSIDE `commit_lock`.
+/// Phase 6.5 (markers), run OUTSIDE `commit_lock`.
+///
+/// D2 P1d-2b CUTOVER: Phase 7 (`wal.commit` + A5 interner-hwm gate) has
+/// MOVED OUT of this ack-path function into the background
+/// [`Drainer`](crate::tx::drainer::Drainer). After the cutover the ack-path
+/// must NOT truncate the WAL entry: the entry is the source of truth for the
+/// not-yet-drained value (the ack-path wrote only the in-memory overlay, not
+/// `history`). Truncating here would lose the only durable record of an
+/// undrained version on a crash. So this function now does ONLY:
+///   - Phase 6.5: persist `last_committed`/`next_tx_id` recovery markers
+///     (visibility metadata — cheap, and consistent on crash: recovery
+///     re-derives the same floor).
+///   - A5 interner checkpoint (fire-and-forget, on interval) so the
+///     persisted hwm advances and the DRAINER's A5 gate can truncate.
+///
+/// `wal.commit` is NOW exclusively the drainer's job, gated on the version
+/// being durable in `history` (`replay_v2_entry` → `mark_durable` →
+/// `wal.commit`). The `MaterializationState` it returns reflects only the
+/// marker write (the visible projections already ran in [`materialize`]).
 ///
 /// These phases are pure crash-recovery bookkeeping: they do not affect
 /// in-memory visibility (Phase 6 already published the version) and do not
-/// need serialisation against other committers. Moving them out of the
-/// lock shrinks the critical section by two `info_store.set` calls + one
-/// WAL remove — measurable I/O that was serialising every committer.
-///
-/// Ordering is preserved: markers BEFORE WAL cleanup (the inverse is
-/// unsafe — see the original Phase 6.5 comment). The only change is that
-/// another committer may now enter the lock while these I/O ops run for
-/// the previous commit. That is safe because:
-///   - `publish_committed` already advanced `last_committed_version`;
-///     the new committer sees the correct MVCC floor.
-///   - Markers are a best-effort snapshot; recovery re-persists the floor
-///     from `gate.last_committed()` when consuming any inflight WAL entry.
-///   - WAL cleanup is idempotent (removing an already-absent marker is OK).
+/// need serialisation against other committers.
 pub(super) async fn post_publish_cleanup(
     state: PostPublishState,
     repo: &RepoInstance,
     gate: &RepoTxGate,
-    wal: &RepoWalManager,
 ) -> MaterializationState {
     let PostPublishState {
         tx_id,
@@ -285,31 +290,12 @@ pub(super) async fn post_publish_cleanup(
 
     // Phase 6.5: persist recovery markers (CRIT-1).
     //
-    // Write `last_committed_version` + `next_tx_id` to the repo's
-    // `__tx__` info_store BEFORE Phase 7 removes the WAL marker.
-    //
-    // Ordering rationale:
-    //
-    // - Markers BEFORE wal.commit:
-    //     If markers succeed but `wal.commit` fails, the WAL entry stays
-    //     inflight and recovery re-applies it. Data writes are idempotent
-    //     and counter replay is intentionally skipped.
-    //
-    // - Markers AFTER publish_committed:
-    //     The in-memory `last_committed_version` is the runtime source of
-    //     truth; the persisted copy only matters across restarts.
-    //
-    // The inverse order (wal.commit before markers) is unsafe: a crash
-    // between the two would clear the WAL marker yet leave
-    // `last_committed_version` stale on disk → version-monotonicity
-    // violation on restart.
-    //
-    // Best-effort post-commit: a marker write failure is logged and flips
-    // `projections_ok` (Phase 7 will be skipped so the marker stays
-    // inflight). Even without these markers, `recover_inflight_v2`
-    // re-persists the floor (`gate.last_committed()`) when it consumes
-    // the inflight entry, so the version floor is restored on the next
-    // open.
+    // Write `last_committed_version` + `next_tx_id` to the repo's `__tx__`
+    // info_store. Best-effort post-commit: a marker write failure is logged
+    // and flips `projections_ok` → `Deferred`. Even without these markers,
+    // `recover_inflight_v2` re-persists the floor (`gate.last_committed()`)
+    // when it consumes the inflight entry, so the version floor is restored
+    // on the next open.
     if let Err(e) = persist_markers(repo, gate, commit_version).await {
         log::warn!(
             "commit_tx materialization Phase 6.5 (recovery markers) failed for tx {tx_id} \
@@ -318,15 +304,15 @@ pub(super) async fn post_publish_cleanup(
         projections_ok = false;
     }
 
-    // Crash seam (test-only): everything (data, index, markers) is on
-    // disk but Phase 7 has NOT removed the WAL marker. The inflight
-    // marker survives → recovery re-applies the (already-present) entry
-    // idempotently and cleans the marker.
+    // Crash seam (test-only): visible state + markers are set but the WAL
+    // entry is still inflight (it is NOT truncated here post-cutover). The
+    // inflight marker survives → recovery / the drainer replays it into
+    // `history` idempotently.
     maybe_crash("phase6_5", repo).await;
 
     // A5: background interner checkpoint. Every INTERNER_CHECKPOINT_INTERVAL
     // commits, persist each touched table's interner so the high-water mark
-    // advances and future Phase 7 passes can truncate older WAL entries.
+    // advances and the DRAINER's A5 gate can later truncate older WAL entries.
     // Spawned fire-and-forget: the persist is not on the commit critical path.
     if commit_version.is_multiple_of(INTERNER_CHECKPOINT_INTERVAL)
         && !interner_delta_max_ids.is_empty()
@@ -348,49 +334,14 @@ pub(super) async fn post_publish_cleanup(
         });
     }
 
-    // A5: Phase 7 gating — WAL truncation is safe ONLY when every
-    // interner id in the entry's delta has been durably persisted. The
-    // check is factored into [`interner_delta_safe_to_truncate`] so the
-    // background drainer (P1d-2) applies the SAME gate before its
-    // `wal.commit`. A conservative error → `false` (defer truncation).
-    let interner_safe = interner_delta_safe_to_truncate(repo, &interner_delta_max_ids)
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!(
-                "Phase 7 gating: interner-hwm check for tx {tx_id}: {e}; \
-                 conservatively deferring WAL truncation"
-            );
-            false
-        });
-
-    // Phase 7: WAL cleanup — ONLY on full materialization AND when the
-    // interner delta is covered by persisted state (A5 invariant).
-    if projections_ok && interner_safe {
-        if let Err(e) = wal.commit(tx_id).await {
-            log::warn!(
-                "commit_tx materialization Phase 7 (WAL cleanup) failed for tx {tx_id} \
-                 commit_version {commit_version}: {e}; marker left inflight for recovery"
-            );
-            projections_ok = false;
-        } else {
-            // Crash seam (test-only): Phase 7 done — the WAL marker is
-            // gone and the tx is fully materialized. A HARD crash here
-            // leaves a clean committed state; recovery is a no-op.
-            maybe_crash("phase7", repo).await;
-        }
-    } else if !projections_ok {
+    // Phase 7 (`wal.commit` + A5 gate) is GONE — the background drainer owns
+    // it now (see fn doc). `projections_ok` reflects only the visible
+    // projections (materialize) + the marker write above.
+    if !projections_ok {
         log::warn!(
             "commit_tx tx {tx_id} commit_version {commit_version} COMMITTED but \
-             materialization DEFERRED — WAL marker left inflight; recovery will \
-             reconcile main/info on the next open"
-        );
-    } else {
-        // projections_ok but !interner_safe: WAL entry stays inflight
-        // until a future checkpoint advances the persisted hwm. NOT a
-        // materialization deferral (data + index are committed).
-        log::debug!(
-            "commit_tx tx {tx_id} commit_version {commit_version} COMMITTED, \
-             projections complete, WAL entry retained pending interner checkpoint"
+             materialization DEFERRED — WAL marker left inflight; recovery / drainer \
+             will reconcile on the next pass"
         );
     }
 

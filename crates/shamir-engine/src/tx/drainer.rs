@@ -221,40 +221,63 @@ impl Drainer {
         Ok(total)
     }
 
-    /// Spawn the background drain loop as a weak-ref task (mirrors
-    /// `WalGroupCommit::spawn_background_fsync` / `MemBufferStore`'s
-    /// flusher): the loop runs while BOTH the [`Drainer`] and the
-    /// [`RepoInstance`] are alive, and exits when either is dropped — no
-    /// leak. Driven by [`wake`](Self::wake) (commit-path notify) with an
-    /// `interval` backstop so a missed wakeup still makes progress.
+    /// Spawn the background drain loop as a leak-free task (mirrors
+    /// `WalGroupCommit::spawn_background_fsync` / `MemBufferStore`'s flusher).
     ///
-    /// NOT called from the commit path in P1d-2a — it only exists so the
-    /// P1d-2b cutover can start it once per repo. The single-owner contract
-    /// (exactly one task per repo) is the caller's responsibility (spawn
-    /// once, e.g. behind a `OnceCell` on `RepoInstance`).
-    pub fn spawn(self: &Arc<Self>, repo: Weak<RepoInstance>, interval: Duration) {
+    /// ## Lifecycle (the hard part)
+    ///
+    /// [`RepoInstance`] is `Clone`-of-`Arc`s (every field is `Arc`-shared;
+    /// there is NO canonical `Arc<RepoInstance>` to take a `Weak` from). A
+    /// task holding an owned `RepoInstance` clone would therefore bump every
+    /// inner `Arc` and keep the repo alive forever — a leak for ephemeral
+    /// repos (tests create/drop many).
+    ///
+    /// The fix: `repo` here is a BACKGROUND clone whose `live` token is `None`
+    /// (`RepoInstance::clone_for_background`), so it does NOT count toward the
+    /// repo's liveness. `live` is a `Weak<()>` of the repo's shared liveness
+    /// `Arc<()>`, held STRONGLY only by the real (foreground) repo clones. The
+    /// loop parks on the wake/interval, then checks `live.upgrade()`: once the
+    /// last foreground clone drops, the strong count hits zero, the upgrade
+    /// fails, the loop breaks, and the owned background clone is dropped —
+    /// releasing every inner `Arc`. No leak, no cycle (the background clone's
+    /// strong ref to the `Drainer` is severed when the loop exits), no
+    /// deadlock (the loop only `.await`s I/O + the notify).
+    ///
+    /// Driven by [`wake`](Self::wake) (commit-path notify) with an `interval`
+    /// backstop so a missed wakeup still makes progress. The single-owner
+    /// contract (exactly one task per repo) is the caller's responsibility
+    /// (spawn once behind the repo's `OnceCell<Arc<Drainer>>`).
+    pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
         let drainer = Arc::downgrade(self);
         tokio::spawn(async move {
-            // Park on the next wake OR the interval backstop, whichever fires
-            // first, while the drainer is alive; exit when it (or the repo)
-            // drops. Upgrading inside the `while let` mirrors
-            // `WalGroupCommit::spawn_background_fsync`. enable()-before-check
-            // is unnecessary: a missed wake is bounded by `interval`.
-            while let Some(this) = drainer.upgrade() {
-                tokio::select! {
-                    _ = this.notify.notified() => {}
-                    _ = tokio::time::sleep(interval) => {}
+            loop {
+                // Exit promptly once every foreground repo clone has dropped.
+                if live.upgrade().is_none() {
+                    break;
                 }
-                // Drop the strong drainer ref BEFORE the await so a quiescent
-                // system can drop the drainer between ticks; re-resolve the
-                // repo (weak) for the actual work.
-                drop(this);
-                let (this, repo) = match (drainer.upgrade(), repo.upgrade()) {
-                    (Some(d), Some(r)) => (d, r),
-                    _ => break, // either side dropped → exit the loop
-                };
-                if let Err(e) = this.drain_all(&repo).await {
-                    log::warn!("drainer background loop: drain_all failed: {e}");
+                // Park on the next wake OR the interval backstop. Upgrade the
+                // drainer just to reach its `notify`; drop it before the work
+                // so a quiescent system can release it.
+                match drainer.upgrade() {
+                    Some(this) => {
+                        tokio::select! {
+                            _ = this.notify.notified() => {}
+                            _ = tokio::time::sleep(interval) => {}
+                        }
+                    }
+                    None => break,
+                }
+                // Re-check liveness after the park (the last clone may have
+                // dropped while we slept) so we never drain a dead repo.
+                if live.upgrade().is_none() {
+                    break;
+                }
+                if let Some(this) = drainer.upgrade() {
+                    if let Err(e) = this.drain_all(&repo).await {
+                        log::warn!("drainer background loop: drain_all failed: {e}");
+                    }
+                } else {
+                    break;
                 }
             }
         });

@@ -145,7 +145,15 @@ impl MvccStore {
             let _ = self.history.remove(ts_key(*version)).await;
             // P1c: drop the same (key, version) from the overlay in lockstep so
             // the overlay never serves a value that history just reclaimed.
-            self.overlay.remove(key, *version);
+            // D2 P1d-2b: but NEVER drop a version the drainer has not yet made
+            // durable (`version > durable_watermark`) — post-cutover the
+            // overlay holds the ONLY copy of an undrained version, so removing
+            // it here would lose committed data. Such a version is also a
+            // superseded-history candidate that simply isn't in history yet;
+            // the real overlay-GC on durable_watermark advance is P1e.
+            if *version <= self.gate.durable_watermark() {
+                self.overlay.remove(key, *version);
+            }
         }
     }
 
@@ -226,7 +234,12 @@ impl MvccStore {
                 // outlive their versions.
                 let _ = self.history.remove(ts_key(*version)).await;
                 // P1c: drop the same (key, version) from the overlay in lockstep.
-                self.overlay.remove(&orig_key, *version);
+                // D2 P1d-2b: gate on durable_watermark — never drop an undrained
+                // version (the overlay holds its only copy until the drainer
+                // lands it in history). Full overlay-GC is P1e.
+                if *version <= self.gate.durable_watermark() {
+                    self.overlay.remove(&orig_key, *version);
+                }
                 deleted += 1;
             }
         }
@@ -333,7 +346,12 @@ impl MvccStore {
                 let _ = self.history.remove(phys_key.clone()).await;
                 let _ = self.history.remove(ts_key(*version)).await;
                 // P1c: drop the same (key, version) from the overlay in lockstep.
-                self.overlay.remove(&orig_key, *version);
+                // D2 P1d-2b: gate on durable_watermark — never drop an undrained
+                // version (the overlay holds its only copy until the drainer
+                // lands it in history). Full overlay-GC is P1e.
+                if *version <= self.gate.durable_watermark() {
+                    self.overlay.remove(&orig_key, *version);
+                }
                 deleted += 1;
             }
         }

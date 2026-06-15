@@ -176,7 +176,7 @@ pub(crate) async fn materialize_async_tail(
         ok = false;
     }
 
-    // A5: capture interner delta max-ids for Phase 7 gating.
+    // A5: capture interner delta max-ids for the interner checkpoint below.
     let interner_delta_max_ids: Vec<(u64, u64)> = tx
         .interner_deltas
         .iter()
@@ -207,45 +207,20 @@ pub(crate) async fn materialize_async_tail(
         });
     }
 
-    // A5: Phase 7 gating on interner persisted high-water mark.
-    let mut interner_safe = true;
-    if !interner_delta_max_ids.is_empty() {
-        for &(table_token, max_id) in &interner_delta_max_ids {
-            match repo.table_by_token(table_token).await {
-                Ok(Some(tbl)) => {
-                    let hwm = tbl.interner().persisted_high_water() as u64;
-                    if max_id > hwm {
-                        interner_safe = false;
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    interner_safe = false;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Phase 7: WAL cleanup ONLY on full success AND interner safety.
-    if ok && interner_safe {
-        if let Ok(wal) = repo.repo_wal().await {
-            if let Err(e) = wal.commit(tx_id).await {
-                log::warn!(
-                    "commit_tx (async) Phase 7 (WAL cleanup) failed for tx {tx_id} \
-                     commit_version {commit_version}: {e}; marker left inflight for recovery"
-                );
-                ok = false;
-            }
-        } else {
-            ok = false;
-        }
-    } else if !ok {
+    // D2 P1d-2b FIX: Phase 7 (WAL truncation) is NO LONGER done here. Post-
+    // cutover the AsyncIndex ack-path writes ONLY the in-memory overlay (via
+    // `apply_data_batch` → `apply_committed_visible`) — the value is durable in
+    // `history` only after the background `Drainer` replays the inflight WAL
+    // entry. Truncating the marker here would remove the WAL entry while the
+    // data lives ONLY in the (volatile) overlay → DATA LOSS on crash, and would
+    // wedge `durable_watermark` (the drainer could never mark this version
+    // durable because its entry is gone). The drainer is the SOLE caller of
+    // `wal.commit` now: it writes history → `mark_durable` → A5-gated truncate,
+    // exactly as the lockfree path's `post_publish_cleanup` was changed to.
+    if !ok {
         log::warn!(
             "commit_tx (async) tx {tx_id} commit_version {commit_version} COMMITTED but \
-             materialization DEFERRED — WAL marker left inflight; recovery will \
-             reconcile main/info on the next open"
+             materialization DEFERRED — recovery / drainer will reconcile main/info"
         );
     }
 
@@ -372,7 +347,21 @@ pub(crate) async fn apply_data_batch(
         .read_async(&table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
         .await;
     match mvcc_found {
-        Some(mvcc) => mvcc.apply_committed_ops(ops, commit_version).await,
+        // D2 P1d-2b CUTOVER: the ack-path writes ONLY the in-memory visible
+        // half (overlay + cell + floor). It no longer writes `history` inline
+        // — the background `Drainer` (replaying the durable WAL entry via
+        // `write_committed_to_history`) is now the SOLE history writer. The WAL
+        // entry (Phase 4, already durable) is the source of truth; the overlay
+        // holds the single RAM copy of the value until the drainer makes it
+        // durable. Crash before drain ⇒ inflight WAL ⇒ recovery replays.
+        Some(mvcc) => {
+            mvcc.apply_committed_visible(&ops, commit_version);
+            Ok(())
+        }
+        // Non-MVCC tables (system / test) have NO overlay and are NOT drained
+        // — they have no version-log. Keep the direct durable write inline:
+        // this is the rare unattached-table path, and its data is replayed
+        // from the WAL on recovery exactly as before the cutover.
         None => base.transact(ops).await,
     }
 }

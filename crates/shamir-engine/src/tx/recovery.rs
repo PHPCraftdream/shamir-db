@@ -6,10 +6,10 @@
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
-use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_tx::version_codec::encode_version_key;
+use shamir_storage::types::KvOp;
 use shamir_tx::CompletionState;
+use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -267,6 +267,15 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
         if entry.commit_version > 0 {
             gate.completion()
                 .mark(entry.commit_version, CompletionState::Materialized);
+            // D2 P1d-2b: `replay_v2_entry` just wrote this version's data into
+            // `history` (via `write_committed_to_history`) — it is now durable.
+            // Advance the durable watermark so a freshly-opened repo's
+            // `durable_watermark()` catches up to its `last_committed()` (on
+            // open the overlay is empty, so reads go straight to history, and
+            // the durable/visibility gap must be closed). The drainer's normal
+            // warm path does this same `mark_durable`; recovery is the cold
+            // path doing it for the inflight tail.
+            gate.mark_durable(entry.commit_version);
         }
         // No-op: there are no per-entry markers; the segment is cleaned by
         // F6 truncation and replay is idempotent.
@@ -340,14 +349,16 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
     Ok(())
 }
 
-/// cancel-safe: yes — read-only resolution of per-table MvccStores plus
-/// CAS-based `seed_version` upserts; cancellation leaves the cache in a
-/// consistent (possibly partially seeded) state that a re-replay fixes.
+/// cancel-safe: NO — routes each table's data ops through
+/// `write_committed_to_history` (history transact + ts + cell seed).
+/// Cancellation mid-loop leaves some tables written, others not; the ops are
+/// idempotent (last-write-wins) so a re-replay / re-drain converges.
 ///
-/// Seed the version cache for every data (`Put`/`Delete`) op in `entry`
-/// with the entry's `commit_version`. Index / counter / interner ops do
-/// not flow through the `MvccStore` (it wraps only the data store), so
-/// they are skipped.
+/// Write every data (`Put`/`Delete`) op in `entry` to the table's durable
+/// version-log at the entry's `commit_version` (D2 P1d-2b: this is the
+/// history-write half — the drainer and cold recovery share it). Index /
+/// counter / interner ops do not flow through the `MvccStore` (it wraps only
+/// the data store), so they are skipped here.
 ///
 /// Looks up the table's `MvccStore` via `per_table_mvcc` — populated when
 /// `table_by_token` (called during replay) instantiates the
@@ -355,39 +366,60 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
 /// silent skip, matching the replay ops' own graceful handling.
 async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) {
     let v = entry.commit_version;
+
+    // D2 P1d-2b: group this entry's DATA ops per table and route them through
+    // `MvccStore::write_committed_to_history` — the SAME history-write half the
+    // background drainer uses. This is what makes `replay_v2_entry` the genuine
+    // history writer after the cutover (the ack-path writes only the overlay).
+    // For an MVCC table this writes the version-log entry (Put body / Delete
+    // tombstone), records the commit ts, and seeds the cell + floor. Cold
+    // recovery (overlay empty) thus lands every recovered version in `history`
+    // so post-restart reads resolve correctly; warm drain re-runs the same path
+    // idempotently (last-write-wins).
+    let mut by_table: std::collections::HashMap<u64, Vec<KvOp>, THasher> =
+        std::collections::HashMap::default();
     for op in &entry.ops {
-        let (table_id, rid, maybe_body) = match op {
+        let (table_id, kvop) = match op {
             WalOpV2::Put {
                 table_id_interned,
                 rid,
                 body,
-            } => (*table_id_interned, *rid, Some(body.clone())),
+            } => (*table_id_interned, KvOp::Set(rid.to_bytes(), body.clone())),
             WalOpV2::Delete {
                 table_id_interned,
                 rid,
-            } => (*table_id_interned, *rid, None),
+            } => (*table_id_interned, KvOp::Remove(rid.to_bytes())),
             _ => continue,
         };
+        by_table.entry(table_id).or_default().push(kvop);
+    }
+
+    for (table_id, ops) in by_table {
         if let Some(mvcc) = repo
             .per_table_mvcc()
             .read_async(&table_id, |_, m| std::sync::Arc::clone(m))
             .await
         {
-            // C2: write the log so recovery populates the single version
-            // timeline. For a Put the body is the record; for a Delete
-            // the tombstone is empty Bytes.
-            let log_val = maybe_body.unwrap_or_else(Bytes::new);
-            let _ = mvcc
-                .history_store()
-                .set(encode_version_key(&rid.to_bytes(), v), log_val)
-                .await;
-            mvcc.seed_version(rid.to_bytes(), v).await;
+            // C2 + ts: write the version-log + commit ts + seed cell/floor.
+            // Best-effort on error: leaving a partial history write inflight is
+            // safe — the WAL marker is untouched on the recovery path (the
+            // caller `recover_inflight_v2` only `wal.commit`s after this
+            // returns Ok-ish), and the drainer / next recovery converges.
+            if let Err(e) = mvcc.write_committed_to_history(&ops, v).await {
+                log::warn!(
+                    "seed_version_cache_for_entry: history write for tx {} \
+                     table {} commit_version {} failed: {e}",
+                    entry.txn_id,
+                    table_id,
+                    v
+                );
+            }
         }
     }
-    // R3: advance the reader-visible floor so subsequent `get_current` /
-    // `current_stream` see the recovered version. Recovery writes bypass
-    // `apply_committed_ops` / `set_versioned`, so the gate must be
-    // advanced explicitly. Monotonic fetch_max — safe to call redundantly.
+    // R3: advance the reader-visible floor even when no MVCC table matched
+    // (e.g. an entry touching only unattached tables). `write_committed_to_history`
+    // already advances it for MVCC tables; this is the catch-all. Monotonic
+    // fetch_max — safe to call redundantly.
     if v > 0 {
         if let Ok(gate) = repo.tx_gate().await {
             gate.publish_committed_max(v);

@@ -390,22 +390,14 @@ async fn commit_tx_inner_legacy_async(
         let state = materialize_async_tail(&mut tx, &repo_clone, commit_version, uwl_guards).await;
         if state == MaterializationState::Deferred {
             metrics.on_tx_materialization_deferred();
-        } else if let Ok(gate) = repo_clone.tx_gate().await {
-            // P1d-1 (AsyncIndex): the tail's Complete signal means Phase 5c
-            // (index → info) also landed; combined with the inline Phase 5a
-            // (data → main, run synchronously before the ack), the value is
-            // now durable in history. Mark durable from inside the spawned
-            // task — this can land BEFORE or AFTER the synchronous ack
-            // returns to the caller; the durable watermark is strictly
-            // background machinery in P1d-1 and the order does not matter
-            // for the inline-materialize equality invariant: durable always
-            // lags visibility (visibility was advanced by `version_guard.commit()`
-            // on the sync prefix above, before this task was spawned).
-            // On Deferred (above branch) we leave durable un-advanced so
-            // recovery is the convergence point — same policy as the sync
-            // paths.
-            gate.mark_durable(commit_version);
         }
+        // D2 P1d-2b CUTOVER: the inline `gate.mark_durable(commit_version)` is
+        // GONE here too. The ack-path wrote only the overlay (visible half);
+        // the value becomes durable in `history` only after the background
+        // drainer replays the WAL entry. The drainer owns `mark_durable` + WAL
+        // truncation. Wake it after the version is published so it drains the
+        // freshly-committed tail promptly.
+        repo_clone.drainer().wake();
         promote_vectors(&tx, &repo_clone, commit_version).await;
         state
     });
@@ -490,20 +482,17 @@ async fn commit_tx_lockfree(
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
     let post_publish = materialize(&mut tx, repo, version_guard, validated.uwl_guards).await;
-    let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
+    let materialization = post_publish_cleanup(post_publish, repo, gate).await;
     if materialization == MaterializationState::Deferred {
         repo.tx_metrics().on_tx_materialization_deferred();
-    } else {
-        // P1d-1: Complete ⇒ Phase 5a (data → history via main projection) and
-        // Phase 5c (index → info) landed inline, so the value for this version
-        // is durable. Mark durable AFTER `version_guard.commit()` (which ran
-        // inside `materialize`) so `durable_watermark() <= last_committed()`
-        // holds at every observation point. On Deferred we intentionally do
-        // NOT mark durable — recovery will replay the inflight WAL entry and
-        // a future commit / re-open will advance the durable watermark; P1d-2
-        // will move this signal into the background drain leader.
-        gate.mark_durable(commit_version);
     }
+    // D2 P1d-2b CUTOVER: the inline `gate.mark_durable(commit_version)` is
+    // GONE. The ack-path no longer writes `history` (only the overlay), so the
+    // value is NOT durable at this point — it is durable only after the
+    // background drainer replays the WAL entry into `history`. The DRAINER now
+    // owns both `mark_durable` and the WAL truncation. We only WAKE it here,
+    // after the version is published (visibility), so it drains promptly.
+    repo.drainer().wake();
     repo.emit_changefeed_event(changefeed_event).await;
     crate::tx::commit_phases::promote_vectors(&tx, repo, commit_version).await;
 

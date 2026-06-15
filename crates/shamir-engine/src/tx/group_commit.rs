@@ -373,15 +373,15 @@ pub(super) async fn run_leader(
     for mut work in post_works {
         let post_publish =
             materialize(&mut work.tx, repo, work.version_guard, work.uwl_guards).await;
-        let mat = post_publish_cleanup(post_publish, repo, gate, wal).await;
+        let mat = post_publish_cleanup(post_publish, repo, gate).await;
         if mat == MaterializationState::Deferred {
             repo.tx_metrics().on_tx_materialization_deferred();
-        } else {
-            // P1d-1: Complete ⇒ this survivor's value is durable in history.
-            // Mark durable AFTER `materialize` consumed the version_guard
-            // (visibility), keeping `durable_watermark() <= last_committed()`.
-            gate.mark_durable(work.commit_version);
         }
+        // D2 P1d-2b CUTOVER: inline `gate.mark_durable` removed — the ack-path
+        // wrote only the overlay; durability + WAL truncation are the drainer's
+        // job now. Wake it after each survivor publishes so the batch's tail
+        // drains promptly.
+        repo.drainer().wake();
         repo.emit_changefeed_event(work.changefeed_event).await;
         promote_vectors(&work.tx, repo, work.commit_version).await;
 
@@ -457,14 +457,13 @@ async fn run_single_tx(
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
     let post_publish = materialize(&mut tx, repo, pre.version_guard, pre.uwl_guards).await;
 
-    let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
+    let materialization = post_publish_cleanup(post_publish, repo, gate).await;
     if materialization == MaterializationState::Deferred {
         repo.tx_metrics().on_tx_materialization_deferred();
-    } else {
-        // P1d-1: Complete ⇒ value is durable in history. Mark durable
-        // AFTER the visibility commit (consumed inside `materialize`).
-        gate.mark_durable(commit_version);
     }
+    // D2 P1d-2b CUTOVER: inline `gate.mark_durable` removed — durability + WAL
+    // truncation moved to the background drainer. Wake it after publish.
+    repo.drainer().wake();
     repo.emit_changefeed_event(changefeed_event).await;
     promote_vectors(&tx, repo, commit_version).await;
 

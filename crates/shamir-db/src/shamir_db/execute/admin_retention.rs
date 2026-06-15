@@ -103,6 +103,28 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
         let mvcc =
             resolve_table_mvcc(&self.shamir, &self.db_name, &op.repo, &op.purge_history).await?;
+
+        // D2 P1d-2b: drain the repo's inflight WAL tail into `history` BEFORE
+        // purging. Post-cutover, freshly-committed versions live in the
+        // in-memory overlay until the background drainer lands them in history;
+        // a purge that scanned history first would miss (and so fail to
+        // reclaim, or mis-resolve the ts cutoff against) the undrained tail.
+        // `drain_all` is the authoritative warm-drain (= generalized recovery)
+        // and is idempotent / cheap when already caught up.
+        if let Some(repo) = self
+            .shamir
+            .get_db(&self.db_name)
+            .and_then(|db| db.get_repo(&op.repo))
+        {
+            if let Err(e) = repo.drainer().drain_all(&repo).await {
+                log::warn!(
+                    "handle_purge_history: drain_all {}/{}: {e}",
+                    op.repo,
+                    op.purge_history
+                );
+            }
+        }
+
         // Resolve the cutoff from the scope. OlderThan is an
         // absolute epoch-millis; OlderThanAge is subtracted
         // from the store's clock so tests freeze the clock via

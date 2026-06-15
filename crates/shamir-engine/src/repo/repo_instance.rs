@@ -56,6 +56,26 @@ pub struct RepoInstance {
     /// back to KV markers. INERT plumbing (W3): the file WAL is constructed
     /// but not yet written by the live commit path (W4/W5).
     wal_dir: Option<std::path::PathBuf>,
+    /// D2 P1d-2b: lazily-spawned background drainer (history-write off the
+    /// ack-path). Created + spawned once on first [`drainer`](Self::drainer)
+    /// call; shared across foreground clones. The drain TASK holds a
+    /// background clone of this repo (`live = None`) plus a `Weak<()>` of
+    /// [`live`](Self::live), so it exits + releases when the last foreground
+    /// clone drops — see [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
+    ///
+    /// `std::sync::OnceLock` (not tokio's async `OnceCell`): the
+    /// [`drainer`](Self::drainer) accessor is SYNC (called from the commit
+    /// tail to `wake()`), and init does no `.await` — it only constructs the
+    /// drainer + `tokio::spawn`s the loop. Single-init is guaranteed by
+    /// `OnceLock`; a lost race just drops a redundant un-spawned `Drainer`.
+    drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
+    /// D2 P1d-2b: repo liveness token. `Some(Arc<()>)` on every FOREGROUND
+    /// clone (the strong count == number of live foreground clones); `None`
+    /// on the single BACKGROUND clone the drain task owns
+    /// ([`clone_for_background`](Self::clone_for_background)) so the task does
+    /// NOT keep the repo alive. The drain loop holds a `Weak<()>` of this and
+    /// exits when the strong count reaches zero.
+    live: Option<Arc<()>>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -82,6 +102,11 @@ impl Clone for RepoInstance {
             group_commit: Arc::clone(&self.group_commit),
             changefeed: Arc::clone(&self.changefeed),
             wal_dir: self.wal_dir.clone(),
+            drainer: Arc::clone(&self.drainer),
+            // Foreground clone: carries a strong liveness ref. If `self` is
+            // itself the background clone (`None`) this stays `None` — a clone
+            // of the background handle must not resurrect liveness.
+            live: self.live.clone(),
         }
     }
 }
@@ -129,7 +154,50 @@ impl RepoInstance {
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),
             wal_dir,
+            drainer: Arc::new(std::sync::OnceLock::new()),
+            live: Some(Arc::new(())),
         }
+    }
+
+    /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.
+    /// Identical to a foreground [`Clone`] except `live = None`, so the task's
+    /// owned handle does NOT count toward repo liveness — the loop exits and
+    /// the inner `Arc`s are released once the last foreground clone drops.
+    /// See [`Drainer::spawn`](crate::tx::drainer::Drainer::spawn).
+    fn clone_for_background(&self) -> Self {
+        let mut bg = self.clone();
+        bg.live = None;
+        bg
+    }
+
+    /// D2 P1d-2b: the repo's background drainer, spawned once (single-owner).
+    ///
+    /// First call lazily creates the [`Drainer`](crate::tx::drainer::Drainer)
+    /// and starts its background loop (a leak-free task owning a
+    /// [`clone_for_background`](Self::clone_for_background) of this repo plus a
+    /// `Weak<()>` of [`live`](Self::live)). Subsequent calls (from any
+    /// foreground clone) return the same `Arc<Drainer>` via the shared
+    /// `OnceCell`. The commit path calls `repo.drainer().wake()` after
+    /// publishing a version to nudge the loop.
+    pub fn drainer(&self) -> Arc<crate::tx::drainer::Drainer> {
+        Arc::clone(self.drainer.get_or_init(|| {
+            let drainer = Arc::new(crate::tx::drainer::Drainer::new());
+            // 50 ms backstop: prompt drain even if a wake is missed, cheap
+            // when idle (the loop short-circuits when nothing is undrained).
+            const DRAIN_INTERVAL_MS: u64 = 50;
+            let live_weak = match &self.live {
+                Some(l) => Arc::downgrade(l),
+                // Background clone asking for the drainer (shouldn't happen on
+                // the commit path) — a dead weak makes the loop exit at once.
+                None => std::sync::Weak::new(),
+            };
+            drainer.spawn(
+                self.clone_for_background(),
+                live_weak,
+                std::time::Duration::from_millis(DRAIN_INTERVAL_MS),
+            );
+            drainer
+        }))
     }
 
     /// cancel-safe: yes — single `factory.create().await`; cancellation
@@ -849,6 +917,21 @@ impl RepoInstance {
     /// after attempting all stores.
     pub async fn flush_buffers(&self) -> DbResult<()> {
         let mut first_err: Option<DbError> = None;
+
+        // D2 P1d-2b: drain the inflight WAL tail into `history` before flushing
+        // the durable stores. Post-cutover the ack-path writes only the
+        // in-memory overlay; the value is durable in `history` only after the
+        // drainer replays the WAL entry. A graceful flush therefore drains
+        // first so the committed-but-not-yet-drained tail lands durably (and
+        // the WAL markers truncate). If no drainer was ever spawned (no commit
+        // happened) this is a cheap no-op pass. Best-effort: a drain error is
+        // logged and recovery on the next open still converges.
+        if let Err(e) = self.drainer().drain_all(self).await {
+            log::warn!("flush_buffers: drain_all {}: {}", self.name, e);
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
 
         if let Ok(store) = self.tx_info_store().await {
             if let Err(e) = store.flush().await {
