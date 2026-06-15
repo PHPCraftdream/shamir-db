@@ -30,10 +30,32 @@ use crate::wal_entry_v2::WalEntryV2;
 ///     survives a process crash, lost only on power loss before `sync`).
 ///   - `sync`         → `fsync` (level 3: survives power loss).
 ///
-/// Single-writer by construction (the group-commit leader is the only
-/// appender); the `Mutex<File>` guards the handle for standalone safety
-/// and is held ONLY on the blocking thread inside `spawn_blocking`, never
-/// across an `.await`.
+/// Single-writer BY CONSTRUCTION: the sole appender is the WAL group-commit
+/// coordinator's drain path (one window at a time — see
+/// `wal_group_commit.rs`). The `Arc<Mutex<File>>` is therefore UNCONTENDED on
+/// the hot path; it is retained, not removed, on purpose. (a) it is held
+/// ONLY on the blocking thread inside `spawn_blocking` (`append_batch` /
+/// `sync`), NEVER across an `.await`. (b) the `Arc` is mandatory regardless
+/// of the lock — `spawn_blocking` needs a `'static` handle, so the file must
+/// be reference-counted to cross the closure boundary. (c) MEASURED
+/// non-bottleneck: the WAL-append contention bench (`benches/wal_append.rs`,
+/// baseline `2e3bd51`) shows file-sink throughput SCALING with concurrency
+/// (7.2K→80.2K appends/s, N=1→64) exactly like the lockless mem sink — a
+/// lock-bound path would flatten. fsync dominates a durable append ~63×; the
+/// marginal ~10µs/append is `spawn_blocking` + `Notify`, not this sub-µs lock.
+///
+/// A single-writer-task rewrite (CAPSTONE, `docs/perf/capstone-subplan.md`)
+/// would drop the `Mutex` (single ownership becomes type-level) but keep the
+/// `Arc` for `spawn_blocking`. It was PROTOTYPED and REVERTED: a permanent
+/// writer task mandates a per-append cross-task `oneshot` round-trip, which
+/// suspends the executor on EVERY append — whereas the rotating leader drains
+/// the in-RAM `Mem` sink synchronously within one poll (no yield). That
+/// regressed mem N=1 latency ~+22% (the subplan §0 GO/NO-GO criterion) AND
+/// broke an atomicity property the engine commit path relies on (a
+/// non-yielding Mem append keeps a commit atomic on a current-thread runtime;
+/// the mandatory yield let concurrent SSI committers all validate before any
+/// published, defeating "exactly one wins"). So the lock stays, honestly
+/// annotated.
 #[allow(dead_code)]
 pub struct WalSegment {
     path: PathBuf,
