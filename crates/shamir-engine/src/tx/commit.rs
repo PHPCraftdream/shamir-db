@@ -491,6 +491,7 @@ async fn commit_tx_inner_legacy_async(
         commit_version,
         uwl_guards,
         version_guard,
+        cell_guards,
     } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
@@ -510,6 +511,10 @@ async fn commit_tx_inner_legacy_async(
             return Err(e);
         }
     };
+    // SSI fix S2 — still-armed cell-reservation guards from pre_commit_locked
+    // (WAL begin already succeeded inside it). Disarmed after the inline Phase 5a
+    // (`apply_data_phase`) finalizes the cells below.
+    let mut cell_guards = cell_guards;
 
     release_pessimistic_locks(&tx, repo).await;
 
@@ -518,6 +523,13 @@ async fn commit_tx_inner_legacy_async(
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
     apply_data_phase(&mut tx, repo, commit_version).await;
+    // SSI fix S2 — Phase 5a (`apply_data_phase` → `apply_committed_visible`)
+    // finalized every claimed cell (version published, `reserved_by` cleared).
+    // Disarm so the guards' `Drop` is a no-op.
+    for g in &mut cell_guards {
+        g.disarm();
+    }
+    drop(cell_guards);
     apply_counter_phase(&tx, repo).await;
     // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
     // last_committed_version from the watermark (fetch_max). Replaces the
@@ -602,6 +614,11 @@ async fn commit_tx_lockfree(
 
     let commit_version = validated.commit_version;
     let version_guard = validated.version_guard;
+    // SSI fix S2 — the still-armed cell-reservation guards. Held across Phase 4
+    // and `materialize`; `disarm`ed after publish (Phase 5a `finalize_reservation`
+    // already cleared each `reserved_by`). On the WAL-begin abort below they drop
+    // → release every claimed cell (I-PreWAL: a loser never strands a claim).
+    let mut cell_guards = validated.cell_guards;
 
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).
@@ -610,8 +627,10 @@ async fn commit_tx_lockfree(
         .await
     {
         // version_guard drops here → mark(Aborted): WAL begin failed, the
-        // tx is a pre-commit abort and nothing durable exists.
+        // tx is a pre-commit abort and nothing durable exists. Drop the
+        // cell_guards too → release the claimed cells.
         drop(version_guard);
+        drop(cell_guards);
         release_pessimistic_locks(&tx, repo).await;
         return Err(TxError::Storage(e));
     }
@@ -630,6 +649,17 @@ async fn commit_tx_lockfree(
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
     let post_publish = materialize(&mut tx, repo, version_guard, validated.uwl_guards).await;
+    // SSI fix S2 — publish (Phase 5a `apply_committed_visible`) ran inside
+    // `materialize` and `finalize_reservation`'d every claimed cell (version
+    // published, `reserved_by` cleared). Disarm the guards so their `Drop` does
+    // NOT redundantly release: the claims are gone and the version is the cell's
+    // published state now. (A deferred Phase 5a still cleared the reservation for
+    // the keys it published; any not-yet-finalized key is released by drop —
+    // harmless, the cell version is the source of truth either way.)
+    for g in &mut cell_guards {
+        g.disarm();
+    }
+    drop(cell_guards);
     let materialization = post_publish_cleanup(post_publish, repo, gate).await;
     if materialization == MaterializationState::Deferred {
         repo.tx_metrics().on_tx_materialization_deferred();

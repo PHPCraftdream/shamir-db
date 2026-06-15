@@ -341,25 +341,6 @@ impl MvccStore {
         }
     }
 
-    /// D2 P1d-2b: synchronous sibling of [`Self::publish_cell`] for the
-    /// ack-path visible half ([`Self::apply_committed_visible`]), which does no
-    /// I/O and must stay off `.await`. Uses scc's blocking `entry` (no async
-    /// suspension): the cell map is lock-free / sharded, so this is a bounded
-    /// CAS, not a contended lock on the commit hot path.
-    pub(super) fn publish_cell_sync(&self, key: Bytes, version: u64) {
-        match self.cells.entry(key) {
-            scc::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().version = version;
-            }
-            scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version,
-                    reserved_by: 0,
-                });
-            }
-        }
-    }
-
     // ========================================================================
     // SSI fix S1 — cell-reservation primitive (additive; NOT yet wired).
     //
@@ -402,11 +383,12 @@ impl MvccStore {
     ///   moved past the snapshot (someone published — stale-write detection) or
     ///   it is already claimed by another committer.
     ///
-    /// `#[allow(dead_code)]`: S1 is additive — no live path calls this yet
-    /// (only the S1 unit tests do, which don't count for the lib build). S2
-    /// wires it into `pre_commit`. Until then the lib sees it as unused.
-    #[allow(dead_code)]
-    pub(crate) fn try_reserve(&self, key: Bytes, snapshot_version: u64, txn_id: u64) -> bool {
+    /// S2 wires this into the engine's `pre_commit` (after read-validate,
+    /// before WAL): `pub` (not `pub(crate)`) so the cross-crate `shamir-engine`
+    /// commit path can call it to claim each write-set key. The claim is the
+    /// explicit serialization point that makes "exactly one committer wins" hold
+    /// for non-unique tables under true parallelism.
+    pub fn try_reserve(&self, key: Bytes, snapshot_version: u64, txn_id: u64) -> bool {
         match self.cells.entry(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
@@ -436,9 +418,9 @@ impl MvccStore {
     /// claim should have inserted it), insert `RecordCell { version,
     /// reserved_by: 0 }` so the published version is never lost.
     ///
-    /// `#[allow(dead_code)]`: S1 is additive — no live path calls this yet
-    /// (only the S1 unit tests do). S2 wires it into the publish path.
-    #[allow(dead_code)]
+    /// S2 wires this into the publish path (`apply_committed_visible`,
+    /// Phase 5a) in place of the prior `publish_cell_sync` — it is a strict
+    /// superset (sets `version` AND clears `reserved_by`).
     pub(crate) fn finalize_reservation(&self, key: Bytes, version: u64) {
         match self.cells.entry(key) {
             scc::hash_map::Entry::Occupied(mut e) => {

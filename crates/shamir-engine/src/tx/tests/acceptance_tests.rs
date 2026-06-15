@@ -668,7 +668,13 @@ async fn concurrent_ssi_storm_exactly_one_wins() {
 /// validate(Phase2)→assign(Phase3)→WAL(Phase4)→publish(Phase5a) span across
 /// committers running on different worker threads — the cell version is
 /// published at a DIFFERENT instant than it is read.
-#[ignore = "repro for task #24 — fails: SSI 'exactly one wins' not serializable under multi_thread (validate→publish_cell non-atomic for non-unique tables)"]
+// SSI fix S2 — un-ignored: the cell-reservation cutover makes "exactly one
+// wins" hold under TRUE parallelism. The write-write race is now decided by an
+// atomic pre-WAL claim (`try_reserve` in `claim_write_set`, pre_commit.rs)
+// instead of the post-WAL publish, so the 20 same-key committers funnel through
+// one cell: exactly one claims it (→ commits), the other 19 see `reserved_by !=
+// 0` and abort with `SsiConflict` BEFORE touching the WAL. Kept as a multi-thread
+// regression guard.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repro24_concurrent_ssi_storm_multithread() {
     use tokio::sync::Barrier;
@@ -711,7 +717,9 @@ async fn repro24_concurrent_ssi_storm_multithread() {
                 Err(_) => err_count += 1,
             }
         }
-        if ok_count != 1 {
+        // Exactly one winner AND exactly n-1 losers (the 19 conflicts abort
+        // with SsiConflict before the WAL — I-PreWAL).
+        if ok_count != 1 || err_count != n - 1 {
             violations.push((round, ok_count));
         }
     }
