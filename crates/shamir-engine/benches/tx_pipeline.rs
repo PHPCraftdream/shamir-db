@@ -144,6 +144,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_all: false,
                             return_only: None,
                             limits: Default::default(),
+                            interner_epochs: Default::default(),
                         };
                         let _ =
                             execute_batch(&request, resolver, None, None, Actor::System, "bench")
@@ -194,6 +195,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_all: false,
                             return_only: None,
                             limits: Default::default(),
+                            interner_epochs: Default::default(),
                         };
                         let _ =
                             execute_batch(&request, resolver, None, None, Actor::System, "bench")
@@ -274,6 +276,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_all: false,
                             return_only: None,
                             limits: Default::default(),
+                            interner_epochs: Default::default(),
                         };
 
                         let start = Instant::now();
@@ -513,6 +516,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                         return_all: false,
                         return_only: None,
                         limits: Default::default(),
+                        interner_epochs: Default::default(),
                     };
 
                     let start = Instant::now();
@@ -739,6 +743,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_all: false,
                 return_only: None,
                 limits: Default::default(),
+                interner_epochs: Default::default(),
             };
             execute_batch(&request, &resolver, None, None, Actor::System, "bench")
                 .await
@@ -775,6 +780,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_all: true,
                 return_only: None,
                 limits: Default::default(),
+                interner_epochs: Default::default(),
             }
         };
         b.to_async(&rt).iter(|| {
@@ -812,6 +818,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_all: true,
                 return_only: None,
                 limits: Default::default(),
+                interner_epochs: Default::default(),
             }
         };
         b.to_async(&rt).iter(|| {
@@ -849,6 +856,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_all: true,
                 return_only: None,
                 limits: Default::default(),
+                interner_epochs: Default::default(),
             }
         };
         b.to_async(&rt).iter(|| {

@@ -68,6 +68,7 @@ pub(super) async fn execute_reactive_batch(
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     match db.execute_as(actor.clone(), db_name, &wrapper).await {
@@ -113,6 +114,7 @@ pub(super) async fn execute_reactive_call(
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let mut outer_queries: TMap<String, QueryEntry> = new_map();
@@ -137,6 +139,7 @@ pub(super) async fn execute_reactive_call(
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     match db.execute_as(actor.clone(), db_name, &wrapper).await {

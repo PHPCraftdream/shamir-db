@@ -99,6 +99,8 @@ pub async fn execute_in_open_tx(
         execution_time_us: elapsed.as_micros() as u64,
         // The tx is still open — there is no commit outcome yet.
         transaction: None,
+        // Ambient interner deltas are attached server-side (shamir-db); empty here.
+        interner_delta: Default::default(),
     })
 }
 

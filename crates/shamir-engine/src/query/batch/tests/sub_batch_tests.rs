@@ -121,6 +121,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -207,6 +208,7 @@ async fn sub_batch_bind_injects_param() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Outer batch:
@@ -251,6 +253,7 @@ async fn sub_batch_bind_injects_param() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -327,6 +330,7 @@ async fn sub_batch_atomic() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let sub_entry = QueryEntry {
@@ -350,6 +354,7 @@ async fn sub_batch_atomic() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // The outer batch succeeds (the sub-batch failure is surfaced as an error).
@@ -427,6 +432,7 @@ async fn tx_in_tx_rejected() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let sub_entry = QueryEntry {
@@ -453,6 +459,7 @@ async fn tx_in_tx_rejected() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let result = execute_in_open_tx(
@@ -543,6 +550,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Sub-batch with EMPTY bind — so missing_param is not supplied.
@@ -567,6 +575,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -624,6 +633,7 @@ async fn unbound_param_in_bind_errors() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Bind references a $param from the OUTER scope that doesn't exist.
@@ -655,6 +665,7 @@ async fn unbound_param_in_bind_errors() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -726,6 +737,7 @@ async fn param_in_insert_values() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Outer batch:
@@ -779,6 +791,7 @@ async fn param_in_insert_values() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -844,6 +857,7 @@ async fn param_in_insert_nested() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Bind actor_id = 99.
@@ -876,6 +890,7 @@ async fn param_in_insert_nested() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -912,6 +927,7 @@ async fn param_in_insert_nested() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
     let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
         .await
@@ -963,6 +979,7 @@ async fn param_in_insert_missing_param_errors() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     // Bind is EMPTY — ghost_param not supplied.
@@ -988,6 +1005,7 @@ async fn param_in_insert_missing_param_errors() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")

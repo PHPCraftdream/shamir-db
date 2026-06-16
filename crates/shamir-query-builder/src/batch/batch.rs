@@ -615,6 +615,7 @@ impl Batch {
             return_all: self.return_all,
             return_only: self.return_only.clone(),
             limits: self.limits.clone(),
+            interner_epochs: Default::default(),
         }
     }
 

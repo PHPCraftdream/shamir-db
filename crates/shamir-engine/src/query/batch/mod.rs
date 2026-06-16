@@ -154,7 +154,7 @@ pub use query_runner::{
 };
 pub use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
-    QueryEntry, QueryPath, QueryReference, ReferenceParseError, TransactionInfo,
+    InternerDelta, QueryEntry, QueryPath, QueryReference, ReferenceParseError, TransactionInfo,
 };
 
 // Retained for engine-level unit tests; not accessible outside test builds.

@@ -661,22 +661,51 @@ impl Client {
     }
 
     /// Execute a [`BatchRequest`] against the named database.
+    ///
+    /// Ambient interner epoch-delta sync (Stage 5-wire Part A): before sending,
+    /// the client advertises its per-repo interner epoch for every distinct
+    /// repo the batch targets (so the server can attach a delta); after the
+    /// response, any `interner_delta` entries are merged into the cache
+    /// (`insert_entry` + `set_epoch` CAS-max). This is transparent — a
+    /// backward-compatible server leaves `interner_delta` empty → no-op.
     pub async fn execute(
         &self,
         db: &str,
-        batch: BatchRequest,
+        mut batch: BatchRequest,
     ) -> Result<BatchResponse, ClientError> {
+        // BEFORE send: populate interner_epochs from the per-(db,repo) cache.
+        // `distinct_repos` walks the batch's data ops' table-refs; admin ops
+        // (no table_ref) are skipped. For each repo with a FieldMap, advertise
+        // its current epoch so the server can attach a delta.
+        if batch.interner_epochs.is_empty() {
+            for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
+                let epoch = self.interner_cache().get_or_create(db, &repo).epoch();
+                batch.interner_epochs.insert(repo, epoch);
+            }
+        }
+
         let req = DbRequest::Execute {
             query_version: CURRENT_QUERY_LANG_VERSION,
             db: db.to_string(),
             batch,
         };
-        match self.roundtrip(&req).await? {
-            DbResponse::Batch { response } => Ok(response),
-            other => Err(ClientError::Protocol(format!(
-                "expected Batch, got {other:?}"
-            ))),
+        let response = match self.roundtrip(&req).await? {
+            DbResponse::Batch { response } => response,
+            other => {
+                return Err(ClientError::Protocol(format!(
+                    "expected Batch, got {other:?}"
+                )))
+            }
+        };
+
+        // AFTER receive: merge interner_delta into the cache. Ids come ONLY
+        // from the server (§9.4). The merge mirrors dump/refresh's apply:
+        // insert_entry (idempotent) + set_epoch (CAS-max).
+        if !response.interner_delta.is_empty() {
+            self.merge_interner_delta(db, &response);
         }
+
+        Ok(response)
     }
 
     /// Create a SCRAM-authenticatable user. Requires the current
