@@ -157,11 +157,7 @@ pub enum FilterNode {
 }
 
 impl FilterNode {
-    pub fn matches(
-        &self,
-        record: &shamir_types::types::value::InnerValue,
-        ctx: &FilterContext,
-    ) -> bool {
+    pub fn matches(&self, record: &(impl RecordRef + ?Sized), ctx: &FilterContext) -> bool {
         use shamir_types::types::value::InnerValue;
         match self {
             FilterNode::True => true,
