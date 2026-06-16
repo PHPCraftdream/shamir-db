@@ -16,8 +16,10 @@ use futures::StreamExt;
 use shamir_collections::THasher;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -46,25 +48,18 @@ impl FtsRankedBackend {
         }
     }
 
-    fn extract_text<'a>(&self, rec: &'a InnerValue) -> Option<&'a str> {
-        let mut current = rec;
-        for &seg in &self.field_path {
-            match current {
-                InnerValue::Map(m) => {
-                    let key = InternerKey::new(seg);
-                    current = m.get(&key)?;
-                }
-                _ => return None,
-            }
-        }
-        match current {
-            InnerValue::Str(s) => Some(s.as_str()),
-            _ => None,
-        }
+    /// Resolve `self.field_path` to its interned-key form (see
+    /// `FtsBackend::ipath`).
+    fn ipath(&self) -> SmallVec<[InternerKey; 4]> {
+        self.field_path
+            .iter()
+            .map(|&id| InternerKey::new(id))
+            .collect()
     }
 
-    fn tokenize_with_freq(&self, rec: &InnerValue) -> (HashMap<u64, u32, THasher>, u32) {
-        match self.extract_text(rec) {
+    fn tokenize_with_freq(&self, rec: &dyn RecordRef) -> (HashMap<u64, u32, THasher>, u32) {
+        let ipath = self.ipath();
+        match rec.str_at(&ipath) {
             Some(text) => {
                 let tokens = self.tokenizer.tokenize(text);
                 let doc_len = tokens.len() as u32;
@@ -78,7 +73,7 @@ impl FtsRankedBackend {
         }
     }
 
-    fn tokenize_set(&self, rec: &InnerValue) -> HashSet<u64> {
+    fn tokenize_set(&self, rec: &dyn RecordRef) -> HashSet<u64> {
         let (freq, _) = self.tokenize_with_freq(rec);
         freq.keys().copied().collect()
     }
@@ -139,7 +134,7 @@ impl IndexBackend for FtsRankedBackend {
     async fn plan_insert(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let (freq, doc_len) = self.tokenize_with_freq(rec);
         if doc_len == 0 {
@@ -162,8 +157,8 @@ impl IndexBackend for FtsRankedBackend {
     async fn plan_update(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_set = self.tokenize_set(old);
         let (new_freq, new_doc_len) = self.tokenize_with_freq(new);
@@ -205,7 +200,7 @@ impl IndexBackend for FtsRankedBackend {
     async fn plan_delete(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let (freq, doc_len) = self.tokenize_with_freq(rec);
         let mut ops = Vec::with_capacity(freq.len() + 1);

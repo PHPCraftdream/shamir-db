@@ -8,8 +8,8 @@ use crate::descriptor::IndexDescriptor;
 use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use shamir_storage::types::Store;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::ops::Bound;
@@ -109,10 +109,17 @@ pub trait IndexBackend: Send + Sync {
     }
 
     /// Plan ops for an insert.
+    ///
+    /// `rec` is borrowed as a `&dyn RecordRef` so any record
+    /// representation (the in-memory `InnerValue` tree or a zero-copy
+    /// `RecordView` lens) can feed the planner without materialisation.
+    /// The `+ Sync` bound on the trait object lets the `async_trait`
+    /// future capture `rec` across `.await` points (FTS tokenisation,
+    /// vector adapter upserts).
     async fn plan_insert(
         &self,
         _rid: RecordId,
-        _rec: &InnerValue,
+        _rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         Ok(Vec::new())
     }
@@ -120,8 +127,8 @@ pub trait IndexBackend: Send + Sync {
     async fn plan_update(
         &self,
         _rid: RecordId,
-        _old: &InnerValue,
-        _new: &InnerValue,
+        _old: &(dyn RecordRef + Sync + '_),
+        _new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         Ok(Vec::new())
     }
@@ -129,7 +136,7 @@ pub trait IndexBackend: Send + Sync {
     async fn plan_delete(
         &self,
         _rid: RecordId,
-        _rec: &InnerValue,
+        _rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         Ok(Vec::new())
     }
@@ -146,7 +153,7 @@ pub trait IndexBackend: Send + Sync {
     async fn plan_insert_tx(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
         _tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.plan_insert(rid, rec).await
@@ -156,8 +163,8 @@ pub trait IndexBackend: Send + Sync {
     async fn plan_update_tx(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
         _tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.plan_update(rid, old, new).await
@@ -167,7 +174,7 @@ pub trait IndexBackend: Send + Sync {
     async fn plan_delete_tx(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
         _tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.plan_delete(rid, rec).await
@@ -197,7 +204,11 @@ pub trait IndexBackend: Send + Sync {
     /// returned vector into `TxContext::staged_vectors` (HIGH-6). Default
     /// `None` — only `VectorBackend` extracts its embedding field; every
     /// other backend stages its state as `IndexWriteOp`s instead.
-    async fn staged_vector(&self, _rid: RecordId, _rec: &InnerValue) -> Option<Vec<f32>> {
+    async fn staged_vector(
+        &self,
+        _rid: RecordId,
+        _rec: &(dyn RecordRef + Sync + '_),
+    ) -> Option<Vec<f32>> {
         None
     }
 

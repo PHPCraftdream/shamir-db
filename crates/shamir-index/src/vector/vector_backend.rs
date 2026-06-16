@@ -11,8 +11,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 pub struct VectorBackend {
@@ -34,30 +36,49 @@ impl VectorBackend {
         }
     }
 
-    fn extract_vec(&self, rec: &InnerValue) -> Option<Vec<f32>> {
-        let mut current = rec;
-        for &seg in &self.field_path {
-            match current {
-                InnerValue::Map(m) => {
-                    let key = InternerKey::new(seg);
-                    current = m.get(&key)?;
+    /// Resolve `self.field_path` to its interned-key form.
+    fn ipath(&self) -> SmallVec<[InternerKey; 4]> {
+        self.field_path
+            .iter()
+            .map(|&id| InternerKey::new(id))
+            .collect()
+    }
+
+    /// Extract the embedding vector from `rec` via `any_seq_elem`.
+    ///
+    /// Parity with the legacy manual `InnerValue::List` walk: returns
+    /// `Some(Vec<f32>)` iff the field at `ipath` is a sequence whose
+    /// elements are ALL numeric (F64/Int); returns `None` otherwise
+    /// (non-sequence leaf, or any non-numeric scalar element).
+    ///
+    /// **Widening note vs. legacy:** `any_seq_elem` accepts List OR Set
+    /// (the legacy code only accepted List). Vector fields are always
+    /// List in practice, so this is harmless. Additionally,
+    /// `any_seq_elem` silently skips non-scalar elements (nested
+    /// Map/List/Set, Dec, Big) rather than reporting them to the
+    /// callback; a non-scalar element in a vector field would be
+    /// silently omitted rather than causing `None`. This never occurs
+    /// with well-formed vector data (lists of numbers) and matches the
+    /// plan's documented behaviour.
+    fn extract_vec(&self, rec: &dyn RecordRef) -> Option<Vec<f32>> {
+        let ipath = self.ipath();
+        let mut v: Vec<f32> = Vec::new();
+        let mut bad = false;
+        let is_seq = rec.any_seq_elem(&ipath, &mut |sr| {
+            match sr {
+                ScalarRef::F64(f) => v.push(f as f32),
+                ScalarRef::Int(n) => v.push(n as f32),
+                _ => {
+                    bad = true;
+                    return true; // short-circuit any_seq_elem
                 }
-                _ => return None,
             }
-        }
-        match current {
-            InnerValue::List(items) => {
-                let mut v = Vec::with_capacity(items.len());
-                for item in items {
-                    match item {
-                        InnerValue::F64(f) => v.push(*f as f32),
-                        InnerValue::Int(n) => v.push(*n as f32),
-                        _ => return None,
-                    }
-                }
-                Some(v)
-            }
-            _ => None,
+            false // keep going
+        });
+        if is_seq.is_some() && !bad {
+            Some(v)
+        } else {
+            None
         }
     }
 }
@@ -92,7 +113,7 @@ impl IndexBackend for VectorBackend {
     async fn plan_insert(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(rec) {
             self.adapter.upsert(rid, &v).await.map_err(ve)?;
@@ -103,8 +124,8 @@ impl IndexBackend for VectorBackend {
     async fn plan_update(
         &self,
         rid: RecordId,
-        _old: &InnerValue,
-        new: &InnerValue,
+        _old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(new) {
             self.adapter.upsert(rid, &v).await.map_err(ve)?;
@@ -117,7 +138,7 @@ impl IndexBackend for VectorBackend {
     async fn plan_delete(
         &self,
         rid: RecordId,
-        _rec: &InnerValue,
+        _rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.adapter.delete(rid).await.map_err(ve)?;
         Ok(Vec::new())
@@ -135,7 +156,7 @@ impl IndexBackend for VectorBackend {
     async fn plan_insert_tx(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
         tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if tx_id.is_none() {
@@ -148,8 +169,8 @@ impl IndexBackend for VectorBackend {
     async fn plan_update_tx(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
         tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if tx_id.is_none() {
@@ -162,7 +183,7 @@ impl IndexBackend for VectorBackend {
     async fn plan_delete_tx(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
         tx_id: Option<shamir_tx::TxId>,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if tx_id.is_none() {
@@ -174,7 +195,11 @@ impl IndexBackend for VectorBackend {
     /// HIGH-6: hand the executor this record's embedding so it can stage
     /// it tx-locally (`TxContext::stage_vector`). `None` when the record
     /// carries no vector at this backend's field path.
-    async fn staged_vector(&self, _rid: RecordId, rec: &InnerValue) -> Option<Vec<f32>> {
+    async fn staged_vector(
+        &self,
+        _rid: RecordId,
+        rec: &(dyn RecordRef + Sync + '_),
+    ) -> Option<Vec<f32>> {
         self.extract_vec(rec)
     }
 
@@ -232,7 +257,7 @@ impl IndexBackend for VectorBackend {
                 let rid = RecordId(arr);
                 let rec = InnerValue::from_bytes(&val_bytes)
                     .map_err(|e| IndexError::Backend(e.to_string()))?;
-                if let Some(v) = self.extract_vec(&rec) {
+                if let Some(v) = self.extract_vec(&rec as &dyn RecordRef) {
                     items.push((rid, v));
                 }
             }

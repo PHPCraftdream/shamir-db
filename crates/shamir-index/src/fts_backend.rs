@@ -15,8 +15,9 @@ use futures::StreamExt;
 use shamir_collections::THasher;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
@@ -55,25 +56,20 @@ impl FtsBackend {
         }
     }
 
-    fn extract_text<'a>(&self, rec: &'a InnerValue) -> Option<&'a str> {
-        let mut current = rec;
-        for &seg in &self.field_path {
-            match current {
-                InnerValue::Map(m) => {
-                    let key = InternerKey::new(seg);
-                    current = m.get(&key)?;
-                }
-                _ => return None,
-            }
-        }
-        match current {
-            InnerValue::Str(s) => Some(s.as_str()),
-            _ => None,
-        }
+    /// Resolve `self.field_path` to its interned-key form. The path is
+    /// stored as `Vec<u64>` (raw interner ids); `str_at` needs
+    /// `&[InternerKey]`. Built fresh per call — cheap (typical paths are
+    /// 1-2 segments, stack-allocated via `SmallVec<[InternerKey; 4]>`).
+    fn ipath(&self) -> SmallVec<[InternerKey; 4]> {
+        self.field_path
+            .iter()
+            .map(|&id| InternerKey::new(id))
+            .collect()
     }
 
-    fn tokenize_record(&self, rec: &InnerValue) -> HashSet<u64, THasher> {
-        match self.extract_text(rec) {
+    fn tokenize_record(&self, rec: &dyn RecordRef) -> HashSet<u64, THasher> {
+        let ipath = self.ipath();
+        match rec.str_at(&ipath) {
             Some(text) => self
                 .tokenizer
                 .tokenize(text)
@@ -133,7 +129,7 @@ impl IndexBackend for FtsBackend {
     async fn plan_insert(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let tokens = self.tokenize_record(rec);
         let mut ops = Vec::with_capacity(tokens.len());
@@ -150,8 +146,8 @@ impl IndexBackend for FtsBackend {
     async fn plan_update(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_tokens = self.tokenize_record(old);
         let new_tokens = self.tokenize_record(new);
@@ -177,7 +173,7 @@ impl IndexBackend for FtsBackend {
     async fn plan_delete(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let tokens = self.tokenize_record(rec);
         let mut ops = Vec::with_capacity(tokens.len());

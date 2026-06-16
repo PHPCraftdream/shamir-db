@@ -14,6 +14,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHasher;
 use shamir_storage::types::Store;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
@@ -55,7 +56,7 @@ impl FunctionalBackend {
         build_posting_key(self.descriptor.id, type_tag::FUNCTIONAL, &h, rid)
     }
 
-    fn eval_or_null(&self, rec: &InnerValue) -> InnerValue {
+    fn eval_or_null(&self, rec: &dyn RecordRef) -> InnerValue {
         match self.expr.eval(rec) {
             Ok(v) => v,
             Err(ExprError::FieldNotFound) => InnerValue::Null,
@@ -136,7 +137,7 @@ impl IndexBackend for FunctionalBackend {
     async fn plan_insert(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let val = self.eval_or_null(rec);
         let key = self.posting_key(&val, &rid);
@@ -149,8 +150,8 @@ impl IndexBackend for FunctionalBackend {
     async fn plan_update(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(dyn RecordRef + Sync + '_),
+        new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_val = self.eval_or_null(old);
         let new_val = self.eval_or_null(new);
@@ -176,7 +177,7 @@ impl IndexBackend for FunctionalBackend {
     async fn plan_delete(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let val = self.eval_or_null(rec);
         let key = self.posting_key(&val, &rid);
