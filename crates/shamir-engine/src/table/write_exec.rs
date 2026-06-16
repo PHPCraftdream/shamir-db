@@ -239,12 +239,12 @@ impl TableManager {
         // in the `WalEntryV2.interner_delta`. The overlay stays empty on this
         // path, so `pre_commit` Phase 1 skips the overlay merge entirely and
         // the staging-bytes remap is a no-op (no overlay ids to rewrite).
+        //
+        // Stage I: the interner is per-REPO (one id-namespace across tables),
+        // so the delta is a single flat `Vec` — no per-table key.
         let new_base_keys = new_base_keys.into_inner();
         if !new_base_keys.is_empty() {
-            tx.interner_deltas
-                .entry(self.table_token())
-                .or_default()
-                .extend(new_base_keys);
+            tx.interner_deltas.extend(new_base_keys);
         }
 
         // S3: run validators on each record before staging.

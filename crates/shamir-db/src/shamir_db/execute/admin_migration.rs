@@ -111,11 +111,18 @@ impl ShamirAdminExecutor {
             let dst_table = db.get_table(dst_repo_name, table_name).await?;
             let dst_data = Arc::clone(dst_table.table().data_store());
 
-            // Step 1: replicate src's interner state into dst's
-            // info_store so the data_store bytes copied below
-            // decode with the same field-name → id mappings.
-            // Must precede any `.interner().get()` on dst.
-            dst_table.replicate_interner_from(&src_table).await?;
+            // Stage I TODO: the per-table `replicate_interner_from` step was
+            // RETIRED when the interner moved to per-repo ownership. Under
+            // per-repo interners, migrating a single table from repo A to
+            // repo B is no longer a byte-copy of one table's interner chunks
+            // — repo B has its OWN repo-wide interner, and naively copying
+            // repo A's would clobber repo B's existing id-namespace. The
+            // migration coordinator needs rework to re-intern the copied
+            // table's field names into repo B's interner and rewrite the
+            // data_store bytes with the new ids. That is out of scope for
+            // Stage I (pre-release, no backward-compat). The
+            // `replicate_index2_descriptors_from` step below already re-interns
+            // index names into the dst repo's interner, so it is unaffected.
 
             // Step 2: replicate index2 descriptors (FTS / Functional
             // / Vector) from src → dst. Creates empty backends on

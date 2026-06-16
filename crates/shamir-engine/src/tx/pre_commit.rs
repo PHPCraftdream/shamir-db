@@ -8,6 +8,17 @@ use crate::tx::commit::{maybe_crash, TxError};
 
 use super::commit::wal_ops_from_tx;
 
+/// Stage I: the constant first `u64` of every `WalEntryV2.interner_delta`
+/// triple. Pre-Stage-I this slot carried the per-table `table_token` so
+/// recovery could route each delta to the right per-table interner. The
+/// interner is now per-REPO (one id-namespace shared across tables), so the
+/// slot is repurposed to a constant scope marker — recovery resolves the
+/// single repo interner directly and ignores this value. The WAL wire-shape
+/// (`Vec<(u64, String, u64)>`) is UNCHANGED; no version bump. The constant
+/// `0` is chosen so a future reader can distinguish "repo scope" from any
+/// nonzero per-table token if a hybrid scheme ever returns.
+pub(crate) const REPO_INTERNER_SCOPE: u64 = 0;
+
 /// SSI fix S2 — atomically CLAIM every data write-set key of `tx` on its
 /// per-table [`MvccStore`] cell, BEFORE the version is assigned and the WAL
 /// entry is written (Phase 4). This moves the "who won the write-write race"
@@ -145,46 +156,43 @@ pub(super) async fn pre_commit_prelock(
     tx: &mut TxContext,
     repo: &RepoInstance,
 ) -> Result<PreLockResult, TxError> {
-    // Phase 1: interner overlay merge → per-table id remap.
+    // Phase 1: interner overlay merge → id remap.
     //
-    // Each table has its own Interner. The tx overlay is a shared
-    // scc::HashMap that may contain entries contributed by multiple
-    // tables. We merge it into each touched table's base Interner
-    // separately, obtaining a per-table remap, then rewrite only that
-    // table's staging bytes. This is correct because overlay ids in
-    // table A's staging came from a LayeredInterner backed by table A's
-    // base — table B's staging has its own set of overlay ids.
+    // Stage I: the interner is per-REPO (one id-namespace shared across
+    // every table), so we merge the tx overlay ONCE into the repo interner
+    // and obtain ONE remap. The remap is then applied to every touched
+    // table's staging bytes — overlay ids are tx-scoped, and the repo
+    // interner is the single base they all resolve against, so the same
+    // `{overlay_id → base_id}` mapping is correct for every table.
     if !tx.interner_overlay.is_empty() {
-        let table_ids: Vec<u64> = tx.write_set.keys().cloned().collect();
-        for table_id in &table_ids {
-            if let Some(tbl) = repo.table_by_token(*table_id).await? {
-                let base_interner = tbl.interner().get().await?;
-                let shamir_tx::OverlayCommitResult { remap, delta } =
-                    shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
-                if !delta.is_empty() {
-                    tx.interner_deltas.insert(*table_id, delta);
+        let repo_interner = repo.repo_interner().await?;
+        let base_interner = repo_interner.get().await?;
+        let shamir_tx::OverlayCommitResult { remap, delta } =
+            shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
+        if !delta.is_empty() {
+            tx.interner_deltas.extend(delta);
+        }
+        if !remap.is_empty() {
+            let table_ids: Vec<u64> = tx.write_set.keys().cloned().collect();
+            for table_id in &table_ids {
+                if let Some(staging) = tx.write_set.get_mut(table_id) {
+                    staging
+                        .rewrite_set_inner(|inner| {
+                            shamir_tx::remap_value(inner, &remap);
+                            Ok(())
+                        })
+                        .await
+                        .map_err(DbError::Codec)?;
                 }
-                if !remap.is_empty() {
-                    if let Some(staging) = tx.write_set.get_mut(table_id) {
-                        staging
-                            .rewrite_set_inner(|inner| {
-                                shamir_tx::remap_value(inner, &remap);
-                                Ok(())
-                            })
-                            .await
-                            .map_err(DbError::Codec)?;
-                    }
-                }
-                // A5: interner persist removed from the commit critical
-                // path. The WAL entry carries the interner delta
-                // (`interner_deltas`), so crash recovery replays new
-                // (name, id) mappings via `touch_with_id`. A background
-                // checkpoint (every INTERNER_CHECKPOINT_INTERVAL commits)
-                // flushes the delta to the durable chunk store, advancing
-                // the persisted high-water mark so Phase 7 WAL truncation
-                // can proceed. Graceful shutdown flushes all interners.
             }
         }
+        // A5: interner persist removed from the commit critical path. The WAL
+        // entry carries the interner delta (`interner_deltas`), so crash
+        // recovery replays new (name, id) mappings via `touch_with_id`. A
+        // background checkpoint (every INTERNER_CHECKPOINT_INTERVAL commits)
+        // flushes the delta to the durable chunk store, advancing the
+        // persisted high-water mark so Phase 7 WAL truncation can proceed.
+        // Graceful shutdown flushes the repo interner once.
     }
 
     // Phase 2.5 (HIGH-A): acquire each unique table's `unique_write_lock`
@@ -348,14 +356,16 @@ pub(super) async fn pre_commit_locked_validate(
 
     // Build WAL entry (Phase 4 prep) — does NOT persist.
     let wal_ops = wal_ops_from_tx(tx).await;
+    // Stage I: the interner is per-REPO. `interner_deltas` is a single flat
+    // `Vec<(name, id)>` (no per-table key), so we emit every entry under the
+    // REPO scope marker (constant 0). The WAL wire-shape
+    // `Vec<(u64, String, u64)>` is UNCHANGED — only the meaning of the first
+    // `u64` shifts from `table_token` to a repo-scope constant. Recovery
+    // resolves the single repo interner directly (keystone).
     let interner_delta: Vec<(u64, String, u64)> = tx
         .interner_deltas
         .iter()
-        .flat_map(|(token, deltas)| {
-            deltas
-                .iter()
-                .map(move |(name, id)| (*token, name.clone(), *id))
-        })
+        .map(|(name, id)| (REPO_INTERNER_SCOPE, name.clone(), *id))
         .collect();
     let mut wal_entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops)
         .with_commit_version(commit_version);
@@ -469,16 +479,13 @@ pub(super) async fn pre_commit_locked(
     // `txn_id` (the `WalActiveKey` byte order) is not a safe proxy because
     // tx allocation and commit ordering are independent.
     let wal_ops = wal_ops_from_tx(tx).await;
-    // A3: flatten per-table interner deltas into the WAL entry so
-    // recovery can replay them via `touch_with_id` before data ops.
+    // Stage I: flatten the per-repo interner delta into the WAL entry. See
+    // the matching note in `pre_commit_prelock`: the first `u64` is a
+    // repo-scope constant (0), NOT a table token. Wire-shape unchanged.
     let interner_delta: Vec<(u64, String, u64)> = tx
         .interner_deltas
         .iter()
-        .flat_map(|(token, deltas)| {
-            deltas
-                .iter()
-                .map(move |(name, id)| (*token, name.clone(), *id))
-        })
+        .map(|(name, id)| (REPO_INTERNER_SCOPE, name.clone(), *id))
         .collect();
     let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);

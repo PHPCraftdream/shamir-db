@@ -3,9 +3,9 @@
 //! Verifies the full migration helper chain:
 //!   1. open src TableManager, create index2 indexes, insert records
 //!   2. open dst TableManager on separate stores
-//!   3. `dst.replicate_interner_from(&src)` — copies src's persisted
-//!      interner state so dst decodes the upcoming data_store bytes
-//!      with matching field-name → id mappings
+//!   3. share src's interner with dst via `with_interner` so dst decodes
+//!      the upcoming data_store bytes with matching field-name → id mappings
+//!      (Stage I: per-repo interner replaces the old `replicate_interner_from`)
 //!   4. copy src data_store bytes verbatim into dst data_store
 //!   5. `dst.replicate_index2_descriptors_from(&src)` — creates empty
 //!      backends on dst with paths re-interned through dst's interner
@@ -50,6 +50,9 @@ async fn migrate_index2_fts() {
     let dst = TableManager::create("docs".into(), Arc::clone(&dst_data), Arc::clone(&dst_info))
         .await
         .unwrap();
+    // Stage I: share src's interner with dst so copied data_store bytes
+    // decode with matching field-name → id mappings.
+    let dst = dst.with_interner(src.interner().clone());
 
     let op = CreateIndexOp {
         create_index: "body_fts".into(),
@@ -91,7 +94,6 @@ async fn migrate_index2_fts() {
     }
 
     // --- simulate migration: copy data_store + replicate + populate ---
-    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();
@@ -131,6 +133,8 @@ async fn migrate_index2_functional() {
     let dst = TableManager::create("docs".into(), Arc::clone(&dst_data), Arc::clone(&dst_info))
         .await
         .unwrap();
+    // Stage I: share src's interner with dst.
+    let dst = dst.with_interner(src.interner().clone());
 
     let op = CreateIndexOp {
         create_index: "email_lower".into(),
@@ -172,7 +176,6 @@ async fn migrate_index2_functional() {
         src.insert(&InnerValue::Map(m)).await.unwrap();
     }
 
-    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();
@@ -210,6 +213,8 @@ async fn migrate_index2_vector() {
     let dst = TableManager::create("docs".into(), Arc::clone(&dst_data), Arc::clone(&dst_info))
         .await
         .unwrap();
+    // Stage I: share src's interner with dst.
+    let dst = dst.with_interner(src.interner().clone());
 
     let op = CreateIndexOp {
         create_index: "vec_idx".into(),
@@ -255,7 +260,6 @@ async fn migrate_index2_vector() {
         src.insert(&InnerValue::Map(m)).await.unwrap();
     }
 
-    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();

@@ -153,12 +153,18 @@ pub struct TxContext {
     /// emission and interner merge (Stage 5).
     pub table_tokens: HashMap<u64, String, THasher>,
 
-    /// Per-table interner delta: entries genuinely new to the base
-    /// interner that were merged during commit Phase 1. Each entry is
-    /// `(field_name, base_id)`. Populated by `pre_commit` Phase 1 and
-    /// threaded into the `WalEntryV2.interner_delta` field so recovery
-    /// can replay them via `touch_with_id` BEFORE replaying data ops.
-    pub interner_deltas: HashMap<u64, Vec<(String, u64)>, THasher>,
+    /// Per-repo interner delta (Stage I — collapsed from per-table): entries
+    /// genuinely new to the BASE interner that were merged during commit
+    /// Phase 1. Each entry is `(field_name, base_id)`. Populated by
+    /// `pre_commit` Phase 1 (and the C5 implicit path in `write_exec`) and
+    /// threaded into the `WalEntryV2.interner_delta` field so recovery can
+    /// replay them via `touch_with_id` BEFORE replaying data ops.
+    ///
+    /// Stage I: the interner is now per-REPO (one id-namespace shared across
+    /// every table), so there is no per-table key — a single flat `Vec`
+    /// replaces the old `HashMap<table_token, Vec<...>>`. The repo owns ONE
+    /// interner, so all deltas target it.
+    pub interner_deltas: Vec<(String, u64)>,
 
     /// Optional version provider for SSI read-set validation.
     /// When `None`, commit_tx Phase 2 falls back to a stub provider
@@ -258,7 +264,7 @@ impl TxContext {
             counter_deltas: HashMap::with_hasher(THasher::default()),
             read_set: scc::HashMap::with_hasher(THasher::default()),
             table_tokens: HashMap::with_hasher(THasher::default()),
-            interner_deltas: HashMap::with_hasher(THasher::default()),
+            interner_deltas: Vec::new(),
             version_provider: None,
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),

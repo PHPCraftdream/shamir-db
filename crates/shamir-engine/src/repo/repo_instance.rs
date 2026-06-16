@@ -3,6 +3,7 @@ use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
+use crate::table::interner_manager::InternerManager;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo, Store};
 use shamir_types::access::Actor;
@@ -69,6 +70,15 @@ pub struct RepoInstance {
     /// drainer + `tokio::spawn`s the loop. Single-init is guaranteed by
     /// `OnceLock`; a lost race just drops a redundant un-spawned `Drainer`.
     drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
+    /// Per-repo string interner (Stage I — moved from per-table to per-repo).
+    /// Backed by the dedicated `"__interner__"` store. Built once on first
+    /// access (lazy) and shared via [`Arc::clone`] so every
+    /// [`TableManager`](crate::table::TableManager) in this repo shares the
+    /// same live [`Interner`](shamir_types::core::interner::Interner) and
+    /// id-namespace. This is what makes a field name resolve to ONE id across
+    /// every table in the repo, and what lets V2 WAL recovery resolve a single
+    /// interner instead of a per-table one.
+    repo_interner: Arc<OnceCell<InternerManager>>,
     /// D2 P1d-2b: repo liveness token. `Some(Arc<()>)` on every FOREGROUND
     /// clone (the strong count == number of live foreground clones); `None`
     /// on the single BACKGROUND clone the drain task owns
@@ -103,6 +113,7 @@ impl Clone for RepoInstance {
             changefeed: Arc::clone(&self.changefeed),
             wal_dir: self.wal_dir.clone(),
             drainer: Arc::clone(&self.drainer),
+            repo_interner: Arc::clone(&self.repo_interner),
             // Foreground clone: carries a strong liveness ref. If `self` is
             // itself the background clone (`None`) this stays `None` — a clone
             // of the background handle must not resurrect liveness.
@@ -155,6 +166,7 @@ impl RepoInstance {
             changefeed: Arc::new(OnceCell::new()),
             wal_dir,
             drainer: Arc::new(std::sync::OnceLock::new()),
+            repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
         }
     }
@@ -298,7 +310,12 @@ impl RepoInstance {
         let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));
 
         let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
-        let tbl = tbl.with_mvcc_store(mvcc);
+        // Stage I: every table in this repo SHARES the one repo-level
+        // interner (built lazily against the `"__interner__"` store) so a
+        // field name resolves to a single id across tables and V2 WAL
+        // recovery resolves one interner instead of a per-table one.
+        let repo_interner = self.repo_interner().await?;
+        let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
 
         // Changefeed (Phase 3b follow-up): wire the non-tx write path to the
         // per-repo changefeed so non-transactional insert/update/set/delete
@@ -375,6 +392,30 @@ impl RepoInstance {
     /// without scanning every active WAL marker.
     pub async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get("__tx__").await
+    }
+
+    /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
+    /// cancellation occurs during init the cell stays empty and the next
+    /// caller retries. Returned manager is a cheap clone (all internal Arcs
+    /// are shared).
+    ///
+    /// The per-repo [`InternerManager`] (Stage I — moved from per-table to
+    /// per-repo ownership). Backed by the dedicated `"__interner__"` store,
+    /// distinct from `"__tx__"` (recovery markers) so the two durability
+    /// streams — chunked interner deltas vs. last-committed/next-tx markers —
+    /// never collide. Built once on first access; every
+    /// [`TableManager`](crate::table::TableManager) shares this one manager
+    /// via `with_interner`, so a field name resolves to ONE id across all
+    /// tables in the repo. V2 WAL recovery resolves this single interner
+    /// instead of a per-table one (Stage I keystone).
+    pub async fn repo_interner(&self) -> DbResult<InternerManager> {
+        self.repo_interner
+            .get_or_try_init(|| async {
+                let store: Arc<dyn Store> = self.repo.store_get("__interner__").await?;
+                Ok::<InternerManager, DbError>(InternerManager::new(store))
+            })
+            .await
+            .cloned()
     }
 
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
@@ -994,13 +1035,9 @@ impl RepoInstance {
                     first_err = Some(e);
                 }
             }
-            // A5: persist each table's interner on graceful shutdown so
-            // all in-memory (name, id) mappings are durable before the
-            // process exits. After this, WAL entries whose deltas covered
-            // these ids can be safely truncated on next boot.
-            if let Err(e) = table.interner().persist().await {
+            if let Err(e) = table.info_store().flush().await {
                 log::warn!(
-                    "flush_buffers: interner persist {}/{}: {}",
+                    "flush_buffers: info_store {}/{}: {}",
                     self.name,
                     table_name,
                     e
@@ -1009,13 +1046,17 @@ impl RepoInstance {
                     first_err = Some(e);
                 }
             }
-            if let Err(e) = table.info_store().flush().await {
-                log::warn!(
-                    "flush_buffers: info_store {}/{}: {}",
-                    self.name,
-                    table_name,
-                    e
-                );
+        }
+
+        // Stage I: persist the single per-repo interner ONCE on graceful
+        // shutdown. Pre-Stage-I this was a per-table loop; now that every
+        // table shares the repo interner, one persist covers all of them
+        // (the manager is Arc-shared so any table's `interner()` handle is
+        // the same live state). After this, WAL entries whose deltas covered
+        // these ids can be safely truncated on next boot.
+        if let Ok(repo_interner) = self.repo_interner().await {
+            if let Err(e) = repo_interner.persist().await {
+                log::warn!("flush_buffers: repo interner persist {}: {}", self.name, e);
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
