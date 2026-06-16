@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use regex::Regex;
 use shamir_collections::TSet;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::scalar_ref_cmp;
 use shamir_types::record_view::RecordRef;
 use smallvec::SmallVec;
 
@@ -173,7 +174,9 @@ impl FilterNode {
                 pre_resolved,
                 op,
             } => {
-                let field_val = resolve_field_ref(record, field_path);
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_val = record.scalar_at(&ipath);
                 let owned_rhs;
                 let filter_val: Option<&InnerValue> = if let Some(pre) = pre_resolved {
                     Some(pre)
@@ -184,16 +187,16 @@ impl FilterNode {
 
                 match (field_val, filter_val) {
                     (Some(a), Some(b)) => match op {
-                        CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
-                        CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
-                        CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
+                        CompareOp::Eq => scalar_ref_cmp(a, b) == Some(Ordering::Equal),
+                        CompareOp::Ne => scalar_ref_cmp(a, b) != Some(Ordering::Equal),
+                        CompareOp::Gt => scalar_ref_cmp(a, b) == Some(Ordering::Greater),
                         CompareOp::Gte => matches!(
-                            compare_values(a, b),
+                            scalar_ref_cmp(a, b),
                             Some(Ordering::Greater | Ordering::Equal)
                         ),
-                        CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
+                        CompareOp::Lt => scalar_ref_cmp(a, b) == Some(Ordering::Less),
                         CompareOp::Lte => {
-                            matches!(compare_values(a, b), Some(Ordering::Less | Ordering::Equal))
+                            matches!(scalar_ref_cmp(a, b), Some(Ordering::Less | Ordering::Equal))
                         }
                     },
                     (None, _) | (_, None) => matches!(op, CompareOp::Ne),
@@ -220,8 +223,10 @@ impl FilterNode {
                 values,
                 negate,
             } => {
-                let found = match resolve_field_ref(record, field_path) {
-                    Some(v) => values.contains(v),
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let found = match record.materialize_at(&ipath) {
+                    Some(v) => values.contains(&v),
                     None => false,
                 };
                 if *negate {
@@ -237,7 +242,9 @@ impl FilterNode {
                 pre_resolved,
                 negate,
             } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_val = match record.scalar_at(&ipath) {
                     Some(v) => v,
                     None => return *negate,
                 };
@@ -249,7 +256,7 @@ impl FilterNode {
                 let mut found = false;
                 for (i, fv) in values.iter().enumerate() {
                     if let Some(pre) = &pre_resolved[i] {
-                        if compare_values(field_val, pre) == Some(Ordering::Equal) {
+                        if scalar_ref_cmp(field_val, pre) == Some(Ordering::Equal) {
                             found = true;
                             break;
                         }
@@ -261,7 +268,7 @@ impl FilterNode {
                             if let Some(qr) = ctx.resolved_refs.get(key) {
                                 let column = resolve_query_ref_column(qr, path.as_deref());
                                 if column.iter().any(|cv| {
-                                    compare_values(field_val, cv) == Some(Ordering::Equal)
+                                    scalar_ref_cmp(field_val, cv) == Some(Ordering::Equal)
                                 }) {
                                     found = true;
                                     break;
@@ -271,7 +278,7 @@ impl FilterNode {
                         continue;
                     }
                     if let Some(resolved) = resolve_filter_value(fv, record, ctx) {
-                        if compare_values(field_val, &resolved) == Some(Ordering::Equal) {
+                        if scalar_ref_cmp(field_val, &resolved) == Some(Ordering::Equal) {
                             found = true;
                             break;
                         }
@@ -413,7 +420,9 @@ impl FilterNode {
                 pre_from,
                 pre_to,
             } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_val = match record.scalar_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -438,10 +447,10 @@ impl FilterNode {
                     &owned_to
                 };
                 matches!(
-                    compare_values(field_val, from_val),
+                    scalar_ref_cmp(field_val, from_val),
                     Some(Ordering::Greater | Ordering::Equal)
                 ) && matches!(
-                    compare_values(field_val, to_val),
+                    scalar_ref_cmp(field_val, to_val),
                     Some(Ordering::Less | Ordering::Equal)
                 )
             }
