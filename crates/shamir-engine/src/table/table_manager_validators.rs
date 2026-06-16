@@ -119,10 +119,7 @@ impl TableManager {
         actor: &shamir_types::access::Actor,
         tx: Option<&shamir_tx::TxContext>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
-        use crate::function::{FnBatch, FnCtx, Params};
-        use crate::validator::{
-            decode_validation_result, inner_to_query_value_with, ValidatorFailure,
-        };
+        use crate::validator::{inner_to_query_value_with, ValidatorFailure};
         use shamir_types::core::interner::InternerKey;
         use shamir_types::types::value::QueryValue;
 
@@ -134,7 +131,7 @@ impl TableManager {
 
         // 2. Load bindings snapshot; filter to applicable ops.
         let all_bindings = self.validator_bindings.load_full();
-        let mut applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
+        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
             .iter()
             .filter(|b| b.ops.contains(&op))
             .collect();
@@ -142,13 +139,6 @@ impl TableManager {
         if applicable.is_empty() {
             return Ok(());
         }
-
-        // 3. Sort by priority ascending, stable tie-break by id.
-        applicable.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| a.validator_id.cmp(&b.validator_id))
-        });
 
         // Pre-convert records to QueryValue (string-keyed) once.
         let interner = self
@@ -200,6 +190,91 @@ impl TableManager {
             None => None,
         };
 
+        self.run_validators_loop(
+            op,
+            &applicable,
+            reg,
+            actor,
+            qv_new.as_ref(),
+            qv_old.as_ref(),
+        )
+        .await
+    }
+
+    /// QueryValue-input entry point for the INSERT write path (W1).
+    ///
+    /// The insert path already holds the resolved `QueryValue` upstream
+    /// (`resolved_values` in `write_exec.rs`). The legacy path built an
+    /// `InnerValue` tree (for storage/index) and then de-interned it back
+    /// to `QueryValue` via `inner_to_query_value_with` just to feed the
+    /// validator — a redundant full-record round-trip whose identity is
+    /// proven by `validator::tests::query_value_conv_tests`. This entry
+    /// skips that round-trip by taking the `QueryValue` directly.
+    ///
+    /// Behaviour is byte-identical to `run_validators(Insert, Some(inner), None)`:
+    /// the validator receives the same `record` / `old_record` params. Only
+    /// the INSERT call sites use this — UPDATE/UPSERT feed a merged
+    /// `InnerValue` and must keep the `run_validators` InnerValue-input path.
+    pub async fn run_validators_qv(
+        &self,
+        op: crate::validator::WriteOp,
+        new_record: Option<&shamir_types::types::value::QueryValue>,
+        old_record: Option<&shamir_types::types::value::QueryValue>,
+        actor: &shamir_types::access::Actor,
+    ) -> Result<(), crate::validator::ValidatorFailure> {
+        // 1. No registry → validators disabled (system tables / tests).
+        let reg = match &self.validator_registry {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        // 2. Load bindings snapshot; filter to applicable ops.
+        let all_bindings = self.validator_bindings.load_full();
+        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
+            .iter()
+            .filter(|b| b.ops.contains(&op))
+            .collect();
+
+        if applicable.is_empty() {
+            return Ok(());
+        }
+
+        self.run_validators_loop(op, &applicable, reg, actor, new_record, old_record)
+            .await
+    }
+
+    /// Per-validator invocation loop shared by [`run_validators_resolved`]
+    /// (InnerValue-input, de-interns to QueryValue) and [`run_validators_qv`]
+    /// (QueryValue-input, skips the de-intern).
+    ///
+    /// Both `qv_new` / `qv_old` arrive already as `QueryValue`; the only
+    /// difference upstream is how they were produced. This body is the
+    /// spec'd VALIDATORS.md algorithm steps 3–7 (sort, resolve, invoke,
+    /// accumulate, fail).
+    async fn run_validators_loop(
+        &self,
+        _op: crate::validator::WriteOp,
+        applicable: &[&crate::validator::ValidatorBinding],
+        reg: &crate::validator::ValidatorRegistry,
+        actor: &shamir_types::access::Actor,
+        qv_new: Option<&shamir_types::types::value::QueryValue>,
+        qv_old: Option<&shamir_types::types::value::QueryValue>,
+    ) -> Result<(), crate::validator::ValidatorFailure> {
+        use crate::function::{FnBatch, FnCtx, Params};
+        use crate::validator::{decode_validation_result, ValidatorFailure};
+        use shamir_types::types::value::QueryValue;
+
+        // The caller already filtered to a non-empty `applicable`, so
+        // indexing [0] for error attribution is safe.
+        let mut applicable = applicable.to_vec();
+
+        // 3. Sort by priority ascending, stable tie-break by id.
+        applicable.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.validator_id.cmp(&b.validator_id))
+        });
+
         // Allocate with a known lower bound to avoid realloc on the common
         // single-validator path.
         let mut all_errors: Vec<shamir_query_types::validator::ValidationError> =
@@ -221,12 +296,12 @@ impl TableManager {
 
             // 5. Build Params per validator (each call gets its own map).
             let mut params = Params::new();
-            if let Some(ref rec) = qv_new {
+            if let Some(rec) = qv_new {
                 params.set("record", rec.clone());
             } else {
                 params.set("record", QueryValue::Null);
             }
-            if let Some(ref old) = qv_old {
+            if let Some(old) = qv_old {
                 params.set("old_record", old.clone());
             } else {
                 params.set("old_record", QueryValue::Null);
