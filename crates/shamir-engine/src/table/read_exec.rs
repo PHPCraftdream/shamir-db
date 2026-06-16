@@ -13,18 +13,19 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
     exec, PaginationInfo, QueryResult, QueryStats, ReadQuery, SelectItem, Temporal,
 };
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use super::record_cow::RecordCow;
 use super::table_manager::TableManager;
 
 /// Boxed, `Send`-able stream of decoded record batches used by the three scan
 /// execution paths (`read_collecting`, `read_counting`, `read_streaming`).
 type DynBatchStream<'a> = std::pin::Pin<
     Box<
-        dyn futures::Stream<Item = shamir_storage::error::DbResult<Vec<(RecordId, InnerValue)>>>
+        dyn futures::Stream<Item = shamir_storage::error::DbResult<Vec<(RecordId, RecordCow)>>>
             + Send
             + 'a,
     >,
@@ -520,18 +521,44 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
-            for (id, record) in batch {
-                let passes = match filter_cb {
-                    Some(cb) => cb.matches(&record, ctx),
-                    None => true,
-                };
-                if passes {
-                    if needs_raw {
-                        raw_acc.push((id, record));
-                    } else {
-                        rec_acc.push(crate::query::read::QueryRecord::Direct(
-                            proj.as_ref().unwrap().project_value(&record, interner),
-                        ));
+            for (id, cow) in batch {
+                match cow {
+                    RecordCow::Borrowed(b) => {
+                        let view = match shamir_types::record_view::RecordView::new(&b) {
+                            Ok(v) => v,
+                            Err(_) => continue, // malformed row → skip
+                        };
+                        let passes = match filter_cb {
+                            Some(cb) => cb.matches(&view, ctx),
+                            None => true,
+                        };
+                        if passes {
+                            if needs_raw {
+                                // Decode to owned tree for GROUP BY / aggregates.
+                                let inner = InnerValue::from_bytes(b)
+                                    .map_err(|e| DbError::Codec(e.to_string()))?;
+                                raw_acc.push((id, inner));
+                            } else {
+                                rec_acc.push(crate::query::read::QueryRecord::Direct(
+                                    proj.as_ref().unwrap().project_value(&view, interner),
+                                ));
+                            }
+                        }
+                    }
+                    RecordCow::Owned(record) => {
+                        let passes = match filter_cb {
+                            Some(cb) => cb.matches(&record, ctx),
+                            None => true,
+                        };
+                        if passes {
+                            if needs_raw {
+                                raw_acc.push((id, record));
+                            } else {
+                                rec_acc.push(crate::query::read::QueryRecord::Direct(
+                                    proj.as_ref().unwrap().project_value(&record, interner),
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -631,32 +658,46 @@ impl TableManager {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
 
-            for (_, record) in &batch {
-                let passes = match filter_cb {
-                    Some(cb) => cb.matches(record, ctx),
-                    None => true,
-                };
-                if !passes {
-                    continue;
+            for (_, cow) in &batch {
+                // Inline helper: filter + project via the correct RecordRef impl.
+                // The RecordView is built once and reused for both matches+project.
+                macro_rules! count_row {
+                    ($rec:expr) => {{
+                        let passes = match filter_cb {
+                            Some(cb) => cb.matches($rec, ctx),
+                            None => true,
+                        };
+                        if !passes {
+                            continue;
+                        }
+                        let idx = matched_total as usize;
+                        matched_total += 1;
+                        if idx >= skip {
+                            if let Some(lim) = limit {
+                                if idx < skip + lim {
+                                    result.push(crate::query::read::QueryRecord::Direct(
+                                        proj.project_value($rec, interner),
+                                    ));
+                                }
+                            } else {
+                                result.push(crate::query::read::QueryRecord::Direct(
+                                    proj.project_value($rec, interner),
+                                ));
+                            }
+                        }
+                    }};
                 }
 
-                let idx = matched_total as usize;
-                matched_total += 1;
-
-                // Only project and keep records that fall within the page
-                if idx >= skip {
-                    if let Some(lim) = limit {
-                        if idx < skip + lim {
-                            result.push(crate::query::read::QueryRecord::Direct(
-                                proj.project_value(record, interner),
-                            ));
-                        }
-                        // Beyond the page — still count, but don't store
-                    } else {
-                        // No limit — keep everything from skip onwards
-                        result.push(crate::query::read::QueryRecord::Direct(
-                            proj.project_value(record, interner),
-                        ));
+                match cow {
+                    RecordCow::Borrowed(b) => {
+                        let view = match shamir_types::record_view::RecordView::new(b) {
+                            Ok(v) => v,
+                            Err(_) => continue, // malformed row → skip
+                        };
+                        count_row!(&view);
+                    }
+                    RecordCow::Owned(record) => {
+                        count_row!(record);
                     }
                 }
             }
@@ -727,32 +768,45 @@ impl TableManager {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
 
-            for (_, record) in &batch {
-                let passes = match filter_cb {
-                    Some(cb) => cb.matches(record, ctx),
-                    None => true,
-                };
-                if !passes {
-                    continue;
+            for (_, cow) in &batch {
+                macro_rules! stream_row {
+                    ($rec:expr) => {{
+                        let passes = match filter_cb {
+                            Some(cb) => cb.matches($rec, ctx),
+                            None => true,
+                        };
+                        if !passes {
+                            continue;
+                        }
+                        if skipped < skip {
+                            skipped += 1;
+                            continue;
+                        }
+                        if let Some(lim) = limit {
+                            if result.len() >= lim {
+                                has_next = true;
+                                done = true;
+                                break;
+                            }
+                        }
+                        result.push(crate::query::read::QueryRecord::Direct(
+                            proj.project_value($rec, interner),
+                        ));
+                    }};
                 }
 
-                if skipped < skip {
-                    skipped += 1;
-                    continue;
-                }
-
-                if let Some(lim) = limit {
-                    if result.len() >= lim {
-                        // This is the limit+1 record — confirms has_next
-                        has_next = true;
-                        done = true;
-                        break;
+                match cow {
+                    RecordCow::Borrowed(b) => {
+                        let view = match shamir_types::record_view::RecordView::new(b) {
+                            Ok(v) => v,
+                            Err(_) => continue, // malformed row → skip
+                        };
+                        stream_row!(&view);
+                    }
+                    RecordCow::Owned(record) => {
+                        stream_row!(record);
                     }
                 }
-
-                result.push(crate::query::read::QueryRecord::Direct(
-                    proj.project_value(record, interner),
-                ));
             }
         }
 

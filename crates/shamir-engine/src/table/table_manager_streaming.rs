@@ -5,6 +5,7 @@ use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use super::record_cow::RecordCow;
 use super::table::Table;
 use super::table_manager::TableManager;
 use crate::query::filter::eval::{compile_filter, FilterCallback};
@@ -25,9 +26,9 @@ impl TableManager {
     pub fn list_stream(
         &self,
         batch_size: usize,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + '_ {
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
         type DynStream<'a> = std::pin::Pin<
-            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Send + 'a>,
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
         >;
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mvcc = Arc::clone(mvcc);
@@ -63,9 +64,9 @@ impl TableManager {
         &self,
         batch_size: usize,
         pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + '_ {
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
         type DynStream<'a> = std::pin::Pin<
-            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Send + 'a>,
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
         >;
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mvcc = Arc::clone(mvcc);
@@ -108,7 +109,7 @@ impl TableManager {
         batch_size: usize,
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
-    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
         let interner = self.interner.get().await?;
         let callback = compile_filter(filter, interner);
         let table_stream = self.list_stream(batch_size);
@@ -121,7 +122,17 @@ impl TableManager {
                     Ok(batch) => {
                         let filtered: Vec<_> = batch
                             .into_iter()
-                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .filter(|(_, cow)| {
+                                match cow {
+                                    RecordCow::Borrowed(b) => {
+                                        match shamir_types::record_view::RecordView::new(b) {
+                                            Ok(view) => callback.matches(&view, ctx),
+                                            Err(_) => false, // malformed → skip
+                                        }
+                                    }
+                                    RecordCow::Owned(record) => callback.matches(record, ctx),
+                                }
+                            })
                             .collect();
                         if !filtered.is_empty() {
                             yield Ok(filtered);
@@ -140,7 +151,7 @@ impl TableManager {
         batch_size: usize,
         callback: &'a dyn FilterCallback,
         ctx: &'a FilterContext<'a>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         let table_stream = self.list_stream(batch_size);
 
         async_stream::stream! {
@@ -149,9 +160,22 @@ impl TableManager {
                 match batch_result {
                     Err(e) => { yield Err(e); return; }
                     Ok(batch) => {
+                        // FilterCallback::matches takes &InnerValue, so for
+                        // Borrowed rows we must decode. This path is only used
+                        // by pessimistic-locking / tx-aware streams (cold).
                         let filtered: Vec<_> = batch
                             .into_iter()
-                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .filter(|(_, cow)| {
+                                match cow {
+                                    RecordCow::Borrowed(b) => {
+                                        match InnerValue::from_bytes(b.clone()) {
+                                            Ok(record) => callback.matches(&record, ctx),
+                                            Err(_) => false, // malformed → skip
+                                        }
+                                    }
+                                    RecordCow::Owned(record) => callback.matches(record, ctx),
+                                }
+                            })
                             .collect();
                         if !filtered.is_empty() {
                             yield Ok(filtered);
@@ -193,7 +217,7 @@ impl TableManager {
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         // Phase C (Step 6): defensive coarse recording for streams
         // reached directly (bypassing read_tx). Zero-overhead: gate on
         // Serializable before any work.
@@ -223,7 +247,7 @@ impl TableManager {
         batch_size: usize,
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
-    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a> {
         // Phase C (Step 6): predicate recording for filter streams
         // reached directly (bypassing read_tx). Zero-overhead: gate on
         // Serializable before any work.
@@ -264,7 +288,7 @@ impl TableManager {
         batch_size: usize,
         callback: &'a dyn FilterCallback,
         ctx: &'a FilterContext<'a>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         let inner = self.filter_stream_with_callback(batch_size, callback, ctx);
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
@@ -284,9 +308,9 @@ impl TableManager {
         tx: Option<&'a shamir_tx::TxContext>,
         token: u64,
         mvcc: Option<Arc<shamir_tx::MvccStore>>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a
     where
-        S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a,
+        S: futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a,
     {
         // Only Serializable txs track reads; everything else is a pass-through
         // so the non-SSI scan path pays nothing per record.
@@ -309,6 +333,12 @@ impl TableManager {
     /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
     /// Used by `create_index` / `create_unique_index` to backfill from the seam
     /// rather than the raw `data_store` when an MvccStore is attached.
+    /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
+    /// Used by `create_index` / `create_unique_index` to backfill from the seam
+    /// rather than the raw `data_store` when an MvccStore is attached.
+    ///
+    /// Decodes every `Borrowed` row to an owned `InnerValue` tree — correct for
+    /// index backfill which needs the full tree.
     pub(super) async fn collect_all_current_records(
         &self,
     ) -> DbResult<Vec<(RecordId, InnerValue)>> {
@@ -316,7 +346,18 @@ impl TableManager {
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
-            out.extend(batch?);
+            for (id, cow) in batch? {
+                let inner = match cow {
+                    RecordCow::Borrowed(b) => InnerValue::from_bytes(b).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "Failed to deserialize record: {}",
+                            e
+                        ))
+                    })?,
+                    RecordCow::Owned(v) => v,
+                };
+                out.push((id, inner));
+            }
         }
         Ok(out)
     }
@@ -488,7 +529,7 @@ impl TableManager {
                 let stream = self.filter_stream(batch_size, filter, ctx).await?;
                 futures::pin_mut!(stream);
                 while let Some(batch) = stream.next().await {
-                    for (rid, _) in batch? {
+                    for (rid, _cow) in batch? {
                         self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
                             .await?;
                     }
@@ -498,7 +539,7 @@ impl TableManager {
                 let stream = self.list_stream(batch_size);
                 futures::pin_mut!(stream);
                 while let Some(batch) = stream.next().await {
-                    for (rid, _) in batch? {
+                    for (rid, _cow) in batch? {
                         self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
                             .await?;
                     }

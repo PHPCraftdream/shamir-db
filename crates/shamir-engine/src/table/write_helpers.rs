@@ -300,7 +300,8 @@ impl TableManager {
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            for (id, record) in batch {
+            for (id, cow) in batch {
+                let record = cow.into_inner()?;
                 let all_match = key_fields.iter().all(|(path, expected)| {
                     // Stage 3: go through RecordRef::scalar_at + scalar_ref_cmp
                     // instead of resolve_field + compare_values. The path is
