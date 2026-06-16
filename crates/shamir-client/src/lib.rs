@@ -29,6 +29,8 @@
 
 mod client;
 mod error;
+pub mod interner_cache;
+mod interner_cache_ops;
 pub mod subscription;
 mod wire_frames;
 
@@ -37,6 +39,7 @@ mod tests;
 
 pub use client::{Client, ConnectOptions, ResumeOptions};
 pub use error::ClientError;
+pub use interner_cache::{FieldMap, InternerCacheRegistry};
 pub use subscription::SubscriptionHandle;
 
 // Re-export the wire payloads so callers don't need to depend on

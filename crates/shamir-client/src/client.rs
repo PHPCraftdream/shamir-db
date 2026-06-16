@@ -42,6 +42,7 @@ use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::error::ClientError;
+use crate::interner_cache::InternerCacheRegistry;
 use crate::subscription::{
     EarlyBuffer, SubscriptionHandle, SubscriptionMap, CLIENT_SUB_CHANNEL_CAP, EARLY_BUFFER_CAP,
 };
@@ -278,6 +279,10 @@ pub struct Client {
     closed: Arc<AtomicBool>,
     /// §B21: JoinHandle is stored so we can abort on close/drop.
     reader_handle: Option<JoinHandle<()>>,
+    /// Per-`(db, repo)` interner field-map cache (Stage 5 minimal). Lock-free
+    /// registry; populated lazily by `dump_repo`/`touch_fields`. Ids come ONLY
+    /// from server `interner_dump`/`interner_touch` responses.
+    pub(crate) interner_cache: Arc<InternerCacheRegistry>,
 }
 
 impl Client {
@@ -480,6 +485,7 @@ impl Client {
             early_buffer,
             closed,
             reader_handle: Some(reader_handle),
+            interner_cache: Arc::new(InternerCacheRegistry::new()),
         })
     }
 
@@ -578,6 +584,7 @@ impl Client {
             early_buffer,
             closed,
             reader_handle: Some(reader_handle),
+            interner_cache: Arc::new(InternerCacheRegistry::new()),
         })
     }
 
