@@ -9,6 +9,8 @@ use std::cmp::Ordering;
 
 use regex::Regex;
 use shamir_collections::TSet;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordRef;
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
@@ -202,14 +204,16 @@ impl FilterNode {
             FilterNode::Or(children) => children.iter().any(|c| c.matches(record, ctx)),
             FilterNode::Not(inner) => !inner.matches(record, ctx),
 
-            FilterNode::IsNull { field_path } => matches!(
-                resolve_field_ref(record, field_path),
-                None | Some(InnerValue::Null)
-            ),
-            FilterNode::IsNotNull { field_path } => !matches!(
-                resolve_field_ref(record, field_path),
-                None | Some(InnerValue::Null)
-            ),
+            FilterNode::IsNull { field_path } => {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                record.is_null_at(&ipath)
+            }
+            FilterNode::IsNotNull { field_path } => {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                !record.is_null_at(&ipath)
+            }
 
             FilterNode::InSet {
                 field_path,
@@ -281,9 +285,11 @@ impl FilterNode {
             }
 
             FilterNode::Like { field_path, regex } | FilterNode::Regex { field_path, regex } => {
-                match resolve_field_ref(record, field_path) {
-                    Some(InnerValue::Str(s)) => regex.is_match(s),
-                    _ => false,
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                match record.str_at(&ipath) {
+                    Some(s) => regex.is_match(s),
+                    None => false,
                 }
             }
 
@@ -440,18 +446,27 @@ impl FilterNode {
                 )
             }
 
-            FilterNode::Exists { field_path } => resolve_field_ref(record, field_path).is_some(),
-            FilterNode::NotExists { field_path } => resolve_field_ref(record, field_path).is_none(),
+            FilterNode::Exists { field_path } => {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                record.exists_at(&ipath)
+            }
+            FilterNode::NotExists { field_path } => {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                !record.exists_at(&ipath)
+            }
 
             FilterNode::FtsMatch {
                 field_path,
                 query_tokens,
                 mode_and,
             } => {
-                use shamir_types::types::value::InnerValue;
-                let text = match resolve_field_ref(record, field_path) {
-                    Some(InnerValue::Str(s)) => s,
-                    _ => return false,
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let text = match record.str_at(&ipath) {
+                    Some(s) => s,
+                    None => return false,
                 };
                 if query_tokens.is_empty() {
                     // AND over empty set = true; OR over empty set = false.
