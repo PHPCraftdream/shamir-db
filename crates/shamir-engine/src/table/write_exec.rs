@@ -94,8 +94,14 @@ impl TableManager {
         //     persistence). Actor is System — the batch executor
         //     will thread the real actor once actor-carrying signatures
         //     land on execute_insert. // TODO actor threading
-        for iv in &inner_values {
-            self.run_validators(WriteOp::Insert, Some(iv), None, &Actor::System)
+        //
+        // W1: feed the resolved `QueryValue` directly (skipping the
+        // redundant `InnerValue → QueryValue` de-intern the legacy
+        // `run_validators` path performed). `resolved_values[i]` is the
+        // exact upstream record; identity vs. the old path is proven by
+        // `validator::tests::query_value_conv_tests`.
+        for qv in &resolved_values {
+            self.run_validators_qv(WriteOp::Insert, Some(qv), None, &Actor::System)
                 .await
                 .map_err(validator_failure_to_db_error)?;
         }
@@ -252,8 +258,14 @@ impl TableManager {
         // names (staged above into the layered interner, not yet in base)
         // resolve at validation time.
         // TODO actor threading — use Actor::System for now.
-        for iv in &inner_values {
-            self.run_validators_tx(WriteOp::Insert, Some(iv), None, &Actor::System, &*tx)
+        //
+        // W1: feed the resolved `QueryValue` directly (the resolved record
+        // already carries the tx-overlay keys as plain strings, so no
+        // de-intern is needed). Identity vs. the legacy
+        // `run_validators_tx` path is proven by
+        // `validator::tests::query_value_conv_tests`.
+        for qv in &resolved_values {
+            self.run_validators_qv(WriteOp::Insert, Some(qv), None, &Actor::System)
                 .await
                 .map_err(validator_failure_to_db_error)?;
         }

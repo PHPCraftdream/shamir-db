@@ -76,3 +76,43 @@ Registry `ScalarFn = Arc<dyn Fn(&[InnerValue]) -> ScalarResult>` (funclib/regist
 - MIN/MAX: table/read_exec.rs:130/:337.
 - CUTOVER: table/table.rs:266/:326; read_exec.rs:25-31 (batch alias), :520-538/:630-663/:723-757 (loops).
 - Post-cutover fold-in: query/filter/eval_bytes.rs:626.
+
+---
+
+## Wave 2 (write-path) — ВЕРДИКТ: NO-GO на cutover, только W1 (validator round-trip)
+
+Design-pass (@aoh) — честный измеренный NO-GO на полное устранение дерева со
+вставки (как CAPSTONE). Причина: горячий insert-путь = implicit-tx
+(`insert_tx_many`), где `StagedRow::Live{inner: InnerValue}` (shamir-tx
+staging_store.rs) ДЕРЖИТ owned-дерево для commit-time overlay-id remap
+(`rewrite_set_inner`). На горячем пути дерево — рабочее представление 6
+потребителей: unique-précheck, index-extract intra-batch dedup, unique_keys,
+index2 `plan_insert_tx`, sorted/legacy `plan_records_created_batch`, staging.
+Index-extract хеширует `&InnerValue` через `IndexRecordKey::with_values`
+(index_keys.rs:99); index2 — `dyn IndexBackend` (`&InnerValue`, async_trait).
+Стриминг QueryValue→msgpack пришлось бы тут же `from_bytes`-ить для них → строго
+хуже. §8 это предсказал («частично»).
+
+**Forced-tree (вне scope, каждое — отдельный проект):** переписать
+`IndexRecordKey::with_values` на хеш `ScalarRef`/`RecordValue`; флип `IndexBackend`
+на `&dyn RecordRef`; научить `StagedRow::Live` держать `Bytes` на implicit-tx
+(единственное, что дало бы горячему пути отдавать байты напрямую — в shamir-tx).
+
+**Реальный salvageable win — W1:** на insert валидатор делает round-trip
+`QueryValue → query_value_to_inner_with → InnerValue → inner_to_query_value_with →
+QueryValue` (query_value_conv.rs:24), хотя resolved-`QueryValue` уже на руках
+(`resolved_values`). Кормить валидатор `QueryValue` напрямую (overload, INSERT-путь;
+UPDATE/UPSERT остаются на InnerValue-merged) убирает де-интернинг записи на каждый
+validated-insert. ПРЕДУСЛОВИЕ: круг-трип `QueryValue→InnerValue→QueryValue` обязан
+быть identity для validator-record (иначе меняет вход валидатора). W0 (прямой
+энкодер) / W3 — без продового потребителя → не лендить (dead code).
+
+### Wave 2 — РЕШЕНИЕ: довести до полного устранения (правка NO-GO)
+Пользователь: не пунтовать в NO-GO, а ПЕРЕПИСАТЬ три блокера и полностью убрать
+дерево с write-пути, перейдя на новые типы и УДАЛИВ старые InnerValue-input пути.
+Многоэтапно (epic #45): W2a IndexRecordKey→ScalarRef/RecordView; W2b IndexBackend→
+&dyn RecordRef (index2); W2c StagedRow::Live→Bytes (overlay-remap на байтах);
+W2d write-cutover (query_value_to_storage_bytes напрямую + линза для всех
+потребителей, удалить query_value_to_inner_with way-station). W1 (validator
+round-trip) — независимый малый win, отдельно. Каждый stage byte-identical +
+полный гейт; W2c durability-critical (crash_recovery).
