@@ -111,18 +111,20 @@ impl ShamirAdminExecutor {
             let dst_table = db.get_table(dst_repo_name, table_name).await?;
             let dst_data = Arc::clone(dst_table.table().data_store());
 
-            // Stage I TODO: the per-table `replicate_interner_from` step was
-            // RETIRED when the interner moved to per-repo ownership. Under
-            // per-repo interners, migrating a single table from repo A to
-            // repo B is no longer a byte-copy of one table's interner chunks
-            // — repo B has its OWN repo-wide interner, and naively copying
-            // repo A's would clobber repo B's existing id-namespace. The
-            // migration coordinator needs rework to re-intern the copied
-            // table's field names into repo B's interner and rewrite the
-            // data_store bytes with the new ids. That is out of scope for
-            // Stage I (pre-release, no backward-compat). The
-            // `replicate_index2_descriptors_from` step below already re-interns
-            // index names into the dst repo's interner, so it is unaffected.
+            // Step 1: carry src's repo-interner `(id → name)` mappings
+            // into dst's repo interner BEFORE any data lands. The
+            // migration coordinator copies raw `data_store` bytes, which
+            // embed src's `InternerKey(u64)` ids for field names; under
+            // per-repo interners dst starts with its own empty interner,
+            // so without this step those ids miss on dst and the index2
+            // backfill (`bulk_populate_index2`) reads empty field values
+            // → the dst index is built empty. `replicate_interner_from`
+            // replays each (name, id) via `touch_with_id` preserving the
+            // SAME ids, so the copied bytes decode unchanged (no
+            // re-encode). Must run before `replicate_index2_descriptors_from`
+            // (which re-interns index path segments through dst's interner)
+            // and before the snapshot/drain that populates dst's data_store.
+            dst_table.replicate_interner_from(&src_table).await?;
 
             // Step 2: replicate index2 descriptors (FTS / Functional
             // / Vector) from src → dst. Creates empty backends on

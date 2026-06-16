@@ -5,6 +5,58 @@ use shamir_types::core::interner::TouchInd;
 use super::table_manager::TableManager;
 
 impl TableManager {
+    /// Carry src's repo-interner `(id → name)` mappings into this (dst)
+    /// TableManager's repo interner, **preserving the src ids** via
+    /// `touch_with_id`.
+    ///
+    /// Migration copies raw `data_store` bytes, which embed
+    /// `InternerKey(u64)` references for field names. For those bytes to
+    /// decode correctly on dst, dst's repo interner must hold the **same**
+    /// `id → name` mappings as src's. This is the repo-level analogue of
+    /// the retired per-table `replicate_interner_from`: instead of
+    /// byte-copying one table's interner chunks, it walks src's live
+    /// `Interner` and replays each `(name, id)` into dst's interner with
+    /// the SAME id — so the copied bytes decode unchanged, no re-encode.
+    ///
+    /// **Id-collision safety.** `touch_with_id` returns `Err` if `id` is
+    /// already mapped to a DIFFERENT name (or `name` to a different id).
+    /// A freshly-created dst repo (the migration target — e.g.
+    /// `in_memory`) has an empty interner, so every src mapping lands at
+    /// its own id with no collision. On a NON-empty dst the call surfaces
+    /// the collision as a hard error rather than silently corrupting
+    /// either repo's id-namespace; the caller (`handle_start_migration`)
+    /// rolls back the dst repo on any failure.
+    ///
+    /// Must be called BEFORE `replicate_index2_descriptors_from` (which
+    /// re-interns index path segments through dst's interner) and BEFORE
+    /// any data lands on dst. Persists dst's interner so the new mappings
+    /// survive a restart of the dst repo.
+    pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
+        let src_interner = src.interner.get().await?;
+        let entries = src_interner.all_entries();
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let dst_interner = self.interner.get().await?;
+        for (interned_key, user_key) in &entries {
+            dst_interner
+                .touch_with_id(user_key.as_str(), interned_key.id())
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "replicate_interner_from: collision replaying (id={}, name='{}'): {} \
+                         — dst repo interner is not empty and conflicts with src",
+                        interned_key.id(),
+                        user_key.as_str(),
+                        e
+                    ))
+                })?;
+        }
+
+        self.interner.persist().await?;
+        Ok(())
+    }
+
     /// Replicate src's index2 descriptors onto this TableManager.
     ///
     /// For each non-Btree descriptor on `src`:
