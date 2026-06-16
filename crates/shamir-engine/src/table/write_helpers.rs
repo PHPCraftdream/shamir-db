@@ -10,14 +10,15 @@ use std::collections::BTreeSet;
 use futures::StreamExt;
 
 use crate::function::builtin_scalars;
-use crate::query::filter::eval::resolve_field;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
-use shamir_types::core::interner::Interner;
+use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::record_view::scalar_ref_cmp;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::TMap;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
@@ -301,12 +302,16 @@ impl TableManager {
             let batch = batch_result?;
             for (id, record) in batch {
                 let all_match = key_fields.iter().all(|(path, expected)| {
-                    resolve_field(&record, path)
-                        .map(|v| {
-                            crate::query::filter::compare_values(&v, expected)
-                                == Some(std::cmp::Ordering::Equal)
-                        })
-                        .unwrap_or(false)
+                    // Stage 3: go through RecordRef::scalar_at + scalar_ref_cmp
+                    // instead of resolve_field + compare_values. The path is
+                    // &[u64]; scalar_at takes &[InternerKey]. Convert on the
+                    // stack (paths are 1-3 segments).
+                    let ipath: smallvec::SmallVec<[InternerKey; 4]> =
+                        path.iter().map(|&id| InternerKey::new(id)).collect();
+                    record
+                        .scalar_at(&ipath)
+                        .and_then(|s| scalar_ref_cmp(s, expected))
+                        == Some(std::cmp::Ordering::Equal)
                 });
                 if all_match {
                     return Ok(Some((id, record)));

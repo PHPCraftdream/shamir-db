@@ -45,7 +45,7 @@ mod scalar_ref;
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
 pub use record_ref::RecordRef;
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};
-pub use scalar_ref::ScalarRef;
+pub use scalar_ref::{scalar_ref_cmp, ScalarRef};
 
 #[cfg(test)]
 mod tests;

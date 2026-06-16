@@ -10,6 +10,10 @@
 //! [`RecordRef`]: super::RecordRef
 //! [`compare_values`]: (engine-internal — see `resolve.rs`)
 
+use std::cmp::Ordering;
+
+use crate::types::value::InnerValue;
+
 /// A borrowed scalar leaf extracted from a record. The cross-impl currency
 /// that makes `InnerValue` and `RecordView` interchangeable at the trait level.
 ///
@@ -58,3 +62,28 @@ impl<'a> PartialEq for ScalarRef<'a> {
 }
 
 impl<'a> Eq for ScalarRef<'a> {}
+
+/// Compare a borrowed [`ScalarRef`] against an [`InnerValue`] scalar literal.
+///
+/// Mirrors `compare_values` (engine `resolve.rs`) arm-for-arm — Null==Null,
+/// Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str. Returns `None`
+/// for non-comparable pairs (Dec, Big, containers, mismatched type families).
+///
+/// This is the reusable comparison helper that Stage-3 consumers call after
+/// extracting a `ScalarRef` via [`RecordRef::scalar_at`], replacing the old
+/// `resolve_field` + `compare_values` pattern one call-site at a time.
+///
+/// [`RecordRef::scalar_at`]: super::RecordRef::scalar_at
+#[inline]
+pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
+    match (a, b) {
+        (ScalarRef::Null, InnerValue::Null) => Some(Ordering::Equal),
+        (ScalarRef::Bool(a), InnerValue::Bool(b)) => Some(a.cmp(b)),
+        (ScalarRef::Int(a), InnerValue::Int(b)) => Some(a.cmp(b)),
+        (ScalarRef::Int(a), InnerValue::F64(b)) => (a as f64).partial_cmp(b),
+        (ScalarRef::F64(a), InnerValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (ScalarRef::F64(a), InnerValue::F64(b)) => a.partial_cmp(b),
+        (ScalarRef::Str(a), InnerValue::Str(b)) => Some(a.cmp(b.as_str())),
+        _ => None,
+    }
+}
