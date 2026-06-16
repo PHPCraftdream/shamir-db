@@ -96,7 +96,8 @@ impl TableManager {
         let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
-            for (_id, value) in batch? {
+            for (_id, cow) in batch? {
+                let value = cow.into_inner()?;
                 records_in_data += 1;
                 for (i, def) in regular_defs.iter().enumerate() {
                     if IndexManager::extract_index_values(&value, &def.paths).is_some() {
@@ -221,7 +222,10 @@ impl TableManager {
             let stream = self.list_stream(FULL_SCAN_BATCH);
             futures::pin_mut!(stream);
             while let Some(batch) = stream.next().await {
-                let pairs = batch?;
+                let pairs: Vec<_> = batch?
+                    .into_iter()
+                    .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
+                    .collect::<Result<_, _>>()?;
                 for (id, value) in &pairs {
                     self.sorted_indexes()
                         .on_record_created(id, value, 0)
@@ -232,9 +236,9 @@ impl TableManager {
 
         // Recount counter from the data store.
         let mut counter_after: u64 = 0;
-        let stream = self.list_stream(FULL_SCAN_BATCH);
-        futures::pin_mut!(stream);
-        while let Some(batch) = stream.next().await {
+        let recount_stream = self.list_stream(FULL_SCAN_BATCH);
+        futures::pin_mut!(recount_stream);
+        while let Some(batch) = recount_stream.next().await {
             counter_after += batch?.len() as u64;
         }
         self.counter().set_to(counter_after).await?;

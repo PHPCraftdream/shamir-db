@@ -3,13 +3,15 @@
 //! WARNING: These functions collect ALL data into memory and should ONLY be used in tests.
 //! For production code, use streaming APIs directly.
 
+use crate::table::record_cow::RecordCow;
 use crate::table::Table;
 use futures::StreamExt;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-/// Collect all records from list_stream into a Vec.
+/// Collect all records from list_stream into a Vec, decoding `RecordCow`
+/// items to `InnerValue`.
 ///
 /// # Warning
 /// FOR TESTS ONLY! This function loads ALL records into memory.
@@ -24,12 +26,21 @@ pub async fn collect_list_stream(table: &Table) -> DbResult<Vec<(RecordId, Inner
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
-        result.extend(batch);
+        for (id, cow) in batch {
+            let inner = match cow {
+                RecordCow::Borrowed(b) => {
+                    InnerValue::from_bytes(b).map_err(|e| DbError::Codec(e.to_string()))?
+                }
+                RecordCow::Owned(v) => v,
+            };
+            result.push((id, inner));
+        }
     }
     Ok(result)
 }
 
-/// Collect all records from a filter_stream into a flat Vec.
+/// Collect all records from a filter_stream (RecordCow) into a flat Vec of
+/// `(RecordId, InnerValue)`, decoding borrowed rows.
 ///
 /// # Warning
 /// FOR TESTS ONLY! This function loads ALL filtered records into memory.
@@ -38,13 +49,21 @@ pub async fn collect_list_stream(table: &Table) -> DbResult<Vec<(RecordId, Inner
     note = "FOR TESTS ONLY. Can consume all memory on large datasets."
 )]
 pub async fn collect_filter_stream(
-    stream: impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>>,
+    stream: impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>>,
 ) -> DbResult<Vec<(RecordId, InnerValue)>> {
     let mut result = Vec::new();
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
-        result.extend(batch);
+        for (id, cow) in batch {
+            let inner = match cow {
+                RecordCow::Borrowed(b) => {
+                    InnerValue::from_bytes(b).map_err(|e| DbError::Codec(e.to_string()))?
+                }
+                RecordCow::Owned(v) => v,
+            };
+            result.push((id, inner));
+        }
     }
     Ok(result)
 }

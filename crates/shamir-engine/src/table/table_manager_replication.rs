@@ -143,7 +143,14 @@ impl TableManager {
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
+            let raw_batch = batch_result?;
+            let batch: Vec<(
+                shamir_types::types::record_id::RecordId,
+                shamir_types::types::value::InnerValue,
+            )> = raw_batch
+                .into_iter()
+                .map(|(rid, cow)| cow.into_inner().map(|v| (rid, v)))
+                .collect::<Result<_, _>>()?;
             let items: Vec<(
                 shamir_types::types::record_id::RecordId,
                 &shamir_types::types::value::InnerValue,

@@ -90,7 +90,7 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
-            for (id, _current_value) in batch {
+            for (id, _cow) in batch {
                 // Read the AS-OF value — this is NOT the current value; it is
                 // the value the record had at `version` (or None if it did not
                 // exist yet / was already deleted at that point).
@@ -221,10 +221,18 @@ impl TableManager {
         let mut matched_ids: Vec<RecordId> = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            for (id, record) in batch {
-                let passes = match filter_cb.as_ref() {
-                    Some(cb) => cb.matches(&record, ctx),
-                    None => true,
+            for (id, cow) in batch {
+                let passes = match (&filter_cb, &cow) {
+                    (Some(cb), super::record_cow::RecordCow::Borrowed(b)) => {
+                        match shamir_types::record_view::RecordView::new(b) {
+                            Ok(view) => cb.matches(&view, ctx),
+                            Err(_) => false,
+                        }
+                    }
+                    (Some(cb), super::record_cow::RecordCow::Owned(record)) => {
+                        cb.matches(record, ctx)
+                    }
+                    (None, _) => true,
                 };
                 if passes {
                     matched_ids.push(id);

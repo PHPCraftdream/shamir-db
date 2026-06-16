@@ -8,6 +8,8 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
+use super::record_cow::RecordCow;
+
 /// Low-level table - InnerValue only (no interning/conversion)
 ///
 /// This table operates directly on InnerValue (interned format).
@@ -188,7 +190,7 @@ impl Table {
     pub fn list_stream(
         &self,
         batch_size: usize,
-    ) -> impl Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> {
         let table = self.clone();
 
         stream! {
@@ -216,7 +218,7 @@ impl Table {
         &self,
         batch_size: usize,
         pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
-    ) -> impl Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         let table = self.clone();
 
         stream! {
@@ -233,114 +235,78 @@ impl Table {
 
 impl Table {
     /// Decode one raw `(key, value)` batch (`Store::iter_stream` /
-    /// `MvccStore::current_stream` shape) into `Vec<(RecordId, InnerValue)>`
-    /// yields, preserving the EXACT skip/yield-empty semantics of the former
-    /// inline `list_stream` decode: a bad key is skipped (after yielding its
-    /// `Internal` error), a deserialisation failure yields its `Codec` error
-    /// WITHOUT aborting the batch (later keys in the same batch are still
-    /// decoded), and a batch that decodes to zero entries yields nothing.
+    /// `MvccStore::current_stream` shape) into `Vec<(RecordId, RecordCow)>`
+    /// yields, with RELAXED error semantics: a bad key is skipped, and
+    /// value bytes are NOT decoded — they are wrapped as
+    /// `RecordCow::Borrowed(value_bytes)`. Malformed rows surface as
+    /// `RecordView::new` errors at the consumer, where they are skipped
+    /// (not propagated as batch errors). The storage layer owns integrity
+    /// via checksums; re-validating here is redundant.
     ///
     /// Shared by [`Table::list_stream`] (unattached tables) and the
     /// `MvccStore`-attached branch of [`TableManager::list_stream`] so there is
-    /// ONE decode implementation (no copy-paste drift). Behaviour-identical to
-    /// the inline decode it replaces.
+    /// ONE decode implementation (no copy-paste drift).
     pub(super) fn decode_raw_batch(
         batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
-    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
+    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, RecordCow)>>> {
         let mut batch = Vec::new();
-        let mut errors: Vec<DbError> = Vec::new();
 
-        for (key_bytes, bytes) in batch_bytes {
-            // Convert Bytes to RecordId
+        for (key_bytes, value_bytes) in batch_bytes {
+            // Convert Bytes to RecordId — skip bad keys.
             let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
                 Ok(a) => a,
-                Err(_) => {
-                    errors.push(DbError::Internal(
-                        "Failed to convert key bytes to RecordId".to_string(),
-                    ));
-                    continue;
-                }
+                Err(_) => continue,
             };
             let id = RecordId(arr);
-
-            match InnerValue::from_bytes(bytes) {
-                Ok(inner_value) => {
-                    batch.push((id, inner_value));
-                }
-                Err(e) => {
-                    errors.push(DbError::Codec(format!(
-                        "Failed to deserialize record: {}",
-                        e
-                    )));
-                }
-            }
+            batch.push((id, RecordCow::Borrowed(value_bytes)));
         }
 
-        // Preserve the EXACT yield order of the former inline stream! body:
-        // each error yields as its own item, then a non-empty decoded batch
-        // yields once at the end. An empty decoded batch yields nothing
-        // (matching the former `if !batch.is_empty() { yield Ok(batch) }`).
-        let mut out: Vec<DbResult<Vec<(RecordId, InnerValue)>>> =
-            errors.into_iter().map(Err).collect();
-        if !batch.is_empty() {
-            out.push(Ok(batch));
-        }
+        // A batch that decodes to zero entries yields nothing.
+        let out: Vec<DbResult<Vec<(RecordId, RecordCow)>>> = if batch.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ok(batch)]
+        };
         out.into_iter()
     }
 
     /// Like [`decode_raw_batch`], but applies a bytes-level pre-filter before
-    /// fully decoding each record.
+    /// passing through each record.
     ///
     /// For each row:
-    /// - `Some(false)` from the pre-filter → row is skipped (no `InnerValue`
-    ///   allocation).
-    /// - `Some(true)` or `None` → full decode proceeds; the compiled filter
-    ///   re-runs on the decoded `InnerValue` in the caller.
+    /// - `Some(false)` from the pre-filter → row is skipped (zero allocation).
+    /// - `Some(true)` or `None` → row is passed through as
+    ///   `RecordCow::Borrowed(value_bytes)`; the compiled filter re-runs on
+    ///   the `RecordView` in the consumer.
     ///
-    /// Error semantics are identical to [`decode_raw_batch`].
+    /// Error semantics: RELAXED (same as [`decode_raw_batch`]).
     pub(super) fn decode_raw_batch_filtered(
         batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
         pre_filter: &crate::query::filter::FilterNode,
-    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
+    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, RecordCow)>>> {
         let mut batch = Vec::new();
-        let mut errors: Vec<DbError> = Vec::new();
 
         for (key_bytes, value_bytes) in batch_bytes {
             let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
                 Ok(a) => a,
-                Err(_) => {
-                    errors.push(DbError::Internal(
-                        "Failed to convert key bytes to RecordId".to_string(),
-                    ));
-                    continue;
-                }
+                Err(_) => continue,
             };
             let id = RecordId(arr);
 
             // Bytes-level pre-filter: skip rows that definitely don't match.
-            // `Some(false)` → skip; `Some(true)` or `None` → full decode.
+            // `Some(false)` → skip; `Some(true)` or `None` → pass through.
             if pre_filter.matches_msgpack_bytes(&value_bytes) == Some(false) {
                 continue;
             }
 
-            match InnerValue::from_bytes(value_bytes) {
-                Ok(inner_value) => {
-                    batch.push((id, inner_value));
-                }
-                Err(e) => {
-                    errors.push(DbError::Codec(format!(
-                        "Failed to deserialize record: {}",
-                        e
-                    )));
-                }
-            }
+            batch.push((id, RecordCow::Borrowed(value_bytes)));
         }
 
-        let mut out: Vec<DbResult<Vec<(RecordId, InnerValue)>>> =
-            errors.into_iter().map(Err).collect();
-        if !batch.is_empty() {
-            out.push(Ok(batch));
-        }
+        let out: Vec<DbResult<Vec<(RecordId, RecordCow)>>> = if batch.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ok(batch)]
+        };
         out.into_iter()
     }
 }

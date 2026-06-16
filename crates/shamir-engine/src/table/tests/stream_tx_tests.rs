@@ -13,6 +13,7 @@ use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
 
 async fn make_table_with_n_records(n: usize) -> (TableManager, Vec<RecordId>) {
@@ -33,12 +34,14 @@ fn make_tx(snapshot: u64) -> TxContext {
 
 async fn collect_stream<S>(stream: S) -> Vec<(RecordId, InnerValue)>
 where
-    S: futures::Stream<Item = shamir_storage::error::DbResult<Vec<(RecordId, InnerValue)>>>,
+    S: futures::Stream<Item = shamir_storage::error::DbResult<Vec<(RecordId, RecordCow)>>>,
 {
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(batch) = stream.next().await {
-        out.extend(batch.unwrap());
+        for (id, cow) in batch.unwrap() {
+            out.push((id, cow.into_inner().unwrap()));
+        }
     }
     out
 }

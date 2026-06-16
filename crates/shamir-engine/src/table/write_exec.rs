@@ -326,7 +326,8 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
-                    for (id, record) in batch {
+                    for (id, cow) in batch {
+                        let record = cow.into_inner()?;
                         if callback.matches(&record, ctx) {
                             result.push((id, record));
                         }
@@ -340,7 +341,9 @@ impl TableManager {
             let stream = self.list_stream(batch_size);
             futures::pin_mut!(stream);
             while let Some(batch_result) = stream.next().await {
-                result.extend(batch_result?);
+                for (id, cow) in batch_result? {
+                    result.push((id, cow.into_inner()?));
+                }
             }
             result
         };
@@ -485,7 +488,8 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
-                    for (id, record) in batch {
+                    for (id, cow) in batch {
+                        let record = cow.into_inner()?;
                         if callback.matches(&record, ctx) {
                             result.push((id, record));
                         }
@@ -498,7 +502,9 @@ impl TableManager {
             let stream = self.list_stream(batch_size);
             futures::pin_mut!(stream);
             while let Some(batch_result) = stream.next().await {
-                result.extend(batch_result?);
+                for (id, cow) in batch_result? {
+                    result.push((id, cow.into_inner()?));
+                }
             }
             result
         };
@@ -579,7 +585,8 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
-                    for (id, record) in batch {
+                    for (id, cow) in batch {
+                        let record = cow.into_inner()?;
                         if callback.matches(&record, ctx) {
                             result.push(id);
                         }
@@ -676,7 +683,8 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
-                    for (id, record) in batch {
+                    for (id, cow) in batch {
+                        let record = cow.into_inner()?;
                         if callback.matches(&record, ctx) {
                             result.push(id);
                         }

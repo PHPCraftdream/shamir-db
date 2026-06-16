@@ -61,7 +61,8 @@ impl TableManager {
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
-            for (id, record) in batch? {
+            for (id, cow) in batch? {
+                let record = cow.into_inner()?;
                 self.sorted_indexes
                     .on_record_created(&id, &record, 0)
                     .await?;

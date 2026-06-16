@@ -67,7 +67,9 @@ async fn list_stream_yields_inserted_records_via_seam() {
     let mut stream = tbl.list_stream(1000);
     let mut collected: Vec<(RecordId, InnerValue)> = Vec::new();
     while let Some(batch) = stream.next().await {
-        collected.extend(batch.unwrap());
+        for (id, cow) in batch.unwrap() {
+            collected.push((id, cow.into_inner().unwrap()));
+        }
     }
 
     assert_eq!(collected.len(), n, "expected exactly {n} records");
