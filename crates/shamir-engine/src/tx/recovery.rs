@@ -183,20 +183,18 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             Ok(())
         }
         WalOpV2::InternerOverlayMerge { entries } => {
-            // Each entry is (overlay_id, key_string). Merge into every
-            // table's base interner — recovery doesn't know which table
-            // contributed which entry, so broadcast like the initial
-            // table_id_interned=0 approach. This is safe: touch_ind is
-            // idempotent — interning a key that already exists returns
-            // the existing id.
-            for name in repo.list_table_names() {
-                if let Ok(tbl) = repo.get_table(&name).await {
-                    if let Ok(interner) = tbl.interner().get().await {
-                        for (_overlay_id, key_str) in entries {
-                            let _ = interner.touch_ind(key_str);
-                        }
-                        let _ = tbl.interner().persist().await;
+            // Stage I: the interner is per-REPO, so the old per-table
+            // broadcast collapses to a single merge against the repo
+            // interner. `touch_ind` is idempotent — interning a key that
+            // already exists returns the existing id. (Pre-Stage-I this
+            // looped over every table because each had its own interner;
+            // now they all share one.)
+            if let Ok(repo_interner) = repo.repo_interner().await {
+                if let Ok(interner) = repo_interner.get().await {
+                    for (_overlay_id, key_str) in entries {
+                        let _ = interner.touch_ind(key_str);
                     }
+                    let _ = repo_interner.persist().await;
                 }
             }
             Ok(())
@@ -321,19 +319,27 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
 /// so without this the version cache would report `0` for recovered keys.
 /// See [`seed_version_cache_for_entry`] for why this matters.
 pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
-    // A4-recovery: apply interner delta BEFORE replaying data ops.
-    // The ops' record bytes reference intern-ids from the delta, so
-    // the interner must know them before any decode/replay occurs.
-    for (table_token, name, id) in &entry.interner_delta {
-        if let Some(tbl) = repo.table_by_token(*table_token).await? {
-            if let Ok(interner) = tbl.interner().get().await {
-                interner.touch_with_id(name, *id).map_err(|e| {
-                    DbError::Internal(format!(
-                        "replay tx {} interner delta failed: {}",
-                        entry.txn_id, e
-                    ))
-                })?;
-            }
+    // A4-recovery + Stage I keystone: apply the interner delta BEFORE
+    // replaying data ops. The ops' record bytes reference intern-ids from the
+    // delta, so the interner must know them before any decode/replay occurs.
+    //
+    // Stage I: the interner is per-REPO (one id-namespace across every
+    // table), so the old per-token routing (`repo.table_by_token(token)` →
+    // `tbl.interner()`) collapses to a SINGLE resolution of the repo
+    // interner. The first `u64` of each triple is now a repo-scope constant
+    // (see `REPO_INTERNER_SCOPE`) and is ignored here. This is the
+    // correctness keystone: every replayed record byte encodes ids from
+    // THIS ONE interner, regardless of which table the op targets.
+    if !entry.interner_delta.is_empty() {
+        let repo_interner = repo.repo_interner().await?;
+        let interner = repo_interner.get().await?;
+        for (_scope, name, id) in &entry.interner_delta {
+            interner.touch_with_id(name, *id).map_err(|e| {
+                DbError::Internal(format!(
+                    "replay tx {} interner delta failed: {}",
+                    entry.txn_id, e
+                ))
+            })?;
         }
     }
 

@@ -176,32 +176,33 @@ pub(crate) async fn materialize_async_tail(
         ok = false;
     }
 
-    // A5: capture interner delta max-ids for the interner checkpoint below.
-    let interner_delta_max_ids: Vec<(u64, u64)> = tx
-        .interner_deltas
-        .iter()
-        .filter_map(|(token, deltas)| deltas.iter().map(|(_, id)| *id).max().map(|m| (*token, m)))
-        .collect();
+    // A5 + Stage I: capture the max interner id across the tx's per-repo
+    // delta for the interner checkpoint below. Pre-Stage-I this was a
+    // per-table `Vec<(token, max_id)>`; the interner is now per-repo so it
+    // collapses to ONE max id (or `None` if the delta was empty).
+    let interner_delta_max_id: Option<u64> = tx.interner_deltas.iter().map(|(_, id)| *id).max();
 
-    // A5: background interner checkpoint on interval.
+    // A5 + Stage I: background interner checkpoint on interval. One persist
+    // covers the whole repo (the manager is Arc-shared across tables).
     if commit_version.is_multiple_of(INTERNER_CHECKPOINT_INTERVAL)
-        && !interner_delta_max_ids.is_empty()
+        && interner_delta_max_id.is_some()
     {
         let repo_ck = repo.clone();
         tokio::spawn(async move {
-            for table_name in repo_ck.list_table_names() {
-                match repo_ck.get_table(&table_name).await {
-                    Ok(tbl) => {
-                        if let Err(e) = tbl.interner().persist().await {
-                            log::warn!(
-                                "A5 interner checkpoint (async) failed for table \
-                                 {table_name}: {e}"
-                            );
-                        }
+            match repo_ck.repo_interner().await {
+                Ok(repo_interner) => {
+                    if let Err(e) = repo_interner.persist().await {
+                        log::warn!(
+                            "A5 interner checkpoint (async) failed for repo {}: {e}",
+                            repo_ck.name()
+                        );
                     }
-                    Err(e) => {
-                        log::warn!("A5 interner checkpoint (async): get_table {table_name}: {e}");
-                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "A5 interner checkpoint (async): repo_interner resolve for {}: {e}",
+                        repo_ck.name()
+                    );
                 }
             }
         });

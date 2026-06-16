@@ -220,13 +220,12 @@ pub(super) async fn materialize(
     // The inflight WAL marker survives → recovery materializes the tx.
     maybe_crash("phase6", repo).await;
 
-    // A5: capture the max interner id per table from the tx's delta so
-    // Phase 7 can gate WAL truncation on the persisted high-water mark.
-    let interner_delta_max_ids: Vec<(u64, u64)> = tx
-        .interner_deltas
-        .iter()
-        .filter_map(|(token, deltas)| deltas.iter().map(|(_, id)| *id).max().map(|m| (*token, m)))
-        .collect();
+    // A5 + Stage I: capture the max interner id across the tx's per-repo
+    // delta so Phase 7 can gate WAL truncation on the repo's single
+    // persisted high-water mark. Pre-Stage-I this was a per-table
+    // `Vec<(token, max_id)>`; the interner is now per-repo so it collapses
+    // to ONE max id (or `None` if the delta was empty).
+    let interner_delta_max_id: Option<u64> = tx.interner_deltas.iter().map(|(_, id)| *id).max();
 
     // Phase 6.5 + 7 (markers + WAL cleanup) are returned as post-lock
     // work — the caller runs them AFTER releasing `commit_lock`. See
@@ -235,7 +234,7 @@ pub(super) async fn materialize(
         tx_id,
         commit_version,
         projections_ok: ok,
-        interner_delta_max_ids,
+        interner_delta_max_id,
     }
 }
 
@@ -247,10 +246,11 @@ pub(super) struct PostPublishState {
     /// True iff Phases 5a–5c all succeeded. When false, Phase 7 is
     /// skipped so the WAL marker stays inflight for recovery.
     pub projections_ok: bool,
-    /// A5: max interner id per table from the WAL entry's interner delta.
-    /// Phase 7 checks that each table's persisted high-water mark covers
-    /// these ids before truncating the WAL entry.
-    pub interner_delta_max_ids: Vec<(u64, u64)>,
+    /// A5 + Stage I: max interner id across the WAL entry's per-repo
+    /// interner delta (`None` if the delta was empty). Phase 7 checks that
+    /// the repo's single persisted high-water mark covers this id before
+    /// truncating the WAL entry.
+    pub interner_delta_max_id: Option<u64>,
 }
 
 /// Phase 6.5 (markers), run OUTSIDE `commit_lock`.
@@ -285,7 +285,7 @@ pub(super) async fn post_publish_cleanup(
         tx_id,
         commit_version,
         mut projections_ok,
-        interner_delta_max_ids,
+        interner_delta_max_id,
     } = state;
 
     // Phase 6.5: persist recovery markers (CRIT-1).
@@ -310,25 +310,31 @@ pub(super) async fn post_publish_cleanup(
     // `history` idempotently.
     maybe_crash("phase6_5", repo).await;
 
-    // A5: background interner checkpoint. Every INTERNER_CHECKPOINT_INTERVAL
-    // commits, persist each touched table's interner so the high-water mark
-    // advances and the DRAINER's A5 gate can later truncate older WAL entries.
-    // Spawned fire-and-forget: the persist is not on the commit critical path.
+    // A5 + Stage I: background interner checkpoint. Every
+    // INTERNER_CHECKPOINT_INTERVAL commits, persist the SINGLE repo interner
+    // so its high-water mark advances and the DRAINER's A5 gate can later
+    // truncate older WAL entries. Spawned fire-and-forget: the persist is not
+    // on the commit critical path. Pre-Stage-I this looped over every table;
+    // now one persist covers the whole repo (the manager is Arc-shared).
     if commit_version.is_multiple_of(INTERNER_CHECKPOINT_INTERVAL)
-        && !interner_delta_max_ids.is_empty()
+        && interner_delta_max_id.is_some()
     {
         let repo_clone = repo.clone();
         tokio::spawn(async move {
-            for table_name in repo_clone.list_table_names() {
-                match repo_clone.get_table(&table_name).await {
-                    Ok(tbl) => {
-                        if let Err(e) = tbl.interner().persist().await {
-                            log::warn!("A5 interner checkpoint failed for table {table_name}: {e}");
-                        }
+            match repo_clone.repo_interner().await {
+                Ok(repo_interner) => {
+                    if let Err(e) = repo_interner.persist().await {
+                        log::warn!(
+                            "A5 interner checkpoint failed for repo {}: {e}",
+                            repo_clone.name()
+                        );
                     }
-                    Err(e) => {
-                        log::warn!("A5 interner checkpoint: get_table {table_name}: {e}");
-                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "A5 interner checkpoint: repo_interner resolve for {}: {e}",
+                        repo_clone.name()
+                    );
                 }
             }
         });
@@ -352,9 +358,9 @@ pub(super) async fn post_publish_cleanup(
     }
 }
 
-/// A5 interner-hwm gate: true iff WAL truncation for an entry carrying these
-/// per-table interner delta max-ids is safe — i.e. every table's persisted
-/// interner high-water mark covers the entry's max id.
+/// A5 interner-hwm gate: true iff WAL truncation for an entry carrying this
+/// interner delta max-id is safe — i.e. the repo's persisted interner
+/// high-water mark covers the entry's max id.
 ///
 /// Shared by the inline Phase-7 path ([`post_publish_cleanup`]) and the
 /// background [`Drainer`](crate::tx::drainer::Drainer): truncating an entry
@@ -363,30 +369,26 @@ pub(super) async fn post_publish_cleanup(
 /// entry would have re-supplied. The entry MUST stay inflight until a future
 /// checkpoint advances the hwm.
 ///
-/// `interner_delta_max_ids` is `(table_token, max_id)`. An empty slice is
-/// trivially safe. A missing table (dropped since the delta was captured) is
-/// safe to truncate — its interner no longer exists to corrupt. A table
-/// lookup error returns `Err` so the caller can conservatively defer.
+/// Stage I: the interner is per-REPO (one id-namespace across tables), so
+/// there is ONE persisted high-water mark. Pre-Stage-I this took a
+/// `Vec<(table_token, max_id)>` and looped per-token; now it takes a single
+/// `Option<u64>` (the max id across the whole delta, or `None` if the delta
+/// was empty — trivially safe).
 pub(crate) async fn interner_delta_safe_to_truncate(
     repo: &RepoInstance,
-    interner_delta_max_ids: &[(u64, u64)],
+    interner_delta_max_id: Option<u64>,
 ) -> shamir_storage::error::DbResult<bool> {
-    for &(table_token, max_id) in interner_delta_max_ids {
-        match repo.table_by_token(table_token).await? {
-            Some(tbl) => {
-                let hwm = tbl.interner().persisted_high_water() as u64;
-                if max_id > hwm {
-                    log::debug!(
-                        "interner-hwm gate: table {table_token} delta max_id {max_id} \
-                         > persisted hwm {hwm}; truncation unsafe"
-                    );
-                    return Ok(false);
-                }
-            }
-            None => {
-                // Table gone — delta is stale; safe to truncate.
-            }
-        }
+    let Some(max_id) = interner_delta_max_id else {
+        return Ok(true);
+    };
+    let repo_interner = repo.repo_interner().await?;
+    let hwm = repo_interner.persisted_high_water() as u64;
+    if max_id > hwm {
+        log::debug!(
+            "interner-hwm gate: repo delta max_id {max_id} > persisted hwm {hwm}; \
+             truncation unsafe"
+        );
+        return Ok(false);
     }
     Ok(true)
 }

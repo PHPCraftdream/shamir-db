@@ -41,13 +41,11 @@
 //! is OK). The cutover that makes the drainer the SOLE history writer is
 //! P1d-2b.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use shamir_storage::error::DbResult;
-use shamir_types::types::common::THasher;
 use tokio::sync::Notify;
 
 use crate::repo::RepoInstance;
@@ -179,8 +177,8 @@ impl Drainer {
             //    (mark_durable above), so this is NOT a durability deferral,
             //    only a truncation deferral (a later checkpoint advances the
             //    hwm and a future pass truncates).
-            let delta_max_ids = entry_interner_max_ids(entry);
-            match interner_delta_safe_to_truncate(repo, &delta_max_ids).await {
+            let delta_max_id = entry_interner_max_id(entry);
+            match interner_delta_safe_to_truncate(repo, delta_max_id).await {
                 Ok(true) => {
                     if let Err(e) = wal.commit(entry.txn_id).await {
                         log::warn!(
@@ -353,17 +351,18 @@ impl Drainer {
     }
 }
 
-/// Project a WAL entry's `interner_delta` (`Vec<(token, name, id)>`) into
-/// the per-table max-id shape the A5 gate consumes (`Vec<(token, max_id)>`).
-/// Mirrors `materialize`'s `interner_delta_max_ids` capture, sourced here
-/// from the durable WAL entry rather than the in-memory `TxContext`.
-fn entry_interner_max_ids(entry: &shamir_wal::WalEntryV2) -> Vec<(u64, u64)> {
-    let mut by_token: HashMap<u64, u64, THasher> = HashMap::default();
-    for (token, _name, id) in &entry.interner_delta {
-        let e = by_token.entry(*token).or_insert(0);
-        if *id > *e {
-            *e = *id;
-        }
-    }
-    by_token.into_iter().collect()
+/// Project a WAL entry's `interner_delta` (`Vec<(scope, name, id)>`) into the
+/// single max-id shape the A5 gate consumes (`Option<u64>`). Mirrors
+/// `materialize`'s `interner_delta_max_id` capture, sourced here from the
+/// durable WAL entry rather than the in-memory `TxContext`.
+///
+/// Stage I: the interner is per-REPO, so every triple's `id` shares one
+/// id-namespace — we just take the max across the whole delta. The first
+/// `u64` (the scope constant) is ignored.
+fn entry_interner_max_id(entry: &shamir_wal::WalEntryV2) -> Option<u64> {
+    entry
+        .interner_delta
+        .iter()
+        .map(|(_scope, _name, id)| *id)
+        .max()
 }

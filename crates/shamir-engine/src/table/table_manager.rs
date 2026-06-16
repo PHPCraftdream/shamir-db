@@ -176,8 +176,8 @@ impl TableManager {
         // transient cache here, right after open, before any write path runs.
         //
         // Skip if no sorted indexes exist — avoids forcing early interner
-        // initialization, which would prevent `replicate_interner_from`
-        // from loading persisted state into the OnceCell.
+        // initialization before `with_interner` can replace it with the
+        // shared per-repo manager.
         if mgr.sorted_indexes.has_covering_indexes() {
             if let Ok(interner) = mgr.interner.get().await {
                 mgr.sorted_indexes.intern_included_paths(interner);
@@ -424,6 +424,29 @@ impl TableManager {
     /// fast path (same as `get`).
     pub fn with_mvcc_store(mut self, mvcc: Arc<shamir_tx::MvccStore>) -> Self {
         self.mvcc_store = Some(mvcc);
+        self
+    }
+
+    /// Stage I — replace this table's per-table [`InternerManager`] with the
+    /// shared per-repo one. `RepoInstance::create_table_context` calls this
+    /// so every table in a repo shares ONE live
+    /// [`Interner`](shamir_types::core::interner::Interner) and id-namespace
+    /// (a field name resolves to the SAME id across tables). Returns `self`
+    /// for chaining after [`create`](Self::create), mirroring
+    /// [`with_mvcc_store`](Self::with_mvcc_store).
+    ///
+    /// `InternerManager::clone` Arc-shares the live `Interner` (the
+    /// `OnceCell<Interner>`, the chunk-persist atomics, and the persist
+    /// mutex), so the per-table handle returned by [`interner`](Self::interner)
+    /// is the SAME manager the repo owns — a write through any table's
+    /// interner is visible to every other table's reads. The
+    /// [`PersistRegistry`] keeps a separate clone of the per-table manager it
+    /// was built with in [`create`](Self::create); that clone shares the same
+    /// Arc state, so `flush_metadata` / `flush_buffers` persist the shared
+    /// interner through any registered handle. Idempotent: re-attaching the
+    /// same manager is a cheap clone.
+    pub fn with_interner(mut self, interner: InternerManager) -> Self {
+        self.interner = interner;
         self
     }
 

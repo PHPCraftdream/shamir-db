@@ -5,53 +5,6 @@ use shamir_types::core::interner::TouchInd;
 use super::table_manager::TableManager;
 
 impl TableManager {
-    /// Replicate src's interner state into this TableManager's info_store.
-    ///
-    /// Migration copies raw `data_store` bytes, which embed `InternerKey(u64)`
-    /// references for field names. For those bytes to decode correctly on
-    /// dst, dst's interner must hold the **same** `id → name` mappings as
-    /// src. The interner persists itself under a fixed system key, so we
-    /// just copy that one record byte-for-byte and let the dst interner
-    /// pick it up via its normal lazy-load path.
-    ///
-    /// Must be called BEFORE any `.interner().get()` on `self` (so the
-    /// lazy load sees the freshly-copied bytes) and BEFORE
-    /// `replicate_index2_descriptors_from` (which re-interns names on dst).
-    /// Persists src first so the bytes are current.
-    pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
-        src.interner().persist().await?;
-        // Copy the legacy single-blob record (if any) — for repos
-        // upgraded from the old persist format. New code never writes
-        // here, but on-disk data may still contain it.
-        let legacy_key = crate::meta::MetaKey::Internals.as_record_id().to_bytes();
-        match src.info_store.get(legacy_key.clone()).await {
-            Ok(bytes) => {
-                self.info_store.set(legacy_key, bytes).await?;
-            }
-            Err(shamir_storage::error::DbError::NotFound(_)) => {
-                // No legacy blob — fall through to chunk copy.
-            }
-            Err(e) => return Err(e),
-        }
-        // Copy every append-only delta chunk emitted by the new
-        // incremental persist path. Without this, the dst would load
-        // an empty interner and msgpack-encoded field-name ids on dst
-        // would not resolve.
-        let prefix = {
-            let mut p = Vec::with_capacity(4 + 3);
-            p.extend_from_slice(&[0u8, 0, 0, 0]);
-            p.extend_from_slice(b"i.d");
-            bytes::Bytes::from(p)
-        };
-        let mut stream = src.info_store.scan_prefix_stream(prefix, 256);
-        while let Some(batch) = stream.next().await {
-            for (k, v) in batch? {
-                self.info_store.set(k, v).await?;
-            }
-        }
-        Ok(())
-    }
-
     /// Replicate src's index2 descriptors onto this TableManager.
     ///
     /// For each non-Btree descriptor on `src`:
