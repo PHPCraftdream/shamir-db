@@ -423,6 +423,28 @@ impl SessionPermissions {
                 },
             ),
 
+            // Per-repo interner dump — repo-scoped read (the live DAC path
+            // enforces Action::Read on the repo Store resource).
+            BatchOp::InternerDump(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.interner_dump.clone(),
+                },
+            ),
+
+            // Per-repo interner touch — mints ids (writes). The live DAC
+            // path enforces Action::Write on the repo Store resource; this
+            // pre-resolved cache uses Alter (the closest admin-class write
+            // action, mirroring SetRetention).
+            BatchOp::InternerTouch(op) => (
+                Action::Alter,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.interner_touch.clone(),
+                },
+            ),
+
             // Stored procedure call — execute on a function, no table_ref.
             BatchOp::Call(_) => (Action::Read, Resource::Global),
 

@@ -86,6 +86,10 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::PurgeHistory(_) => self.handle_purge_history(op).await,
             op @ BatchOp::ChangesSince(_) => self.handle_changes_since(op).await,
 
+            // ── Interner (Stage 5d) ────────────────────────────────────
+            op @ BatchOp::InternerDump(_) => self.handle_interner_dump(op).await,
+            op @ BatchOp::InternerTouch(_) => self.handle_interner_touch(op).await,
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }

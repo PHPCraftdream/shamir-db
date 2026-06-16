@@ -9,9 +9,9 @@ use crate::admin::{
     ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
     CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
     DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
-    GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp,
-    SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
+    GetBufferConfigOp, InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp,
+    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -103,6 +103,10 @@ pub enum BatchOp {
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
 
+    // Per-repo interner introspection / registration (Stage 5d)
+    InternerDump(InternerDumpOp),
+    InternerTouch(InternerTouchOp),
+
     /// Imperative history purge (temporal T2).
     PurgeHistory(PurgeHistoryOp),
 
@@ -173,6 +177,8 @@ impl Serialize for BatchOp {
             BatchOp::UnbindValidator(op) => op.serialize(serializer),
             BatchOp::ListValidators(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
+            BatchOp::InternerDump(op) => op.serialize(serializer),
+            BatchOp::InternerTouch(op) => op.serialize(serializer),
             BatchOp::PurgeHistory(op) => op.serialize(serializer),
             BatchOp::SetRetention(op) => op.serialize(serializer),
             BatchOp::ChangesSince(op) => op.serialize(serializer),
@@ -385,6 +391,14 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::CreateFunctionFolder)
                 .map_err(serde::de::Error::custom)
+        } else if has("interner_dump") {
+            serde_json::from_value(value)
+                .map(BatchOp::InternerDump)
+                .map_err(serde::de::Error::custom)
+        } else if has("interner_touch") {
+            serde_json::from_value(value)
+                .map(BatchOp::InternerTouch)
+                .map_err(serde::de::Error::custom)
         } else if has("purge_history") {
             serde_json::from_value(value)
                 .map(BatchOp::PurgeHistory)
@@ -482,6 +496,8 @@ impl BatchOp {
                 | BatchOp::UnbindValidator(_)
                 | BatchOp::ListValidators(_)
                 | BatchOp::CreateFunctionFolder(_)
+                | BatchOp::InternerDump(_)
+                | BatchOp::InternerTouch(_)
                 | BatchOp::PurgeHistory(_)
                 | BatchOp::SetRetention(_)
                 | BatchOp::ChangesSince(_)
