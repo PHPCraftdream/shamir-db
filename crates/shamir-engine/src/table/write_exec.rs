@@ -153,16 +153,40 @@ impl TableManager {
         let interner = self.interner().get().await?;
 
         // Resolve inline `$fn` computed fields first (fail-closed), then
-        // intern field names through the tx overlay.
+        // intern field names.
+        //
+        // C5: on the IMPLICIT / auto-commit path (`run_implicit_batch_tx` →
+        // `tx.implicit == true`) we intern field names **directly into base**
+        // instead of into the tx overlay. The implicit tx always commits
+        // (Snapshot, last-writer-wins, never rolls back), so there is no
+        // rollback-isolation to preserve — and base-interning makes the
+        // commit-time `commit_interner_overlay` remap EMPTY, which
+        // short-circuits the deep `rewrite_set_inner` walk over every staged
+        // record (the redundant second full pass this cycle removes). The
+        // newly-interned `(name, id)` pairs are still collected here and
+        // threaded into `tx.interner_deltas` below so they reach the
+        // `WalEntryV2.interner_delta` — recovery replays them via
+        // `touch_with_id` exactly as for the overlay path (inv. #2). This
+        // mirrors the original non-tx `execute_insert`, which also interns
+        // straight into base via `touch_ind`.
+        //
+        // On the INTERACTIVE path (`tx.implicit == false`) we keep the tx
+        // overlay: multi-statement txs must stay rollback-isolated, so new
+        // field names live in the overlay until commit (inv. #1).
         //
         // Per-batch intern cache (C1): field names repeat across every row in
         // the batch (e.g. all 100 rows have "email", "city", "score"). Without
-        // the cache, `touch_sync` does a DashMap lookup per field per row —
-        // O(N×k) sharded-map operations. With the cache we pay one DashMap
-        // lookup per unique field name per batch and amortise the rest to an
-        // FxHashMap lookup — 3-5× cheaper for typical short batches with
+        // the cache, the per-field intern does a DashMap lookup per field per
+        // row — O(N×k) sharded-map operations. With the cache we pay one
+        // DashMap lookup per unique field name per batch and amortise the rest
+        // to an FxHashMap lookup — 3-5× cheaper for typical short batches with
         // uniform schema.
+        let intern_to_base = tx.implicit;
         let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
+        // Collected on the base-intern path only: `(field_name, base_id)` for
+        // every name genuinely NEW to the base interner this insert. Drained
+        // into `tx.interner_deltas` after the immutable-borrow block ends.
+        let new_base_keys: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
             let base_intern_fn = intern_via_layered(&layered);
@@ -176,7 +200,26 @@ impl TableManager {
                         return Ok(ik.clone());
                     }
                 }
-                let ik = base_intern_fn(key)?;
+                let ik = if intern_to_base {
+                    // Intern straight into base. `touch_ind` returns whether the
+                    // key was newly created so we can record the delta for WAL /
+                    // recovery — the overlay path's `commit_interner_overlay`
+                    // builds the identical `(name, id)` delta from `is_new`.
+                    let ti = interner.touch_ind(key).map_err(|e| {
+                        shamir_types::codecs::CodecError::Decode(format!(
+                            "Failed to intern key '{}': {}",
+                            key, e
+                        ))
+                    })?;
+                    if ti.is_new() {
+                        new_base_keys
+                            .borrow_mut()
+                            .push((key.to_string(), ti.key().id()));
+                    }
+                    ti.into_key()
+                } else {
+                    base_intern_fn(key)?
+                };
                 cache.borrow_mut().insert(key.to_string(), ik.clone());
                 Ok(ik)
             };
@@ -191,6 +234,18 @@ impl TableManager {
             }
             vals
         };
+
+        // C5: thread the base-interned delta into the tx so pre-commit emits it
+        // in the `WalEntryV2.interner_delta`. The overlay stays empty on this
+        // path, so `pre_commit` Phase 1 skips the overlay merge entirely and
+        // the staging-bytes remap is a no-op (no overlay ids to rewrite).
+        let new_base_keys = new_base_keys.into_inner();
+        if !new_base_keys.is_empty() {
+            tx.interner_deltas
+                .entry(self.table_token())
+                .or_default()
+                .extend(new_base_keys);
+        }
 
         // S3: run validators on each record before staging.
         // tx path: resolve keys through the tx overlay so brand-new field
