@@ -73,10 +73,15 @@ impl SelectProjection {
         }
     }
 
-    /// Project a single InnerValue record to JSON.
-    pub fn project(&self, record: &InnerValue, interner: &Interner) -> json::Value {
+    /// Project a single record to JSON.
+    pub fn project(&self, record: &(impl RecordRef + ?Sized), interner: &Interner) -> json::Value {
         if self.is_all {
-            return inner_to_json_value(record, interner).unwrap_or(json::Value::Null);
+            let mut m = new_map_wc(0);
+            record.for_each_field(&mut |k, v| {
+                m.insert(k, v);
+            });
+            let whole = InnerValue::Map(m);
+            return inner_to_json_value(&whole, interner).unwrap_or(json::Value::Null);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
             return json::Value::Object(json::Map::new());
@@ -106,15 +111,24 @@ impl SelectProjection {
         json::Value::Object(obj)
     }
 
-    /// Project a single InnerValue record to QueryValue.
+    /// Project a single record to QueryValue.
     ///
     /// Mirrors `project` exactly — same branching, same field/func
     /// handling — but builds `QueryValue` (string-keyed) instead of
     /// `serde_json::Value`.  Callers switch to this once the read path
     /// stops needing `serde_json`.
-    pub fn project_value(&self, record: &InnerValue, interner: &Interner) -> QueryValue {
+    pub fn project_value(
+        &self,
+        record: &(impl RecordRef + ?Sized),
+        interner: &Interner,
+    ) -> QueryValue {
         if self.is_all {
-            return inner_value_to_query_value(record, interner).unwrap_or(QueryValue::Null);
+            let mut m = new_map_wc(0);
+            record.for_each_field(&mut |k, v| {
+                m.insert(k, v);
+            });
+            let whole = InnerValue::Map(m);
+            return inner_value_to_query_value(&whole, interner).unwrap_or(QueryValue::Null);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
             return QueryValue::Map(shamir_types::types::common::new_map_wc(0));
