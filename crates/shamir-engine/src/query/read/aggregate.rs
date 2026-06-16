@@ -399,7 +399,7 @@ pub(super) fn build_aggregate_object(
         for (key, fv) in func_slots {
             let val = group_records
                 .first()
-                .and_then(|first| resolve_filter_value(&fv, first, &ctx))
+                .and_then(|first| resolve_filter_value(&fv, *first, &ctx))
                 .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null);
             obj.insert(key, val);

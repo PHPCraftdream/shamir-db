@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
 
@@ -101,7 +102,7 @@ pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
 /// filter values (`$ref` / literals / `$fn`).
 pub fn resolve_filter_value(
     fv: &FilterValue,
-    record: &InnerValue,
+    record: &(impl RecordRef + ?Sized),
     ctx: &FilterContext,
 ) -> Option<InnerValue> {
     match fv {
@@ -113,7 +114,9 @@ pub fn resolve_filter_value(
         FilterValue::Binary(b) => Some(InnerValue::Bin(b.clone())),
         FilterValue::FieldRef { path } => {
             let keys = intern_field_path(path, ctx.interner)?;
-            resolve_field(record, &keys)
+            let ipath: SmallVec<[InternerKey; 4]> =
+                keys.iter().map(|&id| InternerKey::new(id)).collect();
+            record.materialize_at(&ipath)
         }
         FilterValue::QueryRef { alias, path } => {
             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());

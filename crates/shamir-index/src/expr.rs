@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::InnerValue;
+use smallvec::SmallVec;
 
 /// A pure, deterministic expression that transforms a record's field
 /// value into a computed index key.
@@ -50,10 +52,17 @@ pub enum ExprError {
 
 impl IndexExpr {
     /// Evaluate the expression against a record. The record must be
-    /// `InnerValue::Map` at the top level (as stored by the engine).
-    pub fn eval(&self, rec: &InnerValue) -> Result<InnerValue, ExprError> {
+    /// a map at the top level (as stored by the engine).
+    ///
+    /// Generic over `RecordRef` so both `InnerValue` (tree) and
+    /// `RecordView` (zero-copy lens) callers work without conversion.
+    pub fn eval(&self, rec: &(impl RecordRef + ?Sized)) -> Result<InnerValue, ExprError> {
         match self {
-            IndexExpr::Field(path) => resolve_path(rec, path),
+            IndexExpr::Field(path) => {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    path.iter().map(|&id| InternerKey::new(id)).collect();
+                rec.materialize_at(&ipath).ok_or(ExprError::FieldNotFound)
+            }
 
             IndexExpr::Lower(inner) => match inner.eval(rec)? {
                 InnerValue::Str(s) => Ok(InnerValue::Str(s.to_lowercase())),
