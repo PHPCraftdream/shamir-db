@@ -1105,4 +1105,47 @@ impl<'a> RecordView<'a> {
         }
         FieldIndex::new(self.body, map)
     }
+
+    /// Return the raw msgpack byte slice for the value at `path` (navigating
+    /// through nested maps). Returns `None` on miss, path-through-non-map, or
+    /// malformed buffer. The returned slice is a valid standalone msgpack value
+    /// suitable for `InnerValue::from_bytes()`.
+    pub(crate) fn value_bytes_at(&self, path: &[InternerKey]) -> Option<&'a [u8]> {
+        if path.is_empty() {
+            return None;
+        }
+        // Find the value bytes for the first path segment in this map.
+        let (first, rest) = path.split_first()?;
+        let target = interned_key_bytes(first.id());
+        let target_bytes = target.as_ref();
+        let mut pos = 0usize;
+        for _ in 0..self.n_entries {
+            let klen = read_bin_len(self.body, &mut pos).ok()?;
+            let kstart = pos;
+            let kend = kstart.checked_add(klen)?;
+            if kend > self.body.len() {
+                return None;
+            }
+            pos = kend;
+            if klen == target_bytes.len() && self.body[kstart..kend] == *target_bytes {
+                // Found the key. Record the value's start, then figure out
+                // whether we need to descend or return the bytes.
+                if rest.is_empty() {
+                    // Terminal segment — capture the full value byte range.
+                    let val_start = pos;
+                    skip_value(self.body, &mut pos, 0).ok()?;
+                    return Some(&self.body[val_start..pos]);
+                }
+                // Non-terminal — the value must be a map; descend into it.
+                let val = read_value(self.body, &mut pos, 0).ok()?;
+                match val {
+                    RecordValue::Map(nested) => return nested.value_bytes_at(rest),
+                    _ => return None,
+                }
+            }
+            // Miss — skip the value.
+            skip_value(self.body, &mut pos, 0).ok()?;
+        }
+        None
+    }
 }

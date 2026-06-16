@@ -37,11 +37,13 @@
 //! Every primitive returns `Result` / `Option` and bounds-checks every read.
 //! The lens NEVER panics on malformed/truncated bytes.
 
+mod kind;
 mod lens;
 mod record_ref;
 mod record_value;
 mod scalar_ref;
 
+pub use kind::Kind;
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
 pub use record_ref::RecordRef;
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};
