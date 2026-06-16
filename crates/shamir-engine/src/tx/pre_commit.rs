@@ -177,9 +177,9 @@ pub(super) async fn pre_commit_prelock(
             for table_id in &table_ids {
                 if let Some(staging) = tx.write_set.get_mut(table_id) {
                     staging
-                        .rewrite_set_inner(|inner| {
-                            shamir_tx::remap_value(inner, &remap);
-                            Ok(())
+                        .rewrite_set_bytes(|b| {
+                            shamir_tx::remap_inner_value_bytes(b.clone(), &remap)
+                                .map_err(|e| format!("remap: {e}"))
                         })
                         .await
                         .map_err(DbError::Codec)?;

@@ -18,6 +18,7 @@ use crate::query::write::{
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     inner_to_json_value, query_value_to_inner, query_value_to_inner_with,
+    query_value_to_storage_bytes,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
@@ -167,7 +168,7 @@ impl TableManager {
         // (Snapshot, last-writer-wins, never rolls back), so there is no
         // rollback-isolation to preserve — and base-interning makes the
         // commit-time `commit_interner_overlay` remap EMPTY, which
-        // short-circuits the deep `rewrite_set_inner` walk over every staged
+        // short-circuits the deep `rewrite_set_bytes` walk over every staged
         // record (the redundant second full pass this cycle removes). The
         // newly-interned `(name, id)` pairs are still collected here and
         // threaded into `tx.interner_deltas` below so they reach the
@@ -193,11 +194,14 @@ impl TableManager {
         // every name genuinely NEW to the base interner this insert. Drained
         // into `tx.interner_deltas` after the immutable-borrow block ends.
         let new_base_keys: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
-        let inner_values: Vec<InnerValue> = {
+        // W2d-cutover: build storage Bytes directly via the byte-identical
+        // encoder `query_value_to_storage_bytes` (no InnerValue tree).
+        let staged: Vec<bytes::Bytes> = {
             let layered = make_layered_interner(interner, tx);
             let base_intern_fn = intern_via_layered(&layered);
             // RefCell lets the closure capture and mutate the cache while
-            // satisfying the `Fn` (not `FnMut`) bound on `query_value_to_inner_with`.
+            // satisfying the `Fn` (not `FnMut`) bound on
+            // `query_value_to_storage_bytes`.
             let cache: RefCell<FxHashMap<String, InternerKey>> = RefCell::new(FxHashMap::default());
             let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
                 {
@@ -229,16 +233,16 @@ impl TableManager {
                 cache.borrow_mut().insert(key.to_string(), ik.clone());
                 Ok(ik)
             };
-            let mut vals = Vec::with_capacity(op.values.len());
+            let mut out = Vec::with_capacity(op.values.len());
             for value in &op.values {
                 let resolved = resolve_computed_record(value, interner)
                     .map_err(shamir_storage::error::DbError::Codec)?;
-                let inner = query_value_to_inner_with(&resolved, &intern_fn)
+                let bytes = query_value_to_storage_bytes(&resolved, &intern_fn)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-                vals.push(inner);
+                out.push(bytes);
                 resolved_values.push(resolved);
             }
-            vals
+            out
         };
 
         // C5: thread the base-interned delta into the tx so pre-commit emits it
@@ -270,14 +274,11 @@ impl TableManager {
                 .map_err(validator_failure_to_db_error)?;
         }
 
-        // Batched tx insert — mirrors `insert_many`'s structure on the
-        // tx staging path. Lifts per-row overhead
-        // (`validate_unique_for_create`, `unique_keys_for`,
-        // `all_backends().await`, legacy/sorted plan calls) out of
-        // the row loop. Semantics identical to looping `insert_tx`:
-        // same RecordId order, same unique-guard recording, same
-        // staged_vectors, same counter delta.
-        let ids: Vec<RecordId> = self.insert_tx_many(&inner_values, tx).await?;
+        // W2d-cutover: lens-driven batched tx insert — the staged bytes
+        // feed `insert_tx_many_bytes`, which builds `RecordView`s over the
+        // bytes and drives every index/unique/vector planner through the
+        // zero-copy lens. No InnerValue tree is built on the insert path.
+        let ids: Vec<RecordId> = self.insert_tx_many_bytes(&staged, tx).await?;
 
         // Skip result-map assembly for fire-and-forget inserts
         // (return_result=false) — avoids per-row serde_json::Map build
