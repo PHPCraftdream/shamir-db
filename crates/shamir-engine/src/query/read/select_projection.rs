@@ -1,12 +1,14 @@
 //! Pre-resolved SELECT projection — avoids re-interning paths per record.
 
 use serde_json as json;
+use smallvec::SmallVec;
 
-use crate::query::filter::eval::{intern_field_path, resolve_field_ref, resolve_filter_value};
+use crate::query::filter::eval::{intern_field_path, resolve_filter_value};
 use crate::query::filter::{FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
-use shamir_types::core::interner::Interner;
+use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
 use shamir_types::types::value::QueryValue;
@@ -83,8 +85,12 @@ impl SelectProjection {
         for (interned_path, key) in &self.fields {
             let val = interned_path
                 .as_ref()
-                .and_then(|p| resolve_field_ref(record, p))
-                .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
+                .and_then(|p| {
+                    let ipath: SmallVec<[InternerKey; 4]> =
+                        p.iter().map(|&id| InternerKey::new(id)).collect();
+                    record.materialize_at(&ipath)
+                })
+                .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null);
             obj.insert(key.clone(), val);
         }
@@ -117,8 +123,12 @@ impl SelectProjection {
         for (interned_path, key) in &self.fields {
             let val = interned_path
                 .as_ref()
-                .and_then(|p| resolve_field_ref(record, p))
-                .map(|v| inner_value_to_query_value(v, interner).unwrap_or(QueryValue::Null))
+                .and_then(|p| {
+                    let ipath: SmallVec<[InternerKey; 4]> =
+                        p.iter().map(|&id| InternerKey::new(id)).collect();
+                    record.materialize_at(&ipath)
+                })
+                .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
                 .unwrap_or(QueryValue::Null);
             obj.insert(key.clone(), val);
         }
