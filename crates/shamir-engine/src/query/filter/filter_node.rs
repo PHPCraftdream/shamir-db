@@ -18,8 +18,7 @@ use super::eval_context::FilterContext;
 use super::filter_callback::FilterCallback;
 use super::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
 use super::resolve::{
-    compare_values, is_column_query_ref, resolve_field_ref, resolve_filter_value,
-    resolve_query_ref_column,
+    compare_values, is_column_query_ref, resolve_filter_value, resolve_query_ref_column,
 };
 use crate::query::filter::FilterValue;
 
@@ -305,10 +304,13 @@ impl FilterNode {
                 value,
                 pre_resolved,
             } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_owned = match record.materialize_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
+                let field_val = &field_owned;
                 let owned_rhs;
                 let filter_val: &InnerValue = if let Some(pre) = pre_resolved {
                     pre
@@ -338,10 +340,13 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAny { field_path, values } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_owned = match record.materialize_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
+                let field_val = &field_owned;
                 values.iter().any(|fv| {
                     let resolved = match resolve_filter_value(fv, record, ctx) {
                         Some(v) => v,
@@ -360,10 +365,13 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAnySet { field_path, values } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_owned = match record.materialize_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
+                let field_val = &field_owned;
                 match field_val {
                     InnerValue::List(list) => list.iter().any(|item| values.contains(item)),
                     InnerValue::Set(set) => set.iter().any(|item| values.contains(item)),
@@ -372,10 +380,13 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAll { field_path, values } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_owned = match record.materialize_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
+                let field_val = &field_owned;
                 values.iter().all(|fv| {
                     let resolved = match resolve_filter_value(fv, record, ctx) {
                         Some(v) => v,
@@ -394,10 +405,13 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAllSet { field_path, values } => {
-                let field_val = match resolve_field_ref(record, field_path) {
+                let ipath: SmallVec<[InternerKey; 4]> =
+                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                let field_owned = match record.materialize_at(&ipath) {
                     Some(v) => v,
                     None => return false,
                 };
+                let field_val = &field_owned;
                 // Count how many required values appear in the field array/set.
                 // Pass when every required value was found (count == values.len()).
                 let required = values.len();
