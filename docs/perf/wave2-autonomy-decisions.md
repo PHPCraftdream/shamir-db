@@ -27,3 +27,25 @@
   была; crush-finish починил THasher/модуль/линты.
 
 ## (дописывается по ходу)
+
+## Wave 2 — реализация (эпик завершён, коммиты)
+- **W2a (byte-identity крукс):** легаси/unique индекс-ключи = `FxHash(<InnerValue as Hash>)`
+  с ведущим `mem::discriminant(Value)`. Решение Option A1: `materialize_at`→leaf→
+  НЕИЗМЕНЁННЫЙ `with_values`, НИКОГДА не хешировать `ScalarRef` (другой discriminant).
+  `materialize_at` (не `scalar_at`) — иначе Dec/Big/контейнер выпадают из индекса.
+  sorted-индекс — `scalar_at`+sort_codec (primitive-driven, арм-match). Коммиты
+  e2abab5 (sorted), 7e60866 (hash/unique). byte-identity тесты обязательны.
+- **W2b:** IndexBackend → `&(dyn RecordRef + Sync + '_)` (param-site, не trait-wide).
+  FTS→str_at, vector→any_seq_elem, functional без изменений. Коммит ba53050.
+- **W2c+W2d (точка невозврата):** StagedRow::Live/set_many_live/rewrite_set_inner
+  УДАЛЕНЫ; staging хранит Bytes; remap→rewrite_set_bytes+remap_inner_value_bytes
+  (холодный interactive-tx путь, implicit пропускает). execute_insert_tx → прямой
+  энкодер query_value_to_storage_bytes (byte-identity 12/12, ccb8ac4) + insert_tx_many_bytes
+  (RecordView для index/unique/vector/sorted). validators=run_validators_qv (W1).
+  Dec/Big-инвариант: insert-QueryValue никогда не даёт Dec/Big/Set → линза==дерево для
+  ключей. non-tx/update/delete — вне scope (W3 follow-up). Коммит 3f2f40a.
+- **Решение combine vs split:** W2a sorted/hash раздельно (риск), W2c+W2d вместе (один
+  cutover, как Stage 4). encoder отдельно (additive foundation).
+- **Стиль гейта на cutover:** жёсткий — crash-seam (implicit+interactive) + @oracle +
+  index byte-identity + @e2e; перепроверял сам (не доверял агенту на точке невозврата).
+- **Гигиена:** убрал мусорные *.log, что crush оставил в корне.
