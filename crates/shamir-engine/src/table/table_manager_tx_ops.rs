@@ -316,10 +316,7 @@ impl TableManager {
             for (i, v) in values.iter().enumerate() {
                 self.index_manager.validate_unique_for_create(v).await?;
                 for def in self.index_manager.iter_unique_indexes() {
-                    if let Some(vs) =
-                        crate::index::index_manager::IndexManager::extract_index_values(
-                            v, &def.paths,
-                        )
+                    if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
                     {
                         let key = bincode::serialize(&vs)
                             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;

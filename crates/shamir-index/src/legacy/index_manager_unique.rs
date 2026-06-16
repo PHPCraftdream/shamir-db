@@ -4,15 +4,14 @@
 //! этот модуль отвечает за гарантии уникальности значений.
 
 use crate::legacy::index_definition::IndexDefinition;
-use crate::legacy::index_keys::{
-    build_index_key, build_index_key_from_refs, extract_index_values, extract_index_values_ref,
-};
+use crate::legacy::index_keys::{build_index_key, extract_index_leaves};
 use crate::legacy::index_manager::IndexManager;
 use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::atomic::Ordering;
@@ -30,14 +29,17 @@ impl IndexManager {
     /// # Аргументы
     ///
     /// * `value` — значение новой записи
-    pub async fn validate_unique_for_create(&self, value: &InnerValue) -> DbResult<()> {
+    pub async fn validate_unique_for_create(
+        &self,
+        value: &(impl RecordRef + ?Sized),
+    ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
         }
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_values(value, &def.paths) {
+            if let Some(values) = extract_index_leaves(value, &def.paths) {
                 if let Some(existing_id) = self
                     .check_unique_constraint(def.name_interned, &values)
                     .await?
@@ -67,8 +69,8 @@ impl IndexManager {
     pub async fn validate_unique_for_update(
         &self,
         record_id: &RecordId,
-        old_value: &InnerValue,
-        new_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
+        new_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
@@ -76,8 +78,8 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            let old_values = extract_index_values(old_value, &def.paths);
-            let new_values = extract_index_values(new_value, &def.paths);
+            let old_values = extract_index_leaves(old_value, &def.paths);
+            let new_values = extract_index_leaves(new_value, &def.paths);
 
             // Если значение не изменилось или оба отсутствуют — пропускаем
             match (&old_values, &new_values) {
@@ -116,13 +118,13 @@ impl IndexManager {
     ///
     /// Returns an empty vec when there are no unique indexes or the
     /// value populates none of them.
-    pub fn unique_keys_for(&self, value: &InnerValue) -> Vec<Bytes> {
+    pub fn unique_keys_for(&self, value: &(impl RecordRef + ?Sized)) -> Vec<Bytes> {
         if !self.has_unique_indexes() {
             return Vec::new();
         }
         let mut keys = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_values(value, &def.paths) {
+            if let Some(values) = extract_index_leaves(value, &def.paths) {
                 keys.push(build_index_key(true, def.name_interned, &values).to_bytes());
             }
         }
@@ -204,7 +206,7 @@ impl IndexManager {
     pub async fn on_record_created_unique(
         &self,
         record_id: &RecordId,
-        value: &InnerValue,
+        value: &(impl RecordRef + ?Sized),
     ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
@@ -212,7 +214,7 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_values(value, &def.paths) {
+            if let Some(values) = extract_index_leaves(value, &def.paths) {
                 self.add_unique_entry(def.name_interned, &values, record_id)
                     .await?;
             }
@@ -232,8 +234,8 @@ impl IndexManager {
     pub async fn on_record_updated_unique(
         &self,
         record_id: &RecordId,
-        old_value: &InnerValue,
-        new_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
+        new_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
@@ -241,8 +243,8 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            let old_values = extract_index_values(old_value, &def.paths);
-            let new_values = extract_index_values(new_value, &def.paths);
+            let old_values = extract_index_leaves(old_value, &def.paths);
+            let new_values = extract_index_leaves(new_value, &def.paths);
 
             match (old_values, new_values) {
                 (None, None) => {}
@@ -273,7 +275,7 @@ impl IndexManager {
     pub async fn on_record_deleted_unique(
         &self,
         _record_id: &RecordId,
-        old_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
@@ -281,7 +283,7 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_values(old_value, &def.paths) {
+            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
                 self.remove_unique_entry(def.name_interned, &values).await?;
             }
         }
@@ -349,7 +351,7 @@ impl IndexManager {
         let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
 
         for (record_id, value) in &records {
-            if let Some(values) = extract_index_values(value, &index_def.paths) {
+            if let Some(values) = extract_index_leaves(value, &index_def.paths) {
                 let values_key = bincode::serialize(&values)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 *value_counts.entry(values_key.clone()).or_insert(0) += 1;
@@ -520,14 +522,14 @@ impl IndexManager {
     pub async fn plan_record_created_unique(
         &self,
         record_id: &RecordId,
-        value: &InnerValue,
+        value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_values(value, &def.paths) {
+            if let Some(values) = extract_index_leaves(value, &def.paths) {
                 let index_key = build_index_key(true, def.name_interned, &values).to_bytes();
                 ops.push(IndexWriteOp::SetPosting {
                     key: index_key,
@@ -547,16 +549,16 @@ impl IndexManager {
     pub async fn plan_record_updated_unique(
         &self,
         record_id: &RecordId,
-        old_value: &InnerValue,
-        new_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
+        new_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            let old_values = extract_index_values(old_value, &def.paths);
-            let new_values = extract_index_values(new_value, &def.paths);
+            let old_values = extract_index_leaves(old_value, &def.paths);
+            let new_values = extract_index_leaves(new_value, &def.paths);
             match (old_values, new_values) {
                 (None, None) => {}
                 (None, Some(new)) => {
@@ -592,14 +594,14 @@ impl IndexManager {
     pub async fn plan_record_deleted_unique(
         &self,
         _record_id: &RecordId,
-        old_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_values(old_value, &def.paths) {
+            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
                 let key = build_index_key(true, def.name_interned, &values).to_bytes();
                 ops.push(IndexWriteOp::RemovePosting { key });
             }
@@ -611,12 +613,13 @@ impl IndexManager {
     /// `Vec<IndexWriteOp>`. Uniqueness validation (collision detection)
     /// stays in the plan phase: it reads existing postings to detect
     /// duplicates. If collision → `Err(DuplicateKey(...))`.
-    pub async fn plan_records_created_unique_batch<'a, I>(
+    pub async fn plan_records_created_unique_batch<'a, R, I>(
         &self,
         items: I,
     ) -> DbResult<Vec<IndexWriteOp>>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
@@ -624,9 +627,8 @@ impl IndexManager {
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
             for (rid, value) in items.clone() {
-                if let Some(value_refs) = extract_index_values_ref(value, &def.paths) {
-                    let index_key =
-                        build_index_key_from_refs(true, def.name_interned, &value_refs).to_bytes();
+                if let Some(leaves) = extract_index_leaves(value, &def.paths) {
+                    let index_key = build_index_key(true, def.name_interned, &leaves).to_bytes();
                     ops.push(IndexWriteOp::SetPosting {
                         key: index_key,
                         value: Bytes::copy_from_slice(rid.as_bytes()),
@@ -639,9 +641,10 @@ impl IndexManager {
 
     /// Batched version of `on_record_created_unique`. Same borrow
     /// shape as `on_records_created_batch`.
-    pub async fn on_records_created_unique_batch<'a, I>(&self, items: I) -> DbResult<()>
+    pub async fn on_records_created_unique_batch<'a, R, I>(&self, items: I) -> DbResult<()>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         let ops = self.plan_records_created_unique_batch(items).await?;
         self.apply_ops(&ops).await

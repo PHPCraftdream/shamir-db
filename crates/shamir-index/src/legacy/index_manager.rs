@@ -16,11 +16,7 @@
 
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info::IndexInfo;
-use crate::legacy::index_info_item::IndexInfoItem;
-use crate::legacy::index_keys::{
-    build_index_key, build_index_key_from_refs, build_posting_key, extract_index_values,
-    extract_index_values_ref,
-};
+use crate::legacy::index_keys::{build_index_key, build_posting_key, extract_index_leaves};
 use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
@@ -28,6 +24,7 @@ use dashmap::DashMap;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, Store};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -195,34 +192,6 @@ impl IndexManager {
         self.has_indexes_unique.load(Ordering::Relaxed)
     }
 
-    /// Извлекает значения для составного индекса из записи.
-    ///
-    /// Составной индекс может включать несколько полей (например, [name, age]).
-    /// Этот метод извлекает все указанные поля и возвращает их как вектор.
-    ///
-    /// # Возвращает
-    ///
-    /// - `Some(Vec<InnerValue>)` — все поля успешно извлечены
-    /// - `None` — хотя бы одно поле отсутствует
-    pub fn extract_index_values(
-        value: &InnerValue,
-        paths: &[IndexInfoItem],
-    ) -> Option<Vec<InnerValue>> {
-        extract_index_values(value, paths)
-    }
-
-    /// Borrowing variant of `extract_index_values` — returns
-    /// `Vec<&InnerValue>` (no per-leaf clone). Used by batch write
-    /// hot paths that immediately feed the values into
-    /// `IndexRecordKey::with_values` (which takes `&[&InnerValue]`
-    /// already) and into `build_posting_key`.
-    pub fn extract_index_values_ref<'a>(
-        value: &'a InnerValue,
-        paths: &[IndexInfoItem],
-    ) -> Option<Vec<&'a InnerValue>> {
-        extract_index_values_ref(value, paths)
-    }
-
     /// Создаёт новый индекс для таблицы.
     ///
     /// Процесс создания:
@@ -280,7 +249,7 @@ impl IndexManager {
         let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
         let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
         for (record_id, value) in &records {
-            if let Some(values) = extract_index_values(value, &index_def.paths) {
+            if let Some(values) = extract_index_leaves(value, &index_def.paths) {
                 let index_key = build_index_key(false, name_interned, &values).to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 posting_writes.push((posting_key, Bytes::new()));
@@ -399,7 +368,7 @@ impl IndexManager {
     pub async fn plan_record_created(
         &self,
         record_id: &RecordId,
-        value: &InnerValue,
+        value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
             return Ok(Vec::new());
@@ -407,7 +376,7 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            if let Some(values) = extract_index_values(value, &def.paths) {
+            if let Some(values) = extract_index_leaves(value, &def.paths) {
                 let index_key = build_index_key(false, def.name_interned, &values).to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 ops.push(IndexWriteOp::SetPosting {
@@ -429,9 +398,10 @@ impl IndexManager {
     /// into ONE `Store::set_many` call → one backend commit on
     /// transactional backends, same number of individual writes on
     /// default-loop backends but with reduced allocation overhead.
-    pub async fn on_records_created_batch<'a, I>(&self, items: I) -> DbResult<()>
+    pub async fn on_records_created_batch<'a, R, I>(&self, items: I) -> DbResult<()>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         let ops = self.plan_records_created_batch(items).await?;
         self.apply_ops(&ops).await
@@ -440,9 +410,13 @@ impl IndexManager {
     /// Planner variant of `on_records_created_batch` — returns
     /// accumulated `Vec<IndexWriteOp>` for all items across all
     /// regular indexes.
-    pub async fn plan_records_created_batch<'a, I>(&self, items: I) -> DbResult<Vec<IndexWriteOp>>
+    pub async fn plan_records_created_batch<'a, R, I>(
+        &self,
+        items: I,
+    ) -> DbResult<Vec<IndexWriteOp>>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         if !self.has_indexes() {
             return Ok(Vec::new());
@@ -451,9 +425,8 @@ impl IndexManager {
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
             for (rid, value) in items.clone() {
-                if let Some(value_refs) = extract_index_values_ref(value, &def.paths) {
-                    let index_key =
-                        build_index_key_from_refs(false, def.name_interned, &value_refs).to_bytes();
+                if let Some(leaves) = extract_index_leaves(value, &def.paths) {
+                    let index_key = build_index_key(false, def.name_interned, &leaves).to_bytes();
                     let posting_key = build_posting_key(&index_key, rid);
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
@@ -494,8 +467,8 @@ impl IndexManager {
     pub async fn plan_record_updated(
         &self,
         record_id: &RecordId,
-        old_value: &InnerValue,
-        new_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
+        new_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
             return Ok(Vec::new());
@@ -503,8 +476,8 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            let old_values = extract_index_values(old_value, &def.paths);
-            let new_values = extract_index_values(new_value, &def.paths);
+            let old_values = extract_index_leaves(old_value, &def.paths);
+            let new_values = extract_index_leaves(new_value, &def.paths);
 
             match (old_values, new_values) {
                 (None, None) => {}
@@ -568,7 +541,7 @@ impl IndexManager {
     pub async fn plan_record_deleted(
         &self,
         record_id: &RecordId,
-        old_value: &InnerValue,
+        old_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
             return Ok(Vec::new());
@@ -576,7 +549,7 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            if let Some(values) = extract_index_values(old_value, &def.paths) {
+            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
                 let index_key = build_index_key(false, def.name_interned, &values).to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 ops.push(IndexWriteOp::RemovePosting { key: posting_key });
