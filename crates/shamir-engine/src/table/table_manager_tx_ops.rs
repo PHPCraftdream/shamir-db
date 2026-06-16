@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
 use shamir_types::types::common::THasher;
@@ -403,17 +404,164 @@ impl TableManager {
         legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
         index_ops.extend(legacy_ops);
 
-        // 6. Single ensure_table_staging, then set_many_live: one synchronous
-        //    pass — no async overhead per key. InnerValues are stored as
-        //    StagedRow::Live; msgpack encoding is deferred to commit Phase 4/5.
-        //    Aborted txs skip encoding entirely.
+        // 6. Single ensure_table_staging, then set_many: one synchronous
+        //    pass — no async overhead per key. InnerValues are serialized
+        //    to bytes here (the Live variant was removed in W2c).
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-        staging.set_many_live(id_bytes.into_iter().zip(values.iter().cloned()));
+        let staged_bytes: Vec<Bytes> = {
+            let mut out = Vec::with_capacity(values.len());
+            for v in values {
+                out.push(v.to_bytes().map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "Failed to serialize InnerValue: {}",
+                        e
+                    ))
+                })?);
+            }
+            out
+        };
+        staging.set_many(id_bytes.into_iter().zip(staged_bytes.into_iter()));
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
             .extend(index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(token, values.len() as i64);
+
+        Ok(ids)
+    }
+
+    /// W2d — lens-driven batched tx insert. Structurally identical to
+    /// [`insert_tx_many`] but takes already-encoded storage `Bytes` (produced
+    /// by `query_value_to_storage_bytes` in `execute_insert_tx`) instead of
+    /// `InnerValue` trees. Index extraction, unique validation, vector
+    /// staging, and all posting planners run through `RecordView` (zero-copy
+    /// lens over the msgpack bytes) — no `InnerValue` tree is ever built on
+    /// the insert path.
+    ///
+    /// INVARIANT (Dec/Big/Set guard): `staged[i]` was produced by
+    /// `query_value_to_storage_bytes`, which encodes Dec/Big/Set as
+    /// `serialize_str` (msgpack `str`), and the source `QueryValue` from
+    /// JSON / `resolve_computed_record` never yields Dec/Big/Set variants.
+    /// Therefore both the tree path (via `InnerValue`) and the lens path
+    /// (via `RecordView`) see the SAME `Str` for what used to be Dec/Big,
+    /// so index-key extraction agrees byte-for-byte. If a future msgpack-client
+    /// introduces a real Dec/Big `QueryValue` source, a Dec/Big-keyed index
+    /// would diverge under the lens — gate that with a debug-assert / typed
+    /// encoder before extending this path.
+    pub async fn insert_tx_many_bytes(
+        &self,
+        staged: &[Bytes],
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<Vec<RecordId>> {
+        if staged.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build one RecordView per staged row — the zero-copy lens that feeds
+        // every RecordRef-accepting extractor below. `RecordView::new`
+        // validates the top-level map header only (no tree decode).
+        let views: Vec<shamir_types::record_view::RecordView<'_>> = staged
+            .iter()
+            .map(|b| shamir_types::record_view::RecordView::new(b))
+            .collect::<Result<_, _>>()
+            .map_err(|e| shamir_storage::error::DbError::Codec(format!("RecordView: {e}")))?;
+
+        // 1. Batch-validate unique indexes — same shape as `insert_tx_many`
+        //    but driven through the lens (`&views[i]` as `&impl RecordRef`).
+        if self.index_manager.has_unique_indexes() {
+            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
+                std::collections::HashSet::default();
+            for (i, view) in views.iter().enumerate() {
+                self.index_manager.validate_unique_for_create(view).await?;
+                for def in self.index_manager.iter_unique_indexes() {
+                    if let Some(vs) =
+                        crate::index::index_keys::extract_index_leaves(view, &def.paths)
+                    {
+                        let key = bincode::serialize(&vs)
+                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                        if !batch_seen.insert((def.name_interned, key)) {
+                            return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                                "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
+                                def.name_interned, i
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Generate ids upfront.
+        let mut ids: Vec<RecordId> = Vec::with_capacity(staged.len());
+        for _ in staged {
+            ids.push(RecordId::new());
+        }
+
+        // 2b. Precompute Bytes keys once — reused in the lock loop and set_many.
+        let id_bytes: Vec<Bytes> = ids.iter().map(|rid| rid.to_bytes()).collect();
+
+        // Level-3: acquire Exclusive locks on every new rid before staging.
+        for key in &id_bytes {
+            self.acquire_pessimistic_write_lock(key.clone(), tx).await?;
+        }
+
+        // 3. Record UniqueGuards per row per unique index it claims.
+        if self.index_manager.has_unique_indexes() {
+            let token = self.table_token();
+            for (rid, view) in ids.iter().zip(views.iter()) {
+                for index_key in self.index_manager.unique_keys_for(view) {
+                    tx.record_unique_guard(shamir_tx::UniqueGuard {
+                        table_token: token,
+                        index_key,
+                        owner: *rid,
+                    });
+                }
+            }
+        }
+
+        // 4. Take the index2 backend snapshot ONCE, then drive both
+        //    plan_insert_tx (stateless ops → index_write_set) and
+        //    staged_vector (HNSW → tx.staged_vectors) per row off the
+        //    cached list, feeding `&views[i]` as `&dyn RecordRef`.
+        let backends = self.index2_registry.all_backends().await;
+        let tx_id = Some(tx.tx_id);
+        let token = self.table_token();
+        let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
+        for (rid, view) in ids.iter().zip(views.iter()) {
+            for backend in &backends {
+                if let Ok(ops) = backend.plan_insert_tx(*rid, view, tx_id).await {
+                    index_ops.extend(ops);
+                }
+                if let Some(vec) = backend.staged_vector(*rid, view).await {
+                    tx.stage_vector(token, *rid, vec);
+                }
+            }
+        }
+
+        // 5. Legacy + sorted batch planners — one call each, planning
+        //    over the whole (id, view) iterator. `RecordView: RecordRef`,
+        //    so the generic `R: RecordRef` bound is satisfied.
+        let pairs = || ids.iter().zip(views.iter());
+        let mut legacy_ops = self
+            .index_manager
+            .plan_records_created_batch(pairs())
+            .await?;
+        legacy_ops.extend(
+            self.index_manager
+                .plan_records_created_unique_batch(pairs())
+                .await?,
+        );
+        legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
+        index_ops.extend(legacy_ops);
+
+        // 6. Single ensure_table_staging, then set_many with the staged
+        //    bytes (NOT set_many_live — bytes are already encoded).
+        let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
+        staging.set_many(id_bytes.into_iter().zip(staged.iter().cloned()));
+
+        // 7. Merge index_ops + counter delta in one go.
+        tx.index_write_set
+            .extend(index_ops.into_iter().map(|op| (token, op)));
+        tx.bump_counter(token, staged.len() as i64);
 
         Ok(ids)
     }

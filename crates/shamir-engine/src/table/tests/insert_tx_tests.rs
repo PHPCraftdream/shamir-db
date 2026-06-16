@@ -202,8 +202,15 @@ async fn execute_insert_tx_stages_all_records() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(40), 0, u64::MAX, IsolationLevel::Snapshot);
 
+    // W2d: execute_insert_tx now goes through the lens-driven path
+    // (insert_tx_many_bytes → RecordView). Records must be maps (the
+    // production shape); bare scalars are not valid top-level records.
     let op = write::insert("t")
-        .rows([json!("v1"), json!("v2"), json!("v3")])
+        .rows([
+            json!({ "name": "v1" }),
+            json!({ "name": "v2" }),
+            json!({ "name": "v3" }),
+        ])
         .build();
 
     let result = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
@@ -363,4 +370,62 @@ async fn execute_set_tx_update_path() {
         0,
         "update via set_tx must not change row count"
     );
+}
+
+// ---------------------------------------------------------------------------
+// W2d Dec/Big invariant: insert QueryValue never yields Dec/Big/Set (JSON
+// source + resolve_computed_record collapses Dec→Str). Both the tree path
+// (InnerValue) and the lens path (RecordView) see Str for a decimal-as-string
+// field, so index-key extraction agrees. This test proves it.
+// ---------------------------------------------------------------------------
+
+/// A decimal-as-string + float record: the lens (RecordView) and the tree
+/// (InnerValue) must extract the SAME index leaf for the "price" field,
+/// because both decode the msgpack `str` marker to `Str`.
+#[tokio::test]
+async fn w2d_dec_big_invariant_index_key_parity() {
+    let tbl = make_table().await;
+    let interner = tbl.interner().get().await.unwrap();
+    let price_k = interner.touch_ind("price").unwrap().into_key();
+    let price_id = price_k.id();
+    let score_k = interner.touch_ind("score").unwrap().into_key();
+
+    // Build an InnerValue map with a decimal-as-string (the form JSON +
+    // resolve_computed_record produces) and a float.
+    let mut m = new_map();
+    m.insert(price_k, InnerValue::Str("123.45".into())); // Dec → Str on the wire
+    m.insert(score_k, InnerValue::F64(99.5));
+    let inner = InnerValue::Map(m);
+
+    // Encode to storage bytes (the W2d encoder is byte-identical to
+    // to_bytes∘query_value_to_inner_with).
+    let bytes = inner.to_bytes().unwrap();
+
+    // Build the lens over the same bytes.
+    let view = shamir_types::record_view::RecordView::new(&bytes).unwrap();
+
+    // extract_index_leaves drives materialize_at under the hood — this is
+    // what insert_tx_many_bytes uses. Both must agree on the leaf value.
+    let def = shamir_index::legacy::index_info_item::IndexInfoItem::new(vec![price_id]);
+
+    let tree_leaves =
+        crate::index::index_keys::extract_index_leaves(&inner, std::slice::from_ref(&def));
+    let lens_leaves =
+        crate::index::index_keys::extract_index_leaves(&view, std::slice::from_ref(&def));
+
+    // Both must be Some (the field exists) and equal (both see Str).
+    let tree_leaves = tree_leaves.expect("tree: price field must be present");
+    let lens_leaves = lens_leaves.expect("lens: price field must be present");
+    assert_eq!(
+        tree_leaves, lens_leaves,
+        "Dec/Big invariant violation: tree sees {:?} but lens sees {:?} for the same record",
+        tree_leaves, lens_leaves
+    );
+
+    // Both must be Str("123.45") — not Dec(123.45).
+    assert_eq!(tree_leaves.len(), 1);
+    match &tree_leaves[0] {
+        InnerValue::Str(s) => assert_eq!(s, "123.45"),
+        other => panic!("expected Str for decimal-as-string, got {:?}", other),
+    }
 }

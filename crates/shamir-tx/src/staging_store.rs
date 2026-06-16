@@ -17,76 +17,31 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_types::types::value::InnerValue;
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-/// Wrapper for staged row payload. Initial implementation holds only
-/// already-serialized Bytes; future cycle (18c) adds a Live(InnerValue)
-/// variant for lazy serialization on the hot insert path.
-/// `StagedRow` with `OnceLock`-based serialization cache for the `Live` variant.
+/// Serialized staged row payload — always holds already-encoded msgpack
+/// `Bytes` (the W2c write-path cutover eliminated the `InnerValue` tree
+/// from the insert path; every insert now encodes via
+/// `query_value_to_storage_bytes` before staging).
 ///
-/// `Clone` resets the cache so the cloned row re-serializes on first access —
-/// this is correct because `OnceLock` is not `Clone`. Resetting is cheaper than
-/// the alternative (serializing eagerly on every clone), and `StagedRow` clones
-/// are rare (only in `StagedKind::Set` reads and tests).
-#[derive(Debug)]
-pub enum StagedRow {
-    /// Already-serialized msgpack bytes.
-    Bytes(Bytes),
-    /// Decoded value. Serialization is deferred and cached via `OnceLock`.
-    Live {
-        inner: InnerValue,
-        /// Cached msgpack encoding. Populated on the first `as_bytes()` call
-        /// and reused for all subsequent calls — `OnceLock::get_or_init` is
-        /// lock-free after initialization.
-        encoded: OnceLock<Bytes>,
-    },
-}
-
-impl Clone for StagedRow {
-    fn clone(&self) -> Self {
-        match self {
-            StagedRow::Bytes(b) => StagedRow::Bytes(b.clone()),
-            // Reset the cache: the clone is a fresh value.
-            StagedRow::Live { inner, .. } => StagedRow::Live {
-                inner: inner.clone(),
-                encoded: OnceLock::new(),
-            },
-        }
-    }
-}
+/// `as_inner` decodes on demand (cold read-your-own-write / commit remap).
+#[derive(Debug, Clone)]
+pub struct StagedRow(Bytes);
 
 impl StagedRow {
-    /// Serialize to msgpack Bytes. Identity for the Bytes variant; serializes
-    /// once and caches for the Live variant.
+    /// Identity — return the held bytes.
     pub fn as_bytes(&self) -> Bytes {
-        match self {
-            StagedRow::Bytes(b) => b.clone(),
-            StagedRow::Live { inner, encoded } => encoded
-                .get_or_init(|| {
-                    inner
-                        .to_bytes()
-                        .expect("InnerValue::to_bytes never fails on valid data")
-                })
-                .clone(),
-        }
+        self.0.clone()
     }
 
     /// Exact serialized byte length.
     pub fn len_bytes(&self) -> usize {
-        match self {
-            StagedRow::Bytes(b) => b.len(),
-            StagedRow::Live { .. } => self.as_bytes().len(),
-        }
+        self.0.len()
     }
 
-    /// Borrow the decoded value. Live is zero-copy; Bytes deserializes.
+    /// Borrow the decoded value (always deserializes — no live variant).
     pub fn as_inner(&self) -> Cow<'_, InnerValue> {
-        match self {
-            StagedRow::Live { inner, .. } => Cow::Borrowed(inner),
-            StagedRow::Bytes(b) => Cow::Owned(
-                InnerValue::from_bytes(b).expect("StagedRow::Bytes always holds valid msgpack"),
-            ),
-        }
+        Cow::Owned(InnerValue::from_bytes(&self.0).expect("StagedRow always holds valid msgpack"))
     }
 }
 
@@ -175,7 +130,7 @@ impl StagingStore {
 
     /// Stage a set (creates or overwrites).
     pub fn set(&mut self, k: RecordKey, v: Bytes) {
-        self.writes.insert(k, StagedOp::Set(StagedRow::Bytes(v)));
+        self.writes.insert(k, StagedOp::Set(StagedRow(v)));
     }
 
     /// Stage multiple sets in a single synchronous pass — no `.await` per key.
@@ -183,22 +138,7 @@ impl StagingStore {
     /// Equivalent to calling `set(k, v)` for each `(k, v)` in `items`.
     pub fn set_many(&mut self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
         for (k, v) in items {
-            self.writes.insert(k, StagedOp::Set(StagedRow::Bytes(v)));
-        }
-    }
-
-    /// Stage multiple `InnerValue` rows in a single synchronous pass (lazy
-    /// serialization). msgpack encoding is deferred to commit Phase 4/5.
-    /// Aborted txs skip encoding entirely.
-    pub fn set_many_live(&mut self, items: impl IntoIterator<Item = (RecordKey, InnerValue)>) {
-        for (k, v) in items {
-            self.writes.insert(
-                k,
-                StagedOp::Set(StagedRow::Live {
-                    inner: v,
-                    encoded: OnceLock::new(),
-                }),
-            );
+            self.writes.insert(k, StagedOp::Set(StagedRow(v)));
         }
     }
 
@@ -274,7 +214,7 @@ impl StagingStore {
     ///
     /// Rewrite all staged `Set` values via a byte transform.
     ///
-    /// Used by `TxContext::apply_id_remap` during commit phase 1 to
+    /// Used by `TxContext::apply_id_remap` and `pre_commit` Phase 1 to
     /// replace overlay interner ids with stable base ids in staged
     /// record bytes before they reach `transact()`.
     pub async fn rewrite_set_bytes<F>(&mut self, mut f: F) -> Result<(), String>
@@ -284,42 +224,7 @@ impl StagingStore {
         for op in self.writes.values_mut() {
             if let StagedOp::Set(row) = op {
                 let bytes = row.as_bytes();
-                *row = StagedRow::Bytes(f(&bytes)?);
-            }
-        }
-        Ok(())
-    }
-
-    /// cancel-safe: NO — same reasoning as [`rewrite_set_bytes`].
-    ///
-    /// Rewrite all staged `Set` values via an `InnerValue`-level transform.
-    ///
-    /// **Fast path for `Live` rows:** the closure receives the already-decoded
-    /// `InnerValue` directly — no msgpack round-trip. `Bytes` rows are
-    /// decoded once, transformed, and stored back as `Live` (so subsequent
-    /// access also skips re-serialization until commit/WAL emit).
-    ///
-    /// Used by `TxContext::apply_id_remap` in place of [`rewrite_set_bytes`]
-    /// to save one full msgpack deserialize + one full msgpack reserialize
-    /// per `Live` row during the intern-id remap commit phase.
-    pub async fn rewrite_set_inner<F>(&mut self, mut f: F) -> Result<(), String>
-    where
-        F: FnMut(&mut InnerValue) -> Result<(), String>,
-    {
-        for op in self.writes.values_mut() {
-            if let StagedOp::Set(row) = op {
-                let mut inner = match row {
-                    StagedRow::Live { inner, .. } => std::mem::replace(inner, InnerValue::Null),
-                    StagedRow::Bytes(b) => {
-                        InnerValue::from_bytes(b).map_err(|e| format!("remap decode: {e}"))?
-                    }
-                };
-                f(&mut inner)?;
-                // Reset encoded cache: inner was mutated by f.
-                *row = StagedRow::Live {
-                    inner,
-                    encoded: OnceLock::new(),
-                };
+                *row = StagedRow(f(&bytes)?);
             }
         }
         Ok(())
