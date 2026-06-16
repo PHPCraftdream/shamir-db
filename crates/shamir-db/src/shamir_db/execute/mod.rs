@@ -16,6 +16,7 @@
 //! - [`admin_function`]    — CreateFunction, DropFunction, RenameFunction, CreateFunctionFolder
 //! - [`admin_validator`]   — CreateValidator, DropValidator, RenameValidator, BindValidator, UnbindValidator, ListValidators
 //! - [`admin_retention`]   — SetRetention, PurgeHistory, ChangesSince
+//! - [`admin_interner`]    — InternerDump, InternerTouch
 //! - [`db_execute`]        — `impl ShamirDb { execute, execute_as }`
 //! - [`db_tx`]             — `impl ShamirDb { tx_begin, tx_begin_as, tx_execute, tx_execute_as, tx_commit, tx_commit_as }`
 
@@ -24,6 +25,7 @@ mod admin_buffer;
 mod admin_db_repo;
 mod admin_dispatch;
 mod admin_function;
+mod admin_interner;
 mod admin_list;
 mod admin_migration;
 mod admin_retention;
