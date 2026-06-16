@@ -64,3 +64,32 @@ C1 и C2 — один hot-spot (`query_runner.rs` BatchOp::Insert), делают
 **Инвариант корректности:** каждая return-mode (none / return_flagged /
 return_result) отдаёт **байт-идентичный** наблюдаемый вывод до и после. @oracle +
 батч/insert тесты зелёные на каждом цикле. Durability/SSI не трогаем.
+
+---
+
+## Итоги кампании (что реально сделано)
+
+Метрика: in-memory `bulk_insert/100` ns/строка. Старт **89.7µs**, финиш **54.5µs**
+= **×1.65** (≈11K → ≈18K rec/s на этом бенче). FLOOR (сырой store) = 2.5µs.
+
+| Цикл | Δ (измерено) | Коммит | Суть |
+|---|---|---|---|
+| **C1+C2** | 89.7→62.7, **−30%** | `78c7610` | убрать двойную сборку ответа (`QueryRecord::Inserted` + lazy-json-кэш) + O(N) deep-eq `values==op.values` → `contains_param_ref` скан |
+| C3 wal_ops | **0 (шум)** | откат | атрибуция профиля завышена; per-row тела уже refcounted Bytes |
+| C4 single-row skips | **шум (≤1%)** | откат | backpressure/join_all амортизированы; single-row «1.1ms» = cold-start lazy-init, не та метрика |
+| **C5 overlay-remap** | 62.7→54.5, **−13%** | `408d7cd` | implicit insert интернит в base напрямую → `rewrite_set_inner` deep-walk не выполняется (паттерн C1) |
+
+### Методологический урок
+**Эфемерная per-phase инструментация ненадёжна** для мелких бакетов — C3/C4 были
+реализованы по её числам и оказались измеренным нулём. Надёжный метод — **ablation:
+выключить фазу, замерить САМ бенч; Δ над variance (~±2µs) = реальная стоимость.**
+Ablation вскрыл единственную над-variance redundancy после C1+C2 (overlay-remap,
+−6.6µs) → C5. Прочее (JSON→InnerValue конверсия, msgpack-encode, overlay-publish)
+ablation подтвердил как **необходимую** работу — bulk-путь **у пола**.
+
+### Где дальше (за пределами дешёвой обвязки)
+Дешёвые redundant-win'ы исчерпаны (×1.65 взято). Дальше — **большие/архитектурные**:
+- ускорить **необходимую** per-row конверсию/encode (JSON→InnerValue, msgpack);
+- **disk/sustained-трек**: batch-drain (`set_many` на окно) + group-commit batching
+  (см. `durability-model.md` / `capstone-subplan.md`) — поднимает backend-bandwidth;
+- **cold-start** (lazy-init дренажа/gate/interner) — для эфемерных репо.
