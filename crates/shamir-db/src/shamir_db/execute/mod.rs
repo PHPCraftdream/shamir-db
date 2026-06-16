@@ -17,6 +17,7 @@
 //! - [`admin_validator`]   — CreateValidator, DropValidator, RenameValidator, BindValidator, UnbindValidator, ListValidators
 //! - [`admin_retention`]   — SetRetention, PurgeHistory, ChangesSince
 //! - [`admin_interner`]    — InternerDump, InternerTouch
+//! - [`ambient_interner`]  — ambient epoch-delta sync (Part A)
 //! - [`db_execute`]        — `impl ShamirDb { execute, execute_as }`
 //! - [`db_tx`]             — `impl ShamirDb { tx_begin, tx_begin_as, tx_execute, tx_execute_as, tx_commit, tx_commit_as }`
 
@@ -32,6 +33,7 @@ mod admin_retention;
 mod admin_table_index;
 mod admin_users_roles;
 mod admin_validator;
+mod ambient_interner;
 mod db_execute;
 mod db_tx;
 mod function_invoker;

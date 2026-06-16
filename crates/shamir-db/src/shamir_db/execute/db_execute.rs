@@ -5,6 +5,7 @@ use crate::query::batch::{execute_batch, BatchError, BatchOp, BatchRequest, Batc
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
+use super::ambient_interner::attach_interner_delta;
 use super::function_invoker::ShamirFunctionInvoker;
 use super::table_resolver::DbTableResolver;
 
@@ -69,7 +70,7 @@ impl ShamirDb {
         }
 
         let resolver = DbTableResolver {
-            db,
+            db: db.clone(),
             validators: self.validators().clone(),
         };
         let admin = ShamirAdminExecutor {
@@ -82,7 +83,7 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         };
-        execute_batch(
+        let mut response = execute_batch(
             request,
             &resolver,
             Some(&admin),
@@ -90,6 +91,18 @@ impl ShamirDb {
             actor,
             db_name,
         )
-        .await
+        .await?;
+
+        // Ambient interner epoch-delta sync (Stage 5-wire Part A): attach the
+        // server's per-repo delta for each epoch the client advertised. `db`
+        // is cloned above for the resolver; we reuse the original here.
+        // Errors are non-fatal (batch already succeeded) — logged + swallowed.
+        if !request.interner_epochs.is_empty() {
+            if let Err(e) = attach_interner_delta(&mut response, request, &db).await {
+                log::debug!("ambient interner delta attach skipped: {e}");
+            }
+        }
+
+        Ok(response)
     }
 }

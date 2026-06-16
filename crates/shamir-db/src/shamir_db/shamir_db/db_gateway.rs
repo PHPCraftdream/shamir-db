@@ -137,6 +137,7 @@ impl DbGateway for FacadeDbGateway {
             return_all: false,
             return_only: Some(vec!["r".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
+            interner_epochs: Default::default(),
         };
 
         let resp = self
@@ -194,6 +195,7 @@ impl DbGateway for FacadeDbGateway {
             return_all: false,
             return_only: Some(vec!["i".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
+            interner_epochs: Default::default(),
         };
 
         let resp = self
@@ -275,6 +277,7 @@ impl DbGateway for FacadeDbGateway {
             return_all: false,
             return_only: Some(vec!["q".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
+            interner_epochs: Default::default(),
         };
 
         let resp = self

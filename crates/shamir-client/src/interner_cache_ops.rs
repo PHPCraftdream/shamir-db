@@ -293,6 +293,23 @@ impl Client {
         self.interner_cache().get_or_create(db, repo).name_of(id)
     }
 
+    /// Merge a response's `interner_delta` into the per-`(db, repo)` cache.
+    ///
+    /// Ambient sync path (Stage 5-wire Part A): called from [`Client::execute`]
+    /// after every batch response. For each `(repo, delta)`: get-or-create the
+    /// FieldMap, `insert_entry(name, id)` for each entry (idempotent), then
+    /// `set_epoch(delta.epoch)` (CAS-max). §9.4-safe — ids come only from the
+    /// server response.
+    pub(crate) fn merge_interner_delta(&self, db: &str, response: &BatchResponse) {
+        for (repo, delta) in &response.interner_delta {
+            let fm = self.interner_cache().get_or_create(db, repo);
+            for (id, name) in &delta.entries {
+                fm.insert_entry(name, *id);
+            }
+            fm.set_epoch(delta.epoch);
+        }
+    }
+
     /// Explicit pre-touch write entry (Stage 5 mode a).
     ///
     /// Walks `batch`'s insert / set(upsert) / update records, collects the

@@ -1,7 +1,10 @@
 use shamir_collections::TMap;
 
 use crate::admin::{GroupRef, ResourceRef};
-use crate::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp, TransactionInfo};
+use crate::batch::{
+    BatchLimits, BatchOp, BatchRequest, BatchResponse, InternerDelta, QueryEntry, SubBatchOp,
+    TransactionInfo,
+};
 use crate::filter::FilterValue;
 
 fn roundtrip(json: &str) -> BatchOp {
@@ -498,6 +501,7 @@ fn nested_batch_serde_roundtrip() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
     };
     let mut bind = TMap::default();
     bind.insert("uid".to_string(), FilterValue::String("u1".into()));
@@ -530,6 +534,7 @@ fn nested_batch_empty_bind_omitted() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
     };
     let op = BatchOp::Batch(SubBatchOp {
         batch: inner,
@@ -562,6 +567,7 @@ fn nested_batch_is_admin() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
     };
     let op = BatchOp::Batch(SubBatchOp {
         batch: inner,
@@ -605,4 +611,125 @@ fn chown_function_serde() {
         },
         _ => panic!("expected Chown"),
     }
+}
+
+// ========================================================================
+// Ambient interner epoch-delta fields (Stage 5-wire Part A)
+// ========================================================================
+
+#[test]
+fn batch_request_interner_epochs_omitted_when_empty() {
+    let req = BatchRequest {
+        id: serde_json::json!(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: TMap::default(),
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(
+        !json.contains("interner_epochs"),
+        "empty interner_epochs must be omitted: {json}"
+    );
+    let back: BatchRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(req, back);
+}
+
+#[test]
+fn batch_request_interner_epochs_roundtrip() {
+    let mut epochs = TMap::default();
+    epochs.insert("repo_a".to_string(), 5u64);
+    epochs.insert("repo_b".to_string(), 42u64);
+    let req = BatchRequest {
+        id: serde_json::json!(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: TMap::default(),
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: epochs,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(
+        json.contains("interner_epochs"),
+        "non-empty interner_epochs must appear: {json}"
+    );
+    let back: BatchRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(req, back);
+    assert_eq!(back.interner_epochs.get("repo_a"), Some(&5u64));
+    assert_eq!(back.interner_epochs.get("repo_b"), Some(&42u64));
+}
+
+#[test]
+fn batch_request_backward_compat_old_peer_no_field() {
+    // An old client that doesn't know interner_epochs sends JSON without it.
+    let json = r#"{"id":1,"queries":{}}"#;
+    let req: BatchRequest = serde_json::from_str(json).unwrap();
+    assert!(req.interner_epochs.is_empty());
+}
+
+#[test]
+fn batch_response_interner_delta_omitted_when_empty() {
+    let resp = BatchResponse {
+        id: serde_json::json!(1),
+        results: TMap::default(),
+        execution_plan: vec![],
+        execution_time_us: 0,
+        transaction: None,
+        interner_delta: TMap::default(),
+    };
+    let json = serde_json::to_string(&resp).unwrap();
+    assert!(
+        !json.contains("interner_delta"),
+        "empty interner_delta must be omitted: {json}"
+    );
+    let back: BatchResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(resp, back);
+}
+
+#[test]
+fn batch_response_interner_delta_roundtrip() {
+    let mut delta = TMap::default();
+    delta.insert(
+        "main".to_string(),
+        InternerDelta {
+            epoch: 10,
+            entries: vec![(7, "alpha".to_string()), (8, "beta".to_string())],
+        },
+    );
+    let resp = BatchResponse {
+        id: serde_json::json!(1),
+        results: TMap::default(),
+        execution_plan: vec![],
+        execution_time_us: 0,
+        transaction: None,
+        interner_delta: delta,
+    };
+    let json = serde_json::to_string(&resp).unwrap();
+    assert!(
+        json.contains("interner_delta"),
+        "non-empty interner_delta must appear: {json}"
+    );
+    let back: BatchResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(resp, back);
+    let d = back.interner_delta.get("main").expect("main delta");
+    assert_eq!(d.epoch, 10);
+    assert_eq!(d.entries.len(), 2);
+    assert_eq!(d.entries[0], (7, "alpha".to_string()));
+}
+
+#[test]
+fn batch_response_backward_compat_old_peer_no_field() {
+    // An old server that doesn't know interner_delta sends JSON without it.
+    let json = r#"{"id":1,"results":{},"execution_plan":[],"execution_time_us":0}"#;
+    let resp: BatchResponse = serde_json::from_str(json).unwrap();
+    assert!(resp.interner_delta.is_empty());
 }

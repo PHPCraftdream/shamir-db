@@ -95,6 +95,16 @@ pub struct BatchRequest {
     /// Execution limits (security).
     #[serde(default = "BatchLimits::default")]
     pub limits: BatchLimits,
+
+    /// Per-repo interner epochs the client has cached (Stage 5-wire Part A).
+    ///
+    /// Keyed by repo name; value is the client's current gap-free high-water
+    /// epoch for that repo's interner. The server attaches a per-repo
+    /// [`InternerDelta`](super::interner_delta::InternerDelta) to the response
+    /// for every entry here. Backward-compatible: `#[serde(default)]` → old
+    /// clients / servers that don't know the field leave it empty.
+    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    pub interner_epochs: TMap<String, u64>,
 }
 
 fn default_return_all() -> bool {

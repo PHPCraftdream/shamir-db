@@ -69,6 +69,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
     };
 
     let mut response = BatchResponse {
@@ -77,6 +78,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         execution_plan: vec![],
         execution_time_us: 0,
         transaction: None,
+        interner_delta: Default::default(),
     };
     response.results.insert(
         "my_sub".to_string(),

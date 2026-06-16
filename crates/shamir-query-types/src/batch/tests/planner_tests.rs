@@ -47,6 +47,7 @@ fn empty_batch_request() -> BatchRequest {
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
     }
 }
 
@@ -61,6 +62,7 @@ fn batch_request_with_queries(queries: TMap<String, QueryEntry>) -> BatchRequest
         return_all: true,
         return_only: None,
         limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
     }
 }
 

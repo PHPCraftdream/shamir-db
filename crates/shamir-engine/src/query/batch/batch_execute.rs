@@ -157,6 +157,9 @@ pub(super) fn execute_batch_impl<'a>(
             execution_plan: std::mem::take(&mut plan.stages),
             execution_time_us: elapsed.as_micros() as u64,
             transaction: tx_info,
+            // Ambient interner deltas are attached server-side (shamir-db's
+            // execute_as post-processing); the engine layer leaves this empty.
+            interner_delta: Default::default(),
         })
     }) // end Box::pin
 }
