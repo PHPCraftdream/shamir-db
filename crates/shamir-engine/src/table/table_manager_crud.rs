@@ -162,10 +162,7 @@ impl TableManager {
                 // Now record this row's unique-index claims so the
                 // next iteration sees them.
                 for def in self.index_manager.iter_unique_indexes() {
-                    if let Some(vs) =
-                        crate::index::index_manager::IndexManager::extract_index_values(
-                            v, &def.paths,
-                        )
+                    if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
                     {
                         let key = bincode::serialize(&vs)
                             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
@@ -271,6 +268,10 @@ impl TableManager {
 
             // Check each row against persisted state.
             for (id, old, new_val) in pairs {
+                // `old`/`new_val` are `&&InnerValue` (pairs is
+                // `&[(RecordId, &InnerValue, &InnerValue)]`); collapse to
+                // `&InnerValue` for the `&(impl RecordRef + ?Sized)` bound.
+                let (old, new_val) = (*old, *new_val);
                 self.index_manager
                     .validate_unique_for_update(id, old, new_val)
                     .await?;
@@ -281,11 +282,10 @@ impl TableManager {
             let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
                 std::collections::HashSet::default();
             for (i, (_id, _old, new_val)) in pairs.iter().enumerate() {
+                let new_val = *new_val;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) =
-                        crate::index::index_manager::IndexManager::extract_index_values(
-                            new_val, &def.paths,
-                        )
+                        crate::index::index_keys::extract_index_leaves(new_val, &def.paths)
                     {
                         let key =
                             bincode::serialize(&vs).map_err(|e| DbError::Codec(e.to_string()))?;
@@ -325,6 +325,10 @@ impl TableManager {
 
         // 3. Index maintenance — per-record (no batched update API).
         for (id, old, new_val) in pairs {
+            // `old`/`new_val` are `&&InnerValue` (pairs is
+            // `&[(RecordId, &InnerValue, &InnerValue)]`); collapse to
+            // `&InnerValue` for the `&(impl RecordRef + ?Sized)` bound.
+            let (old, new_val) = (*old, *new_val);
             self.index_manager
                 .on_record_updated(id, old, new_val)
                 .await?;
@@ -332,7 +336,7 @@ impl TableManager {
                 .on_record_updated_unique(id, old, new_val)
                 .await?;
             self.sorted_indexes
-                .on_record_updated(id, *old, *new_val, batch_version)
+                .on_record_updated(id, old, new_val, batch_version)
                 .await?;
             self.index2_on_update(id, old, new_val).await;
         }

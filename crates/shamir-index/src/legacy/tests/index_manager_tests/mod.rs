@@ -1,5 +1,6 @@
 pub mod basic_tests;
 pub mod btree_tests;
+pub mod byte_identity_tests;
 pub mod composite_tests;
 pub mod concurrency_tests;
 pub mod helpers;

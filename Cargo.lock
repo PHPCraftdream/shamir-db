@@ -3888,6 +3888,7 @@ dependencies = [
  "fxhash",
  "hnsw_rs",
  "log",
+ "num-bigint",
  "rmp-serde",
  "rust-stemmers",
  "rust_decimal",
