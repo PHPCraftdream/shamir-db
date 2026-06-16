@@ -332,7 +332,7 @@ impl TableManager {
                 .on_record_updated_unique(id, old, new_val)
                 .await?;
             self.sorted_indexes
-                .on_record_updated(id, old, new_val, batch_version)
+                .on_record_updated(id, *old, *new_val, batch_version)
                 .await?;
             self.index2_on_update(id, old, new_val).await;
         }

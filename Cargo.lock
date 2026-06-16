@@ -3890,6 +3890,7 @@ dependencies = [
  "log",
  "rmp-serde",
  "rust-stemmers",
+ "rust_decimal",
  "scc",
  "serde",
  "serde_json",

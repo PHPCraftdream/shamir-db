@@ -25,6 +25,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
+use smallvec::SmallVec;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
 // module continue to compile unchanged after the type moved to its own file.
 pub use crate::legacy::sorted_index_definition::SortedIndexDefinition;
@@ -35,6 +36,8 @@ use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
+use shamir_types::record_view::RecordRef;
+use shamir_types::record_view::ScalarRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -180,7 +183,7 @@ impl SortedIndexManager {
     pub fn plan_record_created(
         &self,
         record_id: &RecordId,
-        record: &InnerValue,
+        record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
         if self.indexes.is_empty() {
@@ -207,13 +210,14 @@ impl SortedIndexManager {
     /// pass, snapshotting `iter_indexes()` ONCE (the per-row
     /// `plan_record_created` re-snapshots every call). Used by the
     /// tx batch insert path.
-    pub fn plan_records_created_batch<'a, I>(
+    pub fn plan_records_created_batch<'a, R, I>(
         &self,
         items: I,
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         if self.indexes.is_empty() {
             return Ok(Vec::new());
@@ -240,8 +244,8 @@ impl SortedIndexManager {
     pub fn plan_record_updated(
         &self,
         record_id: &RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(impl RecordRef + ?Sized),
+        new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
         if self.indexes.is_empty() {
@@ -298,7 +302,7 @@ impl SortedIndexManager {
     pub fn plan_record_deleted(
         &self,
         record_id: &RecordId,
-        record: &InnerValue,
+        record: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if self.indexes.is_empty() {
             return Ok(Vec::new());
@@ -345,7 +349,7 @@ impl SortedIndexManager {
     pub async fn on_record_created(
         &self,
         record_id: &RecordId,
-        record: &InnerValue,
+        record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
         let ops = self.plan_record_created(record_id, record, version)?;
@@ -356,8 +360,8 @@ impl SortedIndexManager {
     pub async fn on_record_updated(
         &self,
         record_id: &RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
+        old: &(impl RecordRef + ?Sized),
+        new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
         let ops = self.plan_record_updated(record_id, old, new, version)?;
@@ -369,9 +373,10 @@ impl SortedIndexManager {
     /// `Store::set_many` call. Borrow-only — no `InnerValue` clones
     /// except for covering-index projection (unavoidable: projection
     /// requires a deep clone of the leaf value).
-    pub async fn on_records_created_batch<'a, I>(&self, items: I, version: u64) -> DbResult<()>
+    pub async fn on_records_created_batch<'a, R, I>(&self, items: I, version: u64) -> DbResult<()>
     where
-        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+        R: RecordRef + ?Sized + 'a,
+        I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
         if self.indexes.is_empty() {
             return Ok(());
@@ -402,7 +407,7 @@ impl SortedIndexManager {
     pub async fn on_record_deleted(
         &self,
         record_id: &RecordId,
-        record: &InnerValue,
+        record: &(impl RecordRef + ?Sized),
     ) -> DbResult<()> {
         let ops = self.plan_record_deleted(record_id, record)?;
         self.apply_ops(&ops).await
@@ -760,7 +765,7 @@ impl SortedIndexManager {
     /// True iff `record` carries a value at `field_path` that the
     /// sort codec can encode (i.e. an entry for this record *should*
     /// exist in a sorted index keyed on this path).
-    pub fn has_indexable_value(record: &InnerValue, field_path: &[u64]) -> bool {
+    pub fn has_indexable_value(record: &(impl RecordRef + ?Sized), field_path: &[u64]) -> bool {
         matches!(extract_and_encode(record, field_path), Ok(Some(_)))
     }
 
@@ -849,8 +854,8 @@ type CoveringProjection = Vec<(String, InnerValue)>;
 /// `SortedIndexDefinition` that has non-empty `included_fields_interned`.
 ///
 /// For each included field path:
-///   - Walk `record` by the interned path segments using `resolve_path_ref`.
-///   - If the leaf is present, push `(path_joined_with_dots, leaf.clone())`.
+///   - Walk `record` by the interned path segments via `RecordRef::materialize_at`.
+///   - If the leaf is present, push `(path_joined_with_dots, leaf)` (owned).
 ///   - Missing paths are silently skipped.
 ///
 /// Returns `Bytes::new()` when no fields could be resolved (backward-compat:
@@ -864,7 +869,7 @@ type CoveringProjection = Vec<(String, InnerValue)>;
 /// The `version` parameter should be the MVCC write version for the record
 /// being indexed (pass `0` when no MVCC store is attached).
 fn build_covering_projection(
-    record: &InnerValue,
+    record: &(impl RecordRef + ?Sized),
     def: &SortedIndexDefinition,
     version: u64,
 ) -> Bytes {
@@ -877,9 +882,11 @@ fn build_covering_projection(
         if path_ids.is_empty() {
             continue;
         }
-        if let Some(leaf) = resolve_path_ref(record, path_ids) {
+        let ipath: SmallVec<[InternerKey; 4]> =
+            path_ids.iter().map(|&id| InternerKey::new(id)).collect();
+        if let Some(leaf) = record.materialize_at(&ipath) {
             let key_str = path_strs.join(".");
-            projection.push((key_str, leaf.clone()));
+            projection.push((key_str, leaf));
         }
     }
     if projection.is_empty() {
@@ -916,47 +923,36 @@ pub fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, Inn
 /// `sort_codec`. Returns `None` if the field is missing or has a type
 /// we don't index (we intentionally skip such records — they won't
 /// surface in sorted lookups).
-fn extract_and_encode(record: &InnerValue, field_path: &[u64]) -> DbResult<Option<Vec<u8>>> {
-    let Some(val) = resolve_path_ref(record, field_path) else {
+///
+/// Reads the scalar via `RecordRef::scalar_at` and dispatches to the
+/// SAME `sort_codec::encode_*` primitives the legacy `&InnerValue` path
+/// used. `scalar_at` yields exactly {Null, Bool, Int, F64, Str, Bin} for
+/// comparable scalars and `None` for Dec/Big/containers/absent —
+/// byte-identical to the previous `resolve_path_ref` + InnerValue match,
+/// including all the skip cases.
+fn extract_and_encode(
+    rec: &(impl RecordRef + ?Sized),
+    field_path: &[u64],
+) -> DbResult<Option<Vec<u8>>> {
+    let ipath: SmallVec<[InternerKey; 4]> =
+        field_path.iter().map(|&id| InternerKey::new(id)).collect();
+    let Some(sr) = rec.scalar_at(&ipath) else {
         return Ok(None);
     };
     let mut buf = Vec::new();
-    match val {
-        InnerValue::Null => sort_codec::encode_null(&mut buf),
-        InnerValue::Bool(b) => sort_codec::encode_bool(&mut buf, *b),
-        InnerValue::Int(i) => sort_codec::encode_i64(&mut buf, *i),
-        InnerValue::F64(f) => {
-            if sort_codec::encode_f64(&mut buf, *f).is_err() {
+    match sr {
+        ScalarRef::Null => sort_codec::encode_null(&mut buf),
+        ScalarRef::Bool(b) => sort_codec::encode_bool(&mut buf, b),
+        ScalarRef::Int(i) => sort_codec::encode_i64(&mut buf, i),
+        ScalarRef::F64(f) => {
+            if sort_codec::encode_f64(&mut buf, f).is_err() {
                 return Ok(None);
             }
         }
-        InnerValue::Str(s) => sort_codec::encode_str(&mut buf, s),
-        InnerValue::Bin(b) => sort_codec::encode_bytes(&mut buf, b),
-        _ => return Ok(None),
+        ScalarRef::Str(s) => sort_codec::encode_str(&mut buf, s),
+        ScalarRef::Bin(b) => sort_codec::encode_bytes(&mut buf, b),
     }
     Ok(Some(buf))
-}
-
-/// Walk `record` along `field_path`, returning a borrow of the leaf.
-///
-/// The previous owned-`InnerValue` version started with
-/// `let mut cur = record.clone()` — a *full* deep clone of the
-/// entire record on every sorted-index entry, even when the path
-/// resolved to a 4-byte Int leaf. For batch writes that's a clone
-/// per (record × sorted-index) pair on the hot path. The ref walk
-/// allocates nothing — same shape as `IndexManager::extract_value_by_path_ref`.
-fn resolve_path_ref<'a>(record: &'a InnerValue, field_path: &[u64]) -> Option<&'a InnerValue> {
-    let mut cur = record;
-    for &p in field_path {
-        match cur {
-            InnerValue::Map(map) => {
-                let key = InternerKey::new(p);
-                cur = map.get(&key)?;
-            }
-            _ => return None,
-        }
-    }
-    Some(cur)
 }
 
 fn decode_record_id_suffix(key_bytes: &[u8]) -> Option<RecordId> {
