@@ -209,7 +209,7 @@ impl TableManager {
             )> = batch.iter().map(|(rid, val)| (*rid, val)).collect();
             for backend in &backends {
                 for (rid, val) in items.iter() {
-                    let ops = backend.plan_insert(*rid, val).await.map_err(|e| {
+                    let ops = backend.plan_insert(*rid, *val).await.map_err(|e| {
                         shamir_storage::error::DbError::Internal(format!(
                             "bulk_populate_index2 plan_insert failed: {}",
                             e
