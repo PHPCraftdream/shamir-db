@@ -3,6 +3,12 @@
 //! `IndexExpr` is a closed whitelist of deterministic, side-effect-free
 //! transforms over `InnerValue`. No I/O, no time-dependency, no WASM.
 //! Each function is O(1) or O(n) in the size of the input string.
+//!
+//! §5b floor: `eval` takes a `RecordRef` lens (no input conversion); its
+//! result is an OWNED COMPUTED value (a transform output, not a record
+//! materialization), so it is irreducibly `InnerValue`. The single record
+//! touch is `materialize_at` on the `Field` leaf — the `RecordRef` trait's
+//! documented escape hatch.
 
 use serde::{Deserialize, Serialize};
 use shamir_types::core::interner::InternerKey;
@@ -56,6 +62,7 @@ impl IndexExpr {
     ///
     /// Generic over `RecordRef` so both `InnerValue` (tree) and
     /// `RecordView` (zero-copy lens) callers work without conversion.
+    /// Returns an owned computed value (§5b floor — not a record materialization).
     pub fn eval(&self, rec: &(impl RecordRef + ?Sized)) -> Result<InnerValue, ExprError> {
         match self {
             IndexExpr::Field(path) => {

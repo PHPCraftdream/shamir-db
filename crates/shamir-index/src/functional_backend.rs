@@ -56,6 +56,9 @@ impl FunctionalBackend {
         build_posting_key(self.descriptor.id, type_tag::FUNCTIONAL, &h, rid)
     }
 
+    /// Evaluate the index expression, collapsing every `ExprError` to
+    /// `InnerValue::Null` so a missing/typed-wrong field yields a stable
+    /// posting key. The result is the owned computed value (§5b floor).
     fn eval_or_null(&self, rec: &dyn RecordRef) -> InnerValue {
         match self.expr.eval(rec) {
             Ok(v) => v,
@@ -89,6 +92,13 @@ impl FunctionalBackend {
     }
 }
 
+/// Hash a computed expression value into the FUNCTIONAL posting key using
+/// EXPLICIT u8 type tags (0..=6, 255), NOT `std::mem::discriminant`.
+///
+/// §5b/byte-identity floor: this is the persisted posting hash format —
+/// the tag scheme is part of on-disk index compatibility and must stay
+/// stable. The `InnerValue` here is the owned computed expression result
+/// (see `IndexExpr::eval`), not a record materialization.
 fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
     match val {
         InnerValue::Null => h.write_u8(0),
