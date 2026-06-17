@@ -24,6 +24,7 @@ use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     inner_to_json_value, merge_storage_bytes, query_value_to_inner, query_value_to_inner_with,
     query_value_to_storage_bytes, record_view_to_json_value, record_view_to_query_value,
+    validate_keys_resolve_interner,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -176,18 +177,76 @@ impl TableManager {
         // feed `insert_tx_many_bytes`, which builds `RecordView`s over the
         // bytes and drives every index/unique/vector planner through the
         // zero-copy lens. No InnerValue tree is built on the insert path.
-        let ids: Vec<RecordId> = self.insert_tx_many_bytes(&staged, tx).await?;
+        let values_ids: Vec<RecordId> = self.insert_tx_many_bytes(&staged, tx).await?;
+
+        // S-write id-keyed branch: accept pre-encoded id-msgpack records
+        // from `op.records_idmsgpack`. For each record:
+        //   1. Structural validation — `RecordView::new` (must be a msgpack map).
+        //   2. Security spine — `validate_keys_resolve_interner` confirms every
+        //      interned key id resolves in the server interner. REJECT the whole
+        //      op on first unresolved id — never write bytes with stale/forged keys.
+        //   3. Per-write interning is SKIPPED (the client already interned all
+        //      keys; `tx.interner_deltas` for this branch is empty).
+        //   4. Validators — if any Insert validators are bound, decode each row
+        //      via `record_view_to_query_value` and run `run_validators_qv`.
+        //      If no validators are bound, skip the decode entirely (lens-only).
+        //   5. Feed the validated bytes verbatim to `insert_tx_many_bytes` —
+        //      same lens-driven path as the `values` branch above.
+        //
+        // When BOTH `values` and `records_idmsgpack` are non-empty, the
+        // `values` records are inserted first and their IDs appear first in
+        // the combined result.
+        let idmsgpack_ids: Vec<RecordId> = if op.records_idmsgpack.is_empty() {
+            Vec::new()
+        } else {
+            // Collect validated bytes — validate-before-collect so we never
+            // stage any bytes whose keys don't resolve (security invariant).
+            let mut idmsgpack_staged: Vec<Bytes> = Vec::with_capacity(op.records_idmsgpack.len());
+            // Check if any Insert validators are bound; if not, skip the
+            // per-row decode. One snapshot covers the whole batch.
+            let has_validators = {
+                let bindings = self.validator_bindings();
+                bindings.iter().any(|b| b.ops.contains(&WriteOp::Insert))
+            };
+            for buf in &op.records_idmsgpack {
+                // 1. Structural validation — reject non-map bytes.
+                let view = RecordView::new(buf.as_ref()).map_err(|e| {
+                    shamir_storage::error::DbError::Validation(format!(
+                        "execute_insert_tx (id-keyed): malformed record bytes: {e}"
+                    ))
+                })?;
+                // 2. Security spine — reject if any key id is unresolved.
+                validate_keys_resolve_interner(&view, interner).map_err(|e| {
+                    shamir_storage::error::DbError::Validation(format!(
+                        "execute_insert_tx (id-keyed): unresolved interner key — {e}"
+                    ))
+                })?;
+                // 3. Validators — only decode when validators are actually bound.
+                if has_validators {
+                    let qv = record_view_to_query_value(&view, interner)?;
+                    self.run_validators_qv(WriteOp::Insert, Some(&qv), None, &Actor::System)
+                        .await
+                        .map_err(validator_failure_to_db_error)?;
+                }
+                idmsgpack_staged.push(Bytes::copy_from_slice(buf.as_ref()));
+            }
+            self.insert_tx_many_bytes(&idmsgpack_staged, tx).await?
+        };
+
+        // Merge IDs: values first, then id-keyed (deterministic ordering).
+        let mut all_ids = values_ids;
+        all_ids.extend_from_slice(&idmsgpack_ids);
 
         // Skip result-map assembly for fire-and-forget inserts
         // (return_result=false) — avoids per-row serde_json::Map build
         // and QueryValue→json::Value clone on the hot batch-insert path.
         let records = if return_result {
-            build_insert_result_records(&resolved_values, &ids)
+            build_insert_result_records(&resolved_values, &all_ids[..resolved_values.len()])
         } else {
             Vec::new()
         };
 
-        let affected = ids.len() as u64;
+        let affected = all_ids.len() as u64;
         Ok(WriteResult {
             affected,
             records,
