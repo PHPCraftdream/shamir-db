@@ -50,8 +50,22 @@ intern/de-intern/дерева на операцию**.
   `inner_value_to_query_value` уходят с горячего read-пути.
 - **S-client** (достройка Stage 5): intern-on-send + de-intern-on-recv +
   батч-pre-touch. Кеш/ambient-delta уже есть.
-- **S-json**: удалить JSON-приём **записей** (костыль) → wire по данным
-  msgpack-only.
+- **S-json (ЯВНАЯ ЦЕЛЬ — full JSON elimination)**: убрать JSON из data-плоскости
+  **полностью** и удалить все связанные типы/кодеки. Масштаб: `serde_json`/
+  `json::Value` — **742 вхождения / 120 файлов**, почти все крейты. Разбивка:
+  - **GO (внутреннее):** доминирующий потребитель — весь **read-result pipeline**
+    (`query/read/*`: project/order/aggregate/distinct строят `json::Value`) →
+    перевести на `QueryValue`/id-msgpack; wire-DTO (`query-types` несут json::Value)
+    → id-msgpack; удалить `json_to_inner`/`inner_to_json*`/`QueryValue↔json` мост
+    (`types/value.rs`, `codecs/interned/json.rs`).
+  - **Не-стены:** funclib `json.rs` = 3 сайта (работает на InnerValue, не serde_json);
+    wasm `host_call.rs` = 0 serde_json.
+  - **Граница (решение):** FFI napi (`shamir-client-node`) + TS (`shamir-client-ts`)
+    — формат внешнего API; вне дефолт-workspace; full-removal там = внешние клиенты
+    только msgpack (продуктовое решение).
+  - **Контрол-плоскость** (`shamir-db` admin/system) — под-развилка: типизировать/
+    msgpack vs оставить JSON только в admin.
+  Это отдельная под-кампания по крейтам (фундамент: types → query-types → engine‖…).
 - **W3** (исслед. @aoh): update/delete тоже tree-free — вписывается как «запись
   полностью без дерева».
 
