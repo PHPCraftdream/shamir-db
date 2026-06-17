@@ -15,13 +15,12 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::{inner_value_to_query_value, json_value_to_inner, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::scalar_ref_cmp;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::TMap;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::{InnerValue, QueryValue, Value};
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::validator::ValidatorFailure;
 
@@ -60,7 +59,7 @@ pub(super) fn validator_failure_to_db_error(
 /// by their computed result before the record is interned and persisted.
 pub(super) fn is_computed_field(v: &QueryValue) -> bool {
     match v {
-        Value::Map(m) => m.contains_key("$fn"),
+        QueryValue::Map(m) => m.contains_key("$fn"),
         _ => false,
     }
 }
@@ -82,10 +81,10 @@ pub(super) fn is_computed_field(v: &QueryValue) -> bool {
 /// `any()` scan.
 pub(super) fn resolve_computed_record<'a>(
     value: &'a QueryValue,
-    interner: &Interner,
+    _interner: &Interner,
 ) -> Result<Cow<'a, QueryValue>, String> {
     let obj = match value {
-        Value::Map(m) => m,
+        QueryValue::Map(m) => m,
         _ => return Ok(Cow::Borrowed(value)),
     };
     if !obj.values().any(is_computed_field) {
@@ -111,53 +110,56 @@ pub(super) fn resolve_computed_record<'a>(
         let jv = serde_json::Value::from(v.clone());
         let fv: FilterValue =
             serde_json::from_value(jv).map_err(|e| format!("computed field '{k}': {e}"))?;
-        let result = eval_write_value(&fv, &literal, interner, scalars)
+        // C6 (#80): eval_write_value now returns QueryValue directly — the
+        // $fn round-trip (inner→query→funclib→query→inner) is gone, and the
+        // result flows straight into the (already QueryValue) record map.
+        let result = eval_write_value(&fv, &literal, scalars)
             .map_err(|e| format!("computed field '{k}': {e}"))?;
-        out.insert(
-            k.clone(),
-            inner_value_to_query_value(&result, interner)
-                .map_err(|e| format!("computed field '{k}': {e}"))?,
-        );
+        out.insert(k.clone(), result);
     }
-    Ok(Cow::Owned(Value::Map(out)))
+    Ok(Cow::Owned(QueryValue::Map(out)))
 }
 
-/// Evaluate a [`FilterValue`] to an [`InnerValue`] in the write-time computed
+/// Evaluate a [`FilterValue`] to a [`QueryValue`] in the write-time computed
 /// context: literals map directly, `$ref` navigates `literal` (the record's
-/// own literal fields), and `$fn` dispatches recursively through the scalar
-/// registry.
+/// own literal fields) via the natural serde_json → QueryValue conversion,
+/// and `$fn` dispatches recursively through the scalar registry.
+///
+/// C6 (#80): the `$fn` branch builds QueryValue args and keeps the funclib
+/// result as QueryValue — the previous `inner→query→funclib→query→inner`
+/// round-trip (old lines 152/159) is retired. The result flows straight
+/// into the record map (already QueryValue per M2).
 pub(super) fn eval_write_value(
     fv: &FilterValue,
     literal: &serde_json::Map<String, serde_json::Value>,
-    interner: &Interner,
     scalars: &ScalarRegistry,
-) -> Result<InnerValue, String> {
+) -> Result<QueryValue, String> {
     match fv {
-        FilterValue::Null => Ok(InnerValue::Null),
-        FilterValue::Bool(b) => Ok(InnerValue::Bool(*b)),
-        FilterValue::Int(i) => Ok(InnerValue::Int(*i)),
-        FilterValue::Float(f) => Ok(InnerValue::F64(*f)),
-        FilterValue::String(s) => Ok(InnerValue::Str(s.clone())),
-        FilterValue::Binary(b) => Ok(InnerValue::Bin(b.clone())),
+        FilterValue::Null => Ok(QueryValue::Null),
+        FilterValue::Bool(b) => Ok(QueryValue::Bool(*b)),
+        FilterValue::Int(i) => Ok(QueryValue::Int(*i)),
+        FilterValue::Float(f) => Ok(QueryValue::F64(*f)),
+        FilterValue::String(s) => Ok(QueryValue::Str(s.clone())),
+        FilterValue::Binary(b) => Ok(QueryValue::Bin(b.clone())),
         FilterValue::FieldRef { path } => {
             let leaf = json_nav(literal, path).ok_or_else(|| {
                 format!("$ref '{}' not found among literal fields", path.join("."))
             })?;
-            json_value_to_inner(leaf, interner).map_err(|e| e.to_string())
+            // serde_json::Value is already string-keyed, so this is the
+            // natural QueryValue target — no InnerValue crossing needed.
+            Ok(QueryValue::from(leaf.clone()))
         }
         FilterValue::FnCall { call } => {
+            // Args are QueryValue → straight to funclib; result kept as
+            // QueryValue. Zero InnerValue, zero round-trip (C6 #80).
             let mut qv_args = Vec::with_capacity(call.args().len());
             for a in call.args() {
-                let iv = eval_write_value(a, literal, interner, scalars)?;
-                let qv = inner_value_to_query_value(&iv, interner)
-                    .map_err(|e| format!("{}: {}", call.name(), e))?;
+                let qv = eval_write_value(a, literal, scalars)?;
                 qv_args.push(qv);
             }
-            let qv_result = scalars
+            scalars
                 .call(call.name(), &qv_args)
-                .map_err(|e| format!("{}: {}", call.name(), e.code))?;
-            query_value_to_inner(&qv_result, interner)
-                .map_err(|e| format!("{}: {}", call.name(), e))
+                .map_err(|e| format!("{}: {}", call.name(), e.code))
         }
         _ => Err("unsupported computed value variant".to_string()),
     }

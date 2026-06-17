@@ -1,6 +1,6 @@
 use crate::query::filter::eval::{compare_values, resolve_field};
 use shamir_types::core::interner::Interner;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::helpers::{make_alice_record, make_nested_record};
 
@@ -52,15 +52,15 @@ fn test_resolve_field_empty_path() {
 fn test_compare_values_int() {
     use std::cmp::Ordering;
     assert_eq!(
-        compare_values(&InnerValue::Int(10), &InnerValue::Int(20)),
+        compare_values(&QueryValue::Int(10), &QueryValue::Int(20)),
         Some(Ordering::Less)
     );
     assert_eq!(
-        compare_values(&InnerValue::Int(20), &InnerValue::Int(20)),
+        compare_values(&QueryValue::Int(20), &QueryValue::Int(20)),
         Some(Ordering::Equal)
     );
     assert_eq!(
-        compare_values(&InnerValue::Int(30), &InnerValue::Int(20)),
+        compare_values(&QueryValue::Int(30), &QueryValue::Int(20)),
         Some(Ordering::Greater)
     );
 }
@@ -70,15 +70,15 @@ fn test_compare_values_str() {
     use std::cmp::Ordering;
     assert_eq!(
         compare_values(
-            &InnerValue::Str("abc".into()),
-            &InnerValue::Str("def".into())
+            &QueryValue::Str("abc".into()),
+            &QueryValue::Str("def".into())
         ),
         Some(Ordering::Less)
     );
     assert_eq!(
         compare_values(
-            &InnerValue::Str("abc".into()),
-            &InnerValue::Str("abc".into())
+            &QueryValue::Str("abc".into()),
+            &QueryValue::Str("abc".into())
         ),
         Some(Ordering::Equal)
     );
@@ -88,7 +88,7 @@ fn test_compare_values_str() {
 fn test_compare_values_float() {
     use std::cmp::Ordering;
     assert_eq!(
-        compare_values(&InnerValue::F64(1.0), &InnerValue::F64(2.0)),
+        compare_values(&QueryValue::F64(1.0), &QueryValue::F64(2.0)),
         Some(Ordering::Less)
     );
 }
@@ -97,7 +97,7 @@ fn test_compare_values_float() {
 fn test_compare_values_int_float_cross() {
     use std::cmp::Ordering;
     assert_eq!(
-        compare_values(&InnerValue::Int(10), &InnerValue::F64(10.5)),
+        compare_values(&QueryValue::Int(10), &QueryValue::F64(10.5)),
         Some(Ordering::Less)
     );
 }
@@ -106,7 +106,7 @@ fn test_compare_values_int_float_cross() {
 fn test_compare_values_null() {
     use std::cmp::Ordering;
     assert_eq!(
-        compare_values(&InnerValue::Null, &InnerValue::Null),
+        compare_values(&QueryValue::Null, &QueryValue::Null),
         Some(Ordering::Equal)
     );
 }
@@ -114,7 +114,7 @@ fn test_compare_values_null() {
 #[test]
 fn test_compare_values_incompatible() {
     assert_eq!(
-        compare_values(&InnerValue::Int(1), &InnerValue::Str("a".into())),
+        compare_values(&QueryValue::Int(1), &QueryValue::Str("a".into())),
         None
     );
 }

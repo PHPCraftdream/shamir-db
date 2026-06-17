@@ -10,6 +10,6 @@ pub use super::filter_callback::FilterCallback;
 pub use super::filter_node::{CompareOp, FilterNode};
 pub use super::index_range::predicate_to_index_range;
 pub use super::resolve::{
-    compare_values, filter_value_to_inner, intern_field_path, resolve_field, resolve_field_ref,
-    resolve_filter_value,
+    compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path, resolve_field,
+    resolve_field_ref, resolve_filter_query, resolve_filter_value,
 };

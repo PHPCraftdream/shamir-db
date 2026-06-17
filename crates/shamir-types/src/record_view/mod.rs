@@ -48,7 +48,7 @@ pub(crate) use lens::skip_value;
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
 pub use record_ref::RecordRef;
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};
-pub use scalar_ref::{scalar_ref_cmp, ScalarRef};
+pub use scalar_ref::{scalar_ref_cmp, scalar_ref_cmp_qv, ScalarRef};
 
 #[cfg(test)]
 mod tests;

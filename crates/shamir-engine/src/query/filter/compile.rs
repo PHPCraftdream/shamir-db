@@ -2,7 +2,7 @@ use shamir_collections::TSet;
 
 use super::filter_node::{CompareOp, FilterNode};
 use super::fts::like_pattern_to_regex;
-use super::resolve::{filter_value_to_inner, intern_field_path, intern_field_path_compact};
+use super::resolve::{filter_value_to_query, intern_field_path, intern_field_path_compact};
 use crate::query::filter::{Filter, FilterValue};
 use regex::Regex;
 use shamir_types::core::interner::Interner;
@@ -86,7 +86,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::Contains { field, value } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::Contains {
                 field_path: path,
-                pre_resolved: filter_value_to_inner(value),
+                pre_resolved: filter_value_to_query(value),
                 value: value.clone(),
             },
             None => FilterNode::False,
@@ -102,8 +102,8 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::Between { field, from, to } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::Between {
                 field_path: path,
-                pre_from: filter_value_to_inner(from),
-                pre_to: filter_value_to_inner(to),
+                pre_from: filter_value_to_query(from),
+                pre_to: filter_value_to_query(to),
                 from: from.clone(),
                 to: to.clone(),
             },
@@ -152,7 +152,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             match build_index_expr(expr_op, field, expr_args.as_deref(), interner) {
                 Some(expr) => FilterNode::ComputedCompare {
                     expr: Box::new(expr),
-                    pre_resolved: filter_value_to_inner(value),
+                    pre_resolved: filter_value_to_query(value),
                     value: value.clone(),
                     op,
                 },
@@ -195,12 +195,12 @@ fn compile_in_node(
     negate: bool,
 ) -> FilterNode {
     // Attempt to resolve every value to a literal.
-    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
-        values.iter().map(filter_value_to_inner).collect();
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
 
     if resolved.iter().all(Option::is_some) {
         // Fast path: all literals → HashSet.
-        let set: TSet<shamir_types::types::value::InnerValue> =
+        let set: TSet<shamir_types::types::value::QueryValue> =
             resolved.into_iter().flatten().collect();
         FilterNode::InSet {
             field_path: path,
@@ -227,10 +227,10 @@ fn compile_contains_any_node(
     path: super::filter_node::CompactPath,
     values: &[FilterValue],
 ) -> FilterNode {
-    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
-        values.iter().map(filter_value_to_inner).collect();
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
     if resolved.iter().all(Option::is_some) {
-        let set: TSet<shamir_types::types::value::InnerValue> =
+        let set: TSet<shamir_types::types::value::QueryValue> =
             resolved.into_iter().flatten().collect();
         FilterNode::ContainsAnySet {
             field_path: path,
@@ -253,10 +253,10 @@ fn compile_contains_all_node(
     path: super::filter_node::CompactPath,
     values: &[FilterValue],
 ) -> FilterNode {
-    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
-        values.iter().map(filter_value_to_inner).collect();
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
     if resolved.iter().all(Option::is_some) {
-        let set: TSet<shamir_types::types::value::InnerValue> =
+        let set: TSet<shamir_types::types::value::QueryValue> =
             resolved.into_iter().flatten().collect();
         FilterNode::ContainsAllSet {
             field_path: path,
@@ -279,7 +279,7 @@ pub(super) fn compile_compare(
     match intern_field_path_compact(field, interner) {
         Some(path) => FilterNode::Compare {
             field_path: path,
-            pre_resolved: filter_value_to_inner(value),
+            pre_resolved: filter_value_to_query(value),
             value: value.clone(),
             op,
         },
