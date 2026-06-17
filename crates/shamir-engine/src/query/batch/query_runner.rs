@@ -11,6 +11,7 @@ use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use shamir_collections::TFxSet;
+use shamir_query_types::batch::ResultEncoding;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
@@ -61,6 +62,10 @@ pub struct QueryRunner<'a> {
     pub depth: usize,
     /// Injected `$param` bindings for this execution scope.
     pub params: &'a TMap<String, InnerValue>,
+    /// Result row encoding requested by the client. `Name` (default) =
+    /// server de-interns to name-keyed `QueryValue`; `Id` = server
+    /// returns raw id-keyed storage msgpack (client de-interns).
+    pub result_encoding: ResultEncoding,
 }
 
 impl<'a> QueryRunner<'a> {
@@ -332,9 +337,21 @@ impl<'a> QueryRunner<'a> {
                 // holds the `&mut`, and queries within a stage run sequentially
                 // (no read/write aliasing over the same tx). Non-tx batches
                 // keep the original zero-overhead `read` path.
+                //
+                // S-read: thread result_encoding into the read path so that
+                // Id-encoding requests return id-keyed IdBytes rows instead of
+                // de-interning on the server.
                 match self.tx.as_deref() {
-                    Some(tx) => table.read_tx(query, &ctx, Some(tx)).await,
-                    None => table.read(query, &ctx).await,
+                    Some(tx) => {
+                        table
+                            .read_tx_with_encoding(query, &ctx, Some(tx), self.result_encoding)
+                            .await
+                    }
+                    None => {
+                        table
+                            .read_with_encoding(query, &ctx, self.result_encoding)
+                            .await
+                    }
                 }
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
@@ -620,6 +637,7 @@ pub(super) async fn execute_single_impl(
     db_name: &str,
     depth: usize,
     params: &TMap<String, InnerValue>,
+    result_encoding: ResultEncoding,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
         resolver,
@@ -630,6 +648,7 @@ pub(super) async fn execute_single_impl(
         db_name,
         depth,
         params,
+        result_encoding,
     };
     runner.run(alias, entry, resolved_refs).await
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -568,6 +569,62 @@ impl TableManager {
         // fallback so SSI read-set recording is folded into the single scan
         // that emits rows (eliminates the previous double-scan).
         self.read_for_tx(query, ctx, tx).await
+    }
+
+    /// tx-aware variant of [`read_with_encoding`].
+    ///
+    /// Performs the same SSI predicate recording and Pessimistic lock
+    /// acquisition as [`read_tx`] and then dispatches to [`read_for_tx_with_encoding`]
+    /// so that the result rows honour the requested encoding.
+    pub async fn read_tx_with_encoding(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+        encoding: ResultEncoding,
+    ) -> DbResult<crate::query::read::QueryResult> {
+        // Only a Serializable tx records reads; for everything else the
+        // recording pass is pure overhead, so skip it.
+        let recording = tx
+            .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
+            .is_some();
+        if recording {
+            let tx_ref = tx.expect("recording=true implies tx is Some");
+            let token = self.table_token();
+            match query.r#where.as_ref() {
+                None => {
+                    tx_ref.record_predicate_shared(
+                        shamir_tx::predicate_set::PredicateDep::TableScan { table_token: token },
+                    );
+                }
+                Some(filter) => {
+                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                        filter,
+                        self.sorted_indexes(),
+                        ctx.interner,
+                        token,
+                    );
+                    if deps.is_empty() {
+                        tx_ref.record_predicate_shared(
+                            shamir_tx::predicate_set::PredicateDep::TableScan {
+                                table_token: token,
+                            },
+                        );
+                    } else {
+                        for dep in deps {
+                            tx_ref.record_predicate_shared(dep);
+                        }
+                    }
+                }
+            }
+        }
+        // Level-3: acquire a Shared lock on every record the query touches
+        // BEFORE reading (Pessimistic isolation only).
+        if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
+            self.lock_query_reads(query, ctx, t).await?;
+        }
+        self.read_for_tx_with_encoding(query, ctx, tx, encoding)
+            .await
     }
 
     /// Level-3: acquire a `Shared` lock on every record matching `query`'s
