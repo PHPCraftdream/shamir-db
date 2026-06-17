@@ -555,7 +555,7 @@ async fn deintern_query_result(
             let bytes_snapshot = bytes.clone();
             let qv =
                 deintern_id_bytes(client, db, bytes_snapshot.as_ref(), repos, refreshed).await?;
-            *record = QueryRecord::Direct(qv);
+            *record = QueryRecord::Direct(qv, std::sync::OnceLock::new());
         }
     }
     Ok(())

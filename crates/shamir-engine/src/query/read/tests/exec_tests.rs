@@ -10,7 +10,14 @@ use shamir_query_builder::val::{col, func as vfunc, lit};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
+
+/// Convert a slice of QueryValue to Vec<json::Value> for assertion convenience.
+fn to_json(qvs: &[QueryValue]) -> Vec<serde_json::Value> {
+    qvs.iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect()
+}
 
 /// Helper: intern a string and return its u64 id.
 fn intern(interner: &Interner, s: &str) -> u64 {
@@ -176,11 +183,12 @@ fn group_by_count() {
     };
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0]["city"], "LA");
-    assert_eq!(result[0]["cnt"], 2);
-    assert_eq!(result[1]["city"], "NYC");
-    assert_eq!(result[1]["cnt"], 2);
+    let r = to_json(&result);
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(r[0]["cnt"], 2);
+    assert_eq!(r[1]["city"], "NYC");
+    assert_eq!(r[1]["cnt"], 2);
 }
 
 #[test]
@@ -201,12 +209,13 @@ fn group_by_sum_avg() {
     };
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    assert_eq!(result[0]["city"], "LA");
-    assert_eq!(result[0]["total_age"], 50);
-    assert_eq!(result[0]["avg_age"], 25.0);
-    assert_eq!(result[1]["city"], "NYC");
-    assert_eq!(result[1]["total_age"], 65);
-    assert_eq!(result[1]["avg_age"], 32.5);
+    let r = to_json(&result);
+    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(r[0]["total_age"], 50);
+    assert_eq!(r[0]["avg_age"], 25.0);
+    assert_eq!(r[1]["city"], "NYC");
+    assert_eq!(r[1]["total_age"], 65);
+    assert_eq!(r[1]["avg_age"], 32.5);
 }
 
 #[test]
@@ -227,10 +236,11 @@ fn group_by_min_max() {
     };
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    assert_eq!(result[0]["min_age"], 25);
-    assert_eq!(result[0]["max_age"], 25);
-    assert_eq!(result[1]["min_age"], 30);
-    assert_eq!(result[1]["max_age"], 35);
+    let r = to_json(&result);
+    assert_eq!(r[0]["min_age"], 25);
+    assert_eq!(r[0]["max_age"], 25);
+    assert_eq!(r[1]["min_age"], 30);
+    assert_eq!(r[1]["max_age"], 35);
 }
 
 #[test]
@@ -250,8 +260,9 @@ fn group_by_having() {
     };
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0]["city"], "NYC");
+    let r = to_json(&result);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["city"], "NYC");
 }
 
 #[test]
@@ -314,9 +325,10 @@ fn aggregate_all_count_sum() {
     };
 
     let result = apply_aggregate_all(&records, &select, &interner);
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0]["total"], 4);
-    assert_eq!(result[0]["sum_age"], 115);
+    let r = to_json(&result);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["total"], 4);
+    assert_eq!(r[0]["sum_age"], 115);
 }
 
 // ============================================================================
@@ -590,15 +602,16 @@ fn aggregate_fn_median_per_group() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let r = to_json(&result);
 
     // Groups are emitted in alphabetical key order: LA, then NYC.
-    assert_eq!(result.len(), 2);
-    assert_eq!(result[0]["city"], "LA");
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0]["city"], "LA");
     // LA ages [25, 25] -> lower-median = 25.
-    assert_eq!(result[0]["med_age"], 25);
-    assert_eq!(result[1]["city"], "NYC");
+    assert_eq!(r[0]["med_age"], 25);
+    assert_eq!(r[1]["city"], "NYC");
     // NYC ages [30, 35] -> lower-median (even n) = 30.
-    assert_eq!(result[1]["med_age"], 30);
+    assert_eq!(r[1]["med_age"], 30);
 }
 
 #[test]
@@ -613,9 +626,10 @@ fn aggregate_fn_count_distinct_all_rows() {
     assert!(has_aggregates(&select));
 
     let result = apply_aggregate_all(&records, &select, &interner);
-    assert_eq!(result.len(), 1);
+    let r = to_json(&result);
+    assert_eq!(r.len(), 1);
     // Distinct cities across the four rows: NYC, LA -> 2.
-    assert_eq!(result[0]["cities"], 2);
+    assert_eq!(r[0]["cities"], 2);
 }
 
 #[test]
@@ -628,7 +642,8 @@ fn aggregate_fn_unknown_name_is_null() {
     };
 
     let result = apply_aggregate_all(&records, &select, &interner);
-    assert_eq!(result.len(), 1);
+    let r = to_json(&result);
+    assert_eq!(r.len(), 1);
     // An unregistered aggregate yields a null cell, never a panic.
-    assert_eq!(result[0]["x"], serde_json::Value::Null);
+    assert_eq!(r[0]["x"], serde_json::Value::Null);
 }

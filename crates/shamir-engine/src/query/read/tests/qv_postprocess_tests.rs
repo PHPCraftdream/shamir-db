@@ -10,9 +10,20 @@ use serde_json as json;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::read::exec::{apply_distinct, apply_distinct_qv, apply_pagination};
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::read::exec::{
+    apply_distinct, apply_distinct_qv, apply_pagination, apply_select, apply_select_value,
+};
 use crate::query::read::order::{apply_order_by, apply_order_by_qv};
-use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection, Pagination};
+use crate::query::read::{
+    apply_aggregate_all, apply_group_by, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
+    Pagination, Select,
+};
+use shamir_query_builder::select;
+use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
+use shamir_types::types::common::new_map;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
 
 /// Helper: build a QueryValue map from key-value pairs.
 fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
@@ -478,4 +489,297 @@ fn order_by_qv_bool_asc_desc() {
     apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
     assert_byte_identical(&jvs, &qvs);
+}
+
+// ============================================================================
+// Golden result-identity tests — Stage D (Path B: apply_select_value) and
+// Stage E (aggregate pipeline: QueryValue).
+// ============================================================================
+
+/// Intern a string, returning its u64 id.
+fn intern(interner: &Interner, s: &str) -> u64 {
+    match interner.touch_ind(s) {
+        Ok(TouchInd::New(k)) | Ok(TouchInd::Exists(k)) => k.id(),
+        Err(e) => panic!("intern failed: {e}"),
+    }
+}
+
+/// Build a record: `{ name: Str, age: Int, city: Str, score: F64 }`.
+fn make_record(interner: &Interner, name: &str, age: i64, city: &str, score: f64) -> InnerValue {
+    let mut map = new_map();
+    map.insert(
+        InternerKey::new(intern(interner, "name")),
+        InnerValue::Str(name.into()),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "age")),
+        InnerValue::Int(age),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "city")),
+        InnerValue::Str(city.into()),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "score")),
+        InnerValue::F64(score),
+    );
+    InnerValue::Map(map)
+}
+
+fn make_test_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
+    vec![
+        (
+            RecordId::new(),
+            make_record(interner, "Alice", 30, "NYC", 1.5),
+        ),
+        (RecordId::new(), make_record(interner, "Bob", 25, "LA", 2.5)),
+        (
+            RecordId::new(),
+            make_record(interner, "Carol", 35, "NYC", 3.5),
+        ),
+        (
+            RecordId::new(),
+            make_record(interner, "Dave", 25, "LA", 0.5),
+        ),
+    ]
+}
+
+// ── Stage D: apply_select_value vs apply_select ─────────────────────────
+
+#[test]
+fn select_value_identical_to_select_json() {
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+    let select = Select::fields(["name", "age", "city"]);
+
+    let json_result = apply_select(&records, &select, &interner);
+    let qv_result = apply_select_value(&records, &select, &interner);
+
+    assert_byte_identical(&json_result, &qv_result);
+}
+
+#[test]
+fn select_value_all_identical() {
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+    let select = Select::all();
+
+    let json_result = apply_select(&records, &select, &interner);
+    let qv_result = apply_select_value(&records, &select, &interner);
+
+    assert_byte_identical(&json_result, &qv_result);
+}
+
+#[test]
+fn path_b_distinct_order_identical() {
+    // Simulate Path B: apply_select_value -> distinct_qv -> order_by_qv
+    // vs json path: apply_select -> distinct -> order_by.
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+    let select = Select::fields(["city", "age"]);
+
+    let json_result = apply_select(&records, &select, &interner);
+    let qv_result = apply_select_value(&records, &select, &interner);
+
+    // json path
+    let j_distinct = apply_distinct(json_result);
+    let mut j_sorted = j_distinct;
+    apply_order_by(&mut j_sorted, &OrderBy::asc("age"));
+
+    // qv path
+    let q_distinct = apply_distinct_qv(qv_result);
+    let mut q_sorted = q_distinct;
+    apply_order_by_qv(&mut q_sorted, &OrderBy::asc("age"));
+
+    assert_byte_identical(&j_sorted, &q_sorted);
+}
+
+// ── Stage E: aggregate pipeline QueryValue identity ─────────────────────
+
+#[test]
+fn aggregate_group_by_all_funcs_identical() {
+    // GROUP BY city + SUM/AVG/MIN/MAX/COUNT on age, score.
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+    let refs = new_map();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let group_by = GroupBy::new(["city"]);
+    let select = Select {
+        items: vec![
+            select::field("city"),
+            select::count_all("cnt"),
+            select::sum("age", "sum_age"),
+            select::avg("age", "avg_age"),
+            select::min("age", "min_age"),
+            select::max("age", "max_age"),
+            select::sum("score", "sum_score"),
+            select::avg("score", "avg_score"),
+        ],
+        distinct: false,
+    };
+
+    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+
+    // Convert to json for assertions.
+    let r: Vec<json::Value> = result
+        .iter()
+        .map(|v| json::Value::from(v.clone()))
+        .collect();
+
+    // Groups sorted alphabetically: LA, NYC.
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(r[0]["cnt"], 2);
+    assert_eq!(r[0]["sum_age"], 50);
+    assert_eq!(r[0]["avg_age"], 25.0);
+    assert_eq!(r[0]["min_age"], 25);
+    assert_eq!(r[0]["max_age"], 25);
+    assert_eq!(r[1]["city"], "NYC");
+    assert_eq!(r[1]["cnt"], 2);
+    assert_eq!(r[1]["sum_age"], 65);
+    assert_eq!(r[1]["avg_age"], 32.5);
+    assert_eq!(r[1]["min_age"], 30);
+    assert_eq!(r[1]["max_age"], 35);
+}
+
+#[test]
+fn aggregate_sum_float_byte_identity() {
+    // Sum of floats: the QV path must produce F64 that serialises
+    // identically to json Number::from_f64.
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+
+    let select = Select {
+        items: vec![select::sum("score", "total_score")],
+        distinct: false,
+    };
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    assert_eq!(result.len(), 1);
+
+    // Serialise the QV result to json bytes.
+    let qv_json = json::Value::from(result[0].clone());
+    let qv_bytes = json::to_vec(&qv_json).unwrap();
+
+    // Build the expected json value via Number::from_f64.
+    let total = 1.5 + 2.5 + 3.5 + 0.5; // = 8.0
+    let expected_json = json::json!({"total_score": total});
+    let expected_bytes = json::to_vec(&expected_json).unwrap();
+
+    assert_eq!(
+        qv_bytes, expected_bytes,
+        "Sum(float) F64 serialisation must match json Number::from_f64"
+    );
+}
+
+#[test]
+fn aggregate_having_filters_correctly() {
+    // GROUP BY city + HAVING sum_age > 55 should keep only NYC (sum=65).
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+    let refs = new_map();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let group_by = GroupBy {
+        fields: vec![vec!["city".into()]],
+        having: Some(shamir_query_builder::filter::gt("sum_age", 55)),
+    };
+    let select = Select {
+        items: vec![select::field("city"), select::sum("age", "sum_age")],
+        distinct: false,
+    };
+
+    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let r: Vec<json::Value> = result
+        .iter()
+        .map(|v| json::Value::from(v.clone()))
+        .collect();
+
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["city"], "NYC");
+    assert_eq!(r[0]["sum_age"], 65);
+}
+
+#[test]
+fn aggregate_avg_float_byte_identity() {
+    // Avg produces F64 — must serialise identically to json Number::from_f64.
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+
+    let select = Select {
+        items: vec![select::avg("score", "avg_score")],
+        distinct: false,
+    };
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    assert_eq!(result.len(), 1);
+
+    let qv_json = json::Value::from(result[0].clone());
+    let qv_bytes = json::to_vec(&qv_json).unwrap();
+
+    let avg = (1.5 + 2.5 + 3.5 + 0.5) / 4.0; // = 2.0
+    let expected_json = json::json!({"avg_score": avg});
+    let expected_bytes = json::to_vec(&expected_json).unwrap();
+
+    assert_eq!(
+        qv_bytes, expected_bytes,
+        "Avg F64 serialisation must match json Number::from_f64"
+    );
+}
+
+#[test]
+fn aggregate_count_as_int_identity() {
+    // Count produces Int(i64) — must serialise identically to json Number(u64).
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+
+    let select = Select {
+        items: vec![select::count_all("cnt")],
+        distinct: false,
+    };
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    let qv_json = json::Value::from(result[0].clone());
+    let qv_bytes = json::to_vec(&qv_json).unwrap();
+
+    let expected_json = json::json!({"cnt": 4});
+    let expected_bytes = json::to_vec(&expected_json).unwrap();
+
+    assert_eq!(
+        qv_bytes, expected_bytes,
+        "Count serialisation must match json Number"
+    );
+}
+
+#[test]
+fn aggregate_all_no_group_identical() {
+    // apply_aggregate_all: SUM + AVG + MIN + MAX + COUNT without GROUP BY.
+    let interner = Interner::default();
+    let records = make_test_records(&interner);
+
+    let select = Select {
+        items: vec![
+            select::count_all("cnt"),
+            select::sum("age", "sum_age"),
+            select::avg("age", "avg_age"),
+            select::min("age", "min_age"),
+            select::max("age", "max_age"),
+        ],
+        distinct: false,
+    };
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    let r: Vec<json::Value> = result
+        .iter()
+        .map(|v| json::Value::from(v.clone()))
+        .collect();
+
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0]["cnt"], 4);
+    assert_eq!(r[0]["sum_age"], 115);
+    // avg_age = 115/4 = 28.75
+    assert_eq!(r[0]["avg_age"], 28.75);
+    assert_eq!(r[0]["min_age"], 25);
+    assert_eq!(r[0]["max_age"], 35);
 }

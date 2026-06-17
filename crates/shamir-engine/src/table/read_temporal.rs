@@ -16,7 +16,7 @@ use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::read_exec::try_project_page_only;
 use super::table_manager::TableManager;
@@ -136,27 +136,27 @@ impl TableManager {
             });
         }
 
-        let mut result_json = if has_group_by {
+        let mut result_qv = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
             exec::apply_aggregate_all(&matched, &query.select, interner)
         } else {
-            exec::apply_select(&matched, &query.select, interner)
+            exec::apply_select_value(&matched, &query.select, interner)
         };
 
         if query.select.distinct {
-            result_json = exec::apply_distinct(result_json);
+            result_qv = exec::apply_distinct_qv(result_qv);
         }
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result_json, order_by);
+            exec::apply_order_by_qv(&mut result_qv, order_by);
         }
 
-        let (records_json, pagination) =
-            exec::apply_pagination(result_json, &query.pagination, query.count_total);
+        let (records_qv, pagination) =
+            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
 
-        let records_returned = records_json.len() as u64;
-        let records: Vec<QueryRecord> = records_json.into_iter().map(QueryRecord::Json).collect();
+        let records_returned = records_qv.len() as u64;
+        let records: Vec<QueryRecord> = records_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
         Ok(QueryResult {
             records,
             stats: Some(QueryStats {
@@ -304,7 +304,7 @@ impl TableManager {
         }
 
         // ── 5. Decode each version's value bytes into an InnerValue
-        //     and project via `apply_select` on the single
+        //     and project via `apply_select_value` on the single
         //     (id, value) pair; then attach `_version` and `_ts`.
         let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
         for (id, version, ts, value_bytes) in rows {
@@ -316,43 +316,41 @@ impl TableManager {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let mut projected = exec::apply_select(&[(id, inner)], &query.select, interner);
-            // apply_select returns one JSON value per input record.
-            let mut row = projected
+            let mut projected = exec::apply_select_value(&[(id, inner)], &query.select, interner);
+            // apply_select_value returns one QueryValue per input record.
+            let row_qv = projected
                 .pop()
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                .unwrap_or(QueryValue::Map(shamir_types::types::common::new_map_wc(0)));
             // Attach the timeline metadata. If projection produced a
-            // non-object (e.g. a bare scalar SELECT), wrap it so the
-            // metadata has a home.
-            if let serde_json::Value::Object(map) = &mut row {
-                map.insert(
-                    "_version".to_string(),
-                    serde_json::Value::Number(version.into()),
-                );
-                map.insert(
-                    "_ts".to_string(),
-                    match ts {
-                        Some(t) => serde_json::Value::Number(t.into()),
-                        None => serde_json::Value::Null,
-                    },
-                );
-            } else {
-                let mut map = serde_json::Map::new();
-                map.insert("value".to_string(), row);
-                map.insert(
-                    "_version".to_string(),
-                    serde_json::Value::Number(version.into()),
-                );
-                map.insert(
-                    "_ts".to_string(),
-                    match ts {
-                        Some(t) => serde_json::Value::Number(t.into()),
-                        None => serde_json::Value::Null,
-                    },
-                );
-                row = serde_json::Value::Object(map);
-            }
-            out_records.push(QueryRecord::Json(row));
+            // Map, insert directly; otherwise wrap so the metadata has
+            // a home.
+            let final_qv = match row_qv {
+                QueryValue::Map(mut map) => {
+                    map.insert("_version".to_string(), QueryValue::Int(version as i64));
+                    map.insert(
+                        "_ts".to_string(),
+                        match ts {
+                            Some(t) => QueryValue::Int(t as i64),
+                            None => QueryValue::Null,
+                        },
+                    );
+                    QueryValue::Map(map)
+                }
+                other => {
+                    let mut map = shamir_types::types::common::new_map_wc(3);
+                    map.insert("value".to_string(), other);
+                    map.insert("_version".to_string(), QueryValue::Int(version as i64));
+                    map.insert(
+                        "_ts".to_string(),
+                        match ts {
+                            Some(t) => QueryValue::Int(t as i64),
+                            None => QueryValue::Null,
+                        },
+                    );
+                    QueryValue::Map(map)
+                }
+            };
+            out_records.push(QueryRecord::Direct(final_qv, std::sync::OnceLock::new()));
         }
 
         let records_returned = out_records.len() as u64;

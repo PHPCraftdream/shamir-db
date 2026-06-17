@@ -477,7 +477,7 @@ impl TableManager {
                         if let Ok(qv) = shamir_types::codecs::interned::inner_value_to_query_value(
                             &inner, interner,
                         ) {
-                            records.push(crate::query::read::QueryRecord::Direct(qv));
+                            records.push(crate::query::read::QueryRecord::Direct(qv, std::sync::OnceLock::new()));
                         }
                     }
                     let returned = records.len() as u64;
@@ -824,6 +824,7 @@ impl TableManager {
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
+                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -839,6 +840,7 @@ impl TableManager {
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),
+                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -847,66 +849,36 @@ impl TableManager {
             }
         }
 
-        let result = if has_group_by {
+        let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
-                .into_iter()
-                .map(crate::query::read::QueryRecord::Json)
-                .collect()
         } else if has_agg {
             exec::apply_aggregate_all(&raw_acc, &query.select, interner)
-                .into_iter()
-                .map(crate::query::read::QueryRecord::Json)
-                .collect()
         } else {
             rec_acc
+                .into_iter()
+                .map(|r| match r {
+                    crate::query::read::QueryRecord::Direct(qv, _) => qv,
+                    other => serde_json::Value::from(other).into(),
+                })
+                .collect()
         };
 
         // Post-process directly on QueryValue — no json round-trip.
-        // GROUP BY / aggregates still produce json::Value and go through
-        // the json post-processors (out of scope for this migration); the
-        // non-aggregate path (rec_acc) produces QueryValue via
-        // project_value and uses the new QV post-processors.
-        let (final_records, pagination) = if has_group_by || has_agg {
-            // Legacy json path for aggregate results.
-            let mut json_result: Vec<serde_json::Value> =
-                result.into_iter().map(serde_json::Value::from).collect();
-            if query.select.distinct {
-                json_result = exec::apply_distinct(json_result);
-            }
-            if let Some(ref order_by) = query.order_by {
-                exec::apply_order_by(&mut json_result, order_by);
-            }
-            let (paged, pag) =
-                exec::apply_pagination(json_result, &query.pagination, query.count_total);
-            let recs: Vec<crate::query::read::QueryRecord> = paged
-                .into_iter()
-                .map(crate::query::read::QueryRecord::Json)
-                .collect();
-            (recs, pag)
-        } else {
-            // Direct QueryValue path — no json round-trip.
-            let mut qv_result: Vec<shamir_types::types::value::QueryValue> = result
-                .into_iter()
-                .map(|r| match r {
-                    crate::query::read::QueryRecord::Direct(qv) => qv,
-                    other => serde_json::Value::from(other).into(),
-                })
-                .collect();
-            if query.select.distinct {
-                qv_result = exec::apply_distinct_qv(qv_result);
-            }
-            if let Some(ref order_by) = query.order_by {
-                exec::apply_order_by_qv(&mut qv_result, order_by);
-            }
-            let (paged, pag) =
-                exec::apply_pagination(qv_result, &query.pagination, query.count_total);
-            let recs: Vec<crate::query::read::QueryRecord> = paged
-                .into_iter()
-                .map(crate::query::read::QueryRecord::Direct)
-                .collect();
-            (recs, pag)
-        };
+        // Both aggregate and non-aggregate paths now produce QueryValue
+        // and go through the QV post-processors.
+        if query.select.distinct {
+            qv_result = exec::apply_distinct_qv(qv_result);
+        }
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by_qv(&mut qv_result, order_by);
+        }
+        let (paged, pagination) =
+            exec::apply_pagination(qv_result, &query.pagination, query.count_total);
+        let final_records: Vec<crate::query::read::QueryRecord> = paged
+            .into_iter()
+            .map(|qv| crate::query::read::QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+            .collect();
 
         let elapsed = start.elapsed();
         let records_returned = final_records.len() as u64;
@@ -986,11 +958,13 @@ impl TableManager {
                                 if idx < skip + lim {
                                     result.push(crate::query::read::QueryRecord::Direct(
                                         proj.project_value($rec, interner),
+                                        std::sync::OnceLock::new(),
                                     ));
                                 }
                             } else {
                                 result.push(crate::query::read::QueryRecord::Direct(
                                     proj.project_value($rec, interner),
+                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -1146,7 +1120,7 @@ impl TableManager {
                                         QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref()))
                                     }
                                     Err(_) => {
-                                        QueryRecord::Direct(proj.project_value(&view, interner))
+                                        QueryRecord::Direct(proj.project_value(&view, interner), std::sync::OnceLock::new())
                                     }
                                 }
                             };
@@ -1185,10 +1159,11 @@ impl TableManager {
                                             )),
                                             Err(_) => QueryRecord::Direct(
                                                 proj.project_value(iv, interner),
+                                                std::sync::OnceLock::new(),
                                             ),
                                         }
                                     }
-                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
+                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner), std::sync::OnceLock::new()),
                                 }
                             };
                             result.push(record);
@@ -1218,7 +1193,7 @@ impl TableManager {
                                 break;
                             }
                         }
-                        result.push(QueryRecord::Direct(proj.project_value($rec, interner)));
+                        result.push(QueryRecord::Direct(proj.project_value($rec, interner), std::sync::OnceLock::new()));
                     }};
                 }
 
@@ -1314,6 +1289,7 @@ pub(super) fn try_project_page_only(
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
             proj.project_value(record, interner),
+            std::sync::OnceLock::new(),
         ));
     }
 
