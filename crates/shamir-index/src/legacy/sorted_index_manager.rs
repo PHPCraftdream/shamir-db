@@ -40,7 +40,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::record_view::ScalarRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 /// Manages a set of sorted indexes for one table. The set itself is
 /// kept in memory (`DashMap`) and persisted to a single system
@@ -837,31 +837,35 @@ impl SortedIndexManager {
 }
 
 /// Serialised covering-index projection type: a list of
-/// `(field_path_dotted, InnerValue)` pairs, encoded with MessagePack.
+/// `(field_path_dotted, QueryValue)` pairs, encoded with MessagePack.
+///
+/// S9: changed from `Vec<(String, InnerValue)>` to `Vec<(String, QueryValue)>`
+/// as part of the InnerValue-elimination campaign. `QueryValue = Value<String>`
+/// has NO `InternerKey` dependency.
 ///
 /// The field_path_dotted key is the segments joined with "." so the
 /// read-side (S3.3) can reconstruct the projection without the interner.
 ///
-/// A leaf `InnerValue` that is a `Map` will carry `InternerKey` map keys —
-/// that's fine because the read-side will join it back with the interner.
-///
-/// Format: `rmp_serde::to_vec_named(&Vec<(String, InnerValue)>)` — bincode is
-/// not usable because `InnerValue`'s `Deserialize` relies on `deserialize_any`,
+/// Format: `rmp_serde::to_vec_named(&Vec<(String, QueryValue)>)` — bincode is
+/// not usable because `Value`'s `Deserialize` relies on `deserialize_any`,
 /// which bincode does not support.
 ///
-/// `InnerValue` here is a retained anchor — see the accepted-limit note in
-/// `legacy/index_keys.rs` (# Accepted limit — #61 InnerValue-elimination
-/// campaign) for why this cannot be replaced by `ScalarRef` without an
-/// index-format version bump and O(N) rebuild migration.
-type CoveringProjection = Vec<(String, InnerValue)>;
+/// The wire format for SCALAR leaves (Null, Bool, Int, F64, Str, Bin, Dec, Big)
+/// is byte-identical between `QueryValue` and `InnerValue`, so the decode side
+/// (`decode_covering_projection`) can deserialize as `Vec<(String, InnerValue)>`
+/// without conversion. Container leaves are skipped at encode time (they would
+/// differ due to key types).
+type CoveringProjection = Vec<(String, QueryValue)>;
 
 /// Build the covering-index projection value for one record and one
 /// `SortedIndexDefinition` that has non-empty `included_fields_interned`.
 ///
+/// S9: produces `Vec<(String, QueryValue)>` instead of `Vec<(String, InnerValue)>`.
 /// For each included field path:
 ///   - Walk `record` by the interned path segments via `RecordRef::materialize_at`.
+///   - Convert the leaf to `QueryValue` (scalar-only; containers are skipped).
 ///   - If the leaf is present, push `(path_joined_with_dots, leaf)` (owned).
-///   - Missing paths are silently skipped.
+///   - Missing / container paths are silently skipped.
 ///
 /// Returns `Bytes::new()` when no fields could be resolved (backward-compat:
 /// write side acts as if no projection; read side sees empty value).
@@ -869,7 +873,7 @@ type CoveringProjection = Vec<(String, InnerValue)>;
 /// When the projection is non-empty the returned bytes are a **versioned
 /// envelope**:
 /// ```text
-/// [8 bytes: version as u64 little-endian] ++ [msgpack: Vec<(String, InnerValue)>]
+/// [8 bytes: version as u64 little-endian] ++ [msgpack: Vec<(String, QueryValue)>]
 /// ```
 /// The `version` parameter should be the MVCC write version for the record
 /// being indexed (pass `0` when no MVCC store is attached).
@@ -890,14 +894,19 @@ fn build_covering_projection(
         let ipath: SmallVec<[InternerKey; 4]> =
             path_ids.iter().map(|&id| InternerKey::new(id)).collect();
         if let Some(leaf) = record.materialize_at(&ipath) {
-            let key_str = path_strs.join(".");
-            projection.push((key_str, leaf));
+            if let Some(qv) = inner_value_to_query_scalar(&leaf) {
+                let key_str = path_strs.join(".");
+                projection.push((key_str, qv));
+            }
+            // Container leaves (Map/List/Set) are skipped — their QueryValue
+            // wire format differs from InnerValue due to key types, and the
+            // decode side reads as InnerValue. Scalar leaves are wire-identical.
         }
     }
     if projection.is_empty() {
         return Bytes::new();
     }
-    // Use MessagePack (rmp_serde) because InnerValue's Deserialize impl
+    // Use MessagePack (rmp_serde) because Value's Deserialize impl
     // relies on `deserialize_any`, which bincode does not support.
     match rmp_serde::to_vec_named(&projection) {
         Ok(msgpack) => {
@@ -909,10 +918,33 @@ fn build_covering_projection(
     }
 }
 
+/// Convert an `InnerValue` to `QueryValue` for SCALAR types only.
+/// Returns `None` for Map/List/Set containers (whose wire format would
+/// differ due to InternerKey vs String keys).
+fn inner_value_to_query_scalar(v: &InnerValue) -> Option<QueryValue> {
+    match v {
+        InnerValue::Null => Some(QueryValue::Null),
+        InnerValue::Bool(b) => Some(QueryValue::Bool(*b)),
+        InnerValue::Int(i) => Some(QueryValue::Int(*i)),
+        InnerValue::F64(f) => Some(QueryValue::F64(*f)),
+        InnerValue::Dec(d) => Some(QueryValue::Dec(*d)),
+        InnerValue::Big(b) => Some(QueryValue::Big(b.clone())),
+        InnerValue::Str(s) => Some(QueryValue::Str(s.clone())),
+        InnerValue::Bin(b) => Some(QueryValue::Bin(b.clone())),
+        // Container leaves are skipped — see doc on build_covering_projection.
+        InnerValue::List(_) | InnerValue::Set(_) | InnerValue::Map(_) => None,
+    }
+}
+
 /// Decode a versioned covering-projection envelope written by
 /// `build_covering_projection`. Returns `None` for an empty value, a
 /// value shorter than 8 bytes, or one whose msgpack body fails to
 /// decode (callers treat `None` as "fall back to a full fetch").
+///
+/// S9: the encode side writes `Vec<(String, QueryValue)>` but the wire
+/// format for scalar leaves is byte-identical to `Vec<(String, InnerValue)>`,
+/// so this function can deserialize as `InnerValue` without conversion.
+/// The return type stays `InnerValue` for engine API compatibility.
 ///
 /// Used by slice A3 (index-only read path).
 pub fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, InnerValue)>)> {

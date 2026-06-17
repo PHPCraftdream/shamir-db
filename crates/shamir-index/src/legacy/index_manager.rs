@@ -16,7 +16,9 @@
 
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info::IndexInfo;
-use crate::legacy::index_keys::{build_index_key, build_posting_key, extract_index_leaves};
+use crate::legacy::index_keys::{
+    build_index_key, build_index_key_from_record, build_posting_key,
+};
 use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
@@ -247,21 +249,23 @@ impl IndexManager {
         let mut count = 0usize;
 
         let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
-        let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
+        let mut cache_index_keys: Vec<Bytes> = Vec::new();
         for (record_id, value) in &records {
-            if let Some(values) = extract_index_leaves(value, &index_def.paths) {
-                let index_key = build_index_key(false, name_interned, &values).to_bytes();
+            if let Some(irk) =
+                build_index_key_from_record(false, name_interned, value, &index_def.paths)
+            {
+                let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 posting_writes.push((posting_key, Bytes::new()));
-                cache_keys.push((name_interned, values));
+                cache_index_keys.push(index_key);
                 count += 1;
             }
         }
         if !posting_writes.is_empty() {
             self.info_store.set_many(posting_writes).await?;
         }
-        for (name, vals) in cache_keys {
-            self.invalidate_posting_cache(name, &vals);
+        for ik in cache_index_keys {
+            self.posting_cache.remove(&ik);
         }
 
         self.indexes.add_index(index_def);
@@ -376,8 +380,10 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            if let Some(values) = extract_index_leaves(value, &def.paths) {
-                let index_key = build_index_key(false, def.name_interned, &values).to_bytes();
+            if let Some(irk) =
+                build_index_key_from_record(false, def.name_interned, value, &def.paths)
+            {
+                let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 ops.push(IndexWriteOp::SetPosting {
                     key: posting_key,
@@ -425,8 +431,10 @@ impl IndexManager {
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
             for (rid, value) in items.clone() {
-                if let Some(leaves) = extract_index_leaves(value, &def.paths) {
-                    let index_key = build_index_key(false, def.name_interned, &leaves).to_bytes();
+                if let Some(irk) =
+                    build_index_key_from_record(false, def.name_interned, value, &def.paths)
+                {
+                    let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, rid);
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
@@ -476,36 +484,36 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            let old_values = extract_index_leaves(old_value, &def.paths);
-            let new_values = extract_index_leaves(new_value, &def.paths);
+            let old_key =
+                build_index_key_from_record(false, def.name_interned, old_value, &def.paths);
+            let new_key =
+                build_index_key_from_record(false, def.name_interned, new_value, &def.paths);
 
-            match (old_values, new_values) {
+            match (old_key, new_key) {
                 (None, None) => {}
-                (None, Some(new)) => {
-                    let index_key = build_index_key(false, def.name_interned, &new).to_bytes();
+                (None, Some(nk)) => {
+                    let index_key = nk.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
                         value: Bytes::new(),
                     });
                 }
-                (Some(old), None) => {
-                    let index_key = build_index_key(false, def.name_interned, &old).to_bytes();
+                (Some(ok), None) => {
+                    let index_key = ok.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
                     ops.push(IndexWriteOp::RemovePosting { key: posting_key });
                 }
-                (Some(old), Some(new)) => {
-                    if old != new {
-                        let old_index_key =
-                            build_index_key(false, def.name_interned, &old).to_bytes();
-                        let old_posting_key = build_posting_key(&old_index_key, record_id);
+                (Some(ok), Some(nk)) => {
+                    let old_bytes = ok.to_bytes();
+                    let new_bytes = nk.to_bytes();
+                    if old_bytes != new_bytes {
+                        let old_posting_key = build_posting_key(&old_bytes, record_id);
                         ops.push(IndexWriteOp::RemovePosting {
                             key: old_posting_key,
                         });
 
-                        let new_index_key =
-                            build_index_key(false, def.name_interned, &new).to_bytes();
-                        let new_posting_key = build_posting_key(&new_index_key, record_id);
+                        let new_posting_key = build_posting_key(&new_bytes, record_id);
                         ops.push(IndexWriteOp::SetPosting {
                             key: new_posting_key,
                             value: Bytes::new(),
@@ -549,8 +557,10 @@ impl IndexManager {
 
         let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
-                let index_key = build_index_key(false, def.name_interned, &values).to_bytes();
+            if let Some(irk) =
+                build_index_key_from_record(false, def.name_interned, old_value, &def.paths)
+            {
+                let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 ops.push(IndexWriteOp::RemovePosting { key: posting_key });
             }
@@ -661,14 +671,6 @@ impl IndexManager {
             .insert(index_key, Arc::new(record_ids.clone()));
 
         Ok(record_ids)
-    }
-
-    /// Invalidate any cached posting list for `(name_interned,
-    /// values)`. Called from write hooks after the durable update
-    /// landed, so the next `lookup_by_index` re-fetches.
-    fn invalidate_posting_cache(&self, name_interned: u64, values: &[InnerValue]) {
-        let index_key = build_index_key(false, name_interned, values).to_bytes();
-        self.posting_cache.remove(&index_key);
     }
 
     /// Invalidate posting cache entries for every `SetPosting` /

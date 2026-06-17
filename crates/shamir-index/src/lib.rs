@@ -45,6 +45,10 @@ pub use kind::{
     FunctionalConfig, IndexKind, TokenizerKind, VectorBackendRef, VectorConfig, VectorMetric,
 };
 pub use meta_envelope::{MetaEnvelope, MetaError, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+pub use persistence::{
+    legacy_indexes_need_rebuild, load_legacy_index_version, save_legacy_index_version,
+    LEGACY_INDEX_FORMAT_VERSION,
+};
 pub use posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 pub use registry::IndexRegistry;
 pub use write_ops::{apply_index_ops, IndexWriteOp};

@@ -39,10 +39,26 @@ impl IndexRecordKey {
         }
     }
 
+    /// Set hash values from pre-computed hashes.
+    ///
+    /// This is the primary constructor for S9+ (lens-native hashing):
+    /// the caller computes `(hash1, hash2)` via the stable tag-based
+    /// `hash_scalar_ref` / `hash_inner_value` scheme in `index_keys.rs`
+    /// and passes the results here.
+    pub fn with_hash(mut self, hash1: u64, hash2: u64) -> Self {
+        self.hash1 = hash1;
+        self.hash2 = hash2;
+        self
+    }
+
     /// Set hash values from the provided values using FxHasher with different seeds
     /// for collision resistance:
     /// - hash1: FxHasher with seed 0
     /// - hash2: FxHasher with seed 0x9E3779B97F4A7C15 (golden ratio constant)
+    ///
+    /// **DEPRECATED (S9)**: retained for `index_record_key_tests` only.
+    /// Production write/lookup paths use `with_hash` + the stable tag-based
+    /// hash in `index_keys.rs`.
     pub fn with_values<T: Hash>(mut self, values: &[&T]) -> Self {
         const SEED2: u64 = 0x9E3779B97F4A7C15;
 

@@ -3,56 +3,281 @@
 //! These are free functions shared by `index_manager` and
 //! `index_manager_unique`. They do not access any `IndexManager` fields.
 //!
-//! # Byte-identity (W2a hash/unique)
+//! # S9 — lens-native leaf hashing
 //!
-//! Legacy + unique index keys are PERSISTED. The legacy key is
-//! `FxHash(<InnerValue as Hash>::hash(leaf))` with a leading
-//! `std::mem::discriminant(Value<InternerKey>)`. `ScalarRef` is a DIFFERENT
-//! enum (6 variants vs `Value`'s 10) → hashing `ScalarRef` directly DIVERGES.
+//! Index keys are hashed via a STABLE, deterministic, version-local scheme
+//! that works directly from the `RecordRef` lens:
 //!
-//! We therefore materialise each indexed leaf to an owned `InnerValue` via
-//! `RecordRef::materialize_at` and feed THAT through the UNCHANGED
-//! `IndexRecordKey::with_values::<InnerValue>`. Byte-identical by
-//! construction. NEVER hash `ScalarRef` for these keys.
+//! - **Scalars** (Null, Bool, Int, F64, Str, Bin) are hashed via
+//!   `scalar_at` (zero-copy `ScalarRef`) — no owned `InnerValue` needed.
+//! - **Non-scalar leaves** (Dec, Big, containers) are hashed via
+//!   `materialize_at` → transient owned value → `hash_inner_value`.
+//!   This is the ONE unavoidable `InnerValue` usage — the `RecordRef` trait's
+//!   escape hatch method returns `InnerValue` by design. The value is consumed
+//!   immediately; no InnerValue is stored or persisted.
 //!
-//! `materialize_at` (NOT `scalar_at`) is mandatory here: `scalar_at` returns
-//! `None` for Dec/Big/containers, which would silently drop those records
-//! from the index. `materialize_at` preserves any leaf.
+//! The hash uses EXPLICIT u8 discriminant tags (0..=10), NOT
+//! `std::mem::discriminant`, so it is stable across rustc versions and enum
+//! layout changes. Set and Map hashes are order-independent (XOR of per-element
+//! hashes).
 //!
-//! # Accepted limit — #61 InnerValue-elimination campaign
+//! The lookup path (`lookup_by_index`, `check_unique_constraint`) receives
+//! `&[InnerValue]` from the engine and feeds each through `hash_inner_value`
+//! with the SAME tag scheme, so write-path and read-path hashes agree.
 //!
-//! The materialized `InnerValue` leaf fed to `IndexRecordKey::with_values`
-//! (and the `Vec<(String, InnerValue)>` covering-projection blob in
-//! `sorted_index_manager`) is a DELIBERATELY retained `InnerValue` anchor.
-//! Persisted index posting hashes (`hash1`/`hash2`) and covering blobs are
-//! on-disk and depend on `<Value<InternerKey> as Hash>`'s
-//! `std::mem::discriminant`-prefixed byte stream (10 variants), which no
-//! 6-variant `ScalarRef`/lens type can reproduce without divergence.
-//! Eliminating it requires either a discriminant-stable hand-rolled hasher
-//! proven against a frozen golden corpus, or an index-format version bump +
-//! full O(N) rebuild migration that breaks storage byte-identity across
-//! versions. Neither pays for itself: the record is already read via the byte
-//! lens; only the transient indexed leaf is an `InnerValue`. Accepted limit
-//! for the #61 InnerValue-elimination campaign.
+//! # Index format version
+//!
+//! This hash scheme is VERSION 2 of the legacy index posting format.
+//! Old V1 postings (based on `<Value<InternerKey> as Hash>` with
+//! `std::mem::discriminant` tags) are NOT compatible — the engine triggers
+//! a full O(N) rebuild-on-open when it detects a version mismatch (see
+//! `LEGACY_INDEX_FORMAT_VERSION` in `persistence.rs`).
 
 use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_record_key::IndexRecordKey;
 use bytes::Bytes;
+use fxhash::FxHasher;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
+use shamir_types::record_view::ScalarRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
+use std::hash::{Hash, Hasher};
+
+// ============================================================================
+// Stable discriminant tags — explicit u8, never `std::mem::discriminant`.
+// ============================================================================
+
+const TAG_NULL: u8 = 0;
+const TAG_BOOL: u8 = 1;
+const TAG_INT: u8 = 2;
+const TAG_F64: u8 = 3;
+const TAG_STR: u8 = 4;
+const TAG_BIN: u8 = 5;
+const TAG_DEC: u8 = 6;
+const TAG_BIG: u8 = 7;
+const TAG_LIST: u8 = 8;
+const TAG_SET: u8 = 9;
+const TAG_MAP: u8 = 10;
+
+// ============================================================================
+// Core hash primitives
+// ============================================================================
+
+/// Hash a `ScalarRef` leaf into the hasher using stable tags.
+/// Covers: Null, Bool, Int, F64, Str, Bin.
+fn hash_scalar_ref(sr: &ScalarRef<'_>, state: &mut impl Hasher) {
+    match sr {
+        ScalarRef::Null => {
+            TAG_NULL.hash(state);
+        }
+        ScalarRef::Bool(b) => {
+            TAG_BOOL.hash(state);
+            b.hash(state);
+        }
+        ScalarRef::Int(i) => {
+            TAG_INT.hash(state);
+            i.hash(state);
+        }
+        ScalarRef::F64(f) => {
+            TAG_F64.hash(state);
+            f.to_bits().hash(state);
+        }
+        ScalarRef::Str(s) => {
+            TAG_STR.hash(state);
+            s.hash(state);
+        }
+        ScalarRef::Bin(b) => {
+            TAG_BIN.hash(state);
+            b.hash(state);
+        }
+    }
+}
+
+/// Hash an `InnerValue` leaf into the hasher using the SAME stable tags
+/// as `hash_scalar_ref`, so the write path (ScalarRef) and the lookup
+/// path (InnerValue) produce IDENTICAL hashes for equivalent values.
+///
+/// Set and Map hashes are order-independent: each element is hashed
+/// independently with a fresh FxHasher, the results are XOR'd, and the
+/// XOR sum is fed into `state`.
+fn hash_inner_value(v: &InnerValue, state: &mut impl Hasher) {
+    match v {
+        InnerValue::Null => {
+            TAG_NULL.hash(state);
+        }
+        InnerValue::Bool(b) => {
+            TAG_BOOL.hash(state);
+            b.hash(state);
+        }
+        InnerValue::Int(i) => {
+            TAG_INT.hash(state);
+            i.hash(state);
+        }
+        InnerValue::F64(f) => {
+            TAG_F64.hash(state);
+            f.to_bits().hash(state);
+        }
+        InnerValue::Str(s) => {
+            TAG_STR.hash(state);
+            s.hash(state);
+        }
+        InnerValue::Bin(b) => {
+            TAG_BIN.hash(state);
+            b.hash(state);
+        }
+        InnerValue::Dec(d) => {
+            TAG_DEC.hash(state);
+            d.hash(state);
+        }
+        InnerValue::Big(b) => {
+            TAG_BIG.hash(state);
+            b.hash(state);
+        }
+        InnerValue::List(l) => {
+            TAG_LIST.hash(state);
+            for elem in l {
+                hash_inner_value(elem, state);
+            }
+        }
+        InnerValue::Set(s) => {
+            TAG_SET.hash(state);
+            let mut xor_sum: u64 = 0;
+            for elem in s {
+                let mut h = FxHasher::default();
+                hash_inner_value(elem, &mut h);
+                xor_sum ^= h.finish();
+            }
+            xor_sum.hash(state);
+        }
+        InnerValue::Map(m) => {
+            TAG_MAP.hash(state);
+            let mut xor_sum: u64 = 0;
+            for (k, v) in m {
+                let mut h = FxHasher::default();
+                // Hash the InternerKey's numeric id directly — deterministic
+                // and order-independent.
+                k.id().hash(&mut h);
+                hash_inner_value(v, &mut h);
+                xor_sum ^= h.finish();
+            }
+            xor_sum.hash(state);
+        }
+    }
+}
+
+// ============================================================================
+// Dual-hash computation (hash1 + hash2 with different seeds)
+// ============================================================================
+
+/// Compute the dual `(hash1, hash2)` for one or more leaves hashed from
+/// a `RecordRef`. Each leaf is hashed via `scalar_at` when possible (the
+/// fast zero-copy path); falls back to `materialize_at` for Dec/Big/containers.
+///
+/// Returns `None` if ANY path is absent (all-or-nothing semantics).
+fn compute_leaf_hashes(
+    rec: &(impl RecordRef + ?Sized),
+    paths: &[IndexInfoItem],
+    name_interned: u64,
+) -> Option<(u64, u64)> {
+    const SEED2: u64 = 0x9E3779B97F4A7C15;
+
+    let mut h1 = FxHasher::default();
+    let mut h2 = FxHasher::default();
+
+    SEED2.hash(&mut h2);
+    name_interned.hash(&mut h2);
+    name_interned.hash(&mut h1);
+
+    for item in paths {
+        let ipath: SmallVec<[InternerKey; 4]> =
+            item.path.iter().map(|&id| InternerKey::new(id)).collect();
+
+        // Fast path: scalar_at is zero-copy.
+        if let Some(sr) = rec.scalar_at(&ipath) {
+            hash_scalar_ref(&sr, &mut h1);
+            hash_scalar_ref(&sr, &mut h2);
+            continue;
+        }
+
+        // Slow path: materialize the leaf for Dec/Big/containers.
+        // This is the ONE unavoidable InnerValue usage (RecordRef trait
+        // returns InnerValue from materialize_at by design).
+        let leaf = rec.materialize_at(&ipath)?;
+        hash_inner_value(&leaf, &mut h1);
+        hash_inner_value(&leaf, &mut h2);
+    }
+
+    Some((h1.finish(), h2.finish()))
+}
+
+/// Compute the dual `(hash1, hash2)` for lookup values (`&[InnerValue]`)
+/// using the SAME tag scheme as `compute_leaf_hashes`.
+fn compute_lookup_hashes(values: &[InnerValue], name_interned: u64) -> (u64, u64) {
+    const SEED2: u64 = 0x9E3779B97F4A7C15;
+
+    let mut h1 = FxHasher::default();
+    let mut h2 = FxHasher::default();
+
+    SEED2.hash(&mut h2);
+    name_interned.hash(&mut h2);
+    name_interned.hash(&mut h1);
+
+    for v in values {
+        hash_inner_value(v, &mut h1);
+        hash_inner_value(v, &mut h2);
+    }
+
+    (h1.finish(), h2.finish())
+}
+
+// ============================================================================
+// Public API
+// ============================================================================
+
+/// Extract the indexed leaves for a composite index from a record AND
+/// compute the dual posting-key hash in one pass — no intermediate
+/// `Vec<InnerValue>`.
+///
+/// For each `IndexInfoItem` path, tries `scalar_at` (zero-copy) then
+/// falls back to `materialize_at` (owned, for Dec/Big/containers). If
+/// ANY path is absent the WHOLE record is skipped (all-or-nothing).
+///
+/// Returns the fully-formed `IndexRecordKey` or `None`.
+pub fn build_index_key_from_record(
+    is_unique: bool,
+    name_interned: u64,
+    rec: &(impl RecordRef + ?Sized),
+    paths: &[IndexInfoItem],
+) -> Option<IndexRecordKey> {
+    let (h1, h2) = compute_leaf_hashes(rec, paths, name_interned)?;
+    Some(IndexRecordKey::new(is_unique, name_interned).with_hash(h1, h2))
+}
+
+/// Build the index key from lookup values (`&[InnerValue]` supplied by
+/// the engine's `lookup_by_index`). Uses the SAME hash scheme as
+/// `build_index_key_from_record` so write-path and read-path agree.
+pub(super) fn build_index_key(
+    is_unique: bool,
+    name_interned: u64,
+    values: &[InnerValue],
+) -> IndexRecordKey {
+    let (h1, h2) = compute_lookup_hashes(values, name_interned);
+    IndexRecordKey::new(is_unique, name_interned).with_hash(h1, h2)
+}
 
 /// Extract the indexed leaves for a composite index from a record.
 ///
-/// For each `IndexInfoItem` path: convert `&[u64]` → `&[InternerKey]` and
+/// For each `IndexInfoItem` path: convert `&[u64]` to `&[InternerKey]` and
 /// call `rec.materialize_at(path)`. If ANY path is missing (returns `None`)
-/// the WHOLE record is skipped (returns `None`) — mirrors the legacy
-/// all-or-nothing semantics of the old `extract_index_values`.
+/// the WHOLE record is skipped (returns `None`).
 ///
-/// Uses `materialize_at` (NOT `scalar_at`) so Dec/Big/Map/List leaves are
-/// preserved and stay indexed byte-identically to the legacy path.
+/// **S9 note**: this function still returns `Vec<InnerValue>` because the
+/// engine uses it for unique-index duplicate detection (serializing values
+/// for comparison). The hot-path write/read cycle uses
+/// `build_index_key_from_record` instead, which hashes directly from the
+/// lens without collecting owned leaves.
 pub fn extract_index_leaves(
     rec: &(impl RecordRef + ?Sized),
     paths: &[IndexInfoItem],
@@ -67,21 +292,6 @@ pub fn extract_index_leaves(
         }
     }
     Some(values)
-}
-
-/// Build the 25-byte index key from already-materialised leaves.
-///
-/// Feeds `&leaves` through the UNCHANGED `IndexRecordKey::with_values::<InnerValue>`
-/// — the byte-identity anchor. The hashing boundary is exactly here: leaves
-/// are owned `InnerValue`s, so `<InnerValue as Hash>::hash` is invoked
-/// (matching the legacy discriminant + leaf bytes), never `ScalarRef`'s.
-pub(super) fn build_index_key(
-    is_unique: bool,
-    name_interned: u64,
-    leaves: &[InnerValue],
-) -> IndexRecordKey {
-    let leaf_refs: Vec<&InnerValue> = leaves.iter().collect();
-    IndexRecordKey::new(is_unique, name_interned).with_values(&leaf_refs)
 }
 
 /// Compose the physical posting key:

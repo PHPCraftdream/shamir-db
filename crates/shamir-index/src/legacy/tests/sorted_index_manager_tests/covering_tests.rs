@@ -405,8 +405,12 @@ fn decode_covering_projection_invalid_msgpack_returns_none() {
 
 #[test]
 fn decode_covering_projection_roundtrip() {
-    // Manually build a valid versioned envelope and verify roundtrip.
-    let projection: Vec<(String, InnerValue)> = vec![("score".to_string(), InnerValue::Int(77))];
+    // S9: the encode side now writes QueryValue. Build a valid versioned
+    // envelope with QueryValue and verify the decode (which reads as
+    // InnerValue) round-trips correctly for scalar leaves.
+    use shamir_types::types::value::QueryValue;
+
+    let projection: Vec<(String, QueryValue)> = vec![("score".to_string(), QueryValue::Int(77))];
     let msgpack = rmp_serde::to_vec_named(&projection).unwrap();
     let version: u64 = 0xDEAD_BEEF;
     let mut envelope = version.to_le_bytes().to_vec();

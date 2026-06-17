@@ -1,6 +1,9 @@
 use crate::descriptor::IndexDescriptor;
 use crate::kind::{FunctionalConfig, IndexKind, TokenizerKind};
-use crate::persistence::{load_index2_metadata, save_index2_metadata, PersistedIndexes};
+use crate::persistence::{
+    legacy_indexes_need_rebuild, load_index2_metadata, load_legacy_index_version,
+    save_index2_metadata, save_legacy_index_version, PersistedIndexes, LEGACY_INDEX_FORMAT_VERSION,
+};
 use crate::MetaEnvelope;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -78,4 +81,58 @@ async fn load_missing_returns_none() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let loaded = load_index2_metadata(&store).await.unwrap();
     assert!(loaded.is_none());
+}
+
+// ============================================================================
+// S9 — legacy index format version
+// ============================================================================
+
+#[tokio::test]
+async fn legacy_version_missing_returns_zero() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let v = load_legacy_index_version(&store).await.unwrap();
+    assert_eq!(v, 0, "missing version marker must return 0");
+}
+
+#[tokio::test]
+async fn legacy_version_save_load_roundtrip() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    save_legacy_index_version(&store).await.unwrap();
+    let v = load_legacy_index_version(&store).await.unwrap();
+    assert_eq!(v, LEGACY_INDEX_FORMAT_VERSION);
+}
+
+#[tokio::test]
+async fn legacy_needs_rebuild_when_missing() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    assert!(
+        legacy_indexes_need_rebuild(&store).await.unwrap(),
+        "pre-S9 data (no version marker) must trigger rebuild"
+    );
+}
+
+#[tokio::test]
+async fn legacy_no_rebuild_when_current() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    save_legacy_index_version(&store).await.unwrap();
+    assert!(
+        !legacy_indexes_need_rebuild(&store).await.unwrap(),
+        "current version must NOT trigger rebuild"
+    );
+}
+
+#[tokio::test]
+async fn legacy_rebuild_when_old_version() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    // Simulate an old version (1) in the store.
+    let key = RecordId::system("_m.idx.lfv");
+    let old_ver: u32 = 1;
+    store
+        .set(key.to_bytes(), Bytes::from(old_ver.to_le_bytes().to_vec()))
+        .await
+        .unwrap();
+    assert!(
+        legacy_indexes_need_rebuild(&store).await.unwrap(),
+        "old version must trigger rebuild"
+    );
 }

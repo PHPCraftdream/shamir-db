@@ -4,7 +4,7 @@
 //! этот модуль отвечает за гарантии уникальности значений.
 
 use crate::legacy::index_definition::IndexDefinition;
-use crate::legacy::index_keys::{build_index_key, extract_index_leaves};
+use crate::legacy::index_keys::{build_index_key, build_index_key_from_record};
 use crate::legacy::index_manager::IndexManager;
 use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
@@ -39,11 +39,11 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_leaves(value, &def.paths) {
-                if let Some(existing_id) = self
-                    .check_unique_constraint(def.name_interned, &values)
-                    .await?
-                {
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, value, &def.paths)
+            {
+                let index_key = irk.to_bytes();
+                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
                     return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                         "Unique index '{}' violated: value already exists for record {:?}",
                         def.name_interned, existing_id
@@ -78,22 +78,22 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            let old_values = extract_index_leaves(old_value, &def.paths);
-            let new_values = extract_index_leaves(new_value, &def.paths);
+            let old_key =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
+            let new_key =
+                build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
 
-            // Если значение не изменилось или оба отсутствуют — пропускаем
-            match (&old_values, &new_values) {
+            // If the key is unchanged or both absent, skip.
+            match (&old_key, &new_key) {
                 (None, None) => continue,
-                (Some(old), Some(new)) if old == new => continue,
+                (Some(o), Some(n)) if o.to_bytes() == n.to_bytes() => continue,
                 _ => {}
             }
 
-            // Проверяем новое значение (если оно есть)
-            if let Some(new) = &new_values {
-                if let Some(existing_id) =
-                    self.check_unique_constraint(def.name_interned, new).await?
-                {
-                    // Если существующая запись — это не мы сами, то нарушение
+            // Check the new key (if present).
+            if let Some(nk) = &new_key {
+                let index_key = nk.to_bytes();
+                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
                     if &existing_id != record_id {
                         return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                             "Unique index '{}' violated: value already exists for record {:?}",
@@ -110,11 +110,10 @@ impl IndexManager {
     /// Deterministic unique-index keys this `value` would claim.
     ///
     /// For every unique index whose paths the value fully populates,
-    /// returns the BYTE-IDENTICAL key that `check_unique_constraint`
-    /// (and `add_unique_entry`) read/write — i.e.
-    /// `build_index_key(true, name_interned, values).to_bytes()`. The
-    /// tx commit path records these as `UniqueGuard`s and re-validates
-    /// them under `commit_lock`, closing the tx-concurrent unique hole.
+    /// returns the key that `check_unique_constraint`
+    /// (and `add_unique_entry`) read/write. The tx commit path records
+    /// these as `UniqueGuard`s and re-validates them under `commit_lock`,
+    /// closing the tx-concurrent unique hole.
     ///
     /// Returns an empty vec when there are no unique indexes or the
     /// value populates none of them.
@@ -124,8 +123,10 @@ impl IndexManager {
         }
         let mut keys = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_leaves(value, &def.paths) {
-                keys.push(build_index_key(true, def.name_interned, &values).to_bytes());
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, value, &def.paths)
+            {
+                keys.push(irk.to_bytes());
             }
         }
         keys
@@ -144,8 +145,12 @@ impl IndexManager {
         values: &[InnerValue],
     ) -> DbResult<Option<RecordId>> {
         let index_key = build_index_key(true, name_interned, values).to_bytes();
+        self.check_unique_key(&index_key).await
+    }
 
-        match self.info_store.get(index_key).await {
+    /// Check a unique constraint by its pre-computed index key bytes.
+    async fn check_unique_key(&self, index_key: &Bytes) -> DbResult<Option<RecordId>> {
+        match self.info_store.get(index_key.clone()).await {
             Ok(bytes) => {
                 if bytes.len() == 16 {
                     let arr: [u8; 16] = bytes.as_ref().try_into().unwrap();
@@ -165,7 +170,7 @@ impl IndexManager {
     // UNIQUE INDEXES - Storage helpers
     // ============================================================================
 
-    /// Добавляет запись в уникальный индекс.
+    /// Добавляет запись в уникальный индекс by pre-computed key.
     ///
     /// Ключ: `[index_key with is_unique=true]` (25 байт)
     /// Значение: `RecordId` (16 байт)
@@ -173,20 +178,17 @@ impl IndexManager {
     /// # Важно
     ///
     /// Не проверяет уникальность! Вызывай `validate_unique_*` перед этим методом.
-    async fn add_unique_entry(
+    async fn add_unique_entry_by_key(
         &self,
-        name_interned: u64,
-        values: &[InnerValue],
+        index_key: Bytes,
         record_id: &RecordId,
     ) -> DbResult<()> {
-        let index_key = build_index_key(true, name_interned, values).to_bytes();
         self.info_store.set(index_key, record_id.to_bytes()).await?;
         Ok(())
     }
 
-    /// Удаляет запись из уникального индекса.
-    async fn remove_unique_entry(&self, name_interned: u64, values: &[InnerValue]) -> DbResult<()> {
-        let index_key = build_index_key(true, name_interned, values).to_bytes();
+    /// Удаляет запись из уникального индекса by pre-computed key.
+    async fn remove_unique_entry_by_key(&self, index_key: Bytes) -> DbResult<()> {
         self.info_store.remove(index_key).await?;
         Ok(())
     }
@@ -214,8 +216,10 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_leaves(value, &def.paths) {
-                self.add_unique_entry(def.name_interned, &values, record_id)
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, value, &def.paths)
+            {
+                self.add_unique_entry_by_key(irk.to_bytes(), record_id)
                     .await?;
             }
         }
@@ -243,23 +247,26 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            let old_values = extract_index_leaves(old_value, &def.paths);
-            let new_values = extract_index_leaves(new_value, &def.paths);
+            let old_key =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
+            let new_key =
+                build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
 
-            match (old_values, new_values) {
+            match (old_key, new_key) {
                 (None, None) => {}
-                (None, Some(new)) => {
-                    self.add_unique_entry(def.name_interned, &new, record_id)
+                (None, Some(nk)) => {
+                    self.add_unique_entry_by_key(nk.to_bytes(), record_id)
                         .await?;
                 }
-                (Some(old), None) => {
-                    self.remove_unique_entry(def.name_interned, &old).await?;
+                (Some(ok), None) => {
+                    self.remove_unique_entry_by_key(ok.to_bytes()).await?;
                 }
-                (Some(old), Some(new)) => {
-                    if old != new {
-                        self.remove_unique_entry(def.name_interned, &old).await?;
-                        self.add_unique_entry(def.name_interned, &new, record_id)
-                            .await?;
+                (Some(ok), Some(nk)) => {
+                    let old_bytes = ok.to_bytes();
+                    let new_bytes = nk.to_bytes();
+                    if old_bytes != new_bytes {
+                        self.remove_unique_entry_by_key(old_bytes).await?;
+                        self.add_unique_entry_by_key(new_bytes, record_id).await?;
                     }
                 }
             }
@@ -283,8 +290,10 @@ impl IndexManager {
 
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
         for def in defs {
-            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
-                self.remove_unique_entry(def.name_interned, &values).await?;
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
+            {
+                self.remove_unique_entry_by_key(irk.to_bytes()).await?;
             }
         }
 
@@ -347,26 +356,26 @@ impl IndexManager {
         use shamir_types::types::common::{new_map, TMap};
 
         let name_interned = index_def.name_interned;
-        let mut value_counts: TMap<Vec<u8>, usize> = new_map();
-        let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
+        // Collect (record_id, index_key_bytes) for duplicate detection and bulk write.
+        let mut key_counts: TMap<Bytes, usize> = new_map();
+        let mut entries: Vec<(RecordId, Bytes)> = Vec::new();
 
         for (record_id, value) in &records {
-            if let Some(values) = extract_index_leaves(value, &index_def.paths) {
-                let values_key = bincode::serialize(&values)
-                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-                *value_counts.entry(values_key.clone()).or_insert(0) += 1;
-                entries.push((*record_id, values_key, values));
+            if let Some(irk) =
+                build_index_key_from_record(true, name_interned, value, &index_def.paths)
+            {
+                let index_key = irk.to_bytes();
+                *key_counts.entry(index_key.clone()).or_insert(0) += 1;
+                entries.push((*record_id, index_key));
             }
         }
 
-        let duplicates: Vec<(&Vec<u8>, &usize)> =
-            value_counts.iter().filter(|(_, &c)| c > 1).collect();
+        let duplicates: Vec<(&Bytes, &usize)> =
+            key_counts.iter().filter(|(_, &c)| c > 1).collect();
         if !duplicates.is_empty() {
             let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
-            let sample_key = duplicates[0].0;
-            let sample_values: Vec<InnerValue> =
-                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Null]);
-            let sample_str = Self::format_values_for_error(&sample_values);
+            // Sample: we can't decode the hash back to values, so give a generic message.
+            let sample_str = "<duplicate indexed values>".to_string();
             return Err(shamir_storage::error::DbError::UniqueIndexCreationFailed(
                 name_interned.to_string(),
                 duplicate_record_count,
@@ -376,8 +385,7 @@ impl IndexManager {
 
         let count = entries.len();
         let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
-        for (record_id, _values_key, values) in entries {
-            let index_key = build_index_key(true, name_interned, &values).to_bytes();
+        for (record_id, index_key) in entries {
             writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
         }
         if !writes.is_empty() {
@@ -394,33 +402,6 @@ impl IndexManager {
             count
         );
         Ok(())
-    }
-
-    /// Форматирует значения для сообщения об ошибке.
-    fn format_values_for_error(values: &[InnerValue]) -> String {
-        let formatted: Vec<String> = values
-            .iter()
-            .map(|v| match v {
-                InnerValue::Null => "null".to_string(),
-                InnerValue::Bool(b) => b.to_string(),
-                InnerValue::Int(n) => n.to_string(),
-                InnerValue::F64(n) => n.to_string(),
-                InnerValue::Dec(d) => d.to_string(),
-                InnerValue::Big(b) => b.to_string(),
-                InnerValue::Str(s) => format!("\"{}\"", s),
-                InnerValue::Bin(_) => "<binary>".to_string(),
-                InnerValue::List(arr) => {
-                    if arr.len() <= 5 {
-                        format!("[{}]", arr.len())
-                    } else {
-                        format!("[{}...]", arr.len())
-                    }
-                }
-                InnerValue::Set(s) => format!("{{{} items}}", s.len()),
-                InnerValue::Map(map) => format!("{{{} fields}}", map.len()),
-            })
-            .collect();
-        formatted.join(", ")
     }
 
     /// Удаляет уникальный индекс по его имени.
@@ -529,10 +510,11 @@ impl IndexManager {
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_leaves(value, &def.paths) {
-                let index_key = build_index_key(true, def.name_interned, &values).to_bytes();
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, value, &def.paths)
+            {
                 ops.push(IndexWriteOp::SetPosting {
-                    key: index_key,
+                    key: irk.to_bytes(),
                     value: Bytes::copy_from_slice(record_id.as_bytes()),
                 });
             }
@@ -557,28 +539,28 @@ impl IndexManager {
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            let old_values = extract_index_leaves(old_value, &def.paths);
-            let new_values = extract_index_leaves(new_value, &def.paths);
-            match (old_values, new_values) {
+            let old_key =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
+            let new_key =
+                build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
+            match (old_key, new_key) {
                 (None, None) => {}
-                (None, Some(new)) => {
-                    let key = build_index_key(true, def.name_interned, &new).to_bytes();
+                (None, Some(nk)) => {
                     ops.push(IndexWriteOp::SetPosting {
-                        key,
+                        key: nk.to_bytes(),
                         value: Bytes::copy_from_slice(record_id.as_bytes()),
                     });
                 }
-                (Some(old), None) => {
-                    let key = build_index_key(true, def.name_interned, &old).to_bytes();
-                    ops.push(IndexWriteOp::RemovePosting { key });
+                (Some(ok), None) => {
+                    ops.push(IndexWriteOp::RemovePosting { key: ok.to_bytes() });
                 }
-                (Some(old), Some(new)) => {
-                    if old != new {
-                        let old_key = build_index_key(true, def.name_interned, &old).to_bytes();
-                        ops.push(IndexWriteOp::RemovePosting { key: old_key });
-                        let new_key = build_index_key(true, def.name_interned, &new).to_bytes();
+                (Some(ok), Some(nk)) => {
+                    let old_bytes = ok.to_bytes();
+                    let new_bytes = nk.to_bytes();
+                    if old_bytes != new_bytes {
+                        ops.push(IndexWriteOp::RemovePosting { key: old_bytes });
                         ops.push(IndexWriteOp::SetPosting {
-                            key: new_key,
+                            key: new_bytes,
                             value: Bytes::copy_from_slice(record_id.as_bytes()),
                         });
                     }
@@ -601,9 +583,10 @@ impl IndexManager {
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
-            if let Some(values) = extract_index_leaves(old_value, &def.paths) {
-                let key = build_index_key(true, def.name_interned, &values).to_bytes();
-                ops.push(IndexWriteOp::RemovePosting { key });
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
+            {
+                ops.push(IndexWriteOp::RemovePosting { key: irk.to_bytes() });
             }
         }
         Ok(ops)
@@ -627,10 +610,11 @@ impl IndexManager {
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
             for (rid, value) in items.clone() {
-                if let Some(leaves) = extract_index_leaves(value, &def.paths) {
-                    let index_key = build_index_key(true, def.name_interned, &leaves).to_bytes();
+                if let Some(irk) =
+                    build_index_key_from_record(true, def.name_interned, value, &def.paths)
+                {
                     ops.push(IndexWriteOp::SetPosting {
-                        key: index_key,
+                        key: irk.to_bytes(),
                         value: Bytes::copy_from_slice(rid.as_bytes()),
                     });
                 }

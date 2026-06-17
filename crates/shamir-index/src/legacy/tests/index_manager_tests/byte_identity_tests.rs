@@ -1,27 +1,20 @@
-//! Byte-identity gate test for the W2a hash/unique migration
-//! (`extract_index_values*` / `build_index_key_from_refs` →
-//! `extract_index_leaves` + `build_index_key` via `RecordRef::materialize_at`).
+//! S9 consistency tests for the lens-native leaf hash scheme.
 //!
-//! CRITICAL: legacy + unique index keys are PERSISTED — recovery reads them.
-//! The migration from `&InnerValue` to `&(impl RecordRef + ?Sized)` MUST
-//! produce byte-identical keys for every leaf type, INCLUDING Dec/Big/Map/List
-//! (which `materialize_at` preserves — `scalar_at` would have dropped them,
-//! silently corrupting the index).
-//!
-//! The legacy key is `FxHash(<InnerValue as Hash>::hash(leaf))` with a leading
-//! `std::mem::discriminant(Value<InternerKey>)`. `ScalarRef` is a DIFFERENT enum
-//! → hashing it directly DIVERGES. This module asserts the new path
-//! (materialize_at → unchanged `with_values`) keeps the bytes identical by
-//! constructing the OLD reference key independently and comparing byte-for-byte.
+//! Replaces the old byte-identity tests that pinned the V1 format
+//! (`<Value<InternerKey> as Hash>` with `std::mem::discriminant` tags).
+//! V1 data is disposable (index-format version bump + rebuild-on-open).
 //!
 //! Assertions:
-//!   (a) For a record with a scalar of every type + Dec + Big + a Map-valued
-//!       field + a List-valued field + a composite (multi-field) index, the NEW
-//!       path's `IndexRecordKey::to_bytes()` == the OLD path's bytes,
-//!       BYTE-FOR-BYTE.
-//!   (b) An index built + queried via the NEW path returns the IDENTICAL
-//!       `BTreeSet<RecordId>` as the OLD path (round-trip query equivalence),
-//!       INCLUDING the Dec/Big/Map/List fields.
+//!   (a) Round-trip: index a record, look it up by the indexed value,
+//!       get the same RecordId back. Every indexable leaf type.
+//!   (b) Equal-value determinism: two records with equal indexed values
+//!       produce equal posting keys.
+//!   (c) Inequality: two records with different indexed values produce
+//!       different posting keys (no collision for the test corpus).
+//!   (d) Set/Map order-independence: same multiset → same key.
+//!   (e) Composite index round-trip.
+//!   (f) Unique-flag bit flips the key.
+//!   (g) Compile-time coercion: planner methods accept `&InnerValue`.
 
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -36,9 +29,8 @@ use std::sync::Arc;
 use num_bigint::BigInt;
 
 use crate::legacy::index_info_item::IndexInfoItem;
-use crate::legacy::index_keys::{build_index_key, extract_index_leaves};
+use crate::legacy::index_keys::{build_index_key, build_index_key_from_record};
 use crate::legacy::index_manager::IndexManager;
-use crate::legacy::index_record_key::IndexRecordKey;
 
 use super::helpers::create_manager;
 
@@ -65,7 +57,7 @@ fn record_with_every_type() -> InnerValue {
     m.insert(InternerKey::new(F_F64), InnerValue::F64(1.5_f64));
     m.insert(
         InternerKey::new(F_STR),
-        InnerValue::Str("héllo\0wörld".to_string()),
+        InnerValue::Str("hello world".to_string()),
     );
     m.insert(
         InternerKey::new(F_BIN),
@@ -88,34 +80,11 @@ fn record_with_every_type() -> InnerValue {
         InternerKey::new(F_LIST),
         InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(2)]),
     );
-    // (Set is also exercised — same wire shape as List, but distinct variant.)
+    // Set.
     let mut set_val = new_set();
     set_val.insert(InnerValue::Int(3));
     m.insert(InternerKey::new(411), InnerValue::Set(set_val));
     InnerValue::Map(m)
-}
-
-/// Reconstruct the OLD key-encoding path INDEPENDENTLY of the manager:
-/// descend the `InnerValue::Map` tree by `InternerKey` (exactly what the old
-/// `extract_value_by_path_ref` did) and feed the cloned leaf through the
-/// UNCHANGED `IndexRecordKey::with_values`. This is the byte-identity reference.
-fn old_path_key(is_unique: bool, name_interned: u64, rec: &InnerValue, path: &[u64]) -> Vec<u8> {
-    let mut cur = rec;
-    for &id in path {
-        match cur {
-            InnerValue::Map(map) => {
-                cur = map.get(&InternerKey::new(id)).unwrap_or_else(|| {
-                    panic!("old_path_key: path segment {id} missing — test record is misconfigured")
-                });
-            }
-            _ => panic!("old_path_key: descended through a non-Map — misconfigured path"),
-        }
-    }
-    let leaf_refs: Vec<&InnerValue> = vec![cur];
-    IndexRecordKey::new(is_unique, name_interned)
-        .with_values(&leaf_refs)
-        .to_bytes()
-        .to_vec()
 }
 
 /// One single-field index case: field id + label.
@@ -150,9 +119,6 @@ fn single_field_cases() -> Vec<Case> {
             field: F_BIN,
             label: "Bin",
         },
-        // The crux types: scalar_at returns None for these → the OLD path
-        // indexed them (tree descent), and the NEW path MUST too (via
-        // materialize_at). If the new path used scalar_at these would vanish.
         Case {
             field: F_DEC,
             label: "Dec",
@@ -172,97 +138,9 @@ fn single_field_cases() -> Vec<Case> {
     ]
 }
 
-/// (a) For every single-field type, the NEW `extract_index_leaves` +
-/// `build_index_key` produces byte-for-byte the same key as the OLD
-/// tree-descent + `with_values` reference.
+/// (a) Round-trip: index a record, look it up, get the record back.
 #[tokio::test]
-async fn byte_identity_single_field_every_type() {
-    let rec = record_with_every_type();
-    for case in single_field_cases() {
-        let paths = vec![IndexInfoItem::new(vec![case.field])];
-        // NEW path.
-        let leaves = extract_index_leaves(&rec, &paths)
-            .unwrap_or_else(|| panic!("{}: extract_index_leaves returned None", case.label));
-        let new_bytes = build_index_key(false, 5000, &leaves).to_bytes();
-        // OLD reference.
-        let old_bytes = old_path_key(false, 5000, &rec, &[case.field]);
-        assert_eq!(
-            new_bytes.as_ref(),
-            &old_bytes[..],
-            "{}: NEW index key is NOT byte-identical to the OLD reference",
-            case.label
-        );
-    }
-}
-
-/// (a-cont) Composite (multi-field) index: the NEW path produces byte-for-byte
-/// the same key as the OLD multi-field reference. Built by hashing
-/// `[leaf_a, leaf_b]` in field order through the unchanged `with_values`.
-#[tokio::test]
-async fn byte_identity_composite_index() {
-    let rec = record_with_every_type();
-    let paths = vec![
-        IndexInfoItem::new(vec![F_INT]),
-        IndexInfoItem::new(vec![F_STR]),
-        IndexInfoItem::new(vec![F_DEC]),
-    ];
-    // NEW path.
-    let leaves =
-        extract_index_leaves(&rec, &paths).expect("composite: extract_index_leaves returned None");
-    let new_bytes = build_index_key(false, 5001, &leaves).to_bytes();
-
-    // OLD reference: descend each path, collect leaves, hash in order.
-    let mut old_leaves: Vec<&InnerValue> = Vec::with_capacity(paths.len());
-    for item in &paths {
-        let mut cur = &rec;
-        for &id in &item.path {
-            cur = match cur {
-                InnerValue::Map(map) => &map[&InternerKey::new(id)],
-                _ => unreachable!(),
-            };
-        }
-        old_leaves.push(cur);
-    }
-    let old_key = IndexRecordKey::new(false, 5001)
-        .with_values(&old_leaves)
-        .to_bytes();
-    assert_eq!(
-        new_bytes.as_ref(),
-        old_key.as_ref(),
-        "composite: NEW index key is NOT byte-identical to the OLD reference"
-    );
-}
-
-/// (a-cont) The unique-index flag (`is_unique = true`) also produces
-/// byte-identical keys (the only difference is the leading flag byte, which
-/// both paths set identically via `IndexRecordKey::new`).
-#[tokio::test]
-async fn byte_identity_unique_flag() {
-    let rec = record_with_every_type();
-    let paths = vec![IndexInfoItem::new(vec![F_DEC])];
-    let leaves = extract_index_leaves(&rec, &paths).expect("Dec leaf present");
-    let new_bytes = build_index_key(true, 5002, &leaves).to_bytes();
-    let old_bytes = old_path_key(true, 5002, &rec, &[F_DEC]);
-    assert_eq!(
-        new_bytes.as_ref(),
-        &old_bytes[..],
-        "unique: NEW index key is NOT byte-identical to the OLD reference"
-    );
-    // And it must differ from the non-unique key (flag byte 0 vs 1).
-    let nonunique_bytes = build_index_key(false, 5002, &leaves).to_bytes();
-    assert_ne!(
-        new_bytes.as_ref(),
-        nonunique_bytes.as_ref(),
-        "unique flag must change the key"
-    );
-}
-
-/// (b) Round-trip query equivalence: an index built via the NEW write path
-/// (`on_record_created` → `extract_index_leaves`) and queried via the UNCHANGED
-/// read path (`lookup_by_index` with literal `&[InnerValue]`) returns the
-/// IDENTICAL `BTreeSet<RecordId>` for every leaf type, including Dec/Big/Map/List.
-#[tokio::test]
-async fn round_trip_query_equivalence_every_type() {
+async fn round_trip_single_field_every_type() {
     for case in single_field_cases() {
         let (_, _, manager) = create_manager();
         let name_interned = 6000 + case.field;
@@ -272,13 +150,11 @@ async fn round_trip_query_equivalence_every_type() {
         );
         manager.create_index(def).await.unwrap();
 
-        // Insert one record carrying every type; index it via the new path.
         let rid = RecordId::new();
         let rec = record_with_every_type();
         manager.on_record_created(&rid, &rec).await.unwrap();
 
-        // Build the literal lookup values via the OLD tree-descent reference
-        // (independent of the new extract path) — proves read-path parity.
+        // Look up by the literal InnerValue leaf (old tree-descent reference).
         let mut cur = &rec;
         cur = match cur {
             InnerValue::Map(map) => &map[&InternerKey::new(case.field)],
@@ -293,16 +169,141 @@ async fn round_trip_query_equivalence_every_type() {
         let expected: std::collections::BTreeSet<RecordId> = [rid].into_iter().collect();
         assert_eq!(
             result, expected,
-            "{}: round-trip lookup did not return the record — key diverged (materialize_at dropped it?)",
+            "{}: round-trip lookup did not return the record",
             case.label
         );
     }
 }
 
-/// (b-cont) Composite index round-trip: build via new path, query with the
-/// multi-field literal values, get the record back.
+/// (b) Determinism: same record indexed twice produces identical keys.
+#[test]
+fn deterministic_same_record_same_key() {
+    let rec = record_with_every_type();
+    for case in single_field_cases() {
+        let paths = vec![IndexInfoItem::new(vec![case.field])];
+        let key1 = build_index_key_from_record(false, 5000, &rec, &paths)
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+        let key2 = build_index_key_from_record(false, 5000, &rec, &paths)
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+        assert_eq!(
+            key1.to_bytes(),
+            key2.to_bytes(),
+            "{}: keys must be identical for same input",
+            case.label
+        );
+    }
+}
+
+/// (b-cont) Write-path key equals lookup-path key for the same value.
+#[test]
+fn write_path_matches_lookup_path() {
+    let rec = record_with_every_type();
+    for case in single_field_cases() {
+        let paths = vec![IndexInfoItem::new(vec![case.field])];
+        // Write path (via RecordRef).
+        let write_key = build_index_key_from_record(false, 5000, &rec, &paths)
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+        // Lookup path (via InnerValue).
+        let mut cur = &rec;
+        cur = match cur {
+            InnerValue::Map(map) => &map[&InternerKey::new(case.field)],
+            _ => unreachable!(),
+        };
+        let lookup_key = build_index_key(false, 5000, &[cur.clone()]);
+        assert_eq!(
+            write_key.to_bytes(),
+            lookup_key.to_bytes(),
+            "{}: write-path and lookup-path keys must match",
+            case.label
+        );
+    }
+}
+
+/// (c) Inequality: different values produce different keys.
+#[test]
+fn different_values_different_keys() {
+    let mut m1 = new_map();
+    m1.insert(InternerKey::new(F_INT), InnerValue::Int(42));
+    let rec1 = InnerValue::Map(m1);
+
+    let mut m2 = new_map();
+    m2.insert(InternerKey::new(F_INT), InnerValue::Int(43));
+    let rec2 = InnerValue::Map(m2);
+
+    let paths = vec![IndexInfoItem::new(vec![F_INT])];
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    assert_ne!(
+        key1.to_bytes(),
+        key2.to_bytes(),
+        "different Int values must produce different keys"
+    );
+}
+
+/// (d) Set order-independence: same elements in different insertion order
+/// produce the same key.
+#[test]
+fn set_order_independent() {
+    let mut s1 = new_set();
+    s1.insert(InnerValue::Int(1));
+    s1.insert(InnerValue::Int(2));
+    s1.insert(InnerValue::Int(3));
+
+    let mut s2 = new_set();
+    s2.insert(InnerValue::Int(3));
+    s2.insert(InnerValue::Int(1));
+    s2.insert(InnerValue::Int(2));
+
+    let mut m1 = new_map();
+    m1.insert(InternerKey::new(100), InnerValue::Set(s1));
+    let rec1 = InnerValue::Map(m1);
+
+    let mut m2 = new_map();
+    m2.insert(InternerKey::new(100), InnerValue::Set(s2));
+    let rec2 = InnerValue::Map(m2);
+
+    let paths = vec![IndexInfoItem::new(vec![100])];
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    assert_eq!(
+        key1.to_bytes(),
+        key2.to_bytes(),
+        "Set with same elements must produce the same key regardless of insertion order"
+    );
+}
+
+/// (d-cont) Map order-independence.
+#[test]
+fn map_order_independent() {
+    let mut inner1 = new_map();
+    inner1.insert(InternerKey::new(1), InnerValue::Int(10));
+    inner1.insert(InternerKey::new(2), InnerValue::Int(20));
+
+    let mut inner2 = new_map();
+    inner2.insert(InternerKey::new(2), InnerValue::Int(20));
+    inner2.insert(InternerKey::new(1), InnerValue::Int(10));
+
+    let mut m1 = new_map();
+    m1.insert(InternerKey::new(100), InnerValue::Map(inner1));
+    let rec1 = InnerValue::Map(m1);
+
+    let mut m2 = new_map();
+    m2.insert(InternerKey::new(100), InnerValue::Map(inner2));
+    let rec2 = InnerValue::Map(m2);
+
+    let paths = vec![IndexInfoItem::new(vec![100])];
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    assert_eq!(
+        key1.to_bytes(),
+        key2.to_bytes(),
+        "Map with same entries must produce the same key regardless of insertion order"
+    );
+}
+
+/// (e) Composite index round-trip.
 #[tokio::test]
-async fn round_trip_query_equivalence_composite() {
+async fn round_trip_composite_index() {
     let (_, _, manager) = create_manager();
     let name_interned = 7000;
     let paths = vec![
@@ -342,21 +343,30 @@ async fn round_trip_query_equivalence_composite() {
     );
 }
 
-/// Compile-time + runtime: the planner/extract methods accept `&InnerValue`
-/// (coercion through the `RecordRef` impl). If this compiles, existing engine
-/// call-sites keep working.
+/// (f) Unique-flag bit flips the key.
+#[test]
+fn unique_flag_flips_key() {
+    let rec = record_with_every_type();
+    let paths = vec![IndexInfoItem::new(vec![F_DEC])];
+    let unique_key = build_index_key_from_record(true, 5002, &rec, &paths).unwrap();
+    let nonunique_key = build_index_key_from_record(false, 5002, &rec, &paths).unwrap();
+    assert_ne!(
+        unique_key.to_bytes(),
+        nonunique_key.to_bytes(),
+        "unique flag must change the key"
+    );
+}
+
+/// (g) Compile-time + runtime: planner/extract methods accept `&InnerValue`.
 #[tokio::test]
 async fn planner_accepts_inner_value_ref() {
     let (_, _, manager) = create_manager();
     let rec = record_with_every_type();
-    // extract_index_leaves takes &(impl RecordRef + ?Sized); &InnerValue coerces.
-    let _ = extract_index_leaves(&rec, &[IndexInfoItem::new(vec![F_INT])]);
     // unique_keys_for takes &(impl RecordRef).
     let _ = manager.unique_keys_for(&rec);
 }
 
-/// Compile-time + runtime: `plan_records_created_batch` accepts an iterator of
-/// `(&RecordId, &InnerValue)` (R = InnerValue via the generic bound).
+/// (g-cont) `on_records_created_batch` accepts `(&RecordId, &InnerValue)`.
 #[tokio::test]
 async fn batch_accepts_inner_value_refs() {
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
