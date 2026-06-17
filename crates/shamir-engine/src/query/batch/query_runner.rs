@@ -14,7 +14,7 @@ use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::batch::param_subst::{contains_param_ref, substitute_params};
 use shamir_query_types::filter::Filter;
@@ -61,7 +61,7 @@ pub struct QueryRunner<'a> {
     /// Current nesting depth (0 at the public entry).
     pub depth: usize,
     /// Injected `$param` bindings for this execution scope.
-    pub params: &'a TMap<String, InnerValue>,
+    pub params: &'a TMap<String, QueryValue>,
     /// Result row encoding requested by the client. `Name` (default) =
     /// server de-interns to name-keyed `QueryValue`; `Id` = server
     /// returns raw id-keyed storage msgpack (client de-interns).
@@ -109,8 +109,8 @@ impl<'a> QueryRunner<'a> {
             }
 
             // Resolve the `bind` map against the CURRENT scope's resolved_refs
-            // and params. Each value is a FilterValue — resolve it to an
-            // InnerValue using the same machinery as filter evaluation.
+            // and params. Each value is a FilterValue — resolve it to a
+            // QueryValue using the same machinery as filter evaluation.
             // We use a dummy record (Null) because bind values may only
             // reference $query aliases or literals, not record fields.
             let dummy_record = InnerValue::Null;
@@ -120,7 +120,7 @@ impl<'a> QueryRunner<'a> {
             let bind_ctx = FilterContext::new(&scratch, resolved_refs)
                 .with_actor(self.actor.clone())
                 .with_params(self.params);
-            let mut resolved_params: TMap<String, InnerValue> = new_map();
+            let mut resolved_params: TMap<String, QueryValue> = new_map();
             for (key, fv) in &sub.bind {
                 match fv {
                     crate::query::filter::FilterValue::Param { name } => {
@@ -136,7 +136,7 @@ impl<'a> QueryRunner<'a> {
                         resolved_params.insert(key.clone(), v.clone());
                     }
                     other => {
-                        let v = crate::query::filter::eval::resolve_filter_value(
+                        let v = crate::query::filter::eval::resolve_filter_query(
                             other,
                             &dummy_record,
                             &bind_ctx,
@@ -657,7 +657,7 @@ pub(super) async fn execute_single_impl(
     actor: &Actor,
     db_name: &str,
     depth: usize,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
