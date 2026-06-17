@@ -22,6 +22,8 @@ use shamir_connect::server::resume::{process_resume, ResumeRequest};
 use shamir_connect::server::session::{Session, SessionPermissions, MAX_SESSIONS_PER_USER};
 use shamir_connect::server::user_record::UserRecord;
 
+use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
+
 use crate::framer::Framer;
 
 use super::connection_context::ConnectionContext;
@@ -149,6 +151,7 @@ async fn run_resume<F: Framer>(
         expires_at_ns: ok.expires_at_ns,
         resumption_ticket: ok.resumption_ticket.unwrap_or_default(),
         resumption_expires_at_ns: ok.resumption_expires_at_ns.unwrap_or(0),
+        server_query_version: CURRENT_QUERY_LANG_VERSION as u8,
     };
     let bytes = rmp_serde::to_vec(&wire_ok).map_err(|_| HandshakeError::Io)?;
     framer
@@ -476,6 +479,7 @@ async fn run_handshake<F: Framer>(
         expires_at_ns: auth_ok.expires_at_ns,
         resumption_ticket: ticket_bytes,
         resumption_expires_at_ns: ticket_expires_at_ns,
+        server_query_version: CURRENT_QUERY_LANG_VERSION as u8,
     }) {
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),

@@ -4,6 +4,12 @@ use crate::batch::TransactionInfo;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 #[test]
+fn current_query_lang_version_is_two() {
+    // v2: server now supports MessagePack id-keyed write/read pass-through.
+    assert_eq!(CURRENT_QUERY_LANG_VERSION, 2);
+}
+
+#[test]
 fn tx_begin_request_roundtrip_and_tag() {
     let req = DbRequest::TxBegin {
         query_version: CURRENT_QUERY_LANG_VERSION,

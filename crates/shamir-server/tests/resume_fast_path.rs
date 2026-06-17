@@ -76,6 +76,8 @@ struct WireAuthOk {
     pub resumption_ticket: Vec<u8>,
     #[serde(default)]
     pub resumption_expires_at_ns: u64,
+    #[serde(default)]
+    pub server_query_version: u8,
 }
 
 /// Client → server first frame for session resume.
@@ -98,6 +100,8 @@ struct WireResumeOk {
     resumption_ticket: Vec<u8>,
     #[serde(default)]
     resumption_expires_at_ns: u64,
+    #[serde(default)]
+    server_query_version: u8,
 }
 
 // ---------------------------------------------------------------------------

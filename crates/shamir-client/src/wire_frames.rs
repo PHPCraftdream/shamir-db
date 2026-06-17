@@ -57,6 +57,10 @@ pub(crate) struct WireResumeOk {
     pub resumption_ticket: Vec<u8>,
     #[serde(default)]
     pub resumption_expires_at_ns: u64,
+    /// Max query-language version this server supports; `0` when absent
+    /// (old server). Client emits v2 id-keyed write/read only when >= 2.
+    #[serde(default)]
+    pub server_query_version: u8,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,4 +79,8 @@ pub(crate) struct WireAuthOk {
     pub resumption_ticket: Vec<u8>,
     #[serde(default)]
     pub resumption_expires_at_ns: u64,
+    /// Max query-language version this server supports; `0` when absent
+    /// (old server). Client emits v2 id-keyed write/read only when >= 2.
+    #[serde(default)]
+    pub server_query_version: u8,
 }

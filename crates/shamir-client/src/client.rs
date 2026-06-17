@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rustls::crypto::aws_lc_rs::default_provider;
@@ -282,6 +282,10 @@ pub struct Client {
     /// registry; populated lazily by `dump_repo`/`touch_fields`. Ids come ONLY
     /// from server `interner_dump`/`interner_touch` responses.
     pub(crate) interner_cache: Arc<InternerCacheRegistry>,
+    /// Max query-language version advertised by the server in `auth_ok` /
+    /// `resume_ok`. `0` when the server did not send the field (pre-v2 server).
+    /// Set once on connect/resume; never mutated afterward.
+    server_query_version: AtomicU8,
 }
 
 impl Client {
@@ -483,6 +487,7 @@ impl Client {
             closed,
             reader_handle: Some(reader_handle),
             interner_cache: Arc::new(InternerCacheRegistry::new()),
+            server_query_version: AtomicU8::new(ok_wire.server_query_version),
         })
     }
 
@@ -580,6 +585,7 @@ impl Client {
             closed,
             reader_handle: Some(reader_handle),
             interner_cache: Arc::new(InternerCacheRegistry::new()),
+            server_query_version: AtomicU8::new(ok_wire.server_query_version),
         })
     }
 
@@ -608,6 +614,17 @@ impl Client {
     /// Resumption expiry (paired with [`Self::resumption_ticket`]).
     pub fn resumption_expires_at_ns(&self) -> Option<u64> {
         self.resumption_expires_at_ns
+    }
+
+    /// Max query-language version advertised by the server during the
+    /// handshake (`auth_ok.server_query_version` or
+    /// `resume_ok.server_query_version`). Returns `0` when the server
+    /// did not send the field (pre-v2 server) — treat as v1.
+    ///
+    /// Use this to gate v2 id-keyed write/read: emit v2 protocol only when
+    /// `server_query_version() >= 2`.
+    pub fn server_query_version(&self) -> u8 {
+        self.server_query_version.load(Ordering::Relaxed)
     }
 
     /// Register a subscription and get a handle to receive push frames.
