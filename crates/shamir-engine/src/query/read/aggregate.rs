@@ -9,11 +9,11 @@ use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::Aggregator;
-use shamir_types::codecs::interned::inner_to_json_value;
+use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::filter::eval::compare_values;
 
@@ -199,9 +199,9 @@ impl<'a> AggAccum<'a> {
         }
     }
 
-    pub(super) fn finish(self, interner: &Interner) -> json::Value {
+    pub(super) fn finish(self, interner: &Interner) -> QueryValue {
         match self.state {
-            AggState::Count { count } => json::Value::Number(count.into()),
+            AggState::Count { count } => QueryValue::Int(count as i64),
             AggState::Sum {
                 sum_i,
                 sum_f,
@@ -209,26 +209,31 @@ impl<'a> AggAccum<'a> {
             } => {
                 if has_float {
                     let total = sum_f + sum_i as f64;
-                    serde_json::Number::from_f64(total)
-                        .map(json::Value::Number)
-                        .unwrap_or(json::Value::Null)
+                    // Match json Number::from_f64 semantics: NaN/Inf → Null.
+                    if total.is_finite() {
+                        QueryValue::F64(total)
+                    } else {
+                        QueryValue::Null
+                    }
                 } else {
-                    json::Value::Number(sum_i.into())
+                    QueryValue::Int(sum_i)
                 }
             }
             AggState::Avg { sum, count } => {
                 if count == 0 {
-                    json::Value::Null
+                    QueryValue::Null
                 } else {
                     let avg = sum / count as f64;
-                    serde_json::Number::from_f64(avg)
-                        .map(json::Value::Number)
-                        .unwrap_or(json::Value::Null)
+                    if avg.is_finite() {
+                        QueryValue::F64(avg)
+                    } else {
+                        QueryValue::Null
+                    }
                 }
             }
             AggState::Min { current } | AggState::Max { current } => current
-                .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null),
+                .map(|v| inner_value_to_query_value(v, interner).unwrap_or(QueryValue::Null))
+                .unwrap_or(QueryValue::Null),
         }
     }
 }
@@ -248,10 +253,11 @@ impl<'a> AggAccum<'a> {
 pub(super) fn build_aggregate_object(
     group_records: &[&InnerValue],
     select: &Select,
-    group_key_values: Option<&[(String, json::Value)]>,
+    group_key_values: Option<&[(String, QueryValue)]>,
     interner: &Interner,
-) -> json::Value {
-    let mut obj = json::Map::new();
+) -> QueryValue {
+    let mut obj: indexmap::IndexMap<String, QueryValue, shamir_collections::THasher> =
+        new_map_wc(select.items.len());
 
     // Add group key values if provided
     if let Some(keys) = group_key_values {
@@ -267,7 +273,7 @@ pub(super) fn build_aggregate_object(
     // Field-projection fallbacks (in group context, normally already
     // populated from `group_key_values`). Recorded for a second pass so
     // we don't run them during the hot aggregation loop.
-    let mut field_slots: Vec<(String, &Vec<String>)> = Vec::new();
+    let mut field_slots: Vec<(String, &[String])> = Vec::new();
 
     // funclib aggregate slots: (output key, interned field path, whole-record
     // flag, freshly-minted aggregator). `None` aggregator = unknown name →
@@ -285,10 +291,7 @@ pub(super) fn build_aggregate_object(
         match item {
             SelectItem::CountAll { alias } => {
                 let key = alias.as_deref().unwrap_or("count");
-                obj.insert(
-                    key.to_string(),
-                    json::Value::Number(group_records.len().into()),
-                );
+                obj.insert(key.to_string(), QueryValue::Int(group_records.len() as i64));
             }
             SelectItem::Aggregate {
                 func, field, alias, ..
@@ -367,14 +370,14 @@ pub(super) fn build_aggregate_object(
     }
 
     for (key, _, _, agg) in fn_slots {
-        let jv = match agg {
+        let qv = match agg {
             Some(agg) => match agg.finalize() {
-                Ok(v) => inner_to_json_value(&v, interner).unwrap_or(json::Value::Null),
-                Err(_) => json::Value::Null,
+                Ok(v) => inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null),
+                Err(_) => QueryValue::Null,
             },
-            None => json::Value::Null,
+            None => QueryValue::Null,
         };
-        obj.insert(key, jv);
+        obj.insert(key, qv);
     }
 
     // Resolve field-projection fallbacks from the first record (rare path).
@@ -385,9 +388,9 @@ pub(super) fn build_aggregate_object(
                 intern_field_path(path, interner)
                     .as_deref()
                     .and_then(|p| resolve_field_ref(first, p))
-                    .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
+                    .map(|v| inner_value_to_query_value(v, interner).unwrap_or(QueryValue::Null))
             })
-            .unwrap_or(json::Value::Null);
+            .unwrap_or(QueryValue::Null);
         obj.insert(key, val);
     }
 
@@ -400,13 +403,13 @@ pub(super) fn build_aggregate_object(
             let val = group_records
                 .first()
                 .and_then(|first| resolve_filter_value(&fv, *first, &ctx))
-                .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null);
+                .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
+                .unwrap_or(QueryValue::Null);
             obj.insert(key, val);
         }
     }
 
-    json::Value::Object(obj)
+    QueryValue::Map(obj)
 }
 
 // ============================================================================
@@ -420,7 +423,7 @@ pub fn apply_group_by(
     select: &Select,
     interner: &Interner,
     ctx: &FilterContext<'_>,
-) -> Vec<json::Value> {
+) -> Vec<QueryValue> {
     if records.is_empty() {
         return Vec::new();
     }
@@ -436,13 +439,13 @@ pub fn apply_group_by(
         .collect();
 
     // Build groups: typed `Vec<GroupKeyItem>` key drives an `IndexMap`
-    // hashed via FxHash. Each group's JSON-shaped key values stay
-    // alongside the record list so the output projection can read them
-    // without re-hitting the records. The JSON key values are computed
-    // only on first insertion (Vacant branch) — repeated records into
-    // an existing group skip the rebuild.
+    // hashed via FxHash. Each group's key values stay alongside the
+    // record list so the output projection can read them without
+    // re-hitting the records. The key values are computed only on first
+    // insertion (Vacant branch) — repeated records into an existing
+    // group skip the rebuild.
     #[allow(clippy::type_complexity)] // grouped aggregate accumulator; clarity over brevity
-    let mut groups: TMap<Vec<GroupKeyItem>, (Vec<&InnerValue>, Vec<(String, json::Value)>)> =
+    let mut groups: TMap<Vec<GroupKeyItem>, (Vec<&InnerValue>, Vec<(String, QueryValue)>)> =
         new_map_wc(0);
 
     for (_, record) in records {
@@ -459,17 +462,19 @@ pub fn apply_group_by(
                 e.get_mut().0.push(record);
             }
             Entry::Vacant(v) => {
-                let mut key_json_values = Vec::with_capacity(group_paths.len());
+                let mut key_qv_values = Vec::with_capacity(group_paths.len());
                 for (field_name, interned_path) in &group_paths {
                     let val_ref = interned_path
                         .as_ref()
                         .and_then(|p| resolve_field_ref(record, p));
-                    let json_val = val_ref
-                        .map(|vv| inner_to_json_value(vv, interner).unwrap_or(json::Value::Null))
-                        .unwrap_or(json::Value::Null);
-                    key_json_values.push((field_name.clone(), json_val));
+                    let qv = val_ref
+                        .map(|vv| {
+                            inner_value_to_query_value(vv, interner).unwrap_or(QueryValue::Null)
+                        })
+                        .unwrap_or(QueryValue::Null);
+                    key_qv_values.push((field_name.clone(), qv));
                 }
-                v.insert((vec![record], key_json_values));
+                v.insert((vec![record], key_qv_values));
             }
         }
     }
@@ -479,7 +484,7 @@ pub fn apply_group_by(
     // same in-place — no second `paired` Vec, no extra collect/move.
     groups.sort_keys();
 
-    let mut result: Vec<json::Value> = Vec::with_capacity(groups.len());
+    let mut result: Vec<QueryValue> = Vec::with_capacity(groups.len());
     for (_k, (recs, key_vals)) in &groups {
         result.push(build_aggregate_object(
             recs,
@@ -492,16 +497,11 @@ pub fn apply_group_by(
     // Apply HAVING filter
     if let Some(having_filter) = &group_by.having {
         // Pre-intern all output field names so compile_filter can resolve them.
-        // json_to_inner interns keys during conversion, but compile_filter
-        // resolves paths at compile time via intern_field_path (get_ind).
         pre_intern_select_keys(select, interner);
 
         let having_cb = compile_filter(having_filter, interner);
-        result.retain(|json_obj| {
-            // Walk `json::Value` straight into InnerValue — the old path
-            // went through `serde_json::to_vec` + `json_to_inner` (parse
-            // bytes back), which is a needless round-trip.
-            shamir_types::codecs::interned::json_value_to_inner(json_obj, interner)
+        result.retain(|qv| {
+            shamir_types::codecs::interned::query_value_to_inner(qv, interner)
                 .map(|inner| having_cb.matches(&inner, ctx))
                 .unwrap_or(false)
         });
@@ -519,7 +519,7 @@ pub fn apply_aggregate_all(
     records: &[(RecordId, InnerValue)],
     select: &Select,
     interner: &Interner,
-) -> Vec<json::Value> {
+) -> Vec<QueryValue> {
     let refs: Vec<&InnerValue> = records.iter().map(|(_, v)| v).collect();
     let obj = build_aggregate_object(&refs, select, None, interner);
     vec![obj]

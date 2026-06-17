@@ -37,6 +37,23 @@ pub fn apply_select(
         .collect()
 }
 
+/// Apply SELECT projection to raw records, producing QueryValues.
+///
+/// QueryValue twin of `apply_select` — calls `project_value` instead of
+/// `project`. Aggregate items are skipped (handled by the aggregate
+/// pipeline).
+pub fn apply_select_value(
+    records: &[(RecordId, InnerValue)],
+    select: &Select,
+    interner: &Interner,
+) -> Vec<QueryValue> {
+    let proj = SelectProjection::new(select, interner);
+    records
+        .iter()
+        .map(|(_, record)| proj.project_value(record, interner))
+        .collect()
+}
+
 /// Streaming variant of `apply_select`: projects records and serialises
 /// each directly to JSON bytes via `inner_to_json` — bypassing the
 /// intermediate `json::Value` tree. Returns the same content as

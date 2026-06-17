@@ -155,14 +155,14 @@ async fn history_returns_full_timeline_ascending() {
     let versions: Vec<u64> = result
         .records
         .iter()
-        .filter_map(|r| r.get("_version").and_then(|v| v.as_u64()))
+        .filter_map(|r| r.get_owned("_version").and_then(|v| v.as_u64()))
         .collect();
     assert_eq!(versions, vec![1, 2, 3], "_version ascending 1,2,3");
 
     let ns: Vec<i64> = result
         .records
         .iter()
-        .filter_map(|r| r.get("n").and_then(|v| v.as_i64()))
+        .filter_map(|r| r.get_owned("n").and_then(|v| v.as_i64()))
         .collect();
     assert_eq!(ns, vec![1, 2, 3], "n matches each version's value");
 
@@ -214,7 +214,7 @@ async fn history_from_version_filters_low_end() {
     let versions: Vec<u64> = result
         .records
         .iter()
-        .filter_map(|r| r.get("_version").and_then(|v| v.as_u64()))
+        .filter_map(|r| r.get_owned("_version").and_then(|v| v.as_u64()))
         .collect();
     assert_eq!(versions, vec![2, 3], "from=Version(2) drops v1");
 }
@@ -253,7 +253,7 @@ async fn history_limit_caps_whole_result() {
     let versions: Vec<u64> = result
         .records
         .iter()
-        .filter_map(|r| r.get("_version").and_then(|v| v.as_u64()))
+        .filter_map(|r| r.get_owned("_version").and_then(|v| v.as_u64()))
         .collect();
     assert_eq!(versions, vec![1, 2], "limit=2 Asc keeps the two oldest");
 }
@@ -291,7 +291,7 @@ async fn history_order_desc_reverses() {
     let versions: Vec<u64> = result
         .records
         .iter()
-        .filter_map(|r| r.get("_version").and_then(|v| v.as_u64()))
+        .filter_map(|r| r.get_owned("_version").and_then(|v| v.as_u64()))
         .collect();
     assert_eq!(versions, vec![3, 2, 1], "Desc newest-first");
 }

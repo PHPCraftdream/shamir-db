@@ -21,7 +21,16 @@ use crate::write::InsertedRecord;
 pub enum QueryRecord {
     /// Projected row coming from the engine read path — zero extra
     /// allocation beyond the `QueryValue` produced by `project_value`.
-    Direct(QueryValue),
+    ///
+    /// The second field is a lazy json cache: the wire/serialize path never
+    /// touches it (it delegates straight to `QueryValue`, the hot path win),
+    /// while the in-process keyed accessors (`get` / `Index<&str>` /
+    /// `as_json`) materialise the row's `serde_json::Value` ONCE on first use
+    /// and lend a reference into it — so `records[i]["field"]` keeps working
+    /// exactly as it did when aggregates produced `Json`. `OnceLock::new()` is
+    /// alloc-free, so the cache is zero-cost on the hot path that never reads
+    /// a field.
+    Direct(QueryValue, OnceLock<serde_json::Value>),
     /// Legacy deserialized row (from the wire / test fixtures).
     Json(serde_json::Value),
     /// A write-result row carried straight through from a DML op.
@@ -55,7 +64,7 @@ pub enum QueryRecord {
 impl Clone for QueryRecord {
     fn clone(&self) -> Self {
         match self {
-            QueryRecord::Direct(v) => QueryRecord::Direct(v.clone()),
+            QueryRecord::Direct(v, _) => QueryRecord::Direct(v.clone(), OnceLock::new()),
             QueryRecord::Json(v) => QueryRecord::Json(v.clone()),
             // The lazy cache is per-instance; a clone starts cold (it
             // re-materialises on first access). `OnceLock` is not `Clone`,
@@ -71,7 +80,7 @@ impl Clone for QueryRecord {
 impl Serialize for QueryRecord {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
-            QueryRecord::Direct(v) => v.serialize(s),
+            QueryRecord::Direct(v, _) => v.serialize(s),
             QueryRecord::Json(v) => v.serialize(s),
             QueryRecord::Inserted(rec, _) => rec.serialize(s),
             // ByteBuf's Serialize uses serde_bytes::serialize, emitting msgpack
@@ -173,7 +182,7 @@ impl From<serde_json::Value> for QueryRecord {
 
 impl From<QueryValue> for QueryRecord {
     fn from(v: QueryValue) -> Self {
-        QueryRecord::Direct(v)
+        QueryRecord::Direct(v, OnceLock::new())
     }
 }
 
@@ -187,7 +196,7 @@ impl From<QueryRecord> for serde_json::Value {
     fn from(r: QueryRecord) -> Self {
         match r {
             QueryRecord::Json(v) => v,
-            QueryRecord::Direct(qv) => qv.into(),
+            QueryRecord::Direct(qv, _) => qv.into(),
             QueryRecord::Inserted(rec, _) => rec.as_json().into_owned(),
             // IdBytes carries raw binary; represent as a JSON array of ints
             // (the only lossless JSON encoding for bytes).
@@ -205,7 +214,9 @@ impl QueryRecord {
     pub fn as_json(&self) -> Cow<'_, serde_json::Value> {
         match self {
             QueryRecord::Json(v) => Cow::Borrowed(v),
-            QueryRecord::Direct(qv) => Cow::Owned(qv.clone().into()),
+            QueryRecord::Direct(qv, cache) => {
+                Cow::Borrowed(cache.get_or_init(|| qv.clone().into()))
+            }
             // Materialise ONCE into the lazy cache (slow path — accessors /
             // tests only; the wire path serialises via the byte-identical
             // Serialize impl and never reaches here). Subsequent accessors
@@ -233,7 +244,10 @@ impl QueryRecord {
             QueryRecord::Inserted(rec, cache) => {
                 cache.get_or_init(|| rec.as_json().into_owned()).get(key)
             }
-            QueryRecord::Direct(_) | QueryRecord::IdBytes(_) => None,
+            QueryRecord::Direct(qv, cache) => {
+                cache.get_or_init(|| qv.clone().into()).get(key)
+            }
+            QueryRecord::IdBytes(_) => None,
         }
     }
 
@@ -277,16 +291,13 @@ impl Index<&str> for QueryRecord {
                 .get_or_init(|| rec.as_json().into_owned())
                 .get(key)
                 .unwrap_or(&NULL),
-            // Direct has no cache (it is the read hot path, kept alloc-free)
-            // and cannot lend a reference into a materialised value. This
-            // branch panics to surface migration sites; production read paths
-            // use `.as_json()` or the wire-deserialised `Json` form.
-            QueryRecord::Direct(_) => {
-                panic!(
-                    "QueryRecord::Direct does not support Index<&str> — \
-                     use .as_json()[key] instead"
-                );
-            }
+            // Direct materialises its lazy json cache once and lends a
+            // reference into it, so `records[i]["field"]` works exactly as it
+            // did when aggregates produced `Json`.
+            QueryRecord::Direct(qv, cache) => cache
+                .get_or_init(|| qv.clone().into())
+                .get(key)
+                .unwrap_or(&NULL),
             // IdBytes carries raw binary, not name-keyed fields — field
             // lookup is not meaningful on this variant.
             QueryRecord::IdBytes(_) => {
@@ -336,7 +347,7 @@ mod tests {
         map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
         map.insert("age".to_string(), QueryValue::Int(30));
         map.insert("active".to_string(), QueryValue::Bool(true));
-        let direct = QueryRecord::Direct(QueryValue::Map(map));
+        let direct = QueryRecord::Direct(QueryValue::Map(map), std::sync::OnceLock::new());
 
         let json_rec = QueryRecord::Json(json!({
             "name": "alice",
@@ -468,7 +479,7 @@ mod tests {
         let mut map = new_map_wc(2);
         map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
         map.insert("age".to_string(), QueryValue::Int(30));
-        let original = QueryRecord::Direct(QueryValue::Map(map));
+        let original = QueryRecord::Direct(QueryValue::Map(map), std::sync::OnceLock::new());
 
         // Serialize via the existing path (produces a msgpack map, not bin).
         let bytes = rmp_serde::to_vec_named(&original).unwrap();

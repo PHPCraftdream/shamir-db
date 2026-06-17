@@ -118,9 +118,8 @@ async fn covering_index_only_matches_full_fetch() {
         .records
         .iter()
         .filter_map(|r| {
-            r.get("email")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+            r.get_owned("email")
+                .and_then(|v| v.as_str().map(str::to_owned))
         })
         .collect();
     emails.sort();
@@ -192,9 +191,8 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
         .records
         .iter()
         .filter_map(|r| {
-            r.get("email")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+            r.get_owned("email")
+                .and_then(|v| v.as_str().map(str::to_owned))
         })
         .collect();
     assert!(
@@ -220,9 +218,8 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
         .records
         .iter()
         .filter_map(|r| {
-            r.get("email")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+            r.get_owned("email")
+                .and_then(|v| v.as_str().map(str::to_owned))
         })
         .collect();
 

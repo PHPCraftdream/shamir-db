@@ -220,7 +220,11 @@ fn prune_group_by_min_max_avg() {
         serde_json::to_value(&res_pruned).unwrap(),
     );
     // Min/Max exercise the `&'a InnerValue` borrow path — confirm concrete values.
-    let eng = res_full.iter().find(|o| o["dept"] == "eng").unwrap();
+    let res_json: Vec<serde_json::Value> = res_full
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect();
+    let eng = res_json.iter().find(|o| o["dept"] == "eng").unwrap();
     assert_eq!(eng["min_sal"], 100);
     assert_eq!(eng["max_sal"], 200);
 }
@@ -340,7 +344,8 @@ fn prune_aggregate_all_sum_avg_min_max() {
         serde_json::to_value(&res_pruned).unwrap(),
     );
     // Concrete sanity.
-    assert_eq!(res_full[0]["total"], 650);
+    let res0_json = serde_json::to_value(&res_full[0]).unwrap();
+    assert_eq!(res0_json["total"], 650);
 }
 
 #[test]
@@ -519,7 +524,11 @@ fn fallback_full_decode_still_correct_on_select_star() {
     let ctx = ctx_for(&interner, &refs);
     let full = decode_full(&battery);
     let res = apply_group_by(&full, &group_by, &select, &interner, &ctx);
-    let eng = res.iter().find(|o| o["dept"] == "eng").unwrap();
+    let res_json: Vec<serde_json::Value> = res
+        .iter()
+        .map(|v| serde_json::to_value(v).unwrap())
+        .collect();
+    let eng = res_json.iter().find(|o| o["dept"] == "eng").unwrap();
     assert_eq!(eng["total"], json!(450)); // 100+200+150
 }
 
@@ -546,5 +555,6 @@ fn prune_group_by_missing_field_id_decodes_consistently() {
     let full = decode_full(&battery);
     let res = apply_group_by(&full, &group_by, &select, &interner, &ctx);
     assert_eq!(res.len(), 1);
-    assert_eq!(res[0]["cnt"], json!(battery.len() as u64));
+    let res0_json = serde_json::to_value(&res[0]).unwrap();
+    assert_eq!(res0_json["cnt"], json!(battery.len() as i64));
 }

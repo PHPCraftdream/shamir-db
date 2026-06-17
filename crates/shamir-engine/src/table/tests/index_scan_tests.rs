@@ -294,9 +294,8 @@ async fn test_read_index_with_order_by() {
         .records
         .iter()
         .filter_map(|r| {
-            r.get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+            r.get_owned("name")
+                .and_then(|v| v.as_str().map(str::to_owned))
         })
         .collect();
     // Active sorted by age desc: Alice(30), Bob(25), Dave(22)
@@ -493,7 +492,7 @@ async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
         .records
         .iter()
         .map(|r| {
-            r.get("score")
+            r.get_owned("score")
                 .and_then(|v| v.as_i64())
                 .expect("score field")
         })
@@ -584,7 +583,7 @@ async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
         .records
         .iter()
         .map(|r| {
-            r.get("score")
+            r.get_owned("score")
                 .and_then(|v| v.as_i64())
                 .expect("score field")
         })
@@ -707,7 +706,10 @@ async fn test_distinct_with_limit_falls_back_and_sees_all_rows() {
     let mut cities: Vec<String> = r
         .records
         .iter()
-        .filter_map(|v| v.get("city").and_then(|c| c.as_str()).map(String::from))
+        .filter_map(|v| {
+            v.get_owned("city")
+                .and_then(|c| c.as_str().map(String::from))
+        })
         .collect();
     cities.sort();
     assert_eq!(cities, vec!["LA".to_string(), "NYC".to_string()]);

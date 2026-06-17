@@ -172,14 +172,15 @@ impl TableManager {
                                 });
                             }
 
-                            let result_json = exec::apply_select(&matched, &query.select, interner);
-                            let (paged_json, pagination) = exec::apply_pagination(
-                                result_json,
+                            let result_qv =
+                                exec::apply_select_value(&matched, &query.select, interner);
+                            let (paged_qv, pagination) = exec::apply_pagination(
+                                result_qv,
                                 &query.pagination,
                                 query.count_total,
                             );
                             let paged: Vec<QueryRecord> =
-                                paged_json.into_iter().map(QueryRecord::Json).collect();
+                                paged_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
                             let records_returned = paged.len() as u64;
                             return Ok(QueryResult {
                                 records: paged,
@@ -254,22 +255,22 @@ impl TableManager {
             });
         }
 
-        let mut result_json = if has_group_by {
+        let mut result_qv = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
             exec::apply_aggregate_all(&matched, &query.select, interner)
         } else {
-            exec::apply_select(&matched, &query.select, interner)
+            exec::apply_select_value(&matched, &query.select, interner)
         };
 
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result_json, order_by);
+            exec::apply_order_by_qv(&mut result_qv, order_by);
         }
 
-        let (paged_json, pagination) =
-            exec::apply_pagination(result_json, &query.pagination, query.count_total);
-        let paged: Vec<QueryRecord> = paged_json.into_iter().map(QueryRecord::Json).collect();
+        let (paged_qv, pagination) =
+            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+        let paged: Vec<QueryRecord> = paged_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
         let records_returned = paged.len() as u64;
 
         Ok(QueryResult {
@@ -337,9 +338,9 @@ impl TableManager {
             }
         }
 
-        let result_json = exec::apply_select(&matched, &query.select, interner);
-        let records_returned = result_json.len() as u64;
-        let result: Vec<QueryRecord> = result_json.into_iter().map(QueryRecord::Json).collect();
+        let result_qv = exec::apply_select_value(&matched, &query.select, interner);
+        let records_returned = result_qv.len() as u64;
+        let result: Vec<QueryRecord> = result_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
 
         Ok(QueryResult {
             records: result,
@@ -436,28 +437,28 @@ impl TableManager {
             });
         }
 
-        let mut result_json = if has_group_by {
+        let mut result_qv = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
             exec::apply_aggregate_all(&matched, &query.select, interner)
         } else {
-            exec::apply_select(&matched, &query.select, interner)
+            exec::apply_select_value(&matched, &query.select, interner)
         };
 
         if query.select.distinct {
-            result_json = exec::apply_distinct(result_json);
+            result_qv = exec::apply_distinct_qv(result_qv);
         }
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result_json, order_by);
+            exec::apply_order_by_qv(&mut result_qv, order_by);
         }
 
-        let (records_json, pagination) =
-            exec::apply_pagination(result_json, &query.pagination, query.count_total);
+        let (records_qv, pagination) =
+            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
 
         let elapsed = start.elapsed();
-        let records_returned = records_json.len() as u64;
-        let records: Vec<QueryRecord> = records_json.into_iter().map(QueryRecord::Json).collect();
+        let records_returned = records_qv.len() as u64;
+        let records: Vec<QueryRecord> = records_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
 
         Ok(QueryResult {
             records,

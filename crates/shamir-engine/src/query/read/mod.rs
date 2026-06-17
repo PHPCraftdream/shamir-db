@@ -16,7 +16,7 @@ pub mod select_projection;
 pub use aggregate::{apply_aggregate_all, apply_group_by};
 pub use exec::{
     apply_distinct, apply_distinct_qv, apply_pagination, apply_select, apply_select_to_bytes,
-    has_aggregates,
+    apply_select_value, has_aggregates,
 };
 pub use order::{apply_order_by, apply_order_by_qv};
 pub use parser::query_from_value;
