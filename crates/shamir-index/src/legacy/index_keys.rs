@@ -31,15 +31,14 @@
 //! Old V1 postings (based on `<Value<InternerKey> as Hash>` with
 //! `std::mem::discriminant` tags) are NOT byte-compatible with V2.
 //!
-//! Detection primitives exist (`LEGACY_INDEX_FORMAT_VERSION`,
-//! `legacy_indexes_need_rebuild`, `save/load_legacy_index_version` in
-//! `persistence.rs`), BUT the engine does NOT yet CALL them on open — the
-//! O(N) rebuild-on-open is a follow-up (task #81 / S9b). Until that lands,
-//! opening a DB written with V1 postings against this V2 hash scheme yields
-//! silent lookup misses. This is acceptable ONLY under the campaign's S0
-//! decision that pre-existing on-disk index data is disposable
-//! (`docs/perf/innervalue-elimination-plan.md` §S0). Do NOT rely on a clean
-//! V1→V2 upgrade until #81 wires the rebuild trigger.
+//! The engine wires rebuild-on-open (S9b / #81): `TableManager::create`
+//! calls `legacy_indexes_need_rebuild` on every table open and, when the
+//! stored version is older than `LEGACY_INDEX_FORMAT_VERSION` (or absent =
+//! pre-S9 data), runs `repair()` to rebuild every legacy posting from the
+//! data store, then stamps the current version via
+//! `save_legacy_index_version`. So a DB written with V1 postings is upgraded
+//! to the V2 hash scheme automatically on its first open — no silent lookup
+//! misses. The detection primitives live in `persistence.rs`.
 
 use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_record_key::IndexRecordKey;

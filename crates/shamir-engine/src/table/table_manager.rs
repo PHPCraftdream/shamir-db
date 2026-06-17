@@ -221,6 +221,28 @@ impl TableManager {
         // removed in F5d: after the non-tx write cutover (F4b/F5a) the
         // per-table WAL is no longer written, so this scan was a no-op.
 
+        // S9b (#81): legacy-index format-v2 rebuild-on-open. If the stored
+        // posting format version is older than current (or absent = pre-S9
+        // data), the on-disk hash scheme is V1 and would yield silent lookup
+        // misses against the V2 hasher. Rebuild every legacy posting
+        // (hash/unique/sorted) from the data store, then stamp the version so
+        // subsequent opens are a single cheap version read. The full O(N)
+        // scan is skipped when the table has no legacy indexes — only the
+        // marker is written.
+        if crate::index2::persistence::legacy_indexes_need_rebuild(&mgr.info_store).await? {
+            let has_legacy = mgr.index_manager_ref().iter_indexes().next().is_some()
+                || mgr
+                    .index_manager_ref()
+                    .iter_unique_indexes()
+                    .next()
+                    .is_some()
+                || !mgr.sorted_indexes().iter_indexes().is_empty();
+            if has_legacy {
+                mgr.repair().await?;
+            }
+            crate::index2::persistence::save_legacy_index_version(&mgr.info_store).await?;
+        }
+
         Ok(mgr)
     }
 
