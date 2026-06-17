@@ -106,6 +106,29 @@ impl TableManager {
         all_ops
     }
 
+    /// RecordRef-generic variant of [`plan_update_ops`].
+    ///
+    /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
+    /// path can feed zero-copy lenses instead of decoded trees.
+    pub(super) async fn plan_update_ops_ref<R>(
+        &self,
+        rid: RecordId,
+        old: &R,
+        new: &R,
+        tx_id: Option<shamir_tx::TxId>,
+    ) -> Vec<shamir_tx::IndexWriteOp>
+    where
+        R: RecordRef + Sync,
+    {
+        let mut all_ops = Vec::new();
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_update_tx(rid, old, new, tx_id).await {
+                all_ops.extend(ops);
+            }
+        }
+        all_ops
+    }
+
     /// Collect index ops from all index2 backends for a delete.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
@@ -160,6 +183,32 @@ impl TableManager {
         old: &InnerValue,
         new: &InnerValue,
     ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
+        let mut ops = self
+            .index_manager
+            .plan_record_updated(&rid, old, new)
+            .await?;
+        ops.extend(
+            self.index_manager
+                .plan_record_updated_unique(&rid, old, new)
+                .await?,
+        );
+        ops.extend(self.sorted_indexes.plan_record_updated(&rid, old, new, 0)?);
+        Ok(ops)
+    }
+
+    /// RecordRef-generic variant of [`plan_legacy_update_ops`].
+    ///
+    /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
+    /// path can feed zero-copy lenses instead of decoded trees.
+    pub(super) async fn plan_legacy_update_ops_ref<R>(
+        &self,
+        rid: RecordId,
+        old: &R,
+        new: &R,
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>>
+    where
+        R: RecordRef + Sync,
+    {
         let mut ops = self
             .index_manager
             .plan_record_updated(&rid, old, new)
@@ -664,6 +713,116 @@ impl TableManager {
         .await?;
 
         Ok(old.is_some())
+    }
+
+    /// Byte-level tx-aware update — the W3 counterpart of [`update_tx`].
+    ///
+    /// Called by `execute_update_tx` after `merge_storage_bytes` has already
+    /// produced `new_bytes` from `old_bytes + set_map`. Skips the
+    /// `read_one_tx` round-trip (caller already has old_bytes from the scan)
+    /// and drives index/unique/vector planners through zero-copy
+    /// `RecordView` lenses instead of decoded `InnerValue` trees.
+    ///
+    /// The record MUST already exist (this is an update, not an upsert);
+    /// `old_bytes` is the committed storage bytes the caller matched.
+    pub(super) async fn update_tx_bytes(
+        &self,
+        id: RecordId,
+        old_bytes: &Bytes,
+        new_bytes: Bytes,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        // Level-3: acquire an Exclusive lock on the key before staging.
+        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+            .await?;
+
+        // Build RecordView lenses for old and new. For non-map records
+        // (bare scalars from legacy tests), fall back to a full InnerValue
+        // decode so the planners still see the value.
+        let tx_id = Some(tx.tx_id);
+        let (index_ops, counter_delta) =
+            match (RecordView::new(old_bytes), RecordView::new(&new_bytes)) {
+                (Ok(old_view), Ok(new_view)) => {
+                    // Stage-time unique validation via the lens.
+                    self.index_manager
+                        .validate_unique_for_update(&id, &old_view, &new_view)
+                        .await?;
+
+                    // UniqueGuards for commit-time re-validation.
+                    for index_key in self.index_manager.unique_keys_for(&new_view) {
+                        tx.record_unique_guard(shamir_tx::UniqueGuard {
+                            table_token: self.table_token(),
+                            index_key,
+                            owner: id,
+                        });
+                    }
+
+                    // Index2 backends (RecordRef-generic).
+                    let mut ops = self
+                        .plan_update_ops_ref(id, &old_view, &new_view, tx_id)
+                        .await;
+                    // Legacy + sorted posting ops.
+                    ops.extend(
+                        self.plan_legacy_update_ops_ref(id, &old_view, &new_view)
+                            .await?,
+                    );
+
+                    // HNSW vector staging (RecordRef-generic via the backend trait).
+                    let token = self.table_token();
+                    for backend in self.index2_registry.all_backends().await {
+                        if let Some(v) = backend.staged_vector(id, &new_view).await {
+                            tx.stage_vector(token, id, v);
+                        }
+                    }
+
+                    (ops, 0_i64)
+                }
+                _ => {
+                    // Non-map fallback: decode to InnerValue trees.
+                    let old_tree = InnerValue::from_bytes(old_bytes.clone()).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "update_tx_bytes: old decode: {e}"
+                        ))
+                    })?;
+                    let new_tree = InnerValue::from_bytes(new_bytes.clone()).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "update_tx_bytes: new decode: {e}"
+                        ))
+                    })?;
+
+                    self.index_manager
+                        .validate_unique_for_update(&id, &old_tree, &new_tree)
+                        .await?;
+                    for index_key in self.index_manager.unique_keys_for(&new_tree) {
+                        tx.record_unique_guard(shamir_tx::UniqueGuard {
+                            table_token: self.table_token(),
+                            index_key,
+                            owner: id,
+                        });
+                    }
+
+                    let mut ops = self.plan_update_ops(id, &old_tree, &new_tree, tx_id).await;
+                    ops.extend(
+                        self.plan_legacy_update_ops(id, &old_tree, &new_tree)
+                            .await?,
+                    );
+                    self.stage_vectors(id, &new_tree, tx).await;
+
+                    (ops, 0_i64)
+                }
+            };
+
+        self.stage_mutation(
+            StagedMutation {
+                data_op: KvOp::Set(id.to_bytes(), new_bytes),
+                index_ops,
+                counter_delta,
+            },
+            tx,
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// tx-aware delete.

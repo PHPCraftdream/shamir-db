@@ -22,8 +22,8 @@ use crate::query::write::{
 };
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
-    inner_to_json_value, query_value_to_inner, query_value_to_inner_with,
-    query_value_to_storage_bytes,
+    inner_to_json_value, merge_storage_bytes, query_value_to_inner, query_value_to_inner_with,
+    query_value_to_storage_bytes, record_view_to_json_value, record_view_to_query_value,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -232,9 +232,23 @@ impl TableManager {
             }
         };
 
-        let matched = if let Some(ref filter) = op.where_clause {
+        // Collect matched records as raw storage bytes — no InnerValue tree
+        // decode on the hot scan path. The index-via-index arm returns
+        // pre-decoded InnerValue trees; serialize them once to bytes so the
+        // downstream merge/change-detect/index-plan pipeline is uniform.
+        let matched: Vec<(RecordId, Bytes)> = if let Some(ref filter) = op.where_clause {
             if let Some(via_index) = self.lookup_records_via_index(filter, ctx).await? {
                 via_index
+                    .into_iter()
+                    .map(|(id, iv)| {
+                        let b = iv.to_bytes().map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "execute_update_tx: index-path serialize: {e}"
+                            ))
+                        })?;
+                        Ok((id, b))
+                    })
+                    .collect::<DbResult<Vec<_>>>()?
             } else {
                 let callback = compile_filter(filter, interner);
                 let mut result = Vec::new();
@@ -243,9 +257,35 @@ impl TableManager {
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
                     for (id, cow) in batch {
-                        let record = cow.into_inner()?;
-                        if callback.matches(&record, ctx) {
-                            result.push((id, record));
+                        match cow {
+                            RecordCow::Borrowed(bytes) => {
+                                // Zero-copy lens for the filter; keep raw bytes.
+                                match RecordView::new(&bytes) {
+                                    Ok(view) => {
+                                        if callback.matches(&view, ctx) {
+                                            result.push((id, bytes));
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Non-map: decode to InnerValue for filter.
+                                        if let Ok(tree) = InnerValue::from_bytes(bytes.clone()) {
+                                            if callback.matches(&tree, ctx) {
+                                                result.push((id, bytes));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            RecordCow::Owned(tree) => {
+                                if callback.matches(&tree, ctx) {
+                                    let bytes = tree.to_bytes().map_err(|e| {
+                                        shamir_storage::error::DbError::Codec(format!(
+                                            "execute_update_tx: owned serialize: {e}"
+                                        ))
+                                    })?;
+                                    result.push((id, bytes));
+                                }
+                            }
                         }
                     }
                 }
@@ -257,7 +297,17 @@ impl TableManager {
             futures::pin_mut!(stream);
             while let Some(batch_result) = stream.next().await {
                 for (id, cow) in batch_result? {
-                    result.push((id, cow.into_inner()?));
+                    match cow {
+                        RecordCow::Borrowed(bytes) => result.push((id, bytes)),
+                        RecordCow::Owned(tree) => {
+                            let bytes = tree.to_bytes().map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "execute_update_tx: owned serialize: {e}"
+                                ))
+                            })?;
+                            result.push((id, bytes));
+                        }
+                    }
                 }
             }
             result
@@ -272,24 +322,58 @@ impl TableManager {
             .unwrap_or(UpdateReturnMode::Changed);
         let wants_records = op.select.is_some();
 
-        for (id, old_record) in &matched {
-            let new_record = merge_inner_maps(old_record, set_map);
-            let changed = &new_record != old_record;
+        for (id, old_bytes) in &matched {
+            // Byte-level merge: patch old_bytes with the interned set overlay.
+            // Produces bytes identical to merge_inner_maps(old_tree, set_map).to_bytes().
+            let new_bytes = merge_storage_bytes(old_bytes, set_map)?;
+
+            // Change detection: a no-op set yields identical bytes (the
+            // merge copies old value spans verbatim when no key is patched),
+            // so byte equality is safe for this "patched from old" shape.
+            let changed = new_bytes.as_ref() != old_bytes.as_ref();
 
             if changed {
                 // S3: run validators before staging (tx overlay-aware).
-                // TODO actor threading — use Actor::System for now.
-                self.run_validators_tx(
+                //
+                // Build old/new QueryValues WITHOUT decoding an InnerValue tree.
+                // - old_qv: de-intern the committed bytes via RecordView (base
+                //   interner — all keys are committed).
+                // - new_qv: overlay the string-keyed resolved_set on top of old_qv
+                //   (no overlay-minted interned ids to resolve — the overlay keys
+                //   are already strings in resolved_set). This matches the W3a
+                //   result-JSON pattern and avoids the "Interned key not found"
+                //   failure that would occur if we de-interned new_bytes through
+                //   the base-only reverse snapshot (new_bytes may contain overlay-
+                //   minted key ids not yet in base).
+                let old_view = RecordView::new(old_bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "execute_update_tx: RecordView for validator old: {e}"
+                    ))
+                })?;
+                let old_qv = record_view_to_query_value(&old_view, interner)?;
+                let new_qv = {
+                    let mut m = match old_qv.clone() {
+                        Value::Map(m) => m,
+                        _ => shamir_types::types::common::new_map(),
+                    };
+                    if let Value::Map(overlay) = resolved_set.as_ref() {
+                        for (k, v) in overlay {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    QueryValue::Map(m)
+                };
+                self.run_validators_qv(
                     WriteOp::Update,
-                    Some(&new_record),
-                    Some(old_record),
+                    Some(&new_qv),
+                    Some(&old_qv),
                     &Actor::System,
-                    &*tx,
                 )
                 .await
                 .map_err(validator_failure_to_db_error)?;
 
-                self.update_tx(*id, &new_record, Some(&mut *tx)).await?;
+                self.update_tx_bytes(*id, old_bytes, new_bytes.clone(), &mut *tx)
+                    .await?;
                 affected += 1;
             }
 
@@ -303,10 +387,15 @@ impl TableManager {
                     // Build the result JSON from the old record (base-interned
                     // keys — always safe) overlaid with the resolved SET fields
                     // (string-keyed QueryValue — no overlay ids). Decoding
-                    // `new_record` (InnerValue) via the base interner would fail
-                    // when `op.set` introduces brand-new field names that were
-                    // only interned into the tx overlay and are not yet in base.
-                    let mut obj = match inner_to_json_value(old_record, interner)? {
+                    // new_bytes via the base interner would fail when op.set
+                    // introduces brand-new field names that were only interned
+                    // into the tx overlay and are not yet in base.
+                    let old_view = RecordView::new(old_bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "execute_update_tx: RecordView for result: {e}"
+                        ))
+                    })?;
+                    let mut obj = match record_view_to_json_value(&old_view, interner)? {
                         json::Value::Object(m) => m,
                         _ => json::Map::new(),
                     };
