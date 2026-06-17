@@ -126,16 +126,4 @@ impl TableManager {
             value: Some(bytes),
         })
     }
-
-    /// Build one [`RecordChange`](shamir_tx::RecordChange) for a non-tx
-    /// `Delete`: the raw `RecordId` key bytes, no value (mirrors the tx
-    /// `Remove` projection).
-    pub(crate) fn delete_change(&self, id: RecordId) -> shamir_tx::RecordChange {
-        shamir_tx::RecordChange {
-            table: self.name.clone(),
-            key: id.to_bytes(),
-            op: shamir_tx::ChangeOp::Delete,
-            value: None,
-        }
-    }
 }

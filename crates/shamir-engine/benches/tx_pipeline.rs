@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use shamir_bench_utils as bu;
 use shamir_engine::query::batch::{
-    execute_batch, BatchOp, BatchRequest, QueryEntry, TableResolver,
+    execute_batch, BatchOp, BatchRequest, QueryEntry, ResultEncoding, TableResolver,
 };
 use shamir_engine::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
@@ -129,6 +129,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                             )
                                         })
                                         .collect(),
+                                    records_idmsgpack: Vec::new(),
                                 }),
                                 return_result: true,
                                 after: Vec::new(),
@@ -145,6 +146,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_only: None,
                             limits: Default::default(),
                             interner_epochs: Default::default(),
+                            result_encoding: ResultEncoding::default(),
                         };
                         let _ =
                             execute_batch(&request, resolver, None, None, Actor::System, "bench")
@@ -180,6 +182,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                             )
                                         })
                                         .collect(),
+                                    records_idmsgpack: Vec::new(),
                                 }),
                                 return_result: false,
                                 after: Vec::new(),
@@ -196,6 +199,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_only: None,
                             limits: Default::default(),
                             interner_epochs: Default::default(),
+                            result_encoding: ResultEncoding::default(),
                         };
                         let _ =
                             execute_batch(&request, resolver, None, None, Actor::System, "bench")
@@ -261,6 +265,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                 op: BatchOp::Insert(InsertOp {
                                     insert_into: TableRef::new("bench_table"),
                                     values,
+                                    records_idmsgpack: Vec::new(),
                                 }),
                                 return_result: false,
                                 after: Vec::new(),
@@ -277,6 +282,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_only: None,
                             limits: Default::default(),
                             interner_epochs: Default::default(),
+                            result_encoding: ResultEncoding::default(),
                         };
 
                         let start = Instant::now();
@@ -501,6 +507,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                             op: BatchOp::Insert(InsertOp {
                                 insert_into: TableRef::new("indexed"),
                                 values,
+                                records_idmsgpack: Vec::new(),
                             }),
                             return_result: false,
                             after: Vec::new(),
@@ -517,6 +524,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                         return_only: None,
                         limits: Default::default(),
                         interner_epochs: Default::default(),
+                        result_encoding: ResultEncoding::default(),
                     };
 
                     let start = Instant::now();
@@ -728,6 +736,7 @@ fn bench_read_scan(c: &mut Criterion) {
                     op: BatchOp::Insert(InsertOp {
                         insert_into: TableRef::new("bench_table"),
                         values,
+                        records_idmsgpack: Vec::new(),
                     }),
                     return_result: false,
                     after: Vec::new(),
@@ -744,6 +753,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_only: None,
                 limits: Default::default(),
                 interner_epochs: Default::default(),
+                result_encoding: ResultEncoding::default(),
             };
             execute_batch(&request, &resolver, None, None, Actor::System, "bench")
                 .await
@@ -781,6 +791,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_only: None,
                 limits: Default::default(),
                 interner_epochs: Default::default(),
+                result_encoding: ResultEncoding::default(),
             }
         };
         b.to_async(&rt).iter(|| {
@@ -819,6 +830,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_only: None,
                 limits: Default::default(),
                 interner_epochs: Default::default(),
+                result_encoding: ResultEncoding::default(),
             }
         };
         b.to_async(&rt).iter(|| {
@@ -857,6 +869,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 return_only: None,
                 limits: Default::default(),
                 interner_epochs: Default::default(),
+                result_encoding: ResultEncoding::default(),
             }
         };
         b.to_async(&rt).iter(|| {

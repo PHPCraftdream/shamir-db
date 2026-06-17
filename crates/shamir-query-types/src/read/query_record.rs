@@ -1,10 +1,13 @@
 //! QueryRecord — read-response row type.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::ops::Index;
 use std::sync::OnceLock;
 
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_bytes::ByteBuf;
 use shamir_types::types::value::QueryValue;
 
 use crate::write::InsertedRecord;
@@ -39,6 +42,14 @@ pub enum QueryRecord {
     /// alloc-free, so the cache is zero-cost on the hot path that never reads
     /// a field.
     Inserted(InsertedRecord, OnceLock<serde_json::Value>),
+    /// A row returned id-keyed (no server de-intern); the client de-interns
+    /// via its FieldMap. Emitted when the request set
+    /// `result_encoding = Id`. The bytes are a single id-keyed msgpack map
+    /// as produced by the engine's pass-through read path.
+    ///
+    /// Serializes as msgpack `bin` (binary) via [`ByteBuf`]; a deserializer
+    /// receiving a msgpack `bin` value reconstructs this variant.
+    IdBytes(ByteBuf),
 }
 
 impl Clone for QueryRecord {
@@ -50,6 +61,7 @@ impl Clone for QueryRecord {
             // re-materialises on first access). `OnceLock` is not `Clone`,
             // which is why this impl is manual.
             QueryRecord::Inserted(rec, _) => QueryRecord::Inserted(rec.clone(), OnceLock::new()),
+            QueryRecord::IdBytes(b) => QueryRecord::IdBytes(b.clone()),
         }
     }
 }
@@ -62,13 +74,92 @@ impl Serialize for QueryRecord {
             QueryRecord::Direct(v) => v.serialize(s),
             QueryRecord::Json(v) => v.serialize(s),
             QueryRecord::Inserted(rec, _) => rec.serialize(s),
+            // ByteBuf's Serialize uses serde_bytes::serialize, emitting msgpack
+            // `bin` (not a seq-of-u8) on the msgpack wire.
+            QueryRecord::IdBytes(b) => b.serialize(s),
         }
+    }
+}
+
+/// Visitor that routes msgpack `bin` to `IdBytes` and everything else to the
+/// `Json` variant via `serde_json::Value`'s own visitor chain.
+///
+/// `deserialize_any` is used so the deserializer advertises what type it holds
+/// first; bytes map to `IdBytes`, all other self-describing types reconstruct
+/// a `serde_json::Value` and wrap it in `Json`.
+struct QueryRecordVisitor;
+
+impl<'de> Visitor<'de> for QueryRecordVisitor {
+    type Value = QueryRecord;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a QueryRecord (map/value or binary bytes)")
+    }
+
+    // ── byte paths → IdBytes ─────────────────────────────────────────────────
+
+    fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::IdBytes(ByteBuf::from(v)))
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::IdBytes(ByteBuf::from(v)))
+    }
+
+    // ── all other self-describing types → Json ───────────────────────────────
+
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::Bool(v)))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::Number(v.into())))
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::Number(v.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<QueryRecord, E> {
+        let n = serde_json::Number::from_f64(v)
+            .ok_or_else(|| de::Error::custom("non-finite float in QueryRecord"))?;
+        Ok(QueryRecord::Json(serde_json::Value::Number(n)))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::String(v.to_owned())))
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::String(v)))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::Null))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<QueryRecord, E> {
+        Ok(QueryRecord::Json(serde_json::Value::Null))
+    }
+
+    fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<QueryRecord, D2::Error> {
+        Deserialize::deserialize(d)
+    }
+
+    fn visit_seq<A: de::SeqAccess<'de>>(self, seq: A) -> Result<QueryRecord, A::Error> {
+        let v = serde_json::Value::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
+        Ok(QueryRecord::Json(v))
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<QueryRecord, A::Error> {
+        let v = serde_json::Value::deserialize(de::value::MapAccessDeserializer::new(map))?;
+        Ok(QueryRecord::Json(v))
     }
 }
 
 impl<'de> Deserialize<'de> for QueryRecord {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(QueryRecord::Json(serde_json::Value::deserialize(d)?))
+        d.deserialize_any(QueryRecordVisitor)
     }
 }
 
@@ -98,6 +189,11 @@ impl From<QueryRecord> for serde_json::Value {
             QueryRecord::Json(v) => v,
             QueryRecord::Direct(qv) => qv.into(),
             QueryRecord::Inserted(rec, _) => rec.as_json().into_owned(),
+            // IdBytes carries raw binary; represent as a JSON array of ints
+            // (the only lossless JSON encoding for bytes).
+            QueryRecord::IdBytes(b) => {
+                serde_json::Value::Array(b.iter().map(|&byte| byte.into()).collect())
+            }
         }
     }
 }
@@ -117,6 +213,11 @@ impl QueryRecord {
             QueryRecord::Inserted(rec, cache) => {
                 Cow::Borrowed(cache.get_or_init(|| rec.as_json().into_owned()))
             }
+            // IdBytes carries raw binary; represent as a JSON array of ints
+            // (the only lossless JSON encoding for bytes).
+            QueryRecord::IdBytes(b) => Cow::Owned(serde_json::Value::Array(
+                b.iter().map(|&byte| byte.into()).collect(),
+            )),
         }
     }
 
@@ -132,7 +233,7 @@ impl QueryRecord {
             QueryRecord::Inserted(rec, cache) => {
                 cache.get_or_init(|| rec.as_json().into_owned()).get(key)
             }
-            QueryRecord::Direct(_) => None,
+            QueryRecord::Direct(_) | QueryRecord::IdBytes(_) => None,
         }
     }
 
@@ -186,6 +287,14 @@ impl Index<&str> for QueryRecord {
                      use .as_json()[key] instead"
                 );
             }
+            // IdBytes carries raw binary, not name-keyed fields — field
+            // lookup is not meaningful on this variant.
+            QueryRecord::IdBytes(_) => {
+                panic!(
+                    "QueryRecord::IdBytes does not support Index<&str> — \
+                     the client must de-intern the bytes first"
+                );
+            }
         }
     }
 }
@@ -194,7 +303,11 @@ impl Index<&str> for QueryRecord {
 
 impl PartialEq for QueryRecord {
     fn eq(&self, other: &Self) -> bool {
-        // Normalise to serde_json for comparison so Json == Direct works.
+        // Fast-path: both IdBytes — compare raw bytes directly.
+        if let (QueryRecord::IdBytes(a), QueryRecord::IdBytes(b)) = (self, other) {
+            return a == b;
+        }
+        // General case: normalise to serde_json::Value so Json == Direct works.
         let a: serde_json::Value = self.clone().into();
         let b: serde_json::Value = other.clone().into();
         a == b
@@ -205,6 +318,7 @@ impl PartialEq for QueryRecord {
 
 #[cfg(test)]
 mod tests {
+    use serde_bytes::ByteBuf;
     use serde_json::json;
     use shamir_types::types::common::new_map_wc;
     use shamir_types::types::record_id::RecordId;
@@ -308,5 +422,65 @@ mod tests {
         // Missing key → Null via Index, None via get (matches Json behaviour).
         assert_eq!(qr["nope"], serde_json::Value::Null);
         assert_eq!(qr.get("nope"), None);
+    }
+
+    // ── IdBytes round-trip (msgpack wire codec) ───────────────────────────────
+
+    /// `QueryRecord::IdBytes` must survive a msgpack serialize → deserialize
+    /// cycle unchanged. Serialization must emit msgpack `bin` (0xc4/0xc5/0xc6),
+    /// and deserialization of the `bin` token must reconstruct `IdBytes`.
+    #[test]
+    fn id_bytes_roundtrip_via_msgpack() {
+        // A tiny fake id-keyed msgpack map payload.
+        let payload: Vec<u8> = vec![0x82, 0x01, 0xa5, 0x61, 0x6c, 0x69, 0x63, 0x65];
+        let record = QueryRecord::IdBytes(ByteBuf::from(payload.clone()));
+
+        // Serialize to msgpack.
+        let bytes = rmp_serde::to_vec_named(&record).unwrap();
+
+        // Must contain a bin marker (0xc4 = bin8, 0xc5 = bin16, 0xc6 = bin32).
+        let has_bin_marker =
+            bytes.contains(&0xc4) || bytes.contains(&0xc5) || bytes.contains(&0xc6);
+        assert!(
+            has_bin_marker,
+            "IdBytes must serialize as msgpack bin, not as an array: bytes={bytes:x?}"
+        );
+
+        // Full round-trip: deserialize must produce IdBytes with identical bytes.
+        let back: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
+        match back {
+            QueryRecord::IdBytes(b) => {
+                assert_eq!(
+                    b.as_ref(),
+                    payload.as_slice(),
+                    "deserialized bytes must match"
+                );
+            }
+            other => panic!("expected IdBytes, got {other:?}"),
+        }
+    }
+
+    /// A pre-existing `Direct(QueryValue)` payload (a msgpack map) must still
+    /// deserialize successfully as `Json` — the new `IdBytes` variant must not
+    /// interfere with backward-compat for existing payloads.
+    #[test]
+    fn old_direct_payload_still_deserializes_as_json() {
+        let mut map = new_map_wc(2);
+        map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
+        map.insert("age".to_string(), QueryValue::Int(30));
+        let original = QueryRecord::Direct(QueryValue::Map(map));
+
+        // Serialize via the existing path (produces a msgpack map, not bin).
+        let bytes = rmp_serde::to_vec_named(&original).unwrap();
+
+        // Deserializer must route a map token to Json, not to IdBytes.
+        let back: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
+        match &back {
+            QueryRecord::Json(v) => {
+                assert_eq!(v["name"], json!("alice"));
+                assert_eq!(v["age"], json!(30));
+            }
+            other => panic!("expected Json variant for a map payload, got {other:?}"),
+        }
     }
 }

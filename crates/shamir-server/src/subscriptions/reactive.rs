@@ -1,7 +1,9 @@
 use shamir_collections::{new_map, TMap};
 use shamir_db::access::Actor;
 use shamir_db::ShamirDb;
-use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
+use shamir_query_types::batch::{
+    BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
+};
 use shamir_query_types::filter::FilterValue;
 use shamir_tx::ChangeOp;
 
@@ -69,6 +71,7 @@ pub(super) async fn execute_reactive_batch(
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     match db.execute_as(actor.clone(), db_name, &wrapper).await {
@@ -115,6 +118,7 @@ pub(super) async fn execute_reactive_call(
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let mut outer_queries: TMap<String, QueryEntry> = new_map();
@@ -140,6 +144,7 @@ pub(super) async fn execute_reactive_call(
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     match db.execute_as(actor.clone(), db_name, &wrapper).await {

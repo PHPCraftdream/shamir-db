@@ -382,6 +382,7 @@ impl<'a> QueryRunner<'a> {
                     subst_op = shamir_query_types::write::InsertOp {
                         insert_into: op.insert_into.clone(),
                         values,
+                        records_idmsgpack: Vec::new(),
                     };
                     &subst_op
                 };

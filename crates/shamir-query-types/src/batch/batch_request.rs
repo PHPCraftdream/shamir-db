@@ -5,6 +5,7 @@ use shamir_collections::TMap;
 
 use super::batch_limits::BatchLimits;
 use super::query_entry::QueryEntry;
+use super::result_encoding::ResultEncoding;
 
 /// Batch request containing multiple queries.
 ///
@@ -105,6 +106,15 @@ pub struct BatchRequest {
     /// clients / servers that don't know the field leave it empty.
     #[serde(default, skip_serializing_if = "TMap::is_empty")]
     pub interner_epochs: TMap<String, u64>,
+
+    /// Encoding for result rows returned in the response.
+    ///
+    /// Name (default, legacy) = server de-interns rows to name-keyed
+    /// [`QueryValue`](shamir_types::types::value::QueryValue); Id = server
+    /// returns id-keyed [`QueryRecord::IdBytes`](crate::read::QueryRecord),
+    /// client de-interns. Backward-compatible: absent → [`ResultEncoding::Name`].
+    #[serde(default)]
+    pub result_encoding: ResultEncoding,
 }
 
 fn default_return_all() -> bool {

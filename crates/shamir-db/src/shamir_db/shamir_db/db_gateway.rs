@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::access::Actor;
 use crate::engine::function::DbGateway;
-use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry};
+use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, ResultEncoding};
 use crate::engine::query::read::{ReadQuery, Temporal};
 use crate::engine::query::write::InsertOp;
 use crate::engine::query::TableRef;
@@ -138,6 +138,7 @@ impl DbGateway for FacadeDbGateway {
             return_only: Some(vec!["r".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
             interner_epochs: Default::default(),
+            result_encoding: ResultEncoding::default(),
         };
 
         let resp = self
@@ -174,6 +175,7 @@ impl DbGateway for FacadeDbGateway {
         let insert_op = InsertOp {
             insert_into: table_ref,
             values: vec![json_val.into()],
+            records_idmsgpack: Vec::new(),
         };
 
         let mut queries = new_map();
@@ -196,6 +198,7 @@ impl DbGateway for FacadeDbGateway {
             return_only: Some(vec!["i".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
             interner_epochs: Default::default(),
+            result_encoding: ResultEncoding::default(),
         };
 
         let resp = self
@@ -278,6 +281,7 @@ impl DbGateway for FacadeDbGateway {
             return_only: Some(vec!["q".to_string()]),
             limits: crate::engine::query::batch::BatchLimits::default(),
             interner_epochs: Default::default(),
+            result_encoding: ResultEncoding::default(),
         };
 
         let resp = self

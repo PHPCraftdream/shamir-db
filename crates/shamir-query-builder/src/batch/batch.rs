@@ -1,6 +1,8 @@
 use serde_json::Value;
 use shamir_collections::{new_map, TMap};
-use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
+use shamir_query_types::batch::{
+    BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
+};
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
@@ -616,6 +618,7 @@ impl Batch {
             return_only: self.return_only.clone(),
             limits: self.limits.clone(),
             interner_epochs: Default::default(),
+            result_encoding: ResultEncoding::default(),
         }
     }
 

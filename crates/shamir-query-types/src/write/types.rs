@@ -3,6 +3,7 @@
 //! Core types for database write operations.
 
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use shamir_types::types::value::QueryValue;
 
 use crate::filter::Filter;
@@ -49,6 +50,17 @@ pub struct InsertOp {
 
     /// Records to insert (format-agnostic; deserialized directly from wire).
     pub values: Vec<QueryValue>,
+
+    /// Each element is ONE record's id-keyed storage msgpack (the bytes
+    /// `query_value_to_storage_bytes` emits). Used by the pass-through write
+    /// path for fully-literal, client-interned records; records containing
+    /// `$fn`/computed markers stay on `values`. Mutually-exclusive-per-record
+    /// with `values` semantically; both may be present in one op (different
+    /// records).
+    ///
+    /// Serializes as msgpack `bin` (not seq-of-u8) via `serde_bytes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records_idmsgpack: Vec<ByteBuf>,
 }
 
 /// Update operation - updates records matching a filter.

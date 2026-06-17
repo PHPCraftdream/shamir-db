@@ -5,7 +5,9 @@
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{self, doc};
-use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
+use shamir_query_types::batch::{
+    BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
+};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;
@@ -122,6 +124,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -209,6 +212,7 @@ async fn sub_batch_bind_injects_param() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Outer batch:
@@ -254,6 +258,7 @@ async fn sub_batch_bind_injects_param() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -303,6 +308,7 @@ async fn sub_batch_atomic() {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
                 values: vec![serde_json::json!({ "name": "atomic_test" }).into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: Vec::new(),
@@ -314,6 +320,7 @@ async fn sub_batch_atomic() {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("nonexistent_table"),
                 values: vec![serde_json::json!({ "name": "should_not_appear" }).into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: vec!["good".to_string()],
@@ -331,6 +338,7 @@ async fn sub_batch_atomic() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let sub_entry = QueryEntry {
@@ -355,6 +363,7 @@ async fn sub_batch_atomic() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // The outer batch succeeds (the sub-batch failure is surfaced as an error).
@@ -417,6 +426,7 @@ async fn tx_in_tx_rejected() {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
                 values: vec![serde_json::json!({ "name": "tx_in_tx" }).into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: Vec::new(),
@@ -433,6 +443,7 @@ async fn tx_in_tx_rejected() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let sub_entry = QueryEntry {
@@ -460,6 +471,7 @@ async fn tx_in_tx_rejected() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let result = execute_in_open_tx(
@@ -551,6 +563,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Sub-batch with EMPTY bind — so missing_param is not supplied.
@@ -576,6 +589,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -634,6 +648,7 @@ async fn unbound_param_in_bind_errors() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Bind references a $param from the OUTER scope that doesn't exist.
@@ -666,6 +681,7 @@ async fn unbound_param_in_bind_errors() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -722,6 +738,7 @@ async fn param_in_insert_values() {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
                 values: vec![inner_insert_value.into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: Vec::new(),
@@ -738,6 +755,7 @@ async fn param_in_insert_values() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Outer batch:
@@ -792,6 +810,7 @@ async fn param_in_insert_values() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -842,6 +861,7 @@ async fn param_in_insert_nested() {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
                 values: vec![inner_value.into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: Vec::new(),
@@ -858,6 +878,7 @@ async fn param_in_insert_nested() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Bind actor_id = 99.
@@ -891,6 +912,7 @@ async fn param_in_insert_nested() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
@@ -928,6 +950,7 @@ async fn param_in_insert_nested() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
     let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
         .await
@@ -964,6 +987,7 @@ async fn param_in_insert_missing_param_errors() {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
                 values: vec![inner_value.into()],
+                records_idmsgpack: Vec::new(),
             }),
             return_result: true,
             after: Vec::new(),
@@ -980,6 +1004,7 @@ async fn param_in_insert_missing_param_errors() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     // Bind is EMPTY — ghost_param not supplied.
@@ -1006,6 +1031,7 @@ async fn param_in_insert_missing_param_errors() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")

@@ -361,6 +361,7 @@ fn collect_field_names(op: &BatchOp, out: &mut TFxMap<String, Vec<String>>) {
         BatchOp::Insert(InsertOp {
             insert_into,
             values,
+            ..
         }) => (insert_into.repo.as_str(), values.iter().collect()),
         BatchOp::Set(SetOp { set, key, value }) => {
             // Upsert: both the key map and the value map contribute field names.

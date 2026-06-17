@@ -866,6 +866,7 @@ async fn run_child_scenario_w2d(path: PathBuf) {
     let op = shamir_query_types::write::InsertOp {
         insert_into: shamir_query_types::TableRef::new(TABLE),
         values: vec![record.into()],
+        records_idmsgpack: Vec::new(),
     };
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
