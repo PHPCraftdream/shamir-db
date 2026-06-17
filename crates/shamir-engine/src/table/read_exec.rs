@@ -22,7 +22,7 @@ use shamir_types::codecs::interned::record_view_to_id_msgpack;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::record_cow::RecordCow;
 use super::table_manager::TableManager;
@@ -385,21 +385,22 @@ impl TableManager {
                             let record = self.get(id).await?;
                             let val =
                                 crate::query::filter::eval::resolve_field(&record, &field_path);
-                            let json_val = match val {
-                                Some(v) => shamir_types::codecs::interned::inner_to_json_value(
+                            let qv_val = match val {
+                                Some(v) => shamir_types::codecs::interned::inner_value_to_query_value(
                                     &v, interner,
                                 )?,
-                                None => serde_json::Value::Null,
+                                None => QueryValue::Null,
                             };
                             let key = alias
                                 .as_deref()
                                 .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("min"))
                                 .to_string();
-                            let mut obj = serde_json::Map::new();
-                            obj.insert(key, json_val);
+                            let mut obj = new_map_wc(1);
+                            obj.insert(key, qv_val);
                             return Ok(QueryResult {
-                                records: vec![crate::query::read::QueryRecord::Json(
-                                    serde_json::Value::Object(obj),
+                                records: vec![crate::query::read::QueryRecord::Direct(
+                                    QueryValue::Map(obj),
+                                    std::sync::OnceLock::new(),
                                 )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
@@ -421,11 +422,12 @@ impl TableManager {
             if let SelectItem::CountAll { alias } = &query.select.items[0] {
                 let count: u64 = self.counter().get().await?;
                 let key = alias.as_deref().unwrap_or("count").to_string();
-                let mut obj = serde_json::Map::new();
-                obj.insert(key, serde_json::Value::Number(count.into()));
+                let mut obj = new_map_wc(1);
+                obj.insert(key, QueryValue::Int(count as i64));
                 return Ok(QueryResult {
-                    records: vec![crate::query::read::QueryRecord::Json(
-                        serde_json::Value::Object(obj),
+                    records: vec![crate::query::read::QueryRecord::Direct(
+                        QueryValue::Map(obj),
+                        std::sync::OnceLock::new(),
                     )],
                     stats: Some(QueryStats {
                         index_used: Some("__record_counter__".to_string()),
@@ -533,11 +535,12 @@ impl TableManager {
                             total += ids.len() as u64;
                         }
                         let key = alias.as_deref().unwrap_or("count").to_string();
-                        let mut obj = serde_json::Map::new();
-                        obj.insert(key, serde_json::Value::Number(total.into()));
+                        let mut obj = new_map_wc(1);
+                        obj.insert(key, QueryValue::Int(total as i64));
                         return Ok(QueryResult {
-                            records: vec![crate::query::read::QueryRecord::Json(
-                                serde_json::Value::Object(obj),
+                            records: vec![crate::query::read::QueryRecord::Direct(
+                                QueryValue::Map(obj),
+                                std::sync::OnceLock::new(),
                             )],
                             stats: Some(QueryStats {
                                 index_used: Some(format!("idx_{idx_name}")),
@@ -592,21 +595,22 @@ impl TableManager {
                             let record = self.get(id).await?;
                             let val =
                                 crate::query::filter::eval::resolve_field(&record, &field_path);
-                            let json_val = match val {
-                                Some(v) => shamir_types::codecs::interned::inner_to_json_value(
+                            let qv_val = match val {
+                                Some(v) => shamir_types::codecs::interned::inner_value_to_query_value(
                                     &v, interner,
                                 )?,
-                                None => serde_json::Value::Null,
+                                None => QueryValue::Null,
                             };
                             let key = alias
                                 .as_deref()
                                 .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("max"))
                                 .to_string();
-                            let mut obj = serde_json::Map::new();
-                            obj.insert(key, json_val);
+                            let mut obj = new_map_wc(1);
+                            obj.insert(key, qv_val);
                             return Ok(QueryResult {
-                                records: vec![crate::query::read::QueryRecord::Json(
-                                    serde_json::Value::Object(obj),
+                                records: vec![crate::query::read::QueryRecord::Direct(
+                                    QueryValue::Map(obj),
+                                    std::sync::OnceLock::new(),
                                 )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
