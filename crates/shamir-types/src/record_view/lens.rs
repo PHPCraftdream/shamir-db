@@ -1106,6 +1106,24 @@ impl<'a> RecordView<'a> {
         FieldIndex::new(self.body, map)
     }
 
+    /// Return the raw msgpack byte slice for a single **top-level** field's
+    /// value. Returns `None` on miss or malformed buffer. The returned slice is
+    /// a valid standalone msgpack value suitable for
+    /// `InnerValue::from_bytes()` — including any nested map subtree, which
+    /// decodes back to a `Value<InternerKey>` tree identical to the one the
+    /// full-record decoder would have produced for that field.
+    ///
+    /// This is the public projection surface for the per-row decode-prune optimisation
+    /// on the aggregate / GROUP BY read path: callers extract only the referenced
+    /// top-level fields and skip decoding the wide unreferenced ones. The wrapper
+    /// is deliberately restricted to a single top-level id (not an arbitrary
+    /// path) so it does not widen the lens's internal navigation surface —
+    /// `value_bytes_at` below remains the `pub(crate)` multi-segment primitive.
+    #[inline]
+    pub fn field_value_bytes(&self, id: InternerKey) -> Option<&'a [u8]> {
+        self.value_bytes_at(std::slice::from_ref(&id))
+    }
+
     /// Return the raw msgpack byte slice for the value at `path` (navigating
     /// through nested maps). Returns `None` on miss, path-through-non-map, or
     /// malformed buffer. The returned slice is a valid standalone msgpack value

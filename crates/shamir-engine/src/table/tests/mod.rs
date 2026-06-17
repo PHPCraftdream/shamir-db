@@ -1,3 +1,4 @@
+pub mod agg_prune_byte_identity_tests;
 pub mod asof_read_tests;
 pub mod buffer_config_tests;
 pub mod concurrent_tests;
