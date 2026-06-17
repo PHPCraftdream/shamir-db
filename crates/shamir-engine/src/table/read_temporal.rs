@@ -312,20 +312,18 @@ impl TableManager {
             rows.truncate(n as usize);
         }
 
-        // ── 5. Decode each version's value bytes into an InnerValue
-        //     and project via `apply_select_value` on the single
-        //     (id, value) pair; then attach `_version` and `_ts`.
+        // ── 5. Project each version's value bytes via the RecordView lens
+        //     and attach `_version` and `_ts`.
         let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
         for (id, version, ts, value_bytes) in rows {
-            // Decode the archived/current bytes into an InnerValue.
-            // A corrupt entry is skipped (defensive — history bytes
-            // are written by the engine itself, so this should never
-            // fire in practice).
-            let inner = match InnerValue::from_bytes(&value_bytes) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let mut projected = exec::apply_select_value(&[(id, inner)], &query.select, interner);
+            // Project directly from the version's storage bytes via the
+            // RecordView lens (no full InnerValue decode for the common
+            // map-record case; bare-scalar history values fall back to a
+            // transient InnerValue inside the helper). A corrupt entry
+            // (engine-written bytes — should never fire) yields a Null row
+            // rather than being skipped.
+            let mut projected =
+                apply_select_value_bytes(&[(id, value_bytes)], &query.select, interner);
             // apply_select_value returns one QueryValue per input record.
             let row_qv = projected
                 .pop()
