@@ -62,10 +62,6 @@ name = "codec_msgpack"
 harness = false
 
 [[bench]]
-name = "codec_json_roundtrip"
-harness = false
-
-[[bench]]
 name = "codec_json_encode"
 harness = false
 

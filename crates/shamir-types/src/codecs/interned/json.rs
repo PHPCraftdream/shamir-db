@@ -12,19 +12,6 @@ use crate::types::value::{InnerValue, QueryValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json as json;
 
-/// Decodes JSON bytes to InnerValue, interning string keys
-///
-/// This function:
-/// 1. Parses JSON bytes into serde_json::Value
-/// 2. Converts to InnerValue, interning all string keys
-/// 3. Returns InnerValue (InternedKey keys)
-pub fn json_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue, CodecError> {
-    let json_value: json::Value = json::from_slice(bytes)
-        .map_err(|e| CodecError::Decode(format!("JSON decode error: {}", e)))?;
-
-    json_value_to_inner(&json_value, interner)
-}
-
 /// Encodes InnerValue to JSON bytes, de-interning keys.
 ///
 /// Streams the JSON straight into the output buffer via
