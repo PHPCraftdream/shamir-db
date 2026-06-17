@@ -125,6 +125,24 @@ impl SystemStore {
         .map_err(|e| DbError::Internal(e.to_string()))
     }
 
+    /// Route a single non-tx SET (upsert) through the implicit-tx file-WAL
+    /// path (mirrors the `query_runner` non-tx Set branch, W3d-2). Maps the
+    /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
+    pub(crate) async fn set_via_implicit_tx(
+        &self,
+        table: &TableManager,
+        op: &crate::query::write::SetOp,
+    ) -> DbResult<crate::query::write::WriteResult> {
+        let repo = self.system_repo()?;
+        let owned_op = op.clone();
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx).await })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))
+    }
+
     // ========================================================================
     // Database metadata
     // ========================================================================
@@ -148,7 +166,7 @@ impl SystemStore {
             key: json!({"name": name}).into(),
             value: rec.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         Ok(())
     }
@@ -208,7 +226,7 @@ impl SystemStore {
             key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
             value: record.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         // DDL must be durable immediately: flush the MemBuffer-wrapped
         // store so a crash right after the admin op can't lose (or, for
@@ -292,7 +310,7 @@ impl SystemStore {
             .into(),
             value: record.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
@@ -360,7 +378,7 @@ impl SystemStore {
             key: json!({"key": key}).into(),
             value: json!({"key": key, "value": value}).into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         Ok(())
     }
@@ -419,7 +437,7 @@ impl SystemStore {
             key: json!({"name": name}).into(),
             value: rec.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
@@ -511,7 +529,7 @@ impl SystemStore {
             key: json!({"group_id": group_id}).into(),
             value: record.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
@@ -707,7 +725,7 @@ impl SystemStore {
             key: json!({"name": name}).into(),
             value: record.clone().into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
@@ -723,7 +741,7 @@ impl SystemStore {
             key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
             value: record.clone().into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
@@ -745,7 +763,7 @@ impl SystemStore {
             .into(),
             value: record.clone().into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
@@ -771,7 +789,7 @@ impl SystemStore {
             key: json!({"name": name}).into(),
             value: rec.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
@@ -841,7 +859,7 @@ impl SystemStore {
             key: json!({"name": name}).into(),
             value: record.clone().into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
@@ -868,7 +886,7 @@ impl SystemStore {
             key: json!({"path": path_key}).into(),
             value: rec.into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
@@ -941,7 +959,7 @@ impl SystemStore {
             key: json!({"path": path_key}).into(),
             value: record.clone().into(),
         };
-        table.execute_set(&op).await?;
+        self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())

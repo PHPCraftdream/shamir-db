@@ -605,14 +605,37 @@ impl<'a> QueryRunner<'a> {
                         &subst_op
                     };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_set_tx(op_ref, tx).await,
-                    None => table.execute_set(op_ref).await,
-                }
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                    code: None,
-                })?;
+                    Some(tx) => table.execute_set_tx(op_ref, tx).await.map_err(|e| {
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
+                    })?,
+                    // W3d-2: non-tx SET routes through the implicit single-op
+                    // batch transaction (same pattern as DELETE in F5a, INSERT
+                    // in F4b-1, UPDATE in F4b-2).
+                    None => {
+                        let repo =
+                            self.resolver
+                                .resolve_repo(&table_ref.repo)
+                                .await
+                                .map_err(|e| BatchError::QueryError {
+                                    alias: alias.to_string(),
+                                    message: format!("resolve_repo({}): {}", table_ref.repo, e),
+                                    code: None,
+                                })?;
+                        let owned_op: shamir_query_types::write::SetOp = op_ref.clone();
+                        let owned_table = table.clone();
+                        let owned_actor = self.actor.clone();
+                        repo.run_implicit_batch_tx(owned_actor, alias, move |tx| {
+                            Box::pin(async move {
+                                owned_table.execute_set_tx(&owned_op, tx).await
+                            })
+                        })
+                        .await?
+                    }
+                };
                 Ok(write_result_to_query_result(wr))
             }
 

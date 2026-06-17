@@ -1,10 +1,10 @@
 //! Write operation execution on TableManager.
 //!
-//! Implements execute_insert_tx, execute_update_tx, execute_delete_tx
-//! (plus execute_set / execute_set_tx) for TableManager. The legacy
-//! non-transactional `execute_insert` / `execute_update` / `execute_delete`
-//! were removed (W3a): every non-tx mutation now routes through an implicit
-//! Snapshot batch-tx via `run_implicit_batch_tx` → the `_tx` variants.
+//! Implements execute_insert_tx, execute_update_tx, execute_delete_tx,
+//! execute_set_tx for TableManager. The legacy non-transactional
+//! `execute_insert` / `execute_update` / `execute_delete` / `execute_set`
+//! were removed (W3a / W3d-2): every non-tx mutation now routes through an
+//! implicit Snapshot batch-tx via `run_implicit_batch_tx` → the `_tx` variants.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -22,9 +22,8 @@ use crate::query::write::{
 };
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
-    inner_to_json_value, merge_storage_bytes, query_value_to_inner, query_value_to_inner_with,
-    query_value_to_storage_bytes, record_view_to_json_value, record_view_to_query_value,
-    validate_keys_resolve_interner,
+    merge_storage_bytes, query_value_to_inner_with, query_value_to_storage_bytes,
+    record_view_to_json_value, record_view_to_query_value, validate_keys_resolve_interner,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -610,134 +609,11 @@ impl TableManager {
         })
     }
 
-    /// Execute a SET (upsert) operation.
+    /// tx-aware SET (upsert).
     ///
-    /// Finds an existing record by matching all key fields, then either
-    /// updates it (merge) or inserts a new record if not found.
-    pub async fn execute_set(&self, op: &SetOp) -> DbResult<WriteResult> {
-        let start = Instant::now();
-        let batch_size = 1000;
-        let interner = self.interner().get().await?;
-
-        // Parse key as map → list of (field_path, value) to match
-        // Use touch_ind (not get_ind) because key fields may not be interned yet
-        let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
-            Value::Map(map) => {
-                let mut fields = Vec::with_capacity(map.len());
-                for (k, v) in map {
-                    let key_id = match interner.touch_ind(k.as_str()) {
-                        Ok(t) => t.key().id(),
-                        Err(e) => return Err(shamir_storage::error::DbError::Codec(e.to_string())),
-                    };
-                    let inner_v = query_value_to_inner(v, interner)
-                        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-                    fields.push((vec![key_id], inner_v));
-                }
-                fields
-            }
-            _ => {
-                return Err(shamir_storage::error::DbError::Validation(
-                    "SET key must be a JSON object".to_string(),
-                ))
-            }
-        };
-
-        // Locate the existing record (if any) — Opt B uses a regular
-        // single-field index when one exists for the key path; falls
-        // back to a full scan otherwise.
-        let found = self
-            .lookup_existing_for_set(&key_fields, batch_size)
-            .await?;
-
-        // Resolve inline `$fn` computed fields, then convert the new value.
-        let resolved_value = resolve_computed_record(&op.value, interner)
-            .map_err(shamir_storage::error::DbError::Codec)?;
-        let new_inner = query_value_to_inner(&resolved_value, interner)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-
-        // Changefeed (Phase 3b follow-up): the upsert always ends in a Put of
-        // the stored record — `(id, stored_value)` captured from whichever
-        // branch ran (update-merge or fresh insert).
-        let (created, write_version, result_record, changefeed_put) =
-            if let Some((id, existing)) = found {
-                // Update: merge new value into existing
-                let new_map = match &new_inner {
-                    InnerValue::Map(m) => m,
-                    _ => {
-                        return Err(shamir_storage::error::DbError::Validation(
-                            "SET value must be a JSON object".to_string(),
-                        ))
-                    }
-                };
-                let merged = merge_inner_maps(&existing, new_map);
-
-                // S3: run validators (Upsert — existing found → update path).
-                // TODO actor threading — use Actor::System for now.
-                self.run_validators(
-                    WriteOp::Upsert,
-                    Some(&merged),
-                    Some(&existing),
-                    &Actor::System,
-                )
-                .await
-                .map_err(validator_failure_to_db_error)?;
-
-                let (_was_created, ver) = self.set_returning_version(id, &merged).await?;
-                let json = inner_to_json_value(&merged, interner)?;
-                (false, ver, json, (id, merged))
-            } else {
-                // S3: run validators (Upsert — no existing → insert path).
-                // TODO actor threading — use Actor::System for now.
-                self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
-                    .await
-                    .map_err(validator_failure_to_db_error)?;
-
-                // Insert new record
-                let (id, ver) = self.insert_returning_version(&new_inner).await?;
-                let mut obj = match inner_to_json_value(&new_inner, interner)? {
-                    json::Value::Object(m) => m,
-                    other => {
-                        let mut m = json::Map::new();
-                        m.insert("_value".to_string(), other);
-                        m
-                    }
-                };
-                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-                (true, ver, json::Value::Object(obj), (id, new_inner.clone()))
-            };
-
-        let mut result_obj = match result_record {
-            json::Value::Object(m) => m,
-            other => {
-                let mut m = json::Map::new();
-                m.insert("_value".to_string(), other);
-                m
-            }
-        };
-        result_obj.insert("_created".to_string(), json::Value::Bool(created));
-
-        // Persist any newly interned keys
-        self.flush_metadata().await?;
-
-        // Changefeed: emit the single Put. The event carries the MVCC
-        // version the data was written at (best-effort, non-blocking).
-        let (put_id, put_val) = changefeed_put;
-        let changes: Vec<_> = self.put_change(put_id, &put_val).into_iter().collect();
-        self.emit_nontx_changefeed(write_version, changes);
-
-        Ok(WriteResult {
-            affected: 1,
-            records: vec![InsertedRecord::Json(json::Value::Object(result_obj))],
-            execution_time_us: start.elapsed().as_micros() as u64,
-        })
-    }
-
-    /// tx-aware variant of [`execute_set`](Self::execute_set).
-    ///
-    /// Mirrors the upsert semantics of `execute_set` — locate by key fields,
-    /// then either merge-`update` (existing) or insert (new record) — but the
-    /// MERGE branch is tree-free (W3d, the SET counterpart of W3c's
-    /// `execute_update_tx` cutover):
+    /// Locates an existing record by key fields, then either merges-updates
+    /// (existing) or inserts (new record). The MERGE branch is tree-free
+    /// (W3d, the SET counterpart of W3c's `execute_update_tx` cutover):
     ///
     /// - the existing record's raw storage bytes are read once via the
     ///   tx-aware byte read (`read_one_tx_bytes`);
@@ -985,23 +861,3 @@ fn build_insert_result_records(
         .collect()
 }
 
-/// Merge set_map fields into an existing InnerValue record.
-///
-/// Only works on Map values. For each key in set_map, overwrite
-/// the corresponding key in the original. Keys not in set_map
-/// are preserved.
-fn merge_inner_maps(
-    original: &InnerValue,
-    set_map: &shamir_types::types::common::TMap<InternerKey, InnerValue>,
-) -> InnerValue {
-    match original {
-        InnerValue::Map(orig_map) => {
-            let mut merged = orig_map.clone();
-            for (key, value) in set_map {
-                merged.insert(key.clone(), value.clone());
-            }
-            InnerValue::Map(merged)
-        }
-        _ => original.clone(),
-    }
-}

@@ -59,34 +59,26 @@ pub struct TableManager {
     /// reads this to resolve `ValidatorBinding.validator_id` to a
     /// compiled `ShamirFunction`.
     pub(super) validator_registry: Option<Arc<crate::validator::ValidatorRegistry>>,
-    /// Changefeed (Phase 3b follow-up) — the non-tx write path's bridge to
-    /// the per-repo changefeed. `None` for system tables / tests that have
-    /// no feed wired. Attached by `RepoInstance::create_table_context` via
-    /// [`with_changefeed`](Self::with_changefeed). When present, the non-tx
-    /// `execute_insert/update/set/delete` methods project their footprint
-    /// into a `ChangelogEvent`, stamp it with a `commit_version` allocated
-    /// from the SAME per-repo gate the tx commit pipeline uses (so non-tx
-    /// and tx events share one monotonic version sequence), and emit it
-    /// best-effort. Emission never blocks or fails the write.
+    /// SSI gate handle — wires the non-tx write path to the per-repo
+    /// [`RepoTxGate`](shamir_tx::RepoTxGate) so that Serializable
+    /// transactions see non-tx writes in their Phase 2-bis predicate-conflict
+    /// check. `None` for system tables / tests that have no gate wired.
+    /// Attached by `RepoInstance::create_table_context` via
+    /// [`with_changefeed`](Self::with_changefeed).
     pub(super) changefeed: Option<NonTxChangefeed>,
 }
 
-/// Bundle wiring the non-tx write path to the per-repo changefeed AND the
-/// SSI commit-write log.
+/// Bundle wiring the non-tx write path to the SSI commit-write log.
 ///
-/// Holds the repo name (carried into each `ChangelogEvent::repo`), the
-/// per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) (the version source —
-/// shared with the tx commit pipeline so versions stay monotonic across
-/// both paths), and the [`RepoChangefeed`](shamir_tx::RepoChangefeed) the
-/// event is fanned out through. The `gate` is also used by
-/// `record_nontx_ssi_footprint` to append `CommitWriteRecord`s so that
-/// Serializable transactions see non-tx writes in their Phase 2-bis
-/// predicate-conflict window. Cloned cheaply (all `Arc`/`String`).
+/// Holds the per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) (the version
+/// source — shared with the tx commit pipeline so versions stay monotonic
+/// across both paths). The `gate` is used by `record_nontx_ssi_footprint`
+/// to append `CommitWriteRecord`s so that Serializable transactions see
+/// non-tx writes in their Phase 2-bis predicate-conflict window.
+/// Cloned cheaply (`Arc`).
 #[derive(Clone)]
 pub(super) struct NonTxChangefeed {
-    pub(super) repo: String,
     pub(super) gate: Arc<shamir_tx::RepoTxGate>,
-    pub(super) feed: Arc<shamir_tx::RepoChangefeed>,
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -464,8 +456,7 @@ impl TableManager {
         self.mvcc_store_ref().cloned()
     }
 
-    /// Wire this table's non-tx write path to the per-repo changefeed AND
-    /// the SSI commit-write log.
+    /// Wire this table's non-tx write path to the SSI commit-write log.
     ///
     /// Returns `self` so callers can chain after `create()` (mirrors
     /// [`with_mvcc_store`](Self::with_mvcc_store)). `gate` MUST be the same
@@ -473,18 +464,15 @@ impl TableManager {
     /// uses — that is what keeps non-tx and tx `commit_version`s on one
     /// monotonic sequence per repo, AND ensures non-tx writes are visible
     /// to Serializable transactions' Phase 2-bis predicate-conflict check.
-    /// `feed` is the repo's [`RepoChangefeed`](shamir_tx::RepoChangefeed).
     ///
     /// Attached by `RepoInstance::create_table_context`. When absent, the
-    /// non-tx write methods skip changefeed emission AND SSI footprint
-    /// recording entirely (system tables / direct-constructed test tables).
+    /// non-tx write methods skip SSI footprint recording entirely (system
+    /// tables / direct-constructed test tables).
     pub fn with_changefeed(
         mut self,
-        repo: String,
         gate: Arc<shamir_tx::RepoTxGate>,
-        feed: Arc<shamir_tx::RepoChangefeed>,
     ) -> Self {
-        self.changefeed = Some(NonTxChangefeed { repo, gate, feed });
+        self.changefeed = Some(NonTxChangefeed { gate });
         self
     }
 }
