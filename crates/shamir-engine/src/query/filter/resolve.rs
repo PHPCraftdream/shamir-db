@@ -191,10 +191,8 @@ pub fn resolve_filter_query(
         FilterValue::Param { name } => {
             // Injected sub-batch parameter. Populated by the recursive
             // sub-batch executor (P3); empty at the top level. The param
-            // scope is id-keyed (`InnerValue`) today, so convert once here.
-            ctx.params
-                .get(name.as_str())
-                .and_then(|iv| inner_value_to_query_value(iv, ctx.interner).ok())
+            // scope is name-keyed (`QueryValue`) — returned directly, no conversion.
+            ctx.params.get(name.as_str()).cloned()
         }
         _ => None,
     }

@@ -4,7 +4,7 @@ use shamir_funclib::registry::ScalarRegistry;
 use shamir_types::access::Actor;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 use crate::function::builtin_scalars;
 use crate::query::read::QueryResult;
@@ -29,14 +29,14 @@ pub struct FilterContext<'a> {
     pub scalars: &'a ScalarRegistry,
     /// Injected sub-batch parameters (`$param` bindings). Empty at the
     /// top level; populated by the recursive sub-batch executor (P3).
-    pub params: &'a TMap<String, InnerValue>,
+    pub params: &'a TMap<String, QueryValue>,
 }
 
 /// A permanently empty params map, shared across all top-level contexts
 /// so `FilterContext::new` never allocates.
-fn empty_params() -> &'static TMap<String, InnerValue> {
+fn empty_params() -> &'static TMap<String, QueryValue> {
     use std::sync::OnceLock;
-    static EMPTY: OnceLock<TMap<String, InnerValue>> = OnceLock::new();
+    static EMPTY: OnceLock<TMap<String, QueryValue>> = OnceLock::new();
     EMPTY.get_or_init(shamir_types::types::common::new_map)
 }
 
@@ -58,7 +58,7 @@ impl<'a> FilterContext<'a> {
     }
 
     /// Builder: inject sub-batch params for `$param` resolution.
-    pub fn with_params(mut self, params: &'a TMap<String, InnerValue>) -> Self {
+    pub fn with_params(mut self, params: &'a TMap<String, QueryValue>) -> Self {
         self.params = params;
         self
     }

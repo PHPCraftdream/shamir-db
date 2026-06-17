@@ -10,7 +10,7 @@ use shamir_query_types::batch::ResultEncoding;
 use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 /// Execute a batch request against a table resolver.
 ///
@@ -65,7 +65,7 @@ pub(super) fn execute_batch_impl<'a>(
     actor: Actor,
     db_name: &'a str,
     depth: usize,
-    params: &'a TMap<String, InnerValue>,
+    params: &'a TMap<String, QueryValue>,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send + 'a>,
 > {
@@ -277,7 +277,7 @@ pub(super) async fn execute_plan_impl(
     actor: &Actor,
     db_name: &str,
     depth: usize,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
@@ -360,7 +360,7 @@ pub(super) async fn execute_plan_tx_impl(
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
     depth: usize,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
@@ -409,7 +409,7 @@ pub(super) async fn execute_transactional_impl(
     actor: &Actor,
     db_name: &str,
     depth: usize,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
 ) -> Result<
     (

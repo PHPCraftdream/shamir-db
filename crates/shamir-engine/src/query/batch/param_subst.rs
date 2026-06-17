@@ -1,24 +1,5 @@
 use shamir_types::types::common::TMap;
-use shamir_types::types::value::{InnerValue, QueryValue, Value};
-
-/// Convert a scalar `InnerValue` to `QueryValue`.
-///
-/// Only the variants that can arrive in a `$param` binding are handled —
-/// params are resolved from `FilterValue` via `resolve_filter_value`, which
-/// produces only Null/Bool/Int/F64/Str. Map/List/Set/Bin etc. never appear
-/// here; we return `QueryValue::Null` for unrepresentable variants
-/// (safe: no data loss since those variants cannot be bound as params).
-pub(super) fn scalar_inner_to_query_value(v: &InnerValue) -> QueryValue {
-    match v {
-        InnerValue::Null => QueryValue::Null,
-        InnerValue::Bool(b) => QueryValue::Bool(*b),
-        InnerValue::Int(i) => QueryValue::Int(*i),
-        InnerValue::F64(f) => QueryValue::F64(*f),
-        InnerValue::Str(s) => QueryValue::Str(s.clone()),
-        // Binary / List / Set / Map cannot appear in param bindings (see above).
-        _ => QueryValue::Null,
-    }
-}
+use shamir_types::types::value::{QueryValue, Value};
 
 /// Return `true` if `value` contains any `{ "$param": "..." }` node at any depth.
 pub(super) fn contains_param_ref(value: &QueryValue) -> bool {
@@ -37,7 +18,7 @@ pub(super) fn contains_param_ref(value: &QueryValue) -> bool {
 }
 
 /// Recursively substitute `{ "$param": "<name>" }` objects inside a
-/// `QueryValue` with the corresponding resolved `InnerValue`.
+/// `QueryValue` with the corresponding resolved `QueryValue`.
 ///
 /// An object is a `$param` reference if and only if it has exactly one key
 /// named `"$param"` whose value is a string.
@@ -55,7 +36,7 @@ pub(super) fn contains_param_ref(value: &QueryValue) -> bool {
 /// the substitution will error with `unbound_param`.
 pub(super) fn substitute_params(
     value: &QueryValue,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
 ) -> Result<QueryValue, String> {
     // Fast path: if the tree has no $param nodes, return unchanged.
     if !contains_param_ref(value) {
@@ -66,7 +47,7 @@ pub(super) fn substitute_params(
 
 pub(super) fn substitute_params_inner(
     value: &QueryValue,
-    params: &TMap<String, InnerValue>,
+    params: &TMap<String, QueryValue>,
 ) -> Result<QueryValue, String> {
     match value {
         Value::Map(map) => {
@@ -74,7 +55,7 @@ pub(super) fn substitute_params_inner(
             if map.len() == 1 {
                 if let Some(Value::Str(name)) = map.get("$param") {
                     return match params.get(name.as_str()) {
-                        Some(inner) => Ok(scalar_inner_to_query_value(inner)),
+                        Some(qv) => Ok(qv.clone()),
                         None => Err(name.clone()),
                     };
                 }
