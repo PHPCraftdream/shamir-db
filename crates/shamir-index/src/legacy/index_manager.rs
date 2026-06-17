@@ -592,18 +592,7 @@ impl IndexManager {
             self.info_store.transact(kv_ops).await?;
         }
         // Invalidate posting cache for any keys touched.
-        // We invalidate broadly: any SetPosting/RemovePosting key whose
-        // first 25 bytes match a cached index_key prefix.
-        for op in ops {
-            let key = match op {
-                IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key } => key,
-                _ => continue,
-            };
-            if key.len() >= 25 {
-                let index_key = key.slice(..25);
-                self.posting_cache.remove(&index_key);
-            }
-        }
+        self.invalidate_posting_cache_for_ops(ops);
         Ok(())
     }
 
