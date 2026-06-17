@@ -599,12 +599,29 @@ async fn deintern_id_bytes(
 /// A repo's de-intern succeeds when EVERY id in the row is present in that
 /// repo's FieldMap. If any id is missing, `record_view_deintern_with` returns
 /// an error and we try the next repo.
+///
+/// **Assumption:** field-id namespaces are per-repo; a given id maps to the
+/// same field name within a single repo and is not shared across repos. The
+/// caller must pass only the repos targeted by the batch — `touch_fields`
+/// ensures their FieldMaps are pre-warmed. In the common single-repo case
+/// there is exactly one candidate and this is unconditionally correct. In a
+/// multi-repo batch this is a best-effort first-match: if two repos happen to
+/// assign the same id to different field names the result may come from the
+/// wrong repo. Avoid mixing repos that share id-space in one batch.
 fn try_deintern_repos(
     client: &Client,
     db: &str,
     bytes: &[u8],
     repos: &[String],
 ) -> Option<QueryValue> {
+    // Single-repo batches are the overwhelmingly common case and are always
+    // correct. Multi-repo batches rely on the per-repo id-namespace assumption
+    // above; assert that callers don't silently pass an unbounded repo set.
+    debug_assert!(
+        !repos.is_empty(),
+        "try_deintern_repos: repos must not be empty"
+    );
+
     let view = RecordView::new(bytes)
         .map_err(|e| tracing::warn!("de-intern: RecordView::new failed: {:?}", e))
         .ok()?;
