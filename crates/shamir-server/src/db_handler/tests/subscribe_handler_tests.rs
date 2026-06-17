@@ -5,7 +5,9 @@ use shamir_collections::TMap;
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
 use shamir_db::access::Actor;
 use shamir_db::ShamirDb;
-use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, BatchResponse, QueryEntry};
+use shamir_query_types::batch::{
+    BatchLimits, BatchOp, BatchRequest, BatchResponse, QueryEntry, ResultEncoding,
+};
 use shamir_query_types::read::QueryResult;
 use shamir_query_types::subscribe::{DeliverMode, SubscribeOp, SubscriptionSource};
 use shamir_query_types::TableRef;
@@ -70,6 +72,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
     };
 
     let mut response = BatchResponse {

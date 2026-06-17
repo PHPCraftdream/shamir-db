@@ -2,8 +2,8 @@ use shamir_collections::TMap;
 
 use crate::admin::{GroupRef, ResourceRef};
 use crate::batch::{
-    BatchLimits, BatchOp, BatchRequest, BatchResponse, InternerDelta, QueryEntry, SubBatchOp,
-    TransactionInfo,
+    BatchLimits, BatchOp, BatchRequest, BatchResponse, InternerDelta, QueryEntry, ResultEncoding,
+    SubBatchOp, TransactionInfo,
 };
 use crate::filter::FilterValue;
 
@@ -502,6 +502,7 @@ fn nested_batch_serde_roundtrip() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     };
     let mut bind = TMap::default();
     bind.insert("uid".to_string(), FilterValue::String("u1".into()));
@@ -535,6 +536,7 @@ fn nested_batch_empty_bind_omitted() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     };
     let op = BatchOp::Batch(SubBatchOp {
         batch: inner,
@@ -568,6 +570,7 @@ fn nested_batch_is_admin() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     };
     let op = BatchOp::Batch(SubBatchOp {
         batch: inner,
@@ -630,6 +633,7 @@ fn batch_request_interner_epochs_omitted_when_empty() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(
@@ -656,6 +660,7 @@ fn batch_request_interner_epochs_roundtrip() {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: epochs,
+        result_encoding: ResultEncoding::default(),
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(
@@ -732,4 +737,47 @@ fn batch_response_backward_compat_old_peer_no_field() {
     let json = r#"{"id":1,"results":{},"execution_plan":[],"execution_time_us":0}"#;
     let resp: BatchResponse = serde_json::from_str(json).unwrap();
     assert!(resp.interner_delta.is_empty());
+}
+
+// ========================================================================
+// result_encoding field (S-read pass-through, inert DTO)
+// ========================================================================
+
+/// An old client payload that has no `result_encoding` field must deserialize
+/// with `ResultEncoding::Name` as the default — backward-compat preserved.
+#[test]
+fn batch_request_result_encoding_defaults_to_name() {
+    let json = r#"{"id":1,"queries":{}}"#;
+    let req: BatchRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        req.result_encoding,
+        ResultEncoding::Name,
+        "absent result_encoding must default to Name"
+    );
+}
+
+/// A payload with `result_encoding = "id"` must round-trip via msgpack.
+#[test]
+fn batch_request_result_encoding_id_roundtrip_via_msgpack() {
+    let req = BatchRequest {
+        id: serde_json::json!(42),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: TMap::default(),
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::Id,
+    };
+
+    let bytes = rmp_serde::to_vec_named(&req).unwrap();
+    let back: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(
+        back.result_encoding,
+        ResultEncoding::Id,
+        "result_encoding must survive a msgpack round-trip"
+    );
 }

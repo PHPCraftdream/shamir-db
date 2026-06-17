@@ -52,6 +52,7 @@ impl Insert {
         InsertOp {
             insert_into: self.table_ref,
             values: self.values.into_iter().map(Into::into).collect(),
+            records_idmsgpack: Vec::new(),
         }
     }
 }

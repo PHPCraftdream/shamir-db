@@ -28,6 +28,7 @@ pub mod interner_delta;
 pub mod planner;
 pub mod query_entry;
 pub mod reference;
+pub mod result_encoding;
 pub mod sub_batch_op;
 pub mod transaction_info;
 
@@ -44,5 +45,6 @@ pub use interner_delta::InternerDelta;
 pub use planner::BatchPlanner;
 pub use query_entry::{distinct_repos, QueryEntry};
 pub use reference::{QueryPath, QueryReference, ReferenceParseError};
+pub use result_encoding::ResultEncoding;
 pub use sub_batch_op::SubBatchOp;
 pub use transaction_info::TransactionInfo;

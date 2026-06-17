@@ -1,7 +1,9 @@
 use shamir_collections::{new_map, TMap};
 
 use crate::batch::planner::BatchPlanner;
-use crate::batch::{BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
+use crate::batch::{
+    BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
+};
 use crate::filter::FilterValue;
 use crate::read::ReadQuery;
 
@@ -48,6 +50,7 @@ fn empty_batch_request() -> BatchRequest {
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     }
 }
 
@@ -63,6 +66,7 @@ fn batch_request_with_queries(queries: TMap<String, QueryEntry>) -> BatchRequest
         return_only: None,
         limits: BatchLimits::default(),
         interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
     }
 }
 

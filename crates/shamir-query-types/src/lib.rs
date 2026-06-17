@@ -49,6 +49,7 @@ pub mod write;
 #[cfg(test)]
 mod tests;
 
+pub use batch::ResultEncoding;
 pub use call::CallOp;
 pub use table_ref::TableRef;
 pub use validator::{ValidationError, WriteOp};
