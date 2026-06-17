@@ -12,13 +12,13 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use shamir_collections::THasher;
+use shamir_collections::TFxSet;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use smallvec::SmallVec;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub struct FtsBackend {
@@ -67,7 +67,7 @@ impl FtsBackend {
             .collect()
     }
 
-    fn tokenize_record(&self, rec: &dyn RecordRef) -> HashSet<u64, THasher> {
+    fn tokenize_record(&self, rec: &dyn RecordRef) -> TFxSet<u64> {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
             Some(text) => self
@@ -76,7 +76,7 @@ impl FtsBackend {
                 .into_iter()
                 .map(|t| token_hash(&t))
                 .collect(),
-            None => HashSet::<_, THasher>::default(),
+            None => TFxSet::default(),
         }
     }
 

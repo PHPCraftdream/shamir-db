@@ -1,3 +1,4 @@
+use shamir_collections::TFxMap;
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::TxContext;
@@ -697,11 +698,8 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     // Group keys by table_token so each MvccStore is hit once. `locked_keys`
     // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
     // synchronous visitor cannot await inside).
-    let mut by_table: std::collections::HashMap<u64, Vec<bytes::Bytes>, THasher> =
-        std::collections::HashMap::with_capacity_and_hasher(
-            tx.locked_keys.len(),
-            THasher::default(),
-        );
+    let mut by_table: TFxMap<u64, Vec<bytes::Bytes>> =
+        TFxMap::with_capacity_and_hasher(tx.locked_keys.len(), THasher::default());
     tx.locked_keys.scan(|(token, key), _| {
         by_table.entry(*token).or_default().push(key.clone());
     });

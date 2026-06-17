@@ -13,14 +13,14 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use shamir_collections::THasher;
+use shamir_collections::{TFxMap, TFxSet};
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub struct FtsRankedBackend {
@@ -57,23 +57,23 @@ impl FtsRankedBackend {
             .collect()
     }
 
-    fn tokenize_with_freq(&self, rec: &dyn RecordRef) -> (HashMap<u64, u32, THasher>, u32) {
+    fn tokenize_with_freq(&self, rec: &dyn RecordRef) -> (TFxMap<u64, u32>, u32) {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
             Some(text) => {
                 let tokens = self.tokenizer.tokenize(text);
                 let doc_len = tokens.len() as u32;
-                let mut freq: HashMap<u64, u32, THasher> = HashMap::<_, _, THasher>::default();
+                let mut freq: TFxMap<u64, u32> = TFxMap::default();
                 for t in tokens {
                     *freq.entry(token_hash(&t)).or_insert(0) += 1;
                 }
                 (freq, doc_len)
             }
-            None => (HashMap::<_, _, THasher>::default(), 0),
+            None => (TFxMap::default(), 0),
         }
     }
 
-    fn tokenize_set(&self, rec: &dyn RecordRef) -> HashSet<u64> {
+    fn tokenize_set(&self, rec: &dyn RecordRef) -> TFxSet<u64> {
         let (freq, _) = self.tokenize_with_freq(rec);
         freq.keys().copied().collect()
     }
@@ -163,7 +163,7 @@ impl IndexBackend for FtsRankedBackend {
         let old_set = self.tokenize_set(old);
         let (new_freq, new_doc_len) = self.tokenize_with_freq(new);
         let (_, old_doc_len) = self.tokenize_with_freq(old);
-        let new_set: HashSet<u64> = new_freq.keys().copied().collect();
+        let new_set: TFxSet<u64> = new_freq.keys().copied().collect();
 
         let mut ops = Vec::new();
         // Remove disappeared tokens.
@@ -282,8 +282,7 @@ impl IndexBackend for FtsRankedBackend {
                             let first = iter.next().unwrap();
                             iter.fold(first, |acc, s| &acc & &s)
                         };
-                        let mut scores: HashMap<RecordId, f64, THasher> =
-                            HashMap::<_, _, THasher>::default();
+                        let mut scores: TFxMap<RecordId, f64> = TFxMap::default();
                         for entries in per_token.iter() {
                             let df = entries.len() as u64;
                             let idf_val = bm25::idf(total_docs, df);
@@ -308,8 +307,7 @@ impl IndexBackend for FtsRankedBackend {
                     }
                     FtsMode::OrAny => {
                         // Union, accumulate BM25 from each matching term.
-                        let mut scores: HashMap<RecordId, f64, THasher> =
-                            HashMap::<_, _, THasher>::default();
+                        let mut scores: TFxMap<RecordId, f64> = TFxMap::default();
                         for entries in &per_token {
                             let df = entries.len() as u64;
                             let idf_val = bm25::idf(total_docs, df);

@@ -1,7 +1,8 @@
+use shamir_collections::TFxMap;
+use shamir_collections::THasher;
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{IndexWriteOp, TxContext};
-use shamir_types::types::common::THasher;
 
 use crate::repo::RepoInstance;
 use crate::tx::tx_outcome::MaterializationState;
@@ -134,11 +135,8 @@ pub(crate) async fn materialize_async_tail(
 
     // Phase 5c: index postings.
     if !tx.index_write_set.is_empty() {
-        let mut by_token: std::collections::HashMap<u64, Vec<IndexWriteOp>, THasher> =
-            std::collections::HashMap::with_capacity_and_hasher(
-                tx.index_write_set.len(),
-                THasher::default(),
-            );
+        let mut by_token: TFxMap<u64, Vec<IndexWriteOp>> =
+            TFxMap::with_capacity_and_hasher(tx.index_write_set.len(), THasher::default());
         for (token, op) in std::mem::take(&mut tx.index_write_set) {
             by_token.entry(token).or_default().push(op);
         }

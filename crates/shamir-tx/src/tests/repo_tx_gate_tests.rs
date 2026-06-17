@@ -5,8 +5,7 @@ use crate::repo_tx_gate::{
 use crate::types::{IsolationLevel, TxId};
 use crate::IndexWriteOp;
 use bytes::Bytes;
-use shamir_collections::THasher;
-use std::collections::{HashMap, HashSet};
+use shamir_collections::{TFxMap, TFxSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -104,7 +103,7 @@ async fn assign_next_version_concurrent_no_duplicates() {
         let g = Arc::clone(&gate);
         handles.push(tokio::spawn(async move { g.assign_next_version() }));
     }
-    let mut versions = HashSet::<_, THasher>::default();
+    let mut versions = TFxSet::default();
     for h in handles {
         let v = h.await.unwrap();
         assert!(versions.insert(v), "duplicate version {v}");
@@ -121,7 +120,7 @@ async fn fresh_tx_id_concurrent_no_duplicates() {
         let g = Arc::clone(&gate);
         handles.push(tokio::spawn(async move { g.fresh_tx_id() }));
     }
-    let mut ids = HashSet::<_, THasher>::default();
+    let mut ids = TFxSet::default();
     for h in handles {
         let id = h.await.unwrap();
         assert!(ids.insert(id.raw()), "duplicate tx_id");
@@ -136,7 +135,7 @@ fn commit_log_window_scan_excludes_at_or_below_snapshot() {
     let gate = RepoTxGate::new(0, 1);
     let mk = |v: u64, token: u64| CommitWriteRecord {
         commit_version: v,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             token,
             TableWriteFootprint {
                 touched: true,
@@ -174,7 +173,7 @@ fn p3a_batch_footprint_table_scan_conflict_detected() {
     // touched table 42.
     let footprint = CommitWriteRecord {
         commit_version: 7,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             42u64,
             TableWriteFootprint {
                 touched: true,
@@ -237,7 +236,7 @@ fn commit_log_index_range_intersects_posting_key() {
     // Two posting keys committed at v=7.
     let rec = CommitWriteRecord {
         commit_version: 7,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             42,
             TableWriteFootprint {
                 touched: true,
@@ -275,7 +274,7 @@ fn commit_log_prune_below_min_alive() {
     let gate = RepoTxGate::new(0, 1);
     let mk = |v: u64| CommitWriteRecord {
         commit_version: v,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             1,
             TableWriteFootprint {
                 touched: true,
@@ -302,7 +301,7 @@ fn commit_log_prune_uses_min_alive_floor() {
         gate.publish_committed(v);
         gate.record_commit_writes(CommitWriteRecord {
             commit_version: v,
-            per_table: HashMap::<_, _, THasher>::from_iter([(
+            per_table: TFxMap::from_iter([(
                 1,
                 TableWriteFootprint {
                     touched: true,
@@ -325,7 +324,7 @@ fn prune_commit_write_log_drops_only_at_or_below_min() {
     let gate = RepoTxGate::new(0, 1);
     let mk = |v: u64| CommitWriteRecord {
         commit_version: v,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             1,
             TableWriteFootprint {
                 touched: true,
@@ -370,7 +369,7 @@ fn prune_commit_write_log_idempotent() {
     let gate = RepoTxGate::new(0, 1);
     let mk = |v: u64| CommitWriteRecord {
         commit_version: v,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             1,
             TableWriteFootprint {
                 touched: true,
@@ -459,7 +458,7 @@ async fn record_commit_writes_concurrent_no_loss() {
             g.publish_committed(v);
             g.record_commit_writes(CommitWriteRecord {
                 commit_version: v,
-                per_table: HashMap::<_, _, THasher>::from_iter([(
+                per_table: TFxMap::from_iter([(
                     i,
                     TableWriteFootprint {
                         touched: true,

@@ -1,10 +1,8 @@
 use crate::core::interner::{Interner, InternerKey, TouchInd, UserKey};
 use crate::types::common::{new_map_wc, TMap};
-use std::collections::HashSet;
+use shamir_collections::TFxSet;
 use std::sync::Arc;
 use std::thread;
-
-use crate::types::common::THasher;
 
 #[test]
 fn test_basic_interning() {
@@ -254,7 +252,7 @@ fn test_concurrent_same_key_consistency() {
     }
 
     // The three keys must be distinct.
-    let unique: std::collections::HashSet<u64> = [reference[0], reference[1], reference[2]]
+    let unique: TFxSet<u64> = [reference[0], reference[1], reference[2]]
         .into_iter()
         .collect();
     assert_eq!(
@@ -652,7 +650,7 @@ fn test_interner_key_hash_eq_different_sizes() {
     let k1 = InternerKey::new(42);
     let k2 = InternerKey::new(42);
     assert_eq!(k1, k2);
-    let mut set = HashSet::<_, THasher>::default();
+    let mut set = TFxSet::<_>::default();
     set.insert(k1);
     assert!(set.contains(&k2));
 }

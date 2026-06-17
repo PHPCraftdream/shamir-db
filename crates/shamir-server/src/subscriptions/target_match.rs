@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_db::core::interner::Interner;
 use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use super::filter_eval::filter_matches_inner;
@@ -18,15 +16,15 @@ use super::filter_eval::filter_matches_inner;
 /// This collapses the two O(T) linear scans in `any_target_interested` /
 /// `matches_any` to a single O(1) HashMap lookup followed by an O(k) walk
 /// over only the k ≤ T relevant targets.
-pub type TargetIndex = HashMap<(usize, String), Vec<usize>, THasher>;
+pub type TargetIndex = TFxMap<(usize, String), Vec<usize>>;
 
 /// Build the per-bridge target index from the targets vec and the
 /// `repo_idx` map (repo name → position in `repos`).
 pub fn build_target_index(
     targets: &[(String, String, EventMask, Option<Filter>)],
-    repo_idx: &HashMap<String, usize, THasher>,
+    repo_idx: &TFxMap<String, usize>,
 ) -> TargetIndex {
-    let mut index: TargetIndex = HashMap::with_hasher(THasher::default());
+    let mut index: TargetIndex = TFxMap::default();
     for (i, (repo, table, _mask, _filter)) in targets.iter().enumerate() {
         if let Some(&ri) = repo_idx.get(repo.as_str()) {
             index.entry((ri, table.clone())).or_default().push(i);

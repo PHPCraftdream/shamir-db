@@ -6,6 +6,8 @@
 //! crates (query DTOs, builder) can reuse the exact same types as the
 //! host without pulling the heavy `shamir-types` graph.
 
+#![allow(clippy::disallowed_types)]
+
 use fxhash::FxHasher;
 use indexmap::{IndexMap, IndexSet};
 use std::cmp::Eq;

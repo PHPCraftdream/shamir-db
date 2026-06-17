@@ -1,7 +1,7 @@
 use futures::future::join_all;
+use shamir_collections::TFxMap;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{RepoTxGate, TxContext};
-use shamir_types::types::common::THasher;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit::maybe_crash;
@@ -154,8 +154,7 @@ pub(super) async fn materialize(
     // BumpFtsStats is not serialised to the WAL; its in-memory counters are
     // rebuilt via `rebuild()` on open.
     if !tx.index_write_set.is_empty() {
-        let mut by_token: std::collections::HashMap<u64, Vec<shamir_tx::IndexWriteOp>, THasher> =
-            std::collections::HashMap::default();
+        let mut by_token: TFxMap<u64, Vec<shamir_tx::IndexWriteOp>> = TFxMap::default();
         for (token, op) in std::mem::take(&mut tx.index_write_set) {
             by_token.entry(token).or_default().push(op);
         }

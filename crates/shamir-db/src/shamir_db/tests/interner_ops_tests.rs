@@ -3,7 +3,7 @@
 //! the real pipeline (msgpack → BatchOp → admin executor).
 
 use serde_json::Value;
-
+use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 
@@ -72,7 +72,7 @@ async fn dump_returns_touched_pairs_and_epoch() {
 
     // Seed three names.
     let touch_out = run_one(&shamir, ddl::interner_touch(["age", "name", "42"])).await;
-    let touch_map: std::collections::HashMap<String, u64> = touch_out["mappings"]
+    let touch_map: TFxMap<String, u64> = touch_out["mappings"]
         .as_array()
         .unwrap()
         .iter()
@@ -84,7 +84,7 @@ async fn dump_returns_touched_pairs_and_epoch() {
 
     // entries is [[id,"name"],...]
     let entries = out["entries"].as_array().unwrap();
-    let by_id: std::collections::HashMap<u64, String> = entries
+    let by_id: TFxMap<u64, String> = entries
         .iter()
         .map(|e| (e[0].as_u64().unwrap(), e[1].as_str().unwrap().to_string()))
         .collect();

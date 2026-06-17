@@ -16,6 +16,7 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 [workspace.lints.clippy]
 absolute_paths = "warn"
 disallowed_methods = "warn"
+disallowed_types = "deny"
 
 [profile.dev]
 opt-level = 0

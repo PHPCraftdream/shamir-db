@@ -8,6 +8,7 @@
 //! hot paths — enum dispatch monomorphises the `tokenize` call and removes
 //! vtable indirection.
 
+use shamir_collections::TFxSet;
 use std::borrow::Cow;
 
 use crate::kind::StemLanguage;
@@ -178,7 +179,7 @@ fn emit_ngrams<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
 /// For all other Snowball languages the function returns `None`;
 /// stemming still works — stopword filtering is simply skipped.
 /// Non-EN/RU stopword lists are a future addition.
-fn stopwords_for(lang: StemLanguage) -> Option<&'static std::collections::HashSet<&'static str>> {
+fn stopwords_for(lang: StemLanguage) -> Option<&'static TFxSet<&'static str>> {
     match lang {
         StemLanguage::English => Some(english_stopwords()),
         StemLanguage::Russian => Some(russian_stopwords()),
@@ -233,7 +234,7 @@ fn stem_algorithm(lang: StemLanguage) -> rust_stemmers::Algorithm {
 /// Read-only after construction; safe to share across threads without
 /// any mutex.
 pub struct FullTokenizer {
-    stopwords: Option<&'static std::collections::HashSet<&'static str>>,
+    stopwords: Option<&'static TFxSet<&'static str>>,
     stemmer: Option<rust_stemmers::Stemmer>,
     /// Stored to allow `Clone` reconstruction — `rust_stemmers::Stemmer`
     /// holds a bare function pointer and doesn't implement `Clone`.
@@ -301,9 +302,9 @@ fn lowerd_str<'a>(cow: &'a Cow<'a, str>) -> &'a str {
     cow.as_ref()
 }
 
-fn english_stopwords() -> &'static std::collections::HashSet<&'static str> {
+fn english_stopwords() -> &'static TFxSet<&'static str> {
     use std::sync::OnceLock;
-    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
             "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
@@ -316,9 +317,9 @@ fn english_stopwords() -> &'static std::collections::HashSet<&'static str> {
     })
 }
 
-fn russian_stopwords() -> &'static std::collections::HashSet<&'static str> {
+fn russian_stopwords() -> &'static TFxSet<&'static str> {
     use std::sync::OnceLock;
-    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
             "и",

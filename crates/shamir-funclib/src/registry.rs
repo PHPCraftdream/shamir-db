@@ -10,9 +10,8 @@
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_types::types::value::InnerValue;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Machine-readable scalar-error. Carries a stable `code`; the frontend maps the
@@ -82,7 +81,7 @@ impl FnEntry {
 /// inserts the plain name as-is.
 #[derive(Default)]
 pub struct ScalarRegistry {
-    fns: HashMap<String, FnEntry, THasher>,
+    fns: TFxMap<String, FnEntry>,
     prefix: String,
 }
 
@@ -90,7 +89,7 @@ impl ScalarRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            fns: HashMap::<_, _, THasher>::default(),
+            fns: TFxMap::default(),
             prefix: String::new(),
         }
     }

@@ -24,9 +24,10 @@ use super::simd::{dot_product, l2_squared};
 use crate::kind::VectorMetric;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use shamir_collections::TFxMap;
 use shamir_types::types::record_id::RecordId;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -47,7 +48,7 @@ struct BruteSnap {
     norms: Vec<f32>,
     /// `rid -> position in the parallel arrays`. Maintained by the
     /// writer task so upsert / delete are O(1) lookups.
-    index: HashMap<RecordId, usize>,
+    index: TFxMap<RecordId, usize>,
 }
 
 enum WriteOp {

@@ -1,9 +1,8 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
-use std::collections::HashMap;
 
 use super::ts_key;
 use super::MvccStore;
@@ -195,8 +194,7 @@ impl MvccStore {
         futures::pin_mut!(stream);
 
         // Collect: original_key → Vec<(version, physical_key)>
-        let mut per_key: HashMap<Vec<u8>, Vec<(u64, Bytes)>, THasher> =
-            HashMap::<_, _, THasher>::default();
+        let mut per_key: TFxMap<Vec<u8>, Vec<(u64, Bytes)>> = TFxMap::default();
 
         while let Some(batch) = stream.next().await {
             for (phys_key, _value) in batch? {
@@ -287,8 +285,7 @@ impl MvccStore {
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        let mut per_key: HashMap<Vec<u8>, Vec<(u64, Bytes)>, THasher> =
-            HashMap::<_, _, THasher>::default();
+        let mut per_key: TFxMap<Vec<u8>, Vec<(u64, Bytes)>> = TFxMap::default();
 
         while let Some(batch) = stream.next().await {
             for (phys_key, _value) in batch? {

@@ -1,9 +1,7 @@
 //! Full integration tests: indexed range queries, TableScan fallback,
 //! disjoint ranges, cross-table isolation.
 
-use std::collections::HashMap;
-
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 
 use shamir_tx::predicate_set::PredicateDep;
 use shamir_tx::repo_tx_gate::{CommitWriteRecord, TableWriteFootprint};
@@ -46,7 +44,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
     let posting_key = test_posting_key(idx_id, 35);
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -128,7 +126,7 @@ async fn ssi_phantom_between_range_aborts() {
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
     let posting_key = test_posting_key(idx_id, 15);
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -196,7 +194,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
     let posting_key = test_posting_key(idx_id, 50);
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -254,7 +252,7 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
     // Concurrent commit writes anything into the table.
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -321,7 +319,7 @@ async fn ssi_phantom_other_table_does_not_conflict() {
     // Concurrent commit writes into "orders", not "users".
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token_orders,
         TableWriteFootprint {

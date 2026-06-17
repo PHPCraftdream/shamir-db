@@ -31,8 +31,8 @@
 use crate::core::interner::InternerKey;
 use crate::record_view::record_value::{RawSeq, RecordValue};
 use crate::types::common::THasher;
+use shamir_collections::TFxMap;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use thiserror::Error;
 
 /// Maximum nesting depth. Mirrors `messagepack::MAX_MSGPACK_DEPTH` so the lens
@@ -674,7 +674,7 @@ fn borrow_map_body<'a>(
 #[derive(Debug, Clone)]
 pub struct FieldIndex<'a> {
     body: &'a [u8],
-    offsets: HashMap<u64, u32, THasher>,
+    offsets: TFxMap<u64, u32>,
 }
 
 impl<'a> FieldIndex<'a> {
@@ -682,7 +682,7 @@ impl<'a> FieldIndex<'a> {
     /// interned field id to the byte offset (within `body`) of its value's
     /// marker.
     #[inline]
-    fn new(body: &'a [u8], offsets: HashMap<u64, u32, THasher>) -> Self {
+    fn new(body: &'a [u8], offsets: TFxMap<u64, u32>) -> Self {
         Self { body, offsets }
     }
 
@@ -1060,8 +1060,8 @@ impl<'a> RecordView<'a> {
     /// [`index`](Self::index) once and probe it. Uses [`THasher`] per the
     /// workspace default.
     pub fn index(&self) -> FieldIndex<'a> {
-        let mut map: HashMap<u64, u32, THasher> =
-            HashMap::with_capacity_and_hasher(self.n_entries, THasher::default());
+        let mut map: TFxMap<u64, u32> =
+            TFxMap::with_capacity_and_hasher(self.n_entries, THasher::default());
         let mut pos = 0usize;
         for _ in 0..self.n_entries {
             let klen = match read_bin_len(self.body, &mut pos) {

@@ -6,10 +6,10 @@
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
+use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
 use shamir_tx::CompletionState;
-use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -382,8 +382,7 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
     // recovery (overlay empty) thus lands every recovered version in `history`
     // so post-restart reads resolve correctly; warm drain re-runs the same path
     // idempotently (last-write-wins).
-    let mut by_table: std::collections::HashMap<u64, Vec<KvOp>, THasher> =
-        std::collections::HashMap::default();
+    let mut by_table: TFxMap<u64, Vec<KvOp>> = TFxMap::default();
     for op in &entry.ops {
         let (table_id, kvop) = match op {
             WalOpV2::Put {

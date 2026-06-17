@@ -5,13 +5,11 @@
 //! no storage side-effects.
 
 use bytes::Bytes;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-
-use shamir_collections::THasher;
+use shamir_collections::{TFxMap, TFxSet, THasher};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
@@ -103,7 +101,7 @@ pub struct TxContext {
 
     /// Per-table write staging. Key = table name (interned u64).
     /// Each `StagingStore` buffers set/remove ops for that table.
-    pub write_set: HashMap<u64, StagingStore, THasher>,
+    pub write_set: TFxMap<u64, StagingStore>,
 
     /// Accumulated index write ops across all tables, with per-op table
     /// attribution. Each entry is `(table_token, op)`. Applied atomically
@@ -116,7 +114,7 @@ pub struct TxContext {
     /// graph atomically at commit (Phase 5d); discarded by RAII drop on
     /// abort — exactly like every other tx-local field. This is the home
     /// for vector staging: nothing lives outside the `TxContext` anymore.
-    pub staged_vectors: HashMap<u64, Vec<(RecordId, Vec<f32>)>, THasher>,
+    pub staged_vectors: TFxMap<u64, Vec<(RecordId, Vec<f32>)>>,
 
     /// Interner overlay: new `(key_name → id)` mappings created during
     /// this tx. Merged into base interner on commit; dropped on abort.
@@ -129,7 +127,7 @@ pub struct TxContext {
 
     /// Per-table counter delta. Applied at commit:
     /// `counter.add(delta)` for each table.
-    pub counter_deltas: HashMap<u64, i64, THasher>,
+    pub counter_deltas: TFxMap<u64, i64>,
 
     /// SSI read-set: `(table_id, key) → version_seen`. Only populated
     /// when `isolation == Serializable`. Validated at commit:
@@ -151,7 +149,7 @@ pub struct TxContext {
     /// Token → original table name. Populated alongside `write_set`
     /// entries. Used at commit time to look up table names for WAL
     /// emission and interner merge (Stage 5).
-    pub table_tokens: HashMap<u64, String, THasher>,
+    pub table_tokens: TFxMap<u64, String>,
 
     /// Per-repo interner delta (Stage I — collapsed from per-table): entries
     /// genuinely new to the BASE interner that were merged during commit
@@ -256,14 +254,14 @@ impl TxContext {
             repo_id,
             snapshot_version,
             isolation,
-            write_set: HashMap::with_hasher(THasher::default()),
+            write_set: TFxMap::default(),
             index_write_set: Vec::new(),
-            staged_vectors: HashMap::with_hasher(THasher::default()),
+            staged_vectors: TFxMap::default(),
             interner_overlay: scc::HashMap::with_hasher(THasher::default()),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
-            counter_deltas: HashMap::with_hasher(THasher::default()),
+            counter_deltas: TFxMap::default(),
             read_set: scc::HashMap::with_hasher(THasher::default()),
-            table_tokens: HashMap::with_hasher(THasher::default()),
+            table_tokens: TFxMap::default(),
             interner_deltas: Vec::new(),
             version_provider: None,
             started_at: std::time::Instant::now(),
@@ -556,7 +554,7 @@ impl TxContext {
         } else {
             (other, self)
         };
-        let smaller_set: HashSet<(u64, &shamir_storage::types::RecordKey), THasher> =
+        let smaller_set: TFxSet<(u64, &shamir_storage::types::RecordKey)> =
             smaller.write_set_keys().collect();
         larger.write_set_keys().any(|k| smaller_set.contains(&k))
     }
@@ -620,6 +618,8 @@ impl TxContext {
     ///
     /// Errors if any staged value fails to decode/re-encode. Caller
     /// should abort the transaction on error.
+    // hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+    #[allow(clippy::disallowed_types)]
     pub async fn apply_id_remap<S: std::hash::BuildHasher>(
         &mut self,
         remap: &std::collections::HashMap<u64, u64, S>,

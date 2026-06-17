@@ -23,9 +23,8 @@ use crate::registry::{
     ScalarResult,
 };
 use regex::Regex;
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_types::types::value::InnerValue;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 /// Register the `/strings` functions.
@@ -416,8 +415,8 @@ fn pad(args: &[InnerValue], side: Pad) -> ScalarResult {
 /// time guarantees, so a shared cache is ReDoS-safe. Invalid patterns ->
 /// `ScalarError("bad_regex")`.
 fn compile(pat: &str) -> Result<Regex, ScalarError> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Regex, THasher>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::<_, _, THasher>::default()));
+    static CACHE: OnceLock<Mutex<TFxMap<String, Regex>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(TFxMap::default()));
     // Lock is poison-tolerant: a panic-while-compiling cannot corrupt the map
     // (Regex compilation does not mutate it under the guard), so recover the
     // inner map either way.

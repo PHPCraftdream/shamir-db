@@ -1,7 +1,7 @@
 use bytes::Bytes;
+use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
-use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -312,8 +312,7 @@ impl TableManager {
         //    ONE batch claiming the same unique value reject the
         //    later one rather than silently overwriting).
         if self.index_manager.has_unique_indexes() {
-            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
-                std::collections::HashSet::default();
+            let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             for (i, v) in values.iter().enumerate() {
                 self.index_manager.validate_unique_for_create(v).await?;
                 for def in self.index_manager.iter_unique_indexes() {
@@ -469,8 +468,7 @@ impl TableManager {
         // 1. Batch-validate unique indexes — same shape as `insert_tx_many`
         //    but driven through the lens (`&views[i]` as `&impl RecordRef`).
         if self.index_manager.has_unique_indexes() {
-            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
-                std::collections::HashSet::default();
+            let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             for (i, view) in views.iter().enumerate() {
                 self.index_manager.validate_unique_for_create(view).await?;
                 for def in self.index_manager.iter_unique_indexes() {

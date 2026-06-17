@@ -10,14 +10,13 @@
 //! completion order (not send order); the reader task matches each by `rid`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use rustls::crypto::aws_lc_rs::default_provider;
 use rustls::pki_types::ServerName;
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use tokio::io::{split, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -122,7 +121,7 @@ fn decode_frame(buf: &[u8]) -> Option<DemuxResult> {
 /// Per-pending-request slot: either resolved with response bytes or with a
 /// transport-level error.
 pub(crate) type PendingSender = oneshot::Sender<Result<Vec<u8>, ClientError>>;
-pub(crate) type PendingMap = Arc<StdMutex<HashMap<u32, PendingSender, THasher>>>;
+pub(crate) type PendingMap = Arc<StdMutex<TFxMap<u32, PendingSender>>>;
 
 /// Background reader loop.  Owns `ReadHalf`; demuxes frames to pending waiters.
 ///
@@ -456,11 +455,9 @@ impl Client {
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
         // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
-        let subscriptions: SubscriptionMap =
-            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
-        let early_buffer: EarlyBuffer =
-            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
         let closed = Arc::new(AtomicBool::new(false));
 
         // §B21: store JoinHandle — never drop silently.
@@ -557,11 +554,9 @@ impl Client {
         };
 
         // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
-        let subscriptions: SubscriptionMap =
-            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
-        let early_buffer: EarlyBuffer =
-            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
         let closed = Arc::new(AtomicBool::new(false));
         let reader_handle = tokio::spawn(reader_task(
             r,

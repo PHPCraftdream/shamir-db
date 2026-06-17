@@ -1,4 +1,4 @@
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -96,10 +96,7 @@ impl TableManager {
 
         let rec = shamir_tx::CommitWriteRecord {
             commit_version,
-            per_table: std::collections::HashMap::<_, _, THasher>::from_iter([(
-                table_token,
-                footprint,
-            )]),
+            per_table: TFxMap::from_iter([(table_token, footprint)]),
         };
         cf.gate.record_commit_writes(rec);
         // Advance last_committed so that new snapshots opened after this

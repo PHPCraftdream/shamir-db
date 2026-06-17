@@ -19,3 +19,13 @@ disallowed-methods = [
     { path = "dashmap::DashMap::new", reason = "Fx-only: DashMap::with_hasher(THasher::default())" },
     { path = "scc::HashMap::new", reason = "Fx-only: scc::HashMap::with_hasher(THasher::default())" },
 ]
+
+# --- disallowed-types (Fx-only hasher type ban, ideology pillar 4) -------------
+# Ban the std SipHash collection TYPES so they are unconstructable by ANY path
+# (new / default / collect / inference). The ONE sanctioned allow-site is the
+# crate-level `#![allow(clippy::disallowed_types)]` in `shamir-collections`.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use shamir_collections::TFxMap / TMap (Fx hasher); raw std HashMap only at the one #[allow] alias site in shamir-collections" },
+    { path = "std::collections::HashSet", reason = "use shamir_collections::TFxSet / TSet (Fx hasher); raw std HashSet only at the one #[allow] alias site in shamir-collections" },
+    { path = "std::collections::hash_map::RandomState", reason = "SipHash builder — never construct it; use shamir_collections::THasher" },
+]
