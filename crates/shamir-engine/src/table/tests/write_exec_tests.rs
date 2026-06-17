@@ -94,7 +94,7 @@ pub(crate) async fn delete_via_tx(
 }
 
 /// Create a DbInstance with one "users" table, return the table manager + repo.
-async fn setup_empty_table() -> (crate::table::TableManager, RepoInstance) {
+pub(crate) async fn setup_empty_table() -> (crate::table::TableManager, RepoInstance) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),

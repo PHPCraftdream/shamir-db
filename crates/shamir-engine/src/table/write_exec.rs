@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::time::Instant;
 
+use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHashMap;
 use serde_json as json;
@@ -25,12 +26,14 @@ use shamir_types::codecs::interned::{
     query_value_to_storage_bytes,
 };
 use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
 use crate::validator::WriteOp;
 use shamir_types::access::Actor;
 
+use super::record_cow::RecordCow;
 use super::table_manager::TableManager;
 use super::write_helpers::{
     intern_via_layered, make_layered_interner, resolve_computed_record,
@@ -339,20 +342,80 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        let to_delete: Vec<RecordId> =
+        // Check whether any Delete validators are registered BEFORE the scan
+        // so we know whether to carry bytes alongside ids.
+        let has_delete_validators = {
+            let bindings = self.validator_bindings();
+            bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
+        };
+
+        // `to_delete`: (RecordId, Option<Bytes>).
+        //
+        // - Full-scan arm: the filter runs over a `RecordView` lens (no
+        //   `InnerValue` tree decode). Bytes are kept alongside the id so the
+        //   validator pass below can build a `RecordView` without a second
+        //   store read. `RecordCow::Owned` (aggregate / GROUP-BY path) has the
+        //   tree already; we serialize it once if validators are needed.
+        // - Index arm: the planner already resolved the id set; bytes are
+        //   serialised from the already-decoded `InnerValue` only when
+        //   validators are active, otherwise the record is skipped.
+        let to_delete: Vec<(RecordId, Option<Bytes>)> =
             if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
-                via_index.into_iter().map(|(id, _)| id).collect()
+                via_index
+                    .into_iter()
+                    .map(|(id, iv)| {
+                        let bytes = if has_delete_validators {
+                            iv.to_bytes().ok()
+                        } else {
+                            None
+                        };
+                        (id, bytes)
+                    })
+                    .collect()
             } else {
                 let callback = compile_filter(&op.where_clause, interner);
-                let mut result = Vec::new();
+                let mut result: Vec<(RecordId, Option<Bytes>)> = Vec::new();
                 let stream = self.list_stream(batch_size);
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
                     let batch = batch_result?;
                     for (id, cow) in batch {
-                        let record = cow.into_inner()?;
-                        if callback.matches(&record, ctx) {
-                            result.push(id);
+                        match cow {
+                            RecordCow::Borrowed(bytes) => {
+                                // Zero-copy: try a lens over the raw bytes.
+                                // Non-map records (bare scalars from legacy
+                                // tests) fail RecordView::new — fall back to a
+                                // full InnerValue decode for the filter match.
+                                match RecordView::new(&bytes) {
+                                    Ok(view) => {
+                                        if callback.matches(&view, ctx) {
+                                            result.push((id, Some(bytes)));
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Non-map: decode to InnerValue for filter.
+                                        if let Ok(tree) = InnerValue::from_bytes(bytes.clone()) {
+                                            if callback.matches(&tree, ctx) {
+                                                result.push((id, Some(bytes)));
+                                            }
+                                        }
+                                        // truly malformed → skip
+                                    }
+                                }
+                            }
+                            RecordCow::Owned(tree) => {
+                                // Aggregate / GROUP-BY path — tree already in
+                                // memory. Filter via the tree (implements
+                                // RecordRef), serialise only when needed.
+                                if callback.matches(&tree, ctx) {
+                                    let bytes = if has_delete_validators {
+                                        tree.to_bytes().ok()
+                                    } else {
+                                        None
+                                    };
+                                    result.push((id, bytes));
+                                }
+                            }
                         }
                     }
                 }
@@ -360,22 +423,33 @@ impl TableManager {
             };
 
         // S3: run validators on each record before deleting (tx).
-        let has_delete_validators = {
-            let bindings = self.validator_bindings();
-            bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
-        };
+        // Feeds a `RecordView` lens over the bytes collected above — no
+        // second store read, no `InnerValue` tree decode.
         if has_delete_validators && !to_delete.is_empty() {
-            let records = self.get_many(&to_delete).await?;
-            for rec in records.iter().flatten() {
-                // TODO actor threading — use Actor::System for now.
-                self.run_validators_tx(WriteOp::Delete, None, Some(rec), &Actor::System, &*tx)
+            for (_, maybe_bytes) in &to_delete {
+                if let Some(bytes) = maybe_bytes {
+                    let view = RecordView::new(bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "execute_delete_tx: malformed record bytes for validator: {}",
+                            e
+                        ))
+                    })?;
+                    // TODO actor threading — use Actor::System for now.
+                    self.run_validators_view(
+                        WriteOp::Delete,
+                        None,
+                        Some(&view),
+                        &Actor::System,
+                        tx,
+                    )
                     .await
                     .map_err(validator_failure_to_db_error)?;
+                }
             }
         }
 
         let mut affected: u64 = 0;
-        for id in to_delete {
+        for (id, _) in to_delete {
             if self.delete_tx(id, Some(&mut *tx)).await? {
                 affected += 1;
             }

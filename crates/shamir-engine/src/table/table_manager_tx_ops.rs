@@ -2,6 +2,7 @@ use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
+use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -109,12 +110,18 @@ impl TableManager {
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
     /// See [`plan_insert_ops`] for the `tx_id` parameter.
-    pub(super) async fn plan_delete_ops(
+    ///
+    /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
+    /// path can feed a zero-copy lens instead of a decoded tree.
+    pub(super) async fn plan_delete_ops<R>(
         &self,
         rid: RecordId,
-        rec: &InnerValue,
+        rec: &R,
         tx_id: Option<shamir_tx::TxId>,
-    ) -> Vec<shamir_tx::IndexWriteOp> {
+    ) -> Vec<shamir_tx::IndexWriteOp>
+    where
+        R: RecordRef + Sync,
+    {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
             if let Ok(ops) = backend.plan_delete_tx(rid, rec, tx_id).await {
@@ -167,11 +174,17 @@ impl TableManager {
     }
 
     /// HIGH-6: legacy + sorted posting ops for a tx delete.
-    pub(super) async fn plan_legacy_delete_ops(
+    ///
+    /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
+    /// path can feed a zero-copy lens instead of a decoded tree.
+    pub(super) async fn plan_legacy_delete_ops<R>(
         &self,
         rid: RecordId,
-        old: &InnerValue,
-    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
+        old: &R,
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>>
+    where
+        R: RecordRef + Sync,
+    {
         let mut ops = self.index_manager.plan_record_deleted(&rid, old).await?;
         ops.extend(
             self.index_manager
@@ -656,7 +669,8 @@ impl TableManager {
     /// tx-aware delete.
     ///
     /// `tx == None` → existing `delete`.
-    /// `tx == Some` → reads old value, plans delete ops, stages
+    /// `tx == Some` → reads old value as raw bytes, plans delete ops via a
+    /// zero-copy `RecordView` lens (no `InnerValue` tree decode), stages
     /// Remove. Returns `true` if a record was present.
     ///
     /// HIGH-6: see `insert_tx` for the staging contract and the
@@ -670,19 +684,44 @@ impl TableManager {
             return self.delete(id).await;
         };
 
-        let Some(old) = self.read_one_tx(id, Some(&*tx)).await.ok() else {
+        // Read the raw storage bytes — no InnerValue decode. `None` means
+        // the record is absent (staged-removed or not found).
+        let Some(old_bytes) = self.read_one_tx_bytes(id, Some(&*tx)).await? else {
             return Ok(false);
         };
 
         // Level-3: acquire an Exclusive lock on the key before staging the
-        // delete. Re-entrant upgrade from the Shared lock `read_one_tx` took.
-        // No-op for Snapshot / Serializable.
+        // delete. Re-entrant upgrade from the Shared lock `read_one_tx_bytes`
+        // took. No-op for Snapshot / Serializable.
         self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
             .await?;
 
+        // Plan index-removal ops. Try the zero-copy RecordView lens first
+        // (the fast path for map records — the production shape). If the
+        // record is a non-map scalar (e.g. a bare string stored by legacy
+        // tests), RecordView::new fails; fall back to a full InnerValue
+        // decode so the planners still see the value and produce correct
+        // (typically empty) index ops.
         let tx_id = Some(tx.tx_id);
-        let mut index_ops = self.plan_delete_ops(id, &old, tx_id).await;
-        index_ops.extend(self.plan_legacy_delete_ops(id, &old).await?);
+        let index_ops = match RecordView::new(&old_bytes) {
+            Ok(old_view) => {
+                let mut ops = self.plan_delete_ops(id, &old_view, tx_id).await;
+                ops.extend(self.plan_legacy_delete_ops(id, &old_view).await?);
+                ops
+            }
+            Err(_) => {
+                // Non-map record — decode to InnerValue tree for the planners.
+                let old_inner = InnerValue::from_bytes(old_bytes.clone()).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "delete_tx: failed to decode record bytes for {:?}: {}",
+                        id, e
+                    ))
+                })?;
+                let mut ops = self.plan_delete_ops(id, &old_inner, tx_id).await;
+                ops.extend(self.plan_legacy_delete_ops(id, &old_inner).await?);
+                ops
+            }
+        };
 
         self.stage_mutation(
             StagedMutation {

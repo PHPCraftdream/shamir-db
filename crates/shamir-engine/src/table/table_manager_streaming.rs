@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
@@ -449,6 +450,61 @@ impl TableManager {
             }
         }
         self.get(id).await
+    }
+
+    /// tx-aware raw-bytes read (no InnerValue decode).
+    ///
+    /// Same lock / overlay / snapshot semantics as [`read_one_tx`] but
+    /// returns the raw storage msgpack bytes without decoding to an
+    /// `InnerValue` tree. Returns `None` when the record is absent
+    /// (staged-removed, past the snapshot, or not in the main store) —
+    /// real I/O errors propagate via `?`.
+    ///
+    /// Used by [`delete_tx`] to feed index planners via a zero-copy
+    /// `RecordView` lens instead of a decoded `InnerValue` tree.
+    pub(super) async fn read_one_tx_bytes(
+        &self,
+        id: RecordId,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Option<Bytes>> {
+        if let Some(tx) = tx {
+            let key = id.to_bytes();
+            // Level-3: acquire a Shared lock on the key before reading.
+            // No-op for Snapshot / Serializable (the helper self-gates).
+            self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
+            // SSI read-set recording (no-op for Snapshot isolation).
+            let version = self
+                .mvcc_store
+                .as_ref()
+                .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
+            tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            // I.4 read-your-own-writes: check the tx staging overlay first.
+            if let Some(staging) = tx.write_set.get(&self.table_token()) {
+                match staging.staged_op(key.as_ref()) {
+                    Some(shamir_tx::staging_store::StagedKind::Set(v)) => {
+                        return Ok(Some(v));
+                    }
+                    Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                        return Ok(None);
+                    }
+                    None => {}
+                }
+            }
+
+            if let Some(mvcc) = self.mvcc_store.as_ref() {
+                return mvcc.get_at(key.as_ref(), tx.snapshot_version).await;
+            }
+        }
+        // No tx, or no mvcc: read raw bytes from the data store.
+        if let Some(mvcc) = self.mvcc_store.as_ref() {
+            return mvcc.get_current(id.to_bytes()).await;
+        }
+        match self.table.data_store().get(id.to_bytes()).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// tx-aware read-query execution (Vector I.1).
