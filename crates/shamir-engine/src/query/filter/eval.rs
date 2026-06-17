@@ -6,7 +6,6 @@
 //! callers outside `query/filter/`.
 
 pub use super::compile::compile_filter;
-pub use super::filter_callback::FilterCallback;
 pub use super::filter_node::{CompareOp, FilterNode};
 pub use super::index_range::predicate_to_index_range;
 pub use super::resolve::{

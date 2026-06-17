@@ -24,7 +24,6 @@ use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
-use super::filter_callback::FilterCallback;
 use super::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
 use super::resolve::{
     compare_values, is_column_query_ref, resolve_filter_query, resolve_query_ref_column,
@@ -617,15 +616,5 @@ impl FilterNode {
                 }
             }
         }
-    }
-}
-
-impl FilterCallback for FilterNode {
-    fn matches(
-        &self,
-        record: &shamir_types::types::value::InnerValue,
-        ctx: &FilterContext,
-    ) -> bool {
-        FilterNode::matches(self, record, ctx)
     }
 }

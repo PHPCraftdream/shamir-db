@@ -10,7 +10,7 @@ use shamir_types::types::value::InnerValue;
 use super::record_cow::RecordCow;
 use super::table::Table;
 use super::table_manager::TableManager;
-use crate::query::filter::eval::{compile_filter, FilterCallback};
+use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 
@@ -145,49 +145,6 @@ impl TableManager {
         })
     }
 
-    /// Stream records filtered by a pre-compiled callback.
-    ///
-    /// Use this when you want to compile the filter once and reuse it.
-    pub fn filter_stream_with_callback<'a>(
-        &'a self,
-        batch_size: usize,
-        callback: &'a dyn FilterCallback,
-        ctx: &'a FilterContext<'a>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
-        let table_stream = self.list_stream(batch_size);
-
-        async_stream::stream! {
-            futures::pin_mut!(table_stream);
-            while let Some(batch_result) = table_stream.next().await {
-                match batch_result {
-                    Err(e) => { yield Err(e); return; }
-                    Ok(batch) => {
-                        // FilterCallback::matches takes &InnerValue, so for
-                        // Borrowed rows we must decode. This path is only used
-                        // by pessimistic-locking / tx-aware streams (cold).
-                        let filtered: Vec<_> = batch
-                            .into_iter()
-                            .filter(|(_, cow)| {
-                                match cow {
-                                    RecordCow::Borrowed(b) => {
-                                        match InnerValue::from_bytes(b.clone()) {
-                                            Ok(record) => callback.matches(&record, ctx),
-                                            Err(_) => false, // malformed → skip
-                                        }
-                                    }
-                                    RecordCow::Owned(record) => callback.matches(record, ctx),
-                                }
-                            })
-                            .collect();
-                        if !filtered.is_empty() {
-                            yield Ok(filtered);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// tx-aware streaming variant of [`list_stream`].
     ///
     /// Forwards to [`list_stream`] for the actual data, then — when `tx` is
@@ -277,24 +234,6 @@ impl TableManager {
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
         Ok(Self::record_scan_reads(inner, tx, token, mvcc))
-    }
-
-    /// tx-aware streaming variant of [`filter_stream_with_callback`].
-    ///
-    /// Same materialised-read SSI recording as [`list_stream_tx`], and the
-    /// same KNOWN LIMITATION: scans do NOT overlay the tx `write_set` (no
-    /// read-your-own-writes for scans — see [`list_stream_tx`]).
-    pub fn filter_stream_with_callback_tx<'a>(
-        &'a self,
-        tx: Option<&'a shamir_tx::TxContext>,
-        batch_size: usize,
-        callback: &'a dyn FilterCallback,
-        ctx: &'a FilterContext<'a>,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
-        let inner = self.filter_stream_with_callback(batch_size, callback, ctx);
-        let token = self.table_token();
-        let mvcc = self.mvcc_store.clone();
-        Self::record_scan_reads(inner, tx, token, mvcc)
     }
 
     /// Wrap a record stream so that, for a Serializable tx, each yielded
