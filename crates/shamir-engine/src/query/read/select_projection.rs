@@ -10,7 +10,6 @@ use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_v
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::{new_map_wc, TMap};
-use shamir_types::types::value::InnerValue;
 use shamir_types::types::value::QueryValue;
 
 /// Pre-resolved select projection info (avoids re-interning paths per record).
@@ -76,12 +75,7 @@ impl SelectProjection {
     /// Project a single record to JSON.
     pub fn project(&self, record: &(impl RecordRef + ?Sized), interner: &Interner) -> json::Value {
         if self.is_all {
-            let mut m = new_map_wc(0);
-            record.for_each_field(&mut |k, v| {
-                m.insert(k, v);
-            });
-            let whole = InnerValue::Map(m);
-            return inner_to_json_value(&whole, interner).unwrap_or(json::Value::Null);
+            return record.to_json_value(interner);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
             return json::Value::Object(json::Map::new());
@@ -123,12 +117,7 @@ impl SelectProjection {
         interner: &Interner,
     ) -> QueryValue {
         if self.is_all {
-            let mut m = new_map_wc(0);
-            record.for_each_field(&mut |k, v| {
-                m.insert(k, v);
-            });
-            let whole = InnerValue::Map(m);
-            return inner_value_to_query_value(&whole, interner).unwrap_or(QueryValue::Null);
+            return record.to_query_value(interner);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
             return QueryValue::Map(shamir_types::types::common::new_map_wc(0));

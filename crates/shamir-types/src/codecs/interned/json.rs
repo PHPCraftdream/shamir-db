@@ -6,6 +6,7 @@
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey, UserKey};
+use crate::record_view::{RawSeq, RecordValue, RecordView};
 use crate::types::common::{new_map_wc, TSet};
 use crate::types::value::{InnerValue, QueryValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -367,4 +368,146 @@ fn inner_to_json_value_with_rev(
             Ok(json::Value::Object(obj))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RecordView lens de-intern — O(N) direct walk (no intermediate InnerValue tree)
+// ---------------------------------------------------------------------------
+
+/// Converts a [`RecordView`] (id-keyed msgpack lens) to [`QueryValue`] (string keys)
+/// in a single O(N) pass over [`RecordView::fields`], resolving key ids via a
+/// single `reverse_snapshot` acquisition. Mirrors `inner_value_to_query_value`
+/// arm-for-arm so that lens-path == tree-path on every shape the storage encoder
+/// can produce.
+pub fn record_view_to_query_value(
+    view: &RecordView<'_>,
+    interner: &Interner,
+) -> Result<QueryValue, CodecError> {
+    let rev = interner.reverse_snapshot();
+    record_view_to_query_value_with_rev(view, rev.as_slice())
+}
+
+fn record_view_to_query_value_with_rev(
+    view: &RecordView<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<QueryValue, CodecError> {
+    let mut obj = new_map_wc(view.len());
+    for (interned_key, rv) in view.fields() {
+        let idx = interned_key.id() as usize;
+        let key_str = rev
+            .get(idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|k| k.as_str().to_string())
+            .ok_or_else(|| {
+                CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
+            })?;
+        obj.insert(key_str, record_value_to_query_value_with_rev(&rv, rev)?);
+    }
+    Ok(QueryValue::Map(obj))
+}
+
+/// Convert a single [`RecordValue`] to [`QueryValue`], recursing into nested
+/// maps (via `record_view_to_query_value_with_rev`) and arrays.
+fn record_value_to_query_value_with_rev(
+    rv: &RecordValue<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<QueryValue, CodecError> {
+    match rv {
+        RecordValue::Null => Ok(QueryValue::Null),
+        RecordValue::Bool(b) => Ok(QueryValue::Bool(*b)),
+        RecordValue::Int(i) => Ok(QueryValue::Int(*i)),
+        RecordValue::F64(f) => Ok(QueryValue::F64(*f)),
+        RecordValue::Str(cow) => Ok(QueryValue::Str(cow.as_ref().to_owned())),
+        RecordValue::Bin(b) => Ok(QueryValue::Bin(b.to_vec())),
+        RecordValue::Arr(seq) => convert_raw_seq_to_query_value(seq, rev),
+        RecordValue::Map(nested) => record_view_to_query_value_with_rev(nested, rev),
+    }
+}
+
+/// Walk a [`RawSeq`] and convert each element to [`QueryValue`].
+fn convert_raw_seq_to_query_value(
+    seq: &RawSeq<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<QueryValue, CodecError> {
+    let mut items = Vec::with_capacity(seq.len());
+    for elem in seq.iter() {
+        items.push(record_value_to_query_value_with_rev(&elem, rev)?);
+    }
+    Ok(QueryValue::List(items))
+}
+
+/// Converts a [`RecordView`] (id-keyed msgpack lens) to [`serde_json::Value`]
+/// in a single O(N) pass over [`RecordView::fields`], resolving key ids via a
+/// single `reverse_snapshot` acquisition. Mirrors `inner_to_json_value`
+/// arm-for-arm (same F64 non-finite → String, Bin → array-of-byte-numbers).
+pub fn record_view_to_json_value(
+    view: &RecordView<'_>,
+    interner: &Interner,
+) -> Result<json::Value, CodecError> {
+    let rev = interner.reverse_snapshot();
+    record_view_to_json_value_with_rev(view, rev.as_slice())
+}
+
+fn record_view_to_json_value_with_rev(
+    view: &RecordView<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<json::Value, CodecError> {
+    let mut obj = json::Map::new();
+    for (interned_key, rv) in view.fields() {
+        let idx = interned_key.id() as usize;
+        let key_str = rev
+            .get(idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|k| k.as_str().to_string())
+            .ok_or_else(|| {
+                CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
+            })?;
+        obj.insert(key_str, record_value_to_json_value_with_rev(&rv, rev)?);
+    }
+    Ok(json::Value::Object(obj))
+}
+
+/// Convert a single [`RecordValue`] to [`serde_json::Value`], recursing into
+/// nested maps and arrays. Arm-for-arm mirror of `inner_to_json_value_with_rev`
+/// (F64 non-finite → String, Bin → array of byte numbers).
+fn record_value_to_json_value_with_rev(
+    rv: &RecordValue<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<json::Value, CodecError> {
+    match rv {
+        RecordValue::Null => Ok(json::Value::Null),
+        RecordValue::Bool(b) => Ok(json::Value::Bool(*b)),
+        RecordValue::Int(i) => Ok(json::Value::Number((*i).into())),
+        RecordValue::F64(f) => {
+            if f.is_finite() {
+                if let Some(n) = serde_json::Number::from_f64(*f) {
+                    Ok(json::Value::Number(n))
+                } else {
+                    Ok(json::Value::String(f.to_string()))
+                }
+            } else {
+                Ok(json::Value::String(f.to_string()))
+            }
+        }
+        RecordValue::Str(cow) => Ok(json::Value::String(cow.as_ref().to_owned())),
+        RecordValue::Bin(b) => Ok(json::Value::Array(
+            b.iter()
+                .map(|&byte: &u8| json::Value::Number(byte.into()))
+                .collect(),
+        )),
+        RecordValue::Arr(seq) => convert_raw_seq_to_json_value(seq, rev),
+        RecordValue::Map(nested) => record_view_to_json_value_with_rev(nested, rev),
+    }
+}
+
+/// Walk a [`RawSeq`] and convert each element to [`serde_json::Value`].
+fn convert_raw_seq_to_json_value(
+    seq: &RawSeq<'_>,
+    rev: &[Option<UserKey>],
+) -> Result<json::Value, CodecError> {
+    let mut items = Vec::with_capacity(seq.len());
+    for elem in seq.iter() {
+        items.push(record_value_to_json_value_with_rev(&elem, rev)?);
+    }
+    Ok(json::Value::Array(items))
 }

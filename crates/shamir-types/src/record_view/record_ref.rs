@@ -8,12 +8,16 @@
 //!
 //! Static dispatch only: consumers take `&impl RecordRef`, never `dyn`.
 
-use crate::core::interner::InternerKey;
+use crate::codecs::interned::{
+    inner_to_json_value, inner_value_to_query_value, record_view_to_json_value,
+    record_view_to_query_value,
+};
+use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::kind::Kind;
 use crate::record_view::record_value::RecordValue;
 use crate::record_view::scalar_ref::ScalarRef;
 use crate::record_view::RecordView;
-use crate::types::value::InnerValue;
+use crate::types::value::{InnerValue, QueryValue};
 
 /// Uniform read access to a record's fields by interned-id path.
 ///
@@ -93,6 +97,19 @@ pub trait RecordRef {
     /// `fields()` and materialises each value; the tree iterates its map and
     /// clones each value.
     fn for_each_field(&self, f: &mut dyn FnMut(InternerKey, InnerValue));
+
+    /// De-intern and convert the whole record to a [`QueryValue::Map`] with
+    /// string keys. `InnerValue` delegates to the existing tree de-intern;
+    /// `RecordView` uses the new O(N) lens walker.
+    ///
+    /// Returns `QueryValue::Null` on a de-intern error (missing key in interner).
+    fn to_query_value(&self, interner: &Interner) -> QueryValue;
+
+    /// De-intern and convert the whole record to a [`serde_json::Value::Object`].
+    /// Same routing as `to_query_value` (tree vs lens path).
+    ///
+    /// Returns `serde_json::Value::Null` on a de-intern error.
+    fn to_json_value(&self, interner: &Interner) -> serde_json::Value;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +221,14 @@ impl RecordRef for InnerValue {
                 f(k.clone(), v.clone());
             }
         }
+    }
+
+    fn to_query_value(&self, interner: &Interner) -> QueryValue {
+        inner_value_to_query_value(self, interner).unwrap_or(QueryValue::Null)
+    }
+
+    fn to_json_value(&self, interner: &Interner) -> serde_json::Value {
+        inner_to_json_value(self, interner).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -326,5 +351,13 @@ impl RecordRef for RecordView<'_> {
                 f(k, iv);
             }
         }
+    }
+
+    fn to_query_value(&self, interner: &Interner) -> QueryValue {
+        record_view_to_query_value(self, interner).unwrap_or(QueryValue::Null)
+    }
+
+    fn to_json_value(&self, interner: &Interner) -> serde_json::Value {
+        record_view_to_json_value(self, interner).unwrap_or(serde_json::Value::Null)
     }
 }
