@@ -69,9 +69,24 @@ intern/de-intern/дерева на операцию**.
 - **W3** (исслед. @aoh): update/delete тоже tree-free — вписывается как «запись
   полностью без дерева».
 
-**Итог:** горячий путь сервера = чистая линза над msgpack. `InnerValue` остаётся
-в 3 холодных якорях: recovery/doctor-кодек, funclib-значения, byte-identity хеш
-индекса.
+**Итог:** горячий путь сервера = чистая линза над msgpack.
+
+**КОНЕЧНАЯ ЦЕЛЬ (расширена по запросу): ноль `InnerValue` + ноль JSON ВЕЗДЕ.**
+Три холодных якоря `InnerValue` — это уже не «оставить», а **финальные цели
+устранения**:
+1. **recovery/doctor codec** (`to_bytes`/`from_bytes`) — заменить decode-таргет
+   починки на линзу + стриминговый re-encode (или работу байтами).
+2. **funclib** `fn(&[InnerValue])` — обобщить по `Value<Key>` / перевести на
+   `QueryValue` (скаляры без ключей → в осн. type-churn; ~12 категорий).
+3. **index-hash leaf** (`materialize_at`→`with_values`, `Value<InternerKey>::Hash`
+   discriminant) — САМЫЙ ТРУДНЫЙ: discriminant-стабильный хеш с линзы/`ScalarRef`,
+   либо index-format version-bump + **rebuild-миграция** (слом персист-byte-identity).
+   Возможен отдельный sub-проект; если миграция не окупается — «везде кроме
+   index-hash» как честно принятый предел.
+
+JSON «везде» = S-json (мёртвый кодек) + переписать read-result pipeline
+(`json::Value`→`QueryValue`/id-msgpack, ядро S-read) + решить control-plane +
+граница FFI. См. задачу-umbrella «🎯 КОНЕЧНАЯ ЦЕЛЬ».
 
 ---
 
