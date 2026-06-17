@@ -4,7 +4,7 @@
 use crate::registry::{v_int, ScalarRegistry};
 use crate::text;
 use rust_decimal::prelude::ToPrimitive;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -12,8 +12,8 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn s(v: &str) -> InnerValue {
-    InnerValue::Str(v.to_string())
+fn s(v: &str) -> QueryValue {
+    QueryValue::Str(v.to_string())
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn normalize_nfc_composes() {
     );
     // error: wrong type
     assert_eq!(
-        r.call("normalize_nfc", &[InnerValue::Int(1)])
+        r.call("normalize_nfc", &[QueryValue::Int(1)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -71,7 +71,7 @@ fn levenshtein_distance() {
     );
     // error: wrong type for second arg
     assert_eq!(
-        r.call("levenshtein", &[s("abc"), InnerValue::Int(1)])
+        r.call("levenshtein", &[s("abc"), QueryValue::Int(1)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -83,12 +83,12 @@ fn jaro_winkler_similarity() {
     let r = reg();
     // identical strings -> exactly 1.0
     match r.call("jaro_winkler", &[s("abc"), s("abc")]).unwrap() {
-        InnerValue::Dec(d) => assert_eq!(d.to_f64().unwrap(), 1.0),
+        QueryValue::Dec(d) => assert_eq!(d.to_f64().unwrap(), 1.0),
         other => panic!("expected Dec, got {other:?}"),
     }
     // similar strings: shared prefix boosts score into (0, 1)
     match r.call("jaro_winkler", &[s("martha"), s("marhta")]).unwrap() {
-        InnerValue::Dec(d) => {
+        QueryValue::Dec(d) => {
             let v = d.to_f64().unwrap();
             assert!(v > 0.9 && v < 1.0, "got {v}");
         }
@@ -115,25 +115,25 @@ fn truncate_ellipsis_shortens() {
     let r = reg();
     // shortened: 3 kept chars + ellipsis, max = 4
     assert_eq!(
-        r.call("truncate_ellipsis", &[s("abcdef"), InnerValue::Int(4)])
+        r.call("truncate_ellipsis", &[s("abcdef"), QueryValue::Int(4)])
             .unwrap(),
         s("abc…")
     );
     // no truncation when within max
     assert_eq!(
-        r.call("truncate_ellipsis", &[s("abc"), InnerValue::Int(5)])
+        r.call("truncate_ellipsis", &[s("abc"), QueryValue::Int(5)])
             .unwrap(),
         s("abc")
     );
     // edge: max == 0 yields empty
     assert_eq!(
-        r.call("truncate_ellipsis", &[s("abc"), InnerValue::Int(0)])
+        r.call("truncate_ellipsis", &[s("abc"), QueryValue::Int(0)])
             .unwrap(),
         s("")
     );
     // error: negative max
     assert_eq!(
-        r.call("truncate_ellipsis", &[s("abc"), InnerValue::Int(-1)])
+        r.call("truncate_ellipsis", &[s("abc"), QueryValue::Int(-1)])
             .unwrap_err()
             .code,
         "out_of_range"

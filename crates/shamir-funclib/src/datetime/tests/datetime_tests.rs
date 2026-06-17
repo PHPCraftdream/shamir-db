@@ -5,7 +5,7 @@
 use crate::datetime;
 use crate::registry::{v_bool, v_int, v_str, ScalarRegistry};
 use chrono::{DateTime, TimeZone, Utc};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -16,8 +16,8 @@ fn reg() -> ScalarRegistry {
 /// 2021-06-02T15:30:45Z — a Wednesday — as canonical epoch-millis.
 const WED_MS: i64 = 1_622_647_845_000;
 
-fn ts(ms: i64) -> InnerValue {
-    InnerValue::Int(ms)
+fn ts(ms: i64) -> QueryValue {
+    QueryValue::Int(ms)
 }
 
 fn millis_of(s: &str) -> i64 {
@@ -36,7 +36,7 @@ fn now_is_nondeterministic_metadata() {
     assert!(!e.deterministic);
     // result is a positive epoch-millis Int.
     match r.call("now", &[]).unwrap() {
-        InnerValue::Int(n) => assert!(n > 1_600_000_000_000),
+        QueryValue::Int(n) => assert!(n > 1_600_000_000_000),
         other => panic!("expected Int, got {other:?}"),
     }
     // error: arity (now takes no args).
@@ -51,12 +51,12 @@ fn age_is_nondeterministic_and_nonnegative() {
     assert!(!e.deterministic);
     // age of a long-past instant is positive seconds.
     match r.call("age", &[ts(WED_MS)]).unwrap() {
-        InnerValue::Int(n) => assert!(n > 0),
+        QueryValue::Int(n) => assert!(n > 0),
         other => panic!("expected Int, got {other:?}"),
     }
     // error: wrong type.
     assert_eq!(
-        r.call("age", &[InnerValue::Str("x".into())])
+        r.call("age", &[QueryValue::Str("x".into())])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -101,7 +101,7 @@ fn rfc3339_roundtrip() {
     let s = r.call("format_rfc3339", &[ts(WED_MS)]).unwrap();
     // re-parse the formatted string and confirm it round-trips.
     match s {
-        InnerValue::Str(text) => assert_eq!(millis_of(&text), WED_MS),
+        QueryValue::Str(text) => assert_eq!(millis_of(&text), WED_MS),
         other => panic!("expected Str, got {other:?}"),
     }
     // error: unparseable string.
@@ -141,7 +141,7 @@ fn weekday_and_weekend() {
     assert_eq!(r.call("is_weekend", &[ts(sat)]).unwrap(), v_bool(true));
     // error: wrong type for weekday.
     assert_eq!(
-        r.call("is_weekend", &[InnerValue::Str("x".into())])
+        r.call("is_weekend", &[QueryValue::Str("x".into())])
             .unwrap_err()
             .code,
         "type_mismatch"

@@ -1,8 +1,7 @@
 use crate::object;
 use crate::registry::ScalarRegistry;
-use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::{new_map_wc, TMap};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -10,37 +9,38 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-/// Build a map from `(id, value)` pairs, preserving insertion order.
-fn map(pairs: &[(u64, InnerValue)]) -> InnerValue {
-    let mut m: TMap<InternerKey, InnerValue> = new_map_wc(pairs.len());
-    for (id, v) in pairs {
-        m.insert(InternerKey::new(*id), v.clone());
+/// Build a string-keyed map from `(name, value)` pairs, preserving insertion order.
+fn map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+    let mut m: TMap<String, QueryValue> = new_map_wc(pairs.len());
+    for (k, v) in pairs {
+        m.insert((*k).to_owned(), v.clone());
     }
-    InnerValue::Map(m)
+    QueryValue::Map(m)
 }
 
-fn sample() -> InnerValue {
+fn sample() -> QueryValue {
     map(&[
-        (1, InnerValue::Int(10)),
-        (2, InnerValue::Str("hi".into())),
-        (3, InnerValue::Bool(true)),
+        ("a", QueryValue::Int(10)),
+        ("b", QueryValue::Str("hi".into())),
+        ("c", QueryValue::Bool(true)),
     ])
+}
+
+fn s(v: &str) -> QueryValue {
+    QueryValue::Str(v.to_owned())
 }
 
 #[test]
 fn keys_ok_and_type_error() {
     let r = reg();
+    // NOTE: Under QueryValue ABI, keys returns string names.
     assert_eq!(
         r.call("keys", &[sample()]).unwrap(),
-        InnerValue::List(vec![
-            InnerValue::Int(1),
-            InnerValue::Int(2),
-            InnerValue::Int(3),
-        ])
+        QueryValue::List(vec![s("a"), s("b"), s("c"),])
     );
     // error: not a map
     assert_eq!(
-        r.call("keys", &[InnerValue::Int(7)]).unwrap_err().code,
+        r.call("keys", &[QueryValue::Int(7)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -50,10 +50,10 @@ fn values_ok_and_arity() {
     let r = reg();
     assert_eq!(
         r.call("values", &[sample()]).unwrap(),
-        InnerValue::List(vec![
-            InnerValue::Int(10),
-            InnerValue::Str("hi".into()),
-            InnerValue::Bool(true),
+        QueryValue::List(vec![
+            QueryValue::Int(10),
+            QueryValue::Str("hi".into()),
+            QueryValue::Bool(true),
         ])
     );
     // error: missing arg -> arity
@@ -63,76 +63,34 @@ fn values_ok_and_arity() {
 #[test]
 fn entries_ok() {
     let r = reg();
+    // NOTE: Under QueryValue ABI, entries returns [name_str, value] pairs.
     assert_eq!(
-        r.call("entries", &[map(&[(5, InnerValue::Int(99))])])
+        r.call("entries", &[map(&[("x", QueryValue::Int(99))])])
             .unwrap(),
-        InnerValue::List(vec![InnerValue::List(vec![
-            InnerValue::Int(5),
-            InnerValue::Int(99),
-        ])])
+        QueryValue::List(vec![QueryValue::List(vec![s("x"), QueryValue::Int(99),])])
     );
     // edge: empty map -> empty list
     assert_eq!(
         r.call("entries", &[map(&[])]).unwrap(),
-        InnerValue::List(vec![])
+        QueryValue::List(vec![])
     );
 }
 
 #[test]
 fn has_key_true_false_and_bad_key() {
     let r = reg();
+    // has_key now takes a string key
     assert_eq!(
-        r.call("has_key", &[sample(), InnerValue::Int(2)]).unwrap(),
-        InnerValue::Bool(true)
+        r.call("has_key", &[sample(), s("b")]).unwrap(),
+        QueryValue::Bool(true)
     );
     assert_eq!(
-        r.call("has_key", &[sample(), InnerValue::Int(99)]).unwrap(),
-        InnerValue::Bool(false)
+        r.call("has_key", &[sample(), s("zz")]).unwrap(),
+        QueryValue::Bool(false)
     );
-    // error: negative key id
+    // error: non-string key
     assert_eq!(
-        r.call("has_key", &[sample(), InnerValue::Int(-1)])
-            .unwrap_err()
-            .code,
-        "out_of_range"
-    );
-}
-
-#[test]
-fn get_path_nested_and_missing() {
-    let r = reg();
-    let nested = map(&[(1, map(&[(2, map(&[(3, InnerValue::Str("deep".into()))]))]))]);
-    assert_eq!(
-        r.call(
-            "get_path",
-            &[
-                nested.clone(),
-                InnerValue::List(vec![
-                    InnerValue::Int(1),
-                    InnerValue::Int(2),
-                    InnerValue::Int(3),
-                ]),
-            ],
-        )
-        .unwrap(),
-        InnerValue::Str("deep".into())
-    );
-    // missing intermediate key
-    assert_eq!(
-        r.call(
-            "get_path",
-            &[
-                nested,
-                InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(9)]),
-            ],
-        )
-        .unwrap_err()
-        .code,
-        "missing_key"
-    );
-    // head not a map
-    assert_eq!(
-        r.call("get_path", &[InnerValue::Int(1), InnerValue::List(vec![])],)
+        r.call("has_key", &[sample(), QueryValue::Int(-1)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -140,21 +98,58 @@ fn get_path_nested_and_missing() {
 }
 
 #[test]
+fn get_path_nested_and_missing() {
+    let r = reg();
+    let nested = map(&[("x", map(&[("y", map(&[("z", QueryValue::Str("deep".into()))]))]))]);
+    assert_eq!(
+        r.call(
+            "get_path",
+            &[
+                nested.clone(),
+                QueryValue::List(vec![s("x"), s("y"), s("z"),]),
+            ],
+        )
+        .unwrap(),
+        QueryValue::Str("deep".into())
+    );
+    // missing intermediate key
+    assert_eq!(
+        r.call(
+            "get_path",
+            &[nested, QueryValue::List(vec![s("x"), s("missing")]),],
+        )
+        .unwrap_err()
+        .code,
+        "missing_key"
+    );
+    // head not a map
+    assert_eq!(
+        r.call(
+            "get_path",
+            &[QueryValue::Int(1), QueryValue::List(vec![])],
+        )
+        .unwrap_err()
+        .code,
+        "type_mismatch"
+    );
+}
+
+#[test]
 fn merge_right_wins() {
     let r = reg();
-    let a = map(&[(1, InnerValue::Int(1)), (2, InnerValue::Int(2))]);
-    let b = map(&[(2, InnerValue::Int(20)), (3, InnerValue::Int(30))]);
+    let a = map(&[("x", QueryValue::Int(1)), ("y", QueryValue::Int(2))]);
+    let b = map(&[("y", QueryValue::Int(20)), ("z", QueryValue::Int(30))]);
     assert_eq!(
         r.call("merge", &[a, b]).unwrap(),
         map(&[
-            (1, InnerValue::Int(1)),
-            (2, InnerValue::Int(20)),
-            (3, InnerValue::Int(30)),
+            ("x", QueryValue::Int(1)),
+            ("y", QueryValue::Int(20)),
+            ("z", QueryValue::Int(30)),
         ])
     );
     // error: second arg not a map
     assert_eq!(
-        r.call("merge", &[map(&[]), InnerValue::Int(0)])
+        r.call("merge", &[map(&[]), QueryValue::Int(0)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -167,31 +162,25 @@ fn pick_keeps_only_selected() {
     assert_eq!(
         r.call(
             "pick",
-            &[
-                sample(),
-                InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(3)])
-            ],
+            &[sample(), QueryValue::List(vec![s("a"), s("c")])],
         )
         .unwrap(),
-        map(&[(1, InnerValue::Int(10)), (3, InnerValue::Bool(true))])
+        map(&[("a", QueryValue::Int(10)), ("c", QueryValue::Bool(true))])
     );
     // missing keys are silently skipped
     assert_eq!(
         r.call(
             "pick",
-            &[sample(), InnerValue::List(vec![InnerValue::Int(99)])],
+            &[sample(), QueryValue::List(vec![s("zz")])],
         )
         .unwrap(),
         map(&[])
     );
-    // error: non-int key in list
+    // error: non-string key in list
     assert_eq!(
         r.call(
             "pick",
-            &[
-                sample(),
-                InnerValue::List(vec![InnerValue::Str("x".into())])
-            ],
+            &[sample(), QueryValue::List(vec![QueryValue::Int(1)])],
         )
         .unwrap_err()
         .code,
@@ -205,16 +194,16 @@ fn omit_drops_selected() {
     assert_eq!(
         r.call(
             "omit",
-            &[sample(), InnerValue::List(vec![InnerValue::Int(2)])],
+            &[sample(), QueryValue::List(vec![s("b")])],
         )
         .unwrap(),
-        map(&[(1, InnerValue::Int(10)), (3, InnerValue::Bool(true))])
+        map(&[("a", QueryValue::Int(10)), ("c", QueryValue::Bool(true))])
     );
     // omitting a non-present key is a no-op
     assert_eq!(
         r.call(
             "omit",
-            &[sample(), InnerValue::List(vec![InnerValue::Int(99)])],
+            &[sample(), QueryValue::List(vec![s("zz")])],
         )
         .unwrap(),
         sample()

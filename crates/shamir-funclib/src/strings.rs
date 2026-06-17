@@ -24,7 +24,7 @@ use crate::registry::{
 };
 use regex::Regex;
 use shamir_collections::TFxMap;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::sync::{Mutex, OnceLock};
 
 /// Register the `/strings` functions.
@@ -386,7 +386,7 @@ enum Pad {
 /// target **char** width of `len`. `len < 0` -> `out_of_range`; `ch` that is not
 /// exactly one char -> `bad_pad`. A string already at/over width is returned
 /// unchanged (no truncation).
-fn pad(args: &[InnerValue], side: Pad) -> ScalarResult {
+fn pad(args: &[QueryValue], side: Pad) -> ScalarResult {
     let s = arg_str(args, 0)?;
     let len = arg_i64(args, 1)?;
     if len < 0 {

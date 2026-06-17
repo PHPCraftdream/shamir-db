@@ -4,7 +4,7 @@
 use crate::math;
 use crate::registry::{v_bool, v_dec, v_int, ScalarRegistry};
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -12,8 +12,8 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn dec(s: &str) -> InnerValue {
-    InnerValue::Dec(Decimal::from_str_exact(s).unwrap())
+fn dec(s: &str) -> QueryValue {
+    QueryValue::Dec(Decimal::from_str_exact(s).unwrap())
 }
 
 #[test]
@@ -21,12 +21,12 @@ fn abs_ok_and_neg() {
     let r = reg();
     assert_eq!(r.call("abs", &[dec("-3.5")]).unwrap(), dec("3.5"));
     assert_eq!(
-        r.call("abs", &[InnerValue::Int(-7)]).unwrap(),
+        r.call("abs", &[QueryValue::Int(-7)]).unwrap(),
         v_dec(Decimal::from(7))
     );
     // error: wrong type
     assert_eq!(
-        r.call("abs", &[InnerValue::Str("x".into())])
+        r.call("abs", &[QueryValue::Str("x".into())])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -48,13 +48,13 @@ fn round_default_and_places() {
     let r = reg();
     assert_eq!(r.call("round", &[dec("2.5")]).unwrap(), dec("3"));
     assert_eq!(
-        r.call("round", &[dec("2.345"), InnerValue::Int(2)])
+        r.call("round", &[dec("2.345"), QueryValue::Int(2)])
             .unwrap(),
         dec("2.35")
     );
     // error: negative decimal places
     assert_eq!(
-        r.call("round", &[dec("2.5"), InnerValue::Int(-1)])
+        r.call("round", &[dec("2.5"), QueryValue::Int(-1)])
             .unwrap_err()
             .code,
         "out_of_range"
@@ -77,19 +77,19 @@ fn pow_sqrt() {
     let r = reg();
     // 2^10 = 1024
     match r
-        .call("pow", &[InnerValue::Int(2), InnerValue::Int(10)])
+        .call("pow", &[QueryValue::Int(2), QueryValue::Int(10)])
         .unwrap()
     {
-        InnerValue::Dec(d) => assert_eq!(d, Decimal::from(1024)),
+        QueryValue::Dec(d) => assert_eq!(d, Decimal::from(1024)),
         other => panic!("expected Dec, got {other:?}"),
     }
-    match r.call("sqrt", &[InnerValue::Int(9)]).unwrap() {
-        InnerValue::Dec(d) => assert_eq!(d, Decimal::from(3)),
+    match r.call("sqrt", &[QueryValue::Int(9)]).unwrap() {
+        QueryValue::Dec(d) => assert_eq!(d, Decimal::from(3)),
         other => panic!("expected Dec, got {other:?}"),
     }
     // domain error: sqrt of negative
     assert_eq!(
-        r.call("sqrt", &[InnerValue::Int(-1)]).unwrap_err().code,
+        r.call("sqrt", &[QueryValue::Int(-1)]).unwrap_err().code,
         "domain"
     );
 }
@@ -98,31 +98,31 @@ fn pow_sqrt() {
 fn exp_ln_log() {
     let r = reg();
     // ln(1) == 0
-    match r.call("ln", &[InnerValue::Int(1)]).unwrap() {
-        InnerValue::Dec(d) => assert_eq!(d, Decimal::ZERO),
+    match r.call("ln", &[QueryValue::Int(1)]).unwrap() {
+        QueryValue::Dec(d) => assert_eq!(d, Decimal::ZERO),
         other => panic!("expected Dec, got {other:?}"),
     }
     // exp(0) == 1
-    match r.call("exp", &[InnerValue::Int(0)]).unwrap() {
-        InnerValue::Dec(d) => assert_eq!(d, Decimal::from(1)),
+    match r.call("exp", &[QueryValue::Int(0)]).unwrap() {
+        QueryValue::Dec(d) => assert_eq!(d, Decimal::from(1)),
         other => panic!("expected Dec, got {other:?}"),
     }
     // log base 10 of 1000 == 3
-    match r.call("log", &[InnerValue::Int(1000)]).unwrap() {
-        InnerValue::Dec(d) => assert_eq!(d.round(), Decimal::from(3)),
+    match r.call("log", &[QueryValue::Int(1000)]).unwrap() {
+        QueryValue::Dec(d) => assert_eq!(d.round(), Decimal::from(3)),
         other => panic!("expected Dec, got {other:?}"),
     }
     // log base 2 of 8 == 3
     match r
-        .call("log", &[InnerValue::Int(8), InnerValue::Int(2)])
+        .call("log", &[QueryValue::Int(8), QueryValue::Int(2)])
         .unwrap()
     {
-        InnerValue::Dec(d) => assert_eq!(d.round(), Decimal::from(3)),
+        QueryValue::Dec(d) => assert_eq!(d.round(), Decimal::from(3)),
         other => panic!("expected Dec, got {other:?}"),
     }
     // domain error: ln(0)
     assert_eq!(
-        r.call("ln", &[InnerValue::Int(0)]).unwrap_err().code,
+        r.call("ln", &[QueryValue::Int(0)]).unwrap_err().code,
         "domain"
     );
 }
@@ -131,13 +131,13 @@ fn exp_ln_log() {
 fn modulo() {
     let r = reg();
     assert_eq!(
-        r.call("mod", &[InnerValue::Int(10), InnerValue::Int(3)])
+        r.call("mod", &[QueryValue::Int(10), QueryValue::Int(3)])
             .unwrap(),
         dec("1")
     );
     // div by zero
     assert_eq!(
-        r.call("mod", &[InnerValue::Int(10), InnerValue::Int(0)])
+        r.call("mod", &[QueryValue::Int(10), QueryValue::Int(0)])
             .unwrap_err()
             .code,
         "div_by_zero"
@@ -218,27 +218,27 @@ fn min_max_cross_type() {
     let r = reg();
     // Numbers (rank 2) < Strings (rank 3), so Int 5 < Str "a".
     assert_eq!(
-        r.call("min", &[InnerValue::Int(5), InnerValue::Str("a".into())])
+        r.call("min", &[QueryValue::Int(5), QueryValue::Str("a".into())])
             .unwrap(),
-        InnerValue::Int(5)
+        QueryValue::Int(5)
     );
     assert_eq!(
-        r.call("max", &[InnerValue::Int(5), InnerValue::Str("a".into())])
+        r.call("max", &[QueryValue::Int(5), QueryValue::Str("a".into())])
             .unwrap(),
-        InnerValue::Str("a".into())
+        QueryValue::Str("a".into())
     );
     // Bool (rank 1) < Int (rank 2) < Str (rank 3).
     assert_eq!(
         r.call(
             "min",
             &[
-                InnerValue::Str("z".into()),
-                InnerValue::Int(10),
-                InnerValue::Bool(true)
+                QueryValue::Str("z".into()),
+                QueryValue::Int(10),
+                QueryValue::Bool(true)
             ]
         )
         .unwrap(),
-        InnerValue::Bool(true)
+        QueryValue::Bool(true)
     );
 }
 
@@ -250,14 +250,14 @@ fn clamp_cross_type() {
         r.call(
             "clamp",
             &[
-                InnerValue::Bool(false),
-                InnerValue::Int(0),
-                InnerValue::Str("z".into())
+                QueryValue::Bool(false),
+                QueryValue::Int(0),
+                QueryValue::Str("z".into())
             ]
         )
         .unwrap(),
         // Bool rank 1 < Int rank 2 (lo), so clamped up to lo.
-        InnerValue::Int(0)
+        QueryValue::Int(0)
     );
 }
 
@@ -269,9 +269,9 @@ fn between_cross_type() {
         r.call(
             "between",
             &[
-                InnerValue::Int(5),
-                InnerValue::Bool(false),
-                InnerValue::Str("a".into())
+                QueryValue::Int(5),
+                QueryValue::Bool(false),
+                QueryValue::Str("a".into())
             ]
         )
         .unwrap(),
@@ -282,9 +282,9 @@ fn between_cross_type() {
         r.call(
             "between",
             &[
-                InnerValue::Bool(false),
-                InnerValue::Int(1),
-                InnerValue::Str("z".into())
+                QueryValue::Bool(false),
+                QueryValue::Int(1),
+                QueryValue::Str("z".into())
             ]
         )
         .unwrap(),

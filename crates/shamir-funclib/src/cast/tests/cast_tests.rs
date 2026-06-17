@@ -4,7 +4,7 @@
 use crate::cast;
 use crate::registry::{v_bool, v_int, v_str, ScalarRegistry};
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -12,8 +12,8 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn dec(s: &str) -> InnerValue {
-    InnerValue::Dec(Decimal::from_str_exact(s).unwrap())
+fn dec(s: &str) -> QueryValue {
+    QueryValue::Dec(Decimal::from_str_exact(s).unwrap())
 }
 
 #[test]
@@ -21,11 +21,11 @@ fn to_int_ok_and_failures() {
     let r = reg();
     assert_eq!(r.call("to_int", &[dec("7")]).unwrap(), v_int(7));
     assert_eq!(
-        r.call("to_int", &[InnerValue::Bool(true)]).unwrap(),
+        r.call("to_int", &[QueryValue::Bool(true)]).unwrap(),
         v_int(1)
     );
     assert_eq!(
-        r.call("to_int", &[InnerValue::Str("42".into())]).unwrap(),
+        r.call("to_int", &[QueryValue::Str("42".into())]).unwrap(),
         v_int(42)
     );
     // fractional decimal cannot be an integer
@@ -35,7 +35,7 @@ fn to_int_ok_and_failures() {
     );
     // non-numeric string
     assert_eq!(
-        r.call("to_int", &[InnerValue::Str("xx".into())])
+        r.call("to_int", &[QueryValue::Str("xx".into())])
             .unwrap_err()
             .code,
         "cast_failed"
@@ -45,15 +45,15 @@ fn to_int_ok_and_failures() {
 #[test]
 fn to_float_ok_and_failure() {
     let r = reg();
-    assert_eq!(r.call("to_float", &[InnerValue::Int(3)]).unwrap(), dec("3"));
+    assert_eq!(r.call("to_float", &[QueryValue::Int(3)]).unwrap(), dec("3"));
     assert_eq!(
-        r.call("to_float", &[InnerValue::Str("1.5".into())])
+        r.call("to_float", &[QueryValue::Str("1.5".into())])
             .unwrap(),
         dec("1.5")
     );
     // unparsable string
     assert_eq!(
-        r.call("to_float", &[InnerValue::Str("nope".into())])
+        r.call("to_float", &[QueryValue::Str("nope".into())])
             .unwrap_err()
             .code,
         "cast_failed"
@@ -63,14 +63,14 @@ fn to_float_ok_and_failure() {
 #[test]
 fn to_dec_ok_and_failure() {
     let r = reg();
-    assert_eq!(r.call("to_dec", &[InnerValue::Int(5)]).unwrap(), dec("5"));
+    assert_eq!(r.call("to_dec", &[QueryValue::Int(5)]).unwrap(), dec("5"));
     assert_eq!(
-        r.call("to_dec", &[InnerValue::Str("3.14".into())]).unwrap(),
+        r.call("to_dec", &[QueryValue::Str("3.14".into())]).unwrap(),
         dec("3.14")
     );
     // List is not convertible
     assert_eq!(
-        r.call("to_dec", &[InnerValue::List(vec![])])
+        r.call("to_dec", &[QueryValue::List(vec![])])
             .unwrap_err()
             .code,
         "cast_failed"
@@ -81,11 +81,11 @@ fn to_dec_ok_and_failure() {
 fn to_string_renders_variants() {
     let r = reg();
     assert_eq!(
-        r.call("to_string", &[InnerValue::Int(-9)]).unwrap(),
+        r.call("to_string", &[QueryValue::Int(-9)]).unwrap(),
         v_str("-9".to_string())
     );
     assert_eq!(
-        r.call("to_string", &[InnerValue::Bool(true)]).unwrap(),
+        r.call("to_string", &[QueryValue::Bool(true)]).unwrap(),
         v_str("true".to_string())
     );
     assert_eq!(
@@ -100,25 +100,25 @@ fn to_string_renders_variants() {
 fn to_bool_ok_and_failure() {
     let r = reg();
     assert_eq!(
-        r.call("to_bool", &[InnerValue::Int(0)]).unwrap(),
+        r.call("to_bool", &[QueryValue::Int(0)]).unwrap(),
         v_bool(false)
     );
     assert_eq!(
-        r.call("to_bool", &[InnerValue::Int(5)]).unwrap(),
+        r.call("to_bool", &[QueryValue::Int(5)]).unwrap(),
         v_bool(true)
     );
     assert_eq!(
-        r.call("to_bool", &[InnerValue::Str("TRUE".into())])
+        r.call("to_bool", &[QueryValue::Str("TRUE".into())])
             .unwrap(),
         v_bool(true)
     );
     assert_eq!(
-        r.call("to_bool", &[InnerValue::Str("0".into())]).unwrap(),
+        r.call("to_bool", &[QueryValue::Str("0".into())]).unwrap(),
         v_bool(false)
     );
     // unrecognised string
     assert_eq!(
-        r.call("to_bool", &[InnerValue::Str("maybe".into())])
+        r.call("to_bool", &[QueryValue::Str("maybe".into())])
             .unwrap_err()
             .code,
         "cast_failed"
@@ -129,20 +129,20 @@ fn to_bool_ok_and_failure() {
 fn parse_int_ok_and_failures() {
     let r = reg();
     assert_eq!(
-        r.call("parse_int", &[InnerValue::Str("  100 ".into())])
+        r.call("parse_int", &[QueryValue::Str("  100 ".into())])
             .unwrap(),
         v_int(100)
     );
     // malformed literal
     assert_eq!(
-        r.call("parse_int", &[InnerValue::Str("1.5".into())])
+        r.call("parse_int", &[QueryValue::Str("1.5".into())])
             .unwrap_err()
             .code,
         "cast_failed"
     );
     // wrong type: requires Str
     assert_eq!(
-        r.call("parse_int", &[InnerValue::Int(3)]).unwrap_err().code,
+        r.call("parse_int", &[QueryValue::Int(3)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -151,13 +151,13 @@ fn parse_int_ok_and_failures() {
 fn parse_float_ok_and_failure() {
     let r = reg();
     assert_eq!(
-        r.call("parse_float", &[InnerValue::Str("2.718".into())])
+        r.call("parse_float", &[QueryValue::Str("2.718".into())])
             .unwrap(),
         dec("2.718")
     );
     // malformed literal
     assert_eq!(
-        r.call("parse_float", &[InnerValue::Str("abc".into())])
+        r.call("parse_float", &[QueryValue::Str("abc".into())])
             .unwrap_err()
             .code,
         "cast_failed"
@@ -170,20 +170,20 @@ fn try_cast_dispatch_and_unknown_type() {
     assert_eq!(
         r.call(
             "try_cast",
-            &[InnerValue::Str("42".into()), InnerValue::Str("int".into())]
+            &[QueryValue::Str("42".into()), QueryValue::Str("int".into())]
         )
         .unwrap(),
         v_int(42)
     );
     assert_eq!(
-        r.call("try_cast", &[dec("3.5"), InnerValue::Str("string".into())])
+        r.call("try_cast", &[dec("3.5"), QueryValue::Str("string".into())])
             .unwrap(),
         v_str("3.5".to_string())
     );
     assert_eq!(
         r.call(
             "try_cast",
-            &[InnerValue::Int(0), InnerValue::Str("bool".into())]
+            &[QueryValue::Int(0), QueryValue::Str("bool".into())]
         )
         .unwrap(),
         v_bool(false)
@@ -192,7 +192,7 @@ fn try_cast_dispatch_and_unknown_type() {
     assert_eq!(
         r.call(
             "try_cast",
-            &[InnerValue::Int(1), InnerValue::Str("uuid".into())]
+            &[QueryValue::Int(1), QueryValue::Str("uuid".into())]
         )
         .unwrap_err()
         .code,
@@ -202,7 +202,7 @@ fn try_cast_dispatch_and_unknown_type() {
     assert_eq!(
         r.call(
             "try_cast",
-            &[InnerValue::Str("x".into()), InnerValue::Str("int".into())]
+            &[QueryValue::Str("x".into()), QueryValue::Str("int".into())]
         )
         .unwrap_err()
         .code,

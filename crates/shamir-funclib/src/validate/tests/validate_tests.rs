@@ -3,7 +3,7 @@
 
 use crate::registry::{v_bool, ScalarRegistry};
 use crate::validate;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -11,8 +11,8 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn s(x: &str) -> InnerValue {
-    InnerValue::Str(x.into())
+fn s(x: &str) -> QueryValue {
+    QueryValue::Str(x.into())
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn is_email_ok_and_bad() {
     );
     // wrong type
     assert_eq!(
-        r.call("is_email", &[InnerValue::Int(1)]).unwrap_err().code,
+        r.call("is_email", &[QueryValue::Int(1)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -126,7 +126,7 @@ fn in_range_ok_and_bad() {
     assert_eq!(
         r.call(
             "in_range",
-            &[InnerValue::Int(5), InnerValue::Int(1), InnerValue::Int(10)]
+            &[QueryValue::Int(5), QueryValue::Int(1), QueryValue::Int(10)]
         )
         .unwrap(),
         v_bool(true)
@@ -134,7 +134,7 @@ fn in_range_ok_and_bad() {
     assert_eq!(
         r.call(
             "in_range",
-            &[InnerValue::Int(11), InnerValue::Int(1), InnerValue::Int(10)]
+            &[QueryValue::Int(11), QueryValue::Int(1), QueryValue::Int(10)]
         )
         .unwrap(),
         v_bool(false)
@@ -143,7 +143,7 @@ fn in_range_ok_and_bad() {
     assert_eq!(
         r.call(
             "in_range",
-            &[InnerValue::Int(1), InnerValue::Int(1), InnerValue::Int(10)]
+            &[QueryValue::Int(1), QueryValue::Int(1), QueryValue::Int(10)]
         )
         .unwrap(),
         v_bool(true)
@@ -152,7 +152,7 @@ fn in_range_ok_and_bad() {
     assert_eq!(
         r.call(
             "in_range",
-            &[InnerValue::Int(5), InnerValue::Int(10), InnerValue::Int(1)]
+            &[QueryValue::Int(5), QueryValue::Int(10), QueryValue::Int(1)]
         )
         .unwrap_err()
         .code,
@@ -199,23 +199,23 @@ fn is_json_ok_and_bad() {
 fn is_empty_across_variants() {
     let r = reg();
     assert_eq!(
-        r.call("is_empty", &[InnerValue::Null]).unwrap(),
+        r.call("is_empty", &[QueryValue::Null]).unwrap(),
         v_bool(true)
     );
     assert_eq!(r.call("is_empty", &[s("")]).unwrap(), v_bool(true));
     assert_eq!(r.call("is_empty", &[s("x")]).unwrap(), v_bool(false));
     assert_eq!(
-        r.call("is_empty", &[InnerValue::List(vec![])]).unwrap(),
+        r.call("is_empty", &[QueryValue::List(vec![])]).unwrap(),
         v_bool(true)
     );
     assert_eq!(
-        r.call("is_empty", &[InnerValue::List(vec![InnerValue::Int(1)])])
+        r.call("is_empty", &[QueryValue::List(vec![QueryValue::Int(1)])])
             .unwrap(),
         v_bool(false)
     );
     // numbers are never empty
     assert_eq!(
-        r.call("is_empty", &[InnerValue::Int(0)]).unwrap(),
+        r.call("is_empty", &[QueryValue::Int(0)]).unwrap(),
         v_bool(false)
     );
     // arity
@@ -228,7 +228,7 @@ fn len_between_ok_and_bad() {
     assert_eq!(
         r.call(
             "len_between",
-            &[s("hello"), InnerValue::Int(1), InnerValue::Int(10)]
+            &[s("hello"), QueryValue::Int(1), QueryValue::Int(10)]
         )
         .unwrap(),
         v_bool(true)
@@ -236,7 +236,7 @@ fn len_between_ok_and_bad() {
     assert_eq!(
         r.call(
             "len_between",
-            &[s("hello"), InnerValue::Int(1), InnerValue::Int(3)]
+            &[s("hello"), QueryValue::Int(1), QueryValue::Int(3)]
         )
         .unwrap(),
         v_bool(false)
@@ -245,7 +245,7 @@ fn len_between_ok_and_bad() {
     assert_eq!(
         r.call(
             "len_between",
-            &[s("é"), InnerValue::Int(1), InnerValue::Int(1)]
+            &[s("é"), QueryValue::Int(1), QueryValue::Int(1)]
         )
         .unwrap(),
         v_bool(true)
@@ -254,7 +254,7 @@ fn len_between_ok_and_bad() {
     assert_eq!(
         r.call(
             "len_between",
-            &[s("x"), InnerValue::Int(5), InnerValue::Int(1)]
+            &[s("x"), QueryValue::Int(5), QueryValue::Int(1)]
         )
         .unwrap_err()
         .code,

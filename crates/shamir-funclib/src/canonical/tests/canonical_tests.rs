@@ -5,7 +5,7 @@ use crate::registry::ScalarRegistry;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::{InnerValue, QueryValue, Value};
+use shamir_types::types::value::{QueryValue, Value};
 use std::str::FromStr;
 
 /// Build a string-keyed map from `(key, value)` pairs in the given order.
@@ -162,17 +162,17 @@ fn hash_is_lowercase_hex_64_chars() {
 #[test]
 fn scalar_registered_under_crypto_folder() {
     // The scalar wraps canonical_hash and returns a Str; verify it dispatches
-    // under the folder-qualified name. The scalar runs on InnerValue, so we
-    // feed it a non-map InnerValue (no interner needed) and check the shape.
+    // under the folder-qualified name. Under QueryValue ABI the argument is
+    // string-keyed, so no interner is needed.
     let mut r = ScalarRegistry::new();
     r.in_folder("crypto", register);
 
-    let arg = InnerValue::Str("Alice".to_owned());
+    let arg = QueryValue::Str("Alice".to_owned());
     let got = r
         .call("crypto/canonical_hash", std::slice::from_ref(&arg))
         .unwrap();
     match got {
-        InnerValue::Str(h) => assert_eq!(h.len(), 64, "BLAKE3 hex digest is 64 chars"),
+        QueryValue::Str(h) => assert_eq!(h.len(), 64, "BLAKE3 hex digest is 64 chars"),
         other => panic!("expected Str digest, got {other:?}"),
     }
 

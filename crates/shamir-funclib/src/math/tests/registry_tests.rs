@@ -7,7 +7,7 @@ use crate::registry::{
     v_f64, v_int, v_list, v_str, FnEntry, ScalarRegistry,
 };
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 #[test]
 fn unknown_function() {
@@ -22,7 +22,7 @@ fn arity_bounds() {
     // abs requires exactly 1 arg
     assert_eq!(r.call("abs", &[]).unwrap_err().code, "arity");
     assert_eq!(
-        r.call("abs", &[InnerValue::Int(1), InnerValue::Int(2)])
+        r.call("abs", &[QueryValue::Int(1), QueryValue::Int(2)])
             .unwrap_err()
             .code,
         "arity"
@@ -43,50 +43,50 @@ fn register_get_names_len() {
 
 #[test]
 fn extractors_ok() {
-    let i = [InnerValue::Int(7)];
+    let i = [QueryValue::Int(7)];
     assert_eq!(arg_i64(&i, 0).unwrap(), 7);
     assert_eq!(arg_f64(&i, 0).unwrap(), 7.0);
     assert_eq!(arg_dec(&i, 0).unwrap(), Decimal::from(7));
 
-    let s = [InnerValue::Str("hi".into())];
+    let s = [QueryValue::Str("hi".into())];
     assert_eq!(arg_str(&s, 0).unwrap(), "hi");
 
-    let b = [InnerValue::Bool(true)];
+    let b = [QueryValue::Bool(true)];
     assert!(arg_bool(&b, 0).unwrap());
     // bool coerces to i64/f64
     assert_eq!(arg_i64(&b, 0).unwrap(), 1);
 
-    let l = [InnerValue::List(vec![InnerValue::Int(1)])];
+    let l = [QueryValue::List(vec![QueryValue::Int(1)])];
     assert_eq!(arg_list(&l, 0).unwrap().len(), 1);
 
-    let by = [InnerValue::Bin(vec![1, 2, 3])];
+    let by = [QueryValue::Bin(vec![1, 2, 3])];
     assert_eq!(arg_bytes(&by, 0).unwrap(), &[1, 2, 3]);
 }
 
 #[test]
 fn extractors_errors() {
-    let i = [InnerValue::Int(7)];
+    let i = [QueryValue::Int(7)];
     // missing arg
     assert_eq!(arg_i64(&i, 5).unwrap_err().code, "missing_arg");
     // type mismatch
     assert_eq!(arg_str(&i, 0).unwrap_err().code, "type_mismatch");
     // out of range: fractional decimal -> i64
-    let d = [InnerValue::Dec(Decimal::from_str_exact("1.5").unwrap())];
+    let d = [QueryValue::Dec(Decimal::from_str_exact("1.5").unwrap())];
     assert_eq!(arg_i64(&d, 0).unwrap_err().code, "out_of_range");
 }
 
 #[test]
 fn constructors() {
-    assert_eq!(v_int(3), InnerValue::Int(3));
-    assert_eq!(v_str("x".into()), InnerValue::Str("x".into()));
-    assert_eq!(v_bool(true), InnerValue::Bool(true));
-    assert_eq!(v_dec(Decimal::from(2)), InnerValue::Dec(Decimal::from(2)));
+    assert_eq!(v_int(3), QueryValue::Int(3));
+    assert_eq!(v_str("x".into()), QueryValue::Str("x".into()));
+    assert_eq!(v_bool(true), QueryValue::Bool(true));
+    assert_eq!(v_dec(Decimal::from(2)), QueryValue::Dec(Decimal::from(2)));
     assert_eq!(
         v_list(vec![v_int(1)]),
-        InnerValue::List(vec![InnerValue::Int(1)])
+        QueryValue::List(vec![QueryValue::Int(1)])
     );
-    assert_eq!(v_bytes(vec![9]), InnerValue::Bin(vec![9]));
+    assert_eq!(v_bytes(vec![9]), QueryValue::Bin(vec![9]));
     // v_f64 stores as Dec; non-finite is an error
-    assert!(matches!(v_f64(1.5).unwrap(), InnerValue::Dec(_)));
+    assert!(matches!(v_f64(1.5).unwrap(), QueryValue::Dec(_)));
     assert_eq!(v_f64(f64::NAN).unwrap_err().code, "out_of_range");
 }

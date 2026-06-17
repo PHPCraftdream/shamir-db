@@ -356,9 +356,12 @@ pub(super) fn build_aggregate_object(
                         path.as_deref().and_then(|p| resolve_field_ref(record, p))
                     };
                     if let Some(v) = val {
+                        // Convert InnerValue to QueryValue for the funclib ABI.
                         // Aggregator errors (e.g. type_mismatch) are swallowed
                         // per-row; finalize() decides the cell's final value.
-                        let _ = agg.accumulate(v);
+                        if let Ok(qv) = inner_value_to_query_value(v, interner) {
+                            let _ = agg.accumulate(&qv);
+                        }
                     }
                 }
             }
@@ -372,7 +375,8 @@ pub(super) fn build_aggregate_object(
     for (key, _, _, agg) in fn_slots {
         let qv = match agg {
             Some(agg) => match agg.finalize() {
-                Ok(v) => inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null),
+                // funclib finalize() now returns QueryValue directly.
+                Ok(v) => v,
                 Err(_) => QueryValue::Null,
             },
             None => QueryValue::Null,

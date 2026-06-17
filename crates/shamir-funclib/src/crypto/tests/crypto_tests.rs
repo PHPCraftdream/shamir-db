@@ -3,7 +3,7 @@
 
 use crate::crypto;
 use crate::registry::{v_bool, ScalarRegistry};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -11,13 +11,13 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn bin(b: &[u8]) -> InnerValue {
-    InnerValue::Bin(b.to_vec())
+fn bin(b: &[u8]) -> QueryValue {
+    QueryValue::Bin(b.to_vec())
 }
 
-fn out(v: InnerValue) -> Vec<u8> {
+fn out(v: QueryValue) -> Vec<u8> {
     match v {
-        InnerValue::Bin(b) => b,
+        QueryValue::Bin(b) => b,
         other => panic!("expected Bin, got {other:?}"),
     }
 }
@@ -34,7 +34,7 @@ fn sha256_known_answer_and_type_error() {
     assert_eq!(got.len(), 32);
     // error: wrong type (Str, not Bin).
     assert_eq!(
-        r.call("sha256", &[InnerValue::Str("x".into())])
+        r.call("sha256", &[QueryValue::Str("x".into())])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -87,7 +87,7 @@ fn blake3_known_answer_and_type_error() {
     assert_eq!(got.len(), 32);
     // error: wrong type.
     assert_eq!(
-        r.call("blake3", &[InnerValue::Int(3)]).unwrap_err().code,
+        r.call("blake3", &[QueryValue::Int(3)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -114,7 +114,7 @@ fn hmac_sha256_known_answer_and_arity() {
     );
     // error: wrong type for key.
     assert_eq!(
-        r.call("hmac_sha256", &[InnerValue::Int(1), bin(b"msg")])
+        r.call("hmac_sha256", &[QueryValue::Int(1), bin(b"msg")])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -141,7 +141,7 @@ fn ct_eq_equal_unequal_and_length_mismatch() {
     );
     // error: wrong type.
     assert_eq!(
-        r.call("ct_eq", &[bin(b"abc"), InnerValue::Bool(true)])
+        r.call("ct_eq", &[bin(b"abc"), QueryValue::Bool(true)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -195,10 +195,10 @@ fn argon2id_honours_custom_length() {
             &[
                 bin(b"pw"),
                 bin(b"0123456789abcdef"),
-                InnerValue::Int(19_456),
-                InnerValue::Int(2),
-                InnerValue::Int(1),
-                InnerValue::Int(64),
+                QueryValue::Int(19_456),
+                QueryValue::Int(2),
+                QueryValue::Int(1),
+                QueryValue::Int(64),
             ],
         )
         .unwrap());
@@ -222,10 +222,10 @@ fn argon2id_errors() {
             &[
                 bin(b"pw"),
                 bin(b"0123456789abcdef"),
-                InnerValue::Int(19_456),
-                InnerValue::Int(2),
-                InnerValue::Int(1),
-                InnerValue::Int(9999),
+                QueryValue::Int(19_456),
+                QueryValue::Int(2),
+                QueryValue::Int(1),
+                QueryValue::Int(9999),
             ],
         )
         .unwrap_err()

@@ -38,7 +38,7 @@
 
 use crate::registry::{FnEntry, ScalarError, ScalarRegistry};
 use serde::Serialize;
-use shamir_types::types::value::{InnerValue, Value};
+use shamir_types::types::value::{QueryValue, Value};
 use std::hash::Hash;
 
 /// Reserved top-level field carrying the expected hash of the previous version
@@ -221,14 +221,11 @@ where
 /// `canonical_hash(value) -> Str` scalar.
 ///
 /// Hashes its single argument with [`canonical_hash`]. Registered under
-/// `crypto/canonical_hash`. Note that when invoked through the scalar registry
-/// the argument is an [`InnerValue`] with interned map keys, so the result is
-/// stable within one interner instance (see the module-level portability
-/// note); the portable content hash is obtained by hashing a string-keyed
-/// `QueryValue` via [`canonical_hash`] directly.
-fn canonical_hash_fn(a: &[InnerValue]) -> Result<InnerValue, ScalarError> {
+/// `crypto/canonical_hash`. Under the `QueryValue` ABI the argument is
+/// string-keyed, so the hash is portable and content-only.
+fn canonical_hash_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
     let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
-    Ok(InnerValue::Str(canonical_hash(v)))
+    Ok(QueryValue::Str(canonical_hash(v)))
 }
 
 /// Register the canonical-hash scalar into the `/crypto` folder.

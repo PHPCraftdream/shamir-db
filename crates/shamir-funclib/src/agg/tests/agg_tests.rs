@@ -3,7 +3,7 @@
 
 use crate::agg::{self, AggRegistry};
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -15,7 +15,7 @@ fn registry() -> AggRegistry {
     r
 }
 
-fn run(name: &str, values: &[InnerValue]) -> Result<InnerValue, crate::registry::ScalarError> {
+fn run(name: &str, values: &[QueryValue]) -> Result<QueryValue, crate::registry::ScalarError> {
     let reg = registry();
     let mut a = reg.make(name).expect("aggregator not found");
     for v in values {
@@ -24,20 +24,20 @@ fn run(name: &str, values: &[InnerValue]) -> Result<InnerValue, crate::registry:
     a.finalize()
 }
 
-fn int(n: i64) -> InnerValue {
-    InnerValue::Int(n)
+fn int(n: i64) -> QueryValue {
+    QueryValue::Int(n)
 }
-fn f64v(f: f64) -> InnerValue {
-    InnerValue::F64(f)
+fn f64v(f: f64) -> QueryValue {
+    QueryValue::F64(f)
 }
-fn dec(s: &str) -> InnerValue {
-    InnerValue::Dec(Decimal::from_str_exact(s).unwrap())
+fn dec(s: &str) -> QueryValue {
+    QueryValue::Dec(Decimal::from_str_exact(s).unwrap())
 }
-fn str_v(s: &str) -> InnerValue {
-    InnerValue::Str(s.to_owned())
+fn str_v(s: &str) -> QueryValue {
+    QueryValue::Str(s.to_owned())
 }
-fn bool_v(b: bool) -> InnerValue {
-    InnerValue::Bool(b)
+fn bool_v(b: bool) -> QueryValue {
+    QueryValue::Bool(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ fn bool_v(b: bool) -> InnerValue {
 
 #[test]
 fn count_basic() {
-    let r = run("count", &[int(1), int(2), InnerValue::Null, int(3)]).unwrap();
+    let r = run("count", &[int(1), int(2), QueryValue::Null, int(3)]).unwrap();
     assert_eq!(r, int(3));
 }
 
@@ -64,7 +64,7 @@ fn count_distinct_basic() {
     // Int 5 and Dec 5 are equal by compare, so count_distinct should be 2.
     let r = run(
         "count_distinct",
-        &[int(5), dec("5"), int(3), InnerValue::Null],
+        &[int(5), dec("5"), int(3), QueryValue::Null],
     )
     .unwrap();
     assert_eq!(r, int(2));
@@ -82,7 +82,7 @@ fn count_distinct_empty() {
 #[test]
 fn sum_basic() {
     let r = run("sum", &[int(1), int(2), int(3)]).unwrap();
-    assert_eq!(r, InnerValue::Dec(Decimal::from(6)));
+    assert_eq!(r, QueryValue::Dec(Decimal::from(6)));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn sum_type_mismatch() {
 #[test]
 fn avg_basic() {
     let r = run("avg", &[int(2), int(4), int(6)]).unwrap();
-    assert_eq!(r, InnerValue::Dec(Decimal::from(4)));
+    assert_eq!(r, QueryValue::Dec(Decimal::from(4)));
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn median_empty() {
 #[test]
 fn variance_basic() {
     // [2, 4, 4, 4, 5, 5, 7, 9] -> mean=5, variance=4
-    let vals: Vec<InnerValue> = vec![
+    let vals: Vec<QueryValue> = vec![
         int(2),
         int(4),
         int(4),
@@ -184,12 +184,12 @@ fn variance_basic() {
         int(9),
     ];
     let r = run("variance", &vals).unwrap();
-    assert_eq!(r, InnerValue::Dec(Decimal::from(4)));
+    assert_eq!(r, QueryValue::Dec(Decimal::from(4)));
 }
 
 #[test]
 fn stddev_basic() {
-    let vals: Vec<InnerValue> = vec![
+    let vals: Vec<QueryValue> = vec![
         int(2),
         int(4),
         int(4),
@@ -201,7 +201,7 @@ fn stddev_basic() {
     ];
     let r = run("stddev", &vals).unwrap();
     // stddev = 2.0
-    assert_eq!(r, InnerValue::Dec(Decimal::from(2)));
+    assert_eq!(r, QueryValue::Dec(Decimal::from(2)));
 }
 
 #[test]
@@ -236,13 +236,13 @@ fn percentile_empty() {
 
 #[test]
 fn first_basic() {
-    let r = run("first", &[InnerValue::Null, int(10), int(20)]).unwrap();
+    let r = run("first", &[QueryValue::Null, int(10), int(20)]).unwrap();
     assert_eq!(r, int(10));
 }
 
 #[test]
 fn last_basic() {
-    let r = run("last", &[int(10), int(20), InnerValue::Null]).unwrap();
+    let r = run("last", &[int(10), int(20), QueryValue::Null]).unwrap();
     assert_eq!(r, int(20));
 }
 
@@ -285,16 +285,16 @@ fn string_agg_type_mismatch() {
 
 #[test]
 fn array_agg_basic() {
-    let r = run("array_agg", &[int(1), InnerValue::Null, str_v("x")]).unwrap();
+    let r = run("array_agg", &[int(1), QueryValue::Null, str_v("x")]).unwrap();
     assert_eq!(
         r,
-        InnerValue::List(vec![int(1), InnerValue::Null, str_v("x")])
+        QueryValue::List(vec![int(1), QueryValue::Null, str_v("x")])
     );
 }
 
 #[test]
 fn array_agg_empty() {
-    assert_eq!(run("array_agg", &[]).unwrap(), InnerValue::List(vec![]));
+    assert_eq!(run("array_agg", &[]).unwrap(), QueryValue::List(vec![]));
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +357,7 @@ fn mode_empty() {
 #[test]
 fn range_basic() {
     let r = run("range", &[int(3), int(10), int(1)]).unwrap();
-    assert_eq!(r, InnerValue::Dec(Decimal::from(9)));
+    assert_eq!(r, QueryValue::Dec(Decimal::from(9)));
 }
 
 #[test]

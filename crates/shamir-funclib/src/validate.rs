@@ -17,7 +17,7 @@
 
 use crate::registry::{arg_i64, arg_str, v_bool, FnEntry, ScalarError, ScalarRegistry};
 use regex::Regex;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::sync::LazyLock;
 
 static EMAIL_RE: LazyLock<Regex> =
@@ -262,15 +262,15 @@ impl JsonParser<'_> {
     }
 }
 
-/// Whether an [`InnerValue`] counts as "empty": null, empty string, empty
+/// Whether a [`QueryValue`] counts as "empty": null, empty string, empty
 /// list, empty map, or empty binary. Numbers and bools are never empty.
-fn value_is_empty(v: &InnerValue) -> bool {
+fn value_is_empty(v: &QueryValue) -> bool {
     match v {
-        InnerValue::Null => true,
-        InnerValue::Str(s) => s.is_empty(),
-        InnerValue::List(l) => l.is_empty(),
-        InnerValue::Bin(b) => b.is_empty(),
-        InnerValue::Map(m) => m.is_empty(),
+        QueryValue::Null => true,
+        QueryValue::Str(s) => s.is_empty(),
+        QueryValue::List(l) => l.is_empty(),
+        QueryValue::Bin(b) => b.is_empty(),
+        QueryValue::Map(m) => m.is_empty(),
         _ => false,
     }
 }
