@@ -60,3 +60,16 @@
   single-pass; Wave 2 уже убрал дерево). Реальный выигрыш — лишь обход serde_json-double-
   materialization, спекулятивно → bench-first отдельной задачей, не строить сложность
   ради недоказанного. Красота = не плодить параллельный wire-формат без доказанного win.
+
+## #43 clippy — split-решение (measure-first)
+Аудит: Vec::new 555(+136 тестов), String::new 131 (капасити); HashMap<_,_,THasher> 55,
+сырой HashMap::new/default 5 (хешер). Всего HashMap/HashSet-как-тип 140 в 11 крейтах.
+clippy --workspace УЖЕ зелёный (named-ctor баны держат SipHash).
+- **Хешер-airtight — ДЕЛАЮ** (явный ask пользователя «полностью забанить + обходные»):
+  type-ban std HashMap/HashSet/RandomState; мигрировать ~140 на shamir_collections
+  TFxMap/TFxSet (unordered) / TMap/TSet (ordered); #[allow] на alias-сайте; deny.
+  Behavior-preserving (чистый alias-swap). Bounded, механический.
+- **Капасити — ADVISORY (не deny)**: 555 Vec::new + 131 String::new = 686 сайтов,
+  бо́льшая часть честно мелкие/неизвестного размера → deny = churn ради with_capacity(0).
+  Красота = не плодить затычки. Документирую; dylint (UNSIZED_ALLOC) — airtight-опция
+  на потом, по явному слову/бенчу. Named-ctor + advisory = 80/20.
