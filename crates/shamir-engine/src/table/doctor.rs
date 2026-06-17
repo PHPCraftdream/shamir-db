@@ -19,10 +19,13 @@ use std::time::Instant;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::DbResult;
+use shamir_types::record_view::{RecordRef, RecordView};
+use shamir_types::types::value::InnerValue;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 
 use crate::index::index_definition::IndexDefinition;
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
+use crate::table::record_cow::RecordCow;
 
 use super::table_manager::TableManager;
 
@@ -96,24 +99,47 @@ impl TableManager {
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             for (_id, cow) in batch? {
-                let value = cow.into_inner()?;
                 records_in_data += 1;
-                for (i, def) in regular_defs.iter().enumerate() {
-                    if crate::index::index_keys::extract_index_leaves(&value, &def.paths).is_some()
-                    {
-                        expected_regular[i] += 1;
+                // Closure that tallies index-leaf presence for a single record
+                // via the `RecordRef` trait — works for both `RecordView` and
+                // `InnerValue` impls.
+                let mut tally = |rec: &(dyn RecordRef + '_)| {
+                    for (i, def) in regular_defs.iter().enumerate() {
+                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths)
+                            .is_some()
+                        {
+                            expected_regular[i] += 1;
+                        }
                     }
-                }
-                for (i, def) in unique_defs.iter().enumerate() {
-                    if crate::index::index_keys::extract_index_leaves(&value, &def.paths).is_some()
-                    {
-                        expected_unique[i] += 1;
+                    for (i, def) in unique_defs.iter().enumerate() {
+                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths)
+                            .is_some()
+                        {
+                            expected_unique[i] += 1;
+                        }
                     }
-                }
-                for (i, def) in sorted_defs.iter().enumerate() {
-                    if SortedIndexManager::has_indexable_value(&value, &def.field_path) {
-                        expected_sorted[i] += 1;
+                    for (i, def) in sorted_defs.iter().enumerate() {
+                        if SortedIndexManager::has_indexable_value(rec, &def.field_path) {
+                            expected_sorted[i] += 1;
+                        }
                     }
+                };
+                match &cow {
+                    RecordCow::Borrowed(bytes) => match RecordView::new(bytes) {
+                        Ok(view) => tally(&view),
+                        Err(_) => {
+                            // Non-map record (bare scalar from legacy tests) —
+                            // fall back to the full InnerValue decode, mirroring
+                            // the write-exec delete/update paths.
+                            let value = InnerValue::from_bytes(bytes.as_ref()).map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "doctor verify: failed to decode record: {e}"
+                                ))
+                            })?;
+                            tally(&value);
+                        }
+                    },
+                    RecordCow::Owned(value) => tally(value),
                 }
             }
         }
@@ -223,14 +249,33 @@ impl TableManager {
             let stream = self.list_stream(FULL_SCAN_BATCH);
             futures::pin_mut!(stream);
             while let Some(batch) = stream.next().await {
-                let pairs: Vec<_> = batch?
-                    .into_iter()
-                    .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
-                    .collect::<Result<_, _>>()?;
-                for (id, value) in &pairs {
-                    self.sorted_indexes()
-                        .on_record_created(id, value, 0)
-                        .await?;
+                for (id, cow) in batch? {
+                    match &cow {
+                        RecordCow::Borrowed(bytes) => match RecordView::new(bytes) {
+                            Ok(view) => {
+                                self.sorted_indexes()
+                                    .on_record_created(&id, &view, 0)
+                                    .await?;
+                            }
+                            Err(_) => {
+                                // Non-map record — fall back to full decode.
+                                let value =
+                                    InnerValue::from_bytes(bytes.as_ref()).map_err(|e| {
+                                        shamir_storage::error::DbError::Codec(format!(
+                                            "doctor repair: failed to decode record: {e}"
+                                        ))
+                                    })?;
+                                self.sorted_indexes()
+                                    .on_record_created(&id, &value, 0)
+                                    .await?;
+                            }
+                        },
+                        RecordCow::Owned(value) => {
+                            self.sorted_indexes()
+                                .on_record_created(&id, value, 0)
+                                .await?;
+                        }
+                    }
                 }
             }
         }

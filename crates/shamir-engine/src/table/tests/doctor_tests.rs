@@ -2,9 +2,14 @@
 
 #![allow(deprecated)]
 
+use std::str::FromStr;
 use std::sync::Arc;
 
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
+
 use crate::db_instance::db_instance::DbInstance;
+use crate::index::index_record_key::IndexRecordKey;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
@@ -81,7 +86,6 @@ async fn verify_detects_orphan_regular_index_entry() {
     // Build a posting key for a non-existent record_id, write it
     // straight into info_store.
     let info_store = info_store_of(&table);
-    use crate::index::index_record_key::IndexRecordKey;
     let key = IndexRecordKey::new(false, def.name_interned).to_bytes();
     let fake_record_id = shamir_types::types::record_id::RecordId::new();
     let mut posting_key = key.to_vec();
@@ -114,7 +118,6 @@ async fn repair_heals_orphan_index_entry() {
 
     // Plant a bogus posting.
     let info_store = info_store_of(&table);
-    use crate::index::index_record_key::IndexRecordKey;
     let key = IndexRecordKey::new(false, def.name_interned).to_bytes();
     let fake = shamir_types::types::record_id::RecordId::new();
     let mut posting_key = key.to_vec();
@@ -281,4 +284,194 @@ async fn insert_many_leaves_table_consistent_on_success() {
 // verify/repair tests can plant bogus index postings directly.
 fn info_store_of(table: &crate::table::TableManager) -> Arc<dyn Store> {
     Arc::clone(table.info_store())
+}
+
+/// Build a table with mixed indexed field types and seed records whose
+/// indexed leaves exercise every `InnerValue` variant the production data
+/// can hold: plain scalar (Int, Str), Dec, Big, Bin, and a nested Map.
+/// The doctor's lens-driven `verify` and `repair` MUST compute
+/// byte-identical expected index counts and posting bytes as the tree
+/// path that originally built the indexes during insert.
+///
+/// Strategy:
+///   1. Insert records whose indexed field (`tag`) carries varied types.
+///   2. `verify` immediately after — the expected counts are computed by
+///      the lens path (the change under test), the actual counts were
+///      built by the tree path during `insert`. Equal ⇒ lens-tree parity
+///      on leaf-presence detection.
+///   3. Corrupt the index by planting a bogus posting.
+///   4. `repair` (lens-driven) rebuilds from data.
+///   5. `verify` again — healthy ⇒ the lens-driven rebuild produced
+///      posting bytes accepted by the same verify code, confirming
+///      byte-identity of the posting keys/values.
+#[tokio::test]
+async fn doctor_lens_parity_mixed_indexed_types() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("mixed")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let table = db.get_table("default", "mixed").await.unwrap();
+
+    // Regular index on `tag`, unique index on `uid`, sorted on `score`.
+    table.create_index("by_tag", &["tag"]).await.unwrap();
+    table
+        .create_unique_index("by_uid", &["uid"])
+        .await
+        .unwrap();
+    table
+        .create_sorted_index("by_score", &["score"])
+        .await
+        .unwrap();
+
+    let interner = table.interner().get().await.unwrap();
+
+    // Record 0 — plain Int tag, Int score.
+    {
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u0".into()));
+        m.insert("tag".to_string(), UserValue::Int(42));
+        m.insert("score".to_string(), UserValue::Int(100));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // Record 1 — Str tag, F64 score.
+    {
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u1".into()));
+        m.insert("tag".to_string(), UserValue::Str("hello".into()));
+        m.insert("score".to_string(), UserValue::F64(3.5));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // Record 2 — Dec tag (non-scalar: materialize_at returns InnerValue::Dec,
+    // scalar_at returns None).
+    {
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u2".into()));
+        m.insert(
+            "tag".to_string(),
+            UserValue::Dec(Decimal::from_str("123.456").unwrap()),
+        );
+        m.insert("score".to_string(), UserValue::Int(200));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // Record 3 — Big tag.
+    {
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u3".into()));
+        m.insert(
+            "tag".to_string(),
+            UserValue::Big(BigInt::from_str("99999999999999999999").unwrap()),
+        );
+        m.insert("score".to_string(), UserValue::Int(300));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // Record 4 — Bin tag.
+    {
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u4".into()));
+        m.insert("tag".to_string(), UserValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        m.insert("score".to_string(), UserValue::Int(400));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // Record 5 — nested Map tag (container: extract_index_leaves materializes
+    // the whole subtree).
+    {
+        let mut inner_map = new_map();
+        inner_map.insert("nested_key".to_string(), UserValue::Str("nested_val".into()));
+        let mut m = new_map();
+        m.insert("uid".to_string(), UserValue::Str("u5".into()));
+        m.insert("tag".to_string(), UserValue::Map(inner_map));
+        m.insert("score".to_string(), UserValue::Int(500));
+        let r = transform::user_to_inner(&UserValue::Map(m), interner);
+        if let Some(ref nk) = r.new_keys {
+            table.interner().save_new_keys(nk).await.unwrap();
+        }
+        table.insert(&r.inner_value).await.unwrap();
+    }
+
+    // 1. Verify immediately — lens-computed expected counts must match the
+    //    tree-built actual counts from the insert path.
+    let report = table.verify().await.unwrap();
+    assert!(
+        report.is_healthy(),
+        "lens-driven verify must match tree-built indexes: {report:?}"
+    );
+    assert_eq!(report.records_in_data, 6);
+
+    // 2. Corrupt the regular index to force repair.
+    let info_store = info_store_of(&table);
+    let regular_defs: Vec<_> = table.index_manager_ref().iter_indexes().collect();
+    let def = regular_defs.first().expect("by_tag index");
+    {
+        let key = IndexRecordKey::new(false, def.name_interned).to_bytes();
+        let fake = shamir_types::types::record_id::RecordId::new();
+        let mut posting_key = key.to_vec();
+        posting_key.extend_from_slice(fake.as_bytes());
+        info_store
+            .set(bytes::Bytes::from(posting_key), bytes::Bytes::new())
+            .await
+            .unwrap();
+    }
+    assert!(!table.verify().await.unwrap().is_healthy());
+
+    // 3. Repair — lens-driven rebuild of all indexes.
+    let repair_report = table.repair().await.unwrap();
+    assert_eq!(repair_report.records_scanned, 6);
+
+    // 4. Verify after repair — healthy ⇒ lens path produced byte-identical
+    //    posting keys and values.
+    let after = table.verify().await.unwrap();
+    assert!(
+        after.is_healthy(),
+        "lens-driven repair must produce byte-identical postings: {after:?}"
+    );
+    assert_eq!(after.records_in_data, 6);
+    // Confirm per-index counts match expectations.
+    for ih in &after.regular_indexes {
+        assert_eq!(
+            ih.expected_entries, ih.actual_entries,
+            "regular index {}: expected {} != actual {}",
+            ih.name_interned, ih.expected_entries, ih.actual_entries
+        );
+    }
+    for ih in &after.unique_indexes {
+        assert_eq!(
+            ih.expected_entries, ih.actual_entries,
+            "unique index {}: expected {} != actual {}",
+            ih.name_interned, ih.expected_entries, ih.actual_entries
+        );
+    }
+    for ih in &after.sorted_indexes {
+        assert_eq!(
+            ih.expected_entries, ih.actual_entries,
+            "sorted index {}: expected {} != actual {}",
+            ih.name_interned, ih.expected_entries, ih.actual_entries
+        );
+    }
 }
