@@ -25,7 +25,7 @@ use argon2::{Algorithm, Argon2, Params as Argon2Params, Version};
 use hmac::{Mac, SimpleHmac};
 use sha2::{Digest, Sha256, Sha512};
 use sha3::Sha3_256;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use subtle::ConstantTimeEq;
 
 // Argon2id parameter defaults (OWASP interactive-login profile) and upper
@@ -42,7 +42,7 @@ const A2_MAX_LENGTH: u32 = 256;
 
 /// Read an optional `u32` argument at index `i`, falling back to `default`
 /// when absent. Out-of-`u32`-range integers are `"out_of_range"`.
-fn opt_u32(a: &[InnerValue], i: usize, default: u32) -> Result<u32, ScalarError> {
+fn opt_u32(a: &[QueryValue], i: usize, default: u32) -> Result<u32, ScalarError> {
     if i >= a.len() {
         return Ok(default);
     }
@@ -51,7 +51,7 @@ fn opt_u32(a: &[InnerValue], i: usize, default: u32) -> Result<u32, ScalarError>
 }
 
 /// `argon2id(password, salt, [memory_kb, time, parallelism, length]) -> Bin`.
-fn argon2id_fn(a: &[InnerValue]) -> Result<InnerValue, ScalarError> {
+fn argon2id_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
     let password = arg_bytes(a, 0)?;
     let salt = arg_bytes(a, 1)?;
     let memory_kb = opt_u32(a, 2, A2_DEFAULT_MEMORY_KB)?;

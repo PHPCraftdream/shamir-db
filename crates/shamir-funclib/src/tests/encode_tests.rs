@@ -1,6 +1,6 @@
 use crate::encode;
 use crate::registry::ScalarRegistry;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -8,12 +8,12 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn s(v: &str) -> InnerValue {
-    InnerValue::Str(v.into())
+fn s(v: &str) -> QueryValue {
+    QueryValue::Str(v.into())
 }
 
-fn b(v: &[u8]) -> InnerValue {
-    InnerValue::Bin(v.to_vec())
+fn b(v: &[u8]) -> QueryValue {
+    QueryValue::Bin(v.to_vec())
 }
 
 #[test]
@@ -103,13 +103,13 @@ fn json_escape_specials() {
 fn encoders_reject_non_text_non_bin() {
     let r = reg();
     assert_eq!(
-        r.call("base64_enc", &[InnerValue::Int(7)])
+        r.call("base64_enc", &[QueryValue::Int(7)])
             .unwrap_err()
             .code,
         "type_mismatch"
     );
     assert_eq!(
-        r.call("hex_enc", &[InnerValue::Int(7)]).unwrap_err().code,
+        r.call("hex_enc", &[QueryValue::Int(7)]).unwrap_err().code,
         "type_mismatch"
     );
 }

@@ -29,7 +29,7 @@ use crate::registry::{
     ScalarRegistry,
 };
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
 
 /// Register the `/arrays` functions.
@@ -129,10 +129,10 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                let mut out: Vec<InnerValue> = Vec::new();
+                let mut out: Vec<QueryValue> = Vec::new();
                 for e in arr {
                     match e {
-                        InnerValue::List(inner) => out.extend(inner.iter().cloned()),
+                        QueryValue::List(inner) => out.extend(inner.iter().cloned()),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     }
                 }
@@ -147,7 +147,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                let mut out: Vec<InnerValue> = Vec::with_capacity(arr.len());
+                let mut out: Vec<QueryValue> = Vec::with_capacity(arr.len());
                 for e in arr {
                     if !out.iter().any(|kept| kept == e) {
                         out.push(e.clone());
@@ -165,7 +165,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let arr = arg_list(a, 0)?;
                 // Numeric sort by decimal value; non-numeric element -> type_mismatch.
-                let mut keyed: Vec<(Decimal, InnerValue)> = Vec::with_capacity(arr.len());
+                let mut keyed: Vec<(Decimal, QueryValue)> = Vec::with_capacity(arr.len());
                 for i in 0..arr.len() {
                     keyed.push((arg_dec(arr, i)?, arr[i].clone()));
                 }
@@ -185,7 +185,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let mut parts: Vec<&str> = Vec::with_capacity(arr.len());
                 for e in arr {
                     match e {
-                        InnerValue::Str(s) => parts.push(s.as_str()),
+                        QueryValue::Str(s) => parts.push(s.as_str()),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     }
                 }
@@ -213,7 +213,7 @@ enum Reduce {
 /// `Min`/`Max` use [`compare`] (cross-type total order), returning the element
 /// as-is. `Sum`/`Avg` coerce each element via [`arg_dec`] and stay numeric.
 /// An empty array yields `"empty"`.
-fn reduce(args: &[InnerValue], kind: Reduce) -> crate::registry::ScalarResult {
+fn reduce(args: &[QueryValue], kind: Reduce) -> crate::registry::ScalarResult {
     let arr = arg_list(args, 0)?;
     if arr.is_empty() {
         return Err(ScalarError::new("empty"));

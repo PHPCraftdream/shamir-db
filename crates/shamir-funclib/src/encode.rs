@@ -17,7 +17,7 @@ use crate::registry::{arg_str, v_bytes, v_str, FnEntry, ScalarError, ScalarRegis
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 /// Register the `/encode` functions.
 pub fn register(reg: &mut ScalarRegistry) {
@@ -129,10 +129,10 @@ pub fn register(reg: &mut ScalarRegistry) {
 
 /// Extract encoder input as bytes: a `Bin` is used verbatim, a `Str` is taken as
 /// its UTF-8 bytes. Any other variant is a `"type_mismatch"`.
-fn in_bytes(args: &[InnerValue], i: usize) -> Result<&[u8], ScalarError> {
+fn in_bytes(args: &[QueryValue], i: usize) -> Result<&[u8], ScalarError> {
     match args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))? {
-        InnerValue::Bin(b) => Ok(b.as_slice()),
-        InnerValue::Str(s) => Ok(s.as_bytes()),
+        QueryValue::Bin(b) => Ok(b.as_slice()),
+        QueryValue::Str(s) => Ok(s.as_bytes()),
         _ => Err(ScalarError::new("type_mismatch")),
     }
 }

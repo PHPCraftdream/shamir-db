@@ -4,12 +4,9 @@
 //! `keys values entries has_key get_path merge pick omit`.
 //!
 //! Value-model notes (mirrors `math.rs` conventions):
-//! - An "object" is an [`InnerValue::Map`] keyed by [`InternerKey`] (interned
-//!   `u64` field ids). Keys are therefore addressed by their integer id: every
-//!   `key` / path element argument is read via [`arg_i64`] and must be a
-//!   non-negative `u64` ([`ScalarError`]`("out_of_range")` otherwise).
+//! - An "object" is a [`QueryValue::Map`] keyed by `String` field names.
 //! - `keys` / `values` return a `List`; `entries` returns a `List` of two-item
-//!   `[id, value]` `List`s, with each id as an `Int`.
+//!   `[name, value]` `List`s, with each name as a `Str`.
 //! - `has_key` returns a `Bool`; `get_path` walks nested maps and yields
 //!   `ScalarError("missing_key")` if any step is absent or a non-map is
 //!   traversed.
@@ -19,30 +16,28 @@
 //! - Every function here is pure + deterministic.
 
 use crate::registry::{
-    arg_i64, arg_list, v_bool, v_int, v_list, FnEntry, ScalarError, ScalarRegistry,
+    arg_list, arg_str, v_bool, v_list, v_str, FnEntry, ScalarError, ScalarRegistry,
 };
-use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::{new_map_wc, TMap};
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
-/// Extract a `&TMap` from the `i`-th argument or `ScalarError("type_mismatch")`.
-fn arg_map(args: &[InnerValue], i: usize) -> Result<&TMap<InternerKey, InnerValue>, ScalarError> {
+/// Extract a `&TMap<String, QueryValue>` from the `i`-th argument or
+/// `ScalarError("type_mismatch")`.
+fn arg_map(args: &[QueryValue], i: usize) -> Result<&TMap<String, QueryValue>, ScalarError> {
     match args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))? {
-        InnerValue::Map(m) => Ok(m),
+        QueryValue::Map(m) => Ok(m),
         _ => Err(ScalarError::new("type_mismatch")),
     }
 }
 
-/// Read the `i`-th argument as a non-negative field id ([`InternerKey`]).
-fn arg_key(args: &[InnerValue], i: usize) -> Result<InternerKey, ScalarError> {
-    let id = arg_i64(args, i)?;
-    let id = u64::try_from(id).map_err(|_| ScalarError::new("out_of_range"))?;
-    Ok(InternerKey::new(id))
+/// Read the `i`-th argument as a string key.
+fn arg_key(args: &[QueryValue], i: usize) -> Result<String, ScalarError> {
+    Ok(arg_str(args, i)?.to_owned())
 }
 
 /// Construct a `Map`.
-fn v_map(m: TMap<InternerKey, InnerValue>) -> InnerValue {
-    InnerValue::Map(m)
+fn v_map(m: TMap<String, QueryValue>) -> QueryValue {
+    QueryValue::Map(m)
 }
 
 /// Register the `/object` functions.
@@ -52,7 +47,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let m = arg_map(a, 0)?;
-                Ok(v_list(m.keys().map(|k| v_int(k.id() as i64)).collect()))
+                Ok(v_list(m.keys().map(|k| v_str(k.clone())).collect()))
             },
             1,
             Some(1),
@@ -76,7 +71,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let m = arg_map(a, 0)?;
                 Ok(v_list(
                     m.iter()
-                        .map(|(k, v)| v_list(vec![v_int(k.id() as i64), v.clone()]))
+                        .map(|(k, v)| v_list(vec![v_str(k.clone()), v.clone()]))
                         .collect(),
                 ))
             },
@@ -104,22 +99,20 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let path = arg_list(a, 1)?;
                 for step in path {
                     let m = match cur {
-                        InnerValue::Map(m) => m,
+                        QueryValue::Map(m) => m,
                         _ => return Err(ScalarError::new("missing_key")),
                     };
-                    let id = match step {
-                        InnerValue::Int(n) => {
-                            u64::try_from(*n).map_err(|_| ScalarError::new("out_of_range"))?
-                        }
+                    let key = match step {
+                        QueryValue::Str(s) => s.as_str(),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     };
                     cur = m
-                        .get(&InternerKey::new(id))
+                        .get(key)
                         .ok_or_else(|| ScalarError::new("missing_key"))?;
                 }
                 // The head must itself be a map (validated only if a step ran;
                 // validate explicitly so a 0-length path still type-checks).
-                if !matches!(a[0], InnerValue::Map(_)) {
+                if !matches!(a[0], QueryValue::Map(_)) {
                     return Err(ScalarError::new("type_mismatch"));
                 }
                 Ok(cur.clone())
@@ -155,15 +148,12 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let keys = arg_list(a, 1)?;
                 let mut out = new_map_wc(keys.len());
                 for step in keys {
-                    let id = match step {
-                        InnerValue::Int(n) => {
-                            u64::try_from(*n).map_err(|_| ScalarError::new("out_of_range"))?
-                        }
+                    let key = match step {
+                        QueryValue::Str(s) => s.as_str(),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     };
-                    let key = InternerKey::new(id);
-                    if let Some(v) = m.get(&key) {
-                        out.insert(key, v.clone());
+                    if let Some(v) = m.get(key) {
+                        out.insert(key.to_owned(), v.clone());
                     }
                 }
                 Ok(v_map(out))
@@ -178,15 +168,13 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let m = arg_map(a, 0)?;
                 let keys = arg_list(a, 1)?;
-                let mut drop = TMap::<InternerKey, ()>::default();
+                let mut drop = TMap::<String, ()>::default();
                 for step in keys {
-                    let id = match step {
-                        InnerValue::Int(n) => {
-                            u64::try_from(*n).map_err(|_| ScalarError::new("out_of_range"))?
-                        }
+                    let key = match step {
+                        QueryValue::Str(s) => s.clone(),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     };
-                    drop.insert(InternerKey::new(id), ());
+                    drop.insert(key, ());
                 }
                 let mut out = new_map_wc(m.len());
                 for (k, v) in m.iter() {

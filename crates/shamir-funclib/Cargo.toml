@@ -6,7 +6,7 @@ description = "Built-in scalar function library for ShamirDB (math, strings, arr
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Value model — every scalar fn operates on InnerValue.
+# Value model — every scalar fn operates on QueryValue.
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 

@@ -21,7 +21,7 @@
 use crate::registry::{v_bool, v_dec, v_int, v_str, FnEntry, ScalarError, ScalarRegistry};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::str::FromStr;
 
 /// Register the `/cast` functions.
@@ -90,25 +90,25 @@ pub fn register(reg: &mut ScalarRegistry) {
 }
 
 /// Fetch the `i`-th argument by reference or `ScalarError("missing_arg")`.
-fn arg(args: &[InnerValue], i: usize) -> Result<&InnerValue, ScalarError> {
+fn arg(args: &[QueryValue], i: usize) -> Result<&QueryValue, ScalarError> {
     args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))
 }
 
 /// Borrow a `&str` from a `Str` value, else `"type_mismatch"`.
-fn as_str(v: &InnerValue) -> Result<&str, ScalarError> {
+fn as_str(v: &QueryValue) -> Result<&str, ScalarError> {
     match v {
-        InnerValue::Str(s) => Ok(s.as_str()),
+        QueryValue::Str(s) => Ok(s.as_str()),
         _ => Err(ScalarError::new("type_mismatch")),
     }
 }
 
 /// Coerce any value to an `Int`. Strings are parsed; fractional/out-of-range
 /// numerics and unconvertible variants yield `"cast_failed"`.
-fn cast_to_int(v: &InnerValue) -> Result<InnerValue, ScalarError> {
+fn cast_to_int(v: &QueryValue) -> Result<QueryValue, ScalarError> {
     match v {
-        InnerValue::Int(n) => Ok(v_int(*n)),
-        InnerValue::Bool(b) => Ok(v_int(*b as i64)),
-        InnerValue::Dec(d) => {
+        QueryValue::Int(n) => Ok(v_int(*n)),
+        QueryValue::Bool(b) => Ok(v_int(*b as i64)),
+        QueryValue::Dec(d) => {
             if d.fract().is_zero() {
                 d.to_i64()
                     .map(v_int)
@@ -117,42 +117,42 @@ fn cast_to_int(v: &InnerValue) -> Result<InnerValue, ScalarError> {
                 Err(ScalarError::new("cast_failed"))
             }
         }
-        InnerValue::F64(f) => {
+        QueryValue::F64(f) => {
             if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
                 Ok(v_int(*f as i64))
             } else {
                 Err(ScalarError::new("cast_failed"))
             }
         }
-        InnerValue::Str(s) => parse_int_str(s),
+        QueryValue::Str(s) => parse_int_str(s),
         _ => Err(ScalarError::new("cast_failed")),
     }
 }
 
 /// Coerce any value to a `Dec`. Strings are parsed; non-finite `F64` and
 /// unconvertible variants yield `"cast_failed"`.
-fn cast_to_dec(v: &InnerValue) -> Result<InnerValue, ScalarError> {
+fn cast_to_dec(v: &QueryValue) -> Result<QueryValue, ScalarError> {
     match v {
-        InnerValue::Dec(d) => Ok(v_dec(*d)),
-        InnerValue::Int(n) => Ok(v_dec(Decimal::from(*n))),
-        InnerValue::Bool(b) => Ok(v_dec(Decimal::from(*b as i64))),
-        InnerValue::F64(f) => Decimal::from_f64_retain(*f)
+        QueryValue::Dec(d) => Ok(v_dec(*d)),
+        QueryValue::Int(n) => Ok(v_dec(Decimal::from(*n))),
+        QueryValue::Bool(b) => Ok(v_dec(Decimal::from(*b as i64))),
+        QueryValue::F64(f) => Decimal::from_f64_retain(*f)
             .map(v_dec)
             .ok_or_else(|| ScalarError::new("cast_failed")),
-        InnerValue::Str(s) => parse_dec_str(s),
+        QueryValue::Str(s) => parse_dec_str(s),
         _ => Err(ScalarError::new("cast_failed")),
     }
 }
 
 /// Coerce any value to a `Bool`. Numerics map nonzero→true; strings accept
 /// `true`/`false`/`1`/`0` (case-insensitive); anything else `"cast_failed"`.
-fn cast_to_bool(v: &InnerValue) -> Result<InnerValue, ScalarError> {
+fn cast_to_bool(v: &QueryValue) -> Result<QueryValue, ScalarError> {
     match v {
-        InnerValue::Bool(b) => Ok(v_bool(*b)),
-        InnerValue::Int(n) => Ok(v_bool(*n != 0)),
-        InnerValue::Dec(d) => Ok(v_bool(!d.is_zero())),
-        InnerValue::F64(f) => Ok(v_bool(*f != 0.0)),
-        InnerValue::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+        QueryValue::Bool(b) => Ok(v_bool(*b)),
+        QueryValue::Int(n) => Ok(v_bool(*n != 0)),
+        QueryValue::Dec(d) => Ok(v_bool(!d.is_zero())),
+        QueryValue::F64(f) => Ok(v_bool(*f != 0.0)),
+        QueryValue::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
             "true" | "1" => Ok(v_bool(true)),
             "false" | "0" => Ok(v_bool(false)),
             _ => Err(ScalarError::new("cast_failed")),
@@ -162,21 +162,21 @@ fn cast_to_bool(v: &InnerValue) -> Result<InnerValue, ScalarError> {
 }
 
 /// Render any value to its canonical string form.
-fn stringify(v: &InnerValue) -> String {
+fn stringify(v: &QueryValue) -> String {
     match v {
-        InnerValue::Null => "null".to_string(),
-        InnerValue::Bool(b) => b.to_string(),
-        InnerValue::Int(n) => n.to_string(),
-        InnerValue::F64(f) => f.to_string(),
-        InnerValue::Dec(d) => d.to_string(),
-        InnerValue::Big(b) => b.to_string(),
-        InnerValue::Str(s) => s.clone(),
+        QueryValue::Null => "null".to_string(),
+        QueryValue::Bool(b) => b.to_string(),
+        QueryValue::Int(n) => n.to_string(),
+        QueryValue::F64(f) => f.to_string(),
+        QueryValue::Dec(d) => d.to_string(),
+        QueryValue::Big(b) => b.to_string(),
+        QueryValue::Str(s) => s.clone(),
         other => format!("{other:?}"),
     }
 }
 
 /// Parse a decimal-integer string into an `Int`.
-fn parse_int_str(s: &str) -> Result<InnerValue, ScalarError> {
+fn parse_int_str(s: &str) -> Result<QueryValue, ScalarError> {
     s.trim()
         .parse::<i64>()
         .map(v_int)
@@ -184,7 +184,7 @@ fn parse_int_str(s: &str) -> Result<InnerValue, ScalarError> {
 }
 
 /// Parse a decimal string into a `Dec`.
-fn parse_dec_str(s: &str) -> Result<InnerValue, ScalarError> {
+fn parse_dec_str(s: &str) -> Result<QueryValue, ScalarError> {
     Decimal::from_str(s.trim())
         .map(v_dec)
         .map_err(|_| ScalarError::new("cast_failed"))

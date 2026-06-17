@@ -1,6 +1,6 @@
 use crate::registry::{v_bool, v_int, v_list, v_str, ScalarRegistry};
 use crate::strings;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -8,8 +8,8 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn s(x: &str) -> InnerValue {
-    InnerValue::Str(x.to_string())
+fn s(x: &str) -> QueryValue {
+    QueryValue::Str(x.to_string())
 }
 
 #[test]
@@ -19,11 +19,11 @@ fn lower_upper() {
     assert_eq!(r.call("upper", &[s("AbC")]).unwrap(), v_str("ABC".into()));
     // error: wrong type
     assert_eq!(
-        r.call("lower", &[InnerValue::Int(1)]).unwrap_err().code,
+        r.call("lower", &[QueryValue::Int(1)]).unwrap_err().code,
         "type_mismatch"
     );
     assert_eq!(
-        r.call("upper", &[InnerValue::Int(1)]).unwrap_err().code,
+        r.call("upper", &[QueryValue::Int(1)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -52,7 +52,7 @@ fn length_and_byte_length() {
     assert_eq!(r.call("byte_length", &[s("é")]).unwrap(), v_int(2));
     // error: wrong type
     assert_eq!(
-        r.call("length", &[InnerValue::Bool(true)])
+        r.call("length", &[QueryValue::Bool(true)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -65,7 +65,7 @@ fn substring_ok_and_err() {
     assert_eq!(
         r.call(
             "substring",
-            &[s("hello"), InnerValue::Int(1), InnerValue::Int(3)]
+            &[s("hello"), QueryValue::Int(1), QueryValue::Int(3)]
         )
         .unwrap(),
         v_str("ell".into())
@@ -74,7 +74,7 @@ fn substring_ok_and_err() {
     assert_eq!(
         r.call(
             "substring",
-            &[s("hi"), InnerValue::Int(9), InnerValue::Int(3)]
+            &[s("hi"), QueryValue::Int(9), QueryValue::Int(3)]
         )
         .unwrap(),
         v_str("".into())
@@ -83,7 +83,7 @@ fn substring_ok_and_err() {
     assert_eq!(
         r.call(
             "substring",
-            &[s("hi"), InnerValue::Int(-1), InnerValue::Int(1)]
+            &[s("hi"), QueryValue::Int(-1), QueryValue::Int(1)]
         )
         .unwrap_err()
         .code,
@@ -100,7 +100,7 @@ fn concat_nary() {
     );
     // error: non-string arg
     assert_eq!(
-        r.call("concat", &[s("a"), InnerValue::Int(2)])
+        r.call("concat", &[s("a"), QueryValue::Int(2)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -168,11 +168,11 @@ fn index_of_found_and_missing() {
 fn repeat_ok_and_neg() {
     let r = reg();
     assert_eq!(
-        r.call("repeat", &[s("ab"), InnerValue::Int(3)]).unwrap(),
+        r.call("repeat", &[s("ab"), QueryValue::Int(3)]).unwrap(),
         v_str("ababab".into())
     );
     assert_eq!(
-        r.call("repeat", &[s("ab"), InnerValue::Int(-1)])
+        r.call("repeat", &[s("ab"), QueryValue::Int(-1)])
             .unwrap_err()
             .code,
         "out_of_range"
@@ -191,31 +191,31 @@ fn reverse_ok() {
 fn pad_left_right_and_err() {
     let r = reg();
     assert_eq!(
-        r.call("pad_left", &[s("7"), InnerValue::Int(3), s("0")])
+        r.call("pad_left", &[s("7"), QueryValue::Int(3), s("0")])
             .unwrap(),
         v_str("007".into())
     );
     assert_eq!(
-        r.call("pad_right", &[s("7"), InnerValue::Int(3), s("0")])
+        r.call("pad_right", &[s("7"), QueryValue::Int(3), s("0")])
             .unwrap(),
         v_str("700".into())
     );
     // already wide enough -> unchanged
     assert_eq!(
-        r.call("pad_left", &[s("abcd"), InnerValue::Int(2), s("0")])
+        r.call("pad_left", &[s("abcd"), QueryValue::Int(2), s("0")])
             .unwrap(),
         v_str("abcd".into())
     );
     // multi-char pad -> bad_pad
     assert_eq!(
-        r.call("pad_left", &[s("7"), InnerValue::Int(3), s("ab")])
+        r.call("pad_left", &[s("7"), QueryValue::Int(3), s("ab")])
             .unwrap_err()
             .code,
         "bad_pad"
     );
     // negative length -> out_of_range
     assert_eq!(
-        r.call("pad_right", &[s("7"), InnerValue::Int(-1), s("0")])
+        r.call("pad_right", &[s("7"), QueryValue::Int(-1), s("0")])
             .unwrap_err()
             .code,
         "out_of_range"

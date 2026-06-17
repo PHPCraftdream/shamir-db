@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::InnerValue;
@@ -125,15 +126,19 @@ pub fn resolve_filter_value(
         }
         FilterValue::FnCall { call } => {
             // Resolve each argument (literal / FieldRef / nested FnCall) into an
-            // InnerValue, then dispatch by folder-qualified name through the
-            // scalar registry. Any failure (unresolvable arg, unknown function,
-            // arity / type error) collapses to `None` so the comparison treats
-            // the value as absent rather than panicking.
-            let mut args = Vec::with_capacity(call.args().len());
+            // InnerValue, convert to QueryValue for the funclib ABI, dispatch
+            // through the scalar registry, then convert the result back.
+            // Any failure (unresolvable arg, unknown function, arity / type
+            // error, conversion error) collapses to `None` so the comparison
+            // treats the value as absent rather than panicking.
+            let mut qv_args = Vec::with_capacity(call.args().len());
             for a in call.args() {
-                args.push(resolve_filter_value(a, record, ctx)?);
+                let iv = resolve_filter_value(a, record, ctx)?;
+                let qv = inner_value_to_query_value(&iv, ctx.interner).ok()?;
+                qv_args.push(qv);
             }
-            ctx.scalars.call(call.name(), &args).ok()
+            let qv_result = ctx.scalars.call(call.name(), &qv_args).ok()?;
+            query_value_to_inner(&qv_result, ctx.interner).ok()
         }
         FilterValue::Param { name } => {
             // Injected sub-batch parameter. Populated by the recursive

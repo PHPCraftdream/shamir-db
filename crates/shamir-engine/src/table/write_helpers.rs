@@ -15,7 +15,7 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::{inner_value_to_query_value, json_value_to_inner};
+use shamir_types::codecs::interned::{inner_value_to_query_value, json_value_to_inner, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::scalar_ref_cmp;
 use shamir_types::record_view::RecordRef;
@@ -146,13 +146,18 @@ pub(super) fn eval_write_value(
             json_value_to_inner(leaf, interner).map_err(|e| e.to_string())
         }
         FilterValue::FnCall { call } => {
-            let mut args = Vec::with_capacity(call.args().len());
+            let mut qv_args = Vec::with_capacity(call.args().len());
             for a in call.args() {
-                args.push(eval_write_value(a, literal, interner, scalars)?);
+                let iv = eval_write_value(a, literal, interner, scalars)?;
+                let qv = inner_value_to_query_value(&iv, interner)
+                    .map_err(|e| format!("{}: {}", call.name(), e))?;
+                qv_args.push(qv);
             }
-            scalars
-                .call(call.name(), &args)
-                .map_err(|e| format!("{}: {}", call.name(), e.code))
+            let qv_result = scalars
+                .call(call.name(), &qv_args)
+                .map_err(|e| format!("{}: {}", call.name(), e.code))?;
+            query_value_to_inner(&qv_result, interner)
+                .map_err(|e| format!("{}: {}", call.name(), e))
         }
         _ => Err("unsupported computed value variant".to_string()),
     }

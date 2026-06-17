@@ -33,7 +33,7 @@ use crate::registry::ScalarError;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shamir_collections::TFxMap;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -46,10 +46,10 @@ pub trait Aggregator: Send {
     /// Feed one value. `Null` values are silently skipped by most
     /// aggregators (SQL semantics); those that want Nulls override
     /// this default.
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError>;
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError>;
 
     /// Consume the accumulator and return the final aggregate value.
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError>;
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError>;
 }
 
 /// Factory that produces a fresh [`Aggregator`] instance.
@@ -127,14 +127,14 @@ pub fn register(reg: &mut AggRegistry) {
 
 /// Coerce a value to [`Decimal`] (same rules as `arg_dec` but takes a
 /// ref instead of args+index).
-fn to_dec(v: &InnerValue) -> Result<Decimal, ScalarError> {
+fn to_dec(v: &QueryValue) -> Result<Decimal, ScalarError> {
     match v {
-        InnerValue::Dec(d) => Ok(*d),
-        InnerValue::Int(n) => Ok(Decimal::from(*n)),
-        InnerValue::Bool(b) => Ok(Decimal::from(*b as i64)),
-        InnerValue::F64(f) => rust_decimal::Decimal::from_f64_retain(*f)
+        QueryValue::Dec(d) => Ok(*d),
+        QueryValue::Int(n) => Ok(Decimal::from(*n)),
+        QueryValue::Bool(b) => Ok(Decimal::from(*b as i64)),
+        QueryValue::F64(f) => rust_decimal::Decimal::from_f64_retain(*f)
             .ok_or_else(|| ScalarError::new("out_of_range")),
-        InnerValue::Big(b) => {
+        QueryValue::Big(b) => {
             // Try i64 path first, then f64 fallback.
             if let Some(n) = b.to_i64() {
                 Ok(Decimal::from(n))
@@ -149,8 +149,8 @@ fn to_dec(v: &InnerValue) -> Result<Decimal, ScalarError> {
     }
 }
 
-fn is_null(v: &InnerValue) -> bool {
-    matches!(v, InnerValue::Null)
+fn is_null(v: &QueryValue) -> bool {
+    matches!(v, QueryValue::Null)
 }
 
 // ---------------------------------------------------------------------------
@@ -168,15 +168,15 @@ impl CountAgg {
 }
 
 impl Aggregator for CountAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if !is_null(v) {
             self.n += 1;
         }
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
-        Ok(InnerValue::Int(self.n))
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        Ok(QueryValue::Int(self.n))
     }
 }
 
@@ -185,7 +185,7 @@ impl Aggregator for CountAgg {
 // ---------------------------------------------------------------------------
 
 struct CountDistinctAgg {
-    seen: Vec<InnerValue>,
+    seen: Vec<QueryValue>,
 }
 
 impl CountDistinctAgg {
@@ -195,7 +195,7 @@ impl CountDistinctAgg {
 }
 
 impl Aggregator for CountDistinctAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -209,8 +209,8 @@ impl Aggregator for CountDistinctAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
-        Ok(InnerValue::Int(self.seen.len() as i64))
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        Ok(QueryValue::Int(self.seen.len() as i64))
     }
 }
 
@@ -233,7 +233,7 @@ impl SumAgg {
 }
 
 impl Aggregator for SumAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -242,11 +242,11 @@ impl Aggregator for SumAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if !self.any {
-            return Ok(InnerValue::Int(0));
+            return Ok(QueryValue::Int(0));
         }
-        Ok(InnerValue::Dec(self.acc))
+        Ok(QueryValue::Dec(self.acc))
     }
 }
 
@@ -269,7 +269,7 @@ impl AvgAgg {
 }
 
 impl Aggregator for AvgAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -278,11 +278,11 @@ impl Aggregator for AvgAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.count == 0 {
             return Err(ScalarError::new("empty"));
         }
-        Ok(InnerValue::Dec(self.sum / Decimal::from(self.count)))
+        Ok(QueryValue::Dec(self.sum / Decimal::from(self.count)))
     }
 }
 
@@ -291,7 +291,7 @@ impl Aggregator for AvgAgg {
 // ---------------------------------------------------------------------------
 
 struct MinAgg {
-    val: Option<InnerValue>,
+    val: Option<QueryValue>,
 }
 
 impl MinAgg {
@@ -301,7 +301,7 @@ impl MinAgg {
 }
 
 impl Aggregator for MinAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -318,7 +318,7 @@ impl Aggregator for MinAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         self.val.ok_or_else(|| ScalarError::new("empty"))
     }
 }
@@ -328,7 +328,7 @@ impl Aggregator for MinAgg {
 // ---------------------------------------------------------------------------
 
 struct MaxAgg {
-    val: Option<InnerValue>,
+    val: Option<QueryValue>,
 }
 
 impl MaxAgg {
@@ -338,7 +338,7 @@ impl MaxAgg {
 }
 
 impl Aggregator for MaxAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -355,7 +355,7 @@ impl Aggregator for MaxAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         self.val.ok_or_else(|| ScalarError::new("empty"))
     }
 }
@@ -365,7 +365,7 @@ impl Aggregator for MaxAgg {
 // ---------------------------------------------------------------------------
 
 struct MedianAgg {
-    vals: Vec<InnerValue>,
+    vals: Vec<QueryValue>,
 }
 
 impl MedianAgg {
@@ -375,14 +375,14 @@ impl MedianAgg {
 }
 
 impl Aggregator for MedianAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if !is_null(v) {
             self.vals.push(v.clone());
         }
         Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
             return Err(ScalarError::new("empty"));
         }
@@ -410,7 +410,7 @@ impl StddevAgg {
 }
 
 impl Aggregator for StddevAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -418,7 +418,7 @@ impl Aggregator for StddevAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
             return Err(ScalarError::new("empty"));
         }
@@ -426,7 +426,7 @@ impl Aggregator for StddevAgg {
         let f = variance.to_f64().unwrap_or(f64::NAN);
         let sd = f.sqrt();
         Decimal::from_f64_retain(sd)
-            .map(InnerValue::Dec)
+            .map(QueryValue::Dec)
             .ok_or_else(|| ScalarError::new("out_of_range"))
     }
 }
@@ -446,7 +446,7 @@ impl VarianceAgg {
 }
 
 impl Aggregator for VarianceAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -454,12 +454,12 @@ impl Aggregator for VarianceAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
             return Err(ScalarError::new("empty"));
         }
         let v = compute_variance(&self.vals)?;
-        Ok(InnerValue::Dec(v))
+        Ok(QueryValue::Dec(v))
     }
 }
 
@@ -481,7 +481,7 @@ pub fn percentile(p: f64) -> AggFactory {
 
 struct PercentileAgg {
     p: f64,
-    vals: Vec<InnerValue>,
+    vals: Vec<QueryValue>,
 }
 
 impl PercentileAgg {
@@ -494,14 +494,14 @@ impl PercentileAgg {
 }
 
 impl Aggregator for PercentileAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if !is_null(v) {
             self.vals.push(v.clone());
         }
         Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
             return Err(ScalarError::new("empty"));
         }
@@ -523,7 +523,7 @@ impl Aggregator for PercentileAgg {
 // ---------------------------------------------------------------------------
 
 struct FirstAgg {
-    val: Option<InnerValue>,
+    val: Option<QueryValue>,
 }
 
 impl FirstAgg {
@@ -533,7 +533,7 @@ impl FirstAgg {
 }
 
 impl Aggregator for FirstAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -543,13 +543,13 @@ impl Aggregator for FirstAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         self.val.ok_or_else(|| ScalarError::new("empty"))
     }
 }
 
 struct LastAgg {
-    val: Option<InnerValue>,
+    val: Option<QueryValue>,
 }
 
 impl LastAgg {
@@ -559,7 +559,7 @@ impl LastAgg {
 }
 
 impl Aggregator for LastAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -567,7 +567,7 @@ impl Aggregator for LastAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         self.val.ok_or_else(|| ScalarError::new("empty"))
     }
 }
@@ -596,12 +596,12 @@ impl StringAggAgg {
 }
 
 impl Aggregator for StringAggAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
         match v {
-            InnerValue::Str(s) => {
+            QueryValue::Str(s) => {
                 self.parts.push(s.clone());
                 Ok(())
             }
@@ -609,8 +609,8 @@ impl Aggregator for StringAggAgg {
         }
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
-        Ok(InnerValue::Str(self.parts.join(&self.sep)))
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        Ok(QueryValue::Str(self.parts.join(&self.sep)))
     }
 }
 
@@ -619,7 +619,7 @@ impl Aggregator for StringAggAgg {
 // ---------------------------------------------------------------------------
 
 struct ArrayAggAgg {
-    items: Vec<InnerValue>,
+    items: Vec<QueryValue>,
 }
 
 impl ArrayAggAgg {
@@ -629,14 +629,14 @@ impl ArrayAggAgg {
 }
 
 impl Aggregator for ArrayAggAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         // array_agg includes Nulls (collects everything).
         self.items.push(v.clone());
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
-        Ok(InnerValue::List(self.items))
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        Ok(QueryValue::List(self.items))
     }
 }
 
@@ -659,12 +659,12 @@ impl BoolAndAgg {
 }
 
 impl Aggregator for BoolAndAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
         match v {
-            InnerValue::Bool(b) => {
+            QueryValue::Bool(b) => {
                 self.result = self.result && *b;
                 self.any = true;
                 Ok(())
@@ -673,10 +673,10 @@ impl Aggregator for BoolAndAgg {
         }
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         // Identity for AND is true; return true even on empty input.
         let _ = self.any;
-        Ok(InnerValue::Bool(self.result))
+        Ok(QueryValue::Bool(self.result))
     }
 }
 
@@ -695,12 +695,12 @@ impl BoolOrAgg {
 }
 
 impl Aggregator for BoolOrAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
         match v {
-            InnerValue::Bool(b) => {
+            QueryValue::Bool(b) => {
                 self.result = self.result || *b;
                 self.any = true;
                 Ok(())
@@ -709,10 +709,10 @@ impl Aggregator for BoolOrAgg {
         }
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         // Identity for OR is false; return false even on empty input.
         let _ = self.any;
-        Ok(InnerValue::Bool(self.result))
+        Ok(QueryValue::Bool(self.result))
     }
 }
 
@@ -721,7 +721,7 @@ impl Aggregator for BoolOrAgg {
 // ---------------------------------------------------------------------------
 
 struct ModeAgg {
-    vals: Vec<InnerValue>,
+    vals: Vec<QueryValue>,
 }
 
 impl ModeAgg {
@@ -731,14 +731,14 @@ impl ModeAgg {
 }
 
 impl Aggregator for ModeAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if !is_null(v) {
             self.vals.push(v.clone());
         }
         Ok(())
     }
 
-    fn finalize(mut self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
             return Err(ScalarError::new("empty"));
         }
@@ -785,7 +785,7 @@ impl RangeAgg {
 }
 
 impl Aggregator for RangeAgg {
-    fn accumulate(&mut self, v: &InnerValue) -> Result<(), ScalarError> {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
         if is_null(v) {
             return Ok(());
         }
@@ -801,10 +801,10 @@ impl Aggregator for RangeAgg {
         Ok(())
     }
 
-    fn finalize(self: Box<Self>) -> Result<InnerValue, ScalarError> {
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         match (self.min, self.max) {
-            (Some(lo), Some(hi)) => Ok(InnerValue::Dec(hi - lo)),
-            _ => Ok(InnerValue::Int(0)),
+            (Some(lo), Some(hi)) => Ok(QueryValue::Dec(hi - lo)),
+            _ => Ok(QueryValue::Int(0)),
         }
     }
 }

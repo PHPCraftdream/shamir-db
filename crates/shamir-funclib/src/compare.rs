@@ -1,4 +1,4 @@
-//! Canonical cross-type total order for [`InnerValue`].
+//! Canonical cross-type total order for [`QueryValue`].
 //!
 //! [`compare`] defines a **total** order (reflexive, transitive,
 //! antisymmetric, and *total* -- every pair is comparable) so that
@@ -39,14 +39,14 @@
 use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
 
-/// Canonical total order over [`InnerValue`].
+/// Canonical total order over [`QueryValue`].
 ///
 /// Never panics, never returns an "undefined" result. See module docs
 /// for the full rank table and within-type semantics.
-pub fn compare(a: &InnerValue, b: &InnerValue) -> Ordering {
+pub fn compare(a: &QueryValue, b: &QueryValue) -> Ordering {
     let ra = type_rank(a);
     let rb = type_rank(b);
     if ra != rb {
@@ -54,31 +54,31 @@ pub fn compare(a: &InnerValue, b: &InnerValue) -> Ordering {
     }
     // Same rank -- dispatch to within-type comparison.
     match (a, b) {
-        (InnerValue::Null, InnerValue::Null) => Ordering::Equal,
-        (InnerValue::Bool(x), InnerValue::Bool(y)) => x.cmp(y),
+        (QueryValue::Null, QueryValue::Null) => Ordering::Equal,
+        (QueryValue::Bool(x), QueryValue::Bool(y)) => x.cmp(y),
         // Numeric rank (Int | F64 | Dec | Big) -- compare by value.
         (na, nb) if ra == 2 => compare_numeric(na, nb),
-        (InnerValue::Str(x), InnerValue::Str(y)) => x.cmp(y),
-        (InnerValue::Bin(x), InnerValue::Bin(y)) => x.cmp(y),
-        (InnerValue::List(x), InnerValue::List(y)) => compare_lists(x, y),
-        (InnerValue::Set(x), InnerValue::Set(y)) => x.len().cmp(&y.len()),
-        (InnerValue::Map(x), InnerValue::Map(y)) => x.len().cmp(&y.len()),
+        (QueryValue::Str(x), QueryValue::Str(y)) => x.cmp(y),
+        (QueryValue::Bin(x), QueryValue::Bin(y)) => x.cmp(y),
+        (QueryValue::List(x), QueryValue::List(y)) => compare_lists(x, y),
+        (QueryValue::Set(x), QueryValue::Set(y)) => x.len().cmp(&y.len()),
+        (QueryValue::Map(x), QueryValue::Map(y)) => x.len().cmp(&y.len()),
         // Unreachable: same rank means same variant family.
         _ => Ordering::Equal,
     }
 }
 
 /// Assign the type rank used for cross-type ordering.
-fn type_rank(v: &InnerValue) -> u8 {
+fn type_rank(v: &QueryValue) -> u8 {
     match v {
-        InnerValue::Null => 0,
-        InnerValue::Bool(_) => 1,
-        InnerValue::Int(_) | InnerValue::F64(_) | InnerValue::Dec(_) | InnerValue::Big(_) => 2,
-        InnerValue::Str(_) => 3,
-        InnerValue::Bin(_) => 4,
-        InnerValue::List(_) => 5,
-        InnerValue::Set(_) => 6,
-        InnerValue::Map(_) => 7,
+        QueryValue::Null => 0,
+        QueryValue::Bool(_) => 1,
+        QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_) => 2,
+        QueryValue::Str(_) => 3,
+        QueryValue::Bin(_) => 4,
+        QueryValue::List(_) => 5,
+        QueryValue::Set(_) => 6,
+        QueryValue::Map(_) => 7,
     }
 }
 
@@ -86,7 +86,7 @@ fn type_rank(v: &InnerValue) -> u8 {
 // Numeric cross-subtype comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two numeric `InnerValue`s by *value* across subtypes.
+/// Compare two numeric `QueryValue`s by *value* across subtypes.
 ///
 /// Strategy:
 /// - Int vs Int: direct i64 comparison.
@@ -95,20 +95,20 @@ fn type_rank(v: &InnerValue) -> u8 {
 /// - Anything involving F64: convert both sides to f64.
 /// - Anything involving Big: try Decimal first (if Big fits); else f64.
 /// - NaN sorts last; NaN == NaN for totality.
-fn compare_numeric(a: &InnerValue, b: &InnerValue) -> Ordering {
+fn compare_numeric(a: &QueryValue, b: &QueryValue) -> Ordering {
     // Fast paths for same-subtype.
     match (a, b) {
-        (InnerValue::Int(x), InnerValue::Int(y)) => return x.cmp(y),
-        (InnerValue::Dec(x), InnerValue::Dec(y)) => return x.cmp(y),
-        (InnerValue::F64(x), InnerValue::F64(y)) => return cmp_f64(*x, *y),
-        (InnerValue::Big(x), InnerValue::Big(y)) => return x.cmp(y),
+        (QueryValue::Int(x), QueryValue::Int(y)) => return x.cmp(y),
+        (QueryValue::Dec(x), QueryValue::Dec(y)) => return x.cmp(y),
+        (QueryValue::F64(x), QueryValue::F64(y)) => return cmp_f64(*x, *y),
+        (QueryValue::Big(x), QueryValue::Big(y)) => return x.cmp(y),
         _ => {}
     }
 
     // Cross-subtype: exact (Decimal) path for Int/Dec pairs.
     match (a, b) {
-        (InnerValue::Int(x), InnerValue::Dec(d)) => return Decimal::from(*x).cmp(d),
-        (InnerValue::Dec(d), InnerValue::Int(y)) => return d.cmp(&Decimal::from(*y)),
+        (QueryValue::Int(x), QueryValue::Dec(d)) => return Decimal::from(*x).cmp(d),
+        (QueryValue::Dec(d), QueryValue::Int(y)) => return d.cmp(&Decimal::from(*y)),
         _ => {}
     }
 
@@ -129,12 +129,12 @@ fn cmp_f64(a: f64, b: f64) -> Ordering {
 }
 
 /// Best-effort conversion to f64 for cross-subtype numeric comparison.
-fn to_f64(v: &InnerValue) -> f64 {
+fn to_f64(v: &QueryValue) -> f64 {
     match v {
-        InnerValue::Int(n) => *n as f64,
-        InnerValue::F64(f) => *f,
-        InnerValue::Dec(d) => d.to_f64().unwrap_or(f64::NAN),
-        InnerValue::Big(b) => big_to_f64(b),
+        QueryValue::Int(n) => *n as f64,
+        QueryValue::F64(f) => *f,
+        QueryValue::Dec(d) => d.to_f64().unwrap_or(f64::NAN),
+        QueryValue::Big(b) => big_to_f64(b),
         _ => f64::NAN,
     }
 }
@@ -152,7 +152,7 @@ fn big_to_f64(b: &BigInt) -> f64 {
 }
 
 /// Element-wise list comparison with recursive [`compare`].
-fn compare_lists(a: &[InnerValue], b: &[InnerValue]) -> Ordering {
+fn compare_lists(a: &[QueryValue], b: &[QueryValue]) -> Ordering {
     for (x, y) in a.iter().zip(b.iter()) {
         let c = compare(x, y);
         if c != Ordering::Equal {

@@ -2,7 +2,7 @@
 //!
 //! A single [`registry::ScalarRegistry`] maps folder-qualified function names
 //! (`"math/abs"`, `"strings/lower"`, `"arrays/min"`) to pure
-//! `fn(&[InnerValue]) -> ScalarResult`. [`register_builtins`] wires each
+//! `fn(&[QueryValue]) -> ScalarResult`. [`register_builtins`] wires each
 //! category module via [`ScalarRegistry::in_folder`](registry::ScalarRegistry::in_folder)
 //! so that categories sharing a plain name (`json/keys` vs `object/keys`,
 //! `math/min` vs `arrays/min`) no longer collide.
@@ -12,16 +12,13 @@
 //! [`math`] is the fully-implemented reference; the remaining categories are
 //! stubs to be populated by their owning agents.
 //!
-//! # Accepted limit — #61 InnerValue-elimination campaign
+//! # QueryValue ABI — #61 InnerValue-elimination campaign
 //!
-//! funclib's scalar/aggregate ABI operates on `InnerValue` as a TYPED
-//! VALUE-CURRENCY, not as a JSON or tree representation (this crate has zero
-//! `serde_json` dependency). It runs on hot paths (`$fn` filter eval, GROUP
-//! BY aggregation) where the values are key-less scalar leaves, so the
-//! id-keyed discriminant difference is irrelevant. Generalizing the entire
-//! registry + function families over `Value<Key>`/`QueryValue` is pure
-//! type-churn with no runtime or correctness benefit and a wide API blast
-//! radius. Accepted limit for the #61 InnerValue-elimination campaign.
+//! funclib's scalar/aggregate ABI operates on `QueryValue` (string-keyed
+//! `Value<String>`). For scalar leaves (Int/Str/Bool/Dec/F64/Bin) the
+//! key type is irrelevant; for the handful of Map/List/Set-producing
+//! functions, string keys are MORE natural (no interner needed). Callers
+//! at the engine/wasm-host boundary convert to/from `InnerValue` as needed.
 
 pub mod registry;
 

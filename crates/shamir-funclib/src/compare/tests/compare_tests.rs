@@ -3,36 +3,36 @@
 use crate::compare::compare;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn int(n: i64) -> InnerValue {
-    InnerValue::Int(n)
+fn int(n: i64) -> QueryValue {
+    QueryValue::Int(n)
 }
-fn f64v(f: f64) -> InnerValue {
-    InnerValue::F64(f)
+fn f64v(f: f64) -> QueryValue {
+    QueryValue::F64(f)
 }
-fn dec(s: &str) -> InnerValue {
-    InnerValue::Dec(Decimal::from_str_exact(s).unwrap())
+fn dec(s: &str) -> QueryValue {
+    QueryValue::Dec(Decimal::from_str_exact(s).unwrap())
 }
-fn big(n: i64) -> InnerValue {
-    InnerValue::Big(BigInt::from(n))
+fn big(n: i64) -> QueryValue {
+    QueryValue::Big(BigInt::from(n))
 }
-fn str_v(s: &str) -> InnerValue {
-    InnerValue::Str(s.to_owned())
+fn str_v(s: &str) -> QueryValue {
+    QueryValue::Str(s.to_owned())
 }
-fn bool_v(b: bool) -> InnerValue {
-    InnerValue::Bool(b)
+fn bool_v(b: bool) -> QueryValue {
+    QueryValue::Bool(b)
 }
-fn bin(b: &[u8]) -> InnerValue {
-    InnerValue::Bin(b.to_vec())
+fn bin(b: &[u8]) -> QueryValue {
+    QueryValue::Bin(b.to_vec())
 }
-fn list(items: Vec<InnerValue>) -> InnerValue {
-    InnerValue::List(items)
+fn list(items: Vec<QueryValue>) -> QueryValue {
+    QueryValue::List(items)
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ fn numeric_cross_subtype_ordering() {
 #[test]
 fn cross_type_rank_ordering() {
     // Null < Bool
-    assert_eq!(compare(&InnerValue::Null, &bool_v(false)), Ordering::Less);
+    assert_eq!(compare(&QueryValue::Null, &bool_v(false)), Ordering::Less);
     // Bool < Number
     assert_eq!(compare(&bool_v(true), &int(0)), Ordering::Less);
     // Number < Str
@@ -145,8 +145,8 @@ fn nan_equals_nan() {
 
 #[test]
 fn totality_reversal() {
-    let values: Vec<InnerValue> = vec![
-        InnerValue::Null,
+    let values: Vec<QueryValue> = vec![
+        QueryValue::Null,
         bool_v(false),
         bool_v(true),
         int(-1),

@@ -4,7 +4,7 @@
 use crate::arrays;
 use crate::registry::{v_bool, v_dec, v_int, v_list, v_str, ScalarRegistry};
 use rust_decimal::Decimal;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
@@ -12,20 +12,20 @@ fn reg() -> ScalarRegistry {
     r
 }
 
-fn dec(s: &str) -> InnerValue {
-    InnerValue::Dec(Decimal::from_str_exact(s).unwrap())
+fn dec(s: &str) -> QueryValue {
+    QueryValue::Dec(Decimal::from_str_exact(s).unwrap())
 }
 
-fn list(items: Vec<InnerValue>) -> InnerValue {
+fn list(items: Vec<QueryValue>) -> QueryValue {
     v_list(items)
 }
 
-fn ints(xs: &[i64]) -> InnerValue {
-    v_list(xs.iter().map(|&n| InnerValue::Int(n)).collect())
+fn ints(xs: &[i64]) -> QueryValue {
+    v_list(xs.iter().map(|&n| QueryValue::Int(n)).collect())
 }
 
-fn strs(xs: &[&str]) -> InnerValue {
-    v_list(xs.iter().map(|&s| InnerValue::Str(s.into())).collect())
+fn strs(xs: &[&str]) -> QueryValue {
+    v_list(xs.iter().map(|&s| QueryValue::Str(s.into())).collect())
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn length_ok_and_type_error() {
     assert_eq!(r.call("length", &[list(vec![])]).unwrap(), v_int(0));
     // error: not a list
     assert_eq!(
-        r.call("length", &[InnerValue::Int(7)]).unwrap_err().code,
+        r.call("length", &[QueryValue::Int(7)]).unwrap_err().code,
         "type_mismatch"
     );
 }
@@ -44,20 +44,20 @@ fn length_ok_and_type_error() {
 fn get_ok_and_out_of_range() {
     let r = reg();
     assert_eq!(
-        r.call("get", &[ints(&[10, 20, 30]), InnerValue::Int(1)])
+        r.call("get", &[ints(&[10, 20, 30]), QueryValue::Int(1)])
             .unwrap(),
-        InnerValue::Int(20)
+        QueryValue::Int(20)
     );
     // error: index past end
     assert_eq!(
-        r.call("get", &[ints(&[10]), InnerValue::Int(5)])
+        r.call("get", &[ints(&[10]), QueryValue::Int(5)])
             .unwrap_err()
             .code,
         "out_of_range"
     );
     // error: negative index
     assert_eq!(
-        r.call("get", &[ints(&[10]), InnerValue::Int(-1)])
+        r.call("get", &[ints(&[10]), QueryValue::Int(-1)])
             .unwrap_err()
             .code,
         "out_of_range"
@@ -72,8 +72,8 @@ fn slice_ok_and_clamped_and_neg() {
             "slice",
             &[
                 ints(&[1, 2, 3, 4, 5]),
-                InnerValue::Int(1),
-                InnerValue::Int(2)
+                QueryValue::Int(1),
+                QueryValue::Int(2)
             ]
         )
         .unwrap(),
@@ -83,7 +83,7 @@ fn slice_ok_and_clamped_and_neg() {
     assert_eq!(
         r.call(
             "slice",
-            &[ints(&[1, 2, 3]), InnerValue::Int(2), InnerValue::Int(99)]
+            &[ints(&[1, 2, 3]), QueryValue::Int(2), QueryValue::Int(99)]
         )
         .unwrap(),
         ints(&[3])
@@ -92,7 +92,7 @@ fn slice_ok_and_clamped_and_neg() {
     assert_eq!(
         r.call(
             "slice",
-            &[ints(&[1, 2, 3]), InnerValue::Int(10), InnerValue::Int(2)]
+            &[ints(&[1, 2, 3]), QueryValue::Int(10), QueryValue::Int(2)]
         )
         .unwrap(),
         list(vec![])
@@ -101,7 +101,7 @@ fn slice_ok_and_clamped_and_neg() {
     assert_eq!(
         r.call(
             "slice",
-            &[ints(&[1, 2, 3]), InnerValue::Int(0), InnerValue::Int(-1)]
+            &[ints(&[1, 2, 3]), QueryValue::Int(0), QueryValue::Int(-1)]
         )
         .unwrap_err()
         .code,
@@ -113,12 +113,12 @@ fn slice_ok_and_clamped_and_neg() {
 fn contains_ok_and_missing() {
     let r = reg();
     assert_eq!(
-        r.call("contains", &[ints(&[1, 2, 3]), InnerValue::Int(2)])
+        r.call("contains", &[ints(&[1, 2, 3]), QueryValue::Int(2)])
             .unwrap(),
         v_bool(true)
     );
     assert_eq!(
-        r.call("contains", &[ints(&[1, 2, 3]), InnerValue::Int(9)])
+        r.call("contains", &[ints(&[1, 2, 3]), QueryValue::Int(9)])
             .unwrap(),
         v_bool(false)
     );
@@ -132,20 +132,20 @@ fn index_of_found_and_absent() {
     assert_eq!(
         r.call(
             "index_of",
-            &[strs(&["a", "b", "c"]), InnerValue::Str("b".into())]
+            &[strs(&["a", "b", "c"]), QueryValue::Str("b".into())]
         )
         .unwrap(),
         v_int(1)
     );
     // absent -> -1
     assert_eq!(
-        r.call("index_of", &[strs(&["a"]), InnerValue::Str("z".into())])
+        r.call("index_of", &[strs(&["a"]), QueryValue::Str("z".into())])
             .unwrap(),
         v_int(-1)
     );
     // error: first arg not a list
     assert_eq!(
-        r.call("index_of", &[InnerValue::Int(1), InnerValue::Int(1)])
+        r.call("index_of", &[QueryValue::Int(1), QueryValue::Int(1)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -157,11 +157,11 @@ fn first_last_ok_and_empty() {
     let r = reg();
     assert_eq!(
         r.call("first", &[ints(&[7, 8, 9])]).unwrap(),
-        InnerValue::Int(7)
+        QueryValue::Int(7)
     );
     assert_eq!(
         r.call("last", &[ints(&[7, 8, 9])]).unwrap(),
-        InnerValue::Int(9)
+        QueryValue::Int(9)
     );
     // error: empty array
     assert_eq!(r.call("first", &[list(vec![])]).unwrap_err().code, "empty");
@@ -174,7 +174,7 @@ fn flatten_ok_and_non_list_element() {
     let nested = list(vec![ints(&[1, 2]), ints(&[3]), list(vec![])]);
     assert_eq!(r.call("flatten", &[nested]).unwrap(), ints(&[1, 2, 3]));
     // error: element is not a list
-    let bad = list(vec![ints(&[1]), InnerValue::Int(2)]);
+    let bad = list(vec![ints(&[1]), QueryValue::Int(2)]);
     assert_eq!(r.call("flatten", &[bad]).unwrap_err().code, "type_mismatch");
 }
 
@@ -189,7 +189,7 @@ fn distinct_preserves_first_order() {
     assert_eq!(r.call("distinct", &[list(vec![])]).unwrap(), list(vec![]));
     // error: not a list
     assert_eq!(
-        r.call("distinct", &[InnerValue::Bool(true)])
+        r.call("distinct", &[QueryValue::Bool(true)])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -216,20 +216,20 @@ fn join_ok_and_non_string_element() {
     assert_eq!(
         r.call(
             "join",
-            &[strs(&["a", "b", "c"]), InnerValue::Str("-".into())]
+            &[strs(&["a", "b", "c"]), QueryValue::Str("-".into())]
         )
         .unwrap(),
         v_str("a-b-c".into())
     );
     // edge: empty array -> empty string
     assert_eq!(
-        r.call("join", &[list(vec![]), InnerValue::Str(",".into())])
+        r.call("join", &[list(vec![]), QueryValue::Str(",".into())])
             .unwrap(),
         v_str(String::new())
     );
     // error: non-string element
     assert_eq!(
-        r.call("join", &[ints(&[1, 2]), InnerValue::Str(",".into())])
+        r.call("join", &[ints(&[1, 2]), QueryValue::Str(",".into())])
             .unwrap_err()
             .code,
         "type_mismatch"
@@ -243,11 +243,11 @@ fn sum_min_max_avg_and_empty() {
     // min/max now return elements as-is (Int, not coerced Dec).
     assert_eq!(
         r.call("min", &[ints(&[5, 2, 8, -1])]).unwrap(),
-        InnerValue::Int(-1)
+        QueryValue::Int(-1)
     );
     assert_eq!(
         r.call("max", &[ints(&[5, 2, 8, -1])]).unwrap(),
-        InnerValue::Int(8)
+        QueryValue::Int(8)
     );
     assert_eq!(
         r.call("avg", &[ints(&[2, 4, 6])]).unwrap(),
@@ -265,21 +265,21 @@ fn min_max_cross_type_elements() {
     let r = reg();
     // Mixed types in a list: Bool true (rank 1) < Int 5 (rank 2) < Str "a" (rank 3).
     let mixed = list(vec![
-        InnerValue::Bool(true),
-        InnerValue::Int(5),
-        InnerValue::Str("a".into()),
+        QueryValue::Bool(true),
+        QueryValue::Int(5),
+        QueryValue::Str("a".into()),
     ]);
     assert_eq!(
         r.call("min", std::slice::from_ref(&mixed)).unwrap(),
-        InnerValue::Bool(true)
+        QueryValue::Bool(true)
     );
     assert_eq!(
         r.call("max", std::slice::from_ref(&mixed)).unwrap(),
-        InnerValue::Str("a".into())
+        QueryValue::Str("a".into())
     );
     // max no longer errors on strings — it uses cross-type compare.
     assert_eq!(
         r.call("max", &[strs(&["x"])]).unwrap(),
-        InnerValue::Str("x".into())
+        QueryValue::Str("x".into())
     );
 }

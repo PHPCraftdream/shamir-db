@@ -23,7 +23,7 @@ use crate::registry::{
     ScalarResult,
 };
 use rust_decimal::RoundingStrategy;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
 
 /// Register the `/math` functions.
@@ -245,7 +245,7 @@ enum Reduce {
 
 /// N-ary min/max over all arguments using cross-type [`compare`]. Returns the
 /// winning argument as-is (no numeric coercion), so mixed types work.
-fn reduce(args: &[InnerValue], kind: Reduce) -> ScalarResult {
+fn reduce(args: &[QueryValue], kind: Reduce) -> ScalarResult {
     let mut acc = args
         .first()
         .ok_or_else(|| ScalarError::new("missing_arg"))?

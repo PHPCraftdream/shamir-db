@@ -6,7 +6,7 @@ use super::error::{FnResult, FunctionError};
 use super::params::Params;
 use super::scalar::builtin_scalars;
 use async_trait::async_trait;
-use shamir_types::types::value::{InnerValue, QueryValue};
+use shamir_types::types::value::QueryValue;
 
 /// `argon2id(password, salt, [memory_kb, time, parallelism, length]) -> Bin`
 ///
@@ -49,12 +49,12 @@ impl ShamirFunction for Argon2idFunction {
         // Positional argument list for the funclib scalar:
         // (password, salt, memory_kb, time, parallelism, length).
         let args = vec![
-            InnerValue::Bin(password),
-            InnerValue::Bin(salt),
-            InnerValue::Int(memory_kb as i64),
-            InnerValue::Int(time as i64),
-            InnerValue::Int(parallelism as i64),
-            InnerValue::Int(length as i64),
+            QueryValue::Bin(password),
+            QueryValue::Bin(salt),
+            QueryValue::Int(memory_kb as i64),
+            QueryValue::Int(time as i64),
+            QueryValue::Int(parallelism as i64),
+            QueryValue::Int(length as i64),
         ];
 
         // CPU/memory-bound — never run it on an async worker thread. The
@@ -73,7 +73,7 @@ impl ShamirFunction for Argon2idFunction {
                     other => FunctionError::Compute(other.to_string()),
                 })?;
             match out {
-                InnerValue::Bin(b) => Ok(b),
+                QueryValue::Bin(b) => Ok(b),
                 other => Err(FunctionError::Compute(format!(
                     "argon2id returned non-Bin value: {other:?}"
                 ))),
