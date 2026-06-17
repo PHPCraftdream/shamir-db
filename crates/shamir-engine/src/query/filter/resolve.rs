@@ -204,17 +204,19 @@ pub fn resolve_filter_query(
 
 /// Resolve a `FilterValue` into an `InnerValue` for comparison.
 ///
-/// **Legacy adapter (C6 #80).** Out-of-scope callers
-/// (`query/read/aggregate.rs`, `query/read/select_projection.rs`) still
-/// bind to `InnerValue` and are not part of the C6 migration scope. This
-/// entry delegates to [`resolve_filter_query`] (the name-keyed hot path)
-/// and performs a single trailing `query_value_to_inner` conversion at the
-/// legacy boundary — a documented cold adapter, NOT a hot-path round-trip.
-/// The internal filter eval tree (`FilterNode::matches`) uses
-/// `resolve_filter_query` directly and never crosses this seam.
+/// **Legacy adapter (C6 #80).** After E6, the only remaining caller is the
+/// cold JSON projection twin (`SelectProjection::project` in
+/// `query/read/select_projection.rs`), which feeds `inner_to_json_value`.
+/// The hot QueryValue paths (aggregate scalar-fn, `project_value`) were
+/// migrated to [`resolve_filter_query`] directly (E6). This entry delegates
+/// to [`resolve_filter_query`] (the name-keyed hot path) and performs a
+/// single trailing `query_value_to_inner` conversion at the legacy boundary
+/// — a documented cold adapter, NOT a hot-path round-trip. The internal
+/// filter eval tree (`FilterNode::matches`) uses `resolve_filter_query`
+/// directly and never crosses this seam.
 ///
-/// §5b floor: eliminable only by migrating those two callers off
-/// InnerValue (tracked as a follow-up, S10/E6) — not in resolve.rs scope.
+/// §5b floor: survives only for the JSON twin; dies with the JSON axis, not
+/// the InnerValue axis — not reducible within resolve.rs scope.
 pub fn resolve_filter_value(
     fv: &FilterValue,
     record: &(impl RecordRef + ?Sized),

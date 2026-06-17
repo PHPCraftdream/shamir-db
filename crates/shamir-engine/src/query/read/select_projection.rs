@@ -3,7 +3,7 @@
 use serde_json as json;
 use smallvec::SmallVec;
 
-use crate::query::filter::eval::{intern_field_path, resolve_filter_value};
+use crate::query::filter::eval::{intern_field_path, resolve_filter_query, resolve_filter_value};
 use crate::query::filter::{FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
@@ -138,9 +138,7 @@ impl SelectProjection {
         if !self.funcs.is_empty() {
             let ctx = FilterContext::new(interner, &self.empty_refs);
             for (key, fv) in &self.funcs {
-                let val = resolve_filter_value(fv, record, &ctx)
-                    .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
-                    .unwrap_or(QueryValue::Null);
+                let val = resolve_filter_query(fv, record, &ctx).unwrap_or(QueryValue::Null);
                 obj.insert(key.clone(), val);
             }
         }

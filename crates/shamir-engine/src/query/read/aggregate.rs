@@ -24,7 +24,7 @@ use indexmap::map::Entry;
 use serde_json as json;
 
 use crate::function::builtin_aggs;
-use crate::query::filter::eval::{compare_values, resolve_filter_value};
+use crate::query::filter::eval::{compare_values, resolve_filter_query};
 use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
@@ -649,10 +649,7 @@ pub(super) fn build_aggregate_object(
                             Err(_) => return None,
                         },
                     };
-                    view.with_ref(|r| resolve_filter_value(&fv, r, &ctx))
-                        .map(|v| {
-                            inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null)
-                        })
+                    view.with_ref(|r| resolve_filter_query(&fv, r, &ctx))
                 })
                 .unwrap_or(QueryValue::Null);
             obj.insert(key, val);
