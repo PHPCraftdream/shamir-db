@@ -9,29 +9,106 @@ use shamir_query_builder::val::*;
 use shamir_query_builder::write::{self, doc, UpdateReturnMode};
 
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::batch::BatchError;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::InsertOp;
+use crate::query::write::{InsertOp, WriteResult};
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::RepoConfig;
+use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::TableConfig;
+use shamir_types::access::Actor;
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
 
-/// Create a DbInstance with one "users" table, return the table manager.
-async fn setup_empty_table() -> crate::table::TableManager {
+// ---------------------------------------------------------------------------
+// Test-only helpers: drive a single INSERT / UPDATE / DELETE through the
+// PRODUCTION implicit-tx path (`run_implicit_batch_tx` → the `_tx` variant
+// → commit). The legacy non-tx `execute_insert` / `execute_update` /
+// `execute_delete` were removed (W3a); these helpers preserve the
+// "single-op autocommit" ergonomics the tests rely on while exercising the
+// real staging + commit pipeline (so index / counter / doctor side-effects
+// land exactly as in production).
+// ---------------------------------------------------------------------------
+
+/// Test-only INSERT via the production implicit-tx + commit path.
+/// Returns the `Result` so tests can assert on `.is_err()` (e.g. for
+/// fail-closed computed-field cases) or `.unwrap()`.
+pub(crate) async fn insert_via_tx(
+    repo: &RepoInstance,
+    table: &crate::table::TableManager,
+    op: &InsertOp,
+    return_result: bool,
+) -> Result<WriteResult, BatchError> {
+    let owned_op = op.clone();
+    let owned_table = table.clone();
+    repo.run_implicit_batch_tx(Actor::System, "test_insert", move |tx| {
+        Box::pin(async move {
+            owned_table
+                .execute_insert_tx(&owned_op, tx, return_result)
+                .await
+        })
+    })
+    .await
+}
+
+/// Test-only UPDATE via the production implicit-tx + commit path.
+/// `ctx` is rebuilt inside the staging closure (FilterContext borrows the
+/// interner Arc, which must be obtained AFTER `begin_tx`).
+pub(crate) async fn update_via_tx(
+    repo: &RepoInstance,
+    table: &crate::table::TableManager,
+    op: &shamir_query_types::write::UpdateOp,
+    refs: &shamir_types::types::common::TMap<String, crate::query::read::QueryResult>,
+) -> Result<WriteResult, BatchError> {
+    let owned_op = op.clone();
+    let owned_table = table.clone();
+    let owned_refs = refs.clone();
+    repo.run_implicit_batch_tx(Actor::System, "test_update", move |tx| {
+        Box::pin(async move {
+            let interner = owned_table.interner().get().await?;
+            let ctx = FilterContext::new(interner, &owned_refs);
+            owned_table.execute_update_tx(&owned_op, &ctx, tx).await
+        })
+    })
+    .await
+}
+
+/// Test-only DELETE via the production implicit-tx + commit path.
+pub(crate) async fn delete_via_tx(
+    repo: &RepoInstance,
+    table: &crate::table::TableManager,
+    op: &shamir_query_types::write::DeleteOp,
+    refs: &shamir_types::types::common::TMap<String, crate::query::read::QueryResult>,
+) -> Result<WriteResult, BatchError> {
+    let owned_op = op.clone();
+    let owned_table = table.clone();
+    let owned_refs = refs.clone();
+    repo.run_implicit_batch_tx(Actor::System, "test_delete", move |tx| {
+        Box::pin(async move {
+            let interner = owned_table.interner().get().await?;
+            let ctx = FilterContext::new(interner, &owned_refs);
+            owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+        })
+    })
+    .await
+}
+
+/// Create a DbInstance with one "users" table, return the table manager + repo.
+async fn setup_empty_table() -> (crate::table::TableManager, RepoInstance) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
         tables: vec![TableConfig::new("users")],
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
-    db.get_table("default", "users").await.unwrap()
+    let table = db.get_table("default", "users").await.unwrap();
+    let repo = db.get_repo("default").unwrap();
+    (table, repo)
 }
 
 /// Setup table with pre-inserted users.
-async fn setup_table_with_users() -> crate::table::TableManager {
-    let table = setup_empty_table().await;
+async fn setup_table_with_users() -> (crate::table::TableManager, RepoInstance) {
+    let (table, repo) = setup_empty_table().await;
 
     let users = vec![
         vec![
@@ -65,7 +142,7 @@ async fn setup_table_with_users() -> crate::table::TableManager {
         table.insert(&result.inner_value).await.unwrap();
     }
 
-    table
+    (table, repo)
 }
 
 // ============================================================================
@@ -74,13 +151,13 @@ async fn setup_table_with_users() -> crate::table::TableManager {
 
 #[tokio::test]
 async fn test_execute_insert_single() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
         .row(doc().set("name", "Alice").set("age", 30_i64))
         .build();
 
-    let result = table.execute_insert(&op, true).await.unwrap();
+    let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
@@ -94,7 +171,7 @@ async fn test_execute_insert_single() {
 
 #[tokio::test]
 async fn test_execute_insert_multiple() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
         .row(doc().set("name", "Alice").set("age", 30_i64))
@@ -102,7 +179,7 @@ async fn test_execute_insert_multiple() {
         .row(doc().set("name", "Carol").set("age", 35_i64))
         .build();
 
-    let result = table.execute_insert(&op, true).await.unwrap();
+    let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
 
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
@@ -111,11 +188,11 @@ async fn test_execute_insert_multiple() {
 
 #[tokio::test]
 async fn test_execute_insert_empty() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op: InsertOp = write::insert("users").build();
 
-    let result = table.execute_insert(&op, true).await.unwrap();
+    let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
 
     assert_eq!(result.affected, 0);
     assert_eq!(table.count().await.unwrap(), 0);
@@ -127,10 +204,8 @@ async fn test_execute_insert_empty() {
 
 #[tokio::test]
 async fn test_execute_update_with_filter() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // Update active users: set status = "premium"
     let op = write::update("users")
@@ -138,7 +213,7 @@ async fn test_execute_update_with_filter() {
         .set(doc().set("status", "premium"))
         .build();
 
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     // Alice and Bob are active
     assert_eq!(result.affected, 2);
@@ -150,10 +225,8 @@ async fn test_execute_update_with_filter() {
 
 #[tokio::test]
 async fn test_execute_update_returns_changed() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
@@ -161,7 +234,7 @@ async fn test_execute_update_returns_changed() {
         .returning(UpdateReturnMode::Changed)
         .build();
 
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     assert_eq!(result.affected, 2);
     assert_eq!(result.records.len(), 2);
@@ -173,26 +246,22 @@ async fn test_execute_update_returns_changed() {
 
 #[tokio::test]
 async fn test_execute_update_no_match() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     let op = write::update("users")
         .where_(filter::eq("status", "deleted"))
         .set(doc().set("status", "active"))
         .build();
 
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 0);
 }
 
 #[tokio::test]
 async fn test_execute_update_all_records() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // No where clause — update all
     let op = write::update("users")
@@ -200,7 +269,7 @@ async fn test_execute_update_all_records() {
         .returning(UpdateReturnMode::All)
         .build();
 
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for record in &result.records {
@@ -210,10 +279,8 @@ async fn test_execute_update_all_records() {
 
 #[tokio::test]
 async fn test_execute_update_unchanged_mode() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // Set status = "active" on active users — no actual change
     let op = write::update("users")
@@ -222,7 +289,7 @@ async fn test_execute_update_unchanged_mode() {
         .returning(UpdateReturnMode::Unchanged)
         .build();
 
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     // Nothing actually changed
     assert_eq!(result.affected, 0);
     // But Unchanged mode returns records that matched but didn't change
@@ -235,16 +302,14 @@ async fn test_execute_update_unchanged_mode() {
 
 #[tokio::test]
 async fn test_execute_delete_with_filter() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     let op = write::delete("users")
         .where_(filter::eq("status", "inactive"))
         .build();
 
-    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     // Carol is inactive
     assert_eq!(result.affected, 1);
@@ -253,33 +318,29 @@ async fn test_execute_delete_with_filter() {
 
 #[tokio::test]
 async fn test_execute_delete_no_match() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     let op = write::delete("users")
         .where_(filter::eq("status", "deleted"))
         .build();
 
-    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 0);
     assert_eq!(table.count().await.unwrap(), 3);
 }
 
 #[tokio::test]
 async fn test_execute_delete_multiple() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // Delete all active users (Alice, Bob)
     let op = write::delete("users")
         .where_(filter::eq("status", "active"))
         .build();
 
-    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 2);
     assert_eq!(table.count().await.unwrap(), 1);
 }
@@ -290,22 +351,18 @@ async fn test_execute_delete_multiple() {
 
 #[tokio::test]
 async fn test_insert_update_delete_pipeline() {
-    let table = setup_empty_table().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_empty_table().await;
     let refs = new_map();
-    let _ctx = FilterContext::new(interner, &refs);
 
     // 1. Insert
     let insert_op = write::insert("users")
         .row(doc().set("name", "Alice").set("score", 100_i64))
         .row(doc().set("name", "Bob").set("score", 50_i64))
         .build();
-    let r = table.execute_insert(&insert_op, true).await.unwrap();
+    let r = insert_via_tx(&repo, &table, &insert_op, true)
+        .await
+        .unwrap();
     assert_eq!(r.affected, 2);
-
-    // Need to re-get interner after insert (new keys may have been interned)
-    let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(interner, &refs);
 
     // 2. Update: boost Bob's score
     let update_op = write::update("users")
@@ -313,7 +370,9 @@ async fn test_insert_update_delete_pipeline() {
         .set(doc().set("score", 75_i64))
         .returning(UpdateReturnMode::Changed)
         .build();
-    let r = table.execute_update(&update_op, &ctx).await.unwrap();
+    let r = update_via_tx(&repo, &table, &update_op, &refs)
+        .await
+        .unwrap();
     assert_eq!(r.affected, 1);
     assert_eq!(r.records[0].as_json()["score"], 75);
 
@@ -321,7 +380,9 @@ async fn test_insert_update_delete_pipeline() {
     let delete_op = write::delete("users")
         .where_(filter::lt("score", 80_i64))
         .build();
-    let r = table.execute_delete(&delete_op, &ctx).await.unwrap();
+    let r = delete_via_tx(&repo, &table, &delete_op, &refs)
+        .await
+        .unwrap();
     assert_eq!(r.affected, 1); // Bob(75) deleted
 
     assert_eq!(table.count().await.unwrap(), 1); // Only Alice remains
@@ -333,7 +394,7 @@ async fn test_insert_update_delete_pipeline() {
 
 #[tokio::test]
 async fn test_execute_set_insert_new() {
-    let table = setup_empty_table().await;
+    let (table, _repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("email", "alice@example.com"))
@@ -350,7 +411,7 @@ async fn test_execute_set_insert_new() {
 
 #[tokio::test]
 async fn test_execute_set_update_existing() {
-    let table = setup_table_with_users().await;
+    let (table, _repo) = setup_table_with_users().await;
     let _interner = table.interner().get().await.unwrap();
 
     // Alice exists with status=active. Upsert by name.
@@ -376,7 +437,7 @@ async fn test_execute_set_update_existing() {
 
 #[tokio::test]
 async fn test_execute_set_no_match_inserts() {
-    let table = setup_table_with_users().await;
+    let (table, _repo) = setup_table_with_users().await;
 
     let op = write::upsert("users")
         .key(doc().set("name", "Zara"))
@@ -406,13 +467,14 @@ async fn test_interner_persisted_after_insert() {
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
     let table = db.get_table("default", "users").await.unwrap();
+    let repo = db.get_repo("default").unwrap();
 
     // Insert records with new field keys ("brand_new_field" never seen before)
     let op = write::insert("users")
         .row(doc().set("brand_new_field", "value1"))
         .row(doc().set("brand_new_field", "value2"))
         .build();
-    table.execute_insert(&op, true).await.unwrap();
+    insert_via_tx(&repo, &table, &op, true).await.unwrap();
 
     // Verify the key was interned
     let interner = table.interner().get().await.unwrap();
@@ -432,16 +494,14 @@ async fn test_interner_persisted_after_insert() {
 /// Same test for execute_update: new set fields should be persisted.
 #[tokio::test]
 async fn test_interner_persisted_after_update() {
-    let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = setup_table_with_users().await;
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // Update with a brand new field key
     let op = write::update("users")
         .set(doc().set("completely_new_key", 42_i64))
         .build();
-    table.execute_update(&op, &ctx).await.unwrap();
+    update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     // The new key should be persisted
     let interner = table.interner().get().await.unwrap();
@@ -458,7 +518,7 @@ async fn test_interner_persisted_after_update() {
 /// Same test for execute_set: upsert should persist new keys.
 #[tokio::test]
 async fn test_interner_persisted_after_set() {
-    let table = setup_empty_table().await;
+    let (table, _repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("unique_field_xyz", "val"))
@@ -481,7 +541,7 @@ async fn test_interner_persisted_after_set() {
 
 #[tokio::test]
 async fn test_insert_computed_field_lowercase() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     // email_norm = strings/lower(email), evaluated at write time.
     let op = write::insert("users")
@@ -492,7 +552,7 @@ async fn test_insert_computed_field_lowercase() {
         )
         .build();
 
-    let result = table.execute_insert(&op, true).await.unwrap();
+    let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
     assert_eq!(result.affected, 1);
     // The literal field is untouched; the computed field holds the result.
     assert_eq!(result.records[0].as_json()["email"], "Alice@Example.COM");
@@ -504,7 +564,7 @@ async fn test_insert_computed_field_lowercase() {
 
 #[tokio::test]
 async fn test_set_computed_field() {
-    let table = setup_empty_table().await;
+    let (table, _repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("email", "x@y.z"))
@@ -521,23 +581,23 @@ async fn test_set_computed_field() {
 
 #[tokio::test]
 async fn test_insert_computed_unknown_function_fails_closed() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
         .row(doc().set("x", func("strings/does_not_exist", [])))
         .build();
 
     // A broken computed value aborts the write rather than storing garbage.
-    assert!(table.execute_insert(&op, true).await.is_err());
+    assert!(insert_via_tx(&repo, &table, &op, true).await.is_err());
 }
 
 #[tokio::test]
 async fn test_insert_computed_bad_ref_fails_closed() {
-    let table = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::insert("users")
         .row(doc().set("y", func("strings/lower", [col("missing_field")])))
         .build();
 
-    assert!(table.execute_insert(&op, true).await.is_err());
+    assert!(insert_via_tx(&repo, &table, &op, true).await.is_err());
 }

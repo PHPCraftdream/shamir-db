@@ -15,7 +15,6 @@
 #![allow(deprecated)]
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::filter::eval_context::FilterContext;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
@@ -39,8 +38,12 @@ use tokio::sync::Notify;
 /// Create an in-memory table, insert one real record with
 /// `status = "active"`, create a regular index on `status`, plant a
 /// stale posting (status="active" → fabricated RecordId), and return
-/// the table manager together with the real record's id.
-async fn setup_table_with_stale_index_entry() -> (crate::table::TableManager, RecordId) {
+/// the table manager, repo, and the real record's id.
+async fn setup_table_with_stale_index_entry() -> (
+    crate::table::TableManager,
+    crate::repo::RepoInstance,
+    RecordId,
+) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
@@ -48,6 +51,7 @@ async fn setup_table_with_stale_index_entry() -> (crate::table::TableManager, Re
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
     let table = db.get_table("default", "users").await.unwrap();
+    let repo = db.get_repo("default").unwrap();
 
     // --- Insert one real record with status="active" -----------------
     let interner = table.interner().get().await.unwrap();
@@ -86,7 +90,7 @@ async fn setup_table_with_stale_index_entry() -> (crate::table::TableManager, Re
         .await
         .unwrap();
 
-    (table, real_id)
+    (table, repo, real_id)
 }
 
 /// Regression: `execute_delete` WHERE status="active" must succeed even
@@ -101,11 +105,9 @@ async fn setup_table_with_stale_index_entry() -> (crate::table::TableManager, Re
 /// it, and only the real record is returned → `Ok(...)`.
 #[tokio::test]
 async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
-    let (table, _real_id) = setup_table_with_stale_index_entry().await;
+    let (table, repo, _real_id) = setup_table_with_stale_index_entry().await;
 
-    let interner = table.interner().get().await.unwrap();
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
 
     // Delete WHERE status = "active" — triggers index-backed path
     // because "status_idx" covers the Eq condition.
@@ -115,7 +117,9 @@ async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
 
     // This is the critical assertion: the operation must NOT error.
     // On the pre-fix code it would propagate NotFound for the stale id.
-    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    let result = super::write_exec_tests::delete_via_tx(&repo, &table, &op, &refs)
+        .await
+        .unwrap();
 
     // Only the one real record (Alice) should have been deleted.
     assert_eq!(
