@@ -12,13 +12,14 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
     exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
+use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use super::read_exec::try_project_page_only;
+use super::read_exec::{apply_select_value_bytes, try_project_page_only_bytes};
 use super::table_manager::TableManager;
 
 impl TableManager {
@@ -84,7 +85,7 @@ impl TableManager {
         let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        let mut matched: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::new();
         let mut records_scanned: u64 = 0;
 
         while let Some(batch_result) = stream.next().await {
@@ -99,29 +100,36 @@ impl TableManager {
                     // Record did not exist at this version — exclude it.
                     continue;
                 };
-                let inner = match InnerValue::from_bytes(&bytes) {
-                    Ok(v) => v,
-                    Err(_) => continue, // corrupt entry — skip defensively
-                };
+                // bytes is already Bytes from get_at.
                 // Apply the WHERE filter to the AS-OF value (NOT the current
                 // value). This ensures `AsOf` semantics: the filter evaluates
                 // the world as it was at `version`.
+                // S4: filter via RecordView lens (bare-scalar fallback to
+                // InnerValue for non-map records).
                 let passes = match filter_cb.as_ref() {
-                    Some(cb) => cb.matches(&inner, ctx),
+                    Some(cb) => {
+                        match shamir_types::record_view::RecordView::new(&bytes) {
+                            Ok(view) => cb.matches(&view, ctx),
+                            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                                Ok(iv) => cb.matches(&iv, ctx),
+                                Err(_) => false,
+                            },
+                        }
+                    }
                     None => true,
                 };
                 if passes {
-                    matched.push((id, inner));
+                    matched.push((id, bytes));
                 }
             }
         }
 
-        // ── 4. Pipeline tail — same helpers as the collecting / index-scan
-        //       paths. Apply projection, aggregates, order, pagination.
+        // Pipeline tail — same helpers as the collecting / index-scan paths.
+        // S4: matched is now Bytes-typed; all three branches consume Bytes.
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
 
-        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+        if let Some((paged, pagination)) = try_project_page_only_bytes(query, &matched, interner) {
             let records_returned = paged.len() as u64;
             return Ok(QueryResult {
                 records: paged,
@@ -142,7 +150,7 @@ impl TableManager {
         } else if has_agg {
             exec::apply_aggregate_all(&matched, &query.select, interner)
         } else {
-            exec::apply_select_value(&matched, &query.select, interner)
+            apply_select_value_bytes(&matched, &query.select, interner)
         };
 
         if query.select.distinct {

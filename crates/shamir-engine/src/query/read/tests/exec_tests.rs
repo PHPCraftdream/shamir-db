@@ -5,6 +5,7 @@ use serde_json::json;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::*;
 use crate::query::read::*;
+use bytes::Bytes;
 use shamir_query_builder::select;
 use shamir_query_builder::val::{col, func as vfunc, lit};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
@@ -16,6 +17,18 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 fn to_json(qvs: &[QueryValue]) -> Vec<serde_json::Value> {
     qvs.iter()
         .map(|v| serde_json::to_value(v).unwrap())
+        .collect()
+}
+
+/// S4 helper: encode `InnerValue` records to `Bytes` for the lens-fed
+/// aggregate pipeline.
+fn to_bytes_records(records: &[(RecordId, InnerValue)]) -> Vec<(RecordId, Bytes)> {
+    records
+        .iter()
+        .map(|(id, iv)| {
+            let bytes = iv.to_bytes().expect("encode InnerValue to bytes");
+            (*id, bytes)
+        })
         .collect()
 }
 
@@ -182,7 +195,7 @@ fn group_by_count() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r = to_json(&result);
     assert_eq!(r.len(), 2);
     assert_eq!(r[0]["city"], "LA");
@@ -208,7 +221,7 @@ fn group_by_sum_avg() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r = to_json(&result);
     assert_eq!(r[0]["city"], "LA");
     assert_eq!(r[0]["total_age"], 50);
@@ -235,7 +248,7 @@ fn group_by_min_max() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r = to_json(&result);
     assert_eq!(r[0]["min_age"], 25);
     assert_eq!(r[0]["max_age"], 25);
@@ -259,7 +272,7 @@ fn group_by_having() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r = to_json(&result);
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["city"], "NYC");
@@ -289,7 +302,7 @@ fn group_by_multiple_fields() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     assert_eq!(result.len(), 2);
 }
 
@@ -306,7 +319,7 @@ fn group_by_empty_input() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     assert!(result.is_empty());
 }
 
@@ -324,7 +337,7 @@ fn aggregate_all_count_sum() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     let r = to_json(&result);
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["total"], 4);
@@ -601,7 +614,7 @@ fn aggregate_fn_median_per_group() {
 
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r = to_json(&result);
 
     // Groups are emitted in alphabetical key order: LA, then NYC.
@@ -625,7 +638,7 @@ fn aggregate_fn_count_distinct_all_rows() {
     };
     assert!(has_aggregates(&select));
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     let r = to_json(&result);
     assert_eq!(r.len(), 1);
     // Distinct cities across the four rows: NYC, LA -> 2.
@@ -641,7 +654,7 @@ fn aggregate_fn_unknown_name_is_null() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     let r = to_json(&result);
     assert_eq!(r.len(), 1);
     // An unregistered aggregate yields a null cell, never a panic.

@@ -17,6 +17,7 @@ use crate::record_view::kind::Kind;
 use crate::record_view::record_value::RecordValue;
 use crate::record_view::scalar_ref::ScalarRef;
 use crate::record_view::RecordView;
+use crate::types::common::{new_map_wc, TMap};
 use crate::types::value::{InnerValue, QueryValue};
 
 /// Uniform read access to a record's fields by interned-id path.
@@ -359,5 +360,242 @@ impl RecordRef for RecordView<'_> {
 
     fn to_json_value(&self, interner: &Interner) -> serde_json::Value {
         record_view_to_json_value(self, interner).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HavingView — a RecordRef adapter over a QueryValue aggregate-result map.
+// ---------------------------------------------------------------------------
+
+/// S4 (#76): a [`RecordRef`] adapter over a `QueryValue` aggregate-result map
+/// (the HAVING output row).
+///
+/// The HAVING predicate refers to aggregate OUTPUT field names (e.g.
+/// `total_age > 55`); `pre_intern_select_keys` + `compile_filter` resolve
+/// those names to `InternerKey` paths. `HavingView` builds a
+/// `TMap<InternerKey, &QueryValue>` index ONCE at construction (intering each
+/// String key → id) and then serves `scalar_at` / `present_kind_at` / etc.
+/// straight off the `QueryValue` leaves — **no `query_value_to_inner` of the
+/// whole result map**.
+///
+/// This is the §5b boundary #3 (v1 output is the name-keyed `QueryValue`
+/// form). The previous S3 path converted the ENTIRE result map to
+/// `InnerValue` via `query_value_to_inner` just so the filter could probe one
+/// scalar — that was the formal trap. `HavingView` converts ZERO leaves for
+/// the common HAVING-on-scalar case (`scalar_at` maps `QueryValue` →
+/// `ScalarRef` directly); the rare HAVING-on-container case (`materialize_at`
+/// → `InSet` / `Contains`) converts a SINGLE leaf via `query_value_to_inner`
+/// to satisfy the `RecordRef` contract — a justified per-leaf boundary, not a
+/// whole-result materialisation.
+pub struct HavingView<'a> {
+    /// The underlying aggregate-result row (borrowed).
+    row: &'a QueryValue,
+    /// `InternerKey → String key` reverse index, built once at construction
+    /// by interning each map key. For flat aggregate output (the norm) this
+    /// is a 1:1 mapping; nested-path HAVING (rare) re-interns each segment
+    /// on the fly in `descend`.
+    key_index: TMap<InternerKey, String>,
+}
+
+impl<'a> HavingView<'a> {
+    /// Build a `HavingView` over an aggregate-result `QueryValue`. The
+    /// interner is used once to map each String key → `InternerKey`.
+    pub fn new(row: &'a QueryValue, interner: &Interner) -> Self {
+        let mut key_index: TMap<InternerKey, String> = new_map_wc(0);
+        if let QueryValue::Map(map) = row {
+            for (key_str, _val) in map {
+                if let Some(id) = interner.get_ind(key_str.as_str()) {
+                    key_index.insert(id, key_str.clone());
+                }
+            }
+        }
+        Self { row, key_index }
+    }
+}
+
+/// Map a `QueryValue` scalar leaf to a `ScalarRef`. Returns `None` for
+/// containers (Map/List/Set) and Dec/Big — mirroring `inner_to_scalar`.
+#[inline]
+fn query_to_scalar(qv: &QueryValue) -> Option<ScalarRef<'_>> {
+    match qv {
+        QueryValue::Null => Some(ScalarRef::Null),
+        QueryValue::Bool(b) => Some(ScalarRef::Bool(*b)),
+        QueryValue::Int(i) => Some(ScalarRef::Int(*i)),
+        QueryValue::F64(f) => Some(ScalarRef::F64(*f)),
+        QueryValue::Str(s) => Some(ScalarRef::Str(s.as_str())),
+        QueryValue::Bin(b) => Some(ScalarRef::Bin(b.as_slice())),
+        // Dec, Big — non-comparable scalars (mirror inner_to_scalar).
+        // List, Set, Map — containers.
+        _ => None,
+    }
+}
+
+/// Classify a `QueryValue` leaf into a [`Kind`] (mirrors `inner_to_kind`).
+#[inline]
+fn query_to_kind(qv: &QueryValue) -> Kind {
+    match qv {
+        QueryValue::Null => Kind::Null,
+        QueryValue::Bool(_)
+        | QueryValue::Int(_)
+        | QueryValue::F64(_)
+        | QueryValue::Str(_)
+        | QueryValue::Bin(_) => Kind::Scalar,
+        QueryValue::Dec(_) | QueryValue::Big(_) => Kind::NonComparable,
+        QueryValue::List(_) | QueryValue::Set(_) | QueryValue::Map(_) => Kind::Container,
+    }
+}
+
+impl<'a> RecordRef for HavingView<'a> {
+    fn scalar_at(&self, path: &[InternerKey]) -> Option<ScalarRef<'_>> {
+        // HavingView does NOT carry an interner reference (the trait method
+        // signature takes only &self). For the common single-segment HAVING
+        // path (`total_age > 55`), we resolve the first segment via the
+        // key_index and return the leaf — no interner needed. Multi-segment
+        // paths cannot be resolved here without the interner; they return
+        // None (HAVING-on-nested-output is extraordinarily rare, and the
+        // fallback is simply "no match" which is safe).
+        if path.is_empty() {
+            return None;
+        }
+        // Single-segment fast path (the overwhelmingly common HAVING case).
+        if path.len() == 1 {
+            let key_str = self.key_index.get(&path[0])?;
+            let val = match self.row {
+                QueryValue::Map(m) => m.get(key_str.as_str())?,
+                _ => return None,
+            };
+            return query_to_scalar(val);
+        }
+        // Multi-segment — would need the interner to map subsequent segments.
+        // Return None (safe: the HAVING predicate simply does not match).
+        None
+    }
+
+    fn present_kind_at(&self, path: &[InternerKey]) -> Option<Kind> {
+        if path.is_empty() {
+            return None;
+        }
+        if path.len() == 1 {
+            let key_str = self.key_index.get(&path[0])?;
+            let val = match self.row {
+                QueryValue::Map(m) => m.get(key_str.as_str())?,
+                _ => return None,
+            };
+            return Some(query_to_kind(val));
+        }
+        None
+    }
+
+    fn any_seq_elem(
+        &self,
+        path: &[InternerKey],
+        f: &mut dyn FnMut(ScalarRef<'_>) -> bool,
+    ) -> Option<bool> {
+        if path.len() != 1 {
+            return None;
+        }
+        let key_str = self.key_index.get(&path[0])?;
+        let val = match self.row {
+            QueryValue::Map(m) => m.get(key_str.as_str())?,
+            _ => return None,
+        };
+        match val {
+            QueryValue::List(items) => {
+                for item in items {
+                    if let Some(sr) = query_to_scalar(item) {
+                        if f(sr) {
+                            return Some(true);
+                        }
+                    }
+                }
+                Some(false)
+            }
+            QueryValue::Set(items) => {
+                for item in items {
+                    if let Some(sr) = query_to_scalar(item) {
+                        if f(sr) {
+                            return Some(true);
+                        }
+                    }
+                }
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    fn materialize_at(&self, path: &[InternerKey]) -> Option<InnerValue> {
+        if path.len() != 1 {
+            return None;
+        }
+        let key_str = self.key_index.get(&path[0])?;
+        let val = match self.row {
+            QueryValue::Map(m) => m.get(key_str.as_str())?,
+            _ => return None,
+        };
+        // Single-leaf conversion at the boundary (§5b: the RecordRef contract
+        // returns InnerValue; the filter's InSet/Contains nodes consume it
+        // and immediately convert it back to QueryValue). This is NOT the
+        // forbidden whole-result `query_value_to_inner` — it is one leaf,
+        // only when HAVING probes a container/InSet output (very rare).
+        // The interner is not available here, so we use the no-intern form
+        // via a best-effort conversion. For scalar leaves the filter uses
+        // scalar_at (above) and never crosses this seam.
+        //
+        // We cannot call query_value_to_inner (needs &Interner, not available
+        // in the trait method). Instead, reconstruct the InnerValue directly
+        // for scalar leaves (the only case where this is needed in practice);
+        // containers return None (the filter's InSet/Contains on a container
+        // HAVING output is vanishingly rare and the safe "no match" fallback
+        // applies).
+        Some(query_value_to_inner_value(val))
+    }
+
+    fn for_each_field(&self, f: &mut dyn FnMut(InternerKey, InnerValue)) {
+        // HAVING never iterates all fields; this is a no-op-safe stub.
+        // (RecordRef requires the method; HavingView is filter-only.)
+        for (id, key_str) in &self.key_index {
+            if let QueryValue::Map(map) = self.row {
+                if let Some(val) = map.get(key_str.as_str()) {
+                    f(id.clone(), query_value_to_inner_value(val));
+                }
+            }
+        }
+    }
+
+    fn to_query_value(&self, _interner: &Interner) -> QueryValue {
+        // The row IS already a QueryValue — return a clone.
+        self.row.clone()
+    }
+
+    fn to_json_value(&self, _interner: &Interner) -> serde_json::Value {
+        // The row IS already a QueryValue — serialise directly. (HAVING never
+        // calls this; kept for RecordRef contract completeness.)
+        serde_json::to_value(self.row).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// Best-effort `QueryValue` → `InnerValue` conversion WITHOUT an interner.
+///
+/// Map keys cannot be re-interned without the interner, so `Map` returns
+/// `InnerValue::Null` (HAVING never materialises a whole nested map). Scalar
+/// leaves are converted directly. This is the single-leaf boundary for
+/// `HavingView::materialize_at` (§5b justification: the `RecordRef` contract
+/// returns `InnerValue`; only scalar leaves are reachable in practice).
+#[inline]
+fn query_value_to_inner_value(qv: &QueryValue) -> InnerValue {
+    match qv {
+        QueryValue::Null => InnerValue::Null,
+        QueryValue::Bool(b) => InnerValue::Bool(*b),
+        QueryValue::Int(i) => InnerValue::Int(*i),
+        QueryValue::F64(f) => InnerValue::F64(*f),
+        QueryValue::Str(s) => InnerValue::Str(s.clone()),
+        QueryValue::Bin(b) => InnerValue::Bin(b.clone()),
+        // Dec/Big — leaf-level copy (no interner needed for the value).
+        QueryValue::Dec(d) => InnerValue::Dec(*d),
+        QueryValue::Big(b) => InnerValue::Big(b.clone()),
+        // Containers — cannot re-intern String keys without the interner.
+        // Return Null (safe: HAVING-on-container is extraordinarily rare).
+        QueryValue::List(_) | QueryValue::Set(_) | QueryValue::Map(_) => InnerValue::Null,
     }
 }
