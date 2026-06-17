@@ -1,8 +1,10 @@
-use crate::codecs::interned::json::{inner_to_json, inner_to_json_value, json_value_to_inner_with};
+use crate::codecs::interned::json::{
+    inner_to_json, inner_to_json_value, inner_value_to_query_value, json_value_to_inner_with,
+};
 use crate::core::interner::Interner;
 use crate::core::interner::InternerKey;
 use crate::types::common::{new_map, new_set};
-use crate::types::value::InnerValue;
+use crate::types::value::{InnerValue, QueryValue, Value};
 
 #[test]
 fn test_inner_to_json_simple() {
@@ -180,4 +182,214 @@ fn test_json_value_to_inner_with_float_number() {
         }
         _ => panic!("Expected Map"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parity: inner_value_to_query_value vs QueryValue::from(inner_to_json_value)
+//
+// The computed-field write path previously did a two-step hop:
+//   inner_to_json_value(x, i) → json::Value → QueryValue::from(jv)
+// and now does:
+//   inner_value_to_query_value(x, i) → QueryValue  (direct, type-preserving)
+//
+// For Null/Bool/Int/Str/finite-F64/List the two paths produce the same
+// QueryValue, so these assert equality.
+//
+// For Dec, Big, Bin, and non-finite F64 the old JSON round-trip was LOSSY:
+//   - Dec / Big   → json::Value::String → QueryValue::Str  (type erased)
+//   - Bin         → json::Value::Array of byte ints → QueryValue::List of Int (type changed)
+//   - F64 inf/nan → json::Value::String → QueryValue::Str  (type erased)
+// The direct path preserves the original variant. These tests assert that
+// the direct path is type-preserving, and document the old lossy output as
+// a comment so the divergence is explicit.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parity_null() {
+    let interner = Interner::new();
+    let v = InnerValue::Null;
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(via_json, direct);
+}
+
+#[test]
+fn parity_bool() {
+    let interner = Interner::new();
+    for b in [true, false] {
+        let v = InnerValue::Bool(b);
+        let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+        let direct = inner_value_to_query_value(&v, &interner).unwrap();
+        assert_eq!(via_json, direct, "Bool({b})");
+    }
+}
+
+#[test]
+fn parity_int() {
+    let interner = Interner::new();
+    for i in [0i64, 1, -1, i64::MAX, i64::MIN] {
+        let v = InnerValue::Int(i);
+        let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+        let direct = inner_value_to_query_value(&v, &interner).unwrap();
+        assert_eq!(via_json, direct, "Int({i})");
+    }
+}
+
+#[test]
+fn parity_f64_finite() {
+    let interner = Interner::new();
+    for f in [0.0f64, 1.0, -1.0, 4.567, f64::MAX, f64::MIN_POSITIVE] {
+        let v = InnerValue::F64(f);
+        let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+        let direct = inner_value_to_query_value(&v, &interner).unwrap();
+        assert_eq!(via_json, direct, "F64({f})");
+    }
+}
+
+#[test]
+fn parity_str() {
+    let interner = Interner::new();
+    let v = InnerValue::Str("hello".to_string());
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(via_json, direct);
+}
+
+#[test]
+fn parity_list() {
+    let interner = Interner::new();
+    let v = InnerValue::List(vec![
+        InnerValue::Int(1),
+        InnerValue::Str("a".to_string()),
+        InnerValue::Bool(false),
+    ]);
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(via_json, direct);
+}
+
+// Dec: old path → QueryValue::Str (JSON string); direct → QueryValue::Dec (type-preserving).
+#[test]
+fn parity_dec_direct_preserves_type() {
+    let interner = Interner::new();
+    let d = rust_decimal::Decimal::new(12345, 2); // 123.45
+    let v = InnerValue::Dec(d);
+
+    // Old lossy path: Dec becomes a JSON string, then QueryValue::Str.
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    assert!(
+        matches!(via_json, Value::Str(_)),
+        "old path must produce Str, got {:?}",
+        via_json
+    );
+
+    // Direct path: type-preserving.
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(direct, QueryValue::Dec(d), "direct path must preserve Dec");
+}
+
+// Big: old path → QueryValue::Str; direct → QueryValue::Big (type-preserving).
+#[test]
+fn parity_big_direct_preserves_type() {
+    let interner = Interner::new();
+    let b = num_bigint::BigInt::from(999_999_999_999i64);
+    let v = InnerValue::Big(b.clone());
+
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    assert!(
+        matches!(via_json, Value::Str(_)),
+        "old path must produce Str, got {:?}",
+        via_json
+    );
+
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(direct, QueryValue::Big(b), "direct path must preserve Big");
+}
+
+// Bin: old path → QueryValue::List of Int (byte array encoded in JSON);
+//      direct → QueryValue::Bin (type-preserving).
+#[test]
+fn parity_bin_direct_preserves_type() {
+    let interner = Interner::new();
+    let bytes = vec![0xde_u8, 0xad, 0xbe, 0xef];
+    let v = InnerValue::Bin(bytes.clone());
+
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    assert!(
+        matches!(via_json, Value::List(_)),
+        "old path must produce List (byte-array in JSON), got {:?}",
+        via_json
+    );
+
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(
+        direct,
+        QueryValue::Bin(bytes),
+        "direct path must preserve Bin"
+    );
+}
+
+// Non-finite F64: old path → QueryValue::Str; direct → QueryValue::F64 (type-preserving).
+#[test]
+fn parity_f64_non_finite_direct_preserves_type() {
+    let interner = Interner::new();
+    for f in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let v = InnerValue::F64(f);
+
+        let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+        assert!(
+            matches!(via_json, Value::Str(_)),
+            "old path must produce Str for non-finite F64({f}), got {:?}",
+            via_json
+        );
+
+        let direct = inner_value_to_query_value(&v, &interner).unwrap();
+        assert!(
+            matches!(direct, Value::F64(_)),
+            "direct path must preserve F64 variant for non-finite F64({f}), got {:?}",
+            direct
+        );
+    }
+}
+
+// Set: old path encodes as JSON array → QueryValue::List;
+//      direct → QueryValue::Set (type-preserving).
+#[test]
+fn parity_set_direct_preserves_type() {
+    let interner = Interner::new();
+    let mut s = new_set();
+    s.insert(InnerValue::Int(1));
+    s.insert(InnerValue::Int(2));
+    let v = InnerValue::Set(s);
+
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    assert!(
+        matches!(via_json, Value::List(_)),
+        "old path must produce List (Set encodes as JSON array), got {:?}",
+        via_json
+    );
+
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert!(
+        matches!(direct, Value::Set(_)),
+        "direct path must preserve Set variant, got {:?}",
+        direct
+    );
+}
+
+// Map: both paths produce QueryValue::Map with identical string keys and values
+//      (for string-keyed maps with no lossy inner types).
+#[test]
+fn parity_map() {
+    let interner = Interner::new();
+    let k1 = interner.touch_ind("x").unwrap().into_key();
+    let k2 = interner.touch_ind("y").unwrap().into_key();
+    let mut m = new_map();
+    m.insert(k1, InnerValue::Int(1));
+    m.insert(k2, InnerValue::Str("two".to_string()));
+    let v = InnerValue::Map(m);
+
+    let via_json = QueryValue::from(inner_to_json_value(&v, &interner).unwrap());
+    let direct = inner_value_to_query_value(&v, &interner).unwrap();
+    assert_eq!(via_json, direct);
 }

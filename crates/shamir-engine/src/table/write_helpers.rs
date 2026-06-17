@@ -15,7 +15,7 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
+use shamir_types::codecs::interned::{inner_value_to_query_value, json_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::scalar_ref_cmp;
 use shamir_types::record_view::RecordRef;
@@ -113,9 +113,11 @@ pub(super) fn resolve_computed_record<'a>(
             serde_json::from_value(jv).map_err(|e| format!("computed field '{k}': {e}"))?;
         let result = eval_write_value(&fv, &literal, interner, scalars)
             .map_err(|e| format!("computed field '{k}': {e}"))?;
-        let result_jv = inner_to_json_value(&result, interner)
-            .map_err(|e| format!("computed field '{k}': {e}"))?;
-        out.insert(k.clone(), QueryValue::from(result_jv));
+        out.insert(
+            k.clone(),
+            inner_value_to_query_value(&result, interner)
+                .map_err(|e| format!("computed field '{k}': {e}"))?,
+        );
     }
     Ok(Cow::Owned(Value::Map(out)))
 }
