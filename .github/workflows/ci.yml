@@ -38,7 +38,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
   # the project's stated pre-commit gate in CLAUDE.md ("Code quality
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib
+      - run: cargo test --workspace --lib --locked
 
   # Integration gate: the test files under `crates/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
@@ -108,5 +108,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # bash on every runner (Git Bash on Windows) so the `--test '*'` glob
       # target selector is passed to cargo identically across OSes.
-      - run: cargo test --workspace --test '*'
+      - run: cargo test --workspace --test '*' --locked
         shell: bash
+
+  # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
+  # resolving the workspace would pull a crate version younger than 30 days
+  # (config: /cooldown.toml). The `--locked` flags above keep the other jobs on
+  # the committed Cargo.lock; THIS job catches a PR that introduces a too-fresh
+  # dependency. Native cargo support is pending, so we use the cargo-cooldown
+  # subcommand. `check` restores the original lock if enforcement fails.
+  cooldown:
+    name: dependency cooldown (30d)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-cooldown
+      - run: cargo cooldown check
