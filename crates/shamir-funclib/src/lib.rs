@@ -11,6 +11,17 @@
 //! ScalarRegistry)`. [`register_builtins`] wires them all into one registry.
 //! [`math`] is the fully-implemented reference; the remaining categories are
 //! stubs to be populated by their owning agents.
+//!
+//! # Accepted limit — #61 InnerValue-elimination campaign
+//!
+//! funclib's scalar/aggregate ABI operates on `InnerValue` as a TYPED
+//! VALUE-CURRENCY, not as a JSON or tree representation (this crate has zero
+//! `serde_json` dependency). It runs on hot paths (`$fn` filter eval, GROUP
+//! BY aggregation) where the values are key-less scalar leaves, so the
+//! id-keyed discriminant difference is irrelevant. Generalizing the entire
+//! registry + function families over `Value<Key>`/`QueryValue` is pure
+//! type-churn with no runtime or correctness benefit and a wide API blast
+//! radius. Accepted limit for the #61 InnerValue-elimination campaign.
 
 pub mod registry;
 
