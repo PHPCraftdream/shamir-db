@@ -4,19 +4,17 @@
 //! contains Eq conditions on indexed fields, and falls through to full
 //! scan otherwise.
 
-#![allow(deprecated)]
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::ReadQuery;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::val::col;
 use shamir_query_builder::{select, Query};
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::UserValue;
+use shamir_types::types::value::QueryValue;
 
 /// Create a table with 5 users and a regular index on "status".
 async fn setup_table_with_index() -> crate::table::TableManager {
@@ -30,34 +28,34 @@ async fn setup_table_with_index() -> crate::table::TableManager {
 
     let users = vec![
         vec![
-            ("name", UserValue::Str("Alice".into())),
-            ("age", UserValue::Int(30)),
-            ("status", UserValue::Str("active".into())),
-            ("city", UserValue::Str("NYC".into())),
+            ("name", QueryValue::Str("Alice".into())),
+            ("age", QueryValue::Int(30)),
+            ("status", QueryValue::Str("active".into())),
+            ("city", QueryValue::Str("NYC".into())),
         ],
         vec![
-            ("name", UserValue::Str("Bob".into())),
-            ("age", UserValue::Int(25)),
-            ("status", UserValue::Str("active".into())),
-            ("city", UserValue::Str("LA".into())),
+            ("name", QueryValue::Str("Bob".into())),
+            ("age", QueryValue::Int(25)),
+            ("status", QueryValue::Str("active".into())),
+            ("city", QueryValue::Str("LA".into())),
         ],
         vec![
-            ("name", UserValue::Str("Carol".into())),
-            ("age", UserValue::Int(35)),
-            ("status", UserValue::Str("inactive".into())),
-            ("city", UserValue::Str("NYC".into())),
+            ("name", QueryValue::Str("Carol".into())),
+            ("age", QueryValue::Int(35)),
+            ("status", QueryValue::Str("inactive".into())),
+            ("city", QueryValue::Str("NYC".into())),
         ],
         vec![
-            ("name", UserValue::Str("Dave".into())),
-            ("age", UserValue::Int(22)),
-            ("status", UserValue::Str("active".into())),
-            ("city", UserValue::Str("LA".into())),
+            ("name", QueryValue::Str("Dave".into())),
+            ("age", QueryValue::Int(22)),
+            ("status", QueryValue::Str("active".into())),
+            ("city", QueryValue::Str("LA".into())),
         ],
         vec![
-            ("name", UserValue::Str("Eve".into())),
-            ("age", UserValue::Int(28)),
-            ("status", UserValue::Str("deleted".into())),
-            ("city", UserValue::Str("NYC".into())),
+            ("name", QueryValue::Str("Eve".into())),
+            ("age", QueryValue::Int(28)),
+            ("status", QueryValue::Str("deleted".into())),
+            ("city", QueryValue::Str("NYC".into())),
         ],
     ];
 
@@ -67,12 +65,12 @@ async fn setup_table_with_index() -> crate::table::TableManager {
         for (k, v) in fields {
             map.insert(k.to_string(), v.clone());
         }
-        let user_val = UserValue::Map(map);
-        let result = transform::user_to_inner(&user_val, interner);
-        if let Some(ref new_keys) = result.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        let user_val = QueryValue::Map(map);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user_val, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        table.insert(&result.inner_value).await.unwrap();
+        table.insert(&inner_val).await.unwrap();
     }
 
     // Create index on "status"
@@ -444,14 +442,14 @@ async fn setup_sorted_score(n: usize) -> (crate::table::TableManager, Vec<i64>) 
         let s = ((i * 7919) % 1000) as i64;
         scores.push(s);
         let mut map = new_map();
-        map.insert("idx".to_string(), UserValue::Int(i as i64));
-        map.insert("score".to_string(), UserValue::Int(s));
-        let user = UserValue::Map(map);
-        let result = transform::user_to_inner(&user, interner);
-        if let Some(ref new_keys) = result.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        map.insert("idx".to_string(), QueryValue::Int(i as i64));
+        map.insert("score".to_string(), QueryValue::Int(s));
+        let user = QueryValue::Map(map);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        table.insert(&result.inner_value).await.unwrap();
+        table.insert(&inner_val).await.unwrap();
     }
 
     // Sorted index on `score`. `create_sorted_index` registers the

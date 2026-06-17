@@ -1,17 +1,16 @@
 //! Concurrent access tests for Table
-
-#![allow(deprecated)]
+#![allow(deprecated)] // collect_list_stream is deprecated test-only utility
 
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::{InnerValue, UserValue};
+use shamir_types::types::value::{InnerValue, QueryValue};
 use std::sync::Arc;
 
 async fn create_test_table() -> (
@@ -37,17 +36,16 @@ async fn create_test_table() -> (
     (table, interner, counter, dir)
 }
 
-/// Helper to intern a UserValue and save new keys
-async fn intern_value(value: &UserValue, interner: &InternerManager) -> InnerValue {
+/// Helper to intern a QueryValue and save new keys
+async fn intern_value(value: &QueryValue, interner: &InternerManager) -> InnerValue {
     let inter = interner.get().await.unwrap();
-    let transform = transform::user_to_inner(value, inter);
+    let (inner_value, new_keys) = query_value_to_inner_tracked(value, inter).unwrap();
 
-    // Save new keys if any
-    if let Some(ref new_keys) = transform.new_keys {
-        interner.save_new_keys(new_keys).await.unwrap();
+    if !new_keys.is_empty() {
+        interner.save_new_keys(&new_keys).await.unwrap();
     }
 
-    transform.inner_value
+    inner_value
 }
 
 #[tokio::test]
@@ -66,13 +64,13 @@ async fn test_concurrent_inserts() {
             let mut ids = vec![];
             for i in 0..records_per_thread {
                 let mut data = new_map();
-                data.insert("thread".to_string(), UserValue::Int(thread_id));
-                data.insert("index".to_string(), UserValue::Int(i));
+                data.insert("thread".to_string(), QueryValue::Int(thread_id));
+                data.insert("index".to_string(), QueryValue::Int(i));
                 data.insert(
                     "name".to_string(),
-                    UserValue::Str(format!("User_{}_{}", thread_id, i)),
+                    QueryValue::Str(format!("User_{}_{}", thread_id, i)),
                 );
-                let value = UserValue::Map(data);
+                let value = QueryValue::Map(data);
                 let inner = intern_value(&value, &interner_clone).await;
                 let id = table_clone.insert(&inner).await.unwrap();
                 counter_clone.increment(1).await.unwrap();
@@ -114,10 +112,10 @@ async fn test_concurrent_insert_and_read() {
                 let mut data = new_map();
                 data.insert(
                     "key".to_string(),
-                    UserValue::Str(format!("value_{}_{}", i, j)),
+                    QueryValue::Str(format!("value_{}_{}", i, j)),
                 );
-                data.insert("num".to_string(), UserValue::Int(i * 20 + j));
-                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                data.insert("num".to_string(), QueryValue::Int(i * 20 + j));
+                let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                 table_clone.insert(&inner).await.unwrap();
                 counter_clone.increment(1).await.unwrap();
             }
@@ -163,14 +161,14 @@ async fn test_concurrent_same_keys_interning() {
             for j in 0..10 {
                 let mut data = new_map();
                 // Same keys across all threads
-                data.insert("name".to_string(), UserValue::Str(format!("User_{}", i)));
-                data.insert("age".to_string(), UserValue::Int(i));
+                data.insert("name".to_string(), QueryValue::Str(format!("User_{}", i)));
+                data.insert("age".to_string(), QueryValue::Int(i));
                 data.insert(
                     "email".to_string(),
-                    UserValue::Str(format!("user{}@test.com", i)),
+                    QueryValue::Str(format!("user{}@test.com", i)),
                 );
-                data.insert("index".to_string(), UserValue::Int(j));
-                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                data.insert("index".to_string(), QueryValue::Int(j));
+                let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                 table_clone.insert(&inner).await.unwrap();
                 counter_clone.increment(1).await.unwrap();
             }
@@ -212,8 +210,8 @@ async fn test_concurrent_updates() {
 
     // Insert initial record
     let mut data = new_map();
-    data.insert("counter".to_string(), UserValue::Int(0));
-    let inner = intern_value(&UserValue::Map(data), &interner).await;
+    data.insert("counter".to_string(), QueryValue::Int(0));
+    let inner = intern_value(&QueryValue::Map(data), &interner).await;
     let id = table.insert(&inner).await.unwrap();
     counter.increment(1).await.unwrap();
 
@@ -227,9 +225,9 @@ async fn test_concurrent_updates() {
         handles.push(tokio::spawn(async move {
             for i in 0..5 {
                 let mut data = new_map();
-                data.insert("counter".to_string(), UserValue::Int(i));
-                data.insert("thread".to_string(), UserValue::Str("test".to_string()));
-                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                data.insert("counter".to_string(), QueryValue::Int(i));
+                data.insert("thread".to_string(), QueryValue::Str("test".to_string()));
+                let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                 let _ = table_clone.update(id, &inner).await;
             }
         }));
@@ -270,9 +268,9 @@ async fn test_concurrent_clone_and_operations() {
                 0 => {
                     // Insert
                     let mut data = new_map();
-                    data.insert("op".to_string(), UserValue::Str("insert".to_string()));
-                    data.insert("num".to_string(), UserValue::Int(i));
-                    let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                    data.insert("op".to_string(), QueryValue::Str("insert".to_string()));
+                    data.insert("num".to_string(), QueryValue::Int(i));
+                    let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                     table_clone.insert(&inner).await.unwrap();
                     counter_clone.increment(1).await.unwrap();
                 }
@@ -287,8 +285,8 @@ async fn test_concurrent_clone_and_operations() {
                 3 => {
                     // Insert then get
                     let mut data = new_map();
-                    data.insert("op".to_string(), UserValue::Str("insert_get".to_string()));
-                    let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                    data.insert("op".to_string(), QueryValue::Str("insert_get".to_string()));
+                    let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                     let id = table_clone.insert(&inner).await.unwrap();
                     counter_clone.increment(1).await.unwrap();
                     let _ = table_clone.get(id).await;
@@ -315,8 +313,8 @@ async fn test_concurrent_delete() {
     let mut ids = vec![];
     for i in 0..20 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner).await;
+        data.insert("id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner).await;
         let id = table.insert(&inner).await.unwrap();
         ids.push(id);
         counter.increment(1).await.unwrap();
@@ -363,8 +361,8 @@ async fn test_counter_with_concurrent_operations() {
                     0 => {
                         // Insert
                         let mut data = new_map();
-                        data.insert("val".to_string(), UserValue::Int(i * 10 + j));
-                        let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                        data.insert("val".to_string(), QueryValue::Int(i * 10 + j));
+                        let inner = intern_value(&QueryValue::Map(data), &interner_clone).await;
                         table_clone.insert(&inner).await.unwrap();
                         counter_clone.increment(1).await.unwrap();
                     }

@@ -1,7 +1,5 @@
 //! Tests for the integrity doctor — `verify` and `repair`.
 
-#![allow(deprecated)]
-
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -12,12 +10,12 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::index::index_record_key::IndexRecordKey;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
 use shamir_storage::types::Store;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::UserValue;
+use shamir_types::types::value::QueryValue;
 
 /// Build a fresh in-memory DB with a `users` table, a regular index
 /// on `city`, a unique index on `id`, and a sorted index on `score`.
@@ -42,21 +40,21 @@ async fn seeded(n: usize) -> (crate::table::TableManager, crate::repo::RepoInsta
     let interner = table.interner().get().await.unwrap();
     for i in 0..n {
         let mut m = new_map();
-        m.insert("id".to_string(), UserValue::Str(format!("u{:04}", i)));
+        m.insert("id".to_string(), QueryValue::Str(format!("u{:04}", i)));
         m.insert(
             "city".to_string(),
-            UserValue::Str(format!("city_{}", i % 4)),
+            QueryValue::Str(format!("city_{}", i % 4)),
         );
         m.insert(
             "score".to_string(),
-            UserValue::Int((i * 7919) as i64 % 1000),
+            QueryValue::Int((i * 7919) as i64 % 1000),
         );
-        let user = UserValue::Map(m);
-        let r = transform::user_to_inner(&user, interner);
-        if let Some(ref new_keys) = r.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        let user = QueryValue::Map(m);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&inner_val).await.unwrap();
     }
     (table, repo)
 }
@@ -263,15 +261,15 @@ async fn insert_many_leaves_table_consistent_on_success() {
     let mut values = Vec::new();
     for i in 0..5 {
         let mut m = new_map();
-        m.insert("id".to_string(), UserValue::Str(format!("u{}", i)));
-        m.insert("city".to_string(), UserValue::Str("NYC".into()));
-        m.insert("score".to_string(), UserValue::Int(i as i64));
-        let user = UserValue::Map(m);
-        let r = transform::user_to_inner(&user, interner);
-        if let Some(ref new_keys) = r.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        m.insert("id".to_string(), QueryValue::Str(format!("u{}", i)));
+        m.insert("city".to_string(), QueryValue::Str("NYC".into()));
+        m.insert("score".to_string(), QueryValue::Int(i as i64));
+        let user = QueryValue::Map(m);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        values.push(r.inner_value);
+        values.push(inner_val);
     }
     let ids = table.insert_many(&values).await.unwrap();
     assert_eq!(ids.len(), 5);
@@ -330,89 +328,89 @@ async fn doctor_lens_parity_mixed_indexed_types() {
     // Record 0 — plain Int tag, Int score.
     {
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u0".into()));
-        m.insert("tag".to_string(), UserValue::Int(42));
-        m.insert("score".to_string(), UserValue::Int(100));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("uid".to_string(), QueryValue::Str("u0".into()));
+        m.insert("tag".to_string(), QueryValue::Int(42));
+        m.insert("score".to_string(), QueryValue::Int(100));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // Record 1 — Str tag, F64 score.
     {
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u1".into()));
-        m.insert("tag".to_string(), UserValue::Str("hello".into()));
-        m.insert("score".to_string(), UserValue::F64(3.5));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("uid".to_string(), QueryValue::Str("u1".into()));
+        m.insert("tag".to_string(), QueryValue::Str("hello".into()));
+        m.insert("score".to_string(), QueryValue::F64(3.5));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // Record 2 — Dec tag (non-scalar: materialize_at returns InnerValue::Dec,
     // scalar_at returns None).
     {
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u2".into()));
+        m.insert("uid".to_string(), QueryValue::Str("u2".into()));
         m.insert(
             "tag".to_string(),
-            UserValue::Dec(Decimal::from_str("123.456").unwrap()),
+            QueryValue::Dec(Decimal::from_str("123.456").unwrap()),
         );
-        m.insert("score".to_string(), UserValue::Int(200));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("score".to_string(), QueryValue::Int(200));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // Record 3 — Big tag.
     {
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u3".into()));
+        m.insert("uid".to_string(), QueryValue::Str("u3".into()));
         m.insert(
             "tag".to_string(),
-            UserValue::Big(BigInt::from_str("99999999999999999999").unwrap()),
+            QueryValue::Big(BigInt::from_str("99999999999999999999").unwrap()),
         );
-        m.insert("score".to_string(), UserValue::Int(300));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("score".to_string(), QueryValue::Int(300));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // Record 4 — Bin tag.
     {
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u4".into()));
-        m.insert("tag".to_string(), UserValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]));
-        m.insert("score".to_string(), UserValue::Int(400));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("uid".to_string(), QueryValue::Str("u4".into()));
+        m.insert("tag".to_string(), QueryValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        m.insert("score".to_string(), QueryValue::Int(400));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // Record 5 — nested Map tag (container: extract_index_leaves materializes
     // the whole subtree).
     {
         let mut inner_map = new_map();
-        inner_map.insert("nested_key".to_string(), UserValue::Str("nested_val".into()));
+        inner_map.insert("nested_key".to_string(), QueryValue::Str("nested_val".into()));
         let mut m = new_map();
-        m.insert("uid".to_string(), UserValue::Str("u5".into()));
-        m.insert("tag".to_string(), UserValue::Map(inner_map));
-        m.insert("score".to_string(), UserValue::Int(500));
-        let r = transform::user_to_inner(&UserValue::Map(m), interner);
-        if let Some(ref nk) = r.new_keys {
-            table.interner().save_new_keys(nk).await.unwrap();
+        m.insert("uid".to_string(), QueryValue::Str("u5".into()));
+        m.insert("tag".to_string(), QueryValue::Map(inner_map));
+        m.insert("score".to_string(), QueryValue::Int(500));
+        let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
+        if !nk.is_empty() {
+            table.interner().save_new_keys(&nk).await.unwrap();
         }
-        table.insert(&r.inner_value).await.unwrap();
+        table.insert(&iv).await.unwrap();
     }
 
     // 1. Verify immediately — lens-computed expected counts must match the

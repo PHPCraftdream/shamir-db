@@ -27,6 +27,7 @@ pub mod stale_index_tests;
 pub mod stream_tx_tests;
 pub mod stream_utils;
 pub mod table_config_tests;
+pub mod test_helpers;
 pub mod table_manager_tests;
 pub mod table_tests;
 pub mod update_byte_merge_parity_tests;

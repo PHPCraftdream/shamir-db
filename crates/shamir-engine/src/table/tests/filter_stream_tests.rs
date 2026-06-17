@@ -2,7 +2,7 @@
 //!
 //! Each test: JSON filter → compile → filter_stream over real table → check results.
 
-#![allow(deprecated)]
+#![allow(deprecated)] // test-only stream collectors (collect_filter_stream) are deprecated by design
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::common::filter_from_value;
@@ -11,10 +11,10 @@ use crate::query::read::{QueryRecord, QueryResult};
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::tests::stream_utils::collect_filter_stream;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::{QueryValue, UserValue};
+use shamir_types::types::value::QueryValue;
 
 /// Create a DbInstance with one "users" table, insert test records, return the table manager.
 async fn setup_table_with_users() -> crate::table::TableManager {
@@ -29,34 +29,34 @@ async fn setup_table_with_users() -> crate::table::TableManager {
     // Insert 5 users with different attributes
     let users = vec![
         vec![
-            ("name", UserValue::Str("Alice".into())),
-            ("age", UserValue::Int(30)),
-            ("status", UserValue::Str("active".into())),
-            ("score", UserValue::Int(95)),
+            ("name", QueryValue::Str("Alice".into())),
+            ("age", QueryValue::Int(30)),
+            ("status", QueryValue::Str("active".into())),
+            ("score", QueryValue::Int(95)),
         ],
         vec![
-            ("name", UserValue::Str("Bob".into())),
-            ("age", UserValue::Int(25)),
-            ("status", UserValue::Str("active".into())),
-            ("score", UserValue::Int(60)),
+            ("name", QueryValue::Str("Bob".into())),
+            ("age", QueryValue::Int(25)),
+            ("status", QueryValue::Str("active".into())),
+            ("score", QueryValue::Int(60)),
         ],
         vec![
-            ("name", UserValue::Str("Carol".into())),
-            ("age", UserValue::Int(35)),
-            ("status", UserValue::Str("inactive".into())),
-            ("score", UserValue::Int(80)),
+            ("name", QueryValue::Str("Carol".into())),
+            ("age", QueryValue::Int(35)),
+            ("status", QueryValue::Str("inactive".into())),
+            ("score", QueryValue::Int(80)),
         ],
         vec![
-            ("name", UserValue::Str("Dave".into())),
-            ("age", UserValue::Int(22)),
-            ("status", UserValue::Str("active".into())),
-            ("score", UserValue::Int(45)),
+            ("name", QueryValue::Str("Dave".into())),
+            ("age", QueryValue::Int(22)),
+            ("status", QueryValue::Str("active".into())),
+            ("score", QueryValue::Int(45)),
         ],
         vec![
-            ("name", UserValue::Str("Eve".into())),
-            ("age", UserValue::Int(28)),
-            ("status", UserValue::Str("deleted".into())),
-            ("score", UserValue::Int(70)),
+            ("name", QueryValue::Str("Eve".into())),
+            ("age", QueryValue::Int(28)),
+            ("status", QueryValue::Str("deleted".into())),
+            ("score", QueryValue::Int(70)),
         ],
     ];
 
@@ -66,12 +66,12 @@ async fn setup_table_with_users() -> crate::table::TableManager {
         for (k, v) in fields {
             map.insert(k.to_string(), v.clone());
         }
-        let user_val = UserValue::Map(map);
-        let result = transform::user_to_inner(&user_val, interner);
-        if let Some(ref new_keys) = result.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        let user_val = QueryValue::Map(map);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user_val, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        table.insert(&result.inner_value).await.unwrap();
+        table.insert(&inner_val).await.unwrap();
     }
 
     table

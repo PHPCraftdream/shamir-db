@@ -1,16 +1,15 @@
 //! Persistence tests for Table
-
-#![allow(deprecated)]
+#![allow(deprecated)] // collect_list_stream is deprecated test-only utility
 
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::{InnerValue, UserValue};
+use shamir_types::types::value::{InnerValue, QueryValue};
 use std::sync::Arc;
 
 /// Helper to create InternerManager for a table
@@ -23,17 +22,16 @@ fn create_record_counter(info_store: Arc<dyn shamir_storage::types::Store>) -> A
     Arc::new(RecordCounter::new(info_store))
 }
 
-/// Helper to intern a UserValue and save new keys
-async fn intern_value(value: &UserValue, interner: &InternerManager) -> InnerValue {
+/// Helper to intern a QueryValue and save new keys
+async fn intern_value(value: &QueryValue, interner: &InternerManager) -> InnerValue {
     let inter = interner.get().await.unwrap();
-    let transform = transform::user_to_inner(value, inter);
+    let (inner_value, new_keys) = query_value_to_inner_tracked(value, inter).unwrap();
 
-    // Save new keys if any
-    if let Some(ref new_keys) = transform.new_keys {
-        interner.save_new_keys(new_keys).await.unwrap();
+    if !new_keys.is_empty() {
+        interner.save_new_keys(&new_keys).await.unwrap();
     }
 
-    transform.inner_value
+    inner_value
 }
 
 #[tokio::test]
@@ -55,13 +53,13 @@ async fn test_interner_persistence_after_restart() {
 
     // Insert multiple records with overlapping keys to test interning
     let mut data1 = new_map();
-    data1.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+    data1.insert("name".to_string(), QueryValue::Str("Alice".to_string()));
     data1.insert(
         "email".to_string(),
-        UserValue::Str("alice@example.com".to_string()),
+        QueryValue::Str("alice@example.com".to_string()),
     );
-    data1.insert("age".to_string(), UserValue::Int(30));
-    let value1 = UserValue::Map(data1);
+    data1.insert("age".to_string(), QueryValue::Int(30));
+    let value1 = QueryValue::Map(data1);
 
     let inner1 = intern_value(&value1, &interner1).await;
     let id1 = table1.insert(&inner1).await.unwrap();
@@ -69,13 +67,13 @@ async fn test_interner_persistence_after_restart() {
 
     // Insert second record with same keys (should reuse interner entries)
     let mut data2 = new_map();
-    data2.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+    data2.insert("name".to_string(), QueryValue::Str("Bob".to_string()));
     data2.insert(
         "email".to_string(),
-        UserValue::Str("bob@example.com".to_string()),
+        QueryValue::Str("bob@example.com".to_string()),
     );
-    data2.insert("age".to_string(), UserValue::Int(25));
-    let value2 = UserValue::Map(data2);
+    data2.insert("age".to_string(), QueryValue::Int(25));
+    let value2 = QueryValue::Map(data2);
 
     let inner2 = intern_value(&value2, &interner1).await;
     let id2 = table1.insert(&inner2).await.unwrap();
@@ -135,13 +133,13 @@ async fn test_interner_persistence_after_restart() {
 
     // Insert new record with same keys (should reuse restored interner entries)
     let mut data3 = new_map();
-    data3.insert("name".to_string(), UserValue::Str("Charlie".to_string()));
+    data3.insert("name".to_string(), QueryValue::Str("Charlie".to_string()));
     data3.insert(
         "email".to_string(),
-        UserValue::Str("charlie@example.com".to_string()),
+        QueryValue::Str("charlie@example.com".to_string()),
     );
-    data3.insert("age".to_string(), UserValue::Int(35));
-    let value3 = UserValue::Map(data3);
+    data3.insert("age".to_string(), QueryValue::Int(35));
+    let value3 = QueryValue::Map(data3);
 
     let inner3 = intern_value(&value3, &interner2).await;
     let id3 = table2.insert(&inner3).await.unwrap();
@@ -200,9 +198,9 @@ async fn test_counter_persistence_after_restart() {
     // Insert multiple records
     for i in 0..5 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
-        let inner = intern_value(&UserValue::Map(data), &interner1).await;
+        data.insert("id".to_string(), QueryValue::Int(i));
+        data.insert("name".to_string(), QueryValue::Str(format!("User{}", i)));
+        let inner = intern_value(&QueryValue::Map(data), &interner1).await;
         table1.insert(&inner).await.unwrap();
         counter1.increment(1).await.unwrap();
     }
@@ -242,9 +240,9 @@ async fn test_counter_persistence_after_restart() {
     // Insert more records
     for i in 5..10 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
-        let inner = intern_value(&UserValue::Map(data), &interner2).await;
+        data.insert("id".to_string(), QueryValue::Int(i));
+        data.insert("name".to_string(), QueryValue::Str(format!("User{}", i)));
+        let inner = intern_value(&QueryValue::Map(data), &interner2).await;
         table2.insert(&inner).await.unwrap();
         counter2.increment(1).await.unwrap();
     }
@@ -313,8 +311,8 @@ async fn test_counter_matches_actual_record_count() {
     // Insert 10 records
     for i in 0..10 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner).await;
+        data.insert("id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner).await;
         let id = table.insert(&inner).await.unwrap();
         ids.push(id);
         counter.increment(1).await.unwrap();
@@ -336,8 +334,8 @@ async fn test_counter_matches_actual_record_count() {
 
     // Update 2 records
     let mut data = new_map();
-    data.insert("updated".to_string(), UserValue::Str("yes".to_string()));
-    let inner = intern_value(&UserValue::Map(data), &interner).await;
+    data.insert("updated".to_string(), QueryValue::Str("yes".to_string()));
+    let inner = intern_value(&QueryValue::Map(data), &interner).await;
     table.update(ids[3], &inner).await.unwrap();
     table.update(ids[4], &inner).await.unwrap();
 
@@ -348,8 +346,8 @@ async fn test_counter_matches_actual_record_count() {
     // Insert 5 more
     for i in 10..15 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner).await;
+        data.insert("id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner).await;
         table.insert(&inner).await.unwrap();
         counter.increment(1).await.unwrap();
     }
