@@ -19,11 +19,16 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use serde_bytes::ByteBuf;
 use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse};
+use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse, ResultEncoding};
+use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_query_types::write::{InsertOp, SetOp, UpdateOp};
+use shamir_types::codecs::interned::{query_value_to_storage_bytes, record_view_deintern_with};
+use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::RecordView;
 use shamir_types::types::value::{QueryValue, Value};
 
 use crate::error::ClientError;
@@ -310,28 +315,62 @@ impl Client {
         }
     }
 
-    /// Explicit pre-touch write entry (Stage 5 mode a).
+    /// Explicit pre-touch write entry (Stage 5 mode a / S-client).
     ///
     /// Walks `batch`'s insert / set(upsert) / update records, collects the
     /// field names appearing as map keys (grouped by the repo named on each
     /// op's table-ref), calls [`touch_fields`] on the unknown ones (warming
     /// the cache so the subsequent write finds them already interned on the
-    /// server), then sends the batch **UNCHANGED** — the records stay
-    /// string-keyed on the wire (Stage 5 minimal does NOT rewrite record
-    /// keys to ids).
+    /// server), then:
+    ///
+    /// * **v2 server** (`server_query_version >= 2`): encodes each fully-literal
+    ///   (no `$fn`) INSERT record via [`query_value_to_storage_bytes`] into
+    ///   `InsertOp.records_idmsgpack`; the original string-keyed values are
+    ///   REMOVED from `values` (so they are not double-sent). Records containing
+    ///   a `$fn` marker stay on `values` unchanged. Sets `result_encoding = Id`
+    ///   so the server returns id-keyed rows; the client de-interns them
+    ///   transparently before returning (public API stays name-keyed). §9.4: key
+    ///   interning goes through `FieldMap::id_of(name)` — `"42"` resolves to the
+    ///   id the server assigned to the FIELD named "42", never the integer 42.
+    ///
+    /// * **v1 server** (`server_query_version < 2`) or `$fn` records: the records
+    ///   stay on `values` UNCHANGED (today's behaviour). No id-keyed encoding.
+    ///
+    /// # result_encoding choice
+    /// `execute_with_touch` always requests `result_encoding = Id` on v2. This
+    /// is the "smart-write path" that already pre-touches all fields, so the
+    /// FieldMap is guaranteed warm and de-interning always succeeds without an
+    /// extra roundtrip. The lower-level `execute` method does NOT set this —
+    /// admin/interner callers that call `execute` directly get Json rows, which
+    /// is backward-compatible. This design keeps the smart path fully transparent
+    /// to callers (all rows come back as name-keyed `QueryValue`) while not
+    /// touching unrelated code.
     pub async fn execute_with_touch(
         &self,
         db: &str,
-        batch: BatchRequest,
+        mut batch: BatchRequest,
     ) -> Result<BatchResponse, ClientError> {
-        // Collect field names per repo. Each repo gets ONE aggregated touch.
-        // The repo is read straight off each op's table-ref — no caller
-        // closure needed. TFxMap = HashMap with the workspace THasher
+        // Collect field names per repo (write ops only — INSERT/SET/UPDATE).
+        // Each repo gets ONE aggregated touch. The repo is read straight off
+        // each op's table-ref. TFxMap = HashMap with the workspace THasher
         // (`HashMap::new` is banned — SipHash).
         let mut per_repo: TFxMap<String, Vec<String>> = TFxMap::default();
         for entry in batch.queries.values() {
             collect_field_names(&entry.op, &mut per_repo);
         }
+
+        // Collect the FULL set of repos referenced by ANY data op (read OR
+        // write). This wider set is what deintern_response consults: a
+        // read-only batch has no write ops (per_repo empty), but its SELECT
+        // results may come back as IdBytes rows that need a FieldMap to
+        // de-intern. Using table_ref() covers Read, Insert, Update, Set, Delete.
+        let mut all_repos: TFxMap<String, ()> = TFxMap::default();
+        for entry in batch.queries.values() {
+            if let Some(tr) = entry.op.table_ref() {
+                all_repos.insert(tr.repo.clone(), ());
+            }
+        }
+        let repos: Vec<String> = all_repos.into_keys().collect();
 
         // Touch each repo's unknown fields. The touch fn short-circuits when
         // every name is already cached, so a warm cache adds no roundtrip.
@@ -344,9 +383,44 @@ impl Client {
             }
         }
 
-        // Send the batch UNCHANGED. The records are still string-keyed — we do
-        // NOT rewrite keys to ids (that is the deferred id-keyed insert wire).
-        self.execute(db, batch).await
+        // v2 id-keyed write path: encode fully-literal INSERT records into
+        // records_idmsgpack and request Id result encoding for transparent
+        // server-side pass-through. v1 path: send batch unchanged.
+        if self.server_query_version() >= 2 {
+            for entry in batch.queries.values_mut() {
+                if let BatchOp::Insert(ref mut op) = entry.op {
+                    let fm = self
+                        .interner_cache()
+                        .get_or_create(db, &op.insert_into.repo);
+                    // Drain values, separating literal from $fn records.
+                    // Literal records → records_idmsgpack (id-keyed storage bytes).
+                    // $fn records → remain on values (server-side eval required).
+                    let mut remaining: Vec<QueryValue> = Vec::with_capacity(op.values.len());
+                    for qv in op.values.drain(..) {
+                        if qv_has_fn_marker(&qv) {
+                            remaining.push(qv);
+                        } else {
+                            // §9.4: fm.id_of(name) — name is an opaque STRING,
+                            // never parsed as a number.
+                            let bytes = encode_record_idmsgpack(&qv, &fm)?;
+                            op.records_idmsgpack.push(ByteBuf::from(bytes));
+                        }
+                    }
+                    op.values = remaining;
+                }
+            }
+            // Request id-keyed result rows; client de-interns below.
+            batch.result_encoding = ResultEncoding::Id;
+        }
+
+        let response = self.execute(db, batch).await?;
+
+        // De-intern any IdBytes rows back to name-keyed QueryValues. The repos
+        // slice tells deintern_response which FieldMaps to consult. Only called
+        // on v2 (result_encoding = Id was set above), but safe to call on v1
+        // responses too since deintern_response is a no-op when no IdBytes rows
+        // are present.
+        deintern_response(self, db, response, &repos).await
     }
 }
 
@@ -392,4 +466,155 @@ fn collect_map_keys(v: &QueryValue, out: &mut Vec<String>) {
             collect_map_keys(item, out);
         }
     }
+}
+
+// ─── v2 id-keyed helpers ──────────────────────────────────────────────────────
+
+/// Returns `true` if `v` contains a map with the key `"$fn"` anywhere in the
+/// value tree. Records containing `$fn` rely on server-side evaluation and
+/// MUST NOT be encoded as id-keyed storage bytes.
+///
+/// The check is recursive: a `$fn` nested anywhere (including inside a list of
+/// maps or a nested map value) marks the whole record as non-literal.
+fn qv_has_fn_marker(v: &QueryValue) -> bool {
+    match v {
+        Value::Map(m) => {
+            if m.contains_key("$fn") {
+                return true;
+            }
+            m.values().any(qv_has_fn_marker)
+        }
+        Value::List(items) => items.iter().any(qv_has_fn_marker),
+        Value::Set(items) => items.iter().any(qv_has_fn_marker),
+        // Scalars: no $fn possible.
+        _ => false,
+    }
+}
+
+/// Encode a single fully-literal `QueryValue` map record to id-keyed storage
+/// bytes via [`query_value_to_storage_bytes`].
+///
+/// The intern closure resolves each field NAME from the FieldMap.
+/// §9.4: `FieldMap::id_of(name)` looks up the name as an opaque STRING;
+/// a field literally named "42" maps to its server-assigned id, never 42.
+fn encode_record_idmsgpack(
+    qv: &QueryValue,
+    fm: &crate::interner_cache::FieldMap,
+) -> Result<Vec<u8>, ClientError> {
+    let intern = |name: &str| {
+        fm.id_of(name).map(InternerKey::new).ok_or_else(|| {
+            shamir_types::codecs::CodecError::Encode(format!(
+                "field '{}' not in FieldMap — touch_fields must be called first",
+                name
+            ))
+        })
+    };
+    query_value_to_storage_bytes(qv, &intern)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| ClientError::Protocol(format!("id-keyed record encode: {e}")))
+}
+
+/// De-intern all `QueryRecord::IdBytes` rows in `response` using the FieldMaps
+/// for `repos` under `db`. Returns the response with all IdBytes rows replaced
+/// by name-keyed `QueryRecord::Direct(QueryValue)`.
+///
+/// This function is only called from `execute_with_touch` on v2 responses.
+/// It is a no-op if no IdBytes rows are present (v1 responses, or responses
+/// from non-insert ops that return Json rows).
+///
+/// **Repo selection:** the caller passes the repos that were targeted by the
+/// batch — these are exactly the repos whose FieldMaps are pre-warmed by
+/// `touch_fields`. For each IdBytes row we try each repo's FieldMap; the
+/// correct repo's map fully resolves all ids. If no repo resolves the row,
+/// we call `refresh_repo` ONCE per repo and retry.
+async fn deintern_response(
+    client: &Client,
+    db: &str,
+    mut response: BatchResponse,
+    repos: &[String],
+) -> Result<BatchResponse, ClientError> {
+    // Track which repos have been refreshed in this call to avoid double-refresh.
+    let mut refreshed: TFxMap<String, ()> = TFxMap::default();
+
+    for result in response.results.values_mut() {
+        deintern_query_result(client, db, result, repos, &mut refreshed).await?;
+    }
+    Ok(response)
+}
+
+/// De-intern all `QueryRecord::IdBytes` rows in `result` in place.
+async fn deintern_query_result(
+    client: &Client,
+    db: &str,
+    result: &mut QueryResult,
+    repos: &[String],
+    refreshed: &mut TFxMap<String, ()>,
+) -> Result<(), ClientError> {
+    for record in &mut result.records {
+        if let QueryRecord::IdBytes(ref bytes) = *record {
+            let bytes_snapshot = bytes.clone();
+            let qv =
+                deintern_id_bytes(client, db, bytes_snapshot.as_ref(), repos, refreshed).await?;
+            *record = QueryRecord::Direct(qv);
+        }
+    }
+    Ok(())
+}
+
+/// De-intern a single `IdBytes` payload using the FieldMaps for `repos`.
+///
+/// Attempt 1: try each repo's FieldMap. Return the first successful de-intern.
+/// Attempt 2 (if all fail): refresh repos once, then retry.
+/// If still failing after refresh, return a protocol error.
+async fn deintern_id_bytes(
+    client: &Client,
+    db: &str,
+    bytes: &[u8],
+    repos: &[String],
+    refreshed: &mut TFxMap<String, ()>,
+) -> Result<QueryValue, ClientError> {
+    // Attempt 1: try all known repos without any refresh.
+    if let Some(qv) = try_deintern_repos(client, db, bytes, repos) {
+        return Ok(qv);
+    }
+
+    // Attempt 2: refresh all not-yet-refreshed repos, then retry.
+    for repo in repos {
+        if !refreshed.contains_key(repo) {
+            client.refresh_repo(db, repo).await?;
+            refreshed.insert(repo.clone(), ());
+        }
+    }
+
+    try_deintern_repos(client, db, bytes, repos).ok_or_else(|| {
+        ClientError::Protocol(format!(
+            "de-intern: id-keyed row could not be resolved after refresh_repo (db={db})"
+        ))
+    })
+}
+
+/// Try to de-intern `bytes` using each repo's FieldMap in turn. Returns the
+/// first successful de-intern, or `None` if all repos fail.
+///
+/// A repo's de-intern succeeds when EVERY id in the row is present in that
+/// repo's FieldMap. If any id is missing, `record_view_deintern_with` returns
+/// an error and we try the next repo.
+fn try_deintern_repos(
+    client: &Client,
+    db: &str,
+    bytes: &[u8],
+    repos: &[String],
+) -> Option<QueryValue> {
+    let view = RecordView::new(bytes)
+        .map_err(|e| tracing::warn!("de-intern: RecordView::new failed: {:?}", e))
+        .ok()?;
+
+    for repo in repos {
+        let fm = client.interner_cache().get_or_create(db, repo);
+        let resolver = |id: u64| fm.name_of(id);
+        if let Ok(qv) = record_view_deintern_with(&view, &resolver) {
+            return Some(qv);
+        }
+    }
+    None
 }

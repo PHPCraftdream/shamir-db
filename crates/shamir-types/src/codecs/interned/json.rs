@@ -498,3 +498,71 @@ fn convert_raw_seq_to_json_value(
     }
     Ok(json::Value::Array(items))
 }
+
+// ---------------------------------------------------------------------------
+// FieldMap-backed de-intern — closure-driven variant for the client
+// ---------------------------------------------------------------------------
+
+/// Converts a [`RecordView`] (id-keyed msgpack lens) to [`QueryValue`] (string
+/// keys) using a caller-supplied resolver instead of an [`Interner`].
+///
+/// Added for the client-side de-intern path (S-client): the client holds a
+/// [`FieldMap`] (not an `Interner`), so instead of taking a reverse-snapshot
+/// vec the caller passes a `Fn(u64) -> Option<&str>` that resolves each
+/// id to a name from the FieldMap. The function returns
+/// `Err(CodecError::Decode("unknown id …"))` for any id the resolver cannot
+/// resolve — the caller can then refresh the interner cache and retry.
+///
+/// Justification for the new public function (rather than reusing
+/// `record_view_to_query_value`): the `Interner` type is server-only
+/// (`shamir-engine` / `shamir-server`); the client has a `FieldMap`
+/// (`scc::HashMap<u64, String>`). Threading the `Interner` into the client
+/// crate would create an unwanted cross-crate dependency. A closure-based
+/// variant is the lightest approach that avoids that coupling while reusing
+/// the proven O(N) lens walk.
+pub fn record_view_deintern_with<F>(
+    view: &RecordView<'_>,
+    resolve: &F,
+) -> Result<QueryValue, CodecError>
+where
+    F: Fn(u64) -> Option<String>,
+{
+    let mut obj = new_map_wc(view.len());
+    for (interned_key, rv) in view.fields() {
+        let id = interned_key.id();
+        let key_str = resolve(id).ok_or_else(|| {
+            CodecError::Decode(format!("unknown interned id {} (client cache miss)", id))
+        })?;
+        obj.insert(key_str, rv_deintern_value_with(&rv, resolve)?);
+    }
+    Ok(QueryValue::Map(obj))
+}
+
+/// Recursively de-intern a [`RecordValue`] using the resolver closure.
+fn rv_deintern_value_with<F>(rv: &RecordValue<'_>, resolve: &F) -> Result<QueryValue, CodecError>
+where
+    F: Fn(u64) -> Option<String>,
+{
+    match rv {
+        RecordValue::Null => Ok(QueryValue::Null),
+        RecordValue::Bool(b) => Ok(QueryValue::Bool(*b)),
+        RecordValue::Int(i) => Ok(QueryValue::Int(*i)),
+        RecordValue::F64(f) => Ok(QueryValue::F64(*f)),
+        RecordValue::Str(cow) => Ok(QueryValue::Str(cow.as_ref().to_owned())),
+        RecordValue::Bin(b) => Ok(QueryValue::Bin(b.to_vec())),
+        RecordValue::Arr(seq) => rv_deintern_seq_with(seq, resolve),
+        RecordValue::Map(nested) => record_view_deintern_with(nested, resolve),
+    }
+}
+
+/// Walk a [`RawSeq`] using the resolver closure.
+fn rv_deintern_seq_with<F>(seq: &RawSeq<'_>, resolve: &F) -> Result<QueryValue, CodecError>
+where
+    F: Fn(u64) -> Option<String>,
+{
+    let mut items = Vec::with_capacity(seq.len());
+    for elem in seq.iter() {
+        items.push(rv_deintern_value_with(&elem, resolve)?);
+    }
+    Ok(QueryValue::List(items))
+}
