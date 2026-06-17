@@ -381,7 +381,7 @@ mod tests {
         map.insert("score".to_string(), QueryValue::F64(3.5));
         let id = RecordId::system("test-id-00");
         let rec = InsertedRecord::Direct {
-            id,
+            id: Some(id),
             fields: QueryValue::Map(map),
         };
 
@@ -419,7 +419,7 @@ mod tests {
         map.insert("name".to_string(), QueryValue::Str("widget".to_string()));
         map.insert("qty".to_string(), QueryValue::Int(42));
         let rec = InsertedRecord::Direct {
-            id: RecordId::system("test-id-01"),
+            id: Some(RecordId::system("test-id-01")),
             fields: QueryValue::Map(map),
         };
         let qr: QueryRecord = rec.into();
