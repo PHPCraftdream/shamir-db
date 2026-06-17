@@ -1,8 +1,4 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
@@ -16,6 +12,8 @@ use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_query_types::subscribe::source::SubscriptionSource;
 use shamir_tunables::instance_defaults::JOURNAL_BACKFILL_LIMIT;
 use shamir_tx::ChangeOp;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{StreamExt, StreamMap};
 
@@ -80,7 +78,7 @@ pub(crate) async fn bridge_task(
 
         let mut consecutive_push_failures: u32 = 0;
         // repo name → index (built once; repos are fixed at subscribe time).
-        let repo_idx: HashMap<String, usize, THasher> = repos
+        let repo_idx: TFxMap<String, usize> = repos
             .iter()
             .enumerate()
             .map(|(i, r)| (r.clone(), i))

@@ -2,6 +2,7 @@ use crate::kind::VectorMetric;
 use crate::vector::adapter::{VectorAdapter, VectorError};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist};
 use hnsw_rs::prelude::Distance;
+use shamir_collections::TFxSet;
 use shamir_types::types::record_id::RecordId;
 
 fn rid(n: u8) -> RecordId {
@@ -164,12 +165,10 @@ async fn recall_at_10_on_1k_vectors() {
         })
         .collect();
     dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let gt_top10: std::collections::HashSet<RecordId> =
-        dists.iter().take(10).map(|(r, _)| *r).collect();
+    let gt_top10: TFxSet<RecordId> = dists.iter().take(10).map(|(r, _)| *r).collect();
 
     let hnsw_results = adapter.search(query, 10, None).await.unwrap();
-    let hnsw_top10: std::collections::HashSet<RecordId> =
-        hnsw_results.iter().map(|(r, _)| *r).collect();
+    let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
 
     let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
     assert!(recall >= 0.5, "recall@10 = {recall:.2} — expected >= 0.50");
@@ -332,8 +331,7 @@ async fn search_merges_staged_slice() {
 
     // Without the staged slice: only the committed vector.
     let committed_only = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
-    let committed_rids: std::collections::HashSet<_> =
-        committed_only.iter().map(|(r, _)| *r).collect();
+    let committed_rids: TFxSet<_> = committed_only.iter().map(|(r, _)| *r).collect();
     assert!(committed_rids.contains(&rid(1)));
     assert!(
         !committed_rids.contains(&rid(2)),
@@ -345,7 +343,7 @@ async fn search_merges_staged_slice() {
         .search(&[1.0, 0.0, 0.0], 10, Some(&staged))
         .await
         .unwrap();
-    let merged_rids: std::collections::HashSet<_> = merged.iter().map(|(r, _)| *r).collect();
+    let merged_rids: TFxSet<_> = merged.iter().map(|(r, _)| *r).collect();
     assert!(
         merged_rids.contains(&rid(1)),
         "committed vector still found"
@@ -382,7 +380,7 @@ async fn apply_committed_vectors_inserts_all_into_graph() {
         !after.is_empty(),
         "graph must hold committed vectors after apply"
     );
-    let labels: std::collections::HashSet<_> = after.iter().map(|(r, _)| *r).collect();
+    let labels: TFxSet<_> = after.iter().map(|(r, _)| *r).collect();
     assert!(
         labels.contains(&rid(1)),
         "closest applied vector (rid 1) must be findable; got {after:?}"

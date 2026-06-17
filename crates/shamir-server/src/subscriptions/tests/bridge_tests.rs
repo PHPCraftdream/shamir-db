@@ -1,9 +1,8 @@
-use shamir_collections::THasher;
-use std::collections::HashMap;
+use shamir_collections::TFxMap;
 
 #[test]
 fn watermark_skips_already_seen_versions() {
-    let mut watermarks: HashMap<String, u64, THasher> = HashMap::<_, _, THasher>::default();
+    let mut watermarks: TFxMap<String, u64> = TFxMap::default();
     let repo = "repo_a".to_string();
 
     watermarks.insert(repo.clone(), 5);
@@ -19,7 +18,7 @@ fn watermark_skips_already_seen_versions() {
 
 #[test]
 fn watermark_independent_per_repo() {
-    let mut watermarks: HashMap<String, u64, THasher> = HashMap::<_, _, THasher>::default();
+    let mut watermarks: TFxMap<String, u64> = TFxMap::default();
     watermarks.insert("repo_a".to_string(), 10);
     watermarks.insert("repo_b".to_string(), 3);
 
@@ -39,7 +38,7 @@ fn watermark_independent_per_repo() {
 
 #[test]
 fn watermark_backfill_tracks_max_version() {
-    let mut watermarks: HashMap<String, u64, THasher> = HashMap::<_, _, THasher>::default();
+    let mut watermarks: TFxMap<String, u64> = TFxMap::default();
     let repo = "repo_a".to_string();
 
     for version in [2, 5, 3, 7, 6] {

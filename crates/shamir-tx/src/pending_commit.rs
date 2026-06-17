@@ -1,9 +1,7 @@
 //! Group-commit scaffolding — `PendingCommit` queued for batch materialisation.
 
-use std::collections::HashSet;
-
 use bytes::Bytes;
-use shamir_collections::THasher;
+use shamir_collections::TFxSet;
 use shamir_storage::error::DbError;
 use tokio::sync::oneshot;
 
@@ -16,7 +14,7 @@ use crate::TxContext;
 /// WAL fsync.
 pub struct PendingCommit {
     pub tx: TxContext,
-    pub write_set_keys: HashSet<(u64, Bytes), THasher>,
+    pub write_set_keys: TFxSet<(u64, Bytes)>,
     /// Per-table unique-write-lock guards acquired in the pre-lock phase.
     pub uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     pub result_tx: oneshot::Sender<Result<u64, DbError>>,
@@ -25,7 +23,7 @@ pub struct PendingCommit {
 impl PendingCommit {
     pub fn new(
         tx: TxContext,
-        write_set_keys: HashSet<(u64, Bytes), THasher>,
+        write_set_keys: TFxSet<(u64, Bytes)>,
         uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         result_tx: oneshot::Sender<Result<u64, DbError>>,
     ) -> Self {

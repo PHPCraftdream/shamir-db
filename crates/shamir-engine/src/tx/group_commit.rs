@@ -10,10 +10,8 @@
 //! A transaction that loses `try_commit_lock` becomes a FOLLOWER: it
 //! enqueues itself and awaits the leader's notification.
 
-use std::collections::HashSet;
-
 use bytes::Bytes;
-use shamir_collections::THasher;
+use shamir_collections::TFxSet;
 use shamir_storage::error::DbError;
 use shamir_tx::{CommitWriteRecord, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use tokio::sync::oneshot;
@@ -26,7 +24,7 @@ use crate::tx::pre_commit::pre_commit_locked_validate;
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
 /// Compute the write-set keys for conflict detection from a TxContext.
-pub(crate) fn compute_write_set_keys(tx: &TxContext) -> HashSet<(u64, Bytes), THasher> {
+pub(crate) fn compute_write_set_keys(tx: &TxContext) -> TFxSet<(u64, Bytes)> {
     tx.write_set_keys()
         .map(|(token, key)| (token, Bytes::copy_from_slice(key)))
         .collect()
@@ -61,7 +59,7 @@ impl Drop for PanicGuard {
 pub(super) async fn run_leader(
     leader_tx: TxContext,
     leader_uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
-    leader_write_set_keys: HashSet<(u64, Bytes), THasher>,
+    leader_write_set_keys: TFxSet<(u64, Bytes)>,
     commit_guard: tokio::sync::MutexGuard<'_, ()>,
     repo: &RepoInstance,
     gate: &RepoTxGate,
@@ -78,8 +76,7 @@ pub(super) async fn run_leader(
 
     // Step 1: Cross-tx conflict filter.
     // We store accepted write_set_keys in a Vec for pairwise checks.
-    let mut accepted_wsk: Vec<HashSet<(u64, Bytes), THasher>> =
-        Vec::with_capacity(1 + followers.len());
+    let mut accepted_wsk: Vec<TFxSet<(u64, Bytes)>> = Vec::with_capacity(1 + followers.len());
     accepted_wsk.push(leader_write_set_keys);
 
     struct Entry {

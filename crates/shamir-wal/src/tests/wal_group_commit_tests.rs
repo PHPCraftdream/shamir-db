@@ -1,3 +1,5 @@
+// shamir-collections not a dep in shamir-wal
+#![allow(clippy::disallowed_types)]
 use std::collections::HashSet;
 use std::sync::Arc;
 

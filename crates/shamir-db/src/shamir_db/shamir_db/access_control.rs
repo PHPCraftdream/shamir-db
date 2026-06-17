@@ -1,6 +1,5 @@
 use serde_json::json;
-use shamir_collections::THasher;
-use std::collections::HashMap;
+use shamir_collections::TFxMap;
 
 use crate::access::{
     authorize, permits, principal_id, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
@@ -412,7 +411,7 @@ impl ShamirDb {
         db_filter: Option<&str>,
     ) -> DbResult<serde_json::Value> {
         // ── principals first, so resource nodes resolve owner/group names ──
-        let mut name_of: HashMap<u64, String, THasher> = HashMap::<_, _, THasher>::default();
+        let mut name_of: TFxMap<u64, String> = TFxMap::default();
         name_of.insert(OWNER_SYSTEM, "system".to_string());
         let mut users_json: Vec<serde_json::Value> = Vec::new();
         for rec in self.system_store.load_users().await? {
@@ -424,7 +423,7 @@ impl ShamirDb {
         }
         users_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-        let mut group_name_of: HashMap<u64, String, THasher> = HashMap::<_, _, THasher>::default();
+        let mut group_name_of: TFxMap<u64, String> = TFxMap::default();
         let mut groups_json: Vec<serde_json::Value> = Vec::new();
         for rec in self.system_store.load_groups().await? {
             let Some(gid) = rec.get("group_id").and_then(|v| v.as_u64()) else {
@@ -533,8 +532,8 @@ pub(super) fn access_node(
     name: &str,
     kind: &str,
     meta: &ResourceMeta,
-    name_of: &HashMap<u64, String, THasher>,
-    group_name_of: &HashMap<u64, String, THasher>,
+    name_of: &TFxMap<u64, String>,
+    group_name_of: &TFxMap<u64, String>,
 ) -> serde_json::Value {
     let owner_id = meta.owner.to_owner_id();
     json!({

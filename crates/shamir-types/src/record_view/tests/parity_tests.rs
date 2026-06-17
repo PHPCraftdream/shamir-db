@@ -25,10 +25,10 @@
 
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RecordValue, RecordView};
-use crate::types::common::{new_map_wc, THasher};
+use crate::types::common::new_map_wc;
 use crate::types::value::InnerValue;
+use shamir_collections::TFxSet;
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 /// Intern a string key, returning the `InternerKey` the tree map uses.
 fn ik(interner: &Interner, s: &str) -> InternerKey {
@@ -451,7 +451,7 @@ fn parity_fields_iter_matches_tree() {
         _ => panic!("expected map"),
     };
 
-    let mut seen = HashSet::<u64, THasher>::default();
+    let mut seen = TFxSet::<u64>::default();
     for (key, val) in lens.fields() {
         assert_lens_matches_tree(Some(val), tree_map.get(&key));
         seen.insert(key.id());

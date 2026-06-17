@@ -46,7 +46,7 @@ use std::collections::VecDeque;
 
 use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::filter::Filter;
-use shamir_collections::{new_map, new_set, THasher, TMap, TSet};
+use shamir_collections::{new_map, new_set, TFxSet, TMap, TSet};
 use shamir_types::types::value::QueryValue;
 
 // Maximum stack depth for the iterative nesting-depth walk (safety cap).
@@ -334,19 +334,17 @@ impl BatchPlanner {
     /// Uses borrow-based `HashSet<&str>` to avoid per-node `String` allocations
     /// in the DFS hot loop. Only allocates when a cycle is found (rare / error path).
     fn detect_cycle(deps: &TMap<String, TSet<String>>) -> Option<Vec<String>> {
-        use std::collections::HashSet;
-
         // Borrow-based sets — no allocations in the happy path.
-        let mut white: HashSet<&str, THasher> = deps.keys().map(String::as_str).collect();
-        let mut gray: HashSet<&str, THasher> = HashSet::with_hasher(THasher::default());
-        let mut black: HashSet<&str, THasher> = HashSet::with_hasher(THasher::default());
+        let mut white: TFxSet<&str> = deps.keys().map(String::as_str).collect();
+        let mut gray: TFxSet<&str> = TFxSet::default();
+        let mut black: TFxSet<&str> = TFxSet::default();
 
         fn dfs<'a>(
             node: &'a str,
             deps: &'a TMap<String, TSet<String>>,
-            white: &mut HashSet<&'a str, THasher>,
-            gray: &mut HashSet<&'a str, THasher>,
-            black: &mut HashSet<&'a str, THasher>,
+            white: &mut TFxSet<&'a str>,
+            gray: &mut TFxSet<&'a str>,
+            black: &mut TFxSet<&'a str>,
             path: &mut Vec<&'a str>,
         ) -> Option<Vec<String>> {
             white.remove(node);

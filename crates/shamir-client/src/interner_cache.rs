@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use shamir_collections::THasher;
+use shamir_collections::{TFxSet, THasher};
 use tokio::sync::OnceCell;
 
 /// One name↔id mirror for a single `(db, repo)` interner.
@@ -131,8 +131,7 @@ impl FieldMap {
         I: IntoIterator<Item = &'a str>,
     {
         let mut out = Vec::new();
-        // THasher (workspace default) — `HashSet::new` is banned (SipHash).
-        let mut seen = std::collections::HashSet::with_hasher(THasher::default());
+        let mut seen = TFxSet::default();
         for name in input {
             if seen.insert(name) && self.id_of(name).is_none() {
                 out.push(name.to_string());

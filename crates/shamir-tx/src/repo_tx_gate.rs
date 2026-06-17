@@ -13,11 +13,9 @@
 //! non-transactional hot paths.
 
 use bytes::Bytes;
-use std::collections::HashMap;
+use shamir_collections::{TFxMap, THasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-use shamir_collections::THasher;
 
 use crate::completion_tracker::CompletionTracker;
 use crate::pending_commit::PendingCommit;
@@ -51,7 +49,7 @@ pub struct TableWriteFootprint {
 pub struct CommitWriteRecord {
     pub commit_version: u64,
     /// Keyed by table_token (engine's `table_token()`).
-    pub per_table: HashMap<u64, TableWriteFootprint, THasher>,
+    pub per_table: TFxMap<u64, TableWriteFootprint>,
 }
 
 impl CommitWriteRecord {
@@ -608,7 +606,7 @@ pub fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::Pre
 pub fn build_footprint_from_tx(tx: &crate::TxContext, commit_version: u64) -> CommitWriteRecord {
     let mut rec = CommitWriteRecord {
         commit_version,
-        per_table: HashMap::with_hasher(THasher::default()),
+        per_table: TFxMap::default(),
     };
     if tx.isolation != crate::IsolationLevel::Serializable {
         // Zero-overhead: Snapshot/non-tx publishes nothing.

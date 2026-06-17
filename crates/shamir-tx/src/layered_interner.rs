@@ -4,10 +4,9 @@
 //! `architectural-decisions.md` for rationale.
 
 use scc::HashMap as SccHashMap;
-use shamir_collections::THasher;
+use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::{Interner, InternerKey, UserKey};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Starting value for overlay ids. Any id >= this value is treated as an
@@ -168,7 +167,7 @@ impl<'a> LayeredInterner<'a> {
 /// genuinely new entries inserted into base during merge.
 pub struct OverlayCommitResult {
     /// `overlay_id → final_base_id` for every overlay entry.
-    pub remap: HashMap<u64, u64, THasher>,
+    pub remap: TFxMap<u64, u64>,
     /// Entries that were **new** to base (not previously present).
     /// Each tuple is `(field_name, base_id)`.
     pub delta: Vec<(String, u64)>,
@@ -178,7 +177,7 @@ pub async fn commit_interner_overlay(
     base: &Interner,
     overlay: &SccHashMap<String, u64, THasher>,
 ) -> DbResult<OverlayCommitResult> {
-    let mut remap = HashMap::<_, _, THasher>::default();
+    let mut remap = TFxMap::default();
     let mut delta = Vec::new();
     let mut pending: Vec<(String, u64)> = Vec::new();
     overlay

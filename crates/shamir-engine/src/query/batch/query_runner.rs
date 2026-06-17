@@ -10,6 +10,7 @@ use crate::query::filter::FilterContext;
 use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
+use shamir_collections::TFxSet;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
@@ -214,7 +215,7 @@ impl<'a> QueryRunner<'a> {
         // Subscribe — validate sources exist, return a grant marker.
         // Real activation happens in the server handler post-processing.
         if let BatchOp::Subscribe(op) = &entry.op {
-            let unique_repos: std::collections::HashSet<&str> =
+            let unique_repos: TFxSet<&str> =
                 op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
             if unique_repos.len() > 1 {
                 return Err(BatchError::QueryError {

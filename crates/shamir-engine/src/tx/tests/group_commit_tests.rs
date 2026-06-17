@@ -1,8 +1,7 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use shamir_collections::THasher;
+use shamir_collections::TFxSet;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, PendingCommit, RepoTxGate, StagingStore, TxContext, TxId};
@@ -22,7 +21,7 @@ async fn enqueue_and_drain_pending() {
     let tx_id = gate.fresh_tx_id();
 
     let tx = TxContext::new(tx_id, 1, 0, IsolationLevel::Snapshot);
-    let write_set_keys: HashSet<(u64, bytes::Bytes), THasher> = HashSet::default();
+    let write_set_keys: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
     let (result_tx, _rx) = tokio::sync::oneshot::channel();
 
     let pending = PendingCommit::new(tx, write_set_keys, Vec::new(), result_tx);
@@ -69,7 +68,7 @@ async fn concurrent_disjoint_table_commits_monotonic_no_holes() {
     }
 
     // All versions are distinct.
-    let unique: HashSet<u64, THasher> = versions.iter().copied().collect();
+    let unique: TFxSet<u64> = versions.iter().copied().collect();
     assert_eq!(unique.len(), 10, "each commit gets a distinct version");
 
     // After all commits complete, the watermark (last_committed) must be

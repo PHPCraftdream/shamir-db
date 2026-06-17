@@ -6,6 +6,8 @@
 //! [`remap_inner_value_bytes`] for each staged value to rewrite those
 //! references before the bytes hit `transact()`.
 
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -15,6 +17,8 @@ use shamir_types::types::value::InnerValue;
 
 /// Recursively replace `InternerKey` ids in `value` according to
 /// `remap`. Keys not present in the remap are left unchanged.
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
 pub fn remap_value<S: BuildHasher>(value: &mut InnerValue, remap: &HashMap<u64, u64, S>) {
     match value {
         InnerValue::Map(m) => {
@@ -50,6 +54,8 @@ pub fn remap_value<S: BuildHasher>(value: &mut InnerValue, remap: &HashMap<u64, 
 /// Returns `Err` only on serde failure. If `remap` is empty this is a
 /// no-op decode+encode round-trip — caller can skip the call when the
 /// remap is empty.
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
 pub fn remap_inner_value_bytes<S: BuildHasher>(
     bytes: Bytes,
     remap: &HashMap<u64, u64, S>,

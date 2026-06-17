@@ -5,6 +5,7 @@ use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, Table
 use crate::query::batch::query_runner::{build_resolved_refs, execute_single_impl, QueryRunner};
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
+use shamir_collections::TFxSet;
 use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
@@ -521,7 +522,7 @@ pub(super) fn filter_results(
     request: &BatchRequest,
 ) -> TMap<String, QueryResult> {
     if let Some(ref only) = request.return_only {
-        let keep: std::collections::HashSet<String> = only.iter().cloned().collect();
+        let keep: TFxSet<String> = only.iter().cloned().collect();
         all_results.retain(|alias, _| keep.contains(alias));
         return all_results;
     }

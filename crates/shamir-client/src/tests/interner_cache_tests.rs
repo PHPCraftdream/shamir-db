@@ -4,6 +4,7 @@
 //! `tests/smoke.rs` uses) and exercise the cache ops against the production
 //! server path. They MUST run with `--full` (integration/e2e scope).
 
+use shamir_collections::TFxSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -136,7 +137,7 @@ async fn touch_fields_registers_numeric_string_name() {
         // Three distinct ids returned.
         assert_eq!(mappings.len(), 3, "got mappings: {mappings:?}");
         let ids: Vec<u64> = mappings.iter().map(|(_, id)| *id).collect();
-        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        let unique: TFxSet<u64> = ids.iter().copied().collect();
         assert_eq!(unique.len(), 3, "ids must be distinct: {ids:?}");
 
         // §9.4: "42" resolves to the interner id for the field NAMED "42",

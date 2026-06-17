@@ -5,9 +5,7 @@
 //! committer aborts the commit with `PhantomConflict` and bumps
 //! `txs_aborted_phantom`.
 
-use std::collections::HashMap;
-
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 use std::ops::Bound;
 
 use shamir_tx::predicate_set::PredicateDep;
@@ -48,7 +46,7 @@ async fn phase_2bis_aborts_armed_predicate_on_concurrent_write() {
     );
 
     let posting_key = test_posting_key(idx_id, 35);
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -126,7 +124,7 @@ async fn phase_2bis_allows_non_conflicting_predicate() {
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
     let posting_key = test_posting_key(idx_id, 25);
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
@@ -174,7 +172,7 @@ async fn phase_2bis_table_scan_aborts_on_any_concurrent_write() {
 
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {

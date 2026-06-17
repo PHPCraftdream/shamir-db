@@ -2,7 +2,7 @@
 //! the [`distinct_repos`] helper that inspects a map of entries.
 
 use serde::{Deserialize, Serialize};
-use shamir_collections::TMap;
+use shamir_collections::{TFxSet, TMap};
 
 use crate::read::ReadQuery;
 
@@ -70,7 +70,7 @@ impl From<ReadQuery> for QueryEntry {
 ///
 /// Used by the executor to enforce the cross-repo guard for
 /// transactional batches (Stage 4.C).
-pub fn distinct_repos(queries: &TMap<String, QueryEntry>) -> std::collections::HashSet<String> {
+pub fn distinct_repos(queries: &TMap<String, QueryEntry>) -> TFxSet<String> {
     queries
         .values()
         .filter_map(|qe| qe.op.table_ref().map(|tr| tr.repo.clone()))

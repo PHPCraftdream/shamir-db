@@ -67,6 +67,7 @@ use super::host_globals::{host_global_get, host_global_set};
 use super::host_http::host_http_fetch;
 use super::wasm_engine::{WasmEngine, WasmLimits};
 use async_trait::async_trait;
+use shamir_collections::TFxSet;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use wasmtime::{InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -92,7 +93,7 @@ pub(super) struct HostState {
     pub(super) net: Option<Arc<dyn NetGateway>>,
     /// Env-var names this function may read via `global_get("env.X")`.
     /// Non-`env.` globals are ungated; a denied secret looks absent.
-    pub(super) secret_grants: Arc<std::collections::HashSet<String, shamir_collections::THasher>>,
+    pub(super) secret_grants: Arc<TFxSet<String>>,
 }
 
 // ── WasmFunction ─────────────────────────────────────────────────────

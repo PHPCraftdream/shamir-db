@@ -13,6 +13,7 @@
 //!   the reply arrives and then the connection is closed (EOF on next read).
 //! * **Test 4** — burst: 16 concurrent requests all get responses; rid set matches.
 
+use shamir_collections::TFxSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -381,7 +382,7 @@ async fn duplex_test4_burst_16_requests() {
     }
 
     // Collect all 16 responses.
-    let mut received_rids = std::collections::HashSet::<_, shamir_collections::THasher>::default();
+    let mut received_rids = TFxSet::default();
     for _ in 0..N {
         let rid = timeout(Duration::from_secs(2), client_recv_rid(&mut cr))
             .await
@@ -389,7 +390,7 @@ async fn duplex_test4_burst_16_requests() {
         received_rids.insert(rid);
     }
 
-    let expected: std::collections::HashSet<u32, shamir_collections::THasher> = (1..=N).collect();
+    let expected: TFxSet<u32> = (1..=N).collect();
     assert_eq!(
         received_rids, expected,
         "all 16 rids must be received exactly once"

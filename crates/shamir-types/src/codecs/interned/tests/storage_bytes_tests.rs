@@ -21,8 +21,7 @@ use crate::types::value::{QueryValue, Value};
 use bytes::Bytes;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
-use shamir_collections::THasher;
-use std::collections::HashMap;
+use shamir_collections::TFxMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -38,11 +37,11 @@ fn make_first_seen_interner(
 ) -> impl Fn(&str) -> Result<InternerKey, crate::codecs::CodecError> + 'static {
     struct State {
         next_id: u64,
-        seen: HashMap<String, u64, THasher>,
+        seen: TFxMap<String, u64>,
     }
     let state: Arc<Mutex<State>> = Arc::new(Mutex::new(State {
         next_id: 0,
-        seen: HashMap::with_hasher(THasher::default()),
+        seen: TFxMap::default(),
     }));
     move |key: &str| {
         let mut s = state.lock().expect("interner mutex poisoned");
@@ -255,9 +254,9 @@ fn storage_bytes_map_key_id_width_boundaries() {
     // Build a lookup table the intern closure reads from. Each path (direct +
     // reference) gets its OWN closure instance but they read from the SAME
     // static table so id assignment is identical.
-    static TABLE: OnceLock<HashMap<String, u64, THasher>> = OnceLock::new();
+    static TABLE: OnceLock<TFxMap<String, u64>> = OnceLock::new();
     let _ = TABLE.set({
-        let mut m = HashMap::with_hasher(THasher::default());
+        let mut m = TFxMap::default();
         for (k, v) in &ids {
             m.insert(k.clone(), *v);
         }

@@ -14,10 +14,9 @@
 //! Database-access helpers (`db()`, `repo()`, `store()`) arrive in a later
 //! slice.
 
-use shamir_collections::THasher;
+use shamir_collections::{TFxSet, THasher};
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::db_gateway::DbGateway;
@@ -292,7 +291,7 @@ pub struct FnCtx {
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
     net: Option<Arc<dyn NetGateway>>,
-    secret_grants: Arc<HashSet<String, THasher>>,
+    secret_grants: Arc<TFxSet<String>>,
     actor: Actor,
 }
 
@@ -310,7 +309,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
-            secret_grants: Arc::new(HashSet::<_, THasher>::default()),
+            secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
         }
     }
@@ -325,7 +324,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
-            secret_grants: Arc::new(HashSet::<_, THasher>::default()),
+            secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
         }
     }
@@ -439,7 +438,7 @@ impl FnCtx {
     }
 
     /// The secret grants for `env.*` global reads.
-    pub fn secret_grants(&self) -> &Arc<HashSet<String, THasher>> {
+    pub fn secret_grants(&self) -> &Arc<TFxSet<String>> {
         &self.secret_grants
     }
 

@@ -1,9 +1,8 @@
 //! Push-frame demultiplexing for live subscriptions.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 
 use tokio::sync::mpsc;
 
@@ -26,12 +25,12 @@ pub type PushReceiver = mpsc::Receiver<PushEnvelope>;
 
 /// Registry of active subscription channels, keyed by `sub_id`.
 /// Push frames are routed here by the reader task.
-pub(crate) type SubscriptionMap = Arc<StdMutex<HashMap<u64, PushSender, THasher>>>;
+pub(crate) type SubscriptionMap = Arc<StdMutex<TFxMap<u64, PushSender>>>;
 
 pub(crate) const EARLY_BUFFER_CAP: usize = 256;
 
 /// Bounded per-sub early buffer for pushes arriving before `subscribe_push`.
-pub(crate) type EarlyBuffer = Arc<StdMutex<HashMap<u64, Vec<PushEnvelope>, THasher>>>;
+pub(crate) type EarlyBuffer = Arc<StdMutex<TFxMap<u64, Vec<PushEnvelope>>>>;
 
 /// Handle to a live subscription stream. Yields push envelopes as they arrive.
 pub struct SubscriptionHandle {

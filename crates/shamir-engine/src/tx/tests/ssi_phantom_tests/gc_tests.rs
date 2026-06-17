@@ -1,9 +1,7 @@
 //! Step 7 — commit-write-log GC prune integration tests and Snapshot isolation
 //! guards.
 
-use std::collections::HashMap;
-
-use shamir_collections::THasher;
+use shamir_collections::TFxMap;
 
 use shamir_tx::predicate_set::PredicateDep;
 use shamir_tx::repo_tx_gate::{CommitWriteRecord, TableWriteFootprint};
@@ -52,7 +50,7 @@ async fn commit_write_log_not_pruned_below_live_snapshot() {
     gate.publish_committed(v2);
     gate.record_commit_writes(CommitWriteRecord {
         commit_version: v2,
-        per_table: HashMap::<_, _, THasher>::from_iter([(
+        per_table: TFxMap::from_iter([(
             table_token_for("t"),
             TableWriteFootprint {
                 touched: true,
@@ -132,7 +130,7 @@ async fn snapshot_skips_phase_2bis() {
 
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
-    let mut per_table = HashMap::with_hasher(THasher::default());
+    let mut per_table = TFxMap::default();
     per_table.insert(
         table_token,
         TableWriteFootprint {
