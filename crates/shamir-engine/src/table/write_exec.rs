@@ -239,7 +239,29 @@ impl TableManager {
         // (return_result=false) — avoids per-row serde_json::Map build
         // and QueryValue→json::Value clone on the hot batch-insert path.
         let records = if return_result {
-            build_insert_result_records(&resolved_values, &all_ids[..resolved_values.len()])
+            let mut records =
+                build_insert_result_records(&resolved_values, &all_ids[..resolved_values.len()]);
+            // Build RETURNING rows for id-keyed records: decode each
+            // record via `record_view_to_query_value` to get name-keyed
+            // `QueryValue`, then wrap in the same `InsertedRecord::Direct`
+            // the values branch produces.  Order: values-first, then
+            // id-keyed — matching `all_ids`.
+            if !op.records_idmsgpack.is_empty() {
+                let id_offset = resolved_values.len();
+                for (i, buf) in op.records_idmsgpack.iter().enumerate() {
+                    let view = RecordView::new(buf.as_ref()).map_err(|e| {
+                        shamir_storage::error::DbError::Validation(format!(
+                            "execute_insert_tx (id-keyed return_result): malformed record bytes: {e}"
+                        ))
+                    })?;
+                    let qv = record_view_to_query_value(&view, interner)?;
+                    records.push(InsertedRecord::Direct {
+                        id: Some(all_ids[id_offset + i]),
+                        fields: qv,
+                    });
+                }
+            }
+            records
         } else {
             Vec::new()
         };
