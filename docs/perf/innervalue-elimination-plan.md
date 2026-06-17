@@ -82,13 +82,15 @@ Production `Value<InternerKey>` материализация **не ноль**, 
 changefeed (C9), funclib (C7), read-кодеки (C2/C3) → **ноль id-ключевой
 материализации**.
 
-## Решение S0 (ребром — за пользователем)
+## Решение S0 — РЕШЕНО (2026-06-17)
 
-**Index-format version bump + одноразовый O(N) rebuild-on-open?**
-- **(b) ДА (рекомендация @aoh):** чистое устранение анчора + covering→имя-ключевой;
-  цена — один O(N) reindex при первом открытии после апгрейда; ломает
-  byte-identity index-файлов между версиями (pre-1.0 — приемлемо). Машинерия
-  `doctor::repair` уже есть.
-- **(a) НЕТ:** frozen-golden discriminant-stable hasher; ноль миграции/downtime,
-  но привязка формата к негарантированному `Discriminant::hash` rustc (canary
-  ловит дрейф). Index-leaf остаётся единственным честным анчором.
+Пользователь: **старые данные на диске можно смело удалять** → byte-identity
+index-файлов между версиями НЕ ограничение. Выбран путь **(b), упрощённый**:
+- C8/S9 — чистый рерайт: **lens-native хеш листа (без `InnerValue`)**,
+  covering-проекция → имя-ключевая `Vec<(String, QueryValue)>`. **Index-leaf
+  `InnerValue` → НОЛЬ.**
+- При смене формата индекса — **rebuild-on-open из записей** (`doctor::repair`,
+  записи сохраняются). Не нужен ни frozen-golden хешер (a), ни аккуратная
+  байт-идентичная миграция.
+- Конечный итог итога: index-якорь устранён → холодный пол ~26 узлов
+  (tx-recovery `id_remap` + bare-scalar fallback + write-mint).
