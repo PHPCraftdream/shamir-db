@@ -4,21 +4,30 @@
 //! rather than `Box<dyn FilterCallback>` (virtual call per node). Each
 //! `matches()` call walks the tree with monomorphic compares; the
 //! compiler can inline the dispatch arms.
+//!
+//! C6 (#80): the comparison layer is `QueryValue`-native (name-keyed).
+//! Pre-resolved literals, the `InSet`/`ContainsAnySet`/`ContainsAllSet`
+//! hash-sets, and every resolved operand are `QueryValue`. The only
+//! `InnerValue` crossings that remain are the `RecordRef::materialize_at`
+//! boundary (which still yields `InnerValue` today — narrowing that is a
+//! LATER stage) and the index-crate `IndexExpr::eval` boundary; each is
+//! converted **once** to `QueryValue` and never round-tripped back.
 
 use std::cmp::Ordering;
 
 use regex::Regex;
 use shamir_collections::TSet;
+use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::scalar_ref_cmp;
-use shamir_types::record_view::RecordRef;
+use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef};
+use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
 use super::filter_callback::FilterCallback;
 use super::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
 use super::resolve::{
-    compare_values, is_column_query_ref, resolve_filter_value, resolve_query_ref_column,
+    compare_values, is_column_query_ref, resolve_filter_query, resolve_query_ref_column,
 };
 use crate::query::filter::FilterValue;
 
@@ -51,6 +60,10 @@ pub enum CompareOp {
 /// arm. Previously this was `Box<dyn FilterCallback>` per node —
 /// every internal recursive call paid a virtual dispatch (vtable
 /// indirect call + cache miss potential).
+///
+/// C6 (#80): all literal/pre-resolved operands and membership sets are
+/// `QueryValue` (name-keyed). The hot comparison path never crosses to
+/// `InnerValue`.
 pub enum FilterNode {
     /// Always true. Produced when a clause cancels out (e.g.
     /// `NotIn` on a non-existent field).
@@ -60,8 +73,8 @@ pub enum FilterNode {
     Compare {
         field_path: CompactPath,
         value: FilterValue,
-        /// Pre-resolved at compile time when `value` is a literal.
-        pre_resolved: Option<shamir_types::types::value::InnerValue>,
+        /// Pre-resolved at compile time when `value` is a literal (QueryValue).
+        pre_resolved: Option<QueryValue>,
         op: CompareOp,
     },
     And(Vec<FilterNode>),
@@ -78,18 +91,18 @@ pub enum FilterNode {
         values: Vec<FilterValue>,
         /// Parallel slice of pre-resolved literals (Null/Bool/Int/Float/String/Binary).
         /// `None` entries are non-literal variants (FieldRef/QueryRef/...) that
-        /// still need per-record dynamic resolution via `resolve_filter_value`.
-        /// Hoisting literal materialisation off the per-record path eliminates
+        /// still need per-record dynamic resolution via `resolve_filter_query`.
+        /// Hoisting literal materialisation off the per-row path eliminates
         /// O(records × |list|) `String::clone` / `Vec::clone` allocations.
-        pre_resolved: Vec<Option<shamir_types::types::value::InnerValue>>,
+        pre_resolved: Vec<Option<QueryValue>>,
         negate: bool,
     },
     /// Fast-path for `$in`/`$nin` when ALL values are literals.
-    /// Membership check is O(1) via `TSet<InnerValue>` (IndexSet + FxHasher)
+    /// Membership check is O(1) via `TSet<QueryValue>` (IndexSet + FxHasher)
     /// instead of the O(N) linear scan in `In`.
     InSet {
         field_path: CompactPath,
-        values: TSet<shamir_types::types::value::InnerValue>,
+        values: TSet<QueryValue>,
         negate: bool,
     },
     Like {
@@ -103,7 +116,7 @@ pub enum FilterNode {
     Contains {
         field_path: CompactPath,
         value: FilterValue,
-        pre_resolved: Option<shamir_types::types::value::InnerValue>,
+        pre_resolved: Option<QueryValue>,
     },
     ContainsAny {
         field_path: CompactPath,
@@ -114,7 +127,7 @@ pub enum FilterNode {
     /// instead of the O(N×M) nested scan in `ContainsAny`.
     ContainsAnySet {
         field_path: CompactPath,
-        values: TSet<shamir_types::types::value::InnerValue>,
+        values: TSet<QueryValue>,
     },
     ContainsAll {
         field_path: CompactPath,
@@ -125,14 +138,14 @@ pub enum FilterNode {
     /// the count equals `values.len()` — O(field_len) instead of O(N×M).
     ContainsAllSet {
         field_path: CompactPath,
-        values: TSet<shamir_types::types::value::InnerValue>,
+        values: TSet<QueryValue>,
     },
     Between {
         field_path: CompactPath,
         from: FilterValue,
         to: FilterValue,
-        pre_from: Option<shamir_types::types::value::InnerValue>,
-        pre_to: Option<shamir_types::types::value::InnerValue>,
+        pre_from: Option<QueryValue>,
+        pre_to: Option<QueryValue>,
     },
     Exists {
         field_path: CompactPath,
@@ -151,14 +164,13 @@ pub enum FilterNode {
     ComputedCompare {
         expr: Box<crate::index2::expr::IndexExpr>,
         value: FilterValue,
-        pre_resolved: Option<shamir_types::types::value::InnerValue>,
+        pre_resolved: Option<QueryValue>,
         op: CompareOp,
     },
 }
 
 impl FilterNode {
     pub fn matches(&self, record: &(impl RecordRef + ?Sized), ctx: &FilterContext) -> bool {
-        use shamir_types::types::value::InnerValue;
         match self {
             FilterNode::True => true,
             FilterNode::False => false,
@@ -173,25 +185,25 @@ impl FilterNode {
                     field_path.iter().map(|&id| InternerKey::new(id)).collect();
                 let field_val = record.scalar_at(&ipath);
                 let owned_rhs;
-                let filter_val: Option<&InnerValue> = if let Some(pre) = pre_resolved {
+                let filter_val: Option<&QueryValue> = if let Some(pre) = pre_resolved {
                     Some(pre)
                 } else {
-                    owned_rhs = resolve_filter_value(value, record, ctx);
+                    owned_rhs = resolve_filter_query(value, record, ctx);
                     owned_rhs.as_ref()
                 };
 
                 match (field_val, filter_val) {
                     (Some(a), Some(b)) => match op {
-                        CompareOp::Eq => scalar_ref_cmp(a, b) == Some(Ordering::Equal),
-                        CompareOp::Ne => scalar_ref_cmp(a, b) != Some(Ordering::Equal),
-                        CompareOp::Gt => scalar_ref_cmp(a, b) == Some(Ordering::Greater),
+                        CompareOp::Eq => scalar_ref_cmp_qv(a, b) == Some(Ordering::Equal),
+                        CompareOp::Ne => scalar_ref_cmp_qv(a, b) != Some(Ordering::Equal),
+                        CompareOp::Gt => scalar_ref_cmp_qv(a, b) == Some(Ordering::Greater),
                         CompareOp::Gte => matches!(
-                            scalar_ref_cmp(a, b),
+                            scalar_ref_cmp_qv(a, b),
                             Some(Ordering::Greater | Ordering::Equal)
                         ),
-                        CompareOp::Lt => scalar_ref_cmp(a, b) == Some(Ordering::Less),
+                        CompareOp::Lt => scalar_ref_cmp_qv(a, b) == Some(Ordering::Less),
                         CompareOp::Lte => {
-                            matches!(scalar_ref_cmp(a, b), Some(Ordering::Less | Ordering::Equal))
+                            matches!(scalar_ref_cmp_qv(a, b), Some(Ordering::Less | Ordering::Equal))
                         }
                     },
                     (None, _) | (_, None) => matches!(op, CompareOp::Ne),
@@ -220,8 +232,15 @@ impl FilterNode {
             } => {
                 let ipath: SmallVec<[InternerKey; 4]> =
                     field_path.iter().map(|&id| InternerKey::new(id)).collect();
+                // The membership set is name-keyed (`TSet<QueryValue>`); the
+                // materialised field is InnerValue today, so convert once at
+                // this boundary (NOT a round-trip — the field is consumed
+                // here and never re-converted).
                 let found = match record.materialize_at(&ipath) {
-                    Some(v) => values.contains(&v),
+                    Some(v) => match inner_value_to_query_value(&v, ctx.interner) {
+                        Ok(qv) => values.contains(&qv),
+                        Err(_) => false,
+                    },
                     None => false,
                 };
                 if *negate {
@@ -251,7 +270,7 @@ impl FilterNode {
                 let mut found = false;
                 for (i, fv) in values.iter().enumerate() {
                     if let Some(pre) = &pre_resolved[i] {
-                        if scalar_ref_cmp(field_val, pre) == Some(Ordering::Equal) {
+                        if scalar_ref_cmp_qv(field_val, pre) == Some(Ordering::Equal) {
                             found = true;
                             break;
                         }
@@ -262,9 +281,10 @@ impl FilterNode {
                             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
                             if let Some(qr) = ctx.resolved_refs.get(key) {
                                 let column = resolve_query_ref_column(qr, path.as_deref());
-                                if column.iter().any(|cv| {
-                                    scalar_ref_cmp(field_val, cv) == Some(Ordering::Equal)
-                                }) {
+                                if column
+                                    .iter()
+                                    .any(|cv| scalar_ref_cmp_qv(field_val, cv) == Some(Ordering::Equal))
+                                {
                                     found = true;
                                     break;
                                 }
@@ -272,8 +292,8 @@ impl FilterNode {
                         }
                         continue;
                     }
-                    if let Some(resolved) = resolve_filter_value(fv, record, ctx) {
-                        if scalar_ref_cmp(field_val, &resolved) == Some(Ordering::Equal) {
+                    if let Some(resolved) = resolve_filter_query(fv, record, ctx) {
+                        if scalar_ref_cmp_qv(field_val, &resolved) == Some(Ordering::Equal) {
                             found = true;
                             break;
                         }
@@ -306,29 +326,34 @@ impl FilterNode {
                     Some(v) => v,
                     None => return false,
                 };
-                let field_val = &field_owned;
+                // Convert the materialised container once to QueryValue; the
+                // membership scan then compares name-keyed to name-keyed.
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 let owned_rhs;
-                let filter_val: &InnerValue = if let Some(pre) = pre_resolved {
+                let filter_val: &QueryValue = if let Some(pre) = pre_resolved {
                     pre
                 } else {
-                    owned_rhs = match resolve_filter_value(value, record, ctx) {
+                    owned_rhs = match resolve_filter_query(value, record, ctx) {
                         Some(v) => v,
                         None => return false,
                     };
                     &owned_rhs
                 };
-                match field_val {
-                    InnerValue::Str(s) => {
-                        if let InnerValue::Str(sub) = filter_val {
+                match &field_qv {
+                    QueryValue::Str(s) => {
+                        if let QueryValue::Str(sub) = filter_val {
                             s.contains(sub.as_str())
                         } else {
                             false
                         }
                     }
-                    InnerValue::List(list) => list
+                    QueryValue::List(list) => list
                         .iter()
                         .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
-                    InnerValue::Set(set) => set
+                    QueryValue::Set(set) => set
                         .iter()
                         .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
                     _ => false,
@@ -342,17 +367,20 @@ impl FilterNode {
                     Some(v) => v,
                     None => return false,
                 };
-                let field_val = &field_owned;
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 values.iter().any(|fv| {
-                    let resolved = match resolve_filter_value(fv, record, ctx) {
+                    let resolved = match resolve_filter_query(fv, record, ctx) {
                         Some(v) => v,
                         None => return false,
                     };
-                    match field_val {
-                        InnerValue::List(list) => list
+                    match &field_qv {
+                        QueryValue::List(list) => list
                             .iter()
                             .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                        InnerValue::Set(set) => set
+                        QueryValue::Set(set) => set
                             .iter()
                             .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
                         _ => false,
@@ -367,10 +395,13 @@ impl FilterNode {
                     Some(v) => v,
                     None => return false,
                 };
-                let field_val = &field_owned;
-                match field_val {
-                    InnerValue::List(list) => list.iter().any(|item| values.contains(item)),
-                    InnerValue::Set(set) => set.iter().any(|item| values.contains(item)),
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
+                match &field_qv {
+                    QueryValue::List(list) => list.iter().any(|item| values.contains(item)),
+                    QueryValue::Set(set) => set.iter().any(|item| values.contains(item)),
                     _ => false,
                 }
             }
@@ -382,17 +413,20 @@ impl FilterNode {
                     Some(v) => v,
                     None => return false,
                 };
-                let field_val = &field_owned;
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 values.iter().all(|fv| {
-                    let resolved = match resolve_filter_value(fv, record, ctx) {
+                    let resolved = match resolve_filter_query(fv, record, ctx) {
                         Some(v) => v,
                         None => return false,
                     };
-                    match field_val {
-                        InnerValue::List(list) => list
+                    match &field_qv {
+                        QueryValue::List(list) => list
                             .iter()
                             .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                        InnerValue::Set(set) => set
+                        QueryValue::Set(set) => set
                             .iter()
                             .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
                         _ => false,
@@ -407,17 +441,18 @@ impl FilterNode {
                     Some(v) => v,
                     None => return false,
                 };
-                let field_val = &field_owned;
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 // Count how many required values appear in the field array/set.
                 // Pass when every required value was found (count == values.len()).
                 let required = values.len();
-                let found = match field_val {
-                    InnerValue::List(list) => {
+                let found = match &field_qv {
+                    QueryValue::List(list) => {
                         list.iter().filter(|item| values.contains(*item)).count()
                     }
-                    InnerValue::Set(set) => {
-                        set.iter().filter(|item| values.contains(*item)).count()
-                    }
+                    QueryValue::Set(set) => set.iter().filter(|item| values.contains(*item)).count(),
                     _ => return false,
                 };
                 found >= required
@@ -437,30 +472,30 @@ impl FilterNode {
                     None => return false,
                 };
                 let owned_from;
-                let from_val: &InnerValue = if let Some(pre) = pre_from {
+                let from_val: &QueryValue = if let Some(pre) = pre_from {
                     pre
                 } else {
-                    owned_from = match resolve_filter_value(from, record, ctx) {
+                    owned_from = match resolve_filter_query(from, record, ctx) {
                         Some(v) => v,
                         None => return false,
                     };
                     &owned_from
                 };
                 let owned_to;
-                let to_val: &InnerValue = if let Some(pre) = pre_to {
+                let to_val: &QueryValue = if let Some(pre) = pre_to {
                     pre
                 } else {
-                    owned_to = match resolve_filter_value(to, record, ctx) {
+                    owned_to = match resolve_filter_query(to, record, ctx) {
                         Some(v) => v,
                         None => return false,
                     };
                     &owned_to
                 };
                 matches!(
-                    scalar_ref_cmp(field_val, from_val),
+                    scalar_ref_cmp_qv(field_val, from_val),
                     Some(Ordering::Greater | Ordering::Equal)
                 ) && matches!(
-                    scalar_ref_cmp(field_val, to_val),
+                    scalar_ref_cmp_qv(field_val, to_val),
                     Some(Ordering::Less | Ordering::Equal)
                 )
             }
@@ -541,15 +576,22 @@ impl FilterNode {
                 pre_resolved,
                 op,
             } => {
-                let computed = match expr.eval(record) {
+                // IndexExpr::eval (index crate — out of C6 scope) returns
+                // InnerValue. Convert once to QueryValue; the comparison
+                // itself is then QueryValue-to-QueryValue.
+                let computed_iv = match expr.eval(record) {
                     Ok(v) => v,
                     Err(_) => return false,
                 };
+                let computed = match inner_value_to_query_value(&computed_iv, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 let owned_rhs;
-                let rhs: &shamir_types::types::value::InnerValue = if let Some(pre) = pre_resolved {
+                let rhs: &QueryValue = if let Some(pre) = pre_resolved {
                     pre
                 } else {
-                    owned_rhs = resolve_filter_value(value, record, ctx);
+                    owned_rhs = resolve_filter_query(value, record, ctx);
                     match owned_rhs.as_ref() {
                         Some(v) => v,
                         None => return false,

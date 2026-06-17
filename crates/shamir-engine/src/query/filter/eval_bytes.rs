@@ -41,6 +41,7 @@ use std::cmp::Ordering;
 
 use super::filter_node::{CompareOp, FilterNode};
 use crate::query::filter::FilterValue;
+use shamir_types::types::value::QueryValue;
 
 // ── key encoding (unchanged) ──────────────────────────────────────────────────
 
@@ -516,7 +517,7 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
             op,
         } => {
             let fv_lit: FilterValue = if let Some(pre) = pre_resolved {
-                inner_value_to_filter_value_lit(pre)?
+                query_value_to_filter_value_lit(pre)?
             } else {
                 match value {
                     FilterValue::Null
@@ -631,19 +632,21 @@ impl FilterNode {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Convert a pre-resolved `InnerValue` literal into a `FilterValue` literal
+/// Convert a pre-resolved `QueryValue` literal into a `FilterValue` literal
 /// for the scalar comparison helper.  Non-scalar variants return `None`.
-fn inner_value_to_filter_value_lit(
-    v: &shamir_types::types::value::InnerValue,
-) -> Option<FilterValue> {
-    use shamir_types::types::value::InnerValue as Iv;
+///
+/// C6 (#80): operates on the name-keyed `QueryValue` produced by
+/// `compile.rs` (`filter_value_to_query`) — `pre_resolved` is now
+/// `Option<QueryValue>`.
+fn query_value_to_filter_value_lit(v: &QueryValue) -> Option<FilterValue> {
+    use shamir_types::types::value::QueryValue as Qv;
     match v {
-        Iv::Null => Some(FilterValue::Null),
-        Iv::Bool(b) => Some(FilterValue::Bool(*b)),
-        Iv::Int(i) => Some(FilterValue::Int(*i)),
-        Iv::F64(f) => Some(FilterValue::Float(*f)),
-        Iv::Str(s) => Some(FilterValue::String(s.clone())),
-        Iv::Bin(b) => Some(FilterValue::Binary(b.clone())),
+        Qv::Null => Some(FilterValue::Null),
+        Qv::Bool(b) => Some(FilterValue::Bool(*b)),
+        Qv::Int(i) => Some(FilterValue::Int(*i)),
+        Qv::F64(f) => Some(FilterValue::Float(*f)),
+        Qv::Str(s) => Some(FilterValue::String(s.clone())),
+        Qv::Bin(b) => Some(FilterValue::Binary(b.clone())),
         // Dec, Big, List, Set, Map — fall back to full decode
         _ => None,
     }

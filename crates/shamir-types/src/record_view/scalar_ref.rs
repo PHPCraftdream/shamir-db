@@ -12,7 +12,7 @@
 
 use std::cmp::Ordering;
 
-use crate::types::value::InnerValue;
+use crate::types::value::{InnerValue, QueryValue};
 
 /// A borrowed scalar leaf extracted from a record. The cross-impl currency
 /// that makes `InnerValue` and `RecordView` interchangeable at the trait level.
@@ -84,6 +84,26 @@ pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
         (ScalarRef::F64(a), InnerValue::Int(b)) => a.partial_cmp(&(*b as f64)),
         (ScalarRef::F64(a), InnerValue::F64(b)) => a.partial_cmp(b),
         (ScalarRef::Str(a), InnerValue::Str(b)) => Some(a.cmp(b.as_str())),
+        _ => None,
+    }
+}
+
+/// Compare a borrowed [`ScalarRef`] against a [`QueryValue`] scalar literal.
+///
+/// C6 (#80): the name-keyed twin of [`scalar_ref_cmp`]. `Value<String>` and
+/// `Value<InternerKey>` order identically for every scalar arm (the key type
+/// only matters for `Map`, which is not a scalar and resolves to `None`
+/// here), so this is byte-identical to the InnerValue form for scalars.
+#[inline]
+pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
+    match (a, b) {
+        (ScalarRef::Null, QueryValue::Null) => Some(Ordering::Equal),
+        (ScalarRef::Bool(a), QueryValue::Bool(b)) => Some(a.cmp(b)),
+        (ScalarRef::Int(a), QueryValue::Int(b)) => Some(a.cmp(b)),
+        (ScalarRef::Int(a), QueryValue::F64(b)) => (a as f64).partial_cmp(b),
+        (ScalarRef::F64(a), QueryValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (ScalarRef::F64(a), QueryValue::F64(b)) => a.partial_cmp(b),
+        (ScalarRef::Str(a), QueryValue::Str(b)) => Some(a.cmp(b.as_str())),
         _ => None,
     }
 }

@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
@@ -65,22 +65,55 @@ pub(super) fn intern_field_path_compact(
     Some(keys)
 }
 
-/// Compare two InnerValue instances. Returns an Ordering if comparable.
+/// Compare two `Value<K>` scalars. Returns an `Ordering` if comparable.
+///
+/// C6 (#80): generic over the key type. Only the scalar arms
+/// (Null/Bool/Int/F64/Str) participate, and those are key-agnostic — so this
+/// serves BOTH the name-keyed filter path (`QueryValue`) and the id-keyed
+/// aggregator path (`InnerValue`, until S4) with ZERO conversion at either
+/// call site (anti-formal: no inner↔query bridge added). The ordering is
+/// byte-identical to the previous `InnerValue`-only form.
 #[inline]
-pub fn compare_values(a: &InnerValue, b: &InnerValue) -> Option<Ordering> {
+pub fn compare_values<K>(a: &Value<K>, b: &Value<K>) -> Option<Ordering>
+where
+    K: Eq + std::hash::Hash + Ord + Clone + serde::Serialize + std::fmt::Debug,
+{
     match (a, b) {
-        (InnerValue::Null, InnerValue::Null) => Some(Ordering::Equal),
-        (InnerValue::Bool(a), InnerValue::Bool(b)) => Some(a.cmp(b)),
-        (InnerValue::Int(a), InnerValue::Int(b)) => Some(a.cmp(b)),
-        (InnerValue::Int(a), InnerValue::F64(b)) => (*a as f64).partial_cmp(b),
-        (InnerValue::F64(a), InnerValue::Int(b)) => a.partial_cmp(&(*b as f64)),
-        (InnerValue::F64(a), InnerValue::F64(b)) => a.partial_cmp(b),
-        (InnerValue::Str(a), InnerValue::Str(b)) => Some(a.cmp(b)),
+        (Value::Null, Value::Null) => Some(Ordering::Equal),
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Int(a), Value::F64(b)) => (*a as f64).partial_cmp(b),
+        (Value::F64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::F64(a), Value::F64(b)) => a.partial_cmp(b),
+        (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
         _ => None,
     }
 }
 
-/// Convert a literal FilterValue to InnerValue without record/context.
+/// Convert a literal `FilterValue` to `QueryValue` without record/context.
+///
+/// C6 (#80): the name-keyed analogue of the legacy `filter_value_to_inner`.
+/// Returns `None` for non-literal variants (FieldRef, QueryRef, FnCall,
+/// Expr, Cond, Param, Array).
+#[inline]
+pub fn filter_value_to_query(fv: &FilterValue) -> Option<QueryValue> {
+    match fv {
+        FilterValue::Null => Some(QueryValue::Null),
+        FilterValue::Bool(b) => Some(QueryValue::Bool(*b)),
+        FilterValue::Int(i) => Some(QueryValue::Int(*i)),
+        FilterValue::Float(f) => Some(QueryValue::F64(*f)),
+        FilterValue::String(s) => Some(QueryValue::Str(s.clone())),
+        FilterValue::Binary(b) => Some(QueryValue::Bin(b.clone())),
+        _ => None,
+    }
+}
+
+/// Convert a literal `FilterValue` to `InnerValue` without record/context.
+///
+/// **Legacy adapter** — kept for out-of-scope callers (read_planner.rs,
+/// compile-time `pre_resolved` of the legacy InnerValue consumers) that
+/// still bind to `InnerValue`. New filter code uses
+/// [`filter_value_to_query`] (name-keyed).
 ///
 /// Returns `None` for non-literal variants (FieldRef, QueryRef, FnCall, Expr, Cond).
 #[inline]
@@ -96,28 +129,49 @@ pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
     }
 }
 
-/// Resolve a FilterValue into an InnerValue for comparison.
+/// Resolve a `FilterValue` into a **`QueryValue`** for comparison.
 ///
-/// Public so the SELECT projection (`query::read::exec`) can evaluate
-/// scalar-function select items against a record with the same semantics as
-/// filter values (`$ref` / literals / `$fn`).
-pub fn resolve_filter_value(
+/// C6 (#80) — this is the name-keyed hot-path resolver. It retires the
+/// transient `inner→query→funclib→query→inner` round-trips that the
+/// funclib ABI flip (#75) created on the filter-eval path:
+///
+/// - **literals** (`Null`/`Bool`/`Int`/`Float`/`String`/`Binary`) — built
+///   directly as `QueryValue`.
+/// - **`FieldRef`** — `record.materialize_at` still yields `InnerValue`
+///   today (narrowing that lens output is a LATER stage, out of scope for
+///   C6). We convert **once** at this boundary via
+///   `inner_value_to_query_value`. This single lens→QueryValue
+///   materialization *replaces* the old lens→InnerValue one (it is not a
+///   net-new round-trip); everything downstream stays `QueryValue`.
+/// - **`FnCall`** — arguments are now `QueryValue`, passed straight to
+///   `ctx.scalars.call` (no `inner_value_to_query_value` on the way in);
+///   the funclib result is already `QueryValue` and is returned directly
+///   (no `query_value_to_inner` on the way out). **The round-trip is gone.**
+/// - **`QueryRef`** / **`Param`** — return `QueryValue` directly.
+///
+/// Any failure (unresolvable arg, unknown function, arity/type/conversion
+/// error) collapses to `None` so the comparison treats the value as absent.
+pub fn resolve_filter_query(
     fv: &FilterValue,
     record: &(impl RecordRef + ?Sized),
     ctx: &FilterContext,
-) -> Option<InnerValue> {
+) -> Option<QueryValue> {
     match fv {
-        FilterValue::Null => Some(InnerValue::Null),
-        FilterValue::Bool(b) => Some(InnerValue::Bool(*b)),
-        FilterValue::Int(i) => Some(InnerValue::Int(*i)),
-        FilterValue::Float(f) => Some(InnerValue::F64(*f)),
-        FilterValue::String(s) => Some(InnerValue::Str(s.clone())),
-        FilterValue::Binary(b) => Some(InnerValue::Bin(b.clone())),
+        FilterValue::Null => Some(QueryValue::Null),
+        FilterValue::Bool(b) => Some(QueryValue::Bool(*b)),
+        FilterValue::Int(i) => Some(QueryValue::Int(*i)),
+        FilterValue::Float(f) => Some(QueryValue::F64(*f)),
+        FilterValue::String(s) => Some(QueryValue::Str(s.clone())),
+        FilterValue::Binary(b) => Some(QueryValue::Bin(b.clone())),
         FilterValue::FieldRef { path } => {
             let keys = intern_field_path(path, ctx.interner)?;
             let ipath: SmallVec<[InternerKey; 4]> =
                 keys.iter().map(|&id| InternerKey::new(id)).collect();
-            record.materialize_at(&ipath)
+            // Single lens→QueryValue boundary (replaces the old lens→InnerValue
+            // materialization). NOT a net-new round-trip — see fn doc.
+            record
+                .materialize_at(&ipath)
+                .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok())
         }
         FilterValue::QueryRef { alias, path } => {
             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
@@ -125,28 +179,45 @@ pub fn resolve_filter_value(
             resolve_query_ref_value(qr, path.as_deref())
         }
         FilterValue::FnCall { call } => {
-            // Resolve each argument (literal / FieldRef / nested FnCall) into an
-            // InnerValue, convert to QueryValue for the funclib ABI, dispatch
-            // through the scalar registry, then convert the result back.
-            // Any failure (unresolvable arg, unknown function, arity / type
-            // error, conversion error) collapses to `None` so the comparison
-            // treats the value as absent rather than panicking.
+            // Args are QueryValue → straight to funclib. Result is QueryValue
+            // → returned directly. Zero InnerValue, zero round-trip.
             let mut qv_args = Vec::with_capacity(call.args().len());
             for a in call.args() {
-                let iv = resolve_filter_value(a, record, ctx)?;
-                let qv = inner_value_to_query_value(&iv, ctx.interner).ok()?;
+                let qv = resolve_filter_query(a, record, ctx)?;
                 qv_args.push(qv);
             }
-            let qv_result = ctx.scalars.call(call.name(), &qv_args).ok()?;
-            query_value_to_inner(&qv_result, ctx.interner).ok()
+            ctx.scalars.call(call.name(), &qv_args).ok()
         }
         FilterValue::Param { name } => {
             // Injected sub-batch parameter. Populated by the recursive
-            // sub-batch executor (P3); empty at the top level.
-            ctx.params.get(name.as_str()).cloned()
+            // sub-batch executor (P3); empty at the top level. The param
+            // scope is id-keyed (`InnerValue`) today, so convert once here.
+            ctx.params
+                .get(name.as_str())
+                .and_then(|iv| inner_value_to_query_value(iv, ctx.interner).ok())
         }
         _ => None,
     }
+}
+
+/// Resolve a `FilterValue` into an `InnerValue` for comparison.
+///
+/// **Legacy adapter (C6 #80).** Out-of-scope callers
+/// (`query/read/aggregate.rs`, `query/read/select_projection.rs`,
+/// `query/batch/query_runner.rs`) still bind to `InnerValue` and are not
+/// part of the C6 migration scope. This entry delegates to
+/// [`resolve_filter_query`] (the name-keyed hot path) and performs a single
+/// trailing `query_value_to_inner` conversion at the legacy boundary — a
+/// documented cold adapter, NOT a hot-path round-trip. The internal filter
+/// eval tree (`FilterNode::matches`) uses `resolve_filter_query` directly
+/// and never crosses this seam.
+pub fn resolve_filter_value(
+    fv: &FilterValue,
+    record: &(impl RecordRef + ?Sized),
+    ctx: &FilterContext,
+) -> Option<InnerValue> {
+    let qv = resolve_filter_query(fv, record, ctx)?;
+    query_value_to_inner(&qv, ctx.interner).ok()
 }
 
 /// Extract a value from a QueryResult by a simple path like "[0].id".
@@ -164,10 +235,13 @@ pub fn resolve_filter_value(
 ///
 /// For ordinary Read results (`value` is `None`), the records-based
 /// behaviour is preserved unchanged.
-pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> Option<InnerValue> {
+///
+/// C6 (#80): returns `QueryValue` (name-keyed) — the filter comparison
+/// layer is now QueryValue-native.
+pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> Option<QueryValue> {
     // Call-result path: source is `QueryResult.value`.
     if let Some(value) = &qr.value {
-        return resolve_json_path(value, path).and_then(json_to_inner_value);
+        return resolve_json_path(value, path).map(json_to_query_value);
     }
 
     // Read-result path: source is `QueryResult.records`.
@@ -182,17 +256,19 @@ pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> O
     let rest = &path[bracket_end + 1..];
     let record_json = record.as_json();
     if rest.is_empty() {
-        return json_to_inner_value(&record_json);
+        return Some(json_to_query_value(&record_json));
     }
     let rest = rest.strip_prefix('.')?;
     let field_val = record_json.get(rest)?;
-    json_to_inner_value(field_val)
+    Some(json_to_query_value(field_val))
 }
 
 /// Extract a column of values from all records in a QueryResult.
 ///
 /// Supports `[].field` pattern — iterates all records, extracts `field` from each.
-pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<InnerValue> {
+///
+/// C6 (#80): returns `Vec<QueryValue>` (name-keyed).
+pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<QueryValue> {
     let path = match path {
         Some(p) => p,
         None => return Vec::new(),
@@ -211,7 +287,7 @@ pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> 
         .filter_map(|record| {
             let record_json = record.as_json();
             let val = record_json.get(field)?;
-            json_to_inner_value(val)
+            Some(json_to_query_value(val))
         })
         .collect()
 }
@@ -231,10 +307,12 @@ pub(super) fn resolve_json_path<'a>(
     mut cur: &'a serde_json::Value,
     path: Option<&str>,
 ) -> Option<&'a serde_json::Value> {
-    let Some(path) = path else {
-        return Some(cur);
+    // Preserve the original semantics: a `None` path returns the root
+    // value itself (Some(cur)), not None.
+    let mut rest = match path {
+        Some(p) => p,
+        None => return Some(cur),
     };
-    let mut rest = path;
     while !rest.is_empty() {
         if let Some(after_dot) = rest.strip_prefix('.') {
             let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
@@ -257,18 +335,23 @@ pub(super) fn is_column_query_ref(fv: &FilterValue) -> bool {
     matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
 }
 
-pub(super) fn json_to_inner_value(v: &serde_json::Value) -> Option<InnerValue> {
+/// Convert a `serde_json::Value` scalar into a `QueryValue`.
+///
+/// C6 (#80): the name-keyed target. `serde_json::Value` is already
+/// string-keyed, so this is the natural representation — no interner
+/// walk is required.
+pub(super) fn json_to_query_value(v: &serde_json::Value) -> QueryValue {
     match v {
-        serde_json::Value::Null => Some(InnerValue::Null),
-        serde_json::Value::Bool(b) => Some(InnerValue::Bool(*b)),
+        serde_json::Value::Null => QueryValue::Null,
+        serde_json::Value::Bool(b) => QueryValue::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Some(InnerValue::Int(i))
+                QueryValue::Int(i)
             } else {
-                n.as_f64().map(InnerValue::F64)
+                n.as_f64().map(QueryValue::F64).unwrap_or(QueryValue::Null)
             }
         }
-        serde_json::Value::String(s) => Some(InnerValue::Str(s.clone())),
-        _ => None,
+        serde_json::Value::String(s) => QueryValue::Str(s.clone()),
+        _ => QueryValue::Null,
     }
 }
