@@ -806,8 +806,12 @@ fn read_bin_key_id(buf: &[u8], pos: &mut usize) -> Result<u64, CodecError> {
 /// Write a msgpack map header for `total` entries into `buf`, matching the
 /// thresholds rmp_serde uses: FixMap if total≤15, Map16 if total≤65535,
 /// Map32 otherwise.
+///
+/// `pub(crate)` so that the projection codec (`projection.rs`) can write
+/// partial-field map headers using the same thresholds without duplicating
+/// this 3-arm match.
 #[inline]
-fn write_map_header(buf: &mut Vec<u8>, total: usize) -> Result<(), CodecError> {
+pub(crate) fn write_map_header(buf: &mut Vec<u8>, total: usize) -> Result<(), CodecError> {
     if total <= 15 {
         // FixMap: 0x80 | len (single byte)
         buf.push(0x80 | total as u8);
