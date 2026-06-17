@@ -14,12 +14,14 @@ use crate::query::read::{
     exec, AggregateField, GroupBy, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery,
     Select, SelectItem, Temporal,
 };
+use bytes::Bytes;
 use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::record_view_to_id_msgpack;
 use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -473,14 +475,28 @@ impl TableManager {
                         &rids_vec
                     };
 
-                    let inner_records = self.get_many(rids_slice).await?;
-                    let mut records = Vec::with_capacity(inner_records.len());
-                    for inner in inner_records.into_iter().flatten() {
-                        if let Ok(qv) = shamir_types::codecs::interned::inner_value_to_query_value(
-                            &inner, interner,
-                        ) {
-                            records.push(crate::query::read::QueryRecord::Direct(qv, std::sync::OnceLock::new()));
-                        }
+                    // S3: zero-copy bytes path — index2 is plain SELECT only.
+                    let raw_records = self.get_many_bytes(rids_slice).await?;
+                    let mut records = Vec::with_capacity(raw_records.len());
+                    for bytes in raw_records.into_iter().flatten() {
+                        let qv = match shamir_types::record_view::RecordView::new(&bytes) {
+                            Ok(view) => view.to_query_value(interner),
+                            Err(_) => match InnerValue::from_bytes(bytes) {
+                                Ok(iv) => {
+                                    match shamir_types::codecs::interned::inner_value_to_query_value(
+                                        &iv, interner,
+                                    ) {
+                                        Ok(q) => q,
+                                        Err(_) => continue,
+                                    }
+                                }
+                                Err(_) => continue,
+                            },
+                        };
+                        records.push(crate::query::read::QueryRecord::Direct(
+                            qv,
+                            std::sync::OnceLock::new(),
+                        ));
                     }
                     let returned = records.len() as u64;
                     let pagination = if query.pagination.is_none() {
@@ -1321,4 +1337,94 @@ pub(super) fn try_project_page_only(
     };
 
     Some((paged, pagination))
+}
+
+/// Byte-level twin of [`try_project_page_only`] — works on raw `Bytes`
+/// instead of decoded `InnerValue`. Each row is wrapped in a zero-copy
+/// `RecordView` for projection. Bare-scalar / non-map records where
+/// `RecordView::new` fails are decoded via `InnerValue::from_bytes` as a
+/// fallback (records are NEVER silently dropped).
+pub(super) fn try_project_page_only_bytes(
+    query: &ReadQuery,
+    matched: &[(RecordId, Bytes)],
+    interner: &Interner,
+) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
+    // Same eligibility gate as the InnerValue variant.
+    if query.order_by.is_some()
+        || query.group_by.is_some()
+        || query.select.distinct
+        || exec::has_aggregates(&query.select)
+    {
+        return None;
+    }
+    if query.pagination.is_none() && !query.count_total {
+        return None;
+    }
+    let (skip_u64, take_u64) = query.pagination.resolve();
+    let take = take_u64? as usize;
+    let skip = skip_u64 as usize;
+
+    let total_matches = matched.len();
+    let total_u64 = total_matches as u64;
+
+    let page_start = skip.min(total_matches);
+    let page_end = skip.saturating_add(take).min(total_matches);
+    let page_slice = &matched[page_start..page_end];
+
+    let proj = exec::SelectProjection::new(&query.select, interner);
+    let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
+    for (_, bytes) in page_slice {
+        let qv = match shamir_types::record_view::RecordView::new(bytes) {
+            Ok(view) => proj.project_value(&view, interner),
+            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                Ok(iv) => proj.project_value(&iv, interner),
+                Err(_) => continue,
+            },
+        };
+        paged.push(crate::query::read::QueryRecord::Direct(
+            qv,
+            std::sync::OnceLock::new(),
+        ));
+    }
+
+    let pagination = if query.pagination.is_none() && query.count_total {
+        Some(PaginationInfo {
+            total_count: Some(total_u64),
+            total_pages: None,
+            current_page: None,
+            page_size: None,
+            has_next: false,
+            has_prev: false,
+        })
+    } else {
+        let total_for_info = if query.count_total {
+            Some(total_u64)
+        } else {
+            None
+        };
+        Some(PaginationInfo::compute(&query.pagination, total_for_info))
+    };
+
+    Some((paged, pagination))
+}
+
+/// Byte-level twin of [`exec::apply_select_value`] — projects raw `Bytes`
+/// rows via zero-copy `RecordView` instead of decoded `InnerValue`.
+/// Bare-scalar / non-map records fall back to `InnerValue::from_bytes`.
+pub(super) fn apply_select_value_bytes(
+    matched: &[(RecordId, Bytes)],
+    select: &crate::query::read::Select,
+    interner: &Interner,
+) -> Vec<QueryValue> {
+    let proj = exec::SelectProjection::new(select, interner);
+    matched
+        .iter()
+        .map(|(_, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
+            Ok(view) => proj.project_value(&view, interner),
+            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                Ok(iv) => proj.project_value(&iv, interner),
+                Err(_) => QueryValue::Null,
+            },
+        })
+        .collect()
 }
