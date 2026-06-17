@@ -54,7 +54,7 @@ control-plane (admin/system).
 | Шаг | Коммит | Суть |
 |---|---|---|
 | #60 A+B+C | `56ad49b` | paginate/distinct/order_by → QueryValue (canonical-key byte-identity) |
-| #60 D+E | (гейчу) | Path B scans + aggregate/HAVING → QueryValue |
+| #60 D+E | `8958fd9` | Path B scans + aggregate/HAVING → QueryValue (Direct lazy-json cache) |
 
 ### Supply-chain
 | Шаг | Коммит | Суть |
