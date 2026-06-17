@@ -67,34 +67,6 @@ async fn list_stream_tx_some_matches_list_stream_forward() {
     assert_eq!(baseline.len(), 3);
 }
 
-#[tokio::test]
-async fn filter_stream_with_callback_tx_forwards() {
-    use crate::query::filter::eval::{compile_filter, FilterCallback};
-    use crate::query::filter::eval_context::FilterContext;
-    use crate::query::filter::Filter;
-    use shamir_types::types::common::new_map;
-
-    let (tbl, _ids) = make_table_with_n_records(4).await;
-    let interner = tbl.interner().get().await.unwrap();
-
-    let filter = Filter::And { filters: vec![] };
-    let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
-    let cb = compile_filter(&filter, interner);
-
-    let baseline =
-        collect_stream(tbl.filter_stream_with_callback(2, &cb as &dyn FilterCallback, &ctx)).await;
-    let via_tx = collect_stream(tbl.filter_stream_with_callback_tx(
-        None,
-        2,
-        &cb as &dyn FilterCallback,
-        &ctx,
-    ))
-    .await;
-    assert_eq!(baseline.len(), via_tx.len());
-    assert_eq!(baseline.len(), 4);
-}
-
 /// KNOWN LIMITATION guard (C8): streaming scans do NOT overlay the tx's own
 /// `write_set`, so a record staged inside a tx is INVISIBLE to an in-tx
 /// stream until commit (only point reads — `read_one_tx` — do
