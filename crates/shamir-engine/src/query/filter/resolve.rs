@@ -32,8 +32,10 @@ pub fn resolve_field_ref<'a>(record: &'a InnerValue, path: &[u64]) -> Option<&'a
     Some(cur)
 }
 
-/// Owned variant — kept for external callers (tests, query/read/exec.rs).
-/// Hot filter paths use `resolve_field_ref` and never call this.
+/// Owned variant — pinned by `table/read_exec.rs` (two field-resolution
+/// call-sites) plus unit tests. Hot filter paths use `resolve_field_ref`
+/// and never call this. §5b floor: eliminable only when read_exec moves
+/// those sites to the lens.
 pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
     resolve_field_ref(record, path).cloned()
 }
@@ -110,12 +112,14 @@ pub fn filter_value_to_query(fv: &FilterValue) -> Option<QueryValue> {
 
 /// Convert a literal `FilterValue` to `InnerValue` without record/context.
 ///
-/// **Legacy adapter** — kept for out-of-scope callers (read_planner.rs,
-/// compile-time `pre_resolved` of the legacy InnerValue consumers) that
-/// still bind to `InnerValue`. New filter code uses
-/// [`filter_value_to_query`] (name-keyed).
+/// **Legacy adapter** — kept for out-of-scope callers that still bind to
+/// `InnerValue`. New filter code uses [`filter_value_to_query`] (name-keyed).
 ///
 /// Returns `None` for non-literal variants (FieldRef, QueryRef, FnCall, Expr, Cond).
+///
+/// §5b floor: pinned by `table/read_planner.rs`, which encodes filter
+/// literals into InnerValue index-bound keys. Eliminable only via the
+/// index key-encoding boundary — not in resolve.rs scope.
 #[inline]
 pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
     match fv {
@@ -201,14 +205,16 @@ pub fn resolve_filter_query(
 /// Resolve a `FilterValue` into an `InnerValue` for comparison.
 ///
 /// **Legacy adapter (C6 #80).** Out-of-scope callers
-/// (`query/read/aggregate.rs`, `query/read/select_projection.rs`,
-/// `query/batch/query_runner.rs`) still bind to `InnerValue` and are not
-/// part of the C6 migration scope. This entry delegates to
-/// [`resolve_filter_query`] (the name-keyed hot path) and performs a single
-/// trailing `query_value_to_inner` conversion at the legacy boundary — a
-/// documented cold adapter, NOT a hot-path round-trip. The internal filter
-/// eval tree (`FilterNode::matches`) uses `resolve_filter_query` directly
-/// and never crosses this seam.
+/// (`query/read/aggregate.rs`, `query/read/select_projection.rs`) still
+/// bind to `InnerValue` and are not part of the C6 migration scope. This
+/// entry delegates to [`resolve_filter_query`] (the name-keyed hot path)
+/// and performs a single trailing `query_value_to_inner` conversion at the
+/// legacy boundary — a documented cold adapter, NOT a hot-path round-trip.
+/// The internal filter eval tree (`FilterNode::matches`) uses
+/// `resolve_filter_query` directly and never crosses this seam.
+///
+/// §5b floor: eliminable only by migrating those two callers off
+/// InnerValue (tracked as a follow-up, S10/E6) — not in resolve.rs scope.
 pub fn resolve_filter_value(
     fv: &FilterValue,
     record: &(impl RecordRef + ?Sized),
