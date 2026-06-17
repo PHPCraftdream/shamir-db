@@ -13,7 +13,6 @@ use std::time::Instant;
 use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHashMap;
-use serde_json as json;
 
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
@@ -23,7 +22,7 @@ use crate::query::write::{
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     merge_storage_bytes, query_value_to_inner_with, query_value_to_storage_bytes,
-    record_view_to_json_value, record_view_to_query_value, validate_keys_resolve_interner,
+    record_view_to_query_value, validate_keys_resolve_interner,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -453,16 +452,20 @@ impl TableManager {
                             "execute_update_tx: RecordView for result: {e}"
                         ))
                     })?;
-                    let mut obj = match record_view_to_json_value(&old_view, interner)? {
-                        json::Value::Object(m) => m,
-                        _ => json::Map::new(),
+                    let base_qv = record_view_to_query_value(&old_view, interner)?;
+                    let mut m = match base_qv {
+                        Value::Map(m) => m,
+                        _ => shamir_types::types::common::new_map(),
                     };
                     if let Value::Map(overlay) = resolved_set.as_ref() {
                         for (k, v) in overlay {
-                            obj.insert(k.clone(), json::Value::from(v.clone()));
+                            m.insert(k.clone(), v.clone());
                         }
                     }
-                    result_records.push(InsertedRecord::Json(json::Value::Object(obj)));
+                    result_records.push(InsertedRecord::Direct {
+                        id: None,
+                        fields: QueryValue::Map(m),
+                    });
                 }
             }
         }
@@ -626,8 +629,8 @@ impl TableManager {
     ///   from the old bytes via `RecordView`, and `new_qv = old_qv + resolved
     ///   value overlay` (string-keyed — sidesteps de-interning overlay-minted
     ///   key ids, the W3c keystone pattern);
-    /// - result JSON is `record_view_to_json_value(old_view) + resolved value
-    ///   overlay` (same keystone).
+    /// - result is `record_view_to_query_value(old_view) + resolved value
+    ///   overlay` wrapped as `InsertedRecord::Direct` (same keystone).
     ///
     /// The INSERT branch encodes the value via `query_value_to_storage_bytes`
     /// and stages it through `insert_tx_many_bytes` — the same tree-free
@@ -699,7 +702,7 @@ impl TableManager {
             .lookup_existing_for_set(&key_fields, batch_size)
             .await?;
 
-        let (created, result_record) = if let Some((id, _existing)) = found {
+        let result_record = if let Some((id, _existing)) = found {
             // ----- MERGE branch (tree-free, mirrors W3c execute_update_tx) -----
             //
             // Read the existing record's raw storage bytes through the tx-aware
@@ -768,7 +771,7 @@ impl TableManager {
                     .await?;
             }
 
-            // Result JSON: old record (base-interned keys — always safe to
+            // Result: old record (base-interned keys — always safe to
             // decode) overlaid with the string-keyed resolved SET fields.
             // Decoding new_bytes via the base interner would fail when op.value
             // introduces brand-new field names interned only into the tx overlay.
@@ -777,16 +780,21 @@ impl TableManager {
                     "execute_set_tx: RecordView for result: {e}"
                 ))
             })?;
-            let mut base_obj = match record_view_to_json_value(&old_view, interner)? {
-                json::Value::Object(m) => m,
-                _ => json::Map::new(),
+            let base_qv = record_view_to_query_value(&old_view, interner)?;
+            let mut m = match base_qv {
+                Value::Map(m) => m,
+                _ => shamir_types::types::common::new_map(),
             };
             if let Value::Map(overlay) = resolved_value.as_ref() {
                 for (k, v) in overlay {
-                    base_obj.insert(k.clone(), json::Value::from(v.clone()));
+                    m.insert(k.clone(), v.clone());
                 }
             }
-            (false, json::Value::Object(base_obj))
+            m.insert("_created".to_string(), QueryValue::Bool(false));
+            InsertedRecord::Direct {
+                id: None,
+                fields: QueryValue::Map(m),
+            }
         } else {
             // ----- INSERT branch (tree-free, mirrors execute_insert_tx) -----
             //
@@ -811,33 +819,27 @@ impl TableManager {
                     "execute_set_tx: insert_tx_many_bytes returned no id".to_string(),
                 )
             })?;
-            // Result JSON from the original resolved value (string-keyed — no
-            // overlay-id reverse lookup).
-            let mut obj = match json::Value::from(resolved_value.as_ref().clone()) {
-                json::Value::Object(m) => m,
+            // Result from the original resolved value (string-keyed — no
+            // overlay-id reverse lookup). For map values, overlay _created
+            // directly; for non-map, wrap in {_value, _created}.
+            let mut m = match resolved_value.as_ref() {
+                Value::Map(fields) => fields.clone(),
                 other => {
-                    let mut m = json::Map::new();
-                    m.insert("_value".to_string(), other);
-                    m
+                    let mut wrap = shamir_types::types::common::new_map();
+                    wrap.insert("_value".to_string(), other.clone());
+                    wrap
                 }
             };
-            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-            (true, json::Value::Object(obj))
-        };
-
-        let mut result_obj = match result_record {
-            json::Value::Object(m) => m,
-            other => {
-                let mut m = json::Map::new();
-                m.insert("_value".to_string(), other);
-                m
+            m.insert("_created".to_string(), QueryValue::Bool(true));
+            InsertedRecord::Direct {
+                id: Some(id),
+                fields: QueryValue::Map(m),
             }
         };
-        result_obj.insert("_created".to_string(), json::Value::Bool(created));
 
         Ok(WriteResult {
             affected: 1,
-            records: vec![InsertedRecord::Json(json::Value::Object(result_obj))],
+            records: vec![result_record],
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }
@@ -855,7 +857,7 @@ fn build_insert_result_records(
         .iter()
         .zip(ids.iter())
         .map(|(value, id)| InsertedRecord::Direct {
-            id: *id,
+            id: Some(*id),
             fields: (**value).clone(),
         })
         .collect()

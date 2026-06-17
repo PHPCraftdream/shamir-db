@@ -20,8 +20,17 @@ use shamir_types::types::value::{QueryValue, Value};
 #[derive(Debug, Clone)]
 pub enum InsertedRecord {
     /// Zero-copy insert result: serialize directly from [`QueryValue`] +
-    /// [`RecordId`] without an intermediate `serde_json::Map` allocation.
-    Direct { id: RecordId, fields: QueryValue },
+    /// optional [`RecordId`] without an intermediate `serde_json::Map`
+    /// allocation.
+    ///
+    /// When `id` is `Some`, `_id` is injected in sorted-key position
+    /// (matching what `serde_json::Map` would emit). When `None`, only
+    /// the `fields` map is serialized — used by UPDATE-RETURNING and
+    /// SET-UPDATE where the wire result carries no `_id`.
+    Direct {
+        id: Option<RecordId>,
+        fields: QueryValue,
+    },
     /// Legacy: a fully-built `serde_json::Value` map. Kept for call
     /// sites (update, upsert) that already have one.
     Json(serde_json::Value),
@@ -37,36 +46,49 @@ impl Serialize for InsertedRecord {
                 // Emit in the same sorted-key order as serde_json::Map
                 // (which uses a BTreeMap-ordered structure in this build),
                 // so msgpack bytes are byte-identical to the old Json path.
-                let id_str = id.to_string();
+                let id_str = id.as_ref().map(|r| r.to_string());
                 match fields {
                     Value::Map(m) => {
-                        let field_count = m.len() + 1;
+                        let extra = if id_str.is_some() { 1 } else { 0 };
+                        let field_count = m.len() + extra;
                         let mut map = serializer.serialize_map(Some(field_count))?;
                         // Collect and sort keys so wire order matches serde_json::Map.
                         let mut pairs: Vec<(&String, &Value<String>)> = m.iter().collect();
                         pairs.sort_unstable_by_key(|(k, _)| k.as_str());
-                        // Insert _id in sorted position among field keys.
-                        // serde_json::Map sorts all keys including _id; we do the same.
-                        let id_key = "_id";
-                        let mut id_emitted = false;
-                        for (k, v) in &pairs {
-                            if !id_emitted && id_key < k.as_str() {
-                                map.serialize_entry(id_key, &id_str)?;
-                                id_emitted = true;
+                        if let Some(ref id_s) = id_str {
+                            // Insert _id in sorted position among field keys.
+                            // serde_json::Map sorts all keys including _id; we do the same.
+                            let id_key = "_id";
+                            let mut id_emitted = false;
+                            for (k, v) in &pairs {
+                                if !id_emitted && id_key < k.as_str() {
+                                    map.serialize_entry(id_key, id_s)?;
+                                    id_emitted = true;
+                                }
+                                map.serialize_entry(*k, *v)?;
                             }
-                            map.serialize_entry(*k, *v)?;
-                        }
-                        if !id_emitted {
-                            map.serialize_entry(id_key, &id_str)?;
+                            if !id_emitted {
+                                map.serialize_entry(id_key, id_s)?;
+                            }
+                        } else {
+                            // No _id — just emit sorted field pairs.
+                            for (k, v) in &pairs {
+                                map.serialize_entry(*k, *v)?;
+                            }
                         }
                         map.end()
                     }
                     _ => {
-                        // Non-map: emit {"_id": ..., "_value": ...} sorted.
-                        let mut map = serializer.serialize_map(Some(2))?;
-                        map.serialize_entry("_id", &id_str)?;
-                        map.serialize_entry("_value", fields)?;
-                        map.end()
+                        if let Some(ref id_s) = id_str {
+                            // Non-map with id: emit {"_id": ..., "_value": ...} sorted.
+                            let mut map = serializer.serialize_map(Some(2))?;
+                            map.serialize_entry("_id", id_s)?;
+                            map.serialize_entry("_value", fields)?;
+                            map.end()
+                        } else {
+                            // Non-map without id: emit the value directly.
+                            fields.serialize(serializer)
+                        }
                     }
                 }
             }
@@ -158,7 +180,7 @@ mod tests {
         map.insert("qty".to_string(), Value::Int(42));
         let id = RecordId::system("test-id-00");
         InsertedRecord::Direct {
-            id,
+            id: Some(id),
             fields: QueryValue::Map(map),
         }
     }
@@ -179,7 +201,7 @@ mod tests {
         let direct = make_direct();
         // Get the id string the Direct variant will emit so we can build
         // a byte-identical Json counterpart.
-        let id_str = if let InsertedRecord::Direct { id, .. } = &direct {
+        let id_str = if let InsertedRecord::Direct { id: Some(id), .. } = &direct {
             id.to_string()
         } else {
             unreachable!()
@@ -198,7 +220,7 @@ mod tests {
     #[test]
     fn inserted_record_serde_json_round_trip() {
         let direct = make_direct();
-        let id_str = if let InsertedRecord::Direct { id, .. } = &direct {
+        let id_str = if let InsertedRecord::Direct { id: Some(id), .. } = &direct {
             id.to_string()
         } else {
             unreachable!()
@@ -212,7 +234,7 @@ mod tests {
     #[test]
     fn inserted_record_as_json_direct() {
         let direct = make_direct();
-        let id_str = if let InsertedRecord::Direct { id, .. } = &direct {
+        let id_str = if let InsertedRecord::Direct { id: Some(id), .. } = &direct {
             id.to_string()
         } else {
             unreachable!()
