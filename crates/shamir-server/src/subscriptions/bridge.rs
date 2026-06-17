@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use shamir_collections::TFxMap;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
-use shamir_db::codecs::interned::json::inner_to_json_value;
+use shamir_db::core::interner::Interner;
+use shamir_db::record_view::{RecordRef, RecordView};
+use shamir_db::types::value::InnerValue;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -13,14 +17,35 @@ use shamir_query_types::subscribe::source::SubscriptionSource;
 use shamir_tunables::instance_defaults::JOURNAL_BACKFILL_LIMIT;
 use shamir_tx::ChangeOp;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use tokio::sync::OnceCell;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{StreamExt, StreamMap};
 
-use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert};
+use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedBytes};
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
+use super::filter_eval::bytes_to_arc;
 use super::push::{make_deliver_data, try_push_event};
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
+
+/// Convert cached raw bytes + interner to a `serde_json::Value` for delivery.
+///
+/// Tries the zero-copy `RecordView` lens first; falls back to full
+/// `InnerValue` decode for bare-scalar / non-map records.
+fn bytes_to_json(
+    bytes: &[u8],
+    interner_cell: &OnceCell<Interner>,
+) -> Option<serde_json::Value> {
+    let interner = interner_cell.get()?;
+    // Try RecordView (zero-copy lens) first.
+    if let Ok(view) = RecordView::new(bytes) {
+        // `to_json_value` returns Value::Null on de-intern error;
+        // for a valid map that's the best we can do — return it.
+        return Some(view.to_json_value(interner));
+    }
+    // Fallback: full InnerValue decode for non-map records.
+    let inner = InnerValue::from_bytes(bytes).ok()?;
+    Some(inner.to_json_value(interner))
+}
 
 /// Bridge task: subscribes to the changefeed broadcast for the relevant
 /// repos, filters events by table name and event mask, and pushes
@@ -38,7 +63,7 @@ pub(crate) async fn bridge_task(
     initial: bool,
 ) {
     let seq = AtomicU64::new(0);
-    // Unique per ShamirDb instance — prevents deliver-cache pollution across
+    // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.
     let db_id = Arc::as_ptr(&db) as u64;
 
@@ -63,7 +88,7 @@ pub(crate) async fn bridge_task(
             r
         };
 
-        // Subscribe to each repo's changefeed FIRST — before journal backfill —
+        // Subscribe to each repo's changefeed FIRST -- before journal backfill --
         // so we don't miss events between journal read and live subscription.
         let mut receivers = Vec::with_capacity(repos.len());
         for repo in &repos {
@@ -77,13 +102,13 @@ pub(crate) async fn bridge_task(
         }
 
         let mut consecutive_push_failures: u32 = 0;
-        // repo name → index (built once; repos are fixed at subscribe time).
+        // repo name -> index (built once; repos are fixed at subscribe time).
         let repo_idx: TFxMap<String, usize> = repos
             .iter()
             .enumerate()
             .map(|(i, r)| (r.clone(), i))
             .collect();
-        // O(1) target index: (repo_idx, table) → target indices.
+        // O(1) target index: (repo_idx, table) -> target indices.
         // Built once at subscribe time; replaces the two O(T) linear scans.
         let target_index = build_target_index(&targets, &repo_idx);
         let mut watermarks: Vec<u64> = vec![0; repos.len()];
@@ -111,7 +136,7 @@ pub(crate) async fn bridge_task(
                     for event in &jr.events {
                         for change in &event.changes {
                             // O(1) pre-check via target index: skip the async
-                            // de-intern entirely when no target could match.
+                            // interner lookup entirely when no target could match.
                             let ri = repo_idx[repo];
                             if !any_target_interested_indexed(
                                 &targets,
@@ -122,15 +147,15 @@ pub(crate) async fn bridge_task(
                             ) {
                                 continue;
                             }
-                            let decoded_inner = match (&change.op, change.value.as_deref()) {
+                            let bytes_decoded = match (&change.op, change.value.as_deref()) {
                                 (ChangeOp::Put, Some(bytes)) => {
-                                    db.decode_record_value_inner(
-                                        &db_name,
-                                        repo,
-                                        &change.table,
-                                        bytes,
-                                    )
-                                    .await
+                                    db.get_table_interner_cell(
+                                            &db_name,
+                                            repo,
+                                            &change.table,
+                                        )
+                                        .await
+                                        .map(|interner_cell| (bytes_to_arc(bytes), interner_cell))
                                 }
                                 _ => None,
                             };
@@ -140,19 +165,17 @@ pub(crate) async fn bridge_task(
                                 ri,
                                 &change.table,
                                 &change.op,
-                                decoded_inner.as_ref(),
+                                bytes_decoded.as_ref(),
                             ) {
                                 continue;
                             }
-                            // Convert InnerValue → JSON lazily: only for events
+                            // Convert bytes -> JSON lazily: only for events
                             // that passed the filter and must be delivered.
-                            let value_json: Option<serde_json::Value> = match decoded_inner.as_ref()
-                            {
-                                Some((inner, cell)) => {
-                                    cell.get().and_then(|i| inner_to_json_value(inner, i).ok())
-                                }
-                                None => None,
-                            };
+                            let value_json: Option<serde_json::Value> =
+                                match bytes_decoded.as_ref() {
+                                    Some((bytes, cell)) => bytes_to_json(bytes, cell),
+                                    None => None,
+                                };
                             let data = make_deliver_data(
                                 &deliver,
                                 &db,
@@ -271,7 +294,7 @@ pub(crate) async fn bridge_task(
                     let ri = repo_idx[&repo];
                     for (change_idx, change) in event.changes.iter().enumerate() {
                         // O(1) pre-check via target index: skip the async
-                        // de-intern entirely when no target could match.
+                        // interner lookup entirely when no target could match.
                         if !any_target_interested_indexed(
                             &targets,
                             &target_index,
@@ -281,67 +304,72 @@ pub(crate) async fn bridge_task(
                         ) {
                             continue;
                         }
-                        // Decode the Put value once per event across all
-                        // bridge tasks: the decode cache deduplicates the
-                        // msgpack decode so that N subscribers pay O(1).
-                        // We cache InnerValue + Interner (skipping JSON
-                        // alloc); JSON is produced lazily only for delivery.
-                        let decoded_arc = match (&change.op, change.value.as_deref()) {
-                            (ChangeOp::Put, Some(bytes)) => {
-                                if let Some(cached) =
-                                    cache_get(&repo, event.commit_version, change_idx)
-                                {
-                                    cached
-                                } else {
-                                    let decoded = db
-                                        .decode_record_value_inner(
-                                            &db_name,
+                        // Cache raw bytes + interner per event across all
+                        // bridge tasks: the cache deduplicates the interner
+                        // lookup so that N subscribers pay O(1).
+                        // No InnerValue decode on the filter path -- the
+                        // RecordView lens reads fields zero-copy.
+                        let decoded_arc: CachedBytes =
+                            match (&change.op, change.value.as_deref()) {
+                                (ChangeOp::Put, Some(bytes)) => {
+                                    if let Some(cached) =
+                                        cache_get(&repo, event.commit_version, change_idx)
+                                    {
+                                        cached
+                                    } else {
+                                        let entry = db
+                                            .get_table_interner_cell(
+                                                &db_name,
+                                                &repo,
+                                                &change.table,
+                                            )
+                                            .await
+                                            .map(|interner_cell| {
+                                                (bytes_to_arc(bytes), interner_cell)
+                                            });
+                                        cache_insert(
                                             &repo,
-                                            &change.table,
-                                            bytes,
+                                            event.commit_version,
+                                            change_idx,
+                                            entry,
                                         )
-                                        .await;
-                                    cache_insert(&repo, event.commit_version, change_idx, decoded)
+                                    }
                                 }
-                            }
-                            _ => {
-                                static NONE_ARC: std::sync::OnceLock<
-                                    super::decode_cache::DecodedInner,
-                                > = std::sync::OnceLock::new();
-                                Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
-                            }
-                        };
-                        let inner_ref = (*decoded_arc).as_ref();
+                                _ => {
+                                    static NONE_ARC: std::sync::OnceLock<CachedBytes> =
+                                        std::sync::OnceLock::new();
+                                    Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
+                                }
+                            };
+                        let bytes_ref = (*decoded_arc).as_ref();
                         if !matches_any_indexed(
                             &targets,
                             &target_index,
                             ri,
                             &change.table,
                             &change.op,
-                            inner_ref,
+                            bytes_ref,
                         ) {
                             continue;
                         }
-                        // Convert InnerValue → JSON lazily (only for events
+                        // Convert bytes -> JSON lazily (only for events
                         // that passed the filter and must be delivered).
                         // The deliver cache stores the final serialized bytes
                         // so this conversion happens at most once per event.
-                        let value_json: Option<serde_json::Value> = match inner_ref {
-                            Some((inner, cell)) => {
-                                cell.get().and_then(|i| inner_to_json_value(inner, i).ok())
-                            }
+                        let value_json: Option<serde_json::Value> = match bytes_ref {
+                            Some((bytes, cell)) => bytes_to_json(bytes, cell),
                             None => None,
                         };
                         let value_json_ref = value_json.as_ref();
                         // For Records/Keys modes the payload is identical
-                        // across all subscribers — use the deliver cache to
+                        // across all subscribers -- use the deliver cache to
                         // build it once and share via Arc.
                         let deliver_mode_disc = match &deliver {
                             DeliverMode::Records => Some(0u8),
                             DeliverMode::Keys => Some(1u8),
                             _ => None,
                         };
-                        // For Records/Keys the payload is shared via Arc —
+                        // For Records/Keys the payload is shared via Arc --
                         // we borrow it for serialization (zero-copy fan-out).
                         // For Batch/Call the payload is built per-subscriber.
                         let cached_arc;
@@ -400,7 +428,7 @@ pub(crate) async fn bridge_task(
                             return;
                         }
                     }
-                    // Evict stale cache entries — safe because all bridges
+                    // Evict stale cache entries -- safe because all bridges
                     // for this repo advance monotonically past this version.
                     if event.commit_version > 1 {
                         cache_evict_up_to(event.commit_version - 1);

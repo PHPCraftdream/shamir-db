@@ -1,25 +1,22 @@
 use shamir_collections::TFxMap;
-use shamir_db::core::interner::Interner;
-use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
-use std::sync::Arc;
-use tokio::sync::OnceCell;
 
-use super::filter_eval::filter_matches_inner;
+use super::decode_cache::CachedRecordBytes;
+use super::filter_eval::filter_matches_bytes;
 
 /// Per-bridge index built once at subscribe time:
-/// maps `(repo_idx, table_name)` → sorted list of target indices
+/// maps `(repo_idx, table_name)` -> sorted list of target indices
 /// that care about that exact (repo, table) pair.
 ///
 /// This collapses the two O(T) linear scans in `any_target_interested` /
 /// `matches_any` to a single O(1) HashMap lookup followed by an O(k) walk
-/// over only the k ≤ T relevant targets.
+/// over only the k <= T relevant targets.
 pub type TargetIndex = TFxMap<(usize, String), Vec<usize>>;
 
 /// Build the per-bridge target index from the targets vec and the
-/// `repo_idx` map (repo name → position in `repos`).
+/// `repo_idx` map (repo name -> position in `repos`).
 pub fn build_target_index(
     targets: &[(String, String, EventMask, Option<Filter>)],
     repo_idx: &TFxMap<String, usize>,
@@ -41,9 +38,9 @@ pub fn indexed_targets<'a>(
     repo_idx: usize,
     table: &str,
 ) -> Option<&'a [usize]> {
-    // Temporary owned key for lookup — avoids a HashMap<(usize, &str), …> which
+    // Temporary owned key for lookup -- avoids a HashMap<(usize, &str), ...> which
     // would require a custom Borrow impl. The table String is typically short
-    // (≤ 64 bytes) so the allocation is cheap relative to hash probe savings.
+    // (<= 64 bytes) so the allocation is cheap relative to hash probe savings.
     index.get(&(repo_idx, table.to_owned())).map(Vec::as_slice)
 }
 
@@ -64,17 +61,17 @@ pub fn any_target_interested_indexed(
 
 /// O(1)-gated full filter match using the target index.
 ///
-/// `inner_decoded` carries the decoded `InnerValue` and the table's
-/// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to intern
-/// field-name segments for filter evaluation.
-/// JSON conversion is not performed here — that is deferred to the deliver path.
+/// `bytes_decoded` carries the raw msgpack record bytes and the table's
+/// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to construct a
+/// zero-copy `RecordView` lens for filter evaluation.
+/// JSON conversion is not performed here -- that is deferred to the deliver path.
 pub fn matches_any_indexed(
     targets: &[(String, String, EventMask, Option<Filter>)],
     index: &TargetIndex,
     repo_idx: usize,
     table: &str,
     op: &ChangeOp,
-    inner_decoded: Option<&(InnerValue, Arc<OnceCell<Interner>>)>,
+    bytes_decoded: Option<&CachedRecordBytes>,
 ) -> bool {
     match indexed_targets(index, repo_idx, table) {
         None => false,
@@ -84,11 +81,13 @@ pub fn matches_any_indexed(
                 return false;
             }
             match (filter, op) {
-                (Some(f), ChangeOp::Put) => match inner_decoded {
-                    Some((inner, interner_cell)) => filter_matches_inner(f, inner, interner_cell),
+                (Some(f), ChangeOp::Put) => match bytes_decoded {
+                    Some((bytes, interner_cell)) => {
+                        filter_matches_bytes(f, bytes, interner_cell)
+                    }
                     None => {
                         tracing::warn!(
-                            "subscription filter: decode failed for Put value, \
+                            "subscription filter: no bytes for Put value, \
                              skipping event (fail-closed)"
                         );
                         false
@@ -123,7 +122,7 @@ pub fn matches_any(
     repo: &str,
     table: &str,
     op: &ChangeOp,
-    inner_decoded: Option<&(InnerValue, Arc<OnceCell<Interner>>)>,
+    bytes_decoded: Option<&CachedRecordBytes>,
 ) -> bool {
     targets
         .iter()
@@ -132,11 +131,13 @@ pub fn matches_any(
                 return false;
             }
             match (filter, op) {
-                (Some(f), ChangeOp::Put) => match inner_decoded {
-                    Some((inner, interner_cell)) => filter_matches_inner(f, inner, interner_cell),
+                (Some(f), ChangeOp::Put) => match bytes_decoded {
+                    Some((bytes, interner_cell)) => {
+                        filter_matches_bytes(f, bytes, interner_cell)
+                    }
                     None => {
                         tracing::warn!(
-                            "subscription filter: decode failed for Put value, \
+                            "subscription filter: no bytes for Put value, \
                              skipping event (fail-closed)"
                         );
                         false
