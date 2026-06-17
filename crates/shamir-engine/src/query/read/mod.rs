@@ -15,9 +15,10 @@ pub mod select_projection;
 // Re-export DTOs from the shared types crate.
 pub use aggregate::{apply_aggregate_all, apply_group_by};
 pub use exec::{
-    apply_distinct, apply_pagination, apply_select, apply_select_to_bytes, has_aggregates,
+    apply_distinct, apply_distinct_qv, apply_pagination, apply_select, apply_select_to_bytes,
+    has_aggregates,
 };
-pub use order::apply_order_by;
+pub use order::{apply_order_by, apply_order_by_qv};
 pub use parser::query_from_value;
 pub use shamir_query_types::read::{
     AggFunc, AggregateField, At, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
