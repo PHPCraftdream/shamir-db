@@ -1,53 +1,8 @@
 use shamir_collections::TFxMap;
-use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
 
 impl TableManager {
-    /// Project + emit a non-transactional write footprint to the changefeed.
-    ///
-    /// Called by the non-tx `execute_insert/update/set/delete` methods AFTER
-    /// the mutations are applied to the table. Best-effort and non-blocking:
-    ///
-    /// * No feed wired (`changefeed == None`) → no-op.
-    /// * Empty `changes` → no-op.
-    /// * Otherwise build the event via [`shamir_tx::nontx_event`] using
-    ///   the caller-supplied `commit_version` (which is the MVCC version
-    ///   the data was written at — see `*_returning_version` helpers),
-    ///   and hand it to the feed's two non-blocking tracks (broadcast
-    ///   `send` + journal `try_send`). Neither track waits nor errors
-    ///   back to us.
-    ///
-    /// `commit_version` is the version already allocated by the data-
-    /// write path (`MvccStore::set_versioned[_many]` /
-    /// `delete_versioned`), so the event carries the EXACT same version
-    /// the record landed at — no second `assign_next_version` bump.
-    /// For batches with per-record versions the caller passes the MAX
-    /// (= last) version, matching the commit-version-per-batch semantic
-    /// the tx path uses.
-    pub(crate) fn emit_nontx_changefeed(
-        &self,
-        commit_version: u64,
-        changes: Vec<shamir_tx::RecordChange>,
-    ) {
-        let Some(cf) = &self.changefeed else {
-            return; // no feed wired (system table / test)
-        };
-        if changes.is_empty() {
-            return; // empty footprint — nothing to emit
-        }
-        let event = shamir_tx::nontx_event(
-            &cf.repo,
-            commit_version,
-            shamir_types::access::Actor::System,
-            changes,
-        );
-        if let Some(event) = event {
-            cf.feed.emit(event);
-        }
-    }
-
     /// Record a non-tx write footprint in the SSI commit-write log so that
     /// Serializable transactions can detect phantom conflicts caused by
     /// non-transactional writes (MVCC-1 fix).
@@ -107,23 +62,4 @@ impl TableManager {
         cf.gate.publish_committed_max(commit_version);
     }
 
-    /// Build one [`RecordChange`](shamir_tx::RecordChange) for a non-tx
-    /// `Put` (insert / update / set): the raw `RecordId` key bytes plus the
-    /// serialized new record bytes — byte-identical to what the tx staging
-    /// path carries for the same mutation. Serialization failure (which
-    /// would also have failed the data write upstream) yields `None` so the
-    /// change is simply omitted rather than poisoning the batch.
-    pub(crate) fn put_change(
-        &self,
-        id: RecordId,
-        value: &InnerValue,
-    ) -> Option<shamir_tx::RecordChange> {
-        let bytes = value.to_bytes().ok()?;
-        Some(shamir_tx::RecordChange {
-            table: self.name.clone(),
-            key: id.to_bytes(),
-            op: shamir_tx::ChangeOp::Put,
-            value: Some(bytes),
-        })
-    }
 }

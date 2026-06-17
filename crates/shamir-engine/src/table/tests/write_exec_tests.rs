@@ -93,6 +93,20 @@ pub(crate) async fn delete_via_tx(
     .await
 }
 
+/// Test-only SET (upsert) via the production implicit-tx + commit path.
+pub(crate) async fn set_via_tx(
+    repo: &RepoInstance,
+    table: &crate::table::TableManager,
+    op: &shamir_query_types::write::SetOp,
+) -> Result<WriteResult, BatchError> {
+    let owned_op = op.clone();
+    let owned_table = table.clone();
+    repo.run_implicit_batch_tx(Actor::System, "test_set", move |tx| {
+        Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx).await })
+    })
+    .await
+}
+
 /// Create a DbInstance with one "users" table, return the table manager + repo.
 pub(crate) async fn setup_empty_table() -> (crate::table::TableManager, RepoInstance) {
     let repo_config = RepoConfig {
@@ -394,14 +408,14 @@ async fn test_insert_update_delete_pipeline() {
 
 #[tokio::test]
 async fn test_execute_set_insert_new() {
-    let (table, _repo) = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("email", "alice@example.com"))
         .value(doc().set("email", "alice@example.com").set("name", "Alice"))
         .build();
 
-    let result = table.execute_set(&op).await.unwrap();
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records[0].as_json()["_created"], true);
@@ -411,7 +425,7 @@ async fn test_execute_set_insert_new() {
 
 #[tokio::test]
 async fn test_execute_set_update_existing() {
-    let (table, _repo) = setup_table_with_users().await;
+    let (table, repo) = setup_table_with_users().await;
     let _interner = table.interner().get().await.unwrap();
 
     // Alice exists with status=active. Upsert by name.
@@ -425,7 +439,7 @@ async fn test_execute_set_update_existing() {
         )
         .build();
 
-    let result = table.execute_set(&op).await.unwrap();
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records[0].as_json()["_created"], false);
@@ -437,14 +451,14 @@ async fn test_execute_set_update_existing() {
 
 #[tokio::test]
 async fn test_execute_set_no_match_inserts() {
-    let (table, _repo) = setup_table_with_users().await;
+    let (table, repo) = setup_table_with_users().await;
 
     let op = write::upsert("users")
         .key(doc().set("name", "Zara"))
         .value(doc().set("name", "Zara").set("age", 22_i64))
         .build();
 
-    let result = table.execute_set(&op).await.unwrap();
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.records[0].as_json()["_created"], true);
     assert_eq!(table.count().await.unwrap(), 4); // new record added
@@ -518,7 +532,7 @@ async fn test_interner_persisted_after_update() {
 /// Same test for execute_set: upsert should persist new keys.
 #[tokio::test]
 async fn test_interner_persisted_after_set() {
-    let (table, _repo) = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("unique_field_xyz", "val"))
@@ -528,7 +542,7 @@ async fn test_interner_persisted_after_set() {
                 .set("another_new_field", 99_i64),
         )
         .build();
-    table.execute_set(&op).await.unwrap();
+    set_via_tx(&repo, &table, &op).await.unwrap();
 
     let interner = table.interner().get().await.unwrap();
     assert!(interner.get_ind("unique_field_xyz").is_some());
@@ -564,7 +578,7 @@ async fn test_insert_computed_field_lowercase() {
 
 #[tokio::test]
 async fn test_set_computed_field() {
-    let (table, _repo) = setup_empty_table().await;
+    let (table, repo) = setup_empty_table().await;
 
     let op = write::upsert("users")
         .key(doc().set("email", "x@y.z"))
@@ -575,7 +589,7 @@ async fn test_set_computed_field() {
         )
         .build();
 
-    let result = table.execute_set(&op).await.unwrap();
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
     assert_eq!(result.records[0].as_json()["email_norm"], "x@y.z");
 }
 
@@ -600,4 +614,95 @@ async fn test_insert_computed_bad_ref_fails_closed() {
         .build();
 
     assert!(insert_via_tx(&repo, &table, &op, true).await.is_err());
+}
+
+// ============================================================================
+// W3d-2: non-tx SET reroute parity (implicit-tx path)
+// ============================================================================
+
+/// INSERT path: non-tx SET (via `set_via_tx`) creates a new record, stores
+/// bytes that round-trip correctly, and returns `_created = true` with the
+/// expected fields including `_id`.
+#[tokio::test]
+async fn test_set_nontx_insert_parity() {
+    let (table, repo) = setup_empty_table().await;
+
+    let op = write::upsert("users")
+        .key(doc().set("email", "parity@test.com"))
+        .value(
+            doc()
+                .set("email", "parity@test.com")
+                .set("name", "Parity")
+                .set("score", 42_i64),
+        )
+        .build();
+
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
+
+    assert_eq!(result.affected, 1);
+    let rec = result.records[0].as_json();
+    assert_eq!(rec["_created"], true);
+    assert_eq!(rec["email"], "parity@test.com");
+    assert_eq!(rec["name"], "Parity");
+    assert_eq!(rec["score"], 42);
+    assert!(rec["_id"].is_string(), "_id must be present");
+    assert_eq!(table.count().await.unwrap(), 1);
+
+    // Read back and verify the stored bytes round-trip to the same values.
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = crate::query::read::ReadQuery::new("users");
+    let read = table.read(&query, &ctx).await.unwrap();
+    assert_eq!(read.records.len(), 1);
+    let stored = &read.records[0];
+    assert_eq!(stored["email"], "parity@test.com");
+    assert_eq!(stored["name"], "Parity");
+    assert_eq!(stored["score"], 42);
+}
+
+/// UPDATE path: non-tx SET (via `set_via_tx`) merges into an existing
+/// record, preserves untouched fields, and returns `_created = false`.
+#[tokio::test]
+async fn test_set_nontx_update_parity() {
+    let (table, repo) = setup_table_with_users().await;
+
+    // Alice exists with name, age, status. Upsert by name, adding a new field.
+    let op = write::upsert("users")
+        .key(doc().set("name", "Alice"))
+        .value(
+            doc()
+                .set("name", "Alice")
+                .set("status", "vip")
+                .set("badge", "gold"),
+        )
+        .build();
+
+    let result = set_via_tx(&repo, &table, &op).await.unwrap();
+
+    assert_eq!(result.affected, 1);
+    let rec = result.records[0].as_json();
+    assert_eq!(rec["_created"], false);
+    assert_eq!(rec["status"], "vip");
+    assert_eq!(rec["badge"], "gold");
+    // Original field "age" preserved by merge.
+    assert_eq!(rec["age"], 30);
+    // No new record created.
+    assert_eq!(table.count().await.unwrap(), 3);
+
+    // Read back: stored bytes match expectations.
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = crate::query::read::ReadQuery::new("users")
+        .filter(crate::query::filter::Filter::Eq {
+            field: vec!["name".to_string()],
+            value: crate::query::filter::FilterValue::String("Alice".to_string()),
+        });
+    let read = table.read(&query, &ctx).await.unwrap();
+    assert_eq!(read.records.len(), 1);
+    let stored = &read.records[0];
+    assert_eq!(stored["status"], "vip");
+    assert_eq!(stored["badge"], "gold");
+    assert_eq!(stored["age"], 30);
 }

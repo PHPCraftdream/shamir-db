@@ -43,7 +43,11 @@ async fn access_tree_structure_meta_and_principals() {
             key: json!({ "name": "alice" }).into(),
             value: json!({ "name": "alice" }).into(),
         };
-        table.execute_set(&op).await.unwrap();
+        shamir
+            .system_store()
+            .set_via_implicit_tx(&table, &op)
+            .await
+            .unwrap();
     }
 
     // chown alice + chgrp devs + chmod 0o750 on the table.

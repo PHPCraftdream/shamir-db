@@ -64,8 +64,10 @@ impl ShamirAdminExecutor {
             key: json!({"name": op.create_user}).into(),
             value: user_json.into(),
         };
-        table
-            .execute_set(&set_op)
+        // W3d-2: route through the implicit-tx file-WAL path.
+        self.shamir
+            .system_store()
+            .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
         table
@@ -204,8 +206,10 @@ impl ShamirAdminExecutor {
             key: json!({"name": op.create_role}).into(),
             value: role_json.into(),
         };
-        table
-            .execute_set(&set_op)
+        // W3d-2: route through the implicit-tx file-WAL path.
+        self.shamir
+            .system_store()
+            .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
         table
@@ -344,8 +348,10 @@ impl ShamirAdminExecutor {
             key: json!({"name": op.user}).into(),
             value: user_json.into(),
         };
-        table
-            .execute_set(&set_op)
+        // W3d-2: route through the implicit-tx file-WAL path.
+        self.shamir
+            .system_store()
+            .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
         table
@@ -425,8 +431,10 @@ impl ShamirAdminExecutor {
             key: json!({"name": op.user}).into(),
             value: user_json.into(),
         };
-        table
-            .execute_set(&set_op)
+        // W3d-2: route through the implicit-tx file-WAL path.
+        self.shamir
+            .system_store()
+            .set_via_implicit_tx(&table, &set_op)
             .await
             .map_err(|e| err(e.to_string()))?;
         table
