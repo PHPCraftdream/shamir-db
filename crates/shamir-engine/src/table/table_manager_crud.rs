@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
@@ -438,6 +439,43 @@ impl TableManager {
             Ok(out)
         } else {
             self.table.get_many(ids).await
+        }
+    }
+
+    /// Byte-level single-record read — returns the raw storage bytes WITHOUT
+    /// decoding to `InnerValue`. Callers wrap in `RecordView::new(&bytes)` for
+    /// zero-copy field access. The `InnerValue`-decoding [`get`] is kept for
+    /// the aggregate pipeline and other callers that need the full tree.
+    pub async fn get_bytes(&self, id: RecordId) -> DbResult<Option<Bytes>> {
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            mvcc.get_current(id.to_bytes()).await
+        } else {
+            match self.table.data_store().get(id.to_bytes()).await {
+                Ok(b) => Ok(Some(b)),
+                Err(DbError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Vectored byte-level read — returns raw storage bytes for each id
+    /// WITHOUT decoding to `InnerValue`. Returns `None` for missing/tombstoned
+    /// keys. Callers wrap each `Bytes` in `RecordView::new(&bytes)` for
+    /// zero-copy field access. The `InnerValue`-decoding [`get_many`] is kept
+    /// for the aggregate pipeline.
+    pub async fn get_many_bytes(&self, ids: &[RecordId]) -> DbResult<Vec<Option<Bytes>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                out.push(mvcc.get_current(id.to_bytes()).await?);
+            }
+            Ok(out)
+        } else {
+            let keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            self.table.data_store().get_many(keys).await
         }
     }
 }

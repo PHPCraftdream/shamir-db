@@ -6,6 +6,8 @@
 
 use std::time::Instant;
 
+use bytes::Bytes;
+
 use crate::index::sorted_index_manager::decode_covering_projection;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
@@ -17,7 +19,9 @@ use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use super::read_exec::try_project_page_only;
+use super::read_exec::{
+    apply_select_value_bytes, try_project_page_only, try_project_page_only_bytes,
+};
 use super::table_manager::TableManager;
 
 impl TableManager {
@@ -210,39 +214,66 @@ impl TableManager {
         // 2. Compile residual filter if present.
         let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
 
-        // 3. Vectored fetch + per-record residual filter. One round
-        //    trip to the data store via `Store::get_many`; stale
-        //    index entries materialise as `None` and are silently
-        //    skipped (same semantic as the previous NotFound branch).
-        let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
-        let records = self.get_many(&id_vec).await?;
-        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
-        for (id, opt) in id_vec.iter().zip(records) {
-            if let Some(record) = opt {
-                let passes = match &residual_cb {
-                    Some(cb) => cb.matches(&record, ctx),
-                    None => true,
-                };
-                if passes {
-                    matched.push((*id, record));
-                }
-            }
-        }
-
-        // 4. Re-use the same pipeline tail as the equality index path
-        //    by calling the same projection / sort / paginate helpers.
-        //    Inline the bits we need from `read_index_scan` body.
-        let records_scanned = matched.len() as u64;
-
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
+        let needs_inner = has_group_by || has_agg;
 
-        // Opt #3a (LIMIT push-down): plain filtered SELECT with LIMIT
-        // and no in-memory ORDER BY / GROUP BY / DISTINCT / aggregates
-        // projects only the page rows instead of every match.
-        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+        let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
+
+        // S3: aggregate paths keep InnerValue; plain paths use bytes + RecordView.
+        if needs_inner {
+            // ── Aggregate / GROUP BY branch (S4 scope — unchanged) ───────────
+            let records = self.get_many(&id_vec).await?;
+            let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(records) {
+                if let Some(record) = opt {
+                    let passes = match &residual_cb {
+                        Some(cb) => cb.matches(&record, ctx),
+                        None => true,
+                    };
+                    if passes {
+                        matched.push((*id, record));
+                    }
+                }
+            }
+
+            let records_scanned = matched.len() as u64;
+
+            if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+                let records_returned = paged.len() as u64;
+                return Ok(QueryResult {
+                    records: paged,
+                    stats: Some(QueryStats {
+                        index_used: Some(format!("sorted_idx_{index_name}")),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: start.elapsed().as_micros() as u64,
+                    }),
+                    pagination,
+                    value: None,
+                });
+            }
+
+            let mut result_qv = if has_group_by {
+                let group_by = query.group_by.as_ref().unwrap();
+                exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+            } else {
+                exec::apply_aggregate_all(&matched, &query.select, interner)
+            };
+
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut result_qv, order_by);
+            }
+
+            let (paged_qv, pagination) =
+                exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+            let paged: Vec<QueryRecord> = paged_qv
+                .into_iter()
+                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+                .collect();
             let records_returned = paged.len() as u64;
-            return Ok(QueryResult {
+
+            Ok(QueryResult {
                 records: paged,
                 stats: Some(QueryStats {
                     index_used: Some(format!("sorted_idx_{index_name}")),
@@ -252,38 +283,81 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
-            });
-        }
-
-        let mut result_qv = if has_group_by {
-            let group_by = query.group_by.as_ref().unwrap();
-            exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
-        } else if has_agg {
-            exec::apply_aggregate_all(&matched, &query.select, interner)
+            })
         } else {
-            exec::apply_select_value(&matched, &query.select, interner)
-        };
+            // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
+            let raw = self.get_many_bytes(&id_vec).await?;
+            let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(raw) {
+                if let Some(bytes) = opt {
+                    let passes = match &residual_cb {
+                        Some(cb) => {
+                            match shamir_types::record_view::RecordView::new(&bytes) {
+                                Ok(view) => cb.matches(&view, ctx),
+                                Err(_) => {
+                                    // Bare-scalar fallback: decode to InnerValue.
+                                    match InnerValue::from_bytes(bytes.as_ref()) {
+                                        Ok(iv) => cb.matches(&iv, ctx),
+                                        Err(_) => false,
+                                    }
+                                }
+                            }
+                        }
+                        None => true,
+                    };
+                    if passes {
+                        matched.push((*id, bytes));
+                    }
+                }
+            }
 
-        if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by_qv(&mut result_qv, order_by);
+            let records_scanned = matched.len() as u64;
+
+            // Opt #3a (LIMIT push-down)
+            if let Some((paged, pagination)) =
+                try_project_page_only_bytes(query, &matched, interner)
+            {
+                let records_returned = paged.len() as u64;
+                return Ok(QueryResult {
+                    records: paged,
+                    stats: Some(QueryStats {
+                        index_used: Some(format!("sorted_idx_{index_name}")),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: start.elapsed().as_micros() as u64,
+                    }),
+                    pagination,
+                    value: None,
+                });
+            }
+
+            let mut result_qv =
+                apply_select_value_bytes(&matched, &query.select, interner);
+
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut result_qv, order_by);
+            }
+
+            let (paged_qv, pagination) =
+                exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+            let paged: Vec<QueryRecord> = paged_qv
+                .into_iter()
+                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+                .collect();
+            let records_returned = paged.len() as u64;
+
+            Ok(QueryResult {
+                records: paged,
+                stats: Some(QueryStats {
+                    index_used: Some(format!("sorted_idx_{index_name}")),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                }),
+                pagination,
+                value: None,
+            })
         }
-
-        let (paged_qv, pagination) =
-            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
-        let paged: Vec<QueryRecord> = paged_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
-        let records_returned = paged.len() as u64;
-
-        Ok(QueryResult {
-            records: paged,
-            stats: Some(QueryStats {
-                index_used: Some(format!("sorted_idx_{index_name}")),
-                records_scanned,
-                records_returned,
-                execution_time_us: start.elapsed().as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-        })
     }
 
     /// Execute the ORDER BY LIMIT K fast path: pull `skip + take`
@@ -323,24 +397,25 @@ impl TableManager {
         };
 
         let records_scanned = ids.len() as u64;
-        // Vectored fetch of the ids we actually need (post-skip,
-        // pre-take). Stale ids → None; we collect Some until we hit
-        // `take`. One trip to the data store, regardless of K.
+        // S3: zero-copy bytes path — no aggregate in this fast path.
         let needed: Vec<RecordId> = ids.into_iter().skip(skip).collect();
-        let fetched = self.get_many(&needed).await?;
-        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(take);
+        let fetched = self.get_many_bytes(&needed).await?;
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(take);
         for (id, opt) in needed.iter().zip(fetched) {
             if matched.len() == take {
                 break;
             }
-            if let Some(record) = opt {
-                matched.push((*id, record));
+            if let Some(bytes) = opt {
+                matched.push((*id, bytes));
             }
         }
 
-        let result_qv = exec::apply_select_value(&matched, &query.select, interner);
+        let result_qv = apply_select_value_bytes(&matched, &query.select, interner);
         let records_returned = result_qv.len() as u64;
-        let result: Vec<QueryRecord> = result_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
+        let result: Vec<QueryRecord> = result_qv
+            .into_iter()
+            .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+            .collect();
 
         Ok(QueryResult {
             records: result,
@@ -389,28 +464,11 @@ impl TableManager {
         // 2. Compile residual filter if present
         let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
 
-        // 3. Vectored fetch + per-record residual filter. Stale
-        //    index entries materialise as None and are skipped.
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
-        let records = self.get_many(&id_vec).await?;
-        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
-        for (id, opt) in id_vec.iter().zip(records) {
-            if let Some(record) = opt {
-                let passes = match &residual_cb {
-                    Some(cb) => cb.matches(&record, ctx),
-                    None => true,
-                };
-                if passes {
-                    matched.push((*id, record));
-                }
-            }
-        }
 
-        let records_scanned = matched.len() as u64;
-
-        // 4. Apply the rest of the pipeline (same as collecting path)
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
+        let needs_inner = has_group_by || has_agg;
 
         // Resolve index name for stats — needed by both paths below.
         let index_name_str = interner
@@ -418,14 +476,67 @@ impl TableManager {
             .map(|k| k.as_str().to_string())
             .unwrap_or_else(|| index_name.to_string());
 
-        // Opt #3a (LIMIT push-down): plain filtered SELECT with LIMIT
-        // and no in-memory ORDER BY / GROUP BY / DISTINCT / aggregates
-        // projects only the page rows instead of every match.
-        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+        // S3: aggregate paths keep InnerValue; plain paths use bytes + RecordView.
+        if needs_inner {
+            // ── Aggregate / GROUP BY branch (S4 scope — unchanged) ───────────
+            let records = self.get_many(&id_vec).await?;
+            let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(records) {
+                if let Some(record) = opt {
+                    let passes = match &residual_cb {
+                        Some(cb) => cb.matches(&record, ctx),
+                        None => true,
+                    };
+                    if passes {
+                        matched.push((*id, record));
+                    }
+                }
+            }
+
+            let records_scanned = matched.len() as u64;
+
+            if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+                let elapsed = start.elapsed();
+                let records_returned = paged.len() as u64;
+                return Ok(QueryResult {
+                    records: paged,
+                    stats: Some(QueryStats {
+                        index_used: Some(index_name_str),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: elapsed.as_micros() as u64,
+                    }),
+                    pagination,
+                    value: None,
+                });
+            }
+
+            let mut result_qv = if has_group_by {
+                let group_by = query.group_by.as_ref().unwrap();
+                exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+            } else {
+                exec::apply_aggregate_all(&matched, &query.select, interner)
+            };
+
+            if query.select.distinct {
+                result_qv = exec::apply_distinct_qv(result_qv);
+            }
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut result_qv, order_by);
+            }
+
+            let (records_qv, pagination) =
+                exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+
             let elapsed = start.elapsed();
-            let records_returned = paged.len() as u64;
-            return Ok(QueryResult {
-                records: paged,
+            let records_returned = records_qv.len() as u64;
+            let records: Vec<QueryRecord> = records_qv
+                .into_iter()
+                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+                .collect();
+
+            Ok(QueryResult {
+                records,
                 stats: Some(QueryStats {
                     index_used: Some(index_name_str),
                     records_scanned,
@@ -434,42 +545,86 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
-            });
-        }
-
-        let mut result_qv = if has_group_by {
-            let group_by = query.group_by.as_ref().unwrap();
-            exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
-        } else if has_agg {
-            exec::apply_aggregate_all(&matched, &query.select, interner)
+            })
         } else {
-            exec::apply_select_value(&matched, &query.select, interner)
-        };
+            // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
+            let raw = self.get_many_bytes(&id_vec).await?;
+            let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(raw) {
+                if let Some(bytes) = opt {
+                    let passes = match &residual_cb {
+                        Some(cb) => {
+                            match shamir_types::record_view::RecordView::new(&bytes) {
+                                Ok(view) => cb.matches(&view, ctx),
+                                Err(_) => {
+                                    // Bare-scalar fallback: decode to InnerValue.
+                                    match InnerValue::from_bytes(bytes.as_ref()) {
+                                        Ok(iv) => cb.matches(&iv, ctx),
+                                        Err(_) => false,
+                                    }
+                                }
+                            }
+                        }
+                        None => true,
+                    };
+                    if passes {
+                        matched.push((*id, bytes));
+                    }
+                }
+            }
 
-        if query.select.distinct {
-            result_qv = exec::apply_distinct_qv(result_qv);
+            let records_scanned = matched.len() as u64;
+
+            // Opt #3a (LIMIT push-down)
+            if let Some((paged, pagination)) =
+                try_project_page_only_bytes(query, &matched, interner)
+            {
+                let elapsed = start.elapsed();
+                let records_returned = paged.len() as u64;
+                return Ok(QueryResult {
+                    records: paged,
+                    stats: Some(QueryStats {
+                        index_used: Some(index_name_str),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: elapsed.as_micros() as u64,
+                    }),
+                    pagination,
+                    value: None,
+                });
+            }
+
+            let mut result_qv =
+                apply_select_value_bytes(&matched, &query.select, interner);
+
+            if query.select.distinct {
+                result_qv = exec::apply_distinct_qv(result_qv);
+            }
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut result_qv, order_by);
+            }
+
+            let (records_qv, pagination) =
+                exec::apply_pagination(result_qv, &query.pagination, query.count_total);
+
+            let elapsed = start.elapsed();
+            let records_returned = records_qv.len() as u64;
+            let records: Vec<QueryRecord> = records_qv
+                .into_iter()
+                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+                .collect();
+
+            Ok(QueryResult {
+                records,
+                stats: Some(QueryStats {
+                    index_used: Some(index_name_str),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: elapsed.as_micros() as u64,
+                }),
+                pagination,
+                value: None,
+            })
         }
-        if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by_qv(&mut result_qv, order_by);
-        }
-
-        let (records_qv, pagination) =
-            exec::apply_pagination(result_qv, &query.pagination, query.count_total);
-
-        let elapsed = start.elapsed();
-        let records_returned = records_qv.len() as u64;
-        let records: Vec<QueryRecord> = records_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
-
-        Ok(QueryResult {
-            records,
-            stats: Some(QueryStats {
-                index_used: Some(index_name_str),
-                records_scanned,
-                records_returned,
-                execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-        })
     }
 }
