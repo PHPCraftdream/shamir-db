@@ -405,3 +405,147 @@ async fn idmsgpack_validator_rejects_violating_record() {
         "record with score=-5 must be rejected by the validator, got: Ok"
     );
 }
+
+// ============================================================================
+// Test 5 — return_result: id-keyed records appear in RETURNING rows
+// ============================================================================
+
+/// INSERT via `records_idmsgpack` with `return_result=true` must return
+/// `records.len() == affected` and each returned row must carry the correct
+/// name-keyed fields (de-interned from the id-keyed bytes).
+///
+/// This is the regression test for the bug where `build_insert_result_records`
+/// only produced rows for the `values` branch, silently dropping id-keyed
+/// rows from the RETURNING list.
+#[tokio::test]
+async fn idmsgpack_return_result_records_match_affected() {
+    let (table, repo) = setup_empty_table().await;
+    let interner = table.interner().get().await.unwrap();
+
+    // Pre-encode two records id-keyed, simulating a v2 pass-through client.
+    let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
+        interner
+            .touch_ind(key)
+            .map(|ti| ti.into_key())
+            .map_err(|e| {
+                shamir_types::codecs::CodecError::Decode(format!("intern '{}': {}", key, e))
+            })
+    };
+
+    let rec_a = serde_json::from_value::<QueryValue>(serde_json::json!({
+        "name": "Alice",
+        "age": 30
+    }))
+    .unwrap();
+    let rec_b = serde_json::from_value::<QueryValue>(serde_json::json!({
+        "name": "Bob",
+        "age": 25
+    }))
+    .unwrap();
+
+    let bytes_a = query_value_to_storage_bytes(&rec_a, &intern_fn).unwrap();
+    let bytes_b = query_value_to_storage_bytes(&rec_b, &intern_fn).unwrap();
+
+    let op = idmsgpack_op(
+        "users",
+        vec![
+            ByteBuf::from(bytes_a.to_vec()),
+            ByteBuf::from(bytes_b.to_vec()),
+        ],
+    );
+
+    let table_c = table.clone();
+    let result = repo
+        .run_implicit_batch_tx(Actor::System, "idmsgpack_returning", move |tx| {
+            Box::pin(async move { table_c.execute_insert_tx(&op, tx, true).await })
+        })
+        .await
+        .unwrap();
+
+    // Core invariant: records.len() == affected.
+    assert_eq!(result.affected, 2);
+    assert_eq!(
+        result.records.len(),
+        result.affected as usize,
+        "records.len() must equal affected — every inserted record \
+         gets a RETURNING row"
+    );
+
+    // Each returned row must carry an `_id` and the correct field names.
+    for (i, rec) in result.records.iter().enumerate() {
+        let json = rec.as_json();
+        assert!(
+            json.get("_id").is_some(),
+            "record[{i}] must have _id in RETURNING row"
+        );
+        assert!(
+            json.get("name").is_some(),
+            "record[{i}] must have 'name' (de-interned) in RETURNING row"
+        );
+        assert!(
+            json.get("age").is_some(),
+            "record[{i}] must have 'age' (de-interned) in RETURNING row"
+        );
+    }
+
+    // Verify field values match what was inserted.
+    assert_eq!(result.records[0].as_json()["name"], "Alice");
+    assert_eq!(result.records[0].as_json()["age"], 30);
+    assert_eq!(result.records[1].as_json()["name"], "Bob");
+    assert_eq!(result.records[1].as_json()["age"], 25);
+}
+
+/// Mixed INSERT: both `values` and `records_idmsgpack` populated,
+/// `return_result=true`. The combined RETURNING list must have
+/// `records.len() == affected` with values-branch rows first, then
+/// id-keyed rows.
+#[tokio::test]
+async fn mixed_values_and_idmsgpack_return_result() {
+    let (table, repo) = setup_empty_table().await;
+    let interner = table.interner().get().await.unwrap();
+
+    // Pre-encode one id-keyed record.
+    let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
+        interner
+            .touch_ind(key)
+            .map(|ti| ti.into_key())
+            .map_err(|e| {
+                shamir_types::codecs::CodecError::Decode(format!("intern '{}': {}", key, e))
+            })
+    };
+
+    let rec_id = serde_json::from_value::<QueryValue>(serde_json::json!({
+        "name": "Bob",
+        "age": 25
+    }))
+    .unwrap();
+    let bytes_id = query_value_to_storage_bytes(&rec_id, &intern_fn).unwrap();
+
+    // Build an InsertOp with BOTH branches populated.
+    let mut op: InsertOp = write::insert("users")
+        .row(serde_json::json!({
+            "name": "Alice",
+            "age": 30
+        }))
+        .build();
+    op.records_idmsgpack = vec![ByteBuf::from(bytes_id.to_vec())];
+
+    let table_c = table.clone();
+    let result = repo
+        .run_implicit_batch_tx(Actor::System, "mixed_returning", move |tx| {
+            Box::pin(async move { table_c.execute_insert_tx(&op, tx, true).await })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.affected, 2);
+    assert_eq!(
+        result.records.len(),
+        result.affected as usize,
+        "mixed insert: records.len() must equal affected"
+    );
+
+    // Values-branch row first, then id-keyed row.
+    assert_eq!(result.records[0].as_json()["name"], "Alice");
+    assert_eq!(result.records[1].as_json()["name"], "Bob");
+}
