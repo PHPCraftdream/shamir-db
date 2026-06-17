@@ -629,9 +629,7 @@ impl<'a> QueryRunner<'a> {
                         let owned_table = table.clone();
                         let owned_actor = self.actor.clone();
                         repo.run_implicit_batch_tx(owned_actor, alias, move |tx| {
-                            Box::pin(async move {
-                                owned_table.execute_set_tx(&owned_op, tx).await
-                            })
+                            Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx).await })
                         })
                         .await?
                     }

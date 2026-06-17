@@ -23,9 +23,7 @@ use crate::subscriptions::filter_eval::{filter_matches_bytes, filter_matches_inn
 
 /// Build a record from flat `(field_name, value)` pairs.
 /// Returns `(bytes, InnerValue, Arc<OnceCell<Interner>>)`.
-fn make_record(
-    fields: &[(&str, InnerValue)],
-) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
+fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
@@ -202,7 +200,11 @@ fn parity_in_set() {
 fn parity_not_in() {
     let filter = Filter::NotIn {
         field: vec!["code".into()],
-        values: vec![FilterValue::Int(1), FilterValue::Int(2), FilterValue::Int(3)],
+        values: vec![
+            FilterValue::Int(1),
+            FilterValue::Int(2),
+            FilterValue::Int(3),
+        ],
     };
     let (b1, iv1, c1) = make_record(&[("code", InnerValue::Int(4))]);
     assert_parity("nin_pass", &filter, &b1, &iv1, &c1);
@@ -258,11 +260,9 @@ fn parity_nested_eq() {
         field: vec!["address".into(), "city".into()],
         value: FilterValue::String("Jerusalem".into()),
     };
-    let (b1, iv1, c1) =
-        make_nested_record("address", "city", InnerValue::Str("Jerusalem".into()));
+    let (b1, iv1, c1) = make_nested_record("address", "city", InnerValue::Str("Jerusalem".into()));
     assert_parity("nested_eq_match", &filter, &b1, &iv1, &c1);
-    let (b2, iv2, c2) =
-        make_nested_record("address", "city", InnerValue::Str("Tel Aviv".into()));
+    let (b2, iv2, c2) = make_nested_record("address", "city", InnerValue::Str("Tel Aviv".into()));
     assert_parity("nested_eq_miss", &filter, &b2, &iv2, &c2);
 }
 
@@ -303,18 +303,12 @@ fn parity_and_or_not() {
         }),
     };
 
-    let (b, iv, c) = make_record(&[
-        ("a", InnerValue::Int(1)),
-        ("b", InnerValue::Int(2)),
-    ]);
+    let (b, iv, c) = make_record(&[("a", InnerValue::Int(1)), ("b", InnerValue::Int(2))]);
     assert_parity("and_both_match", &and_filter, &b, &iv, &c);
     assert_parity("or_first_match", &or_filter, &b, &iv, &c);
     assert_parity("not_match", &not_filter, &b, &iv, &c);
 
-    let (b2, iv2, c2) = make_record(&[
-        ("a", InnerValue::Int(999)),
-        ("b", InnerValue::Int(2)),
-    ]);
+    let (b2, iv2, c2) = make_record(&[("a", InnerValue::Int(999)), ("b", InnerValue::Int(2))]);
     assert_parity("and_first_mismatch", &and_filter, &b2, &iv2, &c2);
     assert_parity("not_mismatch", &not_filter, &b2, &iv2, &c2);
 }
@@ -329,11 +323,9 @@ fn parity_bin_eq() {
         field: vec!["data".into()],
         value: FilterValue::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
     };
-    let (b1, iv1, c1) =
-        make_record(&[("data", InnerValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]))]);
+    let (b1, iv1, c1) = make_record(&[("data", InnerValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]))]);
     assert_parity("bin_eq_match", &filter, &b1, &iv1, &c1);
-    let (b2, iv2, c2) =
-        make_record(&[("data", InnerValue::Bin(vec![0x00, 0x01]))]);
+    let (b2, iv2, c2) = make_record(&[("data", InnerValue::Bin(vec![0x00, 0x01]))]);
     assert_parity("bin_eq_mismatch", &filter, &b2, &iv2, &c2);
 }
 
@@ -363,11 +355,9 @@ fn parity_contains_string() {
         field: vec!["desc".into()],
         value: FilterValue::String("world".into()),
     };
-    let (b1, iv1, c1) =
-        make_record(&[("desc", InnerValue::Str("hello world".into()))]);
+    let (b1, iv1, c1) = make_record(&[("desc", InnerValue::Str("hello world".into()))]);
     assert_parity("contains_str_match", &filter, &b1, &iv1, &c1);
-    let (b2, iv2, c2) =
-        make_record(&[("desc", InnerValue::Str("goodbye".into()))]);
+    let (b2, iv2, c2) = make_record(&[("desc", InnerValue::Str("goodbye".into()))]);
     assert_parity("contains_str_miss", &filter, &b2, &iv2, &c2);
 }
 
@@ -385,10 +375,8 @@ fn parity_contains_list() {
         ]),
     )]);
     assert_parity("contains_list_match", &filter, &b1, &iv1, &c1);
-    let (b2, iv2, c2) = make_record(&[(
-        "tags",
-        InnerValue::List(vec![InnerValue::Str("go".into())]),
-    )]);
+    let (b2, iv2, c2) =
+        make_record(&[("tags", InnerValue::List(vec![InnerValue::Str("go".into())]))]);
     assert_parity("contains_list_miss", &filter, &b2, &iv2, &c2);
 }
 
@@ -413,10 +401,8 @@ fn parity_contains_any() {
         ]),
     )]);
     assert_parity("contains_any_match", &filter, &b1, &iv1, &c1);
-    let (b2, iv2, c2) = make_record(&[(
-        "tags",
-        InnerValue::List(vec![InnerValue::Str("go".into())]),
-    )]);
+    let (b2, iv2, c2) =
+        make_record(&[("tags", InnerValue::List(vec![InnerValue::Str("go".into())]))]);
     assert_parity("contains_any_miss", &filter, &b2, &iv2, &c2);
 }
 
@@ -481,9 +467,12 @@ fn parity_contains_set() {
     let (b1, iv1, c1) = make_record(&[(
         "roles",
         InnerValue::Set(
-            vec![InnerValue::Str("admin".into()), InnerValue::Str("user".into())]
-                .into_iter()
-                .collect(),
+            vec![
+                InnerValue::Str("admin".into()),
+                InnerValue::Str("user".into()),
+            ]
+            .into_iter()
+            .collect(),
         ),
     )]);
     assert_parity("contains_set_match", &filter, &b1, &iv1, &c1);

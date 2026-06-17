@@ -100,7 +100,10 @@ fn has_key_true_false_and_bad_key() {
 #[test]
 fn get_path_nested_and_missing() {
     let r = reg();
-    let nested = map(&[("x", map(&[("y", map(&[("z", QueryValue::Str("deep".into()))]))]))]);
+    let nested = map(&[(
+        "x",
+        map(&[("y", map(&[("z", QueryValue::Str("deep".into()))]))]),
+    )]);
     assert_eq!(
         r.call(
             "get_path",
@@ -124,12 +127,9 @@ fn get_path_nested_and_missing() {
     );
     // head not a map
     assert_eq!(
-        r.call(
-            "get_path",
-            &[QueryValue::Int(1), QueryValue::List(vec![])],
-        )
-        .unwrap_err()
-        .code,
+        r.call("get_path", &[QueryValue::Int(1), QueryValue::List(vec![])],)
+            .unwrap_err()
+            .code,
         "type_mismatch"
     );
 }
@@ -160,20 +160,14 @@ fn merge_right_wins() {
 fn pick_keeps_only_selected() {
     let r = reg();
     assert_eq!(
-        r.call(
-            "pick",
-            &[sample(), QueryValue::List(vec![s("a"), s("c")])],
-        )
-        .unwrap(),
+        r.call("pick", &[sample(), QueryValue::List(vec![s("a"), s("c")])],)
+            .unwrap(),
         map(&[("a", QueryValue::Int(10)), ("c", QueryValue::Bool(true))])
     );
     // missing keys are silently skipped
     assert_eq!(
-        r.call(
-            "pick",
-            &[sample(), QueryValue::List(vec![s("zz")])],
-        )
-        .unwrap(),
+        r.call("pick", &[sample(), QueryValue::List(vec![s("zz")])],)
+            .unwrap(),
         map(&[])
     );
     // error: non-string key in list
@@ -192,20 +186,14 @@ fn pick_keeps_only_selected() {
 fn omit_drops_selected() {
     let r = reg();
     assert_eq!(
-        r.call(
-            "omit",
-            &[sample(), QueryValue::List(vec![s("b")])],
-        )
-        .unwrap(),
+        r.call("omit", &[sample(), QueryValue::List(vec![s("b")])],)
+            .unwrap(),
         map(&[("a", QueryValue::Int(10)), ("c", QueryValue::Bool(true))])
     );
     // omitting a non-present key is a no-op
     assert_eq!(
-        r.call(
-            "omit",
-            &[sample(), QueryValue::List(vec![s("zz")])],
-        )
-        .unwrap(),
+        r.call("omit", &[sample(), QueryValue::List(vec![s("zz")])],)
+            .unwrap(),
         sample()
     );
 }

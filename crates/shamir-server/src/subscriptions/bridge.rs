@@ -31,10 +31,7 @@ use super::target_match::{any_target_interested_indexed, build_target_index, mat
 ///
 /// Tries the zero-copy `RecordView` lens first; falls back to full
 /// `InnerValue` decode for bare-scalar / non-map records.
-fn bytes_to_json(
-    bytes: &[u8],
-    interner_cell: &OnceCell<Interner>,
-) -> Option<serde_json::Value> {
+fn bytes_to_json(bytes: &[u8], interner_cell: &OnceCell<Interner>) -> Option<serde_json::Value> {
     let interner = interner_cell.get()?;
     // Try RecordView (zero-copy lens) first.
     if let Ok(view) = RecordView::new(bytes) {
@@ -148,15 +145,10 @@ pub(crate) async fn bridge_task(
                                 continue;
                             }
                             let bytes_decoded = match (&change.op, change.value.as_deref()) {
-                                (ChangeOp::Put, Some(bytes)) => {
-                                    db.get_table_interner_cell(
-                                            &db_name,
-                                            repo,
-                                            &change.table,
-                                        )
-                                        .await
-                                        .map(|interner_cell| (bytes_to_arc(bytes), interner_cell))
-                                }
+                                (ChangeOp::Put, Some(bytes)) => db
+                                    .get_table_interner_cell(&db_name, repo, &change.table)
+                                    .await
+                                    .map(|interner_cell| (bytes_to_arc(bytes), interner_cell)),
                                 _ => None,
                             };
                             if !matches_any_indexed(
@@ -171,11 +163,11 @@ pub(crate) async fn bridge_task(
                             }
                             // Convert bytes -> JSON lazily: only for events
                             // that passed the filter and must be delivered.
-                            let value_json: Option<serde_json::Value> =
-                                match bytes_decoded.as_ref() {
-                                    Some((bytes, cell)) => bytes_to_json(bytes, cell),
-                                    None => None,
-                                };
+                            let value_json: Option<serde_json::Value> = match bytes_decoded.as_ref()
+                            {
+                                Some((bytes, cell)) => bytes_to_json(bytes, cell),
+                                None => None,
+                            };
                             let data = make_deliver_data(
                                 &deliver,
                                 &db,
@@ -309,38 +301,26 @@ pub(crate) async fn bridge_task(
                         // lookup so that N subscribers pay O(1).
                         // No InnerValue decode on the filter path -- the
                         // RecordView lens reads fields zero-copy.
-                        let decoded_arc: CachedBytes =
-                            match (&change.op, change.value.as_deref()) {
-                                (ChangeOp::Put, Some(bytes)) => {
-                                    if let Some(cached) =
-                                        cache_get(&repo, event.commit_version, change_idx)
-                                    {
-                                        cached
-                                    } else {
-                                        let entry = db
-                                            .get_table_interner_cell(
-                                                &db_name,
-                                                &repo,
-                                                &change.table,
-                                            )
-                                            .await
-                                            .map(|interner_cell| {
-                                                (bytes_to_arc(bytes), interner_cell)
-                                            });
-                                        cache_insert(
-                                            &repo,
-                                            event.commit_version,
-                                            change_idx,
-                                            entry,
-                                        )
-                                    }
+                        let decoded_arc: CachedBytes = match (&change.op, change.value.as_deref()) {
+                            (ChangeOp::Put, Some(bytes)) => {
+                                if let Some(cached) =
+                                    cache_get(&repo, event.commit_version, change_idx)
+                                {
+                                    cached
+                                } else {
+                                    let entry = db
+                                        .get_table_interner_cell(&db_name, &repo, &change.table)
+                                        .await
+                                        .map(|interner_cell| (bytes_to_arc(bytes), interner_cell));
+                                    cache_insert(&repo, event.commit_version, change_idx, entry)
                                 }
-                                _ => {
-                                    static NONE_ARC: std::sync::OnceLock<CachedBytes> =
-                                        std::sync::OnceLock::new();
-                                    Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
-                                }
-                            };
+                            }
+                            _ => {
+                                static NONE_ARC: std::sync::OnceLock<CachedBytes> =
+                                    std::sync::OnceLock::new();
+                                Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
+                            }
+                        };
                         let bytes_ref = (*decoded_arc).as_ref();
                         if !matches_any_indexed(
                             &targets,

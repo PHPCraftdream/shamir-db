@@ -56,7 +56,8 @@ async fn setup_table_with_stale_index_entry() -> (
     let mut map = new_map();
     map.insert("name".to_string(), QueryValue::Str("Alice".into()));
     map.insert("status".to_string(), QueryValue::Str("active".into()));
-    let (inner_val, new_keys) = query_value_to_inner_tracked(&QueryValue::Map(map), interner).unwrap();
+    let (inner_val, new_keys) =
+        query_value_to_inner_tracked(&QueryValue::Map(map), interner).unwrap();
     if !new_keys.is_empty() {
         table.interner().save_new_keys(&new_keys).await.unwrap();
     }

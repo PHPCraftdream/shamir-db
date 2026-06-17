@@ -82,9 +82,7 @@ pub fn matches_any_indexed(
             }
             match (filter, op) {
                 (Some(f), ChangeOp::Put) => match bytes_decoded {
-                    Some((bytes, interner_cell)) => {
-                        filter_matches_bytes(f, bytes, interner_cell)
-                    }
+                    Some((bytes, interner_cell)) => filter_matches_bytes(f, bytes, interner_cell),
                     None => {
                         tracing::warn!(
                             "subscription filter: no bytes for Put value, \
@@ -132,9 +130,7 @@ pub fn matches_any(
             }
             match (filter, op) {
                 (Some(f), ChangeOp::Put) => match bytes_decoded {
-                    Some((bytes, interner_cell)) => {
-                        filter_matches_bytes(f, bytes, interner_cell)
-                    }
+                    Some((bytes, interner_cell)) => filter_matches_bytes(f, bytes, interner_cell),
                     None => {
                         tracing::warn!(
                             "subscription filter: no bytes for Put value, \

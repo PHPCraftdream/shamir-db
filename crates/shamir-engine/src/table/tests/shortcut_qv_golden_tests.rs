@@ -146,10 +146,7 @@ fn count_shortcut_zero_wire_identical() {
 
     // Old path: serde_json::Value::Number(count.into())
     let mut old_obj = serde_json::Map::new();
-    old_obj.insert(
-        "count".to_string(),
-        serde_json::Value::Number(count.into()),
-    );
+    old_obj.insert("count".to_string(), serde_json::Value::Number(count.into()));
     let old = QueryRecord::Json(serde_json::Value::Object(old_obj));
 
     // New path: QueryValue::Int(count as i64)
@@ -165,10 +162,7 @@ fn count_shortcut_typical_wire_identical() {
     let count: u64 = 42;
 
     let mut old_obj = serde_json::Map::new();
-    old_obj.insert(
-        "count".to_string(),
-        serde_json::Value::Number(count.into()),
-    );
+    old_obj.insert("count".to_string(), serde_json::Value::Number(count.into()));
     let old = QueryRecord::Json(serde_json::Value::Object(old_obj));
 
     let mut new_obj = new_map_wc(1);
@@ -184,10 +178,7 @@ fn count_shortcut_large_wire_identical() {
     let count: u64 = i64::MAX as u64;
 
     let mut old_obj = serde_json::Map::new();
-    old_obj.insert(
-        "total".to_string(),
-        serde_json::Value::Number(count.into()),
-    );
+    old_obj.insert("total".to_string(), serde_json::Value::Number(count.into()));
     let old = QueryRecord::Json(serde_json::Value::Object(old_obj));
 
     let mut new_obj = new_map_wc(1);

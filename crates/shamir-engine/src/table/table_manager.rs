@@ -468,10 +468,7 @@ impl TableManager {
     /// Attached by `RepoInstance::create_table_context`. When absent, the
     /// non-tx write methods skip SSI footprint recording entirely (system
     /// tables / direct-constructed test tables).
-    pub fn with_changefeed(
-        mut self,
-        gate: Arc<shamir_tx::RepoTxGate>,
-    ) -> Self {
+    pub fn with_changefeed(mut self, gate: Arc<shamir_tx::RepoTxGate>) -> Self {
         self.changefeed = Some(NonTxChangefeed { gate });
         self
     }

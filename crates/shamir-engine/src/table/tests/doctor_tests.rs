@@ -314,10 +314,7 @@ async fn doctor_lens_parity_mixed_indexed_types() {
 
     // Regular index on `tag`, unique index on `uid`, sorted on `score`.
     table.create_index("by_tag", &["tag"]).await.unwrap();
-    table
-        .create_unique_index("by_uid", &["uid"])
-        .await
-        .unwrap();
+    table.create_unique_index("by_uid", &["uid"]).await.unwrap();
     table
         .create_sorted_index("by_score", &["score"])
         .await
@@ -388,7 +385,10 @@ async fn doctor_lens_parity_mixed_indexed_types() {
     {
         let mut m = new_map();
         m.insert("uid".to_string(), QueryValue::Str("u4".into()));
-        m.insert("tag".to_string(), QueryValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        m.insert(
+            "tag".to_string(),
+            QueryValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        );
         m.insert("score".to_string(), QueryValue::Int(400));
         let (iv, nk) = query_value_to_inner_tracked(&QueryValue::Map(m), interner).unwrap();
         if !nk.is_empty() {
@@ -401,7 +401,10 @@ async fn doctor_lens_parity_mixed_indexed_types() {
     // the whole subtree).
     {
         let mut inner_map = new_map();
-        inner_map.insert("nested_key".to_string(), QueryValue::Str("nested_val".into()));
+        inner_map.insert(
+            "nested_key".to_string(),
+            QueryValue::Str("nested_val".into()),
+        );
         let mut m = new_map();
         m.insert("uid".to_string(), QueryValue::Str("u5".into()));
         m.insert("tag".to_string(), QueryValue::Map(inner_map));

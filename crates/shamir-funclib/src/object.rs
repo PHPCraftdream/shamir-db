@@ -106,9 +106,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                         QueryValue::Str(s) => s.as_str(),
                         _ => return Err(ScalarError::new("type_mismatch")),
                     };
-                    cur = m
-                        .get(key)
-                        .ok_or_else(|| ScalarError::new("missing_key"))?;
+                    cur = m.get(key).ok_or_else(|| ScalarError::new("missing_key"))?;
                 }
                 // The head must itself be a map (validated only if a step ran;
                 // validate explicitly so a 0-length path still type-checks).

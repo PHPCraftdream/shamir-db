@@ -183,8 +183,10 @@ impl TableManager {
                                 &query.pagination,
                                 query.count_total,
                             );
-                            let paged: Vec<QueryRecord> =
-                                paged_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
+                            let paged: Vec<QueryRecord> = paged_qv
+                                .into_iter()
+                                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+                                .collect();
                             let records_returned = paged.len() as u64;
                             return Ok(QueryResult {
                                 records: paged,
@@ -331,8 +333,7 @@ impl TableManager {
                 });
             }
 
-            let mut result_qv =
-                apply_select_value_bytes(&matched, &query.select, interner);
+            let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
 
             if let Some(ref order_by) = query.order_by {
                 exec::apply_order_by_qv(&mut result_qv, order_by);
@@ -593,8 +594,7 @@ impl TableManager {
                 });
             }
 
-            let mut result_qv =
-                apply_select_value_bytes(&matched, &query.select, interner);
+            let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
 
             if query.select.distinct {
                 result_qv = exec::apply_distinct_qv(result_qv);

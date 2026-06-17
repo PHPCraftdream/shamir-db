@@ -342,7 +342,7 @@ async fn s_read_default_name_encoding_unchanged() {
     );
     match &result_plain.records[0] {
         QueryRecord::Direct(_, _) => {} // correct
-        QueryRecord::Json(_) => {}   // also acceptable (some fast-paths return Json)
+        QueryRecord::Json(_) => {}      // also acceptable (some fast-paths return Json)
         other => panic!("plain read() must return Direct or Json, got {other:?}"),
     }
 

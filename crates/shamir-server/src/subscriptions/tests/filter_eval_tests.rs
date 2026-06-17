@@ -10,9 +10,7 @@ use crate::subscriptions::filter_eval::{filter_matches_bytes, filter_matches_inn
 
 /// Build an `InnerValue::Map` from flat key-value pairs, serialize it to
 /// bytes, and return `(bytes, InnerValue, Arc<OnceCell<Interner>>)`.
-fn make_record(
-    fields: &[(&str, InnerValue)],
-) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
+fn make_record(fields: &[(&str, InnerValue)]) -> (Vec<u8>, InnerValue, Arc<OnceCell<Interner>>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
@@ -32,10 +30,8 @@ fn filter_matches_bytes_eq() {
         field: vec!["name".to_string()],
         value: FilterValue::String("alice".to_string()),
     };
-    let (yes_bytes, _, cell) =
-        make_record(&[("name", InnerValue::Str("alice".to_string()))]);
-    let (no_bytes, _, cell_no) =
-        make_record(&[("name", InnerValue::Str("bob".to_string()))]);
+    let (yes_bytes, _, cell) = make_record(&[("name", InnerValue::Str("alice".to_string()))]);
+    let (no_bytes, _, cell_no) = make_record(&[("name", InnerValue::Str("bob".to_string()))]);
     assert!(filter_matches_bytes(&filter, &yes_bytes, &cell));
     assert!(!filter_matches_bytes(&filter, &no_bytes, &cell_no));
 }

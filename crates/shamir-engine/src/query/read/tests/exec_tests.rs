@@ -195,7 +195,13 @@ fn group_by_count() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r = to_json(&result);
     assert_eq!(r.len(), 2);
     assert_eq!(r[0]["city"], "LA");
@@ -221,7 +227,13 @@ fn group_by_sum_avg() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r = to_json(&result);
     assert_eq!(r[0]["city"], "LA");
     assert_eq!(r[0]["total_age"], 50);
@@ -248,7 +260,13 @@ fn group_by_min_max() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r = to_json(&result);
     assert_eq!(r[0]["min_age"], 25);
     assert_eq!(r[0]["max_age"], 25);
@@ -272,7 +290,13 @@ fn group_by_having() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r = to_json(&result);
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["city"], "NYC");
@@ -302,7 +326,13 @@ fn group_by_multiple_fields() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     assert_eq!(result.len(), 2);
 }
 
@@ -319,7 +349,13 @@ fn group_by_empty_input() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     assert!(result.is_empty());
 }
 
@@ -614,7 +650,13 @@ fn aggregate_fn_median_per_group() {
 
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r = to_json(&result);
 
     // Groups are emitted in alphabetical key order: LA, then NYC.

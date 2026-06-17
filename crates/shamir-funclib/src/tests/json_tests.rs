@@ -23,7 +23,11 @@ fn ints(ns: &[i64]) -> QueryValue {
 
 /// Build a path list from string keys (for Map navigation under QueryValue ABI).
 fn str_path(keys: &[&str]) -> QueryValue {
-    QueryValue::List(keys.iter().map(|k| QueryValue::Str((*k).to_owned())).collect())
+    QueryValue::List(
+        keys.iter()
+            .map(|k| QueryValue::Str((*k).to_owned()))
+            .collect(),
+    )
 }
 
 #[test]
@@ -32,19 +36,13 @@ fn get_path_into_list_and_map() {
     // root = { "a": [10, 20, 30] }
     let root = map(vec![("a", ints(&[10, 20, 30]))]);
     // path ["a", 2] -> map key "a", then list index 2 -> 30
-    let path = QueryValue::List(vec![
-        QueryValue::Str("a".to_owned()),
-        QueryValue::Int(2),
-    ]);
+    let path = QueryValue::List(vec![QueryValue::Str("a".to_owned()), QueryValue::Int(2)]);
     assert_eq!(
         r.call("get_path", &[root.clone(), path]).unwrap(),
         QueryValue::Int(30)
     );
     // negative index: ["a", -1] -> last element -> 30
-    let path_neg = QueryValue::List(vec![
-        QueryValue::Str("a".to_owned()),
-        QueryValue::Int(-1),
-    ]);
+    let path_neg = QueryValue::List(vec![QueryValue::Str("a".to_owned()), QueryValue::Int(-1)]);
     assert_eq!(
         r.call("get_path", &[root.clone(), path_neg]).unwrap(),
         QueryValue::Int(30)
@@ -66,10 +64,7 @@ fn get_path_miss_returns_null() {
         QueryValue::Null
     );
     // out-of-range index
-    let path_oob = QueryValue::List(vec![
-        QueryValue::Str("a".to_owned()),
-        QueryValue::Int(5),
-    ]);
+    let path_oob = QueryValue::List(vec![QueryValue::Str("a".to_owned()), QueryValue::Int(5)]);
     assert_eq!(
         r.call("get_path", &[root.clone(), path_oob]).unwrap(),
         QueryValue::Null
@@ -110,8 +105,7 @@ fn array_length_ok_and_err() {
         QueryValue::Int(3)
     );
     assert_eq!(
-        r.call("array_length", &[QueryValue::List(vec![])])
-            .unwrap(),
+        r.call("array_length", &[QueryValue::List(vec![])]).unwrap(),
         QueryValue::Int(0)
     );
     assert_eq!(
@@ -178,18 +172,12 @@ fn type_of_variants() {
 fn exists_true_false_and_err() {
     let r = reg();
     let root = map(vec![("a", ints(&[10, 20]))]);
-    let path_ok = QueryValue::List(vec![
-        QueryValue::Str("a".to_owned()),
-        QueryValue::Int(0),
-    ]);
+    let path_ok = QueryValue::List(vec![QueryValue::Str("a".to_owned()), QueryValue::Int(0)]);
     assert_eq!(
         r.call("exists", &[root.clone(), path_ok]).unwrap(),
         QueryValue::Bool(true)
     );
-    let path_miss = QueryValue::List(vec![
-        QueryValue::Str("a".to_owned()),
-        QueryValue::Int(99),
-    ]);
+    let path_miss = QueryValue::List(vec![QueryValue::Str("a".to_owned()), QueryValue::Int(99)]);
     assert_eq!(
         r.call("exists", &[root.clone(), path_miss]).unwrap(),
         QueryValue::Bool(false)

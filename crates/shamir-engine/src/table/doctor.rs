@@ -19,9 +19,9 @@ use std::time::Instant;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::DbResult;
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::value::InnerValue;
-use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 
 use crate::index::index_definition::IndexDefinition;
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
@@ -105,15 +105,13 @@ impl TableManager {
                 // `InnerValue` impls.
                 let mut tally = |rec: &(dyn RecordRef + '_)| {
                     for (i, def) in regular_defs.iter().enumerate() {
-                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths)
-                            .is_some()
+                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths).is_some()
                         {
                             expected_regular[i] += 1;
                         }
                     }
                     for (i, def) in unique_defs.iter().enumerate() {
-                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths)
-                            .is_some()
+                        if crate::index::index_keys::extract_index_leaves(rec, &def.paths).is_some()
                         {
                             expected_unique[i] += 1;
                         }

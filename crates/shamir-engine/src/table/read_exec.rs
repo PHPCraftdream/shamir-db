@@ -248,9 +248,11 @@ impl TableManager {
                             let val =
                                 crate::query::filter::eval::resolve_field(&record, &field_path);
                             let qv_val = match val {
-                                Some(v) => shamir_types::codecs::interned::inner_value_to_query_value(
-                                    &v, interner,
-                                )?,
+                                Some(v) => {
+                                    shamir_types::codecs::interned::inner_value_to_query_value(
+                                        &v, interner,
+                                    )?
+                                }
                                 None => QueryValue::Null,
                             };
                             let key = alias
@@ -472,9 +474,11 @@ impl TableManager {
                             let val =
                                 crate::query::filter::eval::resolve_field(&record, &field_path);
                             let qv_val = match val {
-                                Some(v) => shamir_types::codecs::interned::inner_value_to_query_value(
-                                    &v, interner,
-                                )?,
+                                Some(v) => {
+                                    shamir_types::codecs::interned::inner_value_to_query_value(
+                                        &v, interner,
+                                    )?
+                                }
                                 None => QueryValue::Null,
                             };
                             let key = alias
@@ -998,9 +1002,10 @@ impl TableManager {
                                     Ok(bytes) => {
                                         QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref()))
                                     }
-                                    Err(_) => {
-                                        QueryRecord::Direct(proj.project_value(&view, interner), std::sync::OnceLock::new())
-                                    }
+                                    Err(_) => QueryRecord::Direct(
+                                        proj.project_value(&view, interner),
+                                        std::sync::OnceLock::new(),
+                                    ),
                                 }
                             };
                             result.push(record);
@@ -1042,7 +1047,10 @@ impl TableManager {
                                             ),
                                         }
                                     }
-                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner), std::sync::OnceLock::new()),
+                                    Err(_) => QueryRecord::Direct(
+                                        proj.project_value(iv, interner),
+                                        std::sync::OnceLock::new(),
+                                    ),
                                 }
                             };
                             result.push(record);
@@ -1072,7 +1080,10 @@ impl TableManager {
                                 break;
                             }
                         }
-                        result.push(QueryRecord::Direct(proj.project_value($rec, interner), std::sync::OnceLock::new()));
+                        result.push(QueryRecord::Direct(
+                            proj.project_value($rec, interner),
+                            std::sync::OnceLock::new(),
+                        ));
                     }};
                 }
 
@@ -1278,12 +1289,14 @@ pub(super) fn apply_select_value_bytes(
     let proj = exec::SelectProjection::new(select, interner);
     matched
         .iter()
-        .map(|(_, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
-            Ok(view) => proj.project_value(&view, interner),
-            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                Ok(iv) => proj.project_value(&iv, interner),
-                Err(_) => QueryValue::Null,
+        .map(
+            |(_, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
+                Ok(view) => proj.project_value(&view, interner),
+                Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                    Ok(iv) => proj.project_value(&iv, interner),
+                    Err(_) => QueryValue::Null,
+                },
             },
-        })
+        )
         .collect()
 }

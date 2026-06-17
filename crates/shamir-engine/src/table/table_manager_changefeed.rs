@@ -61,5 +61,4 @@ impl TableManager {
         // with concurrent tx commits or other non-tx writes.
         cf.gate.publish_committed_max(commit_version);
     }
-
 }

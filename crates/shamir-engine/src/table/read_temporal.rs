@@ -107,15 +107,13 @@ impl TableManager {
                 // S4: filter via RecordView lens (bare-scalar fallback to
                 // InnerValue for non-map records).
                 let passes = match filter_cb.as_ref() {
-                    Some(cb) => {
-                        match shamir_types::record_view::RecordView::new(&bytes) {
-                            Ok(view) => cb.matches(&view, ctx),
-                            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                                Ok(iv) => cb.matches(&iv, ctx),
-                                Err(_) => false,
-                            },
-                        }
-                    }
+                    Some(cb) => match shamir_types::record_view::RecordView::new(&bytes) {
+                        Ok(view) => cb.matches(&view, ctx),
+                        Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                            Ok(iv) => cb.matches(&iv, ctx),
+                            Err(_) => false,
+                        },
+                    },
                     None => true,
                 };
                 if passes {
@@ -164,7 +162,10 @@ impl TableManager {
             exec::apply_pagination(result_qv, &query.pagination, query.count_total);
 
         let records_returned = records_qv.len() as u64;
-        let records: Vec<QueryRecord> = records_qv.into_iter().map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new())).collect();
+        let records: Vec<QueryRecord> = records_qv
+            .into_iter()
+            .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+            .collect();
         Ok(QueryResult {
             records,
             stats: Some(QueryStats {

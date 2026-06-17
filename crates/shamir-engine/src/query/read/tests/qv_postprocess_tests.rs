@@ -632,7 +632,13 @@ fn aggregate_group_by_all_funcs_identical() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
 
     // Convert to json for assertions.
     let r: Vec<json::Value> = result
@@ -703,7 +709,13 @@ fn aggregate_having_filters_correctly() {
         distinct: false,
     };
 
-    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
     let r: Vec<json::Value> = result
         .iter()
         .map(|v| json::Value::from(v.clone()))
