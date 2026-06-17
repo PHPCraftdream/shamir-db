@@ -1,0 +1,30 @@
+# Supply-chain cooldown — never adopt a crate version younger than 30 days.
+#
+# WHY: freshly-published compromised releases are the dominant registry attack
+# vector (npm/PyPI 2025). A 30-day quarantine gives automated scanners + the
+# community time to catch a malicious version BEFORE we pull it. This is RFC
+# 3923 (cargo-min-publish-age); cargo's native client-side
+# `registry.global-min-publish-age` enforcement is still pending (registry-side
+# pubtime infra landed in Cargo 1.94), so enforcement today is via the
+# `cargo-cooldown` subcommand.
+#
+# HOW TO USE (devs + CI):
+#   cargo install --locked cargo-cooldown      # one-time
+#   cargo cooldown update                       # refresh deps, cooling fresh ones
+#   cargo cooldown check                         # CI guard (fail-closed)
+#   cargo cooldown build|test                    # build/test through the cooldown
+# To intentionally adopt a fresh version (e.g. an urgent security fix), pin it:
+#   cargo update <crate> --precise <ver>   (records the choice in Cargo.lock)
+#
+# When cargo ships native client-side min-publish-age, drop cargo-cooldown and
+# move this to `.cargo/config.toml`'s [registry] global-min-publish-age.
+
+[cooldown]
+# Fail (do NOT silently downgrade) if resolution requires a too-fresh version.
+incompatible-publish-age = "deny"
+# Versions already in Cargo.lock are the protected baseline (grandfathered);
+# only NEW too-fresh resolutions are blocked.
+lockfile-baseline = "floor"
+
+[registry]
+global-min-publish-age = "30 days"
