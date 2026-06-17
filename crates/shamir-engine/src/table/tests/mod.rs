@@ -19,6 +19,7 @@ pub mod read_one_tx_tests;
 pub mod record_counter_tests;
 pub mod recordview_cutover_parity_tests;
 pub mod seam_read_tests;
+pub mod set_byte_merge_parity_tests;
 pub mod stale_index_tests;
 pub mod stream_tx_tests;
 pub mod stream_utils;

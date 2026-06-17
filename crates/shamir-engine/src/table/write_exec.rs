@@ -675,13 +675,28 @@ impl TableManager {
 
     /// tx-aware variant of [`execute_set`](Self::execute_set).
     ///
-    /// Stage 4.D.6.c.2: mirrors the upsert semantics of
-    /// `execute_set` — locate by key fields, then either
-    /// [`update_tx`](Self::update_tx) (merge) or
-    /// [`insert_tx`](Self::insert_tx) (new record). Full parity with
-    /// `execute_set` including index fast-path; differs only in that
-    /// mutations go through tx-aware methods and interner / counter
-    /// persistence is **skipped** (commit_tx handles that uniformly).
+    /// Mirrors the upsert semantics of `execute_set` — locate by key fields,
+    /// then either merge-`update` (existing) or insert (new record) — but the
+    /// MERGE branch is tree-free (W3d, the SET counterpart of W3c's
+    /// `execute_update_tx` cutover):
+    ///
+    /// - the existing record's raw storage bytes are read once via the
+    ///   tx-aware byte read (`read_one_tx_bytes`);
+    /// - the merge runs through `merge_storage_bytes(old_bytes, set_map)` —
+    ///   byte-identical to `merge_inner_maps(existing, set_map).to_bytes()`;
+    /// - change-detection is a byte compare (`new_bytes == old_bytes`);
+    /// - index ops are planned through `update_tx_bytes` (zero-copy
+    ///   `RecordView` lenses for old/new — no `InnerValue` tree decode);
+    /// - validators run through `run_validators_qv` with `old_qv` de-interned
+    ///   from the old bytes via `RecordView`, and `new_qv = old_qv + resolved
+    ///   value overlay` (string-keyed — sidesteps de-interning overlay-minted
+    ///   key ids, the W3c keystone pattern);
+    /// - result JSON is `record_view_to_json_value(old_view) + resolved value
+    ///   overlay` (same keystone).
+    ///
+    /// The INSERT branch encodes the value via `query_value_to_storage_bytes`
+    /// and stages it through `insert_tx_many_bytes` — the same tree-free
+    /// machinery `execute_insert_tx` uses (no `InnerValue` record tree).
     pub async fn execute_set_tx(
         &self,
         op: &SetOp,
@@ -696,8 +711,15 @@ impl TableManager {
             .map_err(shamir_storage::error::DbError::Codec)?;
 
         // Intern field names through the tx overlay, then release the
-        // immutable borrow on `tx` before the mutable `update_tx`/`insert_tx` calls.
-        let (key_fields, new_inner) = {
+        // immutable borrow on `tx` before the mutable staging calls. Two
+        // artefacts come out of this block:
+        //   * `key_fields` — TINY scalar InnerValue keys for the lookup
+        //     (`lookup_existing_for_set` takes `(Vec<u64>, InnerValue)`; these
+        //      are scalar key values, NOT the record tree — out of scope).
+        //   * `set_map` — the interned-key InnerValue overlay that
+        //     `merge_storage_bytes` patches onto the old bytes (the same shape
+        //     W3c's update path builds).
+        let (key_fields, set_map, new_bytes_fresh) = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
 
@@ -721,68 +743,142 @@ impl TableManager {
 
             let new_inner = query_value_to_inner_with(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-
-            (key_fields, new_inner)
-        };
-
-        let found = self
-            .lookup_existing_for_set(&key_fields, batch_size)
-            .await?;
-
-        let (created, result_record) = if let Some((id, existing)) = found {
-            let new_map = match &new_inner {
-                InnerValue::Map(m) => m,
+            let set_map = match &new_inner {
+                InnerValue::Map(m) => m.clone(),
                 _ => {
                     return Err(shamir_storage::error::DbError::Validation(
                         "SET value must be a JSON object".to_string(),
                     ))
                 }
             };
-            let merged = merge_inner_maps(&existing, new_map);
 
-            // S3: run validators (Upsert — existing found → update path, tx).
-            // TODO actor threading — use Actor::System for now.
-            self.run_validators_tx(
-                WriteOp::Upsert,
-                Some(&merged),
-                Some(&existing),
-                &Actor::System,
-                &*tx,
-            )
-            .await
-            .map_err(validator_failure_to_db_error)?;
+            // INSERT-branch bytes: encode the resolved value directly via the
+            // tree-free storage encoder (same call `execute_insert_tx` makes).
+            let new_bytes_fresh = query_value_to_storage_bytes(&resolved_value, &intern_fn)
+                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
-            self.update_tx(id, &merged, Some(&mut *tx)).await?;
-            // Build result JSON from op.value merged onto the existing record
-            // (existing was committed before this tx → base ids only, safe to decode).
-            let mut base_obj = match inner_to_json_value(&existing, interner)? {
+            (key_fields, set_map, new_bytes_fresh)
+        };
+
+        let found = self
+            .lookup_existing_for_set(&key_fields, batch_size)
+            .await?;
+
+        let (created, result_record) = if let Some((id, _existing)) = found {
+            // ----- MERGE branch (tree-free, mirrors W3c execute_update_tx) -----
+            //
+            // Read the existing record's raw storage bytes through the tx-aware
+            // byte read. For the common implicit-tx path this returns the
+            // committed bytes `lookup_existing_for_set` matched; for an
+            // interactive tx it also reflects prior tx-staged writes to the
+            // same record (read-your-writes — strictly safer than the old
+            // committed-only tree lookup).
+            let old_bytes = self
+                .read_one_tx_bytes(id, Some(&*tx))
+                .await?
+                .ok_or_else(|| {
+                    shamir_storage::error::DbError::NotFound(format!(
+                        "execute_set_tx: existing record vanished before merge: {id:?}"
+                    ))
+                })?;
+
+            // Byte-level merge: patch old_bytes with the interned set overlay.
+            // Produces bytes identical to merge_inner_maps(existing, set_map).to_bytes().
+            let new_bytes = merge_storage_bytes(&old_bytes, &set_map)?;
+
+            // Change detection: a no-op set yields identical bytes (the merge
+            // copies old value spans verbatim when no key is patched), so byte
+            // equality is safe for this "patched from old" shape.
+            let changed = new_bytes.as_ref() != old_bytes.as_ref();
+
+            if changed {
+                // S3: run validators before staging (the W3c keystone pattern).
+                //
+                // Build old/new QueryValues WITHOUT decoding an InnerValue tree:
+                // - old_qv: de-intern the committed bytes via RecordView (base
+                //   interner — all keys are committed).
+                // - new_qv: overlay the string-keyed resolved value on top of
+                //   old_qv (no overlay-minted interned ids to resolve — the
+                //   overlay keys are already strings in resolved_value).
+                let old_view = RecordView::new(&old_bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "execute_set_tx: RecordView for validator old: {e}"
+                    ))
+                })?;
+                let old_qv = record_view_to_query_value(&old_view, interner)?;
+                let new_qv = {
+                    let mut m = match old_qv.clone() {
+                        Value::Map(m) => m,
+                        _ => shamir_types::types::common::new_map(),
+                    };
+                    if let Value::Map(overlay) = resolved_value.as_ref() {
+                        for (k, v) in overlay {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Value::Map(m)
+                };
+                self.run_validators_qv(
+                    WriteOp::Upsert,
+                    Some(&new_qv),
+                    Some(&old_qv),
+                    &Actor::System,
+                )
+                .await
+                .map_err(validator_failure_to_db_error)?;
+
+                // Stage the merged bytes + index ops through the zero-copy
+                // lens path (no InnerValue tree decode, no value.to_bytes()).
+                self.update_tx_bytes(id, &old_bytes, new_bytes, &mut *tx)
+                    .await?;
+            }
+
+            // Result JSON: old record (base-interned keys — always safe to
+            // decode) overlaid with the string-keyed resolved SET fields.
+            // Decoding new_bytes via the base interner would fail when op.value
+            // introduces brand-new field names interned only into the tx overlay.
+            let old_view = RecordView::new(&old_bytes).map_err(|e| {
+                shamir_storage::error::DbError::Codec(format!(
+                    "execute_set_tx: RecordView for result: {e}"
+                ))
+            })?;
+            let mut base_obj = match record_view_to_json_value(&old_view, interner)? {
                 json::Value::Object(m) => m,
                 _ => json::Map::new(),
             };
-            // Overlay op.value fields (QueryValue → serde_json::Value).
-            if let Value::Map(overlay) = &op.value {
+            if let Value::Map(overlay) = resolved_value.as_ref() {
                 for (k, v) in overlay {
                     base_obj.insert(k.clone(), json::Value::from(v.clone()));
                 }
             }
             (false, json::Value::Object(base_obj))
         } else {
-            // S3: run validators (Upsert — no existing → insert path, tx).
-            // TODO actor threading — use Actor::System for now.
-            self.run_validators_tx(
+            // ----- INSERT branch (tree-free, mirrors execute_insert_tx) -----
+            //
+            // Validators via the QueryValue entry (no InnerValue round-trip);
+            // the resolved value IS the new record.
+            self.run_validators_qv(
                 WriteOp::Upsert,
-                Some(&new_inner),
+                Some(resolved_value.as_ref()),
                 None,
                 &Actor::System,
-                &*tx,
             )
             .await
             .map_err(validator_failure_to_db_error)?;
 
-            let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
-            // Build result JSON from original op.value to avoid overlay-id
-            // reverse-lookup (overlay ids are not yet in the base interner).
-            let mut obj = match json::Value::from(op.value.clone()) {
+            // Stage the pre-encoded bytes through the lens-driven batch insert
+            // (single-element slice). No InnerValue record tree is built.
+            let ids = self
+                .insert_tx_many_bytes(std::slice::from_ref(&new_bytes_fresh), tx)
+                .await?;
+            let id = ids.into_iter().next().ok_or_else(|| {
+                shamir_storage::error::DbError::Internal(
+                    "execute_set_tx: insert_tx_many_bytes returned no id".to_string(),
+                )
+            })?;
+            // Result JSON from the original resolved value (string-keyed — no
+            // overlay-id reverse lookup).
+            let mut obj = match json::Value::from(resolved_value.as_ref().clone()) {
                 json::Value::Object(m) => m,
                 other => {
                     let mut m = json::Map::new();
