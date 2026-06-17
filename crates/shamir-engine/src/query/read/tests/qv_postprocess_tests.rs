@@ -6,6 +6,7 @@
 //! post-processor, including the Dec/Big/Bin/Set divergence cases
 //! where the canonical-key mapping is essential.
 
+use bytes::Bytes;
 use serde_json as json;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
@@ -526,6 +527,18 @@ fn make_record(interner: &Interner, name: &str, age: i64, city: &str, score: f64
     InnerValue::Map(map)
 }
 
+/// S4 helper: encode `InnerValue` records to `Bytes` for the lens-fed
+/// aggregate pipeline (`apply_group_by` / `apply_aggregate_all`).
+fn to_bytes_records(records: &[(RecordId, InnerValue)]) -> Vec<(RecordId, Bytes)> {
+    records
+        .iter()
+        .map(|(id, iv)| {
+            let bytes = iv.to_bytes().expect("encode InnerValue to bytes");
+            (*id, bytes)
+        })
+        .collect()
+}
+
 fn make_test_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
     vec![
         (
@@ -619,7 +632,7 @@ fn aggregate_group_by_all_funcs_identical() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
 
     // Convert to json for assertions.
     let r: Vec<json::Value> = result
@@ -655,7 +668,7 @@ fn aggregate_sum_float_byte_identity() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
     // Serialise the QV result to json bytes.
@@ -690,7 +703,7 @@ fn aggregate_having_filters_correctly() {
         distinct: false,
     };
 
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&to_bytes_records(&records), &group_by, &select, &interner, &ctx);
     let r: Vec<json::Value> = result
         .iter()
         .map(|v| json::Value::from(v.clone()))
@@ -712,7 +725,7 @@ fn aggregate_avg_float_byte_identity() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
     let qv_json = json::Value::from(result[0].clone());
@@ -739,7 +752,7 @@ fn aggregate_count_as_int_identity() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     let qv_json = json::Value::from(result[0].clone());
     let qv_bytes = json::to_vec(&qv_json).unwrap();
 
@@ -769,7 +782,7 @@ fn aggregate_all_no_group_identical() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&records, &select, &interner);
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     let r: Vec<json::Value> = result
         .iter()
         .map(|v| json::Value::from(v.clone()))

@@ -11,12 +11,11 @@ use futures::StreamExt;
 use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
-    exec, AggregateField, GroupBy, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery,
-    Select, SelectItem, Temporal,
+    exec, GroupBy, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery, Select,
+    SelectItem, Temporal,
 };
 use bytes::Bytes;
 use serde_bytes::ByteBuf;
-use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::record_view_to_id_msgpack;
@@ -38,145 +37,6 @@ type DynBatchStream<'a> = std::pin::Pin<
             + 'a,
     >,
 >;
-
-// ============================================================================
-// AGG #54 — per-row tree decode prune on the aggregate / GROUP BY read path.
-//
-// Today every row in a GROUP BY / aggregate query is fully decoded to an
-// `InnerValue` tree even when the query references only a few fields of a wide
-// record. The helpers below compute the set of referenced *top-level* interned
-// field ids ONCE per query, gate the optimisation so it only applies when the
-// set is provably complete + concrete (falling back to the full
-// `InnerValue::from_bytes` decode otherwise), and build a pruned
-// `InnerValue::Map` containing only those referenced top-level subtrees. The
-// aggregate engine (aggregate.rs) is unchanged: for every referenced path the
-// pruned tree is identical to the full tree, so `resolve_field_ref`,
-// `group_key_item`, Min/Max borrows and funclib all behave byte-identically.
-// ============================================================================
-
-/// Compute the set of referenced TOP-LEVEL interned field ids a query needs,
-/// or `None` when the prune must FALL BACK to the full decode.
-///
-/// The set is the FIRST path segment of every GROUP BY field, every concrete
-/// `AggregateField::Field(path)` (under both `SelectItem::Aggregate` and
-/// `AggregateFn`), and every `SelectItem::Field` projection. Keeping a
-/// referenced top-level field means keeping its WHOLE subtree, so nested paths
-/// (`a.b.c` → keep top-level `a`) resolve correctly afterwards.
-///
-/// **GATE — returns `None` (fall back to full decode) when the query contains
-/// any of:**
-/// - `SelectItem::All` (SELECT *) — reads every field;
-/// - `AggregateField::All` under a record-touching `Aggregate`/`AggregateFn`
-///   (NOT `SelectItem::CountAll`, which never reads a record);
-/// - `SelectItem::Function` / `$fn` scalar items — may read arbitrary fields;
-/// - `SelectItem::Expression` — may read arbitrary fields;
-/// - a referenced first-segment that is not interned (`get_ind` miss) — the
-///   set would be incomplete, so we fall back rather than silently drop it.
-///
-/// `group_by` is `Option<&GroupBy>`; when present its field paths contribute
-/// their first segments (and a HAVING whose referenced fields aren't already
-/// covered is conservatively treated via the select-list gate above — HAVING
-/// itself runs post-aggregate on the result object, so it does not read raw
-/// records, but its field coverage is only knowable through the select list).
-pub(super) fn collect_referenced_top_ids(
-    select: &Select,
-    group_by: Option<&GroupBy>,
-    interner: &Interner,
-) -> Option<TFxSet<u64>> {
-    // Upper bound on the number of referenced ids: group fields + one per item.
-    let cap = select.items.len() + group_by.map(|g| g.fields.len()).unwrap_or(0);
-    let mut ids: TFxSet<u64> = shamir_collections::new_fx_set_wc(cap);
-
-    // Helper: intern the first segment of a path and insert; return false on miss.
-    let mut push_first = |path: &[String]| -> bool {
-        match path.first() {
-            Some(seg) => match interner.get_ind(seg) {
-                Some(k) => {
-                    ids.insert(k.id());
-                    true
-                }
-                None => false,
-            },
-            None => true,
-        }
-    };
-
-    for item in &select.items {
-        match item {
-            // FALL-BACK triggers — these read arbitrary / all fields.
-            SelectItem::All => return None,
-            SelectItem::Function { .. } => return None,
-            SelectItem::Expression { .. } => return None,
-            // CountAll never touches records — contributes no field id and is
-            // safe to keep alongside pruned items.
-            SelectItem::CountAll { .. } => {}
-            SelectItem::Field { path, .. } => {
-                if !push_first(path) {
-                    return None;
-                }
-            }
-            SelectItem::Aggregate { field, .. } => match field {
-                AggregateField::All => return None,
-                AggregateField::Field(p) => {
-                    if !push_first(p) {
-                        return None;
-                    }
-                }
-            },
-            SelectItem::AggregateFn { field, .. } => match field {
-                AggregateField::All => return None,
-                AggregateField::Field(p) => {
-                    if !push_first(p) {
-                        return None;
-                    }
-                }
-            },
-        }
-    }
-
-    // GROUP BY field paths — their first segments must be interned too.
-    if let Some(gb) = group_by {
-        for f in &gb.fields {
-            if !push_first(f) {
-                return None;
-            }
-        }
-    }
-
-    Some(ids)
-}
-
-/// Build a pruned `InnerValue::Map` containing ONLY the referenced top-level
-/// fields, by extracting each field's value bytes from the lens and decoding
-/// just that subtree. Unreferenced wide fields are never decoded.
-///
-/// For every referenced path the resulting tree is byte-identical to the one
-/// `InnerValue::from_bytes(full_record_bytes)` would have produced: nested
-/// map keys decode back to `InternerKey` (the storage codec serialises them
-/// that way), so `resolve_field_ref(&pruned, path)` returns the same
-/// `&InnerValue` as on the full tree.
-///
-/// Fields in `top_ids` that are absent from the record are simply omitted
-/// (matching `resolve_field_ref`'s `None` on miss — no spurious `Null` insert).
-pub(super) fn prune_to_inner(
-    view: &shamir_types::record_view::RecordView<'_>,
-    top_ids: &TFxSet<u64>,
-) -> InnerValue {
-    let mut map = new_map_wc(top_ids.len());
-    for &id in top_ids {
-        let key = InternerKey::new(id);
-        if let Some(bytes) = view.field_value_bytes(key.clone()) {
-            // A miss on decode means malformed bytes for a present field;
-            // mirror the full-decode path's behaviour by skipping (the row was
-            // already accepted as well-formed enough to build a RecordView, so
-            // this branch is pathological — but never panic).
-            if let Ok(sub) = InnerValue::from_bytes(bytes) {
-                map.insert(key, sub);
-            }
-        }
-    }
-    InnerValue::Map(map)
-}
 
 // ============================================================================
 // S-read: simple-select gate
@@ -777,11 +637,10 @@ impl TableManager {
         // when the gate falls back (`None`), it does the original full
         // `InnerValue::from_bytes` decode. The Owned arm is untouched (the
         // tree is already materialised — no bytes to prune).
-        let prune_ids: Option<TFxSet<u64>> = if needs_raw {
-            collect_referenced_top_ids(&query.select, query.group_by.as_ref(), interner)
-        } else {
-            None
-        };
+        // S4: the aggregate path now feeds RecordView lenses over raw Bytes.
+        // The AGG #54 prune_ids/prune_to_inner decode-prune is obsolete (the
+        // lens already reads only referenced fields, skipping unreferenced
+        // ones with O(1) skips, no tree decode).
 
         // Use bytes-level pre-filter when a compiled filter is present: rows
         // that definitely don't match are skipped before full InnerValue decode.
@@ -801,8 +660,10 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
 
-        // Two accumulation modes — raw InnerValues or projected QueryRecord
-        let mut raw_acc: Vec<(RecordId, InnerValue)> = Vec::new();
+        // Two accumulation modes: raw Bytes (for aggregates) or projected
+        // QueryRecord (for plain SELECT). S4: the aggregate arm now carries
+        // Bytes + per-row RecordView instead of a full InnerValue tree.
+        let mut raw_acc: Vec<(RecordId, Bytes)> = Vec::new();
         let mut rec_acc: Vec<crate::query::read::QueryRecord> = Vec::new();
         let proj = if !needs_raw {
             Some(exec::SelectProjection::new(&query.select, interner))
@@ -826,21 +687,10 @@ impl TableManager {
                         };
                         if passes {
                             if needs_raw {
-                                // AGG #54 — when the referenced-id gate
-                                // succeeded, decode ONLY the referenced
-                                // top-level subtrees (wide unreferenced fields
-                                // are never decoded). The pruned tree lives in
-                                // `raw_acc` for the whole group walk, so
-                                // Min/Max's `&'a InnerValue` borrows are
-                                // satisfied identically to the full-decode
-                                // path. When the gate fell back (`None`), do
-                                // the original full `InnerValue::from_bytes`.
-                                let inner = match prune_ids.as_ref() {
-                                    Some(ids) => prune_to_inner(&view, ids),
-                                    None => InnerValue::from_bytes(b)
-                                        .map_err(|e| DbError::Codec(e.to_string()))?,
-                                };
-                                raw_acc.push((id, inner));
+                                // S4: push raw bytes; the aggregate pipeline
+                                // builds a RecordView per row. No InnerValue
+                                // decode here.
+                                raw_acc.push((id, b));
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
@@ -856,7 +706,16 @@ impl TableManager {
                         };
                         if passes {
                             if needs_raw {
-                                raw_acc.push((id, record));
+                                // S4: the Owned arm carries an already-decoded
+                                // InnerValue (e.g. from MVCC). Re-encode to
+                                // bytes once so the aggregate lens can consume
+                                // it. This is the cold path (the hot Borrowed
+                                // arm avoids the re-encode).
+                                match record.to_bytes() {
+                                    Ok(bytes) => raw_acc.push((id, bytes)),
+                                    // Malformed tree — skip defensively.
+                                    Err(_) => continue,
+                                }
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),

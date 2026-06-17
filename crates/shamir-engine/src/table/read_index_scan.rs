@@ -220,39 +220,39 @@ impl TableManager {
 
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
 
-        // S3: aggregate paths keep InnerValue; plain paths use bytes + RecordView.
+        // S4: aggregate paths now use bytes + RecordView lens (same as the
+        // plain SELECT branch). No full InnerValue decode per row.
         if needs_inner {
-            // ── Aggregate / GROUP BY branch (S4 scope — unchanged) ───────────
-            let records = self.get_many(&id_vec).await?;
-            let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
-            for (id, opt) in id_vec.iter().zip(records) {
-                if let Some(record) = opt {
+            // ── Aggregate / GROUP BY branch (S4 — zero-copy RecordView lens) ──
+            let raw = self.get_many_bytes(&id_vec).await?;
+            let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(raw) {
+                if let Some(bytes) = opt {
                     let passes = match &residual_cb {
-                        Some(cb) => cb.matches(&record, ctx),
+                        Some(cb) => {
+                            match shamir_types::record_view::RecordView::new(&bytes) {
+                                Ok(view) => cb.matches(&view, ctx),
+                                Err(_) => {
+                                    // Bare-scalar fallback: decode to InnerValue.
+                                    match InnerValue::from_bytes(bytes.as_ref()) {
+                                        Ok(iv) => cb.matches(&iv, ctx),
+                                        Err(_) => false,
+                                    }
+                                }
+                            }
+                        }
                         None => true,
                     };
                     if passes {
-                        matched.push((*id, record));
+                        matched.push((*id, bytes));
                     }
                 }
             }
 
             let records_scanned = matched.len() as u64;
 
-            if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
-                let records_returned = paged.len() as u64;
-                return Ok(QueryResult {
-                    records: paged,
-                    stats: Some(QueryStats {
-                        index_used: Some(format!("sorted_idx_{index_name}")),
-                        records_scanned,
-                        records_returned,
-                        execution_time_us: start.elapsed().as_micros() as u64,
-                    }),
-                    pagination,
-                    value: None,
-                });
-            }
+            // try_project_page_only gates out for aggregates/group_by (always
+            // None here) — skip the call entirely on this branch.
 
             let mut result_qv = if has_group_by {
                 let group_by = query.group_by.as_ref().unwrap();
@@ -476,40 +476,39 @@ impl TableManager {
             .map(|k| k.as_str().to_string())
             .unwrap_or_else(|| index_name.to_string());
 
-        // S3: aggregate paths keep InnerValue; plain paths use bytes + RecordView.
+        // S4: aggregate paths now use bytes + RecordView lens (same as the
+        // plain SELECT branch). No full InnerValue decode per row.
         if needs_inner {
-            // ── Aggregate / GROUP BY branch (S4 scope — unchanged) ───────────
-            let records = self.get_many(&id_vec).await?;
-            let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
-            for (id, opt) in id_vec.iter().zip(records) {
-                if let Some(record) = opt {
+            // ── Aggregate / GROUP BY branch (S4 — zero-copy RecordView lens) ──
+            let raw = self.get_many_bytes(&id_vec).await?;
+            let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
+            for (id, opt) in id_vec.iter().zip(raw) {
+                if let Some(bytes) = opt {
                     let passes = match &residual_cb {
-                        Some(cb) => cb.matches(&record, ctx),
+                        Some(cb) => {
+                            match shamir_types::record_view::RecordView::new(&bytes) {
+                                Ok(view) => cb.matches(&view, ctx),
+                                Err(_) => {
+                                    // Bare-scalar fallback: decode to InnerValue.
+                                    match InnerValue::from_bytes(bytes.as_ref()) {
+                                        Ok(iv) => cb.matches(&iv, ctx),
+                                        Err(_) => false,
+                                    }
+                                }
+                            }
+                        }
                         None => true,
                     };
                     if passes {
-                        matched.push((*id, record));
+                        matched.push((*id, bytes));
                     }
                 }
             }
 
             let records_scanned = matched.len() as u64;
 
-            if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
-                let elapsed = start.elapsed();
-                let records_returned = paged.len() as u64;
-                return Ok(QueryResult {
-                    records: paged,
-                    stats: Some(QueryStats {
-                        index_used: Some(index_name_str),
-                        records_scanned,
-                        records_returned,
-                        execution_time_us: elapsed.as_micros() as u64,
-                    }),
-                    pagination,
-                    value: None,
-                });
-            }
+            // try_project_page_only gates out for aggregates/group_by (always
+            // None here) — skip the call entirely on this branch.
 
             let mut result_qv = if has_group_by {
                 let group_by = query.group_by.as_ref().unwrap();

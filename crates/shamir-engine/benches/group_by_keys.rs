@@ -117,6 +117,14 @@ fn bench(c: &mut Criterion) {
         distinct: false,
     };
 
+    // S4: `apply_group_by` now consumes `&[(RecordId, Bytes)]` (lens feed) —
+    // encode the InnerValue fixtures to storage bytes ONCE, outside the timed
+    // loop, so the bench measures the aggregate hot path (not encoding).
+    let records: Vec<(RecordId, bytes::Bytes)> = records
+        .into_iter()
+        .map(|(id, v)| (id, v.to_bytes().expect("encode bench record")))
+        .collect();
+
     let mut group = c.benchmark_group("apply_group_by");
     group.throughput(Throughput::Elements(records.len() as u64));
 
