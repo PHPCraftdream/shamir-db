@@ -65,160 +65,17 @@ impl TableManager {
         self.validator_registry = Some(registry);
     }
 
-    /// Run all applicable validators for the given write operation on a
-    /// single record. This is the S3 validator pass.
+    /// QueryValue-input entry point for the INSERT/UPDATE/UPSERT write paths.
+    ///
+    /// All write paths feed `QueryValue` directly: INSERT passes `resolved_values`
+    /// from `write_exec.rs`; UPDATE/UPSERT merge at the `QueryValue` level in
+    /// `write_exec.rs` before calling here. DELETE goes through
+    /// [`run_validators_view`](Self::run_validators_view) (RecordView lens).
     ///
     /// Algorithm (per the VALIDATORS.md spec):
     /// 1. If no registry is set, return `Ok(())` (validators disabled).
     /// 2. Load bindings snapshot; filter to those whose `ops` contains `op`.
-    /// 3. Sort by `priority` ascending, stable tie-break by `validator_id`.
-    /// 4. For each binding, resolve `validator_id` → compiled function.
-    ///    Missing → `Err(ValidatorFailure::Missing)` (fail-closed).
-    /// 5. Build `Params` with `record` + `old_record`, build `FnCtx`
-    ///    with actor. Invoke `validator.call(...)`.
-    /// 6. Accumulate errors. On `stop` → break.
-    /// 7. If errors → `Err(ValidatorFailure::Failed(...))`.
-    pub async fn run_validators(
-        &self,
-        op: crate::validator::WriteOp,
-        new_record: Option<&shamir_types::types::value::InnerValue>,
-        old_record: Option<&shamir_types::types::value::InnerValue>,
-        actor: &shamir_types::access::Actor,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
-        // Direct (non-tx) path: all keys live in the base interner.
-        self.run_validators_resolved(op, new_record, old_record, actor, None)
-            .await
-    }
-
-    /// tx-aware variant of [`run_validators`](Self::run_validators).
-    ///
-    /// The tx write path interns brand-new field names into the per-tx
-    /// LAYERED interner overlay (ids ≥ `OVERLAY_ID_BASE`) that the global
-    /// interner cannot yet resolve (the overlay merges into base only at
-    /// commit, AFTER validators run). Passing the tx's overlay through here
-    /// lets a just-staged record with new-field keys resolve at validation
-    /// time. Without this, validating a tx insert that introduces a brand-new
-    /// field fails with `interned key … not found`.
-    pub async fn run_validators_tx(
-        &self,
-        op: crate::validator::WriteOp,
-        new_record: Option<&shamir_types::types::value::InnerValue>,
-        old_record: Option<&shamir_types::types::value::InnerValue>,
-        actor: &shamir_types::access::Actor,
-        tx: &shamir_tx::TxContext,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
-        self.run_validators_resolved(op, new_record, old_record, actor, Some(tx))
-            .await
-    }
-
-    /// Shared implementation backing [`run_validators`] and
-    /// [`run_validators_tx`]. When `tx` is `Some`, interned keys are
-    /// resolved through a layered view (overlay first, then base) so
-    /// just-staged new-field keys resolve before commit.
-    async fn run_validators_resolved(
-        &self,
-        op: crate::validator::WriteOp,
-        new_record: Option<&shamir_types::types::value::InnerValue>,
-        old_record: Option<&shamir_types::types::value::InnerValue>,
-        actor: &shamir_types::access::Actor,
-        tx: Option<&shamir_tx::TxContext>,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
-        use crate::validator::{inner_to_query_value_with, ValidatorFailure};
-        use shamir_types::core::interner::InternerKey;
-        use shamir_types::types::value::QueryValue;
-
-        // 1. No registry → validators disabled (system tables / tests).
-        let reg = match &self.validator_registry {
-            Some(r) => r,
-            None => return Ok(()),
-        };
-
-        // 2. Load bindings snapshot; filter to applicable ops.
-        let all_bindings = self.validator_bindings.load_full();
-        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
-            .iter()
-            .filter(|b| b.ops.contains(&op))
-            .collect();
-
-        if applicable.is_empty() {
-            return Ok(());
-        }
-
-        // Pre-convert records to QueryValue (string-keyed) once.
-        let interner = self
-            .interner()
-            .get()
-            .await
-            .map_err(|e| ValidatorFailure::Invocation {
-                id: applicable[0].validator_id,
-                reason: format!("interner load failed: {e}"),
-            })?;
-
-        // Key resolver: base interner first; for the tx path fall back to
-        // the tx's interner overlay so brand-new field keys (ids ≥
-        // OVERLAY_ID_BASE, not yet merged into base) resolve at validation
-        // time. The closure borrows `interner` + `tx` for the conversion.
-        let resolve = |key: &InternerKey| -> Option<String> {
-            if let Some(s) = interner.with_str(key, |s| s.to_string()) {
-                return Some(s);
-            }
-            // Overlay is keyed by name → id, so reverse-lookup by id.
-            tx.and_then(|t| {
-                let mut found: Option<String> = None;
-                t.interner_overlay.scan(|name: &String, v: &u64| {
-                    if *v == key.id() {
-                        found = Some(name.clone());
-                    }
-                });
-                found
-            })
-        };
-
-        let qv_new: Option<QueryValue> = match new_record {
-            Some(r) => Some(inner_to_query_value_with(r, &resolve).map_err(|e| {
-                ValidatorFailure::Invocation {
-                    id: applicable[0].validator_id,
-                    reason: format!("record conversion failed: {e}"),
-                }
-            })?),
-            None => None,
-        };
-
-        let qv_old: Option<QueryValue> = match old_record {
-            Some(r) => Some(inner_to_query_value_with(r, &resolve).map_err(|e| {
-                ValidatorFailure::Invocation {
-                    id: applicable[0].validator_id,
-                    reason: format!("old_record conversion failed: {e}"),
-                }
-            })?),
-            None => None,
-        };
-
-        self.run_validators_loop(
-            op,
-            &applicable,
-            reg,
-            actor,
-            qv_new.as_ref(),
-            qv_old.as_ref(),
-        )
-        .await
-    }
-
-    /// QueryValue-input entry point for the INSERT write path (W1).
-    ///
-    /// The insert path already holds the resolved `QueryValue` upstream
-    /// (`resolved_values` in `write_exec.rs`). The legacy path built an
-    /// `InnerValue` tree (for storage/index) and then de-interned it back
-    /// to `QueryValue` via `inner_to_query_value_with` just to feed the
-    /// validator — a redundant full-record round-trip whose identity is
-    /// proven by `validator::tests::query_value_conv_tests`. This entry
-    /// skips that round-trip by taking the `QueryValue` directly.
-    ///
-    /// Behaviour is byte-identical to `run_validators(Insert, Some(inner), None)`:
-    /// the validator receives the same `record` / `old_record` params. Only
-    /// the INSERT call sites use this — UPDATE/UPSERT feed a merged
-    /// `InnerValue` and must keep the `run_validators` InnerValue-input path.
+    /// 3. Delegate to `run_validators_loop` (sort, resolve, invoke, accumulate, fail).
     pub async fn run_validators_qv(
         &self,
         op: crate::validator::WriteOp,
@@ -262,10 +119,10 @@ impl TableManager {
     /// Base-only resolution via `RecordRef::to_query_value` is therefore
     /// correct and complete for the old-record side.
     ///
-    /// The `tx` parameter is reserved for symmetry with `run_validators_resolved`
-    /// and forward compatibility (overlay reverse-lookup if a future path
-    /// needs it). Currently unused on the delete path since `new_record` is
-    /// always `None` and the old record is always in base.
+    /// The `tx` parameter is reserved for forward compatibility (overlay
+    /// reverse-lookup if a future path needs it). Currently unused on the
+    /// delete path since `new_record` is always `None` and the old record
+    /// is always in base.
     ///
     /// `new_record` is `None` for Delete. A non-`None` value is forwarded
     /// unchanged (future-proofing — not used by the delete path today).
@@ -315,14 +172,12 @@ impl TableManager {
             .await
     }
 
-    /// Per-validator invocation loop shared by [`run_validators_resolved`]
-    /// (InnerValue-input, de-interns to QueryValue) and [`run_validators_qv`]
-    /// (QueryValue-input, skips the de-intern).
+    /// Per-validator invocation loop shared by [`run_validators_qv`] and
+    /// [`run_validators_view`](Self::run_validators_view).
     ///
-    /// Both `qv_new` / `qv_old` arrive already as `QueryValue`; the only
-    /// difference upstream is how they were produced. This body is the
-    /// spec'd VALIDATORS.md algorithm steps 3–7 (sort, resolve, invoke,
-    /// accumulate, fail).
+    /// Both `qv_new` / `qv_old` arrive already as `QueryValue`. This body
+    /// is the spec'd VALIDATORS.md algorithm steps 3–7 (sort, resolve,
+    /// invoke, accumulate, fail).
     async fn run_validators_loop(
         &self,
         _op: crate::validator::WriteOp,
