@@ -3,6 +3,8 @@
 //! WARNING: These functions collect ALL data into memory and should ONLY be used in tests.
 //! For production code, use streaming APIs directly.
 
+#![allow(deprecated)] // this module's own collectors are deprecated by design; internal cross-use is intentional
+
 use crate::table::record_cow::RecordCow;
 use crate::table::Table;
 use futures::StreamExt;

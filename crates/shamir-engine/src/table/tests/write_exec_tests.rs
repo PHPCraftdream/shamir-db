@@ -2,8 +2,6 @@
 //!
 //! Request-building uses the typed query builder (`shamir_query_builder`).
 
-#![allow(deprecated)]
-
 use shamir_query_builder::filter;
 use shamir_query_builder::val::*;
 use shamir_query_builder::write::{self, doc, UpdateReturnMode};
@@ -14,11 +12,11 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::write::{InsertOp, WriteResult};
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_types::access::Actor;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::UserValue;
+use shamir_types::types::value::QueryValue;
 
 // ---------------------------------------------------------------------------
 // Test-only helpers: drive a single INSERT / UPDATE / DELETE through the
@@ -126,19 +124,19 @@ async fn setup_table_with_users() -> (crate::table::TableManager, RepoInstance) 
 
     let users = vec![
         vec![
-            ("name", UserValue::Str("Alice".into())),
-            ("age", UserValue::Int(30)),
-            ("status", UserValue::Str("active".into())),
+            ("name", QueryValue::Str("Alice".into())),
+            ("age", QueryValue::Int(30)),
+            ("status", QueryValue::Str("active".into())),
         ],
         vec![
-            ("name", UserValue::Str("Bob".into())),
-            ("age", UserValue::Int(25)),
-            ("status", UserValue::Str("active".into())),
+            ("name", QueryValue::Str("Bob".into())),
+            ("age", QueryValue::Int(25)),
+            ("status", QueryValue::Str("active".into())),
         ],
         vec![
-            ("name", UserValue::Str("Carol".into())),
-            ("age", UserValue::Int(35)),
-            ("status", UserValue::Str("inactive".into())),
+            ("name", QueryValue::Str("Carol".into())),
+            ("age", QueryValue::Int(35)),
+            ("status", QueryValue::Str("inactive".into())),
         ],
     ];
 
@@ -148,12 +146,12 @@ async fn setup_table_with_users() -> (crate::table::TableManager, RepoInstance) 
         for (k, v) in fields {
             map.insert(k.to_string(), v.clone());
         }
-        let user_val = UserValue::Map(map);
-        let result = transform::user_to_inner(&user_val, interner);
-        if let Some(ref new_keys) = result.new_keys {
-            table.interner().save_new_keys(new_keys).await.unwrap();
+        let user_val = QueryValue::Map(map);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user_val, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
         }
-        table.insert(&result.inner_value).await.unwrap();
+        table.insert(&inner_val).await.unwrap();
     }
 
     (table, repo)

@@ -12,17 +12,15 @@
 //! indexed field+value, forcing `lookup_records_via_index` to encounter
 //! both the real and the stale id.
 
-#![allow(deprecated)]
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::UserValue;
+use shamir_types::types::value::QueryValue;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -56,13 +54,13 @@ async fn setup_table_with_stale_index_entry() -> (
     // --- Insert one real record with status="active" -----------------
     let interner = table.interner().get().await.unwrap();
     let mut map = new_map();
-    map.insert("name".to_string(), UserValue::Str("Alice".into()));
-    map.insert("status".to_string(), UserValue::Str("active".into()));
-    let result = transform::user_to_inner(&UserValue::Map(map), interner);
-    if let Some(ref new_keys) = result.new_keys {
-        table.interner().save_new_keys(new_keys).await.unwrap();
+    map.insert("name".to_string(), QueryValue::Str("Alice".into()));
+    map.insert("status".to_string(), QueryValue::Str("active".into()));
+    let (inner_val, new_keys) = query_value_to_inner_tracked(&QueryValue::Map(map), interner).unwrap();
+    if !new_keys.is_empty() {
+        table.interner().save_new_keys(&new_keys).await.unwrap();
     }
-    let real_id = table.insert(&result.inner_value).await.unwrap();
+    let real_id = table.insert(&inner_val).await.unwrap();
 
     // --- Create a regular index on "status" --------------------------
     table.create_index("status_idx", &["status"]).await.unwrap();

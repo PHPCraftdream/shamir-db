@@ -1,18 +1,17 @@
 //! CRUD tests for Table
-
-#![allow(deprecated)]
+#![allow(deprecated)] // collect_list_stream is deprecated test-only utility
 
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
+use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
-use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::{InnerValue, UserValue};
+use shamir_types::types::value::{InnerValue, QueryValue};
 use std::sync::Arc;
 
 async fn create_test_table() -> DbResult<(
@@ -38,17 +37,16 @@ async fn create_test_table() -> DbResult<(
     Ok((table, interner, counter, dir))
 }
 
-/// Helper to intern a UserValue and save new keys
-async fn intern_value(value: &UserValue, interner: &InternerManager) -> DbResult<InnerValue> {
+/// Helper to intern a QueryValue and save new keys
+async fn intern_value(value: &QueryValue, interner: &InternerManager) -> DbResult<InnerValue> {
     let inter = interner.get().await?;
-    let transform = transform::user_to_inner(value, inter);
+    let (inner_value, new_keys) = query_value_to_inner_tracked(value, inter)?;
 
-    // Save new keys if any
-    if let Some(ref new_keys) = transform.new_keys {
-        interner.save_new_keys(new_keys).await?;
+    if !new_keys.is_empty() {
+        interner.save_new_keys(&new_keys).await?;
     }
 
-    Ok(transform.inner_value)
+    Ok(inner_value)
 }
 
 #[tokio::test]
@@ -56,13 +54,13 @@ async fn test_table_insert_and_get() {
     let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut user_data = new_map();
-    user_data.insert("name".to_string(), UserValue::Str("Alice".to_string()));
-    user_data.insert("age".to_string(), UserValue::Int(30));
+    user_data.insert("name".to_string(), QueryValue::Str("Alice".to_string()));
+    user_data.insert("age".to_string(), QueryValue::Int(30));
     user_data.insert(
         "email".to_string(),
-        UserValue::Str("alice@example.com".to_string()),
+        QueryValue::Str("alice@example.com".to_string()),
     );
-    let user_value = UserValue::Map(user_data);
+    let user_value = QueryValue::Map(user_data);
 
     // Intern the value
     let inner_value = intern_value(&user_value, &interner).await.unwrap();
@@ -80,9 +78,9 @@ async fn test_table_insert_many() {
     let mut inners = Vec::new();
     for i in 0..5 {
         let mut m = new_map();
-        m.insert("idx".to_string(), UserValue::Int(i));
-        m.insert("name".to_string(), UserValue::Str(format!("user-{}", i)));
-        let inner = intern_value(&UserValue::Map(m), &interner).await.unwrap();
+        m.insert("idx".to_string(), QueryValue::Int(i));
+        m.insert("name".to_string(), QueryValue::Str(format!("user-{}", i)));
+        let inner = intern_value(&QueryValue::Map(m), &interner).await.unwrap();
         inners.push(inner);
     }
 
@@ -111,16 +109,16 @@ async fn test_table_interning_persistence() {
 
     // Insert first record
     let mut data1 = new_map();
-    data1.insert("name".to_string(), UserValue::Str("Bob".to_string()));
-    let original1 = UserValue::Map(data1.clone());
+    data1.insert("name".to_string(), QueryValue::Str("Bob".to_string()));
+    let original1 = QueryValue::Map(data1.clone());
     let inner1 = intern_value(&original1, &interner).await.unwrap();
     let id1 = table.insert(&inner1).await.unwrap();
 
     // Insert second record with overlapping keys
     let mut data2 = new_map();
-    data2.insert("name".to_string(), UserValue::Str("Charlie".to_string()));
-    data2.insert("age".to_string(), UserValue::Int(25));
-    let inner2 = intern_value(&UserValue::Map(data2), &interner)
+    data2.insert("name".to_string(), QueryValue::Str("Charlie".to_string()));
+    data2.insert("age".to_string(), QueryValue::Int(25));
+    let inner2 = intern_value(&QueryValue::Map(data2), &interner)
         .await
         .unwrap();
     let id2 = table.insert(&inner2).await.unwrap();
@@ -151,17 +149,17 @@ async fn test_table_update() {
     let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut data = new_map();
-    data.insert("name".to_string(), UserValue::Str("Dave".to_string()));
-    let inner = intern_value(&UserValue::Map(data.clone()), &interner)
+    data.insert("name".to_string(), QueryValue::Str("Dave".to_string()));
+    let inner = intern_value(&QueryValue::Map(data.clone()), &interner)
         .await
         .unwrap();
     let id = table.insert(&inner).await.unwrap();
 
     // Update
     let mut updated = new_map();
-    updated.insert("name".to_string(), UserValue::Str("David".to_string()));
-    updated.insert("age".to_string(), UserValue::Int(40));
-    let inner_updated = intern_value(&UserValue::Map(updated), &interner)
+    updated.insert("name".to_string(), QueryValue::Str("David".to_string()));
+    updated.insert("age".to_string(), QueryValue::Int(40));
+    let inner_updated = intern_value(&QueryValue::Map(updated), &interner)
         .await
         .unwrap();
 
@@ -189,8 +187,8 @@ async fn test_table_delete() {
     let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut data = new_map();
-    data.insert("name".to_string(), UserValue::Str("Eve".to_string()));
-    let inner = intern_value(&UserValue::Map(data), &interner)
+    data.insert("name".to_string(), QueryValue::Str("Eve".to_string()));
+    let inner = intern_value(&QueryValue::Map(data), &interner)
         .await
         .unwrap();
     let id = table.insert(&inner).await.unwrap();
@@ -211,9 +209,9 @@ async fn test_table_list() {
 
     for i in 1..=3 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
-        let inner = intern_value(&UserValue::Map(data), &interner)
+        data.insert("id".to_string(), QueryValue::Int(i));
+        data.insert("name".to_string(), QueryValue::Str(format!("User{}", i)));
+        let inner = intern_value(&QueryValue::Map(data), &interner)
             .await
             .unwrap();
         table.insert(&inner).await.unwrap();
@@ -231,8 +229,8 @@ async fn test_table_count() {
 
     for i in 1..=5 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner)
+        data.insert("id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner)
             .await
             .unwrap();
         table.insert(&inner).await.unwrap();
@@ -248,20 +246,20 @@ async fn test_table_with_nested_structures() {
 
     // Complex nested structure
     let mut inner_map = new_map();
-    inner_map.insert("x".to_string(), UserValue::Int(10));
-    inner_map.insert("y".to_string(), UserValue::Str("nested".to_string()));
+    inner_map.insert("x".to_string(), QueryValue::Int(10));
+    inner_map.insert("y".to_string(), QueryValue::Str("nested".to_string()));
 
     let list = vec![
-        UserValue::Int(1),
-        UserValue::Str("hello".to_string()),
-        UserValue::Map(inner_map.clone()),
+        QueryValue::Int(1),
+        QueryValue::Str("hello".to_string()),
+        QueryValue::Map(inner_map.clone()),
     ];
 
     let mut data = new_map();
-    data.insert("list_data".to_string(), UserValue::List(list.clone()));
-    data.insert("map_data".to_string(), UserValue::Map(inner_map));
+    data.insert("list_data".to_string(), QueryValue::List(list.clone()));
+    data.insert("map_data".to_string(), QueryValue::Map(inner_map));
 
-    let inner = intern_value(&UserValue::Map(data), &interner)
+    let inner = intern_value(&QueryValue::Map(data), &interner)
         .await
         .unwrap();
     let id = table.insert(&inner).await.unwrap();
@@ -305,8 +303,8 @@ async fn test_table_with_special_characters() {
 
     for key in &special_keys {
         let mut data = new_map();
-        data.insert(key.to_string(), UserValue::Str("value".to_string()));
-        let inner = intern_value(&UserValue::Map(data), &interner)
+        data.insert(key.to_string(), QueryValue::Str("value".to_string()));
+        let inner = intern_value(&QueryValue::Map(data), &interner)
             .await
             .unwrap();
         table.insert(&inner).await.unwrap();
@@ -340,9 +338,9 @@ async fn test_set_method_creates_new_record() {
     let id = RecordId::new();
 
     let mut data = new_map();
-    data.insert("name".to_string(), UserValue::Str("Alice".to_string()));
-    data.insert("age".to_string(), UserValue::Int(30));
-    let inner = intern_value(&UserValue::Map(data), &interner)
+    data.insert("name".to_string(), QueryValue::Str("Alice".to_string()));
+    data.insert("age".to_string(), QueryValue::Int(30));
+    let inner = intern_value(&QueryValue::Map(data), &interner)
         .await
         .unwrap();
 
@@ -366,9 +364,9 @@ async fn test_set_method_updates_existing_record() {
     // First insert a record
     let id = RecordId::new();
     let mut data1 = new_map();
-    data1.insert("name".to_string(), UserValue::Str("Bob".to_string()));
-    data1.insert("age".to_string(), UserValue::Int(25));
-    let inner1 = intern_value(&UserValue::Map(data1), &interner)
+    data1.insert("name".to_string(), QueryValue::Str("Bob".to_string()));
+    data1.insert("age".to_string(), QueryValue::Int(25));
+    let inner1 = intern_value(&QueryValue::Map(data1), &interner)
         .await
         .unwrap();
 
@@ -379,10 +377,10 @@ async fn test_set_method_updates_existing_record() {
 
     // Now update with set
     let mut data2 = new_map();
-    data2.insert("name".to_string(), UserValue::Str("Robert".to_string()));
-    data2.insert("age".to_string(), UserValue::Int(26));
-    data2.insert("city".to_string(), UserValue::Str("NYC".to_string()));
-    let inner2 = intern_value(&UserValue::Map(data2), &interner)
+    data2.insert("name".to_string(), QueryValue::Str("Robert".to_string()));
+    data2.insert("age".to_string(), QueryValue::Int(26));
+    data2.insert("city".to_string(), QueryValue::Str("NYC".to_string()));
+    let inner2 = intern_value(&QueryValue::Map(data2), &interner)
         .await
         .unwrap();
 
@@ -408,8 +406,8 @@ async fn test_record_counter_with_insert_and_delete() {
     let mut ids = vec![];
     for i in 0..5 {
         let mut data = new_map();
-        data.insert("id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner)
+        data.insert("id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner)
             .await
             .unwrap();
         let id = table.insert(&inner).await.unwrap();
@@ -436,8 +434,8 @@ async fn test_record_counter_with_insert_and_delete() {
     // Insert 3 more
     for i in 0..3 {
         let mut data = new_map();
-        data.insert("new_id".to_string(), UserValue::Int(i));
-        let inner = intern_value(&UserValue::Map(data), &interner)
+        data.insert("new_id".to_string(), QueryValue::Int(i));
+        let inner = intern_value(&QueryValue::Map(data), &interner)
             .await
             .unwrap();
         table.insert(&inner).await.unwrap();
@@ -457,8 +455,8 @@ async fn test_set_method_respects_counter() {
     let id2 = RecordId::new();
 
     let mut data = new_map();
-    data.insert("value".to_string(), UserValue::Int(42));
-    let inner = intern_value(&UserValue::Map(data.clone()), &interner)
+    data.insert("value".to_string(), QueryValue::Int(42));
+    let inner = intern_value(&QueryValue::Map(data.clone()), &interner)
         .await
         .unwrap();
 
