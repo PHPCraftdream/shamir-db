@@ -3,6 +3,7 @@ pub mod asof_read_tests;
 pub mod buffer_config_tests;
 pub mod concurrent_tests;
 pub mod covering_read_tests;
+pub mod delete_view_parity_tests;
 pub mod doctor_tests;
 pub mod filter_stream_tests;
 pub mod fts_tokenizer_dsl_tests;

@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
 use shamir_storage::error::DbResult;
+use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::QueryValue;
+
+use crate::validator::ValidatorFailure;
 
 use super::table_manager::TableManager;
 
@@ -240,6 +244,74 @@ impl TableManager {
         }
 
         self.run_validators_loop(op, &applicable, reg, actor, new_record, old_record)
+            .await
+    }
+
+    /// `RecordView`-input entry point for the DELETE write path (W6-delete).
+    ///
+    /// The delete path holds the raw storage bytes from the scan — no
+    /// `InnerValue` tree is decoded on the index-planner path. This entry
+    /// de-interns `old_view` to a `QueryValue` via `RecordRef::to_query_value`
+    /// (the O(N) lens walker proven byte-for-byte identical to the tree path
+    /// by `deintern_parity_tests`), then routes through `run_validators_loop`.
+    ///
+    /// Overlay-key resolution: the deleted record's fields are already in the
+    /// base interner — they were committed when the record was inserted,
+    /// before this delete. The tx overlay holds only brand-new field names
+    /// staged in the CURRENT tx; a DELETE never introduces new fields.
+    /// Base-only resolution via `RecordRef::to_query_value` is therefore
+    /// correct and complete for the old-record side.
+    ///
+    /// The `tx` parameter is reserved for symmetry with `run_validators_resolved`
+    /// and forward compatibility (overlay reverse-lookup if a future path
+    /// needs it). Currently unused on the delete path since `new_record` is
+    /// always `None` and the old record is always in base.
+    ///
+    /// `new_record` is `None` for Delete. A non-`None` value is forwarded
+    /// unchanged (future-proofing — not used by the delete path today).
+    pub(super) async fn run_validators_view(
+        &self,
+        op: crate::validator::WriteOp,
+        new_record: Option<&QueryValue>,
+        old_view: Option<&RecordView<'_>>,
+        actor: &shamir_types::access::Actor,
+        _tx: &shamir_tx::TxContext,
+    ) -> Result<(), crate::validator::ValidatorFailure> {
+        // 1. No registry → validators disabled.
+        let reg = match &self.validator_registry {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+
+        // 2. Load bindings snapshot; filter to applicable ops.
+        let all_bindings = self.validator_bindings.load_full();
+        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
+            .iter()
+            .filter(|b| b.ops.contains(&op))
+            .collect();
+
+        if applicable.is_empty() {
+            return Ok(());
+        }
+
+        let interner = self
+            .interner()
+            .get()
+            .await
+            .map_err(|e| ValidatorFailure::Invocation {
+                id: applicable[0].validator_id,
+                reason: format!("interner load failed: {e}"),
+            })?;
+
+        // De-intern the old view via the zero-copy lens walker.
+        // `RecordRef::to_query_value` on `RecordView` calls
+        // `record_view_to_query_value` (base interner only). For a deleted
+        // record, all field keys are in base (they were committed at insert
+        // time), so this is equivalent to the full overlay-aware path in
+        // `run_validators_resolved`.
+        let qv_old: Option<QueryValue> = old_view.map(|v| v.to_query_value(interner));
+
+        self.run_validators_loop(op, &applicable, reg, actor, new_record, qv_old.as_ref())
             .await
     }
 

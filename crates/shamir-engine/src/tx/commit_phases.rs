@@ -387,6 +387,12 @@ pub(crate) async fn apply_index_batch(
         crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
             .await
             .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
+        // Invalidate the legacy IndexManager's posting cache for every
+        // SetPosting / RemovePosting that was just durably applied, so the
+        // next lookup_by_index re-fetches from the store instead of
+        // returning a stale cached result.
+        tbl.index_manager_ref()
+            .invalidate_posting_cache_for_ops(ops);
     }
     Ok(())
 }

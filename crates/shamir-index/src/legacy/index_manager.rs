@@ -682,6 +682,23 @@ impl IndexManager {
         self.posting_cache.remove(&index_key);
     }
 
+    /// Invalidate posting cache entries for every `SetPosting` /
+    /// `RemovePosting` in `ops`. Called by the tx-commit pipeline
+    /// (`apply_index_batch`) after durably writing the ops, so the
+    /// next `lookup_by_index` re-fetches from the store.
+    pub fn invalidate_posting_cache_for_ops(&self, ops: &[IndexWriteOp]) {
+        for op in ops {
+            let key = match op {
+                IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key } => key,
+                _ => continue,
+            };
+            if key.len() >= 25 {
+                let index_key = key.slice(..25);
+                self.posting_cache.remove(&index_key);
+            }
+        }
+    }
+
     /// Count entries for one regular or unique index — used by the
     /// doctor's verify pass.
     pub async fn entry_count(&self, name_interned: u64, unique: bool) -> DbResult<u64> {
