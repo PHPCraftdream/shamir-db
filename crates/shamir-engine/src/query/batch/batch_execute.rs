@@ -6,6 +6,7 @@ use crate::query::batch::query_runner::{build_resolved_refs, execute_single_impl
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
+use shamir_query_types::batch::ResultEncoding;
 use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
@@ -96,7 +97,16 @@ pub(super) fn execute_batch_impl<'a>(
         // 3. Execute — branch on transactional.
         let (all_results, tx_info) = if request.transactional {
             execute_transactional_impl(
-                request, &mut plan, resolver, admin, invoker, &actor, db_name, depth, params,
+                request,
+                &mut plan,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
             )
             .await?
         } else {
@@ -110,6 +120,7 @@ pub(super) fn execute_batch_impl<'a>(
                 db_name,
                 depth,
                 params,
+                request.result_encoding,
             )
             .await?;
             (r, None)
@@ -267,6 +278,7 @@ pub(super) async fn execute_plan_impl(
     db_name: &str,
     depth: usize,
     params: &TMap<String, InnerValue>,
+    result_encoding: ResultEncoding,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
@@ -293,6 +305,7 @@ pub(super) async fn execute_plan_impl(
                 db_name,
                 depth,
                 params,
+                result_encoding,
             )
             .await?;
             all_results.insert(alias.clone(), result);
@@ -331,6 +344,7 @@ pub(super) async fn execute_plan_tx(
         tx,
         0,
         &new_map(),
+        ResultEncoding::Name,
     )
     .await
 }
@@ -347,6 +361,7 @@ pub(super) async fn execute_plan_tx_impl(
     tx: &mut shamir_tx::TxContext,
     depth: usize,
     params: &TMap<String, InnerValue>,
+    result_encoding: ResultEncoding,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
@@ -370,6 +385,7 @@ pub(super) async fn execute_plan_tx_impl(
                 db_name,
                 depth,
                 params,
+                result_encoding,
             };
             let result = runner.run(alias, entry, &resolved_refs).await?;
             all_results.insert(alias.clone(), result);
@@ -394,6 +410,7 @@ pub(super) async fn execute_transactional_impl(
     db_name: &str,
     depth: usize,
     params: &TMap<String, InnerValue>,
+    result_encoding: ResultEncoding,
 ) -> Result<
     (
         TMap<String, QueryResult>,
@@ -460,6 +477,7 @@ pub(super) async fn execute_transactional_impl(
         &mut tx,
         depth,
         params,
+        result_encoding,
     )
     .await;
 

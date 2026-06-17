@@ -4,6 +4,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
+use shamir_query_types::batch::ResultEncoding;
 use shamir_types::access::Actor;
 
 use crate::query::batch::QueryRunner;
@@ -37,6 +38,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
         db_name: "test",
         depth: 0,
         params: &empty_params,
+        result_encoding: ResultEncoding::Name,
     };
     let result = runner
         .run(
@@ -64,6 +66,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
         db_name: "test",
         depth: 0,
         params: &empty_params2,
+        result_encoding: ResultEncoding::Name,
     };
     let result = runner
         .run("q", &read_entry, &shamir_types::types::common::new_map())
