@@ -16,8 +16,9 @@ use shamir_types::types::value::UserValue;
 
 /// Build a fresh in-memory DB with a `users` table, a regular index
 /// on `city`, a unique index on `id`, and a sorted index on `score`.
-/// Seeds N records.
-async fn seeded(n: usize) -> crate::table::TableManager {
+/// Seeds N records. Returns the table manager + repo (the repo is needed
+/// to drive writes through the implicit-tx commit path).
+async fn seeded(n: usize) -> (crate::table::TableManager, crate::repo::RepoInstance) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
@@ -25,6 +26,7 @@ async fn seeded(n: usize) -> crate::table::TableManager {
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
     let table = db.get_table("default", "users").await.unwrap();
+    let repo = db.get_repo("default").unwrap();
     table.create_index("by_city", &["city"]).await.unwrap();
     table.create_unique_index("by_id", &["id"]).await.unwrap();
     table
@@ -51,12 +53,12 @@ async fn seeded(n: usize) -> crate::table::TableManager {
         }
         table.insert(&r.inner_value).await.unwrap();
     }
-    table
+    (table, repo)
 }
 
 #[tokio::test]
 async fn verify_reports_healthy_after_seed() {
-    let table = seeded(20).await;
+    let (table, _repo) = seeded(20).await;
     let report = table.verify().await.unwrap();
     assert!(
         report.is_healthy(),
@@ -72,7 +74,7 @@ async fn verify_detects_orphan_regular_index_entry() {
     // Corrupt the index: insert an extra posting entry pointing to
     // a record that doesn't exist. Verify should report the index
     // as unhealthy.
-    let table = seeded(10).await;
+    let (table, _repo) = seeded(10).await;
     let regular_defs: Vec<_> = table.index_manager_ref().iter_indexes().collect();
     let def = regular_defs.first().expect("by_city index registered");
 
@@ -106,7 +108,7 @@ async fn verify_detects_orphan_regular_index_entry() {
 
 #[tokio::test]
 async fn repair_heals_orphan_index_entry() {
-    let table = seeded(10).await;
+    let (table, _repo) = seeded(10).await;
     let regular_defs: Vec<_> = table.index_manager_ref().iter_indexes().collect();
     let def = regular_defs.first().expect("by_city index registered");
 
@@ -139,7 +141,7 @@ async fn repair_heals_orphan_index_entry() {
 
 #[tokio::test]
 async fn repair_heals_drifted_counter() {
-    let table = seeded(15).await;
+    let (table, _repo) = seeded(15).await;
     // Force the cached counter out of sync with data.
     table.counter().set_to(999).await.unwrap();
     let pre = table.verify().await.unwrap();
@@ -157,19 +159,17 @@ async fn repair_heals_drifted_counter() {
 
 #[tokio::test]
 async fn execute_update_leaves_table_consistent_on_success() {
-    use crate::query::filter::eval_context::FilterContext;
-
-    let table = seeded(8).await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = seeded(8).await;
+    let refs = new_map();
 
     let op = write::update("users")
         .where_(filter::eq("city", "city_0"))
         .set(serde_json::json!({ "score": 999 }))
         .build();
 
-    let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
-    let result = table.execute_update(&op, &ctx).await.unwrap();
+    let result = super::write_exec_tests::update_via_tx(&repo, &table, &op, &refs)
+        .await
+        .unwrap();
     assert!(result.affected > 0, "expected at least one update");
 
     assert!(table.verify().await.unwrap().is_healthy());
@@ -177,18 +177,16 @@ async fn execute_update_leaves_table_consistent_on_success() {
 
 #[tokio::test]
 async fn execute_delete_leaves_table_consistent_on_success() {
-    use crate::query::filter::eval_context::FilterContext;
-
-    let table = seeded(12).await;
-    let interner = table.interner().get().await.unwrap();
+    let (table, repo) = seeded(12).await;
+    let refs = new_map();
 
     let op = write::delete("users")
         .where_(filter::eq("city", "city_1"))
         .build();
 
-    let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
-    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    let result = super::write_exec_tests::delete_via_tx(&repo, &table, &op, &refs)
+        .await
+        .unwrap();
     assert!(result.affected > 0);
 
     assert!(table.verify().await.unwrap().is_healthy());
@@ -198,7 +196,7 @@ async fn execute_delete_leaves_table_consistent_on_success() {
 async fn bump_write_counter_spawns_background_verify_periodically() {
     // The watchdog should fire on the threshold crossing —
     // we bump by exactly one batch large enough to cross.
-    let table = seeded(0).await;
+    let (table, _repo) = seeded(0).await;
     // First small bumps — should not spawn.
     table.bump_write_counter(10);
     table.bump_write_counter(10);
@@ -228,7 +226,7 @@ async fn bump_write_counter_is_single_flight() {
     // Two threshold-crossing bumps in immediate succession must
     // NOT spawn two concurrent verifies. The single-flight latch
     // ensures only one runs at a time.
-    let table = seeded(100).await;
+    let (table, _repo) = seeded(100).await;
     // Bump to just below threshold.
     table.bump_write_counter(1000);
     // Snapshot — no verify yet.
@@ -257,7 +255,7 @@ async fn bump_write_counter_is_single_flight() {
 
 #[tokio::test]
 async fn insert_many_leaves_table_consistent_on_success() {
-    let table = seeded(0).await;
+    let (table, _repo) = seeded(0).await;
     let interner = table.interner().get().await.unwrap();
     let mut values = Vec::new();
     for i in 0..5 {

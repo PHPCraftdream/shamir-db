@@ -1,6 +1,10 @@
 //! Write operation execution on TableManager.
 //!
-//! Implements execute_insert, execute_update, execute_delete for TableManager.
+//! Implements execute_insert_tx, execute_update_tx, execute_delete_tx
+//! (plus execute_set / execute_set_tx) for TableManager. The legacy
+//! non-transactional `execute_insert` / `execute_update` / `execute_delete`
+//! were removed (W3a): every non-tx mutation now routes through an implicit
+//! Snapshot batch-tx via `run_implicit_batch_tx` → the `_tx` variants.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -34,116 +38,7 @@ use super::write_helpers::{
 };
 
 impl TableManager {
-    /// Execute an INSERT operation.
-    ///
-    /// Converts each QueryValue to InnerValue, inserts into the table,
-    /// and returns the inserted records with their generated IDs.
-    /// When `return_result` is `false` the per-record JSON map assembly
-    /// is skipped entirely — `WriteResult::records` will be empty.
-    pub async fn execute_insert(
-        &self,
-        op: &InsertOp,
-        return_result: bool,
-    ) -> DbResult<WriteResult> {
-        let start = Instant::now();
-        let interner = self.interner().get().await?;
-
-        // 1. Resolve inline `$fn` computed fields first (fail-closed); the
-        //    resolved record is what we both store and echo back, so the
-        //    client never sees the unevaluated marker. Then convert all
-        //    values to InnerValue upfront — any codec error fails the whole
-        //    insert with nothing written (the first bad value aborts).
-        // Per-batch intern cache (C1, non-tx): field names repeat across every
-        // row in the batch. Without the cache, `touch_ind` does a DashMap
-        // lookup per field per row — O(N×k) sharded-map operations. With the
-        // cache we pay one DashMap lookup per unique field name per batch and
-        // amortise the rest to an FxHashMap lookup — 3-5× cheaper for typical
-        // short batches with uniform schema. Mirrors the identical pattern in
-        // `execute_insert_tx` (Stage 11, commit fd90c44).
-        let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
-        let inner_values: Vec<InnerValue> = {
-            let cache: RefCell<FxHashMap<String, InternerKey>> = RefCell::new(FxHashMap::default());
-            let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
-                {
-                    let c = cache.borrow();
-                    if let Some(ik) = c.get(key) {
-                        return Ok(ik.clone());
-                    }
-                }
-                let ik = interner.touch_ind(key).map(|t| t.into_key()).map_err(|e| {
-                    shamir_types::codecs::CodecError::Decode(format!(
-                        "Failed to intern key '{}': {}",
-                        key, e
-                    ))
-                })?;
-                cache.borrow_mut().insert(key.to_string(), ik.clone());
-                Ok(ik)
-            };
-            let mut vals = Vec::with_capacity(op.values.len());
-            for value in &op.values {
-                let resolved = resolve_computed_record(value, interner)
-                    .map_err(shamir_storage::error::DbError::Codec)?;
-                let inner = query_value_to_inner_with(&resolved, &intern_fn)
-                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-                vals.push(inner);
-                resolved_values.push(resolved);
-            }
-            vals
-        };
-
-        // 2a. S3: run validators on each record (fail-closed, before
-        //     persistence). Actor is System — the batch executor
-        //     will thread the real actor once actor-carrying signatures
-        //     land on execute_insert. // TODO actor threading
-        //
-        // W1: feed the resolved `QueryValue` directly (skipping the
-        // redundant `InnerValue → QueryValue` de-intern the legacy
-        // `run_validators` path performed). `resolved_values[i]` is the
-        // exact upstream record; identity vs. the old path is proven by
-        // `validator::tests::query_value_conv_tests`.
-        for qv in &resolved_values {
-            self.run_validators_qv(WriteOp::Insert, Some(qv), None, &Actor::System)
-                .await
-                .map_err(validator_failure_to_db_error)?;
-        }
-
-        // 2. One batched write — dispatches to `Store::insert_many` at
-        //    the backend, collapsing N×fsync to 1×fsync on backends
-        //    that have a native batched-write API (nebari, persy,
-        //    redb). Index updates still loop per-record inside.
-        let (ids, batch_version) = self.insert_many_returning_version(&inner_values).await?;
-
-        // 3. Build the result records in input order (from the resolved
-        //    values, so computed fields are echoed with their results).
-        //    Skip entirely when the caller does not need the result back
-        //    (fire-and-forget batch inserts with return_result=false).
-        let records = if return_result {
-            build_insert_result_records(&resolved_values, &ids)
-        } else {
-            Vec::new()
-        };
-
-        // Persist any newly interned keys.
-        self.flush_metadata().await?;
-
-        // Changefeed: emit one Put per inserted record. The event carries
-        // the same MVCC version the data was written at (batch_version).
-        let changes: Vec<_> = ids
-            .iter()
-            .zip(inner_values.iter())
-            .filter_map(|(id, iv)| self.put_change(*id, iv))
-            .collect();
-        self.emit_nontx_changefeed(batch_version, changes);
-
-        let affected = ids.len() as u64;
-        Ok(WriteResult {
-            affected,
-            records,
-            execution_time_us: start.elapsed().as_micros() as u64,
-        })
-    }
-
-    /// tx-aware variant of [`execute_insert`](Self::execute_insert).
+    /// tx-aware variant of INSERT.
     ///
     /// Stages each insert through [`insert_tx`](Self::insert_tx) — no
     /// physical writes until `commit_tx` Phase 5. Returns the same
@@ -297,164 +192,7 @@ impl TableManager {
         })
     }
 
-    /// Execute an UPDATE operation.
-    ///
-    /// Filters records by where_clause, merges `set` fields into each
-    /// matched record, writes back. Returns affected count and optionally
-    /// the updated records (controlled by UpdateSelect).
-    pub async fn execute_update(
-        &self,
-        op: &UpdateOp,
-        ctx: &FilterContext<'_>,
-    ) -> DbResult<WriteResult> {
-        let start = Instant::now();
-        let batch_size = 1000;
-        let interner = self.interner().get().await?;
-
-        // Resolve inline `$fn` computed fields, then convert set fields to
-        // InnerValue map entries. `$ref` resolves against the other literal
-        // fields in the same `set` payload.
-        let resolved_set = resolve_computed_record(&op.set, interner)
-            .map_err(shamir_storage::error::DbError::Codec)?;
-        let set_inner = query_value_to_inner(&resolved_set, interner)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-        let set_map = match &set_inner {
-            InnerValue::Map(m) => m,
-            _ => {
-                return Err(shamir_storage::error::DbError::Validation(
-                    "UPDATE set must produce a Map".to_string(),
-                ))
-            }
-        };
-
-        // Collect matching records — Opt C: try index path first, fall
-        // back to scan when no index plan applies.
-        let matched = if let Some(ref filter) = op.where_clause {
-            if let Some(via_index) = self.lookup_records_via_index(filter, ctx).await? {
-                via_index
-            } else {
-                let callback = compile_filter(filter, interner);
-                let mut result = Vec::new();
-                let stream = self.list_stream(batch_size);
-                futures::pin_mut!(stream);
-                while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result?;
-                    for (id, cow) in batch {
-                        let record = cow.into_inner()?;
-                        if callback.matches(&record, ctx) {
-                            result.push((id, record));
-                        }
-                    }
-                }
-                result
-            }
-        } else {
-            // No where clause — update ALL records (no index can help).
-            let mut result = Vec::new();
-            let stream = self.list_stream(batch_size);
-            futures::pin_mut!(stream);
-            while let Some(batch_result) = stream.next().await {
-                for (id, cow) in batch_result? {
-                    result.push((id, cow.into_inner()?));
-                }
-            }
-            result
-        };
-
-        let mut affected: u64 = 0;
-        let mut result_records: Vec<InsertedRecord> = Vec::with_capacity(matched.len());
-        // Changefeed (Phase 3b follow-up): collect (id, new_value) for each
-        // changed record so a Put can be emitted after the batch is durable.
-        let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::with_capacity(matched.len());
-        // Track the maximum MVCC version across per-record writes so the
-        // changefeed event carries the batch's commit-version.
-        let mut max_write_version: u64 = 0;
-        let return_mode = op
-            .select
-            .as_ref()
-            .map(|s| s.return_mode)
-            .unwrap_or(UpdateReturnMode::Changed);
-        let wants_records = op.select.is_some();
-
-        // F4b-4: the V1 per-table WAL marker for the UPDATE batch is GONE.
-        // This non-tx path is now reachable only via the query_runner's non-tx
-        // branch (which routes through the implicit Snapshot tx →
-        // `execute_update_tx` → one `WalEntryV2` to the repo file WAL) and from
-        // tests, so the V1 marker is dead. Crash recoverability is owned by the
-        // file WAL. (`shamir_wal::WalManager` + V1 codec removed in F5c.)
-
-        // Phase 1: merge + validate, collecting changed rows for batched write.
-        let mut batch_pairs: Vec<(RecordId, InnerValue, InnerValue)> =
-            Vec::with_capacity(matched.len());
-
-        for (id, old_record) in &matched {
-            let new_record = merge_inner_maps(old_record, set_map);
-            let changed = &new_record != old_record;
-
-            if changed {
-                // S3: run validators before persisting.
-                self.run_validators(
-                    WriteOp::Update,
-                    Some(&new_record),
-                    Some(old_record),
-                    &Actor::System,
-                )
-                .await
-                .map_err(validator_failure_to_db_error)?;
-
-                batch_pairs.push((*id, old_record.clone(), new_record.clone()));
-                changefeed_puts.push((*id, new_record.clone()));
-            }
-
-            if wants_records {
-                let should_include = match return_mode {
-                    UpdateReturnMode::All => true,
-                    UpdateReturnMode::Changed => changed,
-                    UpdateReturnMode::Unchanged => !changed,
-                };
-                if should_include {
-                    result_records.push(InsertedRecord::Json(inner_to_json_value(
-                        &new_record,
-                        interner,
-                    )?));
-                }
-            }
-        }
-
-        // Phase 2: batched write — one MVCC transaction (one fsync).
-        if !batch_pairs.is_empty() {
-            let refs: Vec<(RecordId, &InnerValue, &InnerValue)> = batch_pairs
-                .iter()
-                .map(|(id, old, new_val)| (*id, old, new_val))
-                .collect();
-            let ver = self.update_many_returning_version(&refs).await?;
-            max_write_version = max_write_version.max(ver);
-            affected = batch_pairs.len() as u64;
-        }
-
-        self.bump_write_counter(affected);
-
-        // Persist any newly interned keys (set fields may have new keys)
-        if affected > 0 {
-            self.flush_metadata().await?;
-        }
-
-        // Changefeed: emit one Put per changed record. The event carries
-        // the max MVCC version from the per-record writes (best-effort).
-        let changes: Vec<_> = changefeed_puts
-            .iter()
-            .filter_map(|(id, iv)| self.put_change(*id, iv))
-            .collect();
-        self.emit_nontx_changefeed(max_write_version, changes);
-
-        Ok(WriteResult {
-            affected,
-            records: result_records,
-            execution_time_us: start.elapsed().as_micros() as u64,
-        })
-    }
-
-    /// tx-aware variant of [`execute_update`](Self::execute_update).
+    /// tx-aware variant of UPDATE.
     ///
     /// Filters records by `where_clause`, merges `set` fields, then
     /// stages each changed record via [`update_tx`](Self::update_tx).
@@ -559,10 +297,22 @@ impl TableManager {
                     UpdateReturnMode::Unchanged => !changed,
                 };
                 if should_include {
-                    result_records.push(InsertedRecord::Json(inner_to_json_value(
-                        &new_record,
-                        interner,
-                    )?));
+                    // Build the result JSON from the old record (base-interned
+                    // keys — always safe) overlaid with the resolved SET fields
+                    // (string-keyed QueryValue — no overlay ids). Decoding
+                    // `new_record` (InnerValue) via the base interner would fail
+                    // when `op.set` introduces brand-new field names that were
+                    // only interned into the tx overlay and are not yet in base.
+                    let mut obj = match inner_to_json_value(old_record, interner)? {
+                        json::Value::Object(m) => m,
+                        _ => json::Map::new(),
+                    };
+                    if let Value::Map(overlay) = resolved_set.as_ref() {
+                        for (k, v) in overlay {
+                            obj.insert(k.clone(), json::Value::from(v.clone()));
+                        }
+                    }
+                    result_records.push(InsertedRecord::Json(json::Value::Object(obj)));
                 }
             }
         }
@@ -574,104 +324,7 @@ impl TableManager {
         })
     }
 
-    /// Execute a DELETE operation.
-    ///
-    /// Filters records by where_clause and deletes all matches.
-    /// Returns the count of deleted records.
-    pub async fn execute_delete(
-        &self,
-        op: &DeleteOp,
-        ctx: &FilterContext<'_>,
-    ) -> DbResult<WriteResult> {
-        let start = Instant::now();
-        let batch_size = 1000;
-        let interner = self.interner().get().await?;
-
-        // Collect IDs to delete — Opt C: try index path, fall back to scan.
-        let to_delete: Vec<RecordId> =
-            if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
-                via_index.into_iter().map(|(id, _)| id).collect()
-            } else {
-                let callback = compile_filter(&op.where_clause, interner);
-                let mut result = Vec::new();
-                let stream = self.list_stream(batch_size);
-                futures::pin_mut!(stream);
-                while let Some(batch_result) = stream.next().await {
-                    let batch = batch_result?;
-                    for (id, cow) in batch {
-                        let record = cow.into_inner()?;
-                        if callback.matches(&record, ctx) {
-                            result.push(id);
-                        }
-                    }
-                }
-                result
-            };
-
-        // F5a: the V1 per-table WAL marker is GONE. All former direct
-        // callers — `shamir-db` system_store (system_store.rs) and admin
-        // user/role teardown (execute/admin_users_roles.rs) — now route their
-        // deletes through `RepoInstance::run_implicit_batch_tx` +
-        // `execute_delete_tx` (the implicit-tx file-WAL path, one V2 entry per
-        // tx), exactly like the query_runner non-tx Delete branch. This
-        // direct `execute_delete` method is therefore WAL-less, consistent
-        // with `execute_set`: single-record CRUD is best-effort no-WAL
-        // (recovery via doctor `repair()`); the WAL-covered path is the
-        // batch/implicit-tx route. The V1 codec / WalManager removal is F5c.
-
-        // S3: run validators on each record before deleting.
-        // Only fetch old records if there are delete-bound validators.
-        let has_delete_validators = {
-            let bindings = self.validator_bindings();
-            bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
-        };
-        if has_delete_validators && !to_delete.is_empty() {
-            let records = self.get_many(&to_delete).await?;
-            for rec in records.iter().flatten() {
-                // TODO actor threading — use Actor::System for now.
-                self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
-                    .await
-                    .map_err(validator_failure_to_db_error)?;
-            }
-        }
-
-        let mut affected: u64 = 0;
-        // Changefeed (Phase 3b follow-up): record the ids actually removed
-        // (a `delete` that found no record contributes no event).
-        let mut deleted_ids: Vec<RecordId> = Vec::with_capacity(to_delete.len());
-        let mut max_write_version: u64 = 0;
-        for id in to_delete {
-            let (removed, ver) = self.delete_returning_version(id).await?;
-            if removed {
-                affected += 1;
-                deleted_ids.push(id);
-                max_write_version = max_write_version.max(ver);
-            }
-        }
-
-        self.bump_write_counter(affected);
-
-        // Flush the counter cache (delete decremented it).
-        if affected > 0 {
-            self.flush_metadata().await?;
-        }
-
-        // Changefeed: emit one Delete per removed record. The event carries
-        // the max MVCC version from the per-record deletes (best-effort).
-        let changes: Vec<_> = deleted_ids
-            .iter()
-            .map(|id| self.delete_change(*id))
-            .collect();
-        self.emit_nontx_changefeed(max_write_version, changes);
-
-        Ok(WriteResult {
-            affected,
-            records: Vec::new(),
-            execution_time_us: start.elapsed().as_micros() as u64,
-        })
-    }
-
-    /// tx-aware variant of [`execute_delete`](Self::execute_delete).
+    /// tx-aware variant of DELETE.
     ///
     /// Filters records by `where_clause`, stages each removal via
     /// [`delete_tx`](Self::delete_tx). WAL is NOT opened here —
