@@ -10,12 +10,12 @@ use serde_json as json;
 
 pub use crate::query::read::aggregate::{apply_aggregate_all, apply_group_by};
 use crate::query::read::hashable_json::HashableJson;
-pub use crate::query::read::order::apply_order_by;
+pub use crate::query::read::order::{apply_order_by, apply_order_by_qv};
 pub use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 // ============================================================================
 // Select projection (public API)
@@ -137,11 +137,11 @@ pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) {
 // ============================================================================
 
 /// Apply pagination to results, returning (page_records, pagination_info).
-pub fn apply_pagination(
-    records: Vec<json::Value>,
+pub fn apply_pagination<T>(
+    records: Vec<T>,
     pagination: &Pagination,
     count_total: bool,
-) -> (Vec<json::Value>, Option<PaginationInfo>) {
+) -> (Vec<T>, Option<PaginationInfo>) {
     if pagination.is_none() && !count_total {
         return (records, None);
     }
@@ -155,7 +155,7 @@ pub fn apply_pagination(
     let (skip, take) = pagination.resolve();
     let skip = skip as usize;
 
-    let sliced: Vec<json::Value> = {
+    let sliced: Vec<T> = {
         let mut v = records;
         if skip > 0 {
             let tail = v.split_off(skip.min(v.len()));
@@ -207,4 +207,23 @@ pub fn apply_distinct(records: Vec<json::Value>) -> Vec<json::Value> {
         seen.insert(HashableJson(record));
     }
     seen.into_iter().map(|h| h.0).collect()
+}
+
+/// Remove duplicate `QueryValue` rows using a canonical json key for
+/// deduplication, matching the semantics of the json-based
+/// `apply_distinct`. The canonical key reproduces the lossy
+/// `From<QueryValue> for serde_json::Value` coercion (Dec/Big→String,
+/// Bin→Array, Set→Array) so that e.g. `Dec("1.0")` and `Str("1.0")`
+/// deduplicate identically to the old json path.
+pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
+    type Map = indexmap::IndexMap<HashableJson, QueryValue, shamir_collections::THasher>;
+    let mut seen: Map = indexmap::IndexMap::with_capacity_and_hasher(
+        records.len(),
+        shamir_collections::THasher::default(),
+    );
+    for record in records {
+        let key = HashableJson(json::Value::from(record.clone()));
+        seen.entry(key).or_insert(record);
+    }
+    seen.into_values().collect()
 }

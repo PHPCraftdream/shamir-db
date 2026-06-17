@@ -862,29 +862,55 @@ impl TableManager {
             rec_acc
         };
 
-        // apply_distinct / apply_order_by / apply_pagination operate on
-        // Vec<serde_json::Value>.  Convert once for these post-processing
-        // steps; the hot streaming/counting paths avoid this conversion
-        // entirely.
-        let mut json_result: Vec<serde_json::Value> =
-            result.into_iter().map(serde_json::Value::from).collect();
-
-        if query.select.distinct {
-            json_result = exec::apply_distinct(json_result);
-        }
-        if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut json_result, order_by);
-        }
-
-        let (json_records, pagination) =
-            exec::apply_pagination(json_result, &query.pagination, query.count_total);
+        // Post-process directly on QueryValue — no json round-trip.
+        // GROUP BY / aggregates still produce json::Value and go through
+        // the json post-processors (out of scope for this migration); the
+        // non-aggregate path (rec_acc) produces QueryValue via
+        // project_value and uses the new QV post-processors.
+        let (final_records, pagination) = if has_group_by || has_agg {
+            // Legacy json path for aggregate results.
+            let mut json_result: Vec<serde_json::Value> =
+                result.into_iter().map(serde_json::Value::from).collect();
+            if query.select.distinct {
+                json_result = exec::apply_distinct(json_result);
+            }
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by(&mut json_result, order_by);
+            }
+            let (paged, pag) =
+                exec::apply_pagination(json_result, &query.pagination, query.count_total);
+            let recs: Vec<crate::query::read::QueryRecord> = paged
+                .into_iter()
+                .map(crate::query::read::QueryRecord::Json)
+                .collect();
+            (recs, pag)
+        } else {
+            // Direct QueryValue path — no json round-trip.
+            let mut qv_result: Vec<shamir_types::types::value::QueryValue> = result
+                .into_iter()
+                .map(|r| match r {
+                    crate::query::read::QueryRecord::Direct(qv) => qv,
+                    other => serde_json::Value::from(other).into(),
+                })
+                .collect();
+            if query.select.distinct {
+                qv_result = exec::apply_distinct_qv(qv_result);
+            }
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut qv_result, order_by);
+            }
+            let (paged, pag) =
+                exec::apply_pagination(qv_result, &query.pagination, query.count_total);
+            let recs: Vec<crate::query::read::QueryRecord> = paged
+                .into_iter()
+                .map(crate::query::read::QueryRecord::Direct)
+                .collect();
+            (recs, pag)
+        };
 
         let elapsed = start.elapsed();
-        let records_returned = json_records.len() as u64;
-        let records: Vec<crate::query::read::QueryRecord> = json_records
-            .into_iter()
-            .map(crate::query::read::QueryRecord::Json)
-            .collect();
+        let records_returned = final_records.len() as u64;
+        let records = final_records;
 
         Ok(QueryResult {
             records,
