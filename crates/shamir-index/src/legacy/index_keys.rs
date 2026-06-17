@@ -29,9 +29,17 @@
 //!
 //! This hash scheme is VERSION 2 of the legacy index posting format.
 //! Old V1 postings (based on `<Value<InternerKey> as Hash>` with
-//! `std::mem::discriminant` tags) are NOT compatible — the engine triggers
-//! a full O(N) rebuild-on-open when it detects a version mismatch (see
-//! `LEGACY_INDEX_FORMAT_VERSION` in `persistence.rs`).
+//! `std::mem::discriminant` tags) are NOT byte-compatible with V2.
+//!
+//! Detection primitives exist (`LEGACY_INDEX_FORMAT_VERSION`,
+//! `legacy_indexes_need_rebuild`, `save/load_legacy_index_version` in
+//! `persistence.rs`), BUT the engine does NOT yet CALL them on open — the
+//! O(N) rebuild-on-open is a follow-up (task #81 / S9b). Until that lands,
+//! opening a DB written with V1 postings against this V2 hash scheme yields
+//! silent lookup misses. This is acceptable ONLY under the campaign's S0
+//! decision that pre-existing on-disk index data is disposable
+//! (`docs/perf/innervalue-elimination-plan.md` §S0). Do NOT rely on a clean
+//! V1→V2 upgrade until #81 wires the rebuild trigger.
 
 use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_record_key::IndexRecordKey;
