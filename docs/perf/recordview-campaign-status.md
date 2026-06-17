@@ -55,6 +55,8 @@ control-plane (admin/system).
 |---|---|---|
 | #60 A+B+C | `56ad49b` | paginate/distinct/order_by → QueryValue (canonical-key byte-identity) |
 | #60 D+E | `8958fd9` | Path B scans + aggregate/HAVING → QueryValue (Direct lazy-json cache) |
+| #60 F+G | `09eff50` | MIN/MAX/COUNT shortcut + temporal _version → QueryValue → **read-result production json-free** |
+| W3d-2 (#62) | `0da6873` | non-tx execute_set reroute → implicit-tx → execute_set_tx (tree-merge + dead non-tx changefeed прочь) |
 
 ### Supply-chain
 | Шаг | Коммит | Суть |
@@ -71,9 +73,12 @@ msgpack хендшейк; read-only-batch repo-collect.
 
 | Приоритет | Задача |
 |---|---|
-| сейчас | **#60 F+G** — MIN/MAX/count shortcut-строки + удалить `hashable_json`/`apply_select`(json)/`project`-twin → read-result production-путь **json-free** |
-| далее | **3 холодных якоря InnerValue** (терминал): recovery/doctor-кодек; funclib (почти не-стена — осталась обёртка inner_to_json_value, в осн. мигрирована); **index-hash leaf** (самый трудный — persisted byte-identity, нужна discriminant-стабильная схема ИЛИ index-format rebuild-миграция, ИЛИ принятый предел) |
-| хвост | #62 (non-tx execute_set детри/reroute), #55 (X-remap холодный), #41 (Stage 6 спекулятивно) |
+| сейчас | **3 холодных якоря InnerValue** (терминал #61): recovery/doctor-кодек; funclib (почти не-стена — осталась обёртка inner_to_json_value, в осн. мигрирована); **index-hash leaf** (самый трудный — persisted byte-identity, нужна discriminant-стабильная схема ИЛИ index-format rebuild-миграция, ИЛИ принятый предел) |
+| хвост | #55 (X-remap холодный), #41 (Stage 6 спекулятивно) |
+
+**#60 ЗАКРЫТ** (`09eff50`): read-result production-путь json-free. json-twins
+(`hashable_json` бэкит production canonical-key; `apply_select`/`project`-twin —
+bench/example-вызовы) остаются, но НЕ на production-пути. #62 ЗАКРЫТ (`0da6873`).
 
 **Честный предел JSON:** `QueryRecord::Json` variant + `inner_to_json_value`/
 `json_value_to_inner` остаются (v1-inbound + control-plane/computed) — не
