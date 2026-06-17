@@ -185,10 +185,7 @@ async fn range_query_round_trip() {
     sort_codec::encode_i64(&mut lo, -1);
     let mut hi = Vec::new();
     sort_codec::encode_i64(&mut hi, 50);
-    let result = mgr
-        .lookup_range(F_INT, Some(&lo), Some(&hi))
-        .await
-        .unwrap();
+    let result = mgr.lookup_range(F_INT, Some(&lo), Some(&hi)).await.unwrap();
     assert_eq!(result.len(), 4);
     for (s, rid) in &id_by_score {
         let expected = (-1..=50).contains(s);

@@ -185,7 +185,12 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
     let proj = SelectProjection::new(&query.select, interner);
     let records: Vec<QueryRecord> = matched
         .iter()
-        .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner), std::sync::OnceLock::new()))
+        .map(|(_, record)| {
+            QueryRecord::Direct(
+                proj.project_value(record, interner),
+                std::sync::OnceLock::new(),
+            )
+        })
         .collect();
 
     let records_returned = records.len() as u64;

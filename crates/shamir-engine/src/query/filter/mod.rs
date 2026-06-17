@@ -24,8 +24,8 @@ pub use filter_callback::FilterCallback;
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
 pub use resolve::{
-    compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path,
-    resolve_field, resolve_field_ref, resolve_filter_query, resolve_filter_value,
+    compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path, resolve_field,
+    resolve_field_ref, resolve_filter_query, resolve_filter_value,
 };
 pub use shamir_query_types::filter::{
     Cond, FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall,

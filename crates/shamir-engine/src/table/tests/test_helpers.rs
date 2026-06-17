@@ -24,9 +24,9 @@ pub fn query_value_to_inner_tracked(
     let new_keys: RefCell<Vec<(InternerKey, UserKey)>> = RefCell::new(Vec::new());
 
     let intern_fn = |key: &str| -> Result<InternerKey, CodecError> {
-        let ti = interner.touch_ind(key).map_err(|e| {
-            CodecError::Decode(format!("Failed to intern key '{}': {}", key, e))
-        })?;
+        let ti = interner
+            .touch_ind(key)
+            .map_err(|e| CodecError::Decode(format!("Failed to intern key '{}': {}", key, e)))?;
         if ti.is_new() {
             new_keys
                 .borrow_mut()

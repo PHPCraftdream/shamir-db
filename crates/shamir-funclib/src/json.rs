@@ -126,15 +126,13 @@ fn navigate<'a>(
                     _ => return Ok(None),
                 }
             }
-            QueryValue::Str(key) => {
-                match cur {
-                    QueryValue::Map(m) => match m.get(key.as_str()) {
-                        Some(v) => cur = v,
-                        None => return Ok(None),
-                    },
-                    _ => return Ok(None),
-                }
-            }
+            QueryValue::Str(key) => match cur {
+                QueryValue::Map(m) => match m.get(key.as_str()) {
+                    Some(v) => cur = v,
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
             _ => return Err(ScalarError::new("type_mismatch")),
         }
     }

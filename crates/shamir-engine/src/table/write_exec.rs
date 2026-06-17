@@ -884,4 +884,3 @@ fn build_insert_result_records(
         })
         .collect()
 }
-

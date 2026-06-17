@@ -16,9 +16,7 @@
 
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info::IndexInfo;
-use crate::legacy::index_keys::{
-    build_index_key, build_index_key_from_record, build_posting_key,
-};
+use crate::legacy::index_keys::{build_index_key, build_index_key_from_record, build_posting_key};
 use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;

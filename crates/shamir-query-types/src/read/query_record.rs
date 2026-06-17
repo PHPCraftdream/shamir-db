@@ -244,9 +244,7 @@ impl QueryRecord {
             QueryRecord::Inserted(rec, cache) => {
                 cache.get_or_init(|| rec.as_json().into_owned()).get(key)
             }
-            QueryRecord::Direct(qv, cache) => {
-                cache.get_or_init(|| qv.clone().into()).get(key)
-            }
+            QueryRecord::Direct(qv, cache) => cache.get_or_init(|| qv.clone().into()).get(key),
             QueryRecord::IdBytes(_) => None,
         }
     }

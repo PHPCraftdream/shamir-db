@@ -692,8 +692,8 @@ async fn test_set_nontx_update_parity() {
     let interner = table.interner().get().await.unwrap();
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
-    let query = crate::query::read::ReadQuery::new("users")
-        .filter(crate::query::filter::Filter::Eq {
+    let query =
+        crate::query::read::ReadQuery::new("users").filter(crate::query::filter::Filter::Eq {
             field: vec!["name".to_string()],
             value: crate::query::filter::FilterValue::String("Alice".to_string()),
         });

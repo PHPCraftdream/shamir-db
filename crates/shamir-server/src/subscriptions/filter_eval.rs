@@ -93,8 +93,7 @@ pub fn filter_matches_inner(
 /// Subscriptions don't use QueryRef, Param, FnCall, or Actor-based filters,
 /// so all auxiliary fields are empty / System.
 fn make_filter_context(interner: &Interner) -> FilterContext<'_> {
-    static EMPTY_REFS: std::sync::OnceLock<TMap<String, QueryResult>> =
-        std::sync::OnceLock::new();
+    static EMPTY_REFS: std::sync::OnceLock<TMap<String, QueryResult>> = std::sync::OnceLock::new();
     let refs = EMPTY_REFS.get_or_init(shamir_collections::new_map);
     FilterContext::new(interner, refs)
 }

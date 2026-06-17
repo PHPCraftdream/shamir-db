@@ -370,8 +370,7 @@ impl IndexManager {
             }
         }
 
-        let duplicates: Vec<(&Bytes, &usize)> =
-            key_counts.iter().filter(|(_, &c)| c > 1).collect();
+        let duplicates: Vec<(&Bytes, &usize)> = key_counts.iter().filter(|(_, &c)| c > 1).collect();
         if !duplicates.is_empty() {
             let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
             // Sample: we can't decode the hash back to values, so give a generic message.
@@ -586,7 +585,9 @@ impl IndexManager {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
             {
-                ops.push(IndexWriteOp::RemovePosting { key: irk.to_bytes() });
+                ops.push(IndexWriteOp::RemovePosting {
+                    key: irk.to_bytes(),
+                });
             }
         }
         Ok(ops)

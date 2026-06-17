@@ -248,9 +248,7 @@ impl AggAccum {
             // let Min/Max/Sum/Avg handle it via the owned-container path.
             None
         } else {
-            self.field_path
-                .as_deref()
-                .and_then(|p| record.scalar_at(p))
+            self.field_path.as_deref().and_then(|p| record.scalar_at(p))
         }
     }
 
@@ -495,8 +493,12 @@ pub(super) fn build_aggregate_object(
     let mut agg_slots: Vec<(String, AggAccum)> = Vec::new();
     let mut field_slots: Vec<(String, &[String])> = Vec::new();
     #[allow(clippy::type_complexity)] // parallel to agg_slots; clarity over brevity
-    let mut fn_slots: Vec<(String, Option<Vec<InternerKey>>, bool, Option<Box<dyn Aggregator>>)> =
-        Vec::new();
+    let mut fn_slots: Vec<(
+        String,
+        Option<Vec<InternerKey>>,
+        bool,
+        Option<Box<dyn Aggregator>>,
+    )> = Vec::new();
     let mut func_slots: Vec<(String, FilterValue)> = Vec::new();
 
     for item in &select.items {
@@ -577,7 +579,8 @@ pub(super) fn build_aggregate_object(
             }
             for (_, path, all_field, agg) in fn_slots.iter_mut() {
                 if let Some(agg) = agg {
-                    let qv = view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner));
+                    let qv =
+                        view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner));
                     if let Some(qv) = qv {
                         let _ = agg.accumulate(&qv);
                     }
@@ -616,16 +619,14 @@ pub(super) fn build_aggregate_object(
                             v.materialize_at(keys.as_slice())
                                 .and_then(|iv| inner_value_to_query_value(&iv, interner).ok())
                         }),
-                    Err(_) => InnerValue::from_bytes(bytes.as_ref())
-                        .ok()
-                        .and_then(|iv| {
-                            iv.scalar_at(keys.as_slice())
-                                .map(scalar_ref_to_query)
-                                .or_else(|| {
-                                    iv.materialize_at(keys.as_slice())
-                                        .and_then(|v| inner_value_to_query_value(&v, interner).ok())
-                                })
-                        }),
+                    Err(_) => InnerValue::from_bytes(bytes.as_ref()).ok().and_then(|iv| {
+                        iv.scalar_at(keys.as_slice())
+                            .map(scalar_ref_to_query)
+                            .or_else(|| {
+                                iv.materialize_at(keys.as_slice())
+                                    .and_then(|v| inner_value_to_query_value(&v, interner).ok())
+                            })
+                    }),
                 }
             })
             .unwrap_or(QueryValue::Null);
@@ -649,7 +650,9 @@ pub(super) fn build_aggregate_object(
                         },
                     };
                     view.with_ref(|r| resolve_filter_value(&fv, r, &ctx))
-                        .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
+                        .map(|v| {
+                            inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null)
+                        })
                 })
                 .unwrap_or(QueryValue::Null);
             obj.insert(key, val);
@@ -761,8 +764,10 @@ pub fn apply_group_by(
     // record list so the output projection can read them without re-hitting
     // the records.
     #[allow(clippy::type_complexity)] // grouped aggregate accumulator; clarity over brevity
-    let mut groups: TMap<Vec<GroupKeyItem>, (Vec<(RecordId, Bytes)>, Vec<(String, QueryValue)>)> =
-        new_map_wc(0);
+    let mut groups: TMap<
+        Vec<GroupKeyItem>,
+        (Vec<(RecordId, Bytes)>, Vec<(String, QueryValue)>),
+    > = new_map_wc(0);
 
     for (id, bytes) in records {
         // Per-row lens for the group-key resolution (same hot/fallback pair
@@ -800,9 +805,8 @@ pub fn apply_group_by(
                     },
                 };
                 for (field_name, interned_path) in &group_paths {
-                    let qv = view.with_ref(|r| {
-                        group_value_to_query(r, interned_path.as_deref(), interner)
-                    });
+                    let qv = view
+                        .with_ref(|r| group_value_to_query(r, interned_path.as_deref(), interner));
                     key_qv_values.push((field_name.clone(), qv));
                 }
                 v.insert((vec![(*id, bytes.clone())], key_qv_values));

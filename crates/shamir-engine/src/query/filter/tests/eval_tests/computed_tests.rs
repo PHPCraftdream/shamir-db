@@ -233,7 +233,10 @@ fn golden_fncall_upper_nested_arg() {
     let filter = Filter::Eq {
         field: vec!["email".into()],
         value: FilterValue::FnCall {
-            call: FnCall::complex("strings/upper", vec![FilterValue::String("alice@foo.com".into())]),
+            call: FnCall::complex(
+                "strings/upper",
+                vec![FilterValue::String("alice@foo.com".into())],
+            ),
         },
     };
     let node = compile_filter(&filter, &interner);

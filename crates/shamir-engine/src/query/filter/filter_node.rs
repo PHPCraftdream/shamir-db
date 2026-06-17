@@ -203,7 +203,10 @@ impl FilterNode {
                         ),
                         CompareOp::Lt => scalar_ref_cmp_qv(a, b) == Some(Ordering::Less),
                         CompareOp::Lte => {
-                            matches!(scalar_ref_cmp_qv(a, b), Some(Ordering::Less | Ordering::Equal))
+                            matches!(
+                                scalar_ref_cmp_qv(a, b),
+                                Some(Ordering::Less | Ordering::Equal)
+                            )
                         }
                     },
                     (None, _) | (_, None) => matches!(op, CompareOp::Ne),
@@ -281,10 +284,9 @@ impl FilterNode {
                             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
                             if let Some(qr) = ctx.resolved_refs.get(key) {
                                 let column = resolve_query_ref_column(qr, path.as_deref());
-                                if column
-                                    .iter()
-                                    .any(|cv| scalar_ref_cmp_qv(field_val, cv) == Some(Ordering::Equal))
-                                {
+                                if column.iter().any(|cv| {
+                                    scalar_ref_cmp_qv(field_val, cv) == Some(Ordering::Equal)
+                                }) {
                                     found = true;
                                     break;
                                 }
@@ -452,7 +454,9 @@ impl FilterNode {
                     QueryValue::List(list) => {
                         list.iter().filter(|item| values.contains(*item)).count()
                     }
-                    QueryValue::Set(set) => set.iter().filter(|item| values.contains(*item)).count(),
+                    QueryValue::Set(set) => {
+                        set.iter().filter(|item| values.contains(*item)).count()
+                    }
                     _ => return false,
                 };
                 found >= required

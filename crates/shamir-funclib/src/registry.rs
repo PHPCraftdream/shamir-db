@@ -186,8 +186,7 @@ pub fn arg_i64(args: &[QueryValue], i: usize) -> Result<i64, ScalarError> {
             }
         }
         QueryValue::F64(f) => {
-            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64
-            {
+            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
                 Ok(*f as i64)
             } else {
                 Err(ScalarError::new("out_of_range"))

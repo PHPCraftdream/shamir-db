@@ -58,11 +58,7 @@ impl DecodeCache {
 }
 
 /// Try to get a cached decode result.
-pub(crate) fn cache_get(
-    repo: &str,
-    commit_version: u64,
-    change_idx: usize,
-) -> Option<CachedBytes> {
+pub(crate) fn cache_get(repo: &str, commit_version: u64, change_idx: usize) -> Option<CachedBytes> {
     let key = (DecodeCache::repo_hash(repo), commit_version, change_idx);
     GLOBAL.inner.get(&key).map(|r| Arc::clone(r.value()))
 }
