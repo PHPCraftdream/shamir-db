@@ -1,126 +1,95 @@
 בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
 
-# RecordView-миграция — общая картина и состояние
+# RecordView / MessagePack-pass-through — текущая картина
 
-Живой обзор кампании. Дополняет:
-`record-view-migration.md` (исходный спек), `recordview-full-migration-map.md`
-(read-path), `wave2-w2ab-index-plan.md` / `wave2-w2cd-write-cutover-plan.md`
-(write-path), `stage5-wire-plan.md` (клиент-тир), `wave2-autonomy-decisions.md`
-(лог автономных решений).
+Живой обзор кампании. Дополняет: `record-view-migration.md` (исходный спек),
+`endgame-msgpack-passthrough.md` (north-star wire-pass-through + JSON),
+`r5-deintern-plan.md`, `wave2-*-plan.md`, `wave2-autonomy-decisions.md`.
 
 ---
 
-## 1. Суть
+## 1. Суть (north-star)
 
-Убрать `InnerValue`-дерево как **промежуточную станцию** с горячих путей СУБД и
-читать поля **линзой (`RecordView`) прямо по storage-байтам** (id-ключевой
-msgpack, ключи = `InternerKey` как `bin`). Дерево материализовалось лишь чтобы
-тут же закодироваться/раскодироваться и быть выброшенным — самый жирный per-row
-аллок. Линза смотрит сквозь байты, не строя дерево.
+**Сервер = линза над id-ключевым MessagePack.** Дерево `InnerValue` и JSON —
+прочь с горячих путей; интернинг/де-интернинг на **клиенте**; **storage-байты =
+wire-байты** (как получили → провалидировали линзой → записали verbatim; как
+считали с диска → отдали). API остаётся имя-based; v1-совместимость сохранена.
 
-**Север-звезда:** дерево и интернинг — прочь с горячих путей; работа линзой по
-storage-байтам; name↔id целиком под капотом коннектора (API именованный);
-интернер — редкий server-авторитет id (на `touch`, не per-insert).
+**Конечная цель (#61):** ноль `InnerValue` + ноль JSON во всём проекте.
+`InnerValue` выживает ТОЛЬКО за оправданными холодными границами (recovery-кодек,
+byte-identity хеш индекса); JSON — ТОЛЬКО как v1-inbound `QueryRecord::Json` +
+control-plane (admin/system).
 
 ---
 
-## 2. Состояние — СДЕЛАНО (всё на master, гейты зелёные)
+## 2. СДЕЛАНО (на master, всё green-gated: clippy --workspace 0 · test.sh · @e2e 543/543)
 
-**Дерево убрано с ОБОИХ горячих путей — чтение и запись.**
-
-### Чтение (Stage 0→4)
+### Чтение tree-free (ранее)
 | Шаг | Коммит | Суть |
 |---|---|---|
-| Stage 0 | (в `1109f60`) | измерили GO: линза ×48-72 дешевле декода дерева |
-| Stage 1+2+I | `1109f60` | линза `RecordView` (id-ключевая) + шов `RecordRef` + интернер per-repo |
-| Stage 3 #1 | `5615479` | unique-key scan на шов |
-| C0 | `6dbca1a` | рост `RecordRef` (present_kind/str/any_seq/materialize/for_each_field) |
-| C1+C3 | `b8c9bbb` | filter presence/string атомы (Exists/IsNull/Like/Regex/Fts) |
-| C2 | `208ec2c` | Compare/Between/In/InSet (scalar_ref_cmp) |
-| C4 | `f7a4265` | Contains-семейство (materialize_at) |
-| C5/C5b | `b2c3b2a`/`9cab824` | projection (per-field + is_all generic) |
-| C6 | `3ff0f5f` | computed/`$fn` (IndexExpr::eval + resolve_filter_value generic) |
-| C-sig | `b002787` | `FilterNode::matches(&impl RecordRef)` |
-| **Stage 4** | `a153c5d` | **cutover**: скан отдаёт `RecordView`/`Bytes`, дерево не строится (`RecordCow`) |
+| R5 | `21569aa` | де-интернинг результата прямо с линзы (O(N²)+дерево прочь) |
+| AGG | `aef7968` | прунинг декода агрегаций до референсируемых полей |
 
-### Интернер per-repo
-`1109f60` (переезд на RepoInstance) + `36d6acb` (фикс cross-repo миграции —
-`replicate_interner_from` на repo-уровне).
-
-### Клиент-тир (registered-numeric)
+### Запись tree-free (W3 эпик) — insert/update/delete/set
 | Шаг | Коммит | Суть |
 |---|---|---|
-| Stage 5d | `7f1cd4d` | `interner.dump`/`touch` wire-операции |
-| Stage 5 minimal | `6695a2c` | клиентский field-map кеш (scc+THasher, §9.4-safe) + builder resolve + pre-touch |
-| ambient-delta | `a35188e` | клиент шлёт epoch — сервер дослыает дельту (под капотом, backward-compat) |
+| byte-merge | `a432707` | `merge_storage_bytes` (byte-identity 22/22) — фундамент |
+| W3a | `5b90799` | удалён мёртвый non-tx CRUD trio + фикс latent update_tx new-field |
+| W3b | `beca2f9` | delete_tx через линзу + фикс latent tx-commit posting-cache |
+| W3c | `42b5fc4` | update_tx merge через byte-merge |
+| W3d | `4033463` | set_tx (upsert) через byte-merge |
 
-### Запись (Wave 2 эпик)
+### Wire pass-through — ЖИВОЙ end-to-end
 | Шаг | Коммит | Суть |
 |---|---|---|
-| W1 | `d5abbc7` | validator round-trip убран (insert кормит QueryValue напрямую) |
-| W2a-sorted | `e2abab5` | sorted-индекс на RecordRef (scalar_at+sort_codec, byte-identical) |
-| W2a-hash | `7e60866` | legacy/unique индекс-ключи (materialize_at→with_values, byte-identical, **discriminant-крукс**) |
-| W2b | `ba53050` | `IndexBackend`→`&dyn RecordRef` (FTS/vector/functional) |
-| W2d-encoder | `ccb8ac4` | прямой `QueryValue→id-msgpack` энкодер (byte-identity 12/12) |
-| **W2c+W2d** | `3f2f40a` | **cutover**: `execute_insert_tx` без дерева; staging на Bytes; удалены `StagedRow::Live`/`inner_values`/`rewrite_set_inner` |
+| types-W1 | `fcdca96` | `validate_keys_resolve` (security-спина) + `record_view_to_id_msgpack` |
+| qt-dto | `8bd81f8` | wire-DTO: records_idmsgpack / QueryRecord::IdBytes / result_encoding |
+| S-json | `eaae672` | мёртвый JSON ingest-кодек удалён |
+| S-write | `44f4ddb` | сервер принимает id-keyed запись + validate + verbatim |
+| S-read | `41f7fb5` | сервер отдаёт id-keyed чтение (SELECT* verbatim / проекция; fallback Name) |
+| version-neg | `416a98a` | протокол v2 (сервер анонсирует, клиент пишет) + фикс latent positional-msgpack |
+| S-client | `df285dd` | клиент интернит на send + де-интернит на recv → **pass-through ЖИВОЙ** |
 
-**Инварианты, что держим железно:** storage-формат НЕ менялся → recovery
-**byte-identical** (crash_recovery 18/18, byte-identity-тесты на каждом
-индекс-шаге, @oracle 1228, @e2e 543, encoder 12/12). ~25 коммитов, каждый
-verified + byte-identical.
-
----
-
-## 3. Архитектура (ключевые факты)
-
-- **Storage = id-ключевой msgpack** (`InnerValue::to_bytes`=rmp_serde; ключи
-  `InternerKey::serialize`→`bin`). Линза читает ровно это. Клиентский wire —
-  строково-ключевой (сервер интернит на лету через `query_value_to_storage_bytes`).
-- **`RecordRef` — шов**: трейт (`scalar_at`/`str_at`/`present_kind_at`/`any_seq_elem`/
-  `materialize_at`/`for_each_field`), реализован ОБОИМИ — `InnerValue` (дерево) и
-  `RecordView` (линза). Статическая диспетчеризация на чтении; `&dyn RecordRef` для
-  index2-backend'ов.
-- **byte-identity — священна**: индекс-ключи и storage-байты персистятся; каждый
-  шаг доказан байт-в-байт (через `materialize_at`+неизменённый `with_values` для
-  hash-ключей — `ScalarRef` хешировать нельзя, другой discriminant).
-- **Интернер per-repo**: один на БД, минтит id на `touch` (редко); recovery
-  восстанавливает один интернер; `interner_delta` repo-scoped.
-- **Dec/Big-инвариант**: insert-`QueryValue` никогда не даёт Dec/Big/Set → линза
-  (декодит Dec/Big как Str) согласна с деревом для индекс-ключей.
-
----
-
-## 4. Ближайшие задачи
-
-| # | Задача | Статус / решение |
+### JSON-elimination read-result (#60, идёт)
+| Шаг | Коммит | Суть |
 |---|---|---|
-| **#43** | clippy hasher-airtight | 🟡 в работе: type-ban SipHash + миграция ~140 HashMap/HashSet→Fx-алиасы. Капасити — advisory (686 сайтов = churn ради малого; dylint на потом) |
-| #51 | W3: non-tx `execute_insert` + `update_tx`/`delete_tx` ещё строят дерево | ⏸ follow-up, низкий приоритет (горячий insert уже tree-free) |
-| #52 | id-ключевой провод (клиент шлёт id) | ⏸ bench-first. Честный NO-GO без бенча: Wave 2 уже убрал дерево, §9.4-валидация съедает encode-skip → выигрыш лишь от обхода serde_json, спекулятивный |
-| Stage 6 | positional + shape-dictionary | пропуск — только при measured-need |
+| #60 A+B+C | `56ad49b` | paginate/distinct/order_by → QueryValue (canonical-key byte-identity) |
+| #60 D+E | (гейчу) | Path B scans + aggregate/HAVING → QueryValue |
+
+### Supply-chain
+| Шаг | Коммит | Суть |
+|---|---|---|
+| cooldown 30d | `a1bc6ca` | cargo-cooldown + dependabot + CI `cargo cooldown check` + `--locked` |
+
+**Бонусом — 4 реальных латентных прод-бага найдены+починены:** update_tx
+new-field result; tx-commit posting-cache stale; skip_serializing_if/positional-
+msgpack хендшейк; read-only-batch repo-collect.
 
 ---
 
-## 5. Выигрыш (измерено / структурно)
+## 3. ОСТАЛОСЬ
 
-- **Чтение:** поле линзой ×48-72 дешевле полного декода дерева (Stage 0, opt-0);
-  на селективном фильтре не-матчащиеся строки **вообще не декодятся в дерево**.
-- **Запись (insert):** дерево не строится — прямой энкодер `QueryValue→msgpack`
-  (доказанно байт-в-байт), линза для index/validators.
-- **Клиент:** field-map кеш + ambient-delta — узнаёт id под капотом, без отдельных
-  dump-round-trip'ов; API остаётся именованным.
+| Приоритет | Задача |
+|---|---|
+| сейчас | **#60 F+G** — MIN/MAX/count shortcut-строки + удалить `hashable_json`/`apply_select`(json)/`project`-twin → read-result production-путь **json-free** |
+| далее | **3 холодных якоря InnerValue** (терминал): recovery/doctor-кодек; funclib (почти не-стена — осталась обёртка inner_to_json_value, в осн. мигрирована); **index-hash leaf** (самый трудный — persisted byte-identity, нужна discriminant-стабильная схема ИЛИ index-format rebuild-миграция, ИЛИ принятый предел) |
+| хвост | #62 (non-tx execute_set детри/reroute), #55 (X-remap холодный), #41 (Stage 6 спекулятивно) |
+
+**Честный предел JSON:** `QueryRecord::Json` variant + `inner_to_json_value`/
+`json_value_to_inner` остаются (v1-inbound + control-plane/computed) — не
+удаляются. Достижимо: read-result *production* эмитит только `Direct(QueryValue)`,
+ноль `json::Value` строится для результатов.
 
 ---
 
-## 6. Где мы на дуге
+## 4. Где на дуге
 
-**Сердце кампании — бьётся.** Главное (×-кратное ускорение чтения + tree-free
-вставка + registered-numeric транспорт) **сделано и доказано**. Остаток: одна
-гигиена-политика (#43, где красиво — узко: хешер-airtight, капасити-advisory),
-один долизывающий рефактор (#51 — дерево с редких write-путей), одна спекулятивная
-оптимизация под бенч (#52 — скорее отпустить).
+**Сердце кампании — сделано и доказано:** pass-through полный и живой, запись
+tree-free на всех путях, read-result почти json-free. Остаток — **долизывание**
+(#60 F+G — мелко) и **холодные якоря** (funclib/recovery — средне; index-hash —
+трудно/возможный принятый предел).
 
-**Метод (весь путь):** measure-first → GO/NO-GO (честный NO-GO валиден);
-design-pass `@aoh` перед крупным/рискованным; byte-identity-тест на каждом
-персист-шаге; коммит между этапами; узкий self-check у исполнителя + авторитетный
-гейт у оркестратора; crush — основной исполнитель, агенты — fallback.
+**Метод (весь путь):** design-pass `@aoh` перед крупным/рисковым → byte-identity
+golden-тест на каждом персист/wire-шаге → коммит между этапами → агенты пишут
+код (без гейтов/git), оркестратор гоняет один авторитетный гейт (clippy
+--workspace + test.sh + @e2e) и коммитит → контекст оркестратора лёгкий.
