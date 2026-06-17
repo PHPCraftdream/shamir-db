@@ -45,18 +45,20 @@ pub struct AuthOk {
     /// Optional resumption ticket — when present, the client may
     /// reconnect later (within the TTL) without re-running Argon2id.
     /// Wire-encoded form per spec §5.4 / SESSION_RESUMPTION.
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+    /// Always present on the wire (empty Vec when no ticket issued);
+    /// positional msgpack — omitting a field shifts array indices.
+    #[serde(default, with = "serde_bytes")]
     pub resumption_ticket: Vec<u8>,
     /// Absolute (unix nanos) expiry of the ticket above. `0` when no
-    /// ticket was issued.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// ticket was issued. Always present (positional msgpack).
+    #[serde(default)]
     pub resumption_expires_at_ns: u64,
-}
-
-/// Helper for `#[serde(skip_serializing_if = ...)]` on the optional
-/// `resumption_expires_at_ns` field.
-pub fn is_zero_u64(v: &u64) -> bool {
-    *v == 0
+    /// Max query-language version this server supports. `0` means the
+    /// server predates query-lang negotiation. Always present on the wire
+    /// (positional msgpack — omitting a non-trailing field shifts array
+    /// indices and breaks the client decode).
+    #[serde(default)]
+    pub server_query_version: u8,
 }
 
 /// Client → server first frame when attempting a session resume.
@@ -79,8 +81,12 @@ pub struct ResumeOkWire {
     #[serde(with = "serde_bytes")]
     pub session_id: Vec<u8>,
     pub expires_at_ns: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+    #[serde(default, with = "serde_bytes")]
     pub resumption_ticket: Vec<u8>,
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[serde(default)]
     pub resumption_expires_at_ns: u64,
+    /// Max query-language version this server supports. Always present on
+    /// the wire (positional msgpack — see `AuthOk::server_query_version`).
+    #[serde(default)]
+    pub server_query_version: u8,
 }

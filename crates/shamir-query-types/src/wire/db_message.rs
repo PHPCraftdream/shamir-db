@@ -10,7 +10,12 @@ use crate::batch::{BatchRequest, BatchResponse, TransactionInfo};
 /// `BatchRequest` schema changes incompatibly. The server keeps a
 /// hardcoded supported list (`SUPPORTED_QUERY_LANG_VERSIONS`) and
 /// rejects unknown versions before invoking the DB layer.
-pub const CURRENT_QUERY_LANG_VERSION: u32 = 1;
+///
+/// v2: server now supports MessagePack id-keyed write/read pass-through.
+/// Advertised to the client via `WireAuthOk.server_query_version` /
+/// `WireResumeOkWire.server_query_version`; clients opt in only when
+/// they see `server_query_version >= 2`.
+pub const CURRENT_QUERY_LANG_VERSION: u32 = 2;
 
 fn default_query_version() -> u32 {
     CURRENT_QUERY_LANG_VERSION
