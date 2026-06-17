@@ -5,37 +5,41 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use shamir_collections::THasher;
 use shamir_db::core::interner::Interner;
-use shamir_db::types::value::InnerValue;
 use tokio::sync::OnceCell;
 
 /// Global decode cache shared across ALL bridge tasks (all connections, all
 /// repos). Keyed by `(repo_hash, commit_version, change_index)`.
 ///
-/// Caches `(InnerValue, Arc<OnceCell<Interner>>)` rather than
-/// `serde_json::Value`:
-/// - `InnerValue` is the msgpack-decoded record (no JSON alloc).
+/// Caches `(Arc<[u8]>, Arc<OnceCell<Interner>>)`:
+/// - `Arc<[u8]>` is the raw msgpack-encoded record bytes (zero-decode on
+///   cache hit — the `RecordView` lens reads fields on demand directly
+///   from these bytes without materialising an `InnerValue` tree).
 /// - `Arc<OnceCell<Interner>>` is a shared handle to the table's interner;
 ///   the cell is guaranteed to be populated before insertion (see
-///   `ShamirDb::decode_record_value_inner`), so callers can do
+///   `ShamirDb::get_table_interner_cell`), so callers can do
 ///   `cell.get().unwrap()` synchronously for filter field-path resolution.
 ///
-/// JSON conversion (`inner_to_json_value`) only happens when the event passes
-/// the filter and must be delivered, eliminating the alloc on rejected events.
+/// JSON conversion (`RecordRef::to_json_value` or `inner_to_json_value`)
+/// only happens when the event passes the filter and must be delivered,
+/// eliminating the decode + alloc on rejected events.
 ///
 /// The cache exploits the fact that `tokio::sync::broadcast` delivers
 /// `Arc<ChangelogEvent>` to every subscriber: N bridges receiving the same
-/// event each decode the same msgpack bytes — the first bridge pays the
-/// decode; the rest share the cached result.
+/// event each see the same msgpack bytes — the first bridge pays the
+/// interner lookup; the rest share the cached result.
 static GLOBAL: Lazy<DecodeCache> = Lazy::new(DecodeCache::new);
 
 /// Key: (repo_hash, commit_version, change_index).
 type CacheKey = (u64, u64, usize);
 
-/// Cached value: decoded InnerValue + initialized interner cell.
-pub(crate) type DecodedInner = Arc<Option<(InnerValue, Arc<OnceCell<Interner>>)>>;
+/// Inner tuple cached in the decode table: raw msgpack bytes + initialized interner cell.
+pub(crate) type CachedRecordBytes = (Arc<[u8]>, Arc<OnceCell<Interner>>);
+
+/// Cached value: raw msgpack bytes + initialized interner cell.
+pub(crate) type CachedBytes = Arc<Option<CachedRecordBytes>>;
 
 pub(crate) struct DecodeCache {
-    inner: DashMap<CacheKey, DecodedInner, THasher>,
+    inner: DashMap<CacheKey, CachedBytes, THasher>,
     evicted_up_to: AtomicU64,
 }
 
@@ -58,20 +62,20 @@ pub(crate) fn cache_get(
     repo: &str,
     commit_version: u64,
     change_idx: usize,
-) -> Option<DecodedInner> {
+) -> Option<CachedBytes> {
     let key = (DecodeCache::repo_hash(repo), commit_version, change_idx);
     GLOBAL.inner.get(&key).map(|r| Arc::clone(r.value()))
 }
 
 /// Insert a decode result and return a shared reference.
-/// Benign race: if two bridges both decode and insert, the second
-/// overwrites the first with an identical value (decode is deterministic).
+/// Benign race: if two bridges both insert, the second
+/// overwrites the first with an identical value (bytes are deterministic).
 pub(crate) fn cache_insert(
     repo: &str,
     commit_version: u64,
     change_idx: usize,
-    value: Option<(InnerValue, Arc<OnceCell<Interner>>)>,
-) -> DecodedInner {
+    value: Option<CachedRecordBytes>,
+) -> CachedBytes {
     let key = (DecodeCache::repo_hash(repo), commit_version, change_idx);
     let arc = Arc::new(value);
     GLOBAL.inner.insert(key, Arc::clone(&arc));

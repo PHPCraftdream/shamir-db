@@ -10,18 +10,22 @@ use tokio::sync::OnceCell;
 
 use crate::subscriptions::target_match::{mask_matches, matches_any};
 
-/// Build a `(InnerValue, Arc<OnceCell<Interner>>)` tuple from flat key-value
-/// pairs, suitable for passing as `inner_decoded` to `matches_any`.
-fn make_inner(fields: &[(&str, InnerValue)]) -> (InnerValue, Arc<OnceCell<Interner>>) {
+/// Build a `(Arc<[u8]>, Arc<OnceCell<Interner>>)` tuple from flat key-value
+/// pairs, suitable for passing as `bytes_decoded` to `matches_any`.
+fn make_record_bytes(
+    fields: &[(&str, InnerValue)],
+) -> (Arc<[u8]>, Arc<OnceCell<Interner>>) {
     let interner = Interner::new();
     let mut map: TMap<_, InnerValue> = TMap::default();
     for (field, val) in fields {
         let key = interner.touch_ind(*field).expect("intern field").into_key();
         map.insert(key, val.clone());
     }
+    let inner = InnerValue::Map(map);
+    let bytes: Arc<[u8]> = Arc::from(inner.to_bytes().expect("serialize").as_ref());
     let cell = OnceCell::new();
     cell.set(interner).unwrap();
-    (InnerValue::Map(map), Arc::new(cell))
+    (bytes, Arc::new(cell))
 }
 
 #[test]
@@ -111,7 +115,7 @@ fn put_with_matching_filter_delivered() {
         value: FilterValue::String("active".to_string()),
     };
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, Some(filter))];
-    let record = make_inner(&[
+    let record = make_record_bytes(&[
         ("status", InnerValue::Str("active".to_string())),
         ("name", InnerValue::Str("alice".to_string())),
     ]);
@@ -131,7 +135,7 @@ fn put_with_non_matching_filter_skipped() {
         value: FilterValue::String("active".to_string()),
     };
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, Some(filter))];
-    let record = make_inner(&[
+    let record = make_record_bytes(&[
         ("status", InnerValue::Str("inactive".to_string())),
         ("name", InnerValue::Str("bob".to_string())),
     ]);
@@ -163,7 +167,7 @@ fn delete_with_filter_delivered_regardless() {
 #[test]
 fn put_without_filter_delivered() {
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, None)];
-    let record = make_inner(&[("status", InnerValue::Str("anything".to_string()))]);
+    let record = make_record_bytes(&[("status", InnerValue::Str("anything".to_string()))]);
     assert!(matches_any(
         &targets,
         "repo",

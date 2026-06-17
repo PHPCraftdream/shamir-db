@@ -13,6 +13,7 @@
 pub use shamir_types::access;
 pub use shamir_types::codecs;
 pub use shamir_types::core;
+pub use shamir_types::record_view;
 pub use shamir_types::types;
 
 // Engine + query are in `shamir-engine`; storage is in `shamir-storage`.

@@ -64,6 +64,25 @@ impl ShamirDb {
         Some((inner, interner_cell))
     }
 
+    /// Return the table's shared `Arc<OnceCell<Interner>>` (guaranteed populated
+    /// after this call) without decoding any record bytes. Used by the
+    /// subscription bridge to cache raw bytes + interner instead of a decoded
+    /// `InnerValue` tree.
+    ///
+    /// Returns `None` when the database / repo / table doesn't exist or the
+    /// interner can't be loaded.
+    pub async fn get_table_interner_cell(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+    ) -> Option<Arc<OnceCell<Interner>>> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        let table_manager = repo_instance.get_table(table).await.ok()?;
+        let _ = table_manager.interner().get().await.ok()?;
+        Some(table_manager.interner().interner_cell())
+    }
+
     // ============================================================================
     // Changefeed (Phase 3b): live broadcast + durable journal
     // ============================================================================
