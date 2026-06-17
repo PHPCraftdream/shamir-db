@@ -848,6 +848,11 @@ impl SortedIndexManager {
 /// Format: `rmp_serde::to_vec_named(&Vec<(String, InnerValue)>)` — bincode is
 /// not usable because `InnerValue`'s `Deserialize` relies on `deserialize_any`,
 /// which bincode does not support.
+///
+/// `InnerValue` here is a retained anchor — see the accepted-limit note in
+/// `legacy/index_keys.rs` (# Accepted limit — #61 InnerValue-elimination
+/// campaign) for why this cannot be replaced by `ScalarRef` without an
+/// index-format version bump and O(N) rebuild migration.
 type CoveringProjection = Vec<(String, InnerValue)>;
 
 /// Build the covering-index projection value for one record and one

@@ -18,6 +18,22 @@
 //! `materialize_at` (NOT `scalar_at`) is mandatory here: `scalar_at` returns
 //! `None` for Dec/Big/containers, which would silently drop those records
 //! from the index. `materialize_at` preserves any leaf.
+//!
+//! # Accepted limit — #61 InnerValue-elimination campaign
+//!
+//! The materialized `InnerValue` leaf fed to `IndexRecordKey::with_values`
+//! (and the `Vec<(String, InnerValue)>` covering-projection blob in
+//! `sorted_index_manager`) is a DELIBERATELY retained `InnerValue` anchor.
+//! Persisted index posting hashes (`hash1`/`hash2`) and covering blobs are
+//! on-disk and depend on `<Value<InternerKey> as Hash>`'s
+//! `std::mem::discriminant`-prefixed byte stream (10 variants), which no
+//! 6-variant `ScalarRef`/lens type can reproduce without divergence.
+//! Eliminating it requires either a discriminant-stable hand-rolled hasher
+//! proven against a frozen golden corpus, or an index-format version bump +
+//! full O(N) rebuild migration that breaks storage byte-identity across
+//! versions. Neither pays for itself: the record is already read via the byte
+//! lens; only the transient indexed leaf is an `InnerValue`. Accepted limit
+//! for the #61 InnerValue-elimination campaign.
 
 use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_record_key::IndexRecordKey;
