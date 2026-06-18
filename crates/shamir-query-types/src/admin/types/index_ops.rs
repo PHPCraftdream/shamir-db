@@ -1,6 +1,7 @@
 //! Index-level DDL operations: create / drop index.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::value::QueryValue;
 
 use super::db_ops::is_false;
 
@@ -51,7 +52,7 @@ pub struct CreateIndexOp {
 
     /// Additional args for functional expr (e.g., mod divisor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub functional_args: Option<Vec<serde_json::Value>>,
+    pub functional_args: Option<Vec<QueryValue>>,
 
     /// Vector dimension (required for vector indexes).
     #[serde(default, skip_serializing_if = "Option::is_none")]

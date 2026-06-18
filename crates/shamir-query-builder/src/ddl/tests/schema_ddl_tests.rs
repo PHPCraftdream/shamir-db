@@ -3,6 +3,7 @@
 
 use serde_json::json;
 use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch};
+use shamir_types::mpack;
 
 use crate::ddl;
 
@@ -228,6 +229,37 @@ fn create_index_functional() {
     let j = roundtrip(&op);
     assert_eq!(j["index_type"], "functional");
     assert_eq!(j["functional_op"], "lower");
+}
+
+/// Builder `.functional_args(vec![...])` accepts `QueryValue` args and they
+/// survive a JSON round-trip with the correct scalar shapes.
+#[test]
+fn create_index_functional_with_args() {
+    let op = ddl::create_index("mod_price", "items")
+        .field("price")
+        .index_type("functional")
+        .functional_op("mod")
+        .functional_args(vec![mpack!(10), mpack!("base")])
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["functional_op"], "mod");
+    // Integer arg must round-trip as a JSON number (not null, not string).
+    assert_eq!(j["functional_args"], json!([10, "base"]));
+}
+
+/// When `functional_args` is not set, the field must be absent in JSON.
+#[test]
+fn create_index_functional_args_absent_when_none() {
+    let op = ddl::create_index("lower_name", "users")
+        .field("name")
+        .index_type("functional")
+        .functional_op("lower")
+        .build();
+    let j = serde_json::to_value(&op).unwrap();
+    assert!(
+        j.get("functional_args").is_none(),
+        "functional_args must be absent when not set, got: {j}"
+    );
 }
 
 #[test]
