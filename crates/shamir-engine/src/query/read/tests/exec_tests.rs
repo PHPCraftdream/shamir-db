@@ -1,6 +1,7 @@
 //! Tests for the read query execution pipeline (exec.rs).
 
 use serde_json::json;
+use shamir_types::mpack;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::*;
@@ -394,153 +395,165 @@ fn aggregate_all_count_sum() {
 }
 
 // ============================================================================
-// apply_order_by tests (operates on Vec<json::Value> — kept as-is)
+// apply_order_by_qv tests (QueryValue-native path)
 // ============================================================================
 
 #[test]
 fn order_by_asc() {
     let mut records = vec![
-        json!({"name": "Carol", "age": 35}),
-        json!({"name": "Alice", "age": 30}),
-        json!({"name": "Bob", "age": 25}),
+        mpack!({"name": "Carol", "age": 35}),
+        mpack!({"name": "Alice", "age": 30}),
+        mpack!({"name": "Bob", "age": 25}),
     ];
 
     let order = OrderBy::asc("age");
-    apply_order_by(&mut records, &order);
-    assert_eq!(records[0]["age"], 25);
-    assert_eq!(records[1]["age"], 30);
-    assert_eq!(records[2]["age"], 35);
+    apply_order_by_qv(&mut records, &order);
+    let r = to_json(&records);
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["age"], 35);
 }
 
 #[test]
 fn order_by_desc() {
     let mut records = vec![
-        json!({"name": "Alice", "age": 30}),
-        json!({"name": "Bob", "age": 25}),
-        json!({"name": "Carol", "age": 35}),
+        mpack!({"name": "Alice", "age": 30}),
+        mpack!({"name": "Bob", "age": 25}),
+        mpack!({"name": "Carol", "age": 35}),
     ];
 
     let order = OrderBy::desc("age");
-    apply_order_by(&mut records, &order);
-    assert_eq!(records[0]["age"], 35);
-    assert_eq!(records[1]["age"], 30);
-    assert_eq!(records[2]["age"], 25);
+    apply_order_by_qv(&mut records, &order);
+    let r = to_json(&records);
+    assert_eq!(r[0]["age"], 35);
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["age"], 25);
 }
 
 #[test]
 fn order_by_multiple_fields() {
     let mut records = vec![
-        json!({"city": "NYC", "age": 35}),
-        json!({"city": "LA", "age": 30}),
-        json!({"city": "LA", "age": 25}),
-        json!({"city": "NYC", "age": 30}),
+        mpack!({"city": "NYC", "age": 35}),
+        mpack!({"city": "LA", "age": 30}),
+        mpack!({"city": "LA", "age": 25}),
+        mpack!({"city": "NYC", "age": 30}),
     ];
 
     let order = OrderBy::new([OrderByItem::asc("city"), OrderByItem::asc("age")]);
-    apply_order_by(&mut records, &order);
-    assert_eq!(records[0]["city"], "LA");
-    assert_eq!(records[0]["age"], 25);
-    assert_eq!(records[1]["city"], "LA");
-    assert_eq!(records[1]["age"], 30);
-    assert_eq!(records[2]["city"], "NYC");
-    assert_eq!(records[2]["age"], 30);
-    assert_eq!(records[3]["city"], "NYC");
-    assert_eq!(records[3]["age"], 35);
+    apply_order_by_qv(&mut records, &order);
+    let r = to_json(&records);
+    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["city"], "LA");
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["city"], "NYC");
+    assert_eq!(r[2]["age"], 30);
+    assert_eq!(r[3]["city"], "NYC");
+    assert_eq!(r[3]["age"], 35);
 }
 
 #[test]
 fn order_by_nulls_first() {
+    // Bob has no "age" field -- missing maps to Null, sorted first by nulls_first.
     let mut records = vec![
-        json!({"name": "Alice", "age": 30}),
-        json!({"name": "Bob"}),
-        json!({"name": "Carol", "age": 25}),
+        mpack!({"name": "Alice", "age": 30}),
+        mpack!({"name": "Bob"}),
+        mpack!({"name": "Carol", "age": 25}),
     ];
 
     let order = OrderBy::new([OrderByItem::asc("age").nulls_first()]);
-    apply_order_by(&mut records, &order);
-    assert!(records[0].get("age").is_none() || records[0]["age"].is_null());
-    assert_eq!(records[1]["age"], 25);
-    assert_eq!(records[2]["age"], 30);
+    apply_order_by_qv(&mut records, &order);
+    let r = to_json(&records);
+    // Bob (no age) must come first
+    assert!(r[0].get("age").is_none() || r[0]["age"].is_null());
+    assert_eq!(r[1]["age"], 25);
+    assert_eq!(r[2]["age"], 30);
 }
 
 #[test]
 fn order_by_nulls_last() {
+    // Bob has no "age" field -- missing maps to Null, sorted last by default ASC.
     let mut records = vec![
-        json!({"name": "Bob"}),
-        json!({"name": "Alice", "age": 30}),
-        json!({"name": "Carol", "age": 25}),
+        mpack!({"name": "Bob"}),
+        mpack!({"name": "Alice", "age": 30}),
+        mpack!({"name": "Carol", "age": 25}),
     ];
 
     let order = OrderBy::new([OrderByItem::asc("age").nulls_last()]);
-    apply_order_by(&mut records, &order);
-    assert_eq!(records[0]["age"], 25);
-    assert_eq!(records[1]["age"], 30);
-    assert!(records[2].get("age").is_none() || records[2]["age"].is_null());
+    apply_order_by_qv(&mut records, &order);
+    let r = to_json(&records);
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["age"], 30);
+    assert!(r[2].get("age").is_none() || r[2]["age"].is_null());
 }
 
 #[test]
 fn order_by_empty_records() {
-    let mut records: Vec<serde_json::Value> = vec![];
+    let mut records: Vec<QueryValue> = vec![];
     let order = OrderBy::asc("age");
-    apply_order_by(&mut records, &order);
+    apply_order_by_qv(&mut records, &order);
     assert!(records.is_empty());
 }
 
 #[test]
 fn order_by_single_record() {
-    let mut records = vec![json!({"name": "Alice", "age": 30})];
+    let mut records = vec![mpack!({"name": "Alice", "age": 30})];
     let order = OrderBy::desc("age");
-    apply_order_by(&mut records, &order);
+    apply_order_by_qv(&mut records, &order);
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["age"], 30);
+    let r = to_json(&records);
+    assert_eq!(r[0]["age"], 30);
 }
 
 #[test]
 fn order_by_explicit_null_value() {
     let mut records = vec![
-        json!({"name": "Alice", "age": 30}),
-        json!({"name": "Bob", "age": null}),
-        json!({"name": "Carol", "age": 25}),
+        mpack!({"name": "Alice", "age": 30}),
+        mpack!({"name": "Bob", "age": null}),
+        mpack!({"name": "Carol", "age": 25}),
     ];
 
     let order = OrderBy::asc("age");
-    apply_order_by(&mut records, &order);
+    apply_order_by_qv(&mut records, &order);
     // Default ASC -> NullsOrder::Last
-    assert_eq!(records[0]["age"], 25);
-    assert_eq!(records[1]["age"], 30);
-    assert!(records[2]["age"].is_null());
+    let r = to_json(&records);
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["age"], 30);
+    assert!(r[2]["age"].is_null());
 }
 
 #[test]
 fn order_by_mixed_types() {
     let mut records = vec![
-        json!({"val": "hello"}),
-        json!({"val": 42}),
-        json!({"val": true}),
+        mpack!({"val": "hello"}),
+        mpack!({"val": 42}),
+        mpack!({"val": true}),
     ];
 
     let order = OrderBy::asc("val");
-    apply_order_by(&mut records, &order);
+    apply_order_by_qv(&mut records, &order);
     // Mixed types compare as Equal in the default comparator,
     // so original order is preserved (stable sort).
-    assert_eq!(records[0]["val"], "hello");
-    assert_eq!(records[1]["val"], 42);
-    assert_eq!(records[2]["val"], true);
+    let r = to_json(&records);
+    assert_eq!(r[0]["val"], "hello");
+    assert_eq!(r[1]["val"], 42);
+    assert_eq!(r[2]["val"], true);
 }
 
 #[test]
 fn order_by_empty_items() {
     let mut records = vec![
-        json!({"name": "Carol"}),
-        json!({"name": "Alice"}),
-        json!({"name": "Bob"}),
+        mpack!({"name": "Carol"}),
+        mpack!({"name": "Alice"}),
+        mpack!({"name": "Bob"}),
     ];
     let order = OrderBy::new([]);
-    apply_order_by(&mut records, &order);
+    apply_order_by_qv(&mut records, &order);
     // Empty order_by -> no sort -> original order preserved
-    assert_eq!(records[0]["name"], "Carol");
-    assert_eq!(records[1]["name"], "Alice");
-    assert_eq!(records[2]["name"], "Bob");
+    let r = to_json(&records);
+    assert_eq!(r[0]["name"], "Carol");
+    assert_eq!(r[1]["name"], "Alice");
+    assert_eq!(r[2]["name"], "Bob");
 }
 
 // ============================================================================

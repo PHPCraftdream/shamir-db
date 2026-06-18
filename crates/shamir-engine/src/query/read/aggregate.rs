@@ -21,7 +21,6 @@ use std::cmp::Ordering;
 
 use bytes::Bytes;
 use indexmap::map::Entry;
-use serde_json as json;
 
 use crate::function::builtin_aggs;
 use crate::query::filter::eval::{compare_values, resolve_filter_query};
@@ -29,7 +28,7 @@ use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::Aggregator;
-use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
+use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -163,12 +162,127 @@ pub(super) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) -> GroupKeyItem {
 }
 
 /// Build the complex-group-key fallback from an owned `InnerValue` (a
-/// container / Dec / Big leaf materialised once via `materialize_at`). Uses
-/// the JSON canonical form for parity with the pre-S4 code path.
+/// container / Dec / Big leaf materialised once via `materialize_at`).
+///
+/// Converts `InnerValue` → `QueryValue` via the interner, then serialises to
+/// a canonical string that matches the equivalence classes of the old
+/// `serde_json::Value::to_string()` path — preserving grouping behaviour.
 #[inline]
 pub(super) fn group_key_item_complex(val: &InnerValue, interner: &Interner) -> GroupKeyItem {
-    let jv = inner_to_json_value(val, interner).unwrap_or(json::Value::Null);
-    GroupKeyItem::Complex(jv.to_string().into_boxed_str())
+    let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
+    GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
+}
+
+/// Produce a canonical JSON-compatible string for a `QueryValue` that matches
+/// the string `serde_json::Value::to_string()` would emit after the old
+/// `From<QueryValue> for serde_json::Value` coercion.
+///
+/// This gives the same GROUP BY equivalence classes as the pre-J3 code path,
+/// with no serde_json allocation.
+fn query_value_canonical_str(qv: &QueryValue) -> String {
+    match qv {
+        QueryValue::Null => "null".to_string(),
+        QueryValue::Bool(b) => {
+            if *b {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        }
+        QueryValue::Int(i) => i.to_string(),
+        QueryValue::F64(f) => {
+            if f.is_finite() {
+                // serde_json serialises finite f64 via ryu; use the same
+                // precision by relying on Rust's default float formatter which
+                // also uses Grisu/Dragon and produces the shortest
+                // round-trip representation — matching serde_json output for
+                // the values we receive.
+                format!("{f}")
+            } else {
+                // Non-finite f64 becomes a quoted string in the old path.
+                format!("\"{}\"", f)
+            }
+        }
+        QueryValue::Dec(d) => format!("\"{}\"", d),
+        QueryValue::Big(b) => format!("\"{}\"", b),
+        QueryValue::Str(s) => {
+            // Escape the string the same way serde_json does:
+            // backslash and double-quote are the only characters that must be
+            // escaped for the ASCII content that appears in group keys. Full
+            // unicode escaping is not needed because serde_json's compact mode
+            // writes non-ASCII chars as UTF-8 (no \uXXXX), and that is what
+            // we replicate here.
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('"');
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if (c as u32) < 0x20 => {
+                        // Control characters: \uXXXX
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut out,
+                            format_args!("\\u{:04x}", c as u32),
+                        );
+                    }
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        QueryValue::Bin(bytes) => {
+            // Old path: Bin → serde_json Array([byte as i64, ...]).
+            let mut out = String::with_capacity(bytes.len() * 3 + 2);
+            out.push('[');
+            for (i, &b) in bytes.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{}", b));
+            }
+            out.push(']');
+            out
+        }
+        QueryValue::List(l) => {
+            let mut out = String::from("[");
+            for (i, item) in l.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&query_value_canonical_str(item));
+            }
+            out.push(']');
+            out
+        }
+        QueryValue::Set(s) => {
+            let mut out = String::from("[");
+            for (i, item) in s.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&query_value_canonical_str(item));
+            }
+            out.push(']');
+            out
+        }
+        QueryValue::Map(m) => {
+            let mut out = String::from("{");
+            for (i, (k, v)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&query_value_canonical_str(&QueryValue::Str(k.clone())));
+                out.push(':');
+                out.push_str(&query_value_canonical_str(v));
+            }
+            out.push('}');
+            out
+        }
+    }
 }
 
 // ============================================================================

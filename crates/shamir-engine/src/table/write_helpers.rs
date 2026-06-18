@@ -94,10 +94,10 @@ pub(super) fn resolve_computed_record<'a>(
     // `$ref` resolves only against literal fields; a reference to another
     // computed field is intentionally unresolved (fail-closed) so computed
     // fields can't depend on evaluation order.
-    let literal: serde_json::Map<String, serde_json::Value> = obj
+    let literal: TMap<String, QueryValue> = obj
         .iter()
         .filter(|(_, v)| !is_computed_field(v))
-        .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     let scalars = builtin_scalars();
@@ -122,7 +122,7 @@ pub(super) fn resolve_computed_record<'a>(
 
 /// Evaluate a [`FilterValue`] to a [`QueryValue`] in the write-time computed
 /// context: literals map directly, `$ref` navigates `literal` (the record's
-/// own literal fields) via the natural serde_json → QueryValue conversion,
+/// own literal fields) as a `QueryValue::Map` path,
 /// and `$fn` dispatches recursively through the scalar registry.
 ///
 /// C6 (#80): the `$fn` branch builds QueryValue args and keeps the funclib
@@ -131,7 +131,7 @@ pub(super) fn resolve_computed_record<'a>(
 /// into the record map (already QueryValue per M2).
 pub(super) fn eval_write_value(
     fv: &FilterValue,
-    literal: &serde_json::Map<String, serde_json::Value>,
+    literal: &TMap<String, QueryValue>,
     scalars: &ScalarRegistry,
 ) -> Result<QueryValue, String> {
     match fv {
@@ -141,14 +141,9 @@ pub(super) fn eval_write_value(
         FilterValue::Float(f) => Ok(QueryValue::F64(*f)),
         FilterValue::String(s) => Ok(QueryValue::Str(s.clone())),
         FilterValue::Binary(b) => Ok(QueryValue::Bin(b.clone())),
-        FilterValue::FieldRef { path } => {
-            let leaf = json_nav(literal, path).ok_or_else(|| {
-                format!("$ref '{}' not found among literal fields", path.join("."))
-            })?;
-            // serde_json::Value is already string-keyed, so this is the
-            // natural QueryValue target — no InnerValue crossing needed.
-            Ok(QueryValue::from(leaf.clone()))
-        }
+        FilterValue::FieldRef { path } => qv_nav(literal, path)
+            .cloned()
+            .ok_or_else(|| format!("$ref '{}' not found among literal fields", path.join("."))),
         FilterValue::FnCall { call } => {
             // Args are QueryValue → straight to funclib; result kept as
             // QueryValue. Zero InnerValue, zero round-trip (C6 #80).
@@ -165,14 +160,21 @@ pub(super) fn eval_write_value(
     }
 }
 
-/// Navigate a field path through a JSON object (`["address","zip"]`).
-pub(super) fn json_nav<'a>(
-    obj: &'a serde_json::Map<String, serde_json::Value>,
+/// Navigate a field path through a `QueryValue::Map` (`["address", "zip"]`).
+///
+/// Replaces the former `json_nav` over `serde_json::Map`. The top-level map
+/// is a `TMap<String, QueryValue>`; nested maps are `QueryValue::Map`.
+pub(super) fn qv_nav<'a>(
+    obj: &'a TMap<String, QueryValue>,
     path: &[String],
-) -> Option<&'a serde_json::Value> {
-    let mut cur = obj.get(path.first()?)?;
+) -> Option<&'a QueryValue> {
+    let first = path.first()?;
+    let mut cur: &QueryValue = obj.get(first.as_str())?;
     for seg in &path[1..] {
-        cur = cur.as_object()?.get(seg)?;
+        match cur {
+            QueryValue::Map(m) => cur = m.get(seg.as_str())?,
+            _ => return None,
+        }
     }
     Some(cur)
 }
