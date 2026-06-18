@@ -345,20 +345,28 @@ async fn effective_fn_actor_switches_on_setuid() {
 
     // Create a real catalogue entry for a function, then set its meta to setuid.
     use base64::Engine;
-    use serde_json::json;
+    use shamir_types::types::common::new_map;
+    use shamir_types::types::value::QueryValue;
 
     let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00asm\x01\x00\x00\x00");
+    let mut fn_rec_map = new_map();
+    fn_rec_map.insert("name".to_string(), QueryValue::Str("suid_fn".to_string()));
+    fn_rec_map.insert("wasm_b64".to_string(), QueryValue::Str(wasm_b64));
+    fn_rec_map.insert(
+        "owner".to_string(),
+        QueryValue::Int(Actor::User(10).to_owner_id() as i64),
+    );
+    fn_rec_map.insert("group".to_string(), QueryValue::Null);
+    fn_rec_map.insert(
+        "mode".to_string(),
+        QueryValue::Int(Mode::with_setuid(0o755, true) as i64),
+    );
+    let fn_rec = QueryValue::Map(fn_rec_map);
     shamir
         .system_store()
         .save_function(
             "suid_fn",
-            &json!({
-                "name": "suid_fn",
-                "wasm_b64": wasm_b64,
-                "owner": Actor::User(10).to_owner_id(),
-                "group": null,
-                "mode": Mode::with_setuid(0o755, true),
-            }),
+            &fn_rec,
             &ResourceMeta {
                 owner: Actor::User(10),
                 group: None,

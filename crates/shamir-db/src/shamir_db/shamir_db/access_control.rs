@@ -1,5 +1,6 @@
 use serde_json::json;
 use shamir_collections::TFxMap;
+use shamir_types::types::value::QueryValue;
 
 use crate::access::{
     authorize, permits, principal_id, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
@@ -166,7 +167,12 @@ impl ShamirDb {
                     .await
             }
             ResourcePath::FunctionNamespace => {
-                let mut rec = serde_json::json!({"key": "fn_namespace_meta"});
+                let mut m = shamir_types::types::common::new_map();
+                m.insert(
+                    "key".to_string(),
+                    QueryValue::Str("fn_namespace_meta".to_string()),
+                );
+                let mut rec = QueryValue::Map(m);
                 meta.inject_into(&mut rec);
                 self.system_store
                     .save_setting("fn_namespace_meta", &rec)
@@ -206,7 +212,7 @@ impl ShamirDb {
                     .load_groups()
                     .await?
                     .iter()
-                    .filter_map(|g| g["group_id"].as_u64())
+                    .filter_map(|g| g.get("group_id").and_then(|v| v.as_u64()))
                     .max();
                 max.map_or(1, |m| m + 1)
             }
@@ -217,7 +223,7 @@ impl ShamirDb {
         // in between only LEAKS an id (monotonic) — it can never overwrite the
         // next group on restart.
         self.system_store
-            .save_setting("next_group_id", &serde_json::json!(current + 1))
+            .save_setting("next_group_id", &QueryValue::Int((current + 1) as i64))
             .await?;
         self.system_store.save_group(group_id, name, &[]).await?;
         Ok(group_id)
@@ -255,8 +261,8 @@ impl ShamirDb {
                 let groups = self.system_store.load_groups().await?;
                 let id = groups
                     .iter()
-                    .find(|g| g["name"].as_str() == Some(name.as_str()))
-                    .and_then(|g| g["group_id"].as_u64())
+                    .find(|g| g.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
+                    .and_then(|g| g.get("group_id").and_then(|v| v.as_u64()))
                     .ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)))?;
                 Ok(id)
             }
@@ -268,8 +274,8 @@ impl ShamirDb {
         let rec = self.system_store.load_group(group_id).await?;
         Ok(rec
             .and_then(|r| {
-                r["members"]
-                    .as_array()
+                r.get("members")
+                    .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             })
             .unwrap_or_default())

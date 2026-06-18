@@ -2,6 +2,7 @@ use crate::access::{
     action_perm, authorize, class_of, permits, principal_id, Action, Actor, Mode, Perm, PermClass,
     ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
+use crate::mpack;
 
 #[test]
 fn system_is_default() {
@@ -202,11 +203,11 @@ fn inject_into_and_from_record_round_trip() {
         group: Some(5),
         mode: 0o750,
     };
-    let mut rec = serde_json::json!({"name": "test"});
+    let mut rec = mpack!({"name": "test"});
     meta.inject_into(&mut rec);
-    assert_eq!(rec["owner"], 10);
-    assert_eq!(rec["group"], 5);
-    assert_eq!(rec["mode"], 0o750);
+    assert_eq!(rec.get("owner").and_then(|v| v.as_u64()), Some(10));
+    assert_eq!(rec.get("group").and_then(|v| v.as_u64()), Some(5));
+    assert_eq!(rec.get("mode").and_then(|v| v.as_u64()), Some(0o750));
 
     let loaded = ResourceMeta::from_record(&rec);
     assert_eq!(loaded.owner, Actor::User(10));
@@ -216,19 +217,21 @@ fn inject_into_and_from_record_round_trip() {
 
 #[test]
 fn from_record_backward_compat_returns_open() {
-    let rec = serde_json::json!({"name": "legacy"});
+    let rec = mpack!({"name": "legacy"});
     let loaded = ResourceMeta::from_record(&rec);
     assert_eq!(loaded, ResourceMeta::open());
 }
 
 #[test]
 fn from_record_null_group_is_none() {
-    let rec = serde_json::json!({
-        "name": "test",
-        "owner": 42,
-        "group": null,
-        "mode": 0o644,
-    });
+    use crate::types::common::new_map;
+    use crate::types::value::QueryValue;
+    let mut m = new_map();
+    m.insert("name".to_string(), QueryValue::Str("test".to_string()));
+    m.insert("owner".to_string(), QueryValue::Int(42));
+    m.insert("group".to_string(), QueryValue::Null);
+    m.insert("mode".to_string(), QueryValue::Int(0o644));
+    let rec = QueryValue::Map(m);
     let loaded = ResourceMeta::from_record(&rec);
     assert_eq!(loaded.owner, Actor::User(42));
     assert!(loaded.group.is_none());

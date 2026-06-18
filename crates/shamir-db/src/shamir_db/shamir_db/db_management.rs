@@ -1,5 +1,3 @@
-use serde_json::json;
-
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::RepoConfig;
@@ -25,19 +23,24 @@ impl ShamirDb {
             .as_secs();
 
         // Persist to system store
-        if let Err(e) = self
-            .system_store
-            .save_database(
-                name,
-                &json!({
-                    "name": name,
-                    "created_at": created_at,
-                }),
-                &ResourceMeta::owned_by(actor),
-            )
-            .await
         {
-            log::warn!("shamir_db::create_db: failed to persist '{}': {}", name, e);
+            let mut m = shamir_types::types::common::new_map();
+            m.insert(
+                "name".to_string(),
+                shamir_types::types::value::QueryValue::Str(name.to_string()),
+            );
+            m.insert(
+                "created_at".to_string(),
+                shamir_types::types::value::QueryValue::Int(created_at as i64),
+            );
+            let record = shamir_types::types::value::QueryValue::Map(m);
+            if let Err(e) = self
+                .system_store
+                .save_database(name, &record, &ResourceMeta::owned_by(actor))
+                .await
+            {
+                log::warn!("shamir_db::create_db: failed to persist '{}': {}", name, e);
+            }
         }
 
         db

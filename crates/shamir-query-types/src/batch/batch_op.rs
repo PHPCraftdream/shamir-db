@@ -208,230 +208,132 @@ impl<'de> Deserialize<'de> for BatchOp {
         };
         let has = |k: &str| keys.iter().any(|s| s == k);
 
-        // Convert to serde_json::Value for the from_value dispatch.
-        // For write-path ops (Insert, Update, Set) the inner types
-        // now carry QueryValue fields — from_value invokes
-        // QueryValue::deserialize which is a single-pass tree walk.
-        let value = serde_json::Value::from(qv);
+        // Re-encode the QueryValue through msgpack so that each typed-op
+        // struct can use its own serde::Deserialize impl without going
+        // through a serde_json::Value trampoline.  The msgpack encoding
+        // is byte-identical to what the wire carries when the caller is
+        // already on msgpack, and is a faithful round-trip for JSON
+        // callers (tests) too, because QueryValue's Serialize output is
+        // format-agnostic.
+        let bytes = rmp_serde::to_vec_named(&qv).map_err(serde::de::Error::custom)?;
+
+        /// Decode msgpack bytes into a typed op struct.
+        fn qv_to<T: serde::de::DeserializeOwned, E: serde::de::Error>(
+            bytes: &[u8],
+        ) -> Result<T, E> {
+            rmp_serde::from_slice(bytes).map_err(serde::de::Error::custom)
+        }
 
         // Dispatch by unique key
         if has("from") {
-            serde_json::from_value(value)
-                .map(BatchOp::Read)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ReadQuery, _>(&bytes).map(BatchOp::Read)
         } else if has("insert_into") {
-            serde_json::from_value(value)
-                .map(BatchOp::Insert)
-                .map_err(serde::de::Error::custom)
+            qv_to::<InsertOp, _>(&bytes).map(BatchOp::Insert)
         } else if has("update") {
-            serde_json::from_value(value)
-                .map(BatchOp::Update)
-                .map_err(serde::de::Error::custom)
+            qv_to::<UpdateOp, _>(&bytes).map(BatchOp::Update)
         } else if has("delete_from") {
-            serde_json::from_value(value)
-                .map(BatchOp::Delete)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DeleteOp, _>(&bytes).map(BatchOp::Delete)
         } else if has("create_db") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateDb)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateDbOp, _>(&bytes).map(BatchOp::CreateDb)
         } else if has("drop_db") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropDb)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropDbOp, _>(&bytes).map(BatchOp::DropDb)
         } else if has("create_repo") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateRepo)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateRepoOp, _>(&bytes).map(BatchOp::CreateRepo)
         } else if has("drop_repo") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropRepo)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropRepoOp, _>(&bytes).map(BatchOp::DropRepo)
         } else if has("create_table") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateTable)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateTableOp, _>(&bytes).map(BatchOp::CreateTable)
         } else if has("drop_table") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropTable)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropTableOp, _>(&bytes).map(BatchOp::DropTable)
         } else if has("create_index") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateIndex)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateIndexOp, _>(&bytes).map(BatchOp::CreateIndex)
         } else if has("drop_index") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropIndex)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropIndexOp, _>(&bytes).map(BatchOp::DropIndex)
         } else if has("set_buffer_config") {
-            serde_json::from_value(value)
-                .map(BatchOp::SetBufferConfig)
-                .map_err(serde::de::Error::custom)
+            qv_to::<SetBufferConfigOp, _>(&bytes).map(BatchOp::SetBufferConfig)
         } else if has("get_buffer_config") {
-            serde_json::from_value(value)
-                .map(BatchOp::GetBufferConfig)
-                .map_err(serde::de::Error::custom)
+            qv_to::<GetBufferConfigOp, _>(&bytes).map(BatchOp::GetBufferConfig)
         } else if has("alter_buffer_config") {
-            serde_json::from_value(value)
-                .map(BatchOp::AlterBufferConfig)
-                .map_err(serde::de::Error::custom)
+            qv_to::<AlterBufferConfigOp, _>(&bytes).map(BatchOp::AlterBufferConfig)
         } else if has("start_migration") {
-            serde_json::from_value(value)
-                .map(BatchOp::StartMigration)
-                .map_err(serde::de::Error::custom)
+            qv_to::<StartMigrationOp, _>(&bytes).map(BatchOp::StartMigration)
         } else if has("commit_migration") {
-            serde_json::from_value(value)
-                .map(BatchOp::CommitMigration)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CommitMigrationOp, _>(&bytes).map(BatchOp::CommitMigration)
         } else if has("rollback_migration") {
-            serde_json::from_value(value)
-                .map(BatchOp::RollbackMigration)
-                .map_err(serde::de::Error::custom)
+            qv_to::<RollbackMigrationOp, _>(&bytes).map(BatchOp::RollbackMigration)
         } else if has("migration_status") {
-            serde_json::from_value(value)
-                .map(BatchOp::MigrationStatus)
-                .map_err(serde::de::Error::custom)
+            qv_to::<MigrationStatusOp, _>(&bytes).map(BatchOp::MigrationStatus)
         } else if has("create_user") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateUser)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateUserOp, _>(&bytes).map(BatchOp::CreateUser)
         } else if has("drop_user") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropUser)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropUserOp, _>(&bytes).map(BatchOp::DropUser)
         } else if has("create_role") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateRole)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateRoleOp, _>(&bytes).map(BatchOp::CreateRole)
         } else if has("drop_role") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropRole)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropRoleOp, _>(&bytes).map(BatchOp::DropRole)
         } else if has("grant_role") {
-            serde_json::from_value(value)
-                .map(BatchOp::GrantRole)
-                .map_err(serde::de::Error::custom)
+            qv_to::<GrantRoleOp, _>(&bytes).map(BatchOp::GrantRole)
         } else if has("revoke_role") {
-            serde_json::from_value(value)
-                .map(BatchOp::RevokeRole)
-                .map_err(serde::de::Error::custom)
+            qv_to::<RevokeRoleOp, _>(&bytes).map(BatchOp::RevokeRole)
         } else if has("list") {
-            serde_json::from_value(value)
-                .map(BatchOp::List)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ListOp, _>(&bytes).map(BatchOp::List)
         } else if has("chmod") {
-            serde_json::from_value(value)
-                .map(BatchOp::Chmod)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ChmodOp, _>(&bytes).map(BatchOp::Chmod)
         } else if has("chown") {
-            serde_json::from_value(value)
-                .map(BatchOp::Chown)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ChownOp, _>(&bytes).map(BatchOp::Chown)
         } else if has("chgrp") {
-            serde_json::from_value(value)
-                .map(BatchOp::Chgrp)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ChgrpOp, _>(&bytes).map(BatchOp::Chgrp)
         } else if has("create_group") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateGroup)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateGroupOp, _>(&bytes).map(BatchOp::CreateGroup)
         } else if has("drop_group") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropGroup)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropGroupOp, _>(&bytes).map(BatchOp::DropGroup)
         } else if has("add_group_member") {
-            serde_json::from_value(value)
-                .map(BatchOp::AddGroupMember)
-                .map_err(serde::de::Error::custom)
+            qv_to::<AddGroupMemberOp, _>(&bytes).map(BatchOp::AddGroupMember)
         } else if has("remove_group_member") {
-            serde_json::from_value(value)
-                .map(BatchOp::RemoveGroupMember)
-                .map_err(serde::de::Error::custom)
+            qv_to::<RemoveGroupMemberOp, _>(&bytes).map(BatchOp::RemoveGroupMember)
         } else if has("access_tree") {
-            serde_json::from_value(value)
-                .map(BatchOp::AccessTree)
-                .map_err(serde::de::Error::custom)
+            qv_to::<AccessTreeOp, _>(&bytes).map(BatchOp::AccessTree)
         } else if has("create_function") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateFunction)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateFunctionOp, _>(&bytes).map(BatchOp::CreateFunction)
         } else if has("drop_function") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropFunction)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropFunctionOp, _>(&bytes).map(BatchOp::DropFunction)
         } else if has("rename_function") {
-            serde_json::from_value(value)
-                .map(BatchOp::RenameFunction)
-                .map_err(serde::de::Error::custom)
+            qv_to::<RenameFunctionOp, _>(&bytes).map(BatchOp::RenameFunction)
         } else if has("create_validator") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateValidator)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateValidatorOp, _>(&bytes).map(BatchOp::CreateValidator)
         } else if has("drop_validator") {
-            serde_json::from_value(value)
-                .map(BatchOp::DropValidator)
-                .map_err(serde::de::Error::custom)
+            qv_to::<DropValidatorOp, _>(&bytes).map(BatchOp::DropValidator)
         } else if has("rename_validator") {
-            serde_json::from_value(value)
-                .map(BatchOp::RenameValidator)
-                .map_err(serde::de::Error::custom)
+            qv_to::<RenameValidatorOp, _>(&bytes).map(BatchOp::RenameValidator)
         } else if has("bind_validator") {
-            serde_json::from_value(value)
-                .map(BatchOp::BindValidator)
-                .map_err(serde::de::Error::custom)
+            qv_to::<BindValidatorOp, _>(&bytes).map(BatchOp::BindValidator)
         } else if has("unbind_validator") {
-            serde_json::from_value(value)
-                .map(BatchOp::UnbindValidator)
-                .map_err(serde::de::Error::custom)
+            qv_to::<UnbindValidatorOp, _>(&bytes).map(BatchOp::UnbindValidator)
         } else if has("list_validators") {
-            serde_json::from_value(value)
-                .map(BatchOp::ListValidators)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ListValidatorsOp, _>(&bytes).map(BatchOp::ListValidators)
         } else if has("create_function_folder") {
-            serde_json::from_value(value)
-                .map(BatchOp::CreateFunctionFolder)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CreateFunctionFolderOp, _>(&bytes).map(BatchOp::CreateFunctionFolder)
         } else if has("interner_dump") {
-            serde_json::from_value(value)
-                .map(BatchOp::InternerDump)
-                .map_err(serde::de::Error::custom)
+            qv_to::<InternerDumpOp, _>(&bytes).map(BatchOp::InternerDump)
         } else if has("interner_touch") {
-            serde_json::from_value(value)
-                .map(BatchOp::InternerTouch)
-                .map_err(serde::de::Error::custom)
+            qv_to::<InternerTouchOp, _>(&bytes).map(BatchOp::InternerTouch)
         } else if has("purge_history") {
-            serde_json::from_value(value)
-                .map(BatchOp::PurgeHistory)
-                .map_err(serde::de::Error::custom)
+            qv_to::<PurgeHistoryOp, _>(&bytes).map(BatchOp::PurgeHistory)
         } else if has("set_retention") {
-            serde_json::from_value(value)
-                .map(BatchOp::SetRetention)
-                .map_err(serde::de::Error::custom)
+            qv_to::<SetRetentionOp, _>(&bytes).map(BatchOp::SetRetention)
         } else if has("changes_since") {
-            serde_json::from_value(value)
-                .map(BatchOp::ChangesSince)
-                .map_err(serde::de::Error::custom)
+            qv_to::<ChangesSinceOp, _>(&bytes).map(BatchOp::ChangesSince)
         } else if has("call") {
-            serde_json::from_value(value)
-                .map(BatchOp::Call)
-                .map_err(serde::de::Error::custom)
+            qv_to::<CallOp, _>(&bytes).map(BatchOp::Call)
         } else if has("batch") {
-            serde_json::from_value(value)
-                .map(BatchOp::Batch)
-                .map_err(serde::de::Error::custom)
+            qv_to::<SubBatchOp, _>(&bytes).map(BatchOp::Batch)
         } else if has("subscribe") {
-            serde_json::from_value(value)
-                .map(BatchOp::Subscribe)
-                .map_err(serde::de::Error::custom)
+            qv_to::<SubscribeOp, _>(&bytes).map(BatchOp::Subscribe)
         } else if has("unsubscribe") {
-            serde_json::from_value(value)
-                .map(BatchOp::Unsubscribe)
-                .map_err(serde::de::Error::custom)
+            qv_to::<UnsubscribeOp, _>(&bytes).map(BatchOp::Unsubscribe)
         } else if has("set") {
             // "set" checked last because UpdateOp also has a "set" field
-            serde_json::from_value(value)
-                .map(BatchOp::Set)
-                .map_err(serde::de::Error::custom)
+            qv_to::<SetOp, _>(&bytes).map(BatchOp::Set)
         } else {
             Err(serde::de::Error::custom("Unknown operation type"))
         }

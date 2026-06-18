@@ -1,5 +1,4 @@
 use base64::Engine;
-use serde_json::json;
 use std::sync::Arc;
 
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
@@ -145,14 +144,35 @@ impl ShamirDb {
         let meta = FunctionMeta::new(opts.visibility, opts.security, opts.secret_grants.clone());
 
         let version = 1u64;
-        let mut record = json!({
-            "name": name,
-            "wasm_b64": wasm_b64,
-            "wasm_hash": wasm_hash,
-            "lang": lang_tag,
-            "source": source_str,
-            "version": version,
-        });
+        let mut m = shamir_types::types::common::new_map();
+        m.insert(
+            "name".to_string(),
+            shamir_types::types::value::QueryValue::Str(name.to_string()),
+        );
+        m.insert(
+            "wasm_b64".to_string(),
+            shamir_types::types::value::QueryValue::Str(wasm_b64),
+        );
+        m.insert(
+            "wasm_hash".to_string(),
+            shamir_types::types::value::QueryValue::Str(wasm_hash),
+        );
+        m.insert(
+            "lang".to_string(),
+            shamir_types::types::value::QueryValue::Str(lang_tag.to_string()),
+        );
+        m.insert(
+            "source".to_string(),
+            match source_str {
+                Some(s) => shamir_types::types::value::QueryValue::Str(s),
+                None => shamir_types::types::value::QueryValue::Null,
+            },
+        );
+        m.insert(
+            "version".to_string(),
+            shamir_types::types::value::QueryValue::Int(version as i64),
+        );
+        let mut record = shamir_types::types::value::QueryValue::Map(m);
         meta.inject_into(&mut record);
         self.system_store
             .save_function(name, &record, &ResourceMeta::owned_by(actor.clone()))
@@ -229,7 +249,7 @@ impl ShamirDb {
         let fn_records = self.system_store.load_functions().await?;
         let old_record = fn_records
             .iter()
-            .find(|r| r["name"].as_str() == Some(from))
+            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(from))
             .cloned();
 
         // Rename in the live registry first.
@@ -247,7 +267,12 @@ impl ShamirDb {
         if let Some(mut rec) = old_record {
             let existing_meta = ResourceMeta::from_record(&rec);
             self.system_store.remove_function(from).await?;
-            rec["name"] = json!(to);
+            if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
+                map.insert(
+                    "name".to_string(),
+                    shamir_types::types::value::QueryValue::Str(to.to_string()),
+                );
+            }
             self.system_store
                 .save_function(to, &rec, &existing_meta)
                 .await?;
@@ -298,10 +323,20 @@ impl ShamirDb {
             if existing.is_some() {
                 continue;
             }
-            let record = json!({
-                "path": path_key,
-                "segments": prefix,
-            });
+            let segments_list: Vec<shamir_types::types::value::QueryValue> = prefix
+                .iter()
+                .map(|s| shamir_types::types::value::QueryValue::Str(s.clone()))
+                .collect();
+            let mut m = shamir_types::types::common::new_map();
+            m.insert(
+                "path".to_string(),
+                shamir_types::types::value::QueryValue::Str(path_key.clone()),
+            );
+            m.insert(
+                "segments".to_string(),
+                shamir_types::types::value::QueryValue::List(segments_list),
+            );
+            let record = shamir_types::types::value::QueryValue::Map(m);
             self.system_store
                 .save_function_folder(&path_key, &record, &ResourceMeta::owned_by(actor.clone()))
                 .await?;
@@ -315,7 +350,11 @@ impl ShamirDb {
         let records = self.system_store.load_function_folders().await?;
         let mut paths: Vec<String> = records
             .iter()
-            .filter_map(|r| r["path"].as_str().map(|s| s.to_string()))
+            .filter_map(|r| {
+                r.get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         paths.sort();
         Ok(paths)

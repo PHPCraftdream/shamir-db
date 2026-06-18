@@ -177,11 +177,13 @@ async fn vector_hnsw_similarity() {
     b.id(2);
     b.insert(
         "w1",
-        insert("posts").row(doc! { "label" => "x" }.set_value("embedding", mpack!([1.0, 0.0, 0.0]))),
+        insert("posts")
+            .row(doc! { "label" => "x" }.set_value("embedding", mpack!([1.0, 0.0, 0.0]))),
     );
     b.insert(
         "w2",
-        insert("posts").row(doc! { "label" => "y" }.set_value("embedding", mpack!([0.0, 1.0, 0.0]))),
+        insert("posts")
+            .row(doc! { "label" => "y" }.set_value("embedding", mpack!([0.0, 1.0, 0.0]))),
     );
     b.insert(
         "w3",
