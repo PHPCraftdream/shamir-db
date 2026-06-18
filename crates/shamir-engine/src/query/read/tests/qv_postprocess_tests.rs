@@ -1,10 +1,13 @@
-//! Golden result-identity tests for QueryValue post-processors.
+//! Self-contained tests for QueryValue post-processors.
 //!
-//! Each test asserts that the new QueryValue-based post-processor
-//! (distinct_qv, order_by_qv, pagination<T>) produces IDENTICAL
-//! results (rows, order, serialised bytes) to the legacy json-based
-//! post-processor, including the Dec/Big/Bin/Set divergence cases
-//! where the canonical-key mapping is essential.
+//! Each test asserts that the QueryValue-based post-processor
+//! (distinct_qv, order_by_qv, pagination<T>) produces the correct
+//! result against explicit expected values, including the Dec/Big/Bin/Set
+//! edge cases where canonical-key mapping is essential for correct dedup.
+//!
+//! The old JSON-twin parity checks (comparing against the now-deleted
+//! apply_distinct / apply_select JSON path) have been replaced with
+//! concrete assertions against known-correct QueryValue results.
 
 use bytes::Bytes;
 use serde_json as json;
@@ -12,10 +15,8 @@ use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::exec::{
-    apply_distinct, apply_distinct_qv, apply_pagination, apply_select, apply_select_value,
-};
-use crate::query::read::order::{apply_order_by, apply_order_by_qv};
+use crate::query::read::exec::{apply_distinct_qv, apply_pagination, apply_select_value};
+use crate::query::read::order::apply_order_by_qv;
 use crate::query::read::{
     apply_aggregate_all, apply_group_by, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
     Pagination, Select,
@@ -35,45 +36,50 @@ fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
     QueryValue::Map(m)
 }
 
-/// Serialise both json and qv results to bytes and compare.
-fn assert_byte_identical(json_results: &[json::Value], qv_results: &[QueryValue]) {
-    assert_eq!(
-        json_results.len(),
-        qv_results.len(),
-        "row count mismatch: json={} qv={}",
-        json_results.len(),
-        qv_results.len()
-    );
-    for (i, (j, q)) in json_results.iter().zip(qv_results.iter()).enumerate() {
-        let jb = json::to_vec(j).unwrap();
-        let qb = json::to_vec(q).unwrap();
-        // Round-trip both through json::Value for structural comparison
-        // (key ordering in maps may differ, so byte comparison is too strict).
-        let jv: json::Value = json::from_slice(&jb).unwrap();
-        let qv: json::Value = json::from_slice(&qb).unwrap();
-        assert_eq!(jv, qv, "row {i} diverges:\n  json: {jv}\n  qv:   {qv}");
-    }
+/// Serialise a QueryValue slice to json::Values for comparison.
+fn to_json(qvs: &[QueryValue]) -> Vec<json::Value> {
+    qvs.iter().map(|v| json::to_value(v).unwrap()).collect()
 }
 
 // ============================================================================
-// Pagination (Stage A) — generic over T
+// Pagination (generic over T)
 // ============================================================================
 
 #[test]
-fn pagination_qv_identical_to_json() {
+fn pagination_qv_limit_offset() {
     let qvs: Vec<QueryValue> = (1..=5).map(QueryValue::Int).collect();
-    let jvs: Vec<json::Value> = (1..=5).map(json::Value::from).collect();
 
     let pag = Pagination::LimitOffset {
         limit: Some(2),
         offset: 1,
     };
 
-    let (j_result, j_info) = apply_pagination(jvs, &pag, true);
-    let (q_result, q_info) = apply_pagination(qvs, &pag, true);
+    let (result, info) = apply_pagination(qvs, &pag, true);
 
-    assert_byte_identical(&j_result, &q_result);
-    assert_eq!(j_info, q_info);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0], QueryValue::Int(2));
+    assert_eq!(result[1], QueryValue::Int(3));
+    let info = info.unwrap();
+    assert_eq!(info.total_count, Some(5));
+    assert!(info.has_next);
+    assert!(info.has_prev);
+}
+
+#[test]
+fn pagination_qv_page_based() {
+    let qvs: Vec<QueryValue> = (1..=5).map(QueryValue::Int).collect();
+
+    let pag = Pagination::page(2, 2);
+    let (result, info) = apply_pagination(qvs, &pag, true);
+
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0], QueryValue::Int(3));
+    assert_eq!(result[1], QueryValue::Int(4));
+    let info = info.unwrap();
+    assert_eq!(info.total_count, Some(5));
+    assert_eq!(info.current_page, Some(2));
+    assert!(info.has_next);
+    assert!(info.has_prev);
 }
 
 // ============================================================================
@@ -89,34 +95,35 @@ fn distinct_qv_scalar_duplicates() {
         qv_map(&[("a", QueryValue::Int(3))]),
         qv_map(&[("a", QueryValue::Int(2))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    let j_result = apply_distinct(jvs);
-    let q_result = apply_distinct_qv(qvs);
-    assert_byte_identical(&j_result, &q_result);
+    let result = apply_distinct_qv(qvs);
+
+    // 3 distinct values, insertion-order preserved
+    assert_eq!(result.len(), 3);
+    let r = to_json(&result);
+    assert_eq!(r[0]["a"], 1);
+    assert_eq!(r[1]["a"], 2);
+    assert_eq!(r[2]["a"], 3);
 }
 
 #[test]
 fn distinct_qv_dec_vs_str_same_dedup_class() {
-    // Dec("1.0") and Str("1.0") must deduplicate identically under both
-    // paths because the json coercion maps Dec→String.
+    // Dec("1.0") and Str("1.0") must deduplicate identically because
+    // the canonical-key mapping converts Dec→String ("1.0").
     let qvs = vec![
         qv_map(&[("v", QueryValue::Dec("1.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Str("1.0".to_string()))]),
         qv_map(&[("v", QueryValue::Int(2))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    let j_result = apply_distinct(jvs);
-    let q_result = apply_distinct_qv(qvs);
+    let result = apply_distinct_qv(qvs);
 
-    // Both paths should deduplicate Dec("1.0") and Str("1.0") into one row.
-    assert_byte_identical(&j_result, &q_result);
-    assert_eq!(
-        q_result.len(),
-        2,
-        "Dec and Str with same string should dedup"
-    );
+    // Dec("1.0") and Str("1.0") share the same canonical key → deduplicate
+    assert_eq!(result.len(), 2, "Dec and Str with same string should dedup");
+    // First seen (Dec) is kept; Int(2) is distinct
+    let r = to_json(&result);
+    assert_eq!(r[0]["v"], "1.0"); // Dec serialises to String in JSON
+    assert_eq!(r[1]["v"], 2);
 }
 
 #[test]
@@ -127,35 +134,30 @@ fn distinct_qv_big_vs_str_same_dedup_class() {
         qv_map(&[("v", QueryValue::Str("42".to_string()))]),
         qv_map(&[("v", QueryValue::Int(99))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    let j_result = apply_distinct(jvs);
-    let q_result = apply_distinct_qv(qvs);
+    let result = apply_distinct_qv(qvs);
 
-    assert_byte_identical(&j_result, &q_result);
-    assert_eq!(
-        q_result.len(),
-        2,
-        "Big and Str with same string should dedup"
-    );
+    // Big(42) and Str("42") share the same canonical key → deduplicate
+    assert_eq!(result.len(), 2, "Big and Str with same string should dedup");
+    let r = to_json(&result);
+    assert_eq!(r[0]["v"], "42"); // Big serialises to String in JSON
+    assert_eq!(r[1]["v"], 99);
 }
 
 #[test]
-fn distinct_qv_bin_as_array() {
-    // Bin([1, 2]) becomes Array([1, 2]) in json. Two identical Bin values
-    // should dedup; a Bin and a List with the same int contents should also
-    // dedup (they both become json arrays).
+fn distinct_qv_bin_dedup() {
+    // Two identical Bin values should deduplicate; a unique Bin is kept.
     let qvs = vec![
         qv_map(&[("v", QueryValue::Bin(vec![1, 2]))]),
         qv_map(&[("v", QueryValue::Bin(vec![1, 2]))]),
         qv_map(&[("v", QueryValue::Int(99))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    let j_result = apply_distinct(jvs);
-    let q_result = apply_distinct_qv(qvs);
+    let result = apply_distinct_qv(qvs);
 
-    assert_byte_identical(&j_result, &q_result);
+    // Two identical Bin → collapse to one; Int(99) is distinct
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[1], qv_map(&[("v", QueryValue::Int(99))]));
 }
 
 #[test]
@@ -165,15 +167,14 @@ fn distinct_qv_null_and_nested_map() {
         qv_map(&[("a", QueryValue::Null)]),
         qv_map(&[("a", nested.clone())]),
         qv_map(&[("a", QueryValue::Null)]),
-        qv_map(&[("a", nested)]),
+        qv_map(&[("a", nested.clone())]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    let j_result = apply_distinct(jvs);
-    let q_result = apply_distinct_qv(qvs);
+    let result = apply_distinct_qv(qvs);
 
-    assert_byte_identical(&j_result, &q_result);
-    assert_eq!(q_result.len(), 2);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0], qv_map(&[("a", QueryValue::Null)]));
+    assert_eq!(result[1], qv_map(&[("a", nested)]));
 }
 
 // ============================================================================
@@ -187,13 +188,14 @@ fn order_by_qv_int_asc() {
         qv_map(&[("age", QueryValue::Int(25))]),
         qv_map(&[("age", QueryValue::Int(30))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("age");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["age"], 35);
 }
 
 #[test]
@@ -203,13 +205,14 @@ fn order_by_qv_int_desc() {
         qv_map(&[("age", QueryValue::Int(35))]),
         qv_map(&[("age", QueryValue::Int(30))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::desc("age");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["age"], 35);
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["age"], 25);
 }
 
 #[test]
@@ -219,13 +222,14 @@ fn order_by_qv_f64() {
         qv_map(&[("v", QueryValue::F64(1.0))]),
         qv_map(&[("v", QueryValue::F64(2.25))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("v");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["v"], 1.0);
+    assert_eq!(r[1]["v"], 2.25);
+    assert_eq!(r[2]["v"], 3.5);
 }
 
 #[test]
@@ -236,13 +240,15 @@ fn order_by_qv_mixed_int_float() {
         qv_map(&[("v", QueryValue::Int(3))]),
         qv_map(&[("v", QueryValue::F64(0.5))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("v");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["v"], 0.5);
+    assert_eq!(r[1]["v"], 1);
+    assert_eq!(r[2]["v"], 2.5);
+    assert_eq!(r[3]["v"], 3);
 }
 
 #[test]
@@ -252,13 +258,14 @@ fn order_by_qv_string() {
         qv_map(&[("s", QueryValue::Str("apple".into()))]),
         qv_map(&[("s", QueryValue::Str("banana".into()))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("s");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["s"], "apple");
+    assert_eq!(r[1]["s"], "banana");
+    assert_eq!(r[2]["s"], "cherry");
 }
 
 #[test]
@@ -269,17 +276,27 @@ fn order_by_qv_null_first_last() {
             qv_map(&[("v", QueryValue::Null)]),
             qv_map(&[("v", QueryValue::Int(5))]),
         ];
-        let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
         let order = OrderBy::new([OrderByItem {
             field: vec!["v".into()],
             direction: OrderDirection::Asc,
             nulls: Some(nulls),
         }]);
-        apply_order_by(&mut jvs, &order);
         apply_order_by_qv(&mut qvs, &order);
 
-        assert_byte_identical(&jvs, &qvs);
+        let r = to_json(&qvs);
+        match nulls {
+            NullsOrder::First => {
+                assert!(r[0]["v"].is_null(), "null should be first");
+                assert_eq!(r[1]["v"], 5);
+                assert_eq!(r[2]["v"], 10);
+            }
+            NullsOrder::Last => {
+                assert_eq!(r[0]["v"], 5);
+                assert_eq!(r[1]["v"], 10);
+                assert!(r[2]["v"].is_null(), "null should be last");
+            }
+        }
     }
 }
 
@@ -291,42 +308,54 @@ fn order_by_qv_desc_nulls_first_last() {
             qv_map(&[("v", QueryValue::Null)]),
             qv_map(&[("v", QueryValue::Int(5))]),
         ];
-        let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
         let order = OrderBy::new([OrderByItem {
             field: vec!["v".into()],
             direction: OrderDirection::Desc,
             nulls: Some(nulls),
         }]);
-        apply_order_by(&mut jvs, &order);
         apply_order_by_qv(&mut qvs, &order);
 
-        assert_byte_identical(&jvs, &qvs);
+        let r = to_json(&qvs);
+        match nulls {
+            NullsOrder::First => {
+                assert!(r[0]["v"].is_null(), "null should be first");
+                assert_eq!(r[1]["v"], 10);
+                assert_eq!(r[2]["v"], 5);
+            }
+            NullsOrder::Last => {
+                assert_eq!(r[0]["v"], 10);
+                assert_eq!(r[1]["v"], 5);
+                assert!(r[2]["v"].is_null(), "null should be last");
+            }
+        }
     }
 }
 
 #[test]
 fn order_by_qv_dec_lexicographic() {
-    // Dec values sort lexicographically by their string form in the json
-    // path (Dec→String coercion). The QV path must reproduce this.
+    // Dec values sort lexicographically by their string form
+    // (Dec→String canonical key). "10.0" < "2.0" < "9.0" lexicographically.
     let mut qvs = vec![
         qv_map(&[("d", QueryValue::Dec("9.0".parse().unwrap()))]),
         qv_map(&[("d", QueryValue::Dec("10.0".parse().unwrap()))]),
         qv_map(&[("d", QueryValue::Dec("2.0".parse().unwrap()))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("d");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    // Lexicographic order: "10.0" < "2.0" < "9.0"
+    assert_eq!(r[0]["d"], "10.0");
+    assert_eq!(r[1]["d"], "2.0");
+    assert_eq!(r[2]["d"], "9.0");
 }
 
 #[test]
-fn order_by_qv_bin_is_other() {
-    // Bin maps to Array in json → SortKey::Other (unsortable).
-    // Both paths should preserve insertion order (stable sort).
+fn order_by_qv_bin_is_unsortable() {
+    // Bin maps to Array in canonical key → SortKey::Other (unsortable).
+    // Both values keep insertion order (stable sort).
     let mut qvs = vec![
         qv_map(&[
             ("b", QueryValue::Bin(vec![3, 2, 1])),
@@ -337,13 +366,14 @@ fn order_by_qv_bin_is_other() {
             ("n", QueryValue::Int(1)),
         ]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("b");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    // Insertion order preserved (both are "Other")
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["n"], 2);
+    assert_eq!(r[1]["n"], 1);
 }
 
 #[test]
@@ -366,31 +396,34 @@ fn order_by_qv_multiple_fields() {
             ("age", QueryValue::Int(30)),
         ]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::new([OrderByItem::asc("city"), OrderByItem::asc("age")]);
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
 
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["city"], "LA");
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["city"], "NYC");
+    assert_eq!(r[2]["age"], 30);
+    assert_eq!(r[3]["city"], "NYC");
+    assert_eq!(r[3]["age"], 35);
 }
 
 #[test]
 fn order_by_qv_empty_and_single() {
     // Empty
     let mut qvs: Vec<QueryValue> = vec![];
-    let mut jvs: Vec<json::Value> = vec![];
     let order = OrderBy::asc("x");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
-    assert_byte_identical(&jvs, &qvs);
+    assert!(qvs.is_empty());
 
     // Single
     let mut qvs = vec![qv_map(&[("x", QueryValue::Int(1))])];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
-    assert_byte_identical(&jvs, &qvs);
+    assert_eq!(qvs.len(), 1);
+    assert_eq!(qvs[0], qv_map(&[("x", QueryValue::Int(1))]));
 }
 
 // ============================================================================
@@ -398,7 +431,7 @@ fn order_by_qv_empty_and_single() {
 // ============================================================================
 
 #[test]
-fn combined_distinct_order_paginate_qv_vs_json() {
+fn combined_distinct_order_paginate_qv() {
     let qvs = vec![
         qv_map(&[("v", QueryValue::Int(3))]),
         qv_map(&[("v", QueryValue::Int(1))]),
@@ -407,25 +440,16 @@ fn combined_distinct_order_paginate_qv_vs_json() {
         qv_map(&[("v", QueryValue::Int(1))]),
         qv_map(&[("v", QueryValue::Int(4))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    // json path
-    let j_distinct = apply_distinct(jvs);
-    let mut j_sorted = j_distinct;
-    apply_order_by(&mut j_sorted, &OrderBy::asc("v"));
-    let (j_paged, j_info) = apply_pagination(
-        j_sorted,
-        &Pagination::LimitOffset {
-            limit: Some(2),
-            offset: 1,
-        },
-        true,
-    );
-
-    // qv path
+    // qv path: distinct → sort asc → page [offset=1, limit=2]
     let q_distinct = apply_distinct_qv(qvs);
+    // distinct gives [1, 2, 3, 4] (insertion-order dedup)
+    assert_eq!(q_distinct.len(), 4);
+
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("v"));
+    // sorted: [1, 2, 3, 4]
+
     let (q_paged, q_info) = apply_pagination(
         q_sorted,
         &Pagination::LimitOffset {
@@ -435,66 +459,76 @@ fn combined_distinct_order_paginate_qv_vs_json() {
         true,
     );
 
-    assert_byte_identical(&j_paged, &q_paged);
-    assert_eq!(j_info, q_info);
+    // page = [2, 3]
+    assert_eq!(q_paged.len(), 2);
+    let r = to_json(&q_paged);
+    assert_eq!(r[0]["v"], 2);
+    assert_eq!(r[1]["v"], 3);
+    let info = q_info.unwrap();
+    assert_eq!(info.total_count, Some(4));
 }
 
 #[test]
 fn combined_with_dec_divergence_case() {
     // Dec("1.0") and Str("1.0") should dedup to one row (canonical-key),
     // then sort correctly among other values.
+    // Canonical: Dec→String, so Dec("1.0")→"1.0" and Str("1.0")→"1.0" collide.
+    // Dec("2.0")→"2.0", Dec("3.0")→"3.0".
+    // Sorted lexicographically: "1.0" < "2.0" < "3.0".
     let qvs = vec![
         qv_map(&[("v", QueryValue::Dec("3.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Str("1.0".into()))]),
         qv_map(&[("v", QueryValue::Dec("1.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Dec("2.0".parse().unwrap()))]),
     ];
-    let jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
-    // json path
-    let j_distinct = apply_distinct(jvs);
-    let mut j_sorted = j_distinct;
-    apply_order_by(&mut j_sorted, &OrderBy::asc("v"));
-
-    // qv path
     let q_distinct = apply_distinct_qv(qvs);
+    // Dec("3.0"), Str("1.0") [kept, Dec("1.0") deduped], Dec("2.0") → 3 rows
+    assert_eq!(q_distinct.len(), 3);
+
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("v"));
 
-    assert_byte_identical(&j_sorted, &q_sorted);
+    let r = to_json(&q_sorted);
+    // Lex order of string forms: "1.0" < "2.0" < "3.0"
+    assert_eq!(r[0]["v"], "1.0");
+    assert_eq!(r[1]["v"], "2.0");
+    assert_eq!(r[2]["v"], "3.0");
 }
 
 #[test]
 fn order_by_qv_bool_asc_desc() {
+    // ASC: false < true
     let mut qvs = vec![
         qv_map(&[("b", QueryValue::Bool(true))]),
         qv_map(&[("b", QueryValue::Bool(false))]),
         qv_map(&[("b", QueryValue::Bool(true))]),
         qv_map(&[("b", QueryValue::Bool(false))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::asc("b");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["b"], false);
+    assert_eq!(r[1]["b"], false);
+    assert_eq!(r[2]["b"], true);
+    assert_eq!(r[3]["b"], true);
 
-    // Reset and test DESC
+    // DESC: true > false
     let mut qvs = vec![
         qv_map(&[("b", QueryValue::Bool(true))]),
         qv_map(&[("b", QueryValue::Bool(false))]),
     ];
-    let mut jvs: Vec<json::Value> = qvs.iter().map(|q| json::Value::from(q.clone())).collect();
 
     let order = OrderBy::desc("b");
-    apply_order_by(&mut jvs, &order);
     apply_order_by_qv(&mut qvs, &order);
-    assert_byte_identical(&jvs, &qvs);
+    let r = to_json(&qvs);
+    assert_eq!(r[0]["b"], true);
+    assert_eq!(r[1]["b"], false);
 }
 
 // ============================================================================
-// Golden result-identity tests — Stage D (Path B: apply_select_value) and
-// Stage E (aggregate pipeline: QueryValue).
+// Stage D: apply_select_value explicit assertions
 // ============================================================================
 
 /// Intern a string, returning its u64 id.
@@ -557,60 +591,69 @@ fn make_test_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
     ]
 }
 
-// ── Stage D: apply_select_value vs apply_select ─────────────────────────
-
 #[test]
-fn select_value_identical_to_select_json() {
+fn select_value_specific_fields() {
     let interner = Interner::default();
     let records = make_test_records(&interner);
     let select = Select::fields(["name", "age", "city"]);
 
-    let json_result = apply_select(&records, &select, &interner);
-    let qv_result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(&records, &select, &interner);
+    assert_eq!(result.len(), 4);
 
-    assert_byte_identical(&json_result, &qv_result);
+    let r = to_json(&result);
+    assert_eq!(r[0]["name"], "Alice");
+    assert_eq!(r[0]["age"], 30);
+    assert_eq!(r[0]["city"], "NYC");
+    assert_eq!(r[1]["name"], "Bob");
+    assert_eq!(r[1]["age"], 25);
+    assert_eq!(r[2]["name"], "Carol");
+    assert_eq!(r[2]["age"], 35);
 }
 
 #[test]
-fn select_value_all_identical() {
+fn select_value_all_returns_all_fields() {
     let interner = Interner::default();
     let records = make_test_records(&interner);
     let select = Select::all();
 
-    let json_result = apply_select(&records, &select, &interner);
-    let qv_result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(&records, &select, &interner);
+    assert_eq!(result.len(), 4);
 
-    assert_byte_identical(&json_result, &qv_result);
+    let r = to_json(&result);
+    // All four fields present
+    assert_eq!(r[0]["name"], "Alice");
+    assert_eq!(r[0]["age"], 30);
+    assert_eq!(r[0]["city"], "NYC");
+    assert_eq!(r[0]["score"], 1.5);
 }
 
 #[test]
-fn path_b_distinct_order_identical() {
-    // Simulate Path B: apply_select_value -> distinct_qv -> order_by_qv
-    // vs json path: apply_select -> distinct -> order_by.
+fn path_b_distinct_order_qv() {
+    // Path B: apply_select_value -> distinct_qv -> order_by_qv
     let interner = Interner::default();
     let records = make_test_records(&interner);
     let select = Select::fields(["city", "age"]);
 
-    let json_result = apply_select(&records, &select, &interner);
     let qv_result = apply_select_value(&records, &select, &interner);
-
-    // json path
-    let j_distinct = apply_distinct(json_result);
-    let mut j_sorted = j_distinct;
-    apply_order_by(&mut j_sorted, &OrderBy::asc("age"));
-
-    // qv path
+    // 4 rows: {city:NYC,age:30},{city:LA,age:25},{city:NYC,age:35},{city:LA,age:25}
+    // After distinct: {NYC,30},{LA,25},{NYC,35} → 3 distinct rows
     let q_distinct = apply_distinct_qv(qv_result);
+    assert_eq!(q_distinct.len(), 3);
+
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("age"));
 
-    assert_byte_identical(&j_sorted, &q_sorted);
+    let r = to_json(&q_sorted);
+    // sorted by age: 25, 30, 35
+    assert_eq!(r[0]["age"], 25);
+    assert_eq!(r[1]["age"], 30);
+    assert_eq!(r[2]["age"], 35);
 }
 
-// ── Stage E: aggregate pipeline QueryValue identity ─────────────────────
+// ── Stage E: aggregate pipeline QueryValue assertions ───────────────────────
 
 #[test]
-fn aggregate_group_by_all_funcs_identical() {
+fn aggregate_group_by_all_funcs() {
     // GROUP BY city + SUM/AVG/MIN/MAX/COUNT on age, score.
     let interner = Interner::default();
     let records = make_test_records(&interner);
@@ -640,11 +683,7 @@ fn aggregate_group_by_all_funcs_identical() {
         &ctx,
     );
 
-    // Convert to json for assertions.
-    let r: Vec<json::Value> = result
-        .iter()
-        .map(|v| json::Value::from(v.clone()))
-        .collect();
+    let r = to_json(&result);
 
     // Groups sorted alphabetically: LA, NYC.
     assert_eq!(r.len(), 2);
@@ -663,9 +702,9 @@ fn aggregate_group_by_all_funcs_identical() {
 }
 
 #[test]
-fn aggregate_sum_float_byte_identity() {
-    // Sum of floats: the QV path must produce F64 that serialises
-    // identically to json Number::from_f64.
+fn aggregate_sum_float_serialisation() {
+    // Sum of floats: the QV path must produce F64 that serialises identically
+    // to json Number::from_f64. Total score = 1.5+2.5+3.5+0.5 = 8.0.
     let interner = Interner::default();
     let records = make_test_records(&interner);
 
@@ -677,11 +716,9 @@ fn aggregate_sum_float_byte_identity() {
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
-    // Serialise the QV result to json bytes.
     let qv_json = json::Value::from(result[0].clone());
     let qv_bytes = json::to_vec(&qv_json).unwrap();
 
-    // Build the expected json value via Number::from_f64.
     let total = 1.5 + 2.5 + 3.5 + 0.5; // = 8.0
     let expected_json = json::json!({"total_score": total});
     let expected_bytes = json::to_vec(&expected_json).unwrap();
@@ -716,10 +753,7 @@ fn aggregate_having_filters_correctly() {
         &interner,
         &ctx,
     );
-    let r: Vec<json::Value> = result
-        .iter()
-        .map(|v| json::Value::from(v.clone()))
-        .collect();
+    let r = to_json(&result);
 
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["city"], "NYC");
@@ -727,8 +761,9 @@ fn aggregate_having_filters_correctly() {
 }
 
 #[test]
-fn aggregate_avg_float_byte_identity() {
+fn aggregate_avg_float_serialisation() {
     // Avg produces F64 — must serialise identically to json Number::from_f64.
+    // avg(score) = (1.5+2.5+3.5+0.5)/4 = 2.0
     let interner = Interner::default();
     let records = make_test_records(&interner);
 
@@ -754,7 +789,7 @@ fn aggregate_avg_float_byte_identity() {
 }
 
 #[test]
-fn aggregate_count_as_int_identity() {
+fn aggregate_count_as_int() {
     // Count produces Int(i64) — must serialise identically to json Number(u64).
     let interner = Interner::default();
     let records = make_test_records(&interner);
@@ -778,7 +813,7 @@ fn aggregate_count_as_int_identity() {
 }
 
 #[test]
-fn aggregate_all_no_group_identical() {
+fn aggregate_all_no_group() {
     // apply_aggregate_all: SUM + AVG + MIN + MAX + COUNT without GROUP BY.
     let interner = Interner::default();
     let records = make_test_records(&interner);
@@ -795,10 +830,7 @@ fn aggregate_all_no_group_identical() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let r: Vec<json::Value> = result
-        .iter()
-        .map(|v| json::Value::from(v.clone()))
-        .collect();
+    let r = to_json(&result);
 
     assert_eq!(r.len(), 1);
     assert_eq!(r[0]["cnt"], 4);

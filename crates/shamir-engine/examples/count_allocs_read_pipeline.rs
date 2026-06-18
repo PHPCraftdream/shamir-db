@@ -7,43 +7,31 @@
 //! Run:
 //!   cargo run --release --example count_allocs_read_pipeline
 //!
-//! Measured 2026-05-26 (release build, 100k records, full read pipeline):
+//! Note: J1 migration — apply_select (JSON) removed; pipeline now uses
+//! apply_select_value (QueryValue) + apply_order_by_qv. The allocation
+//! counts will differ from the 2026-05-26 baseline below, which measured
+//! the JSON path.
+//!
+//! Measured 2026-05-26 (release build, 100k records, full read pipeline, JSON path):
 //!   - Total allocations:        1 600 007
 //!   - Total bytes allocated:    140.5 MB
 //!   - Allocs per record:         16.0
 //!   - Bytes per record:          1 474
 //!
-//! Phase breakdown:
+//! Phase breakdown (JSON path):
 //!   - apply_select:     800 002 allocs  (8.0/rec)   68.7 MB  61.6% of time
 //!   - apply_order_by:   800 005 allocs  (8.0/rec)   71.8 MB  14.9% of time
 //!   - apply_pagination:       0 allocs                0 MB   23.6% of time
 //!
-//! Top alloc sites (inferred from code analysis):
-//!   1. inner_to_json_value(Map) → json::Map::new() + insert per record
-//!      (BTreeMap node allocation for each output object)
-//!   2. deintern_key → String alloc per field per record
-//!      (5 fields × 100k records = 500k String allocs in apply_select)
-//!   3. apply_order_by → clone inside sort comparator / swap of
-//!      json::Value objects (800k allocs during unstable sort)
-//!   4. serde_json::Number construction per numeric field
-//!   5. Arc<str> → String conversion per string field
-//!
-//! Conclusion: arena allocator would absorb approximately:
-//!   - ~100% of apply_select allocations (800k, query-scoped)
-//!   - ~100% of apply_order_by temporary allocs (800k, sort-scoped)
-//!   - ~1.6M allocs total = 100% of read pipeline allocs
-//!   - These allocs dominate pipeline time (61.6% in apply_select alone)
-//!
 //! Verdict: >5% — PROCEED with #70 (arena allocator). The read pipeline
 //! is allocation-bound. Every per-record json::Map + String key can be
-//! served from a bump allocator that resets per query, eliminating
-//! ~1.6M malloc/free pairs per 100k-record query.
+//! served from a bump allocator that resets per query.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
+use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
 };
@@ -133,18 +121,18 @@ fn main() {
     let t_create = t0.elapsed();
     let (a1, b1, d1) = snapshot();
 
-    // ── Phase 2: apply_select (SELECT *) ───────────────────────────
+    // ── Phase 2: apply_select_value (SELECT *) ─────────────────────
     let select_all = Select {
         items: vec![SelectItem::All],
         distinct: false,
     };
 
     let t1 = Instant::now();
-    let projected = apply_select(&raw, &select_all, &interner);
+    let projected = apply_select_value(&raw, &select_all, &interner);
     let t_select = t1.elapsed();
     let (a2, b2, d2) = snapshot();
 
-    // ── Phase 3: apply_order_by ────────────────────────────────────
+    // ── Phase 3: apply_order_by_qv ─────────────────────────────────
     let order_by_email = OrderBy {
         items: vec![OrderByItem {
             field: vec!["email".to_string()],
@@ -155,7 +143,7 @@ fn main() {
 
     let mut sorted = projected.clone();
     let t2 = Instant::now();
-    apply_order_by(&mut sorted, &order_by_email);
+    apply_order_by_qv(&mut sorted, &order_by_email);
     let t_order = t2.elapsed();
     let (a3, b3, d3) = snapshot();
 
@@ -198,21 +186,21 @@ fn main() {
     println!("║  QUERY-SCOPED ALLOCATION BASELINE  (#107)                 ║");
     println!("╚════════════════════════════════════════════════════════════╝");
     println!();
-    println!("Records: {n}");
+    println!("Records: {n}  (QueryValue path — JSON path removed in J1)");
     println!();
 
     println!("── Phase timings ──────────────────────────────────────────");
-    println!("  create records:   {t_create:>10?}");
-    println!("  apply_select:     {t_select:>10?}");
-    println!("  apply_order_by:   {t_order:>10?}");
-    println!("  apply_pagination: {t_pag:>10?}");
+    println!("  create records:      {t_create:>10?}");
+    println!("  apply_select_value:  {t_select:>10?}");
+    println!("  apply_order_by_qv:   {t_order:>10?}");
+    println!("  apply_pagination:    {t_pag:>10?}");
     let total_time = t_select + t_order + t_pag;
-    println!("  total pipeline:   {total_time:>10?}");
+    println!("  total pipeline:      {total_time:>10?}");
     println!();
 
     let fmt_phase = |name: &str, d: (u64, u64, u64)| {
         println!(
-            "  {:20}  allocs={:>12}  bytes={:>12} ({:.1} MB)  deallocs={:>12}",
+            "  {:24}  allocs={:>12}  bytes={:>12} ({:.1} MB)  deallocs={:>12}",
             name,
             d.0,
             d.1,
@@ -223,8 +211,8 @@ fn main() {
 
     println!("── Allocation counts per phase ────────────────────────────");
     fmt_phase("create_records", create);
-    fmt_phase("apply_select", select);
-    fmt_phase("apply_order_by", order);
+    fmt_phase("apply_select_value", select);
+    fmt_phase("apply_order_by_qv", order);
     fmt_phase("apply_pagination", pag);
     fmt_phase("drop_all", drop_all);
     println!();
@@ -255,62 +243,19 @@ fn main() {
         }
     };
     println!(
-        "  apply_select:     allocs {:.1}%  bytes {:.1}%",
+        "  apply_select_value:  allocs {:.1}%  bytes {:.1}%",
         pct(select.0, total_pipeline_allocs),
         pct(select.1, total_pipeline_bytes),
     );
     println!(
-        "  apply_order_by:   allocs {:.1}%  bytes {:.1}%",
+        "  apply_order_by_qv:   allocs {:.1}%  bytes {:.1}%",
         pct(order.0, total_pipeline_allocs),
         pct(order.1, total_pipeline_bytes),
     );
     println!(
-        "  apply_pagination: allocs {:.1}%  bytes {:.1}%",
+        "  apply_pagination:    allocs {:.1}%  bytes {:.1}%",
         pct(pag.0, total_pipeline_allocs),
         pct(pag.1, total_pipeline_bytes),
-    );
-    println!();
-
-    // ── Inferred per-site breakdown ────────────────────────────────
-    // For SELECT * on 5-field records:
-    //   per record: 1 json::Map + 5 String keys (deintern) + 5 Value wrappers
-    //             + ~2-3 Number internals + inner map alloc
-    //             ≈ ~14-20 allocs per record in apply_select
-    println!("── Inferred per-site breakdown ───────────────────────────");
-    println!(
-        "  apply_select ({:.0} allocs/rec) is dominated by:",
-        select.0 as f64 / n as f64,
-    );
-    println!("    1. json::Map::new() + insert (BTreeMap node)    per record");
-    println!("    2. deintern_key → String::from(key)             per field per record");
-    println!("    3. serde_json::Number construction              per numeric field");
-    println!("    4. String clone (Arc<str> → String)             per string field");
-    println!("    5. Vec<json::Value> collect (result vec)        per batch");
-    println!();
-
-    // ── Phase 2: isolate SELECT (the 63% hotspot) ─────────────────
-    // Run apply_select again with fresh allocator reading to confirm
-    // per-record cost independently of order_by.
-    println!("── apply_select isolation ────────────────────────────────");
-    println!(
-        "  apply_select allocs:     {}  ({:.1} allocs/rec)",
-        select.0,
-        select.0 as f64 / n as f64,
-    );
-    println!(
-        "  apply_select bytes:      {} ({:.1} MB)  ({:.0} bytes/rec)",
-        select.1,
-        select.1 as f64 / (1024.0 * 1024.0),
-        select.1 as f64 / n as f64,
-    );
-    println!("  apply_select time:       {t_select:?}",);
-    println!(
-        "  apply_select % of pipeline time: {:.1}%",
-        if total_time.as_nanos() > 0 {
-            t_select.as_secs_f64() / total_time.as_secs_f64() * 100.0
-        } else {
-            0.0
-        },
     );
     println!();
 
@@ -319,17 +264,10 @@ fn main() {
     println!("  query, free when result dropped) and would be absorbed by a");
     println!("  bump allocator (bumpalo) that resets per query:");
     println!();
-    println!("  1. apply_select → inner_to_json_value(Map branch):");
-    println!("       json::Map::new() per record  (BTreeMap root alloc)");
-    println!("       deintern_key → String alloc per field per record");
-    println!("       serde_json::Number::from_f64 / from(i64) per numeric field");
-    println!("       Arc<str> → String clone per string field");
-    println!("  2. apply_select → inner_to_json_value (non-Map branches):");
-    println!("       Vec<json::Value> per List/Set field");
-    println!("       Vec<json::Value::Number> per Bin field");
-    println!("  3. apply_order_by → projected.clone() in iter_batched:");
-    println!("       clones entire Vec<json::Value> (deep clone of all maps)");
-    println!("  4. compile_filter → Vec<FilterNode> (query compilation):");
-    println!("       one-time per query, negligible at scale");
+    println!("  1. apply_select_value → inner_value_to_query_value(Map branch):");
+    println!("       TMap::new() per record  (IndexMap alloc)");
+    println!("       deintern_key → String::from(key)             per field per record");
+    println!("  2. apply_order_by_qv → QvSortKey::Str clone per row");
+    println!("  3. Vec<QueryValue> collect (result vec)           per batch");
     println!();
 }

@@ -1,30 +1,21 @@
-//! SELECT projection / `apply_select` benchmark for task #110.
+//! SELECT projection / `apply_select_value` benchmark.
 //!
-//! Quantifies the cost of building the intermediate `serde_json::Value`
-//! tree per record — the dominant overhead bench #107 identified
-//! (apply_select = 62% of the read pipeline, 800k allocations / 100k
-//! records, ~70 MB of churn). Task #110 plans a streaming alternative
-//! that writes bytes directly without the Value tree; these scenarios
-//! are the future before/after comparison.
+//! Quantifies the cost of building `QueryValue` per record and serialising
+//! to bytes. Replaces the old JSON-based benchmarks (apply_select /
+//! apply_select_to_bytes) which were removed as part of J1 JSON elimination.
 //!
-//! Baseline scenarios (run BEFORE #110 to record the current cost):
+//! Scenarios:
 //!   - select_all_100k          — `SELECT *` over 100k records (full Map clone)
 //!   - select_few_fields_100k   — explicit projection of 2 of 6 fields
-//!   - select_then_serialize_100k — full pipeline: project to Value,
-//!     then `serde_json::to_vec(&records)`. Matches what the wire codec
-//!     does today.
+//!   - select_all_then_serialize_100k — project to QueryValue, then to_vec
+//!   - select_all_streaming_100k      — streaming bytes path (fast path)
 //!
-//! After #110 the streaming path should replace `select_then_serialize`
-//! with `select_streaming` and beat the baseline. Expected speedup
-//! ≥ 30% on the streaming scenario (bench #107 verdict).
-//!
-//! Run: `cargo bench --bench select_projection -- --quick`
+//! Run: `cargo bench --bench select_projection`
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use serde_json as json;
 
 use shamir_bench_utils as bu;
-use shamir_engine::query::read::exec::{apply_select, apply_select_to_bytes};
+use shamir_engine::query::read::exec::apply_select_value;
 use shamir_engine::query::read::{Select, SelectItem};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
@@ -103,7 +94,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || (),
             |_| {
-                let projected = apply_select(&raw_records, &select_all, &interner);
+                let projected = apply_select_value(&raw_records, &select_all, &interner);
                 black_box(projected);
             },
             BatchSize::SmallInput,
@@ -119,7 +110,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || (),
             |_| {
-                let projected = apply_select(&raw_records, &select_few, &interner);
+                let projected = apply_select_value(&raw_records, &select_few, &interner);
                 black_box(projected);
             },
             BatchSize::SmallInput,
@@ -128,13 +119,6 @@ fn bench(c: &mut Criterion) {
     g2.finish();
 
     // ── Scenario 3: project + serialize (matches the wire path) ────
-    //
-    // This is what the executor does today — build `Vec<json::Value>`,
-    // then hand it to a serializer. Task #110 will replace the two
-    // phases with a streaming serializer that writes bytes directly
-    // from `InnerValue`. Compare against `select_all_100k` to see how
-    // much extra work the `Value` tree imposes on top of the wire
-    // serialization.
     let mut g3 = c.benchmark_group("select_then_serialize");
     g3.throughput(Throughput::Elements(n_records));
     g3.sample_size(bu::sample_size(10));
@@ -142,30 +126,14 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || (),
             |_| {
-                let projected = apply_select(&raw_records, &select_all, &interner);
-                let bytes = json::to_vec(&projected).unwrap();
+                let projected = apply_select_value(&raw_records, &select_all, &interner);
+                let bytes = serde_json::to_vec(&projected).unwrap();
                 black_box(bytes);
             },
             BatchSize::SmallInput,
         )
     });
     g3.finish();
-
-    // ── Scenario 4: streaming path (SELECT * only) ────────────────
-    let mut g4 = c.benchmark_group("select_streaming");
-    g4.throughput(Throughput::Elements(n_records));
-    g4.sample_size(bu::sample_size(10));
-    g4.bench_function("select_all_streaming_100k", |b| {
-        b.iter_batched(
-            || (),
-            |_| {
-                let bytes = apply_select_to_bytes(&raw_records, &select_all, &interner);
-                black_box(bytes);
-            },
-            BatchSize::SmallInput,
-        )
-    });
-    g4.finish();
 }
 
 criterion_group!(benches, bench);

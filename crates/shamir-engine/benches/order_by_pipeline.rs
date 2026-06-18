@@ -1,8 +1,7 @@
 //! ORDER BY baseline benchmark.
 //!
 //! Measures the three realistic ORDER BY scenarios and quantifies how
-//! much CPU is spent in `serde_json::Value::get` (per-comparison field
-//! resolution in the comparator) vs the sort + permutation itself.
+//! much CPU is spent in field resolution vs the sort + permutation itself.
 //!
 //! Measured 2026-05-26 (release build, 100k records, 5 fields):
 //!   - order_by_indexed_field_limit_100  (score, sorted): ~84 ms / iter
@@ -31,22 +30,20 @@
 //!     for the single-column case would unlock the remaining ~6× — tracked
 //!     as a follow-up refinement (do after #70 / arena lands).
 //!
-//! Bonus signal: `apply_select` (JSON projection) is 63% of the full
-//! read pipeline — strong evidence for task #68 too (inner_to_json_value
-//! string clones).
+//! Note: J1 migration — `apply_select` removed; this bench now uses
+//! `apply_select_value` + `apply_order_by_qv` (QueryValue path).
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
-use serde_json as json;
 
 use shamir_bench_utils as bu;
-use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
+use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
 };
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 fn touch(interner: &Interner, s: &str) -> InternerKey {
     match interner.touch_ind(s).unwrap() {
@@ -98,8 +95,8 @@ fn bench(c: &mut Criterion) {
         distinct: false,
     };
 
-    // Project once — ORDER BY operates on `Vec<json::Value>`.
-    let projected: Vec<json::Value> = apply_select(&raw_records, &select_all, &interner);
+    // Project once — ORDER BY operates on `Vec<QueryValue>`.
+    let projected: Vec<QueryValue> = apply_select_value(&raw_records, &select_all, &interner);
 
     let order_by_score = OrderBy {
         items: vec![OrderByItem {
@@ -125,7 +122,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_score);
+                apply_order_by_qv(&mut recs, &order_by_score);
                 let limited = apply_pagination(
                     recs,
                     &Pagination::LimitOffset {
@@ -149,7 +146,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_email);
+                apply_order_by_qv(&mut recs, &order_by_email);
                 let limited = apply_pagination(
                     recs,
                     &Pagination::LimitOffset {
@@ -173,7 +170,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_email);
+                apply_order_by_qv(&mut recs, &order_by_email);
                 black_box(recs);
             },
             BatchSize::SmallInput,
@@ -184,12 +181,6 @@ fn bench(c: &mut Criterion) {
     // ══════════════════════════════════════════════════════════════
     // Single-column type-specialised scenarios (for #109)
     // ══════════════════════════════════════════════════════════════
-    //
-    // Each scenario sorts by exactly one column, so the planned
-    // typed-columnar fast path (Vec<i64>/Vec<f64>/Vec<&str>/Vec<bool>)
-    // applies. Use these to verify the columnar refinement actually
-    // hits the prof_order_by ~5-10ms floor without regressing on the
-    // mixed/multi-column paths.
 
     let order_by_id = OrderBy {
         items: vec![OrderByItem {
@@ -227,7 +218,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_id);
+                apply_order_by_qv(&mut recs, &order_by_id);
                 black_box(recs);
             },
             BatchSize::SmallInput,
@@ -237,7 +228,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_score);
+                apply_order_by_qv(&mut recs, &order_by_score);
                 black_box(recs);
             },
             BatchSize::SmallInput,
@@ -247,7 +238,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_email);
+                apply_order_by_qv(&mut recs, &order_by_email);
                 black_box(recs);
             },
             BatchSize::SmallInput,
@@ -257,7 +248,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_active);
+                apply_order_by_qv(&mut recs, &order_by_active);
                 black_box(recs);
             },
             BatchSize::SmallInput,
@@ -266,11 +257,6 @@ fn bench(c: &mut Criterion) {
     g4.finish();
 
     // ── Multi-column / fallback path (must not regress) ───────────
-    //
-    // Two-column ORDER BY (active, email) — the typed-columnar fast
-    // path does NOT kick in here; the existing enum-based SortKey
-    // path runs. Bench guards against regressions when refining the
-    // single-column path.
     let mut g5 = c.benchmark_group("order_by_multi_column");
     g5.throughput(Throughput::Elements(n_records));
     g5.sample_size(bu::sample_size(10));
@@ -278,7 +264,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_multi);
+                apply_order_by_qv(&mut recs, &order_by_multi);
                 black_box(recs);
             },
             BatchSize::SmallInput,
