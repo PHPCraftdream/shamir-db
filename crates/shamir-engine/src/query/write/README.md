@@ -3,7 +3,7 @@
 ## Обзор
 
 Модуль `write` определяет типы операций записи: insert, update, delete, set (upsert).
-Каждая операция — отдельная структура, десериализуемая из JSON batch запроса.
+Каждая операция — отдельная структура, десериализуемая из MessagePack/`QueryValue` batch запроса.
 Выполнение происходит через методы `TableManager` (`execute_insert`, `execute_update`,
 `execute_delete`, `execute_set`).
 

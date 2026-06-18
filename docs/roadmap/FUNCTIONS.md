@@ -33,7 +33,7 @@ reaches up through its `.await` seams.
 ## Plan — remaining
 
 ### Slice 10 — wire DDL + wire-level e2e (not started)
-- `BatchOp::{CreateFunction,DropFunction,RenameFunction,AlterFunction,ListFunctions}` in `shamir-query-types` (+ ser/de) and `execute_admin` dispatch → manage functions via the JSON request API like other DDL.
+- `BatchOp::{CreateFunction,DropFunction,RenameFunction,AlterFunction,ListFunctions}` in `shamir-query-types` (+ ser/de) and `execute_admin` dispatch → manage functions via the batch request API like other DDL.
 - Wire-level e2e through client→server (TLS+SCRAM) exercising the full lifecycle.
 
 ### Deferred (by need, noted in code)

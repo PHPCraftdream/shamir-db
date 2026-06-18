@@ -296,8 +296,8 @@ pub struct ValidationError {
 ## Validator ABI (return convention — no new ABI, an interpretation)
 
 A validator is an ordinary WASM function whose returned `QueryValue` is decoded
-as:
-```json
+as (MessagePack map with these fields):
+```
 { "errors": [ { "field": ["address","zip"], "code": "invalid_zip" }, … ],
   "stop": false }
 ```

@@ -55,7 +55,7 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 
 | Функция | Описание |
 |---------|----------|
-| `apply_select()` | Проекция полей (InnerValue → JSON) |
+| `apply_select()` | Проекция полей (InnerValue → QueryValue) |
 | `apply_group_by()` | Группировка + агрегации |
 | `apply_order_by()` | Сортировка по полям |
 | `apply_pagination()` | LIMIT/OFFSET и Page |
@@ -63,7 +63,7 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 | `SelectProjection::new()` | Компиляция проекции из Select |
 | `SelectProjection::apply()` | Применение проекции к записи |
 
-## JSON примеры
+## Примеры запросов
 
 ### Простой запрос
 
@@ -117,7 +117,7 @@ DTO-типы (`ReadQuery`, `Select`, `SelectItem`, `AggFunc`, `AggregateField`,
 | Файл | Описание |
 |------|----------|
 | `mod.rs` | Re-exports DTO + `query_from_value` + `exec::*` |
-| `parser.rs` | `query_from_value()` — парсинг JSON → ReadQuery |
+| `parser.rs` | `query_from_value()` — парсинг `QueryValue` → `ReadQuery` |
 | `exec.rs` | Пайплайн выполнения: `apply_select`, `apply_group_by`, `apply_order_by`, `apply_pagination`, `apply_distinct`, `SelectProjection` |
 
 ## Индексы

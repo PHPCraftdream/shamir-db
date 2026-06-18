@@ -33,7 +33,7 @@ Consequences:
 Filters, function arguments, and computed write-values all reduce to **one**
 existing type, `FilterValue`:
 
-| Variant | Wire JSON | Meaning |
+| Variant | Wire shape (MessagePack map) | Meaning |
 |---|---|---|
 | `Null/Bool/Int/Float/String/Binary` | literal | a literal value |
 | `Array(Vec<FilterValue>)` | `[...]` | a list |
@@ -172,7 +172,7 @@ Query::from("users").where_eq("name", func("strings/lower", [lit("ALICE")]));
 
 ### 3.4 Computed values on write (`{"$fn":…}` in the record)
 
-The write value is a JSON object whose field values are `FilterValue`s
+The write value is a MessagePack map whose field values are `FilterValue`s
 (literals, `$ref`, nested `$fn`). The `Doc` builder assembles it:
 
 ```rust
@@ -355,7 +355,7 @@ re-exports the builder so app code has a single import.
 
 - **P0 — `val` + `filter`:** the `FilterValue` constructors and `Filter`
   combinators (the foundation everything else builds on). Tests assert
-  builder→JSON equals the hand-written wire JSON.
+  builder→MessagePack equals the hand-written wire shape.
 - **P1 — `Query`:** read builder (select/where/group/having/order/limit/
   offset/pagination/distinct/count_total) → `ReadQuery`.
 - **P2 — `select`:** field / func / agg / agg_fn / count_all projection items.

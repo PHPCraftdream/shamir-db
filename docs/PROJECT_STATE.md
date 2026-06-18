@@ -104,7 +104,7 @@ paths.
 
 - 6 storage backends behind one trait; key interning (~70% memory cut on
   string-heavy data); async streaming with constant memory.
-- JSON batch query API: WHERE / SELECT (projections+aggregations) / GROUP BY
+- MessagePack batch query API (OQL): WHERE / SELECT (projections+aggregations) / GROUP BY
   / ORDER BY / LIMIT / pagination; cross-query refs (`{"$query": "@alias[].field"}`).
 - Secondary indexes + query planner; sorted indexes; **HNSW vector** search;
   **FTS**; functional indexes; index2 backend; online migration.

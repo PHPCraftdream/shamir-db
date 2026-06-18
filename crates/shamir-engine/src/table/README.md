@@ -50,7 +50,7 @@ pub struct TableManager {
 
 | Метод | Описание |
 |-------|----------|
-| `execute_insert(&InsertOp)` | Вставка (JSON → InnerValue → store) |
+| `execute_insert(&InsertOp)` | Вставка (QueryValue/MessagePack → InnerValue → store) |
 | `execute_update(&UpdateOp, &FilterContext)` | Обновление по фильтру |
 | `execute_delete(&DeleteOp, &FilterContext)` | Удаление по фильтру |
 | `execute_set(&SetOp)` | Upsert по ключу |

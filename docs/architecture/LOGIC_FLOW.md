@@ -63,8 +63,8 @@ Underneath it are seven implementations (Sled, Redb, Fjall, Nebari,
 Persy, Canopy, InMemory + a Cached wrapper), each behind a Cargo
 feature. There are no types, no queries here — only key/value.
 
-**`shamir-types` is the foundation.** The Value model, JSON /
-MessagePack codecs, `RecordId` (a 16-byte timestamped ULID), and the
+**`shamir-types` is the foundation.** The Value model, MessagePack
+codecs (plus a legacy JSON codec), `RecordId` (a 16-byte timestamped ULID), and the
 `Interner` (`String → u64` for memory economy). Nothing above it
 violates its abstractions, and it knows nothing of storage or
 sessions.
@@ -108,8 +108,8 @@ without anything above it breaking.
 What is striking: **no layer does another layer's work.**
 `shamir-connect` does not touch the database (it keeps only a
 `UserDirectory` trait; the implementation lives in `shamir-server`).
-`shamir-server` does not parse SQL (the batch is structured JSON,
-parsed by `shamir-engine`). `shamir-engine` does not know what a
+`shamir-server` does not parse SQL (the batch is a structured MessagePack
+object, dispatched by `shamir-engine`). `shamir-engine` does not know what a
 session is — it receives `SessionPermissions` from outside. The
 boundaries stay clean.
 

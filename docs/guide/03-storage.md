@@ -237,9 +237,9 @@ const resp = await Batch.create('tree-db')
   .execute(client, 'default');
 ```
 
-Ответ содержит секции `resources`, `principals` и `functions`:
+Ответ содержит секции `resources`, `principals` и `functions` (структура ответа — MessagePack на проводе):
 
-```json
+```
 {
   "results": {
     "t": {

@@ -245,7 +245,7 @@ implementation follows the wound-wait (Rosenkrantz et al.) protocol.
   dependency on another alias (no implicit auto-ordering of admin ops).
 - **Query language is OQL — forever; no text language, no SQL, no "v2".**
   A query is a typed object (DTO: `Filter`/`ReadQuery`/`BatchRequest`),
-  carried as msgpack/JSON, built by the typed builder / `q!` / `filter!`.
+  carried as MessagePack, built by the typed builder / `q!` / `filter!`.
   This is *by principle*, not by lack of a parser. Queries-as-text is the
   single root mistake that spawns SQL injection, parser/grammar bugs &
   DoS, prepared-statement/bind ceremony, dialect drift, and parse/plan

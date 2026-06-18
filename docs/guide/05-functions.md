@@ -183,7 +183,7 @@ const resp = await Batch.create('call-add')
 resp.results.sum.value; // { sum: 8 }
 ```
 
-`value` — произвольный JSON (object, array, scalar, null), который
+`value` — произвольный `QueryValue` (object, array, scalar, null), который
 вернула функция. `records` — пустой массив (call не читает таблицу).
 
 ### Позиционные параметры
@@ -246,9 +246,9 @@ await Batch.create('bind')
 5. Если валидатор установил `stop: true` — последующие валидаторы не
   вызываются.
 
-Пример ответа при ошибке валидации (wire form):
+Пример ответа при ошибке валидации (wire form; MessagePack на проводе):
 
-```json
+```
 {
   "error": {
     "code": "validation_failed",
