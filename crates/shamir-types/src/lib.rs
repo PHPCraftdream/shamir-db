@@ -14,6 +14,7 @@
 pub mod access;
 pub mod codecs;
 pub mod core;
+pub mod macros;
 pub mod record_view;
 pub mod types;
 
