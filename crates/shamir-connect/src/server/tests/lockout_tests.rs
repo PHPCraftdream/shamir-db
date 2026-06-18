@@ -382,15 +382,15 @@ fn persist_snapshot_without_sink_is_noop() {
 }
 
 #[test]
-fn snapshot_json_roundtrip() {
+fn snapshot_second_codec_roundtrip() {
     // Belt-and-suspenders: the docs promise the snapshot is
-    // serde-compatible. Verify against a second codec (JSON) so a
-    // codec-specific quirk in rmp can't mask a missing derive.
+    // serde-compatible. Verify against a second codec (rmp named encoding)
+    // so a codec-specific quirk can't mask a missing derive.
     let s = InMemoryLockoutStore::new();
     s.register_failure(key(1, 1), 1_000_000_000);
     let snap = s.snapshot();
-    let json = serde_json::to_vec(&snap).expect("json encode");
-    let restored: LockoutSnapshot = serde_json::from_slice(&json).expect("json decode");
+    let bytes = rmp_serde::to_vec_named(&snap).expect("encode");
+    let restored: LockoutSnapshot = rmp_serde::from_slice(&bytes).expect("decode");
     assert_eq!(restored.failures.len(), snap.failures.len());
     assert_eq!(restored.total_lockouts, snap.total_lockouts);
 }

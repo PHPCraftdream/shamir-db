@@ -2,15 +2,14 @@ use crate::common::push_envelope::{PushEnvelope, PushKind};
 
 #[test]
 fn push_kind_round_trip() {
-    for (kind, expected) in [
-        (PushKind::Event, "event"),
-        (PushKind::Gap, "gap"),
-        (PushKind::SlowConsumer, "slow_consumer"),
-        (PushKind::Closed, "closed"),
+    for kind in [
+        PushKind::Event,
+        PushKind::Gap,
+        PushKind::SlowConsumer,
+        PushKind::Closed,
     ] {
-        let json = serde_json::to_value(&kind).unwrap();
-        assert_eq!(json, serde_json::json!(expected));
-        let back: PushKind = serde_json::from_value(json).unwrap();
+        let bytes = rmp_serde::to_vec_named(&kind).unwrap();
+        let back: PushKind = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back, kind);
     }
 }
@@ -24,8 +23,8 @@ fn push_envelope_round_trip() {
         data: Some(vec![1, 2, 3]),
         gap_at: None,
     };
-    let json = serde_json::to_value(&envelope).unwrap();
-    let back: PushEnvelope = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&envelope).unwrap();
+    let back: PushEnvelope = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, envelope);
 }
 
@@ -38,8 +37,8 @@ fn push_envelope_gap() {
         data: None,
         gap_at: Some(50),
     };
-    let json = serde_json::to_value(&envelope).unwrap();
-    let back: PushEnvelope = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&envelope).unwrap();
+    let back: PushEnvelope = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, envelope);
     assert_eq!(back.gap_at, Some(50));
 }
