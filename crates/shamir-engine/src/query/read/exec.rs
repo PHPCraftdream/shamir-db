@@ -10,7 +10,7 @@ use serde_json as json;
 
 pub use crate::query::read::aggregate::{apply_aggregate_all, apply_group_by};
 use crate::query::read::hashable_json::HashableJson;
-pub use crate::query::read::order::{apply_order_by, apply_order_by_qv};
+pub use crate::query::read::order::apply_order_by_qv;
 pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use shamir_types::core::interner::Interner;
