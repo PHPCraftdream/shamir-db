@@ -64,10 +64,7 @@ fn test_insert_nested_data() {
                         { "product_id": 3, "qty": 1 }
                     ]),
                 )
-                .set_value(
-                    "metadata",
-                    mpack!({"source": "web", "coupon": "SAVE10"}),
-                ),
+                .set_value("metadata", mpack!({"source": "web", "coupon": "SAVE10"})),
         )
         .build();
 
@@ -503,11 +500,7 @@ fn test_set_requires_value() {
 #[test]
 fn test_insert_with_null() {
     let op = write::insert("users")
-        .row(
-            doc()
-                .set("name", "Alice")
-                .set_value("email", mpack!(null)),
-        )
+        .row(doc().set("name", "Alice").set_value("email", mpack!(null)))
         .build();
 
     assert!(op.values[0]["email"].is_null());

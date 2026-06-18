@@ -7,7 +7,7 @@
 
 pub mod aggregate;
 pub mod exec;
-pub(crate) mod hashable_json;
+pub(crate) mod hashable_query_value;
 pub mod order;
 mod parser;
 pub mod select_projection;

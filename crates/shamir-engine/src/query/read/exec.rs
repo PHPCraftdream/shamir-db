@@ -6,13 +6,12 @@
 //! Pipeline with GROUP BY:
 //!   WHERE (filter_stream) → GROUP BY → AGG per group → HAVING → SELECT → DISTINCT → ORDER BY → PAGINATION → QueryResult
 
-use serde_json as json;
-
 pub use crate::query::read::aggregate::{apply_aggregate_all, apply_group_by};
-use crate::query::read::hashable_json::HashableJson;
+use crate::query::read::hashable_query_value::HashableQueryValue;
 pub use crate::query::read::order::apply_order_by_qv;
 pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
+use indexmap::IndexSet;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -161,14 +160,29 @@ pub fn apply_pagination<T>(
 /// Bin→Array, Set→Array) so that e.g. `Dec("1.0")` and `Str("1.0")`
 /// deduplicate identically to the old json path.
 pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
-    type Map = indexmap::IndexMap<HashableJson, QueryValue, shamir_collections::THasher>;
-    let mut seen: Map = indexmap::IndexMap::with_capacity_and_hasher(
-        records.len(),
-        shamir_collections::THasher::default(),
-    );
-    for record in records {
-        let key = HashableJson(json::Value::from(record.clone()));
-        seen.entry(key).or_insert(record);
+    // Two-pass borrow pattern: HashableQueryValue<'a> borrows &'a QueryValue,
+    // so we can't hold both the map key (reference into records) and own records
+    // at the same time. Instead we collect unique indices first, then build the
+    // result by draining/moving from the original vec.
+    let mut seen: IndexSet<HashableQueryValue<'_>, shamir_collections::THasher> =
+        IndexSet::with_capacity_and_hasher(records.len(), shamir_collections::THasher::default());
+    // Pass 1: walk references into records, record which indices are unique.
+    let mut unique_indices: Vec<usize> = Vec::with_capacity(records.len());
+    for (i, record) in records.iter().enumerate() {
+        if seen.insert(HashableQueryValue(record)) {
+            unique_indices.push(i);
+        }
     }
-    seen.into_values().collect()
+    // Pass 2: move unique records out by index (iterate records, keep only
+    // those whose index appears in unique_indices in order).
+    let mut unique_set = shamir_collections::new_fx_set_wc::<usize>(unique_indices.len());
+    for &i in &unique_indices {
+        unique_set.insert(i);
+    }
+    records
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| unique_set.contains(i))
+        .map(|(_, v)| v)
+        .collect()
 }
