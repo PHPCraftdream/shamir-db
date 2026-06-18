@@ -6,7 +6,7 @@
 //! All batches (read/write AND DDL ops) are constructed with
 //! `shamir_query_builder` and round-tripped through MessagePack.
 
-use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -177,16 +177,16 @@ async fn vector_hnsw_similarity() {
     b.id(2);
     b.insert(
         "w1",
-        insert("posts").row(doc! { "label" => "x" }.set_json("embedding", json!([1.0, 0.0, 0.0]))),
+        insert("posts").row(doc! { "label" => "x" }.set_value("embedding", mpack!([1.0, 0.0, 0.0]))),
     );
     b.insert(
         "w2",
-        insert("posts").row(doc! { "label" => "y" }.set_json("embedding", json!([0.0, 1.0, 0.0]))),
+        insert("posts").row(doc! { "label" => "y" }.set_value("embedding", mpack!([0.0, 1.0, 0.0]))),
     );
     b.insert(
         "w3",
         insert("posts")
-            .row(doc! { "label" => "x_near" }.set_json("embedding", json!([0.95, 0.1, 0.0]))),
+            .row(doc! { "label" => "x_near" }.set_value("embedding", mpack!([0.95, 0.1, 0.0]))),
     );
     exec_built(&shamir, b.to_request_via_msgpack()).await;
 

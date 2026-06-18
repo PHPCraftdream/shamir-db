@@ -26,7 +26,7 @@ fn inserted_direct_row() -> QueryRecord {
         "qty":  42
     });
     let id = RecordId::system("test-id-qr");
-    let rec = InsertedRecord::Direct {
+    let rec = InsertedRecord {
         id: Some(id),
         fields,
     };

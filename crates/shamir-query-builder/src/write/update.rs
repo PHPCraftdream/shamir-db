@@ -1,9 +1,9 @@
 //! [`Update`] builder for [`UpdateOp`].
 
-use serde_json::Value;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::write::{UpdateOp, UpdateSelect};
 use shamir_query_types::TableRef;
+use shamir_types::types::value::QueryValue;
 
 pub use shamir_query_types::write::UpdateReturnMode;
 
@@ -11,7 +11,7 @@ pub use shamir_query_types::write::UpdateReturnMode;
 pub struct Update {
     table_ref: TableRef,
     where_clause: Option<Filter>,
-    set_value: Value,
+    set_value: QueryValue,
     select: Option<UpdateSelect>,
 }
 
@@ -26,7 +26,7 @@ impl Update {
         Self {
             table_ref: TableRef::new(table),
             where_clause: None,
-            set_value: Value::Null,
+            set_value: QueryValue::Null,
             select: None,
         }
     }
@@ -36,7 +36,7 @@ impl Update {
         Self {
             table_ref: TableRef::with_repo(repo, table),
             where_clause: None,
-            set_value: Value::Null,
+            set_value: QueryValue::Null,
             select: None,
         }
     }
@@ -49,9 +49,9 @@ impl Update {
 
     /// Set the fields to update (the `set` payload).
     ///
-    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<Value>`) or a raw
-    /// `serde_json::Value`.
-    pub fn set(mut self, doc: impl Into<Value>) -> Self {
+    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<QueryValue>`) or any
+    /// `QueryValue` directly (e.g. from `mpack!({...})`).
+    pub fn set(mut self, doc: impl Into<QueryValue>) -> Self {
         self.set_value = doc.into();
         self
     }
@@ -84,7 +84,7 @@ impl Update {
         UpdateOp {
             update: self.table_ref,
             where_clause: self.where_clause,
-            set: self.set_value.into(),
+            set: self.set_value,
             select: self.select,
         }
     }

@@ -178,9 +178,8 @@ impl QueryRecord {
     /// View this row as a `QueryValue`, without going through `serde_json`.
     ///
     /// * `Direct(qv)` — `Cow::Borrowed(&qv)`: zero allocation, zero copy.
-    /// * `Inserted(rec)` — `Cow::Owned(…)`: materialises the record's
-    ///   `QueryValue` for `InsertedRecord::Direct` by cloning fields, or via
-    ///   `serde_json` round-trip for `InsertedRecord::Json`.
+    /// * `Inserted(rec)` — `Cow::Owned(…)`: clones the record's `fields`
+    ///   `QueryValue` (one clone, no serde round-trip).
     /// * `IdBytes(_)` — `Cow::Owned(QueryValue::Null)`: the bytes are an opaque
     ///   id-keyed msgpack blob; field-level access is not meaningful until the
     ///   client de-interns the keys.  Callers that need field access must
@@ -188,10 +187,7 @@ impl QueryRecord {
     pub fn as_value(&self) -> Cow<'_, QueryValue> {
         match self {
             QueryRecord::Direct(qv) => Cow::Borrowed(qv),
-            QueryRecord::Inserted(rec) => match rec {
-                crate::write::InsertedRecord::Direct { fields, .. } => Cow::Owned(fields.clone()),
-                crate::write::InsertedRecord::Json(v) => Cow::Owned(QueryValue::from(v.clone())),
-            },
+            QueryRecord::Inserted(rec) => Cow::Owned(rec.fields.clone()),
             // IdBytes: opaque binary — field-level access is not meaningful
             // without client-side de-interning.  Return Null as a safe sentinel.
             QueryRecord::IdBytes(_) => Cow::Owned(QueryValue::Null),
@@ -231,19 +227,13 @@ impl QueryRecord {
     /// Look up a string field using `QueryValue`-native access.
     ///
     /// * `Direct` — borrows from the inner `QueryValue::Map` (zero allocation).
-    /// * `Inserted::Direct` — borrows from the `fields: QueryValue` in the
+    /// * `Inserted` — borrows from the `fields: QueryValue` in the
     ///   `InsertedRecord` (also zero allocation, borrow from `self`).
-    /// * `Inserted::Json` — borrows from the inner `serde_json::Value` map.
     /// * `IdBytes` — always `None` (opaque bytes; no field access).
     pub fn get_value_str(&self, key: &str) -> Option<&str> {
         match self {
             QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_str),
-            QueryRecord::Inserted(rec) => match rec {
-                crate::write::InsertedRecord::Direct { fields, .. } => {
-                    fields.get(key).and_then(QueryValue::as_str)
-                }
-                crate::write::InsertedRecord::Json(v) => v.get(key).and_then(|v| v.as_str()),
-            },
+            QueryRecord::Inserted(rec) => rec.fields.get(key).and_then(QueryValue::as_str),
             QueryRecord::IdBytes(_) => None,
         }
     }
@@ -342,17 +332,16 @@ mod tests {
         assert_eq!(bytes, bytes2, "re-serialized bytes must be identical");
     }
 
-    /// C1 byte-identity: `QueryRecord::Inserted(rec)` must serialise
-    /// byte-for-byte identically on both the JSON and msgpack wire encodings,
-    /// and its `as_value()` must expose the fields correctly.
+    /// C1: `QueryRecord::Inserted(rec)` must serialise to non-empty msgpack
+    /// bytes, and its `as_value()` must expose the fields correctly.
     #[test]
-    fn inserted_variant_byte_identical_to_direct() {
+    fn inserted_variant_serializes_and_exposes_fields() {
         let mut map = new_map_wc(3);
         map.insert("name".to_string(), QueryValue::Str("widget".to_string()));
         map.insert("qty".to_string(), QueryValue::Int(42));
         map.insert("score".to_string(), QueryValue::F64(3.5));
         let id = RecordId::system("test-id-00");
-        let rec = InsertedRecord::Direct {
+        let rec = InsertedRecord {
             id: Some(id),
             fields: QueryValue::Map(map.clone()),
         };
@@ -360,11 +349,7 @@ mod tests {
         // Inserted path (server-side, never reaches a deserializer in this test).
         let inserted = QueryRecord::Inserted(rec.clone());
 
-        // Build equivalent Direct for comparison.  Note: Inserted serialises
-        // with `_id` injected; Direct does not, so we compare msgpack sizes
-        // rather than raw bytes (Inserted adds `_id`).
         let ins_mp = rmp_serde::to_vec_named(&inserted).unwrap();
-        let ins_json = serde_json::to_vec(&inserted).unwrap();
 
         // Must round-trip as QueryValue via as_value().
         let v = inserted.as_value();
@@ -373,7 +358,6 @@ mod tests {
 
         // Sanity: non-empty wire bytes produced.
         assert!(!ins_mp.is_empty());
-        assert!(!ins_json.is_empty());
     }
 
     // ── IdBytes round-trip (msgpack wire codec) ───────────────────────────────
@@ -440,8 +424,8 @@ mod tests {
     fn partial_eq_direct_vs_inserted() {
         let fields = mpack!({ "x": 1, "y": "z" });
         let d = QueryRecord::Direct(fields.clone());
-        // Build an Inserted::Direct with no id so as_value() = fields.
-        let ins = QueryRecord::Inserted(InsertedRecord::Direct { id: None, fields });
+        // Build an Inserted with no id so as_value() = fields.
+        let ins = QueryRecord::Inserted(InsertedRecord { id: None, fields });
         // Both produce the same as_value(); they must be equal.
         assert_eq!(d, ins);
     }

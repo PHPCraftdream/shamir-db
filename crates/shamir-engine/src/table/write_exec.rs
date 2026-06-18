@@ -255,7 +255,7 @@ impl TableManager {
                         ))
                     })?;
                     let qv = record_view_to_query_value(&view, interner)?;
-                    records.push(InsertedRecord::Direct {
+                    records.push(InsertedRecord {
                         id: Some(all_ids[id_offset + i]),
                         fields: qv,
                     });
@@ -484,7 +484,7 @@ impl TableManager {
                             m.insert(k.clone(), v.clone());
                         }
                     }
-                    result_records.push(InsertedRecord::Direct {
+                    result_records.push(InsertedRecord {
                         id: None,
                         fields: QueryValue::Map(m),
                     });
@@ -813,7 +813,7 @@ impl TableManager {
                 }
             }
             m.insert("_created".to_string(), QueryValue::Bool(false));
-            InsertedRecord::Direct {
+            InsertedRecord {
                 id: None,
                 fields: QueryValue::Map(m),
             }
@@ -853,7 +853,7 @@ impl TableManager {
                 }
             };
             m.insert("_created".to_string(), QueryValue::Bool(true));
-            InsertedRecord::Direct {
+            InsertedRecord {
                 id: Some(id),
                 fields: QueryValue::Map(m),
             }
@@ -878,7 +878,7 @@ fn build_insert_result_records(
     resolved_values
         .iter()
         .zip(ids.iter())
-        .map(|(value, id)| InsertedRecord::Direct {
+        .map(|(value, id)| InsertedRecord {
             id: Some(*id),
             fields: (**value).clone(),
         })
