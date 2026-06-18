@@ -1,7 +1,6 @@
 //! Tests for Database, Repository, Table, Index, Buffer config DDL constructors,
 //! and `create_db` with `if_not_exists`.
 
-use serde_json::json;
 use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch};
 use shamir_types::mpack;
 
@@ -19,7 +18,7 @@ fn create_db_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_db": "mydb"
         })
     );
@@ -32,7 +31,7 @@ fn drop_db_no_hmac() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_db": "mydb"
         })
     );
@@ -44,7 +43,7 @@ fn drop_db_with_hmac() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_db": "mydb",
             "hmac": "abc123"
         })
@@ -61,7 +60,7 @@ fn create_repo_minimal() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_repo": "hot_cache"
         })
     );
@@ -77,7 +76,7 @@ fn create_repo_full() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_repo": "hot_cache",
             "engine": "in_memory",
             "tables": ["sessions", "tokens"]
@@ -91,7 +90,7 @@ fn drop_repo_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_repo": "temp"
         })
     );
@@ -107,7 +106,7 @@ fn create_table_default_repo() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_table": "products",
             "repo": "main"
         })
@@ -121,7 +120,7 @@ fn create_table_custom_repo() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_table": "products",
             "repo": "hot"
         })
@@ -134,7 +133,7 @@ fn drop_table_default() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_table": "users",
             "repo": "main"
         })
@@ -147,7 +146,7 @@ fn drop_table_with_hmac() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_table": "users",
             "repo": "cold",
             "hmac": "ff00"
@@ -167,7 +166,7 @@ fn create_index_regular() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_index": "name_idx",
             "table": "users",
             "fields": [["name"]],
@@ -188,7 +187,7 @@ fn create_index_unique() {
     let j = roundtrip(&op);
     assert_eq!(j["create_index"], "email_idx");
     assert_eq!(j["unique"], true);
-    assert_eq!(j["fields"], json!([["email"]]));
+    assert_eq!(j["fields"], mpack!([["email"]]));
 }
 
 #[test]
@@ -232,7 +231,7 @@ fn create_index_functional() {
 }
 
 /// Builder `.functional_args(vec![...])` accepts `QueryValue` args and they
-/// survive a JSON round-trip with the correct scalar shapes.
+/// survive a msgpack round-trip with the correct scalar shapes.
 #[test]
 fn create_index_functional_with_args() {
     let op = ddl::create_index("mod_price", "items")
@@ -243,11 +242,11 @@ fn create_index_functional_with_args() {
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["functional_op"], "mod");
-    // Integer arg must round-trip as a JSON number (not null, not string).
-    assert_eq!(j["functional_args"], json!([10, "base"]));
+    // Integer arg must round-trip as a number (not null, not string).
+    assert_eq!(j["functional_args"], mpack!([10, "base"]));
 }
 
-/// When `functional_args` is not set, the field must be absent in JSON.
+/// When `functional_args` is not set, the field must be absent in the wire encoding.
 #[test]
 fn create_index_functional_args_absent_when_none() {
     let op = ddl::create_index("lower_name", "users")
@@ -255,10 +254,11 @@ fn create_index_functional_args_absent_when_none() {
         .index_type("functional")
         .functional_op("lower")
         .build();
-    let j = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let j: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert!(
         j.get("functional_args").is_none(),
-        "functional_args must be absent when not set, got: {j}"
+        "functional_args must be absent when not set, got: {j:?}"
     );
 }
 
@@ -282,16 +282,17 @@ fn create_index_sorted_with_include() {
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["sorted"], true);
-    assert_eq!(j["include"], json!([["email"], ["name"]]));
+    assert_eq!(j["include"], mpack!([["email"], ["name"]]));
     // `include` must be absent when empty (skip_serializing_if).
     let op_no_include = ddl::create_index("score_sorted2", "users")
         .field("score")
         .sorted()
         .build();
-    let j2 = serde_json::to_value(&op_no_include).unwrap();
+    let bytes2 = rmp_serde::to_vec_named(&op_no_include).unwrap();
+    let j2: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes2).unwrap();
     assert!(
         j2.get("include").is_none(),
-        "empty include should be omitted from JSON"
+        "empty include should be omitted from msgpack encoding"
     );
 }
 
@@ -301,7 +302,7 @@ fn drop_index_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_index": "name_idx",
             "table": "users",
             "unique": false,
@@ -348,7 +349,7 @@ fn get_buffer_config_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "get_buffer_config": "users",
             "repo": "main"
         })
@@ -380,7 +381,7 @@ fn create_db_if_not_exists_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_db": "newdb",
             "if_not_exists": true
         })

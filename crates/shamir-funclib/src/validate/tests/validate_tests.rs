@@ -180,7 +180,7 @@ fn matches_ok_and_bad_pattern() {
 }
 
 #[test]
-fn is_json_ok_and_bad() {
+fn is_text_encoded_ok_and_bad() {
     let r = reg();
     assert_eq!(
         r.call("is_json", &[s(r#"{"a": [1, 2, true, null], "b": "xA"}"#)])

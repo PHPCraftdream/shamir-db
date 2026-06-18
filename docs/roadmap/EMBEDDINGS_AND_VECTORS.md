@@ -139,9 +139,9 @@ pub enum VectorMetric {
 }
 ```
 
-Wire shape (JSON — wire form; clients build this via the query builder):
+Wire shape (msgpack — wire form; clients build this via the query builder):
 
-```json
+```msgpack
 { "create_vector_index": "by_embedding",
   "table": "docs", "field": ["embedding"],
   "dim": 768, "metric": "cosine" }
@@ -266,7 +266,7 @@ Each embedder gets:
 
 When an index is configured with `auto_embed` (wire form; clients build this via the query builder):
 
-```json
+```msgpack
 {
   "create_vector_index": "by_text",
   "table": "docs",
@@ -339,7 +339,7 @@ ResumeAutoEmbed { table, repo, index }
 
 The observability HTTP server (`/healthz` etc.) gains:
 
-- `/embedders` — JSON list of configured embedders + last 1m stats
+- `/embedders` — msgpack list of configured embedders + last 1m stats
   (calls, tokens, errors, p99 latency).
 - Prometheus metrics: `shamir_embedder_calls_total`,
   `shamir_embedder_tokens_total`, `shamir_embedder_errors_total`,

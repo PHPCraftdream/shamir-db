@@ -1,9 +1,11 @@
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::batch::{Batch, BuildError, Durability, Handle, Isolation};
 use crate::filter;
 use crate::query::Query;
 use crate::val::*;
+use crate::wire::ToWire;
 use crate::write::{self, doc};
 
 // ============================================================================
@@ -42,9 +44,9 @@ fn handle_column_single_field() {
         alias: "users".into(),
     };
     let fv = h.column("id");
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[].id");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[].id");
 }
 
 #[test]
@@ -53,9 +55,9 @@ fn handle_column_nested_field() {
         alias: "users".into(),
     };
     let fv = h.column(["a", "b"]);
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[].a.b");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[].a.b");
 }
 
 #[test]
@@ -64,9 +66,9 @@ fn handle_row_field() {
         alias: "users".into(),
     };
     let fv = h.row(2).field("id");
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[2].id");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[2].id");
 }
 
 #[test]
@@ -75,9 +77,9 @@ fn handle_row_get() {
         alias: "users".into(),
     };
     let fv = h.row(2).get();
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[2]");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[2]");
 }
 
 #[test]
@@ -86,9 +88,9 @@ fn handle_first_field() {
         alias: "users".into(),
     };
     let fv = h.first().field("id");
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[0].id");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[0].id");
 }
 
 #[test]
@@ -97,10 +99,10 @@ fn handle_all() {
         alias: "users".into(),
     };
     let fv = h.all();
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@users");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@users");
     // qref_all produces no path
-    assert!(json.get("path").is_none());
+    assert!(qv.get("path").is_none());
 }
 
 // ============================================================================
@@ -116,14 +118,17 @@ fn two_query_dependency_via_handle() {
         Query::from("orders").where_in("user_id", [users.column("id")]),
     );
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
+    let qv = req.to_query_value().unwrap();
 
-    let orders_where = &json["queries"]["orders"]["where"];
+    let orders_where = &qv["queries"]["orders"]["where"];
     assert_eq!(orders_where["op"], "in");
-    assert_eq!(orders_where["field"], serde_json::json!(["user_id"]));
+    assert_eq!(orders_where["field"], mpack!(["user_id"]));
 
     // The values array should contain the $query ref
-    let values = orders_where["values"].as_array().unwrap();
+    let values = match &orders_where["values"] {
+        QueryValue::List(l) => l,
+        other => panic!("expected List, got {other:?}"),
+    };
     assert_eq!(values.len(), 1);
     assert_eq!(values[0]["$query"], "@users");
     assert_eq!(values[0]["path"], "[].id");
@@ -138,8 +143,8 @@ fn query_silent_return_result_false() {
     let mut b = Batch::new();
     b.query_silent("helper", Query::from("temp"));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["helper"]["return_result"], false);
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["helper"]["return_result"], false);
 }
 
 #[test]
@@ -147,8 +152,8 @@ fn query_return_result_true_by_default() {
     let mut b = Batch::new();
     b.query("main", Query::from("users"));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["main"]["return_result"], true);
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["main"]["return_result"], true);
 }
 
 // ============================================================================
@@ -210,13 +215,9 @@ fn insert_entry() {
     let ins = write::insert("users").row(doc().set("name", "Alice"));
     b.insert("ins", ins);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert!(
-        json["queries"]["ins"]["insert_into"].is_object()
-            || json["queries"]["ins"]["insert_into"].is_string()
-    );
-    // Check the op is an insert by looking for insert_into key
-    assert!(json["queries"]["ins"].get("insert_into").is_some());
+    let qv = req.to_query_value().unwrap();
+    let entry = &qv["queries"]["ins"];
+    assert!(entry.get("insert_into").is_some());
 }
 
 #[test]
@@ -227,8 +228,8 @@ fn update_entry() {
         .set(doc().set("name", "Bob"));
     b.update("upd", upd);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert!(json["queries"]["upd"].get("update").is_some());
+    let qv = req.to_query_value().unwrap();
+    assert!(qv["queries"]["upd"].get("update").is_some());
 }
 
 #[test]
@@ -239,8 +240,8 @@ fn upsert_entry() {
         .value(doc().set("v", 42));
     b.upsert("ups", ups);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert!(json["queries"]["ups"].get("set").is_some());
+    let qv = req.to_query_value().unwrap();
+    assert!(qv["queries"]["ups"].get("set").is_some());
 }
 
 #[test]
@@ -249,8 +250,8 @@ fn delete_entry() {
     let del = write::delete("sessions").where_(filter::eq("expired", true));
     b.delete("del", del);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert!(json["queries"]["del"].get("delete_from").is_some());
+    let qv = req.to_query_value().unwrap();
+    assert!(qv["queries"]["del"].get("delete_from").is_some());
 }
 
 // ============================================================================
@@ -270,9 +271,12 @@ fn query_ref_in_write_doc_via_set_expr() {
         ),
     );
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
+    let qv = req.to_query_value().unwrap();
 
-    let values = json["queries"]["orders"]["values"].as_array().unwrap();
+    let values = match &qv["queries"]["orders"]["values"] {
+        QueryValue::List(l) => l,
+        other => panic!("expected List, got {other:?}"),
+    };
     assert_eq!(values.len(), 1);
     let row = &values[0];
     assert_eq!(row["product"], "widget");
@@ -354,9 +358,9 @@ fn op_escape_hatch() {
     let rq = Query::from("users").build();
     b.op("esc", BatchOp::Read(rq));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["esc"]["return_result"], true);
-    assert!(json["queries"]["esc"].get("from").is_some());
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["esc"]["return_result"], true);
+    assert!(qv["queries"]["esc"].get("from").is_some());
 }
 
 #[test]
@@ -366,8 +370,8 @@ fn op_silent_escape_hatch() {
     let rq = Query::from("users").build();
     b.op_silent("esc", BatchOp::Read(rq));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["esc"]["return_result"], false);
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["esc"]["return_result"], false);
 }
 
 // ============================================================================
@@ -392,14 +396,15 @@ fn batch_new_defaults() {
 fn batch_default_matches_new() {
     let a = Batch::new().build();
     let b = Batch::default().build();
-    // Compare via JSON since BatchRequest doesn't derive Eq with BatchLimits
-    let ja = serde_json::to_value(&a).unwrap();
-    let jb = serde_json::to_value(&b).unwrap();
+    // Compare via msgpack-decoded QueryValue since BatchRequest doesn't
+    // derive Eq with BatchLimits.
+    let ja = a.to_query_value().unwrap();
+    let jb = b.to_query_value().unwrap();
     assert_eq!(ja, jb);
 }
 
 // ============================================================================
-// BatchRequest round-trip (serialize → deserialize)
+// BatchRequest round-trip (serialize → deserialize via msgpack)
 // ============================================================================
 
 #[test]
@@ -415,8 +420,8 @@ fn batch_request_round_trip() {
         Query::from("orders").where_in("user_id", [users.column("id")]),
     );
     let req = b.build();
-    let json_str = serde_json::to_string(&req).unwrap();
-    let req2: shamir_query_types::batch::BatchRequest = serde_json::from_str(&json_str).unwrap();
+    let bytes = rmp_serde::to_vec_named(&req).unwrap();
+    let req2: shamir_query_types::batch::BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(req.name, req2.name);
     assert_eq!(req.id, req2.id);
     assert_eq!(req.transactional, req2.transactional);
@@ -531,7 +536,7 @@ fn name_setter() {
 fn row_ref_nested_field() {
     let h = Handle { alias: "q".into() };
     let fv = h.row(1).field(["addr", "zip"]);
-    let json = serde_json::to_value(&fv).unwrap();
-    assert_eq!(json["$query"], "@q");
-    assert_eq!(json["path"], "[1].addr.zip");
+    let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
+    assert_eq!(qv["$query"], "@q");
+    assert_eq!(qv["path"], "[1].addr.zip");
 }

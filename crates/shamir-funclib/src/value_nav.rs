@@ -1,4 +1,4 @@
-//! `/json` scalar category — structural navigation over the [`QueryValue`]
+//! `/value_nav` scalar category — structural navigation over the [`QueryValue`]
 //! `Map` / `List` tree, with no external dependency.
 //!
 //! Functions registered (plain names, no folder prefix):
@@ -22,7 +22,7 @@ use crate::registry::{
 };
 use shamir_types::types::value::QueryValue;
 
-/// Register the `/json` functions.
+/// Register the `/value_nav` functions.
 pub fn register(reg: &mut ScalarRegistry) {
     reg.register(
         "get_path",

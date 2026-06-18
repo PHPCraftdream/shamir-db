@@ -1,31 +1,29 @@
-//! Tests for Query parsing from JSON
+//! Tests for Query parsing from QueryValue
 //!
-//! All tests use JSON strings as source, parse to QueryValue, then convert to Query.
+//! All tests construct QueryValue directly via mpack! and pass to the parser.
 
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::query_from_value;
 use crate::query::read::{AggFunc, ReadQuery, SelectItem};
 use crate::query::TableRef;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-/// Parse JSON string to QueryValue, then to Query
-fn parse_query(json: &str) -> ReadQuery {
-    let query_value: QueryValue = serde_json::from_str(json).expect("Invalid JSON");
-    query_from_value(&query_value).expect("Failed to parse query")
+/// Construct a ReadQuery from a QueryValue produced by mpack!.
+fn parse_query(value: QueryValue) -> ReadQuery {
+    query_from_value(&value).expect("Failed to parse query")
 }
 
 #[test]
 fn test_simple_select_all() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
                 { "type": "all" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.from, TableRef::new("users"));
     assert_eq!(query.select.items.len(), 1);
@@ -37,7 +35,7 @@ fn test_simple_select_all() {
 
 #[test]
 fn test_select_fields() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -46,9 +44,7 @@ fn test_select_fields() {
                 { "type": "field", "path": "age" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 3);
     assert!(matches!(
@@ -67,7 +63,7 @@ fn test_select_fields() {
 
 #[test]
 fn test_select_fields_with_aliases() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -75,9 +71,7 @@ fn test_select_fields_with_aliases() {
                 { "type": "field", "path": "email", "alias": "user_email" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 2);
     assert!(matches!(
@@ -92,7 +86,7 @@ fn test_select_fields_with_aliases() {
 
 #[test]
 fn test_select_with_where() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -104,9 +98,7 @@ fn test_select_with_where() {
             "field": "status",
             "value": "active"
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.r#where.is_some());
     let filter = query.r#where.unwrap();
@@ -118,7 +110,7 @@ fn test_select_with_where() {
 
 #[test]
 fn test_select_with_limit_offset() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -129,9 +121,7 @@ fn test_select_with_limit_offset() {
             "limit": 10,
             "offset": 20
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(matches!(
         query.pagination,
@@ -144,7 +134,7 @@ fn test_select_with_limit_offset() {
 
 #[test]
 fn test_select_with_order_by() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -157,9 +147,7 @@ fn test_select_with_order_by() {
                 { "field": "name", "order": "asc" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.order_by.is_some());
     let order = query.order_by.unwrap();
@@ -168,7 +156,7 @@ fn test_select_with_order_by() {
 
 #[test]
 fn test_select_with_group_by() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -184,9 +172,7 @@ fn test_select_with_group_by() {
         "group_by": {
             "fields": ["customer_id"]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.group_by.is_some());
     let group = query.group_by.unwrap();
@@ -195,7 +181,7 @@ fn test_select_with_group_by() {
 
 #[test]
 fn test_select_with_group_by_having() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -216,9 +202,7 @@ fn test_select_with_group_by_having() {
                 "value": 5
             }
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.group_by.is_some());
     let group = query.group_by.unwrap();
@@ -227,16 +211,14 @@ fn test_select_with_group_by_having() {
 
 #[test]
 fn test_count_all() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
                 { "type": "count_all", "alias": "total_users" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(
@@ -247,7 +229,7 @@ fn test_count_all() {
 
 #[test]
 fn test_aggregate_count() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -259,9 +241,7 @@ fn test_aggregate_count() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(
@@ -273,7 +253,7 @@ fn test_aggregate_count() {
 
 #[test]
 fn test_aggregate_sum() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -285,9 +265,7 @@ fn test_aggregate_sum() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(
@@ -299,7 +277,7 @@ fn test_aggregate_sum() {
 
 #[test]
 fn test_aggregate_avg() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "employees",
         "select": {
             "items": [
@@ -311,9 +289,7 @@ fn test_aggregate_avg() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(
@@ -325,7 +301,7 @@ fn test_aggregate_avg() {
 
 #[test]
 fn test_aggregate_min_max() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "products",
         "select": {
             "items": [
@@ -343,9 +319,7 @@ fn test_aggregate_min_max() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 2);
     assert!(matches!(
@@ -360,7 +334,7 @@ fn test_aggregate_min_max() {
 
 #[test]
 fn test_aggregate_distinct() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -373,9 +347,7 @@ fn test_aggregate_distinct() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(
@@ -386,7 +358,7 @@ fn test_aggregate_distinct() {
 
 #[test]
 fn test_complex_query() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -426,9 +398,7 @@ fn test_complex_query() {
             "limit": 100,
             "offset": 0
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.from, TableRef::new("orders"));
     assert_eq!(query.select.items.len(), 4);
@@ -446,7 +416,7 @@ fn test_complex_query() {
 
 #[test]
 fn test_sales_report() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "orders",
         "select": {
             "items": [
@@ -493,9 +463,7 @@ fn test_sales_report() {
         "limit": {
             "limit": 50
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.from, TableRef::new("orders"));
     assert_eq!(query.select.items.len(), 5);

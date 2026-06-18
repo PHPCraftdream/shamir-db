@@ -89,7 +89,7 @@ fn html_escape_metachars() {
 }
 
 #[test]
-fn json_escape_specials() {
+fn str_escape_chars_specials() {
     let r = reg();
     assert_eq!(
         r.call("json_escape", &[s("a\"\\\n\t")]).unwrap(),

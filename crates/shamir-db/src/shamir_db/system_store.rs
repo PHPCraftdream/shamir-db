@@ -5,7 +5,7 @@
 //! in_memory for tests).
 
 use shamir_types::access::{Actor, ResourceMeta};
-use shamir_types::codecs::interned::json::query_value_to_inner;
+use shamir_types::codecs::interned::query_value_to_inner;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 

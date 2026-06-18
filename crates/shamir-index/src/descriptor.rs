@@ -23,7 +23,7 @@ pub struct IndexDescriptor {
     pub kind: IndexKind,
     pub created_at_nanos: u64,
     /// Opaque backend-specific tuning (bincode-friendly). Encoded
-    /// JSON or whatever the backend wants; empty by default.
+    /// as msgpack or whatever the backend wants; empty by default.
     #[serde(default)]
     pub options: Vec<u8>,
 }

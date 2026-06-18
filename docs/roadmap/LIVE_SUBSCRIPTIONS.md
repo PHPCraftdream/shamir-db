@@ -98,7 +98,7 @@ version lies at or after the requested `from_version`.
 `ChangesSinceOp` (`crates/shamir-query-types/src/admin/types.rs:554`) is
 a one-shot admin batch op:
 
-```json
+```msgpack
 { "changes_since": 0, "repo": "main", "limit": 1000 }
 ```
 
@@ -108,10 +108,10 @@ Execution (`crates/shamir-db/src/shamir_db/execute.rs:1993`) reads the
 durable journal with `commit_version > cursor` (strictly after) and
 returns:
 
-```json
+```msgpack
 {
     "changes_since": 0,
-    "events": [ /* ChangelogEvent[] serialized as JSON */ ],
+    "events": [ /* ChangelogEvent[] serialized as MessagePack */ ],
     "gap_at": null | <u64>
 }
 ```
@@ -607,20 +607,20 @@ not yet exposed through the TS client; once implemented, P2 will add
 
 ### New DbRequest variants (wire form; clients build this via the query builder)
 
-```json
+```msgpack
 { "op": "subscribe_changelog", "db": "mydb", "repo": "main", "from_version": 0, "limit_backfill": 1000 }
 { "op": "unsubscribe_changelog", "db": "mydb", "repo": "main" }
 ```
 
 ### New DbResponse variant (wire form; clients build this via the query builder)
 
-```json
+```msgpack
 { "kind": "subscription_opened", "db": "mydb", "repo": "main", "backfill_count": 42 }
 ```
 
 ### Push frame (unsolicited, server → client) (wire form; clients build this via the query builder)
 
-```json
+```msgpack
 { "push": "changelog_event", "sub": 1, "seq": 7, "data": <msgpack ChangelogEvent> }
 { "push": "gap", "sub": 1, "gap_at": 1042 }
 { "push": "slow_consumer" }
@@ -628,6 +628,6 @@ not yet exposed through the TS client; once implemented, P2 will add
 
 ### Unsubscribe ack (regular response) (wire form; clients build this via the query builder)
 
-```json
+```msgpack
 { "kind": "subscription_closed", "db": "mydb", "repo": "main" }
 ```

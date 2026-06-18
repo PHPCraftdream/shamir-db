@@ -3,9 +3,9 @@
 //! Verifies that `project_value` produces the correct key-value pairs
 //! for select-all and explicit field projections.
 //!
-//! The old JSON-twin parity tests (comparing `project` against `project_value`)
+//! The old parity tests (comparing `project` against `project_value`)
 //! have been replaced with concrete expected-value assertions after `project`
-//! was removed in J1 JSON elimination.
+//! was removed in J1 elimination.
 
 use std::sync::Arc;
 

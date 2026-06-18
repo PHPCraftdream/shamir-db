@@ -1,6 +1,6 @@
 //! End-to-end tests for the built-in function library (`shamir-funclib`)
 //! exercised through the public `ShamirDb::execute` wire path — the exact
-//! JSON batch format a TCP/WS client sends.
+//! wire batch format a TCP/WS client sends.
 //!
 //! Covers the three application points wired into the engine:
 //! 1. **Computed values on write** — a field whose value is `{ "$fn": ... }`
@@ -13,7 +13,7 @@
 //! # Migration note
 //!
 //! Read/write batches are constructed with `shamir_query_builder`. The admin
-//! `create_repo` setup batch remains as raw `json!` because `create_repo` is
+//! `create_repo` setup batch remains as raw `mpack!` because `create_repo` is
 //! an admin op with no builder coverage.
 
 use shamir_db::ShamirDb;

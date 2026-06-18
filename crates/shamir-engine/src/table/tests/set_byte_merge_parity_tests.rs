@@ -438,7 +438,7 @@ async fn set_insert_new_record_counter_delta() {
 }
 
 /// SET introducing a NEW field name on an existing record — the keystone
-/// overlay-key resolution path. The result JSON must contain both the old
+/// overlay-key resolution path. The result map must contain both the old
 /// (base-interned) fields and the new (overlay-interned) field; the committed
 /// bytes must round-trip. This is the W3c keystone risk made concrete for SET.
 #[tokio::test]
@@ -470,7 +470,7 @@ async fn set_update_introduces_new_field() {
             "alice".to_string()
         ))
     );
-    // New field present (the overlay-string-keyed result-JSON path).
+    // New field present (the overlay-string-keyed result-QueryValue path).
     assert_eq!(
         result.records[0].get_value_owned("score"),
         Some(shamir_types::types::value::QueryValue::Int(100))

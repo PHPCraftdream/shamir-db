@@ -1,9 +1,9 @@
 בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
 
-# JSON-кампания — общая картина (живой статус)
+# Legacy-text-elimination кампания — общая картина (живой статус)
 
 Удаление `serde_json` из всего проекта (вторая ось цели #61). Дополняет
-`json-elimination-stages.md` (этапы) и `innervalue-floor.md` (первая ось).
+`legacy-elimination-stages.md` (этапы) и `innervalue-floor.md` (первая ось).
 
 ---
 
@@ -14,20 +14,20 @@
 линз-нативны (`RecordView`/`ScalarRef`); index V1→V2 авто-мигрирует на открытии
 (S9b). Запушено.
 
-**Кампания JSON (агрессивный scope: снести `serde_json` целиком) — в активной
+**Кампания legacy-text-elimination (агрессивный scope: снести `serde_json` целиком) — в активной
 фазе.**
 
 ---
 
-## 2. Сделано в JSON (локально)
+## 2. Сделано в legacy-text-elimination (локально)
 
 | Этап | Суть |
 |---|---|
-| **J1** | мёртвые JSON read-twins прочь (apply_select/_to_bytes/project/distinct) |
-| **tx + connect** | off serde_json → rmp_serde / toml (leaf-крейты) |
+| **J1** | мёртвые legacy read-twins прочь (apply_select/_to_bytes/project/distinct) |
+| **tx + connect** | off legacy-text-encoding lib → rmp_serde / toml (leaf-крейты) |
 | **`mpack!`** | msgpack-builder данных для тестов (39 тестов; `shamir-types`) |
-| **md-sweep** | ~27 доков json→MessagePack (campaign/spec/история сохранены) |
-| **J2/J3/J4** | engine-internal: `HashableQueryValue` (distinct), group-key, order/computed off serde_json — e2e 567/567 |
+| **md-sweep** | ~27 доков legacy text→MessagePack (campaign/spec/история сохранены) |
+| **J2/J3/J4** | engine-internal: `HashableQueryValue` (distinct), group-key, order/computed off legacy-text-encoding lib — e2e 567/567 |
 | **funcargs** | первый CORE-кластер; wire-совместимость QueryValue↔msgpack доказана |
 
 ---
@@ -37,7 +37,7 @@
 1. **Провод УЖЕ MessagePack.** `serde_json::Value` — in-memory динамический
    тип, десериализуемый ИЗ msgpack. `QueryValue` имеет custom plain-msgpack
    `Serialize`/`Deserialize` (Int→i64, Str/Dec/Big→str, List→seq, Map→map),
-   **байт-идентичный** serde_json::Value. → **CORE = внутренний type-swap
+   **байт-идентичный** `serde_json::Value`. → **CORE = внутренний type-swap
    `serde_json::Value`→`QueryValue`, НЕ слом протокола.** v1-bump не нужен.
 2. **Интернер-синк-протокол уже построен** на Rust (Stage 5-wire): per-repo
    `request.interner_epochs` → `attach_interner_delta` → `response.interner_delta`
@@ -49,29 +49,29 @@
 
 ---
 
-## 4. Ближайшие этапы (JSON-core, по dep-порядку)
+## 4. Ближайшие этапы (legacy-core, по dep-порядку)
 
 1. 🔄 `core-wire-field-swaps` (profile/id/value → QueryValue) — **в работе**.
-2. **`QueryRecord::Json` → `Direct(QueryValue)`** — центровой, отдельным
-   фокусным этапом (variant + From-impls + as_json/get/Index → QueryValue;
+2. **`QueryRecord::Legacy` → `Direct(QueryValue)`** — центровой, отдельным
+   фокусным этапом (variant + From-impls + as_legacy/get/Index → QueryValue;
    db admin_result, client-parsers, server, engine read-fallback).
-3. **builder** — ToWire `to_json_value`, write-builders (row/set/key/value),
+3. **builder** — ToWire `to_legacy_value`, write-builders (row/set/key/value),
    `Batch::id` → QueryValue.
 4. **db** — SystemStore `load_*`/`save_*`, `access_tree`, FacadeDbGateway
    filter-round-trips → typed / QueryValue.
-5. **types codec** — `json.rs`/`JsonCodec`/`RecordRef::to_json_value`/
+5. **types codec** — `legacy.rs`/`LegacyCodec`/`RecordRef::to_legacy_value`/
    `ResourceMeta`/`From<serde_json::Value>`-impls — **последним** (после ухода
    всех потребителей).
 6. **leaf-финал** — wasm-host `FunctionMeta`, client-parsers, **napi
    `client-node`** (граница JS↔Rust → msgpack `Buffer`).
 7. **Снос `serde_json`** из каждого Cargo.toml (критерий готовности крейта) +
-   **финальный sweep комментариев** в коде (json→msgpack — отложен, чтобы не
+   **финальный sweep комментариев** в коде (legacy→msgpack — отложен, чтобы не
    переписывать дважды).
-8. **JSON-close** — ноль `serde_json` в workspace, честный итог в доке.
+8. **legacy-close** — ноль `serde_json` в workspace, честный итог в доке.
 
 ---
 
-## 5. Последующие (north-star+, после JSON)
+## 5. Последующие (north-star+, после legacy-text-elimination)
 
 - **#100 — TS/napi client-side interner.** Подключить клиенты к УЖЕ
   существующему epoch-delta протоколу (`interner_epochs`/`interner_delta`/

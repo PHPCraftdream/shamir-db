@@ -11,8 +11,9 @@
 //!   DDL op. The server gates it on `Manage` of the root, so a non-admin
 //!   user is denied.
 //!
-//! Both modes obtain the same `access_tree` JSON; output is either the raw
-//! JSON (`--json`) or a rendered ASCII tree.
+//! Both modes obtain the same `access_tree` [`QueryValue`] tree; output is
+//! either a pretty-printed QueryValue dump (`--pretty`) or a rendered
+//! ASCII tree.
 
 use std::net::SocketAddr;
 
@@ -33,8 +34,8 @@ pub struct AccessTreeArgs {
     pub depth: Option<u32>,
     /// Restrict the resource tree to a single database.
     pub db: Option<String>,
-    /// Emit raw JSON instead of the rendered ASCII tree.
-    pub json: bool,
+    /// Emit the raw QueryValue dump instead of the rendered ASCII tree.
+    pub pretty: bool,
     /// Online mode: connect to a running server at `host:port`.
     pub connect: Option<String>,
     /// SNI hostname for TLS in online mode (matches the server cert).
@@ -59,12 +60,87 @@ pub async fn fetch_tree(config: &Config, args: &AccessTreeArgs) -> anyhow::Resul
 pub async fn run(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<()> {
     let tree = fetch_tree(config, args).await?;
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&tree)?);
+    if args.pretty {
+        println!("{}", format_pretty(&tree, 0));
     } else {
         println!("{}", render(&tree));
     }
     Ok(())
+}
+
+/// Minimal pretty-printer for [`QueryValue`] trees — produces an indented
+/// text representation suitable for human inspection of the access tree.
+pub fn format_pretty(v: &QueryValue, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    let inner_pad = "  ".repeat(indent + 1);
+    match v {
+        QueryValue::Null => "null".to_string(),
+        QueryValue::Bool(b) => b.to_string(),
+        QueryValue::Int(i) => i.to_string(),
+        QueryValue::F64(f) => format!("{f}"),
+        QueryValue::Dec(d) => format!("{d}"),
+        QueryValue::Big(b) => format!("{b}"),
+        QueryValue::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+        QueryValue::Bin(b) => format!("\"<bin:{}>\"", b.len()),
+        QueryValue::List(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let mut out = String::from("[\n");
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(&inner_pad);
+                out.push_str(&format_pretty(item, indent + 1));
+                if i + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+            out
+        }
+        QueryValue::Set(set) => {
+            let items: Vec<_> = set.iter().collect();
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let mut out = String::from("[\n");
+            for (i, item) in items.iter().enumerate() {
+                out.push_str(&inner_pad);
+                out.push_str(&format_pretty(item, indent + 1));
+                if i + 1 < items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+            out
+        }
+        QueryValue::Map(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+            let mut out = String::from("{\n");
+            let entries: Vec<_> = map.iter().collect();
+            for (i, (k, val)) in entries.iter().enumerate() {
+                out.push_str(&inner_pad);
+                out.push_str(&format!(
+                    "\"{}\"",
+                    k.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
+                out.push_str(": ");
+                out.push_str(&format_pretty(val, indent + 1));
+                if i + 1 < entries.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push('}');
+            out
+        }
+    }
 }
 
 /// Offline: open the durable system store and assemble the tree directly.

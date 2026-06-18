@@ -2,7 +2,7 @@
 //!
 //! v1: stop-and-copy. Operator stops the server, runs
 //! `shamir-server backup --from <data_dir> --to <dest>` which recursively
-//! copies every file under `data_dir` (redb files + JSON registries +
+//! copies every file under `data_dir` (redb files + wire-table registries +
 //! audit log + rotated audit files + TLS PEMs). The destination is
 //! `<dest>/<timestamp>/` so a single `--to` can collect daily snapshots.
 //!

@@ -11,7 +11,7 @@ fn default_repo() -> String {
 ///
 /// Mirrors `shamir_storage::storage_membuffer::MemBufferConfig`
 /// 1:1 — kept separate so the wire DTO doesn't drag the storage
-/// crate into clients that just speak JSON. The executor maps
+/// crate into clients. The executor maps
 /// this struct into the storage struct on its way in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BufferConfigDto {

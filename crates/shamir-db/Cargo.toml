@@ -40,7 +40,6 @@ shamir-tx      = { path = "../shamir-tx" }
 # Direct deps for what's still here: the `db::shamir_db` facade
 # (ShamirDb + SystemStore + execute) and the small `api/` shim.
 serde       = { version = "1.0.217", features = ["derive"] }
-serde_json  = "1.0.149"
 tokio       = { version = "1.49.0", features = ["full"] }
 dashmap     = "6.1.0"
 log         = "0.4"            # log!/info!/warn! macros across the facade

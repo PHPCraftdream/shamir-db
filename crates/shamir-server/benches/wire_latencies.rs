@@ -111,7 +111,7 @@ fn tx_begin_bytes() -> Vec<u8> {
 }
 
 /// Build a `TxExecute` payload with `n` upserts via the typed batch
-/// builder — no raw JSON for the query shape itself.
+/// builder — no hand-assembled query shape.
 fn tx_execute_bytes(tx_handle: u64, n: usize) -> Vec<u8> {
     let mut b = Batch::new();
     b.id("w");

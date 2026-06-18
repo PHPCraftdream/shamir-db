@@ -696,7 +696,7 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
     group.finish();
 }
 
-/// Read-scan bench: quantifies Stage 21 (QueryRecord elim json::Map alloc)
+/// Read-scan bench: quantifies Stage 21 (QueryRecord elim per-row Map alloc)
 /// and Stage 22 (matches_msgpack_bytes skips InnerValue decode on rejects).
 ///
 /// 1000 rows are inserted ONCE before measurement. Three variants exercise
@@ -761,7 +761,7 @@ fn bench_read_scan(c: &mut Criterion) {
     bu::tune(&mut g, 30, 5, 3);
 
     // Variant 1: scan all rows — baseline; pure scan + projection cost.
-    // Exercises Stage 21 (no json::Map alloc per row on 3 scan paths).
+    // Exercises Stage 21 (no per-row Map alloc on 3 scan paths).
     g.bench_function("scan_all_1000", |b| {
         let q = Query::from("bench_table");
         let req = {

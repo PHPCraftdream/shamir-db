@@ -1,20 +1,24 @@
 //! Tests for `filter` module — every leaf constructor, free combinator,
-//! and `FilterExt` smart-merge is verified against exact wire JSON and
-//! round-tripped.
+//! and `FilterExt` smart-merge is verified against exact wire shape and
+//! round-tripped through msgpack.
 
-use serde_json::{json, Value};
 use shamir_query_types::filter::Filter;
+use shamir_types::mpack;
 
 use crate::filter::*;
 use crate::val::*;
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-/// Serialize → JSON value, assert equality, then round-trip back.
-fn assert_wire(f: Filter, expected: Value) {
-    let got = serde_json::to_value(&f).unwrap();
-    assert_eq!(got, expected, "wire JSON mismatch");
-    let back: Filter = serde_json::from_value(got).unwrap();
+/// Serialize → msgpack-decoded QueryValue, assert equality against `mpack!`
+/// expected, then round-trip the original type back and assert structural
+/// equality.
+fn assert_wire(f: Filter, expected: shamir_types::types::value::QueryValue) {
+    let bytes = rmp_serde::to_vec_named(&f).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode QueryValue");
+    assert_eq!(got, expected, "wire shape mismatch");
+    let back: Filter = rmp_serde::from_slice(&bytes).expect("round-trip");
     assert_eq!(back, f, "round-trip mismatch");
 }
 
@@ -24,7 +28,7 @@ fn assert_wire(f: Filter, expected: Value) {
 fn test_eq() {
     assert_wire(
         eq("status", "active"),
-        json!({
+        mpack!({
             "op": "eq",
             "field": ["status"],
             "value": "active"
@@ -36,7 +40,7 @@ fn test_eq() {
 fn test_ne() {
     assert_wire(
         ne("role", "guest"),
-        json!({
+        mpack!({
             "op": "ne",
             "field": ["role"],
             "value": "guest"
@@ -48,7 +52,7 @@ fn test_ne() {
 fn test_gt() {
     assert_wire(
         gt("age", 18_i64),
-        json!({
+        mpack!({
             "op": "gt",
             "field": ["age"],
             "value": 18
@@ -60,7 +64,7 @@ fn test_gt() {
 fn test_gte() {
     assert_wire(
         gte("score", 90_i64),
-        json!({
+        mpack!({
             "op": "gte",
             "field": ["score"],
             "value": 90
@@ -72,7 +76,7 @@ fn test_gte() {
 fn test_lt() {
     assert_wire(
         lt("price", 100.0_f64),
-        json!({
+        mpack!({
             "op": "lt",
             "field": ["price"],
             "value": 100.0
@@ -84,7 +88,7 @@ fn test_lt() {
 fn test_lte() {
     assert_wire(
         lte("qty", 5_i64),
-        json!({
+        mpack!({
             "op": "lte",
             "field": ["qty"],
             "value": 5
@@ -98,7 +102,7 @@ fn test_lte() {
 fn test_field_eq() {
     assert_wire(
         field_eq("name", "alice"),
-        json!({
+        mpack!({
             "op": "field",
             "field": ["name"],
             "value": "alice"
@@ -112,7 +116,7 @@ fn test_field_eq() {
 fn test_in() {
     assert_wire(
         in_("role", ["admin", "mod"]),
-        json!({
+        mpack!({
             "op": "in",
             "field": ["role"],
             "values": ["admin", "mod"]
@@ -124,7 +128,7 @@ fn test_in() {
 fn test_not_in() {
     assert_wire(
         not_in("status", ["deleted", "banned"]),
-        json!({
+        mpack!({
             "op": "not_in",
             "field": ["status"],
             "values": ["deleted", "banned"]
@@ -138,7 +142,7 @@ fn test_not_in() {
 fn test_like() {
     assert_wire(
         like("name", "Al%"),
-        json!({
+        mpack!({
             "op": "like",
             "field": ["name"],
             "pattern": "Al%"
@@ -150,7 +154,7 @@ fn test_like() {
 fn test_ilike() {
     assert_wire(
         ilike("email", "%@example.com"),
-        json!({
+        mpack!({
             "op": "i_like",
             "field": ["email"],
             "pattern": "%@example.com"
@@ -162,7 +166,7 @@ fn test_ilike() {
 fn test_regex() {
     assert_wire(
         regex("code", "^[A-Z]{3}$"),
-        json!({
+        mpack!({
             "op": "regex",
             "field": ["code"],
             "pattern": "^[A-Z]{3}$"
@@ -176,7 +180,7 @@ fn test_regex() {
 fn test_is_null() {
     assert_wire(
         is_null("deleted_at"),
-        json!({
+        mpack!({
             "op": "is_null",
             "field": ["deleted_at"]
         }),
@@ -187,7 +191,7 @@ fn test_is_null() {
 fn test_is_not_null() {
     assert_wire(
         is_not_null("email"),
-        json!({
+        mpack!({
             "op": "is_not_null",
             "field": ["email"]
         }),
@@ -198,7 +202,7 @@ fn test_is_not_null() {
 fn test_exists() {
     assert_wire(
         exists("profile"),
-        json!({
+        mpack!({
             "op": "exists",
             "field": ["profile"]
         }),
@@ -209,7 +213,7 @@ fn test_exists() {
 fn test_not_exists() {
     assert_wire(
         not_exists("legacy_field"),
-        json!({
+        mpack!({
             "op": "not_exists",
             "field": ["legacy_field"]
         }),
@@ -222,7 +226,7 @@ fn test_not_exists() {
 fn test_contains() {
     assert_wire(
         contains("tags", "rust"),
-        json!({
+        mpack!({
             "op": "contains",
             "field": ["tags"],
             "value": "rust"
@@ -234,7 +238,7 @@ fn test_contains() {
 fn test_contains_any() {
     assert_wire(
         contains_any("tags", ["rust", "go"]),
-        json!({
+        mpack!({
             "op": "contains_any",
             "field": ["tags"],
             "values": ["rust", "go"]
@@ -246,7 +250,7 @@ fn test_contains_any() {
 fn test_contains_all() {
     assert_wire(
         contains_all("tags", ["db", "fast"]),
-        json!({
+        mpack!({
             "op": "contains_all",
             "field": ["tags"],
             "values": ["db", "fast"]
@@ -260,7 +264,7 @@ fn test_contains_all() {
 fn test_between() {
     assert_wire(
         between("age", 18_i64, 65_i64),
-        json!({
+        mpack!({
             "op": "between",
             "field": ["age"],
             "from": 18,
@@ -275,7 +279,7 @@ fn test_between() {
 fn test_fts() {
     assert_wire(
         fts("body", "hello world", "and"),
-        json!({
+        mpack!({
             "op": "fts",
             "field": ["body"],
             "query": "hello world",
@@ -290,7 +294,7 @@ fn test_fts() {
 fn test_vector_similarity() {
     assert_wire(
         vector_similarity("embedding", vec![1.0, 0.0, 0.5], 10),
-        json!({
+        mpack!({
             "op": "vector_similarity",
             "field": ["embedding"],
             "query": [1.0, 0.0, 0.5],
@@ -305,7 +309,7 @@ fn test_vector_similarity() {
 fn test_computed_lower_eq() {
     assert_wire(
         computed("lower", "email", "eq", "alice@foo.com"),
-        json!({
+        mpack!({
             "op": "computed",
             "expr_op": "lower",
             "field": ["email"],
@@ -319,7 +323,7 @@ fn test_computed_lower_eq() {
 fn test_computed_with_args() {
     assert_wire(
         computed_with_args("substring", "name", [lit(0_i64), lit(3_i64)], "eq", "ali"),
-        json!({
+        mpack!({
             "op": "computed",
             "expr_op": "substring",
             "field": ["name"],
@@ -334,7 +338,7 @@ fn test_computed_with_args() {
 fn test_computed_nested_field() {
     assert_wire(
         computed("lower", ["address", "city"], "eq", "ny"),
-        json!({
+        mpack!({
             "op": "computed",
             "expr_op": "lower",
             "field": ["address", "city"],
@@ -350,7 +354,7 @@ fn test_computed_nested_field() {
 fn test_and() {
     assert_wire(
         and([eq("a", "x"), gt("b", 1_i64)]),
-        json!({
+        mpack!({
             "op": "and",
             "filters": [
                 {
@@ -372,7 +376,7 @@ fn test_and() {
 fn test_or() {
     assert_wire(
         or([eq("x", true), eq("y", false)]),
-        json!({
+        mpack!({
             "op": "or",
             "filters": [
                 {
@@ -394,7 +398,7 @@ fn test_or() {
 fn test_not() {
     assert_wire(
         not(eq("status", "deleted")),
-        json!({
+        mpack!({
             "op": "not",
             "filter": {
                 "op": "eq",
@@ -412,7 +416,7 @@ fn ext_and_creates_pair() {
     let f = eq("a", 1_i64).and(eq("b", 2_i64));
     assert_wire(
         f,
-        json!({
+        mpack!({
             "op": "and",
             "filters": [
                 {
@@ -445,7 +449,7 @@ fn ext_or_creates_pair() {
     let f = eq("a", 1_i64).or(eq("b", 2_i64));
     assert_wire(
         f,
-        json!({
+        mpack!({
             "op": "or",
             "filters": [
                 {
@@ -477,7 +481,7 @@ fn ext_negate() {
     let f = eq("active", true).negate();
     assert_wire(
         f,
-        json!({
+        mpack!({
             "op": "not",
             "filter": {
                 "op": "eq",
@@ -494,7 +498,7 @@ fn ext_negate() {
 fn eq_nested_field() {
     assert_wire(
         eq(["address", "city"], "NY"),
-        json!({
+        mpack!({
             "op": "eq",
             "field": ["address", "city"],
             "value": "NY"
@@ -508,7 +512,7 @@ fn eq_nested_field() {
 fn eq_with_func_value() {
     assert_wire(
         eq("name", func("strings/lower", [lit("ALICE")])),
-        json!({
+        mpack!({
             "op": "eq",
             "field": ["name"],
             "value": {
@@ -529,7 +533,7 @@ fn complex_and_or_not_tree() {
     let f = eq("status", "active").and(or([eq("role", "admin"), eq("vip", true)]));
     assert_wire(
         f,
-        json!({
+        mpack!({
             "op": "and",
             "filters": [
                 {

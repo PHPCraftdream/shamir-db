@@ -888,7 +888,7 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
 
 // --------------------------------------------------------------------------
 // Sanity: `IndexMap` is in the import set so that future tests can build
-// `TMap` directly without going through JSON if they need to.
+// `TMap` directly without going through a serialised format if they need to.
 // --------------------------------------------------------------------------
 #[allow(dead_code)]
 fn _indexmap_in_scope() -> IndexMap<String, u32> {

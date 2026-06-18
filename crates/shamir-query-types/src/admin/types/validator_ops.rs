@@ -8,7 +8,7 @@ fn default_repo() -> String {
 
 /// Create (or replace) a validator from Rust source or pre-compiled WASM.
 ///
-/// ```json
+/// ```text
 /// { "create_validator": "v_age", "source": "pub fn shamir_call …", "replace": false }
 /// { "create_validator": "v_age", "wasm": "<base64>", "replace": true }
 /// ```
@@ -25,7 +25,7 @@ pub struct CreateValidatorOp {
 
 /// Drop a validator by name.
 ///
-/// ```json
+/// ```text
 /// { "drop_validator": "v_age" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ pub struct DropValidatorOp {
 
 /// Rename a validator.
 ///
-/// ```json
+/// ```text
 /// { "rename_validator": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,7 +46,7 @@ pub struct RenameValidatorOp {
 
 /// Bind a validator to a table on specified write operations.
 ///
-/// ```json
+/// ```text
 /// {
 ///   "bind_validator": "v_age",
 ///   "table": { "db": "testdb", "repo": "main", "table": "users" },
@@ -67,7 +67,7 @@ pub struct BindValidatorOp {
 
 /// Unbind a validator from a table.
 ///
-/// ```json
+/// ```text
 /// { "unbind_validator": "v_age", "table": { "db": "testdb", "repo": "main", "table": "users" } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ pub struct UnbindValidatorOp {
 
 /// List validator bindings for a table.
 ///
-/// ```json
+/// ```text
 /// { "list_validators": "users", "db": "testdb", "repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

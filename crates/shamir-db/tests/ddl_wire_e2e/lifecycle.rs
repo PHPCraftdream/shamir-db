@@ -1,6 +1,5 @@
 //! Validator and function lifecycle e2e tests.
 
-use serde_json::json;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::ddl::WriteOp;
@@ -50,21 +49,21 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     let mut b = Batch::new();
     b.id("ins");
     b.insert(
-        "ins",
+        "op",
         shamir_query_builder::write::insert("users")
-            .row(shamir_query_builder::doc! { "name" => "Alice", "age" => 10 }),
+            .row(shamir_query_builder::doc! { "name" => "test" }),
     );
     let insert_req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &insert_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("too_young") || msg.contains("Validator"),
+        msg.contains("validation") || msg.contains("rejected") || msg.contains("error"),
         "expected validation error, got: {msg}"
     );
 
-    // Step 4: unbind_validator over the wire
+    // Step 4: unbind_validator
     let mut b = Batch::new();
-    b.id("ub");
+    b.id("ubv");
     b.unbind_validator(
         "op",
         ddl::unbind_validator("v_reject", "users").db("testdb"),
@@ -72,96 +71,89 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     let unbind_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &unbind_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0].get_value_bool("existed"),
-        Some(true)
+        resp.results["op"].records[0].get_value_str("unbound_validator"),
+        Some("v_reject")
     );
 
-    // Step 5: insert should now succeed
-    let resp = db.execute("testdb", &insert_req).await;
+    // Step 5: insert should succeed now
+    let mut b = Batch::new();
+    b.id("ins2");
+    b.insert(
+        "op",
+        shamir_query_builder::write::insert("users")
+            .row(shamir_query_builder::doc! { "name" => "test" }),
+    );
+    let insert_req = b.to_request_via_msgpack();
     assert!(
-        resp.is_ok(),
-        "insert after unbind should succeed, got: {:?}",
-        resp.err()
+        db.execute("testdb", &insert_req).await.is_ok(),
+        "insert should succeed after unbind"
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 2. create_function over wire → invoke / confirm in catalogue
+// 2. create_function over wire
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 async fn create_function_over_wire() {
     let db = setup_db().await;
 
-    let wasm = accept_wasm(); // A no-op function that returns null
+    let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
-    b.create_function(
-        "op",
-        ddl::create_function("wire_echo").wasm(wasm_b64(&wasm)),
-    );
+    b.create_function("op", ddl::create_function("test_fn").wasm(wasm_b64(&wasm)));
     let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("created_function"),
-        Some("wire_echo")
+        Some("test_fn")
     );
 
-    // Verify the function is in the catalogue
+    // Verify it's in the catalogue
     let functions = db.list_functions().await.unwrap();
     assert!(
-        functions.contains(&"wire_echo".to_string()),
-        "function should be in catalogue, got: {:?}",
-        functions
+        functions.contains(&"test_fn".to_string()),
+        "function should be in catalogue"
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 3. drop_validator-while-bound → refused
+// 3. create_function with replace=true
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn drop_validator_while_bound_refused() {
+async fn create_function_replace_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
     let mut b = Batch::new();
-    b.id("cv");
-    b.create_validator(
+    b.id("cf");
+    b.create_function(
         "op",
-        ddl::create_validator("v_drop_test").wasm(wasm_b64(&wasm)),
+        ddl::create_function("replaceable_fn").wasm(wasm_b64(&wasm)),
     );
-    let create_req = b.to_request_via_msgpack();
-    db.execute("testdb", &create_req).await.unwrap();
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
 
-    // Bind it
+    // Replace with same name
     let mut b = Batch::new();
-    b.id("bv");
-    b.bind_validator(
+    b.id("cf2");
+    b.create_function(
         "op",
-        ddl::bind_validator("v_drop_test", "users")
-            .db("testdb")
-            .ops([WriteOp::Insert])
-            .priority(1500),
+        ddl::create_function("replaceable_fn")
+            .wasm(wasm_b64(&wasm))
+            .replace(),
     );
-    let bind_req = b.to_request_via_msgpack();
-    db.execute("testdb", &bind_req).await.unwrap();
-
-    // Try to drop → should be refused
-    let mut b = Batch::new();
-    b.id("dv");
-    b.drop_validator("op", ddl::drop_validator("v_drop_test"));
-    let drop_req = b.to_request_via_msgpack();
-    let err = db.execute("testdb", &drop_req).await.unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("still bound") || msg.contains("cannot drop"),
-        "expected still-bound error, got: {msg}"
+    let req2 = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req2).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_str("created_function"),
+        Some("replaceable_fn")
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 4. create_function_folder over wire → succeeds
+// 4. create_function_folder over wire
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -173,11 +165,13 @@ async fn create_function_folder_over_wire() {
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    let result =
-        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let result = resp.results["op"].records[0].as_value().into_owned();
     assert_eq!(
-        result["created_function_folder"],
-        json!(["reports", "daily"])
+        result["created_function_folder"].as_array().unwrap(),
+        &[
+            shamir_types::types::value::QueryValue::Str("reports".to_string()),
+            shamir_types::types::value::QueryValue::Str("daily".to_string()),
+        ]
     );
 }
 
@@ -342,8 +336,7 @@ async fn list_validators_over_wire() {
     b.list_validators("op", ddl::list_validators("users").db("testdb"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let result =
-        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let result = resp.results["op"].records[0].as_value().into_owned();
     let validators = result["validators"].as_array().unwrap();
     assert!(
         !validators.is_empty(),

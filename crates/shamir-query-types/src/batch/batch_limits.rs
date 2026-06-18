@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Example
 ///
-/// ```json
+/// ```text
 /// {
 ///   "limits": {
 ///     "max_queries": 20,

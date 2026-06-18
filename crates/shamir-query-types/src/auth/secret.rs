@@ -3,7 +3,7 @@
 //! [`SecretString`] wraps a `String` with:
 //! - a manual `Debug` that prints `"SecretString(***)"` (never the value),
 //! - `Serialize`/`Deserialize` that pass through the inner value unchanged
-//!   (so the wire JSON shape stays `"password": "..."`),
+//!   (so the wire encoding keeps `"password"` as a plain string),
 //! - `Drop` that zeroizes the heap buffer before freeing it.
 
 use std::fmt;
@@ -16,7 +16,7 @@ use zeroize::Zeroize;
 /// zeroized on drop.
 ///
 /// Use this for any field that carries a cleartext secret (password,
-/// shared secret) that travels on the wire as a plain JSON/string value
+/// shared secret) that travels on the wire as a plain string value
 /// but must not leak through `{:?}` / `tracing` / log output.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString {

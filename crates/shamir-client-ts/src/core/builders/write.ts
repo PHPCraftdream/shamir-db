@@ -17,7 +17,7 @@
 import type { Filter } from '../types/filter.js';
 import type {
   TableRefWire,
-  Json,
+  WireValue,
   UpdateReturnMode,
   UpdateSelect,
   InsertOp,
@@ -39,7 +39,7 @@ function tableRef(repo: string | undefined, table: string): TableRefWire {
  */
 export function insert(
   table: string,
-  values: Json | Json[],
+  values: WireValue | WireValue[],
   opts?: { repo?: string },
 ): InsertOp {
   const rows = Array.isArray(values) ? values : [values];
@@ -52,7 +52,7 @@ export function insert(
 export class UpdateBuilder {
   private readonly tableRef: TableRefWire;
   private whereFilter: Filter | null = null;
-  private setValue: Json | null = null;
+  private setValue: WireValue | null = null;
   private selectValue: UpdateSelect | null = null;
 
   /** @internal Use `update()` to create an instance. */
@@ -71,7 +71,7 @@ export class UpdateBuilder {
   }
 
   /** Set the fields to update (partial record). Required before `.build()`. */
-  set(obj: Json): this {
+  set(obj: WireValue): this {
     this.setValue = obj;
     return this;
   }
@@ -121,8 +121,8 @@ export function update(
 /** Build a `SetOp` (upsert by key). */
 export function upsert(
   table: string,
-  key: Json,
-  value: Json,
+  key: WireValue,
+  value: WireValue,
   opts?: { repo?: string },
 ): SetOp {
   return { set: tableRef(opts?.repo, table), key, value };

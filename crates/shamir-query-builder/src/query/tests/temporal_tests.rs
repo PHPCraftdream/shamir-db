@@ -1,18 +1,19 @@
 //! Tests for the temporal builder methods on [`Query`].
 //!
 //! Each test asserts the exact wire DTO produced and (where applicable)
-//! confirms that the serialised JSON omits keys that should remain off the
+//! confirms that serialised msgpack omits keys that should remain off the
 //! wire when default values are used.
 
-use serde_json::{json, Value};
 use shamir_query_types::read::{At, OrderDirection, ReadQuery, Temporal};
+use shamir_types::mpack;
 
 use crate::query::Query;
 
 // ── helpers ────────────────────────────────────────────────────────
 
-fn wire(rq: &ReadQuery) -> Value {
-    serde_json::to_value(rq).expect("serialize")
+fn wire(rq: &ReadQuery) -> shamir_types::types::value::QueryValue {
+    let bytes = rmp_serde::to_vec_named(rq).expect("serialize");
+    rmp_serde::from_slice(&bytes).expect("decode QueryValue")
 }
 
 // ── as_of_version ─────────────────────────────────────────────────
@@ -28,10 +29,10 @@ fn builder_as_of_version_sets_temporal() {
     );
 
     // Wire: temporal key present with the expected shape.
-    let json = wire(&rq);
+    let qv = wire(&rq);
     assert_eq!(
-        json["temporal"],
-        json!({
+        qv["temporal"],
+        mpack!({
             "kind": "as_of",
             "at": {"version": 5}
         }),
@@ -53,12 +54,12 @@ fn builder_as_of_timestamp_sets_temporal() {
         "temporal should be AsOf {{ at: Timestamp({ts}) }}"
     );
 
-    let json = wire(&rq);
+    let qv = wire(&rq);
     assert_eq!(
-        json["temporal"],
-        json!({
+        qv["temporal"],
+        mpack!({
             "kind": "as_of",
-            "at": {"timestamp": ts}
+            "at": {"timestamp": 1700000000000i64}
         }),
     );
 }
@@ -82,10 +83,10 @@ fn builder_history_sets_temporal() {
 
     // Wire: from/to/limit are omitted (skip_serializing_if = None),
     // order defaults to "asc".
-    let json = wire(&rq);
+    let qv = wire(&rq);
     assert_eq!(
-        json["temporal"],
-        json!({
+        qv["temporal"],
+        mpack!({
             "kind": "history",
             "order": "asc"
         }),
@@ -116,10 +117,10 @@ fn builder_history_range_sets_temporal() {
         "history_range should set all provided fields"
     );
 
-    let json = wire(&rq);
+    let qv = wire(&rq);
     assert_eq!(
-        json["temporal"],
-        json!({
+        qv["temporal"],
+        mpack!({
             "kind": "history",
             "from": {"version": 10},
             "to":   {"version": 50},
@@ -138,8 +139,8 @@ fn builder_with_version_sets_flag() {
     assert!(rq.with_version, "with_version should be true");
 
     // Wire: with_version key present.
-    let json = wire(&rq);
-    assert_eq!(json["with_version"], json!(true));
+    let qv = wire(&rq);
+    assert_eq!(qv["with_version"], true);
 }
 
 // ── default (no temporal call) is Latest ─────────────────────────
@@ -153,17 +154,18 @@ fn builder_without_temporal_is_latest() {
     assert!(!rq.with_version);
 
     // Wire: temporal and with_version keys are absent (skip_serialized).
-    let json = wire(&rq);
+    let qv = wire(&rq);
     assert!(
-        json.get("temporal").is_none(),
+        qv.get("temporal").is_none(),
         "temporal key must be absent from wire for Latest"
     );
     assert!(
-        json.get("with_version").is_none(),
+        qv.get("with_version").is_none(),
         "with_version key must be absent from wire when false"
     );
 
     // Round-trip: deserialising without those keys reproduces the same DTO.
-    let back: ReadQuery = serde_json::from_value(json).expect("deserialize");
+    let bytes = rmp_serde::to_vec_named(&rq).expect("serialize");
+    let back: ReadQuery = rmp_serde::from_slice(&bytes).expect("deserialize");
     assert_eq!(back, rq, "round-trip must be identical");
 }

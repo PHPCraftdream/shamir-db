@@ -16,23 +16,20 @@ use crate::write::InsertedRecord;
 /// `Inserted` carries a write-result row from DML ops. `IdBytes` carries an
 /// id-keyed row for `result_encoding = Id` responses.
 ///
-/// All serde_json accessors have been removed in Stage C; use the
-/// `get_value*` / `as_value` family for field access.
+/// Use the `get_value*` / `as_value` family for field access.
 #[derive(Debug)]
 pub enum QueryRecord {
     /// Projected row coming from the engine read path — zero extra
     /// allocation beyond the `QueryValue` produced by `project_value`.
     /// Also the canonical shape produced by the deserializer for all
-    /// non-binary wire payloads (replaces the former `Json` variant).
+    /// non-binary wire payloads (replaces the former legacy variant).
     Direct(QueryValue),
     /// A write-result row carried straight through from a DML op.
     ///
     /// Wraps the [`InsertedRecord`] that `execute_*` already built, so the
     /// batch layer can fold a `WriteResult` into a `QueryResult` WITHOUT
-    /// re-materialising each row into a `serde_json::Value`.
-    /// Serialization delegates to [`InsertedRecord`]'s impl, so the wire
-    /// bytes are byte-identical to the former `Json(serde_json::to_value(rec))`
-    /// path.
+    /// re-materialising each row into an intermediate value.
+    /// Serialization delegates to [`InsertedRecord`]'s impl.
     Inserted(InsertedRecord),
     /// A row returned id-keyed (no server de-intern); the client de-interns
     /// via its FieldMap. Emitted when the request set
@@ -105,8 +102,7 @@ impl<'de> Visitor<'de> for QueryRecordVisitor {
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<QueryRecord, E> {
         // u64 > i64::MAX cannot be represented losslessly in QueryValue::Int;
-        // clamp to i64::MAX as a safe approximation (matches prior serde_json
-        // behaviour where Number::as_i64() saturated).
+        // clamp to i64::MAX as a safe approximation (u64 > i64::MAX saturates).
         Ok(QueryRecord::Direct(QueryValue::Int(
             v.min(i64::MAX as u64) as i64
         )))
@@ -175,11 +171,11 @@ impl From<InsertedRecord> for QueryRecord {
 impl QueryRecord {
     // ── QueryValue-native accessors ──────────────────────────────────────────
 
-    /// View this row as a `QueryValue`, without going through `serde_json`.
+    /// View this row as a `QueryValue`.
     ///
     /// * `Direct(qv)` — `Cow::Borrowed(&qv)`: zero allocation, zero copy.
     /// * `Inserted(rec)` — `Cow::Owned(…)`: clones the record's `fields`
-    ///   `QueryValue` (one clone, no serde round-trip).
+    ///   `QueryValue` (one clone).
     /// * `IdBytes(_)` — `Cow::Owned(QueryValue::Null)`: the bytes are an opaque
     ///   id-keyed msgpack blob; field-level access is not meaningful until the
     ///   client de-interns the keys.  Callers that need field access must

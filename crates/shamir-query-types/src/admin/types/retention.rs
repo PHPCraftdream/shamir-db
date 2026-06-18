@@ -66,7 +66,7 @@ pub enum PurgeScope {
 
 /// Imperative history purge for a table.
 ///
-/// ```json
+/// ```text
 /// { "purge_history": "users", "repo": "main", "scope": { "older_than_age": { "age_secs": 86400 } } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub struct PurgeHistoryOp {
 /// queryable foundation of #201 (live subscriptions); the live server-push
 /// transport is a separate, larger piece.
 ///
-/// ```json
+/// ```text
 /// { "changes_since": 0, "repo": "main", "limit": 1000 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ pub struct ChangesSinceOp {
 /// policy is applied via a lock-free `ArcSwap` swap — no data migration,
 /// no reshape; subsequent writes are governed by the new policy.
 ///
-/// ```json
+/// ```text
 /// { "set_retention": "users", "repo": "main", "retention": { "max_count": 5 } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

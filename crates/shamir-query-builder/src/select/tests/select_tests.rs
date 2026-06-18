@@ -1,19 +1,22 @@
 //! Tests for `select` module — every constructor is verified against exact
-//! wire JSON and round-tripped through serde.
+//! wire shape and round-tripped through msgpack.
 
-use serde_json::{json, Value};
 use shamir_query_types::read::SelectItem;
+use shamir_types::mpack;
 
 use crate::select::*;
 use crate::val::{col, func as vfunc};
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-/// Serialize -> JSON value, assert equality, then round-trip back.
-fn assert_wire(item: SelectItem, expected: Value) {
-    let got = serde_json::to_value(&item).unwrap();
-    assert_eq!(got, expected, "wire JSON mismatch");
-    let back: SelectItem = serde_json::from_value(got).unwrap();
+/// Serialize → msgpack-decoded QueryValue, assert equality, then round-trip
+/// the original type back and assert structural equality.
+fn assert_wire(item: SelectItem, expected: shamir_types::types::value::QueryValue) {
+    let bytes = rmp_serde::to_vec_named(&item).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode QueryValue");
+    assert_eq!(got, expected, "wire shape mismatch");
+    let back: SelectItem = rmp_serde::from_slice(&bytes).expect("round-trip");
     assert_eq!(back, item, "round-trip mismatch");
 }
 
@@ -23,7 +26,7 @@ fn assert_wire(item: SelectItem, expected: Value) {
 fn test_all() {
     assert_wire(
         all(),
-        json!({
+        mpack!({
             "type": "all"
         }),
     );
@@ -35,7 +38,7 @@ fn test_all() {
 fn test_field_single_segment() {
     assert_wire(
         field("name"),
-        json!({
+        mpack!({
             "type": "field",
             "path": ["name"]
         }),
@@ -46,7 +49,7 @@ fn test_field_single_segment() {
 fn test_field_nested_path() {
     assert_wire(
         field(["address", "zip"]),
-        json!({
+        mpack!({
             "type": "field",
             "path": ["address", "zip"]
         }),
@@ -57,7 +60,7 @@ fn test_field_nested_path() {
 fn test_field_as() {
     assert_wire(
         field_as("email", "user_email"),
-        json!({
+        mpack!({
             "type": "field",
             "path": ["email"],
             "alias": "user_email"
@@ -71,7 +74,7 @@ fn test_field_as() {
 fn test_func() {
     assert_wire(
         func("up", "strings/upper", [col("name")]),
-        json!({
+        mpack!({
             "type": "function",
             "name": "strings/upper",
             "args": [
@@ -92,7 +95,7 @@ fn test_func_nested_args() {
             "strings/concat",
             [vfunc("strings/upper", [col("name")]), crate::val::lit("!")],
         ),
-        json!({
+        mpack!({
             "type": "function",
             "name": "strings/concat",
             "args": [
@@ -119,7 +122,7 @@ fn test_func_nested_args() {
 fn test_count_all() {
     assert_wire(
         count_all("n"),
-        json!({
+        mpack!({
             "type": "count_all",
             "alias": "n"
         }),
@@ -132,7 +135,7 @@ fn test_count_all() {
 fn test_agg_sum() {
     assert_wire(
         agg(AggFunc::Sum, "amount", "total"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "sum",
             "field": ["amount"],
@@ -146,7 +149,7 @@ fn test_agg_sum() {
 fn test_agg_distinct() {
     assert_wire(
         agg_distinct(AggFunc::Count, "email", "unique_emails"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "count",
             "field": ["email"],
@@ -162,7 +165,7 @@ fn test_agg_distinct() {
 fn test_sum() {
     assert_wire(
         sum("amount", "total"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "sum",
             "field": ["amount"],
@@ -176,7 +179,7 @@ fn test_sum() {
 fn test_avg() {
     assert_wire(
         avg("score", "mean_score"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "avg",
             "field": ["score"],
@@ -190,7 +193,7 @@ fn test_avg() {
 fn test_min() {
     assert_wire(
         min("price", "cheapest"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "min",
             "field": ["price"],
@@ -204,7 +207,7 @@ fn test_min() {
 fn test_max() {
     assert_wire(
         max("price", "most_expensive"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "max",
             "field": ["price"],
@@ -218,7 +221,7 @@ fn test_max() {
 fn test_count() {
     assert_wire(
         count("user_id", "user_count"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "count",
             "field": ["user_id"],
@@ -234,7 +237,7 @@ fn test_count() {
 fn test_agg_fn() {
     assert_wire(
         agg_fn("median", "age", "med"),
-        json!({
+        mpack!({
             "type": "aggregate_fn",
             "name": "median",
             "field": ["age"],
@@ -248,7 +251,7 @@ fn test_agg_fn() {
 fn test_agg_fn_distinct() {
     assert_wire(
         agg_fn_distinct("count_distinct", "category", "uniq_cats"),
-        json!({
+        mpack!({
             "type": "aggregate_fn",
             "name": "count_distinct",
             "field": ["category"],
@@ -264,7 +267,7 @@ fn test_agg_fn_distinct() {
 fn test_agg_nested_path() {
     assert_wire(
         sum(["order", "amount"], "order_total"),
-        json!({
+        mpack!({
             "type": "aggregate",
             "func": "sum",
             "field": ["order", "amount"],
@@ -278,7 +281,7 @@ fn test_agg_nested_path() {
 fn test_agg_fn_nested_path() {
     assert_wire(
         agg_fn("stddev", ["stats", "latency"], "lat_sd"),
-        json!({
+        mpack!({
             "type": "aggregate_fn",
             "name": "stddev",
             "field": ["stats", "latency"],

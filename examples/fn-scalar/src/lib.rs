@@ -13,7 +13,7 @@ use shamir_sdk::prelude::*;
 
 /// Uppercases a string parameter `"s"`.
 ///
-/// ```json
+/// ```text
 /// { "s": "hello" }   →   "HELLO"
 /// ```
 #[shamir_sdk::scalar]

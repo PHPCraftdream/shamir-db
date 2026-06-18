@@ -9,10 +9,9 @@ license = "MIT OR Apache-2.0"
 shamir-collections = { path = "../shamir-collections" }
 shamir-types = { path = "../shamir-types" }
 
-# Pure data dependencies — DTOs serialize to JSON / msgpack and use
+# Pure data dependencies — DTOs serialize to msgpack and use
 # ordered maps for deterministic iteration.
 serde      = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.149"
 serde_bytes = "0.11"
 rmp-serde  = "1.3"
 indexmap   = { version = "2.7", features = ["serde"] }

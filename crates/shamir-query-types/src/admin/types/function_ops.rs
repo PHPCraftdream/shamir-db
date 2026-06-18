@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Exactly one of `source` or `wasm` must be provided. `wasm` is the raw
 /// binary bytes (base64-encoded on the wire).
 ///
-/// ```json
+/// ```text
 /// { "create_function": "my_fn", "source": "pub fn shamir_call …", "replace": false }
 /// { "create_function": "my_fn", "wasm": "<base64>", "replace": true }
 /// ```
@@ -24,7 +24,7 @@ pub struct CreateFunctionOp {
 
 /// Drop a stored function by name.
 ///
-/// ```json
+/// ```text
 /// { "drop_function": "my_fn" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct DropFunctionOp {
 
 /// Rename a stored function.
 ///
-/// ```json
+/// ```text
 /// { "rename_function": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ pub struct RenameFunctionOp {
 
 /// Create a function folder by path segments.
 ///
-/// ```json
+/// ```text
 /// { "create_function_folder": ["reports", "daily"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -26,7 +26,7 @@ Batch API предоставляет унифицированный интерф
 
 **Важно:** Поле `id` обязательно в каждом `BatchRequest`. Поля `field` в фильтрах — это массивы строк (не точечные пути).
 
-```json
+```
 {
   "id": "req-001",
   "queries": {
@@ -43,7 +43,7 @@ Batch API предоставляет унифицированный интерф
 
 Поле `from` может быть строкой (repo по умолчанию `"main"`) или массивом `["repo", "table"]`:
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -57,7 +57,7 @@ Batch API предоставляет унифицированный интерф
 
 ### Запросы с зависимостями
 
-```json
+```
 {
   "id": 2,
   "queries": {
@@ -112,7 +112,7 @@ Batch API предоставляет унифицированный интерф
 
 ### Формат QueryEntry
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -144,7 +144,7 @@ Batch API предоставляет унифицированный интерф
 **Важно:** Поля в фильтрах (`field`) — это массивы строк: `["user", "address", "city"]`, не точечные пути `"user.address.city"`.
 
 **Пагинация:**
-```json
+```
 // Limit/Offset
 "pagination": { "mode": "LimitOffset", "limit": 10, "offset": 20 }
 
@@ -193,7 +193,7 @@ pub trait AdminExecutor: Send + Sync {
 
 ### Insert — вставка записей
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -217,7 +217,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Обновляет записи, соответствующие фильтру. Если фильтр не указан — обновляет все записи.
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -230,7 +230,7 @@ pub trait AdminExecutor: Send + Sync {
 }
 ```
 
-```json
+```
 // Обновление с использованием результата другого запроса
 {
   "id": 2,
@@ -256,7 +256,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Опциональное поле `select` возвращает записи, которые были обновлены:
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -287,7 +287,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Обновляет запись если существует, создаёт если нет. Работает по ключу — полностью реализовано.
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -300,7 +300,7 @@ pub trait AdminExecutor: Send + Sync {
 }
 ```
 
-```json
+```
 // Upsert по уникальному полю (email)
 {
   "id": 2,
@@ -324,7 +324,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Удаляет записи по фильтру. **Фильтр обязателен** для безопасности.
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -336,7 +336,7 @@ pub trait AdminExecutor: Send + Sync {
 }
 ```
 
-```json
+```
 // Удаление с использованием результата запроса
 {
   "id": 2,
@@ -387,7 +387,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Пример создания таблицы и индекса:
 
-```json
+```
 {
   "id": "admin-001",
   "queries": {
@@ -412,7 +412,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Пример вывода `list`:
 
-```json
+```
 { "list": "databases" }
 { "list": "repos" }
 { "list": "tables", "repo": "main" }
@@ -436,7 +436,7 @@ pub trait AdminExecutor: Send + Sync {
 
 ### Примеры
 
-```json
+```
 // Весь результат
 { "$query": "@users" }
 
@@ -458,7 +458,7 @@ pub trait AdminExecutor: Send + Sync {
 
 ### Альтернативный формат
 
-```json
+```
 {
   "$query": "users",
   "path": "[0].id"
@@ -473,7 +473,7 @@ pub trait AdminExecutor: Send + Sync {
 
 Поле `from` начинается с `@` — это ссылка на алиас:
 
-```json
+```
 {
   "queries": {
     "all_users": {
@@ -517,7 +517,7 @@ BatchOp::Read(query) => {
 
 #### Каскадная фильтрация
 
-```json
+```
 {
   "queries": {
     "users": {
@@ -544,7 +544,7 @@ Stage 3: [vip]          // фильтруем active
 
 #### Комбинирование с $query
 
-```json
+```
 {
   "queries": {
     "orders": {
@@ -573,7 +573,7 @@ Stage 3: [vip]          // фильтруем active
 
 ### Синтаксис
 
-```json
+```
 // Без аргументов
 { "$fn": "NOW" }
 { "$fn": "UUID" }
@@ -639,7 +639,7 @@ Stage 3: [vip]          // фильтруем active
 
 #### В WHERE
 
-```json
+```
 {
   "from": "sessions",
   "where": {
@@ -652,7 +652,7 @@ Stage 3: [vip]          // фильтруем active
 
 #### В SET (INSERT/UPDATE)
 
-```json
+```
 {
   "insert_into": "users",
   "values": [{
@@ -663,7 +663,7 @@ Stage 3: [vip]          // фильтруем active
 }
 ```
 
-```json
+```
 {
   "update": "users",
   "where": { "op": "eq", "field": ["id"], "value": 1 },
@@ -673,7 +673,7 @@ Stage 3: [vip]          // фильтруем active
 
 #### В SET с аргументами
 
-```json
+```
 {
   "update": "products",
   "where": { "op": "eq", "field": ["id"], "value": 1 },
@@ -685,7 +685,7 @@ Stage 3: [vip]          // фильтруем active
 
 ### Комбинация с $query
 
-```json
+```
 {
   "queries": {
     "user": {
@@ -717,7 +717,7 @@ Stage 3: [vip]          // фильтруем active
 
 **Важно:** `field` — это массив строк (FieldPath = `Vec<String>`), не строка.
 
-```json
+```
 { "op": "eq", "field": ["status"], "value": "active" }
 { "op": "ne", "field": ["status"], "value": "deleted" }
 { "op": "gt", "field": ["age"], "value": 18 }
@@ -727,13 +727,13 @@ Stage 3: [vip]          // фильтруем active
 ```
 
 Вложенные пути:
-```json
+```
 { "op": "eq", "field": ["user", "address", "city"], "value": "Moscow" }
 ```
 
 ### Операторы массивов
 
-```json
+```
 { "op": "in", "field": ["status"], "values": ["active", "pending"] }
 { "op": "not_in", "field": ["status"], "values": ["deleted"] }
 { "op": "contains", "field": ["tags"], "value": "rust" }
@@ -743,7 +743,7 @@ Stage 3: [vip]          // фильтруем active
 
 ### Операторы соответствия
 
-```json
+```
 { "op": "like", "field": ["name"], "pattern": "%john%" }
 { "op": "i_like", "field": ["email"], "pattern": "%@gmail.com" }
 { "op": "regex", "field": ["phone"], "pattern": "^\\+7" }
@@ -751,14 +751,14 @@ Stage 3: [vip]          // фильтруем active
 
 ### Null-проверки
 
-```json
+```
 { "op": "is_null", "field": ["deleted_at"] }
 { "op": "is_not_null", "field": ["email"] }
 ```
 
 ### Логические операторы
 
-```json
+```
 {
   "op": "and",
   "filters": [
@@ -768,7 +768,7 @@ Stage 3: [vip]          // фильтруем active
 }
 ```
 
-```json
+```
 {
   "op": "or",
   "filters": [
@@ -778,7 +778,7 @@ Stage 3: [vip]          // фильтруем active
 }
 ```
 
-```json
+```
 {
   "op": "not",
   "filter": { "op": "eq", "field": ["banned"], "value": true }
@@ -787,20 +787,20 @@ Stage 3: [vip]          // фильтруем active
 
 ### Диапазон
 
-```json
+```
 { "op": "between", "field": ["price"], "from": 10, "to": 100 }
 ```
 
 ### Существование поля
 
-```json
+```
 { "op": "exists", "field": ["profile", "avatar"] }
 { "op": "not_exists", "field": ["deleted_at"] }
 ```
 
 ### Сокращённая форма
 
-```json
+```
 { "op": "field", "field": ["user_id"], "value": { "$query": "users[0].id" } }
 ```
 
@@ -812,7 +812,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 **Правило:** Все `$query` ссылки должны указывать на алиасы, существующие в том же батче.
 
-```json
+```
 // ❌ ОШИБКА: "usres" - опечатка, алиас не существует
 {
   "queries": {
@@ -856,7 +856,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 Если нужна "опциональная" зависимость, используйте отдельные батчи или условную логику на уровне приложения:
 
-```json
+```
 // Батч 1: Получить пользователя (может не существовать)
 { "id": 1, "queries": { "user": { "from": "users", "where": { "op": "eq", "field": ["id"], "value": 999 } } } }
 
@@ -900,7 +900,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 | `max_execution_time_secs` | 30 | Таймаут выполнения |
 | `max_result_size` | 10MB | Максимальный размер результата |
 
-```json
+```
 {
   "limits": {
     "max_queries": 20,
@@ -927,7 +927,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### Пагинация
 
-```json
+```
 {
   "id": "page-3",
   "queries": {
@@ -943,7 +943,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### E-commerce Dashboard
 
-```json
+```
 {
   "id": "dashboard-001",
   "name": "dashboard",
@@ -987,7 +987,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### Транзакционный батч
 
-```json
+```
 {
   "id": "transfer-001",
   "name": "transfer",
@@ -1021,7 +1021,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### Синтаксис
 
-```json
+```
 { "$expr": { "op": "add", "args": [10, 20] } }
 { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
 { "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
@@ -1073,7 +1073,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### В WHERE
 
-```json
+```
 {
   "from": "products",
   "where": {
@@ -1086,7 +1086,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### В SET (Update)
 
-```json
+```
 {
   "update": "products",
   "where": { "op": "eq", "field": ["id"], "value": 1 },
@@ -1099,7 +1099,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### В INSERT
 
-```json
+```
 {
   "insert_into": "orders",
   "values": [{
@@ -1111,7 +1111,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### Вложенные выражения
 
-```json
+```
 {
   "set": {
     "final_price": {
@@ -1133,7 +1133,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ### Синтаксис
 
-```json
+```
 {
   "$cond": {
     "if": { "op": "eq", "field": ["active"], "value": true },
@@ -1147,7 +1147,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 Поле `if` использует **существующий синтаксис Filter**:
 
-```json
+```
 // Простое сравнение
 "if": { "op": "eq", "field": ["status"], "value": "active" }
 
@@ -1168,7 +1168,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### Простой статус
 
-```json
+```
 {
   "update": "users",
   "where": { "op": "eq", "field": ["id"], "value": 1 },
@@ -1186,7 +1186,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### С $expr в then/else
 
-```json
+```
 {
   "set": {
     "price": {
@@ -1202,7 +1202,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### Вложенные $cond
 
-```json
+```
 {
   "set": {
     "tier": {
@@ -1230,7 +1230,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 #### В WHERE
 
-```json
+```
 {
   "from": "products",
   "where": {

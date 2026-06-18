@@ -71,7 +71,7 @@ fn pinned_test_vector_for_interop() {
     let blob = FakeBlob::derive(&secret, &user).unwrap();
 
     // We don't pin specific bytes here in the source — those go to the
-    // JSON test vector file later. This is a placeholder asserting that
+    // test vector file later. This is a placeholder asserting that
     // derivation is deterministic and produces something specific (recorded
     // separately).
     let blob2 = FakeBlob::derive(&secret, &user).unwrap();

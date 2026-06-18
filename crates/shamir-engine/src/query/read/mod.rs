@@ -2,7 +2,7 @@
 //!
 //! DTOs (ReadQuery, OrderBy, Pagination, QueryResult, QueryStats,
 //! Select, SelectExpr, GroupBy, AggFunc, AggregateField) live in
-//! `shamir-query-types::read`. Execution (`exec`) and JSON parser
+//! `shamir-query-types::read`. Execution (`exec`) and query parser
 //! stay here because they touch Interner / runtime state.
 
 pub mod aggregate;

@@ -16,7 +16,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { Json } from './write.js';
+import type { WireValue } from './write.js';
 
 // ── HMAC signer ─────────────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ export interface CreateIndexOp {
   fts_tokenizer?: string;
   fts_language?: string;
   functional_op?: string;
-  functional_args?: Json[];
+  functional_args?: WireValue[];
   vector_dim?: number;
   vector_metric?: string;
   include?: string[][];

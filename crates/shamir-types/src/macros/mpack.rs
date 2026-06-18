@@ -1,6 +1,6 @@
 /// Build a [`crate::types::value::QueryValue`] from a MessagePack-native
-/// literal expression — analogous to `serde_json::json!`, but produces
-/// `QueryValue` (`= Value<String>`) directly, with zero `serde_json` involved.
+/// literal expression that produces `QueryValue` (`= Value<String>`) directly,
+/// with no intermediate encoding layer.
 ///
 /// # Syntax
 ///
@@ -85,7 +85,7 @@ macro_rules! mpack {
     // relies on Rust's type-inference / default-type rules:
     //   - an unsuffixed integer literal defaults to i64 (matched first),
     //   - an unsuffixed float literal defaults to f64.
-    // This gives the same semantics as `serde_json::json!` for numbers.
+    // This gives the same literal-dispatch semantics as standard literal-constructing macros for numbers.
     //
     // Negative literals: in macro_rules the unary minus `-` is a separate token
     // from the digit literal.  We match `- $n:literal` explicitly so that
@@ -102,7 +102,7 @@ macro_rules! mpack {
     // -----------------------------------------------------------------------
     // Array  [ elem, elem, … ]
     //
-    // Uses internal `@array` accumulator rules (mirroring serde_json::json!)
+    // Uses internal `@array` accumulator rules (mirroring the standard literal-macro pattern)
     // so that `@expr` escape hatches inside arrays are handled correctly.
     // A simple `$($elem:tt),+` pattern cannot consume multi-token `@(expr)`
     // elements, so we use an accumulator that drains tokens one at a time.
@@ -179,7 +179,7 @@ macro_rules! mpack {
     // -----------------------------------------------------------------------
     // Object  { "key": value, … }
     //
-    // Uses internal `@object` accumulator rules (mirroring serde_json::json!)
+    // Uses internal `@object` accumulator rules (mirroring the standard literal-macro pattern)
     // to handle trailing commas and heterogeneous value types correctly.
     // -----------------------------------------------------------------------
     ({}) => {{
@@ -195,7 +195,7 @@ macro_rules! mpack {
     }};
 
     // -----------------------------------------------------------------------
-    // Internal object accumulator — adapted from serde_json::json! internals.
+    // Internal object accumulator — adapted from the standard literal-macro accumulator pattern.
     // Pattern: @object <map> (<key-so-far>) (<remaining tokens>) (<full copy>)
     // -----------------------------------------------------------------------
 

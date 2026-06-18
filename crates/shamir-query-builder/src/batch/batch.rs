@@ -622,7 +622,7 @@ impl Batch {
             // Validate $query refs.
             //
             // Encode the op to msgpack and decode as QueryValue so we can
-            // walk the tree without a serde_json::Value intermediate.
+            // walk the tree as a plain QueryValue map.
             let bytes = rmp_serde::to_vec_named(&entry.op)
                 .expect("BatchOp msgpack serialization is infallible");
             let qv: shamir_types::types::value::QueryValue =
@@ -696,7 +696,7 @@ impl Batch {
 ///
 /// The `FilterValue::QueryRef` variant serializes as `{"$query": "@alias", ...}`.
 /// Walking the `QueryValue::Map` for the `"$query"` key mirrors the planner's
-/// logic without requiring a `serde_json::Value` intermediate.
+/// logic directly on the msgpack-decoded tree.
 fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut Vec<String>) {
     use shamir_types::types::value::QueryValue;
     match value {

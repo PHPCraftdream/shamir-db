@@ -111,7 +111,7 @@ fn storage_bytes_int_width_boundaries() {
 }
 
 // --------------------------------------------------------------------------
-// F64 specials (incl. non-finite — rmp_serde writes them, serde_json would not)
+// F64 specials (incl. non-finite — rmp_serde writes them; the legacy text encoding cannot represent these)
 // --------------------------------------------------------------------------
 
 #[test]

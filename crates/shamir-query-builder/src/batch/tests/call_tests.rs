@@ -1,9 +1,11 @@
 use crate::batch::Batch;
 use crate::query::Query;
 use crate::val::*;
+use crate::wire::ToWire;
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
+use shamir_types::types::value::QueryValue;
 
 // ============================================================================
 // Batch::call — basic construction
@@ -14,16 +16,19 @@ fn call_builds_call_op_with_params() {
     let mut b = Batch::new();
     b.call("p", "my_proc", [lit(1), lit("x")]);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
+    let qv = req.to_query_value().unwrap();
 
-    let entry = &json["queries"]["p"];
+    let entry = &qv["queries"]["p"];
     assert_eq!(entry["return_result"], true);
     assert_eq!(entry["call"], "my_proc");
 
-    let params = entry["params"].as_array().unwrap();
+    let params = match &entry["params"] {
+        QueryValue::List(l) => l,
+        other => panic!("expected List, got {other:?}"),
+    };
     assert_eq!(params.len(), 2);
-    assert_eq!(params[0], serde_json::json!(1));
-    assert_eq!(params[1], serde_json::json!("x"));
+    assert_eq!(params[0], shamir_types::mpack!(1));
+    assert_eq!(params[1], shamir_types::mpack!("x"));
 }
 
 #[test]
@@ -31,8 +36,8 @@ fn call_default_repo_is_main() {
     let mut b = Batch::new();
     b.call("p", "proc", Vec::<FilterValue>::new());
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["p"]["repo"], "main");
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["p"]["repo"], "main");
 }
 
 // ============================================================================
@@ -44,9 +49,9 @@ fn call_in_repo_sets_custom_repo() {
     let mut b = Batch::new();
     b.call_in_repo("p", "proc", "analytics", [lit(42)]);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["p"]["repo"], "analytics");
-    assert_eq!(json["queries"]["p"]["call"], "proc");
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["p"]["repo"], "analytics");
+    assert_eq!(qv["queries"]["p"]["call"], "proc");
 }
 
 // ============================================================================
@@ -55,9 +60,6 @@ fn call_in_repo_sets_custom_repo() {
 
 #[test]
 fn call_wire_snapshot() {
-    use crate::wire::ToWire;
-    use shamir_types::types::value::QueryValue;
-
     let mut b = Batch::new();
     b.call("p", "proc", [lit(1), lit("v")]);
     let qv = b.build().to_query_value().unwrap();
@@ -104,9 +106,9 @@ fn call_handle_produces_query_ref() {
     let p = b.call("p", "get_ids", [lit(1)]);
     b.query("q", Query::from("t").where_eq("id", p.first().field("id")));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
+    let qv = req.to_query_value().unwrap();
 
-    let where_clause = &json["queries"]["q"]["where"];
+    let where_clause = &qv["queries"]["q"]["where"];
     assert_eq!(where_clause["op"], "eq");
     assert_eq!(where_clause["value"]["$query"], "@p");
     assert_eq!(where_clause["value"]["path"], "[0].id");
@@ -118,9 +120,12 @@ fn call_handle_column_ref() {
     let p = b.call("p", "proc", [lit(1)]);
     b.query("q", Query::from("t").where_in("uid", [p.column("user_id")]));
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
+    let qv = req.to_query_value().unwrap();
 
-    let vals = json["queries"]["q"]["where"]["values"].as_array().unwrap();
+    let vals = match &qv["queries"]["q"]["where"]["values"] {
+        QueryValue::List(l) => l,
+        other => panic!("expected List, got {other:?}"),
+    };
     assert_eq!(vals[0]["$query"], "@p");
     assert_eq!(vals[0]["path"], "[].user_id");
 }
@@ -166,11 +171,13 @@ fn call_no_params() {
     let mut b = Batch::new();
     b.call("p", "ping", Vec::<FilterValue>::new());
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["p"]["call"], "ping");
-    // params omitted or empty array
-    let params = &json["queries"]["p"]["params"];
-    assert!(params.is_null() || params.as_array().is_none_or(|a| a.is_empty()));
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["p"]["call"], "ping");
+    // params omitted or empty list
+    let params_qv = &qv["queries"]["p"]["params"];
+    let is_empty =
+        params_qv == &QueryValue::Null || matches!(params_qv, QueryValue::List(l) if l.is_empty());
+    assert!(is_empty, "expected null or empty list, got {params_qv:?}");
 }
 
 // ============================================================================
@@ -187,6 +194,6 @@ fn call_via_op_escape_hatch() {
     };
     b.op("c", op);
     let req = b.build();
-    let json = serde_json::to_value(&req).unwrap();
-    assert_eq!(json["queries"]["c"]["call"], "my_fn");
+    let qv = req.to_query_value().unwrap();
+    assert_eq!(qv["queries"]["c"]["call"], "my_fn");
 }

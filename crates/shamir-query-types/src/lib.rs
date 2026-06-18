@@ -26,7 +26,7 @@
 //! * `batch::executor`, `batch::planner`, `batch::reference` — batch
 //!   planning + execution logic.
 //! * `auth::session::SessionPermissions::check_batch` — permission logic.
-//! * `common::filter_from_value` — JSON → Filter parser.
+//! * `common::filter_from_value` — QueryValue → Filter parser.
 //! * Note: `batch::planner` and `batch::reference` were lifted in here
 //!   from `shamir-engine` once it became clear they only consume DTOs.
 //!   `batch::executor` still lives in the engine since it drives a

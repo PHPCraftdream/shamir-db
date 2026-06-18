@@ -3,10 +3,10 @@
 //! `shamir-db`'s system store records databases and repositories but NOT
 //! per-table configuration — `RepoInstance::add_table` is an in-memory
 //! operation. To make tables created over the wire (`BatchOp::CreateTable`)
-//! survive a server restart, this module maintains a small JSON file at
-//! `<data_dir>/wire_tables.json` listing every table per `(db, repo)`. The
-//! boot path replays the file by calling `DbInstance::create_table` on each
-//! entry before the server starts accepting connections.
+//! survive a server restart, this module maintains a small MessagePack file
+//! at `<data_dir>/wire_tables.mpack` listing every table per `(db, repo)`.
+//! The boot path replays the file by calling `DbInstance::create_table` on
+//! each entry before the server starts accepting connections.
 //!
 //! The registry is updated by `ShamirDbHandler` AFTER a batch executes
 //! successfully — so a planner-rejected or query-failing batch never
@@ -14,12 +14,13 @@
 //!
 //! ## File format
 //!
-//! ```json
-//! {
-//!   "default.main": ["widgets", "orders"],
-//!   "default.archive": ["events"]
-//! }
-//! ```
+//! MessagePack-encoded [`RegistrySnapshot`] produced by
+//! `rmp_serde::to_vec_named`. The on-disk structure is a map from
+//! `"db.repo"` string keys to arrays of table name strings.
+//!
+//! **Legacy:** a stale `wire_tables.legacy` (text-encoded registry from a
+//! previous server version) is silently ignored; tables it referenced must be
+//! re-created over the wire (or via a migration) after the upgrade.
 //!
 //! Atomic writes: `tempfile::NamedTempFile::persist` swaps the file in
 //! place so a crash mid-write leaves either the old version or the new
@@ -37,11 +38,11 @@ use std::sync::Arc;
 use std::{fs, io};
 
 /// File name relative to `data_dir`.
-pub const FILENAME: &str = "wire_tables.json";
+pub const FILENAME: &str = "wire_tables.mpack";
 
 /// In-memory + on-disk view of `(db, repo) -> [table_names]`.
 ///
-/// Keys are `format!("{db}.{repo}")` so the JSON is human-readable.
+/// Keys are `format!("{db}.{repo}")` for human-readable on-disk keys.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RegistrySnapshot {
     /// `"db.repo" -> sorted list of table names`. Sorted on every write so
@@ -103,11 +104,13 @@ pub enum RegistryError {
     #[error("registry io: {0}")]
     Io(#[from] io::Error),
     #[error("registry decode: {0}")]
-    Decode(#[from] serde_json::Error),
+    Decode(#[from] rmp_serde::decode::Error),
+    #[error("registry encode: {0}")]
+    Encode(#[from] rmp_serde::encode::Error),
 }
 
 impl TablesRegistry {
-    /// Open or create the registry at `<data_dir>/wire_tables.json`. A
+    /// Open or create the registry at `<data_dir>/wire_tables.mpack`. A
     /// missing file is treated as an empty registry.
     pub fn open(data_dir: &Path) -> Result<Self, RegistryError> {
         let path = data_dir.join(FILENAME);
@@ -116,7 +119,7 @@ impl TablesRegistry {
             if bytes.is_empty() {
                 RegistrySnapshot::default()
             } else {
-                serde_json::from_slice(&bytes)?
+                rmp_serde::from_slice(&bytes)?
             }
         } else {
             RegistrySnapshot::default()
@@ -154,7 +157,7 @@ impl TablesRegistry {
     /// rename over the live file. On crash, either the previous or the new
     /// content is left, never a partial write.
     fn write_atomic(path: &Path, snapshot: &RegistrySnapshot) -> Result<(), RegistryError> {
-        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        let bytes = rmp_serde::to_vec_named(snapshot)?;
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         // tempfile::NamedTempFile lives in this same directory so the
         // rename in `persist` is atomic on the same filesystem.

@@ -3,7 +3,7 @@
 Browser-path: WS binary + msgpack + SCRAM-Argon2id, binding_mode 0x02.
 
 ## Dependencies (from CLIENT_BROWSER.md §2)
-```json
+```
 "argon2-browser": "^1.18.0",
 "@noble/ed25519": "^2.1.0",
 "@noble/ciphers": "^0.5.0",

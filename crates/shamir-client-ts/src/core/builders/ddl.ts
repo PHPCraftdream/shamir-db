@@ -144,7 +144,7 @@ export function createIndex(
     fts_tokenizer?: string;
     fts_language?: string;
     functional_op?: string;
-    functional_args?: import('../types/write.js').Json[];
+    functional_args?: import('../types/write.js').WireValue[];
     vector_dim?: number;
     vector_metric?: string;
     include?: string[][];

@@ -115,7 +115,7 @@ enum BigIntSource {
 
 /// Maximum pre-allocation cap for visitor `Vec::with_capacity`.
 ///
-/// A MessagePack/JSON array/map header can declare a huge element count,
+/// A MessagePack array/map header can declare a huge element count,
 /// driving `Vec::with_capacity(size_hint)` to multi-GB / abort.
 /// The Vec still grows on demand for legit large inputs beyond this cap.
 const SANE_PREALLOC_CAP: usize = 4096;
@@ -357,7 +357,7 @@ impl Value<String> {
         matches!(self, Value::Null)
     }
 
-    /// Returns the value as a JSON-style object map, if it is a Map.
+    /// Returns the value as an object map, if it is a Map.
     pub fn as_object(&self) -> Option<&TMap<String, Value<String>>> {
         match self {
             Value::Map(m) => Some(m),

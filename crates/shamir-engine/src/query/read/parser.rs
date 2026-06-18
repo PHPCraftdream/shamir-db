@@ -1,4 +1,4 @@
-//! Parse SELECT Query from QueryValue (JSON → Value<Map> → Query)
+//! Parse SELECT Query from QueryValue (QueryValue::Map → typed Query struct)
 //!
 //! This module converts QueryValue (Value<Map<String, Value>>) to typed SELECT Query struct.
 

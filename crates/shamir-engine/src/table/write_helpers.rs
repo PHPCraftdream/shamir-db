@@ -33,7 +33,7 @@ pub(super) fn validator_failure_to_db_error(
     match failure {
         ValidatorFailure::Failed(errors) => {
             // Build a typed text summary of field-bound errors without
-            // JSON serialisation. Each entry is rendered as
+            // external serialisation. Each entry is rendered as
             // "field.path: code" (record-level errors omit the path).
             // The resulting string always contains every field path and
             // code, so callers that do substring-contains checks on the
@@ -121,7 +121,7 @@ pub(super) fn resolve_computed_record<'a>(
         // msgpack round-trip: QueryValue → rmp_serde bytes → FilterValue.
         // Both types share the same serde shape (untagged enum), so the
         // msgpack encoding produced by QueryValue is byte-identical to
-        // what FilterValue's deserializer expects — no JSON involved.
+        // what FilterValue's deserializer expects — no extra encoding involved.
         let bytes = rmp_serde::to_vec_named(v)
             .map_err(|e| format!("computed field '{k}': msgpack encode: {e}"))?;
         let fv: FilterValue =
@@ -178,7 +178,7 @@ pub(super) fn eval_write_value(
 
 /// Navigate a field path through a `QueryValue::Map` (`["address", "zip"]`).
 ///
-/// Replaces the former `json_nav` over `serde_json::Map`. The top-level map
+/// Replaces the former `qv_nav` over a QueryValue map. The top-level map
 /// is a `TMap<String, QueryValue>`; nested maps are `QueryValue::Map`.
 pub(super) fn qv_nav<'a>(
     obj: &'a TMap<String, QueryValue>,

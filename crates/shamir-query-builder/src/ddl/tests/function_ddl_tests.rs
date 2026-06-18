@@ -1,7 +1,7 @@
 //! Tests for Function DDL, Validator DDL, Function folder DDL, and Batch composition.
 
-use serde_json::json;
 use shamir_query_types::WriteOp;
+use shamir_types::mpack;
 
 use crate::ddl;
 
@@ -19,7 +19,7 @@ fn create_function_from_source_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_function": "my_fn",
             "source": "pub fn main() {}",
             "replace": false
@@ -47,7 +47,7 @@ fn drop_function_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_function": "my_fn"
         })
     );
@@ -60,7 +60,7 @@ fn rename_function_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "rename_function": "old_fn",
             "to": "new_fn"
         })
@@ -80,7 +80,7 @@ fn create_validator_from_source_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_validator": "v_age",
             "source": "pub fn validate() {}",
             "replace": false
@@ -107,7 +107,7 @@ fn drop_validator_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_validator": "v_age"
         })
     );
@@ -120,7 +120,7 @@ fn rename_validator_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "rename_validator": "v_old",
             "to": "v_new"
         })
@@ -141,7 +141,7 @@ fn bind_validator_wire() {
     assert_eq!(j["db"], "testdb");
     assert_eq!(j["repo"], "main");
     assert_eq!(j["table"], "users");
-    assert_eq!(j["ops"], json!(["insert", "update"]));
+    assert_eq!(j["ops"], mpack!(["insert", "update"]));
     assert_eq!(j["priority"], 1500);
     assert!(op.is_admin());
 }
@@ -166,7 +166,7 @@ fn list_validators_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list_validators": "users",
             "db": "testdb",
             "repo": "hot"
@@ -185,7 +185,7 @@ fn create_function_folder_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_function_folder": ["reports", "daily"]
         })
     );
@@ -198,7 +198,7 @@ fn create_function_folder_single_segment() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_function_folder": ["utils"]
         })
     );

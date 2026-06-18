@@ -83,11 +83,10 @@ const EMPTY_SLICE: &[QueryRecord] = &[];
 /// Deserialize a single `QueryRecord` into `T` via a msgpack round-trip
 /// through its `QueryValue` representation.
 ///
-/// This avoids the `serde_json::Value` intermediate that `as_json()` produces
-/// and instead encodes the record as msgpack (via `rmp_serde::to_vec_named`)
-/// and decodes it into `T` (via `rmp_serde::from_slice`).  Because
-/// `QueryValue`'s `Serialize` impl is byte-identical to the msgpack wire
-/// encoding, this round-trip is lossless.
+/// Encodes the record as msgpack (via `rmp_serde::to_vec_named`) and decodes
+/// it into `T` (via `rmp_serde::from_slice`).  Because `QueryValue`'s
+/// `Serialize` impl is byte-identical to the msgpack wire encoding, this
+/// round-trip is lossless.
 fn deserialize_record<T: serde::de::DeserializeOwned>(
     alias: &str,
     record: &QueryRecord,

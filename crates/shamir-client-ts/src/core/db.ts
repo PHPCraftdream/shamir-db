@@ -11,7 +11,7 @@
 
 import type { ShamirClient } from './client.js';
 import type { BatchResponse, QueryResult, TransactionInfo } from './types/batch.js';
-import type { Json } from './types/write.js';
+import type { WireValue } from './types/write.js';
 import type { ExecCtx } from './exec-ctx.js';
 import { Batch } from './builders/batch.js';
 import { Query } from './builders/query.js';
@@ -71,7 +71,7 @@ export class Db {
   }
 
   /** Shortcut: run a single op and return just the `.records` array. */
-  async rows(op: object): Promise<Array<Record<string, Json>>> {
+  async rows(op: object): Promise<Array<Record<string, WireValue>>> {
     return (await this.run(op)).records;
   }
 
@@ -86,7 +86,7 @@ export class Db {
   }
 
   /** Create a bound `Batch`. */
-  batch(id?: Json): Batch {
+  batch(id?: WireValue): Batch {
     return Batch.create(id).bindCtx(this.ctx);
   }
 
@@ -239,7 +239,7 @@ export class Tx {
   }
 
   /** Shortcut: run a single op and return just the `.records` array. */
-  async rows(op: object): Promise<Array<Record<string, Json>>> {
+  async rows(op: object): Promise<Array<Record<string, WireValue>>> {
     return (await this.run(op)).records;
   }
 
@@ -254,7 +254,7 @@ export class Tx {
   }
 
   /** Create a bound `Batch` inside the transaction. */
-  batch(id?: Json): Batch {
+  batch(id?: WireValue): Batch {
     return Batch.create(id).bindCtx(this.ctx);
   }
 }

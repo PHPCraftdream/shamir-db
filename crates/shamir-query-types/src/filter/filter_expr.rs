@@ -41,7 +41,7 @@ pub enum FilterExprOp {
 ///
 /// # Examples
 ///
-/// ```json
+/// ```text
 /// { "$expr": { "op": "add", "args": [10, 20] } }
 /// { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
 /// { "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }

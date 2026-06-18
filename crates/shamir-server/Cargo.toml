@@ -56,7 +56,6 @@ redb = "3.1"
 ktav = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
-serde_json = "1.0"
 
 # Encoding
 rmp-serde = "1.3"
@@ -89,7 +88,7 @@ indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
 # Global allocator. mimalloc is ~2× on allocation-heavy hot paths
-# (msgpack encode/decode, json::Value trees, Vec<json::Value>) vs
+# (msgpack encode/decode, QueryValue trees, Vec<QueryValue>) vs
 # the platform default. Bench measurement: db_handler/ping_inprocess
 # 578 ns -> 294 ns (-44%, p=0.00).
 mimalloc = { version = "0.1", default-features = false }
@@ -98,7 +97,7 @@ mimalloc = { version = "0.1", default-features = false }
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —
 # version skew between the metrics 0.23 / 0.24 lines silently produces empty
 # /metrics output (the process metrics register against a different global).
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 metrics-process = "2"

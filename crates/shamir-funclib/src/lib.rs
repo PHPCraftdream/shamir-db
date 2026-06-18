@@ -4,7 +4,7 @@
 //! (`"math/abs"`, `"strings/lower"`, `"arrays/min"`) to pure
 //! `fn(&[QueryValue]) -> ScalarResult`. [`register_builtins`] wires each
 //! category module via [`ScalarRegistry::in_folder`](registry::ScalarRegistry::in_folder)
-//! so that categories sharing a plain name (`json/keys` vs `object/keys`,
+//! so that categories sharing a plain name (`value_nav/keys` vs `object/keys`,
 //! `math/min` vs `arrays/min`) no longer collide.
 //!
 //! Each category lives in its own module exposing `pub fn register(&mut
@@ -31,16 +31,16 @@ pub mod cast;
 pub mod crypto;
 pub mod datetime;
 pub mod encode;
-pub mod json;
 pub mod math;
 pub mod object;
 pub mod strings;
 pub mod text;
 pub mod validate;
+pub mod value_nav;
 
 /// Build a registry populated with every built-in category.
 ///
-/// Each category is registered under a folder prefix (`math/abs`, `json/keys`,
+/// Each category is registered under a folder prefix (`math/abs`, `value_nav/keys`,
 /// `object/keys`, etc.) so that categories sharing a plain name no longer
 /// collide. See [`registry::ScalarRegistry::in_folder`].
 pub fn register_builtins() -> registry::ScalarRegistry {
@@ -50,7 +50,7 @@ pub fn register_builtins() -> registry::ScalarRegistry {
     reg.in_folder("arrays", arrays::register);
     reg.in_folder("cast", cast::register);
     reg.in_folder("datetime", datetime::register);
-    reg.in_folder("json", json::register);
+    reg.in_folder("value_nav", value_nav::register);
     reg.in_folder("validate", validate::register);
     reg.in_folder("encode", encode::register);
     reg.in_folder("object", object::register);

@@ -123,7 +123,7 @@ fn default_observability_addr() -> String {
 /// Audit log file management.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuditConfig {
-    /// Max size of the active `audit_log.jsonl` file before it is
+    /// Max size of the active audit log file before it is
     /// rotated. `0` disables rotation. Default 100 MB.
     #[serde(default = "default_audit_max_size_mb")]
     pub max_file_size_mb: u64,

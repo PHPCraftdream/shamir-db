@@ -10,14 +10,14 @@ src/codecs/
 ├── codec.rs            # Codec<T> trait definition
 ├── error.rs            # CodecError enum (Encode/Decode)
 ├── basic/              # Generic codecs (no dependencies)
-│   ├── mod.rs        # JsonCodec, MessagePackCodec, bincode functions
-│   ├── json.rs       # JSON serialization via serde_json
+│   ├── mod.rs        # MsgPackCodec, MessagePackCodec, bincode functions
+│   ├── legacy_text.rs # Legacy text-encoding stub (orphaned — not compiled)
 │   ├── messagepack.rs # MessagePack via rmp_serde
 │   └── bincode.rs   # Binary via bincode (functions, not trait)
 ├── interned/           # Interning-aware codecs
 │   ├── mod.rs        # InternedCodec trait, CodecFormat enum
 │   ├── codec.rs      # InternedCodec trait definition
-│   ├── json.rs       # json_to_inner, inner_to_json, json_value_to_inner, inner_to_json_value
+│   ├── legacy_text.rs # text_to_inner, inner_to_text (legacy text encoding)
 │   ├── messagepack.rs # msgpack_to_inner, inner_to_msgpack
 │   └── common.rs     # intern_string_key, deintern_key
 ├── legacy/            # Deprecated API
@@ -62,7 +62,7 @@ pub trait Codec<T: Serialize + DeserializeOwned> {
 
 ### InternedCodec Trait (`interned/codec.rs`)
 
-The interned codec also provides `json_value_to_inner` / `inner_to_json_value` functions for converting `serde_json::Value` to/from `InnerValue` with interning (used by SystemStore).
+All conversion paths go through `QueryValue` (string-keyed) ↔ `InnerValue` (interned keys). The old text-value typed functions have been removed.
 
 ```rust
 pub trait InternedCodec: Send + Sync {
@@ -83,7 +83,7 @@ pub trait InternedCodec: Send + Sync {
 ```
 
 **Purpose:**
-- Converts external format (JSON/MessagePack) to InnerValue with interned keys
+- Converts external format (MessagePack/QueryValue) to InnerValue with interned keys
 - Automatically interns string keys during decode
 - De-interns keys during encode back to strings
 - Used by TableContext for efficient client data handling
@@ -93,12 +93,12 @@ pub trait InternedCodec: Send + Sync {
 
 ```rust
 pub enum CodecFormat {
-    Json,
+    LegacyText,
     MessagePack,
 }
 ```
 
-**Note:** Only `Json` and `MessagePack` are supported. Bincode is NOT included.
+**Note:** Only `LegacyText` (the old human-readable encoding) and `MessagePack` are supported. Bincode is NOT included.
 
 **Methods:**
 - `codec()` → `Box<dyn InternedCodec>` for this format
@@ -106,26 +106,28 @@ pub enum CodecFormat {
 
 ## Basic Codecs
 
-### JsonCodec (`basic/json.rs`)
+### LegacyTextCodec (`basic/legacy_text.rs`)
 
 ```rust
-pub struct JsonCodec;
+pub struct LegacyTextCodec;
 
-impl<T: Serialize + DeserializeOwned> Codec<T> for JsonCodec {
+impl<T: Serialize + DeserializeOwned> Codec<T> for LegacyTextCodec {
     fn encode(&self, value: &T) -> Result<Vec<u8>, CodecError> {
-        serde_json::to_vec(value).map_err(|e| CodecError::Encode(e.to_string()))
+        // Legacy text encoding — not active; file is orphaned from module tree.
+        Err(CodecError::Encode("LegacyTextCodec is not active".to_string()))
     }
 
     fn decode(&self, bytes: &[u8]) -> Result<T, CodecError> {
-        serde_json::from_slice(bytes).map_err(|e| CodecError::Decode(e.to_string()))
+        // Legacy text encoding — not active; file is orphaned from module tree.
+        Err(CodecError::Decode("LegacyTextCodec is not active".to_string()))
     }
 }
 ```
 
 **Features:**
 - Human-readable, UTF-8 encoded
-- Uses `serde_json` library
-- Widely supported, debuggable
+- Orphaned reference implementation (not compiled into the crate)
+- Active wire format is MessagePack (`MessagePackCodec`)
 - No special type handling (relies on serde)
 
 ### MessagePackCodec (`basic/messagepack.rs`)
@@ -145,10 +147,10 @@ impl<T: Serialize + DeserializeOwned> Codec<T> for MessagePackCodec {
 ```
 
 **Features:**
-- Binary format, ~60% smaller than JSON
+- Binary format, ~60% smaller than the legacy text encoding
 - Uses `rmp_serde` library
 - `to_vec_named()` for field names in output
-- Faster than JSON, not human-readable
+- Faster than text codecs, not human-readable
 
 ### Bincode Functions (`basic/bincode.rs`)
 
@@ -172,8 +174,8 @@ where
 ```
 
 **Features:**
-- **Fastest option** (~2x faster than JSON)
-- **Most compact** (~50% of JSON size)
+- **Fastest option** (~2x faster than MessagePack)
+- **Most compact** (~50% of MessagePack size)
 - Uses `bincode` library
 - Returns `Bytes` (zero-copy wrapper)
 - Has its own `CodecError` enum (not shared with trait)
@@ -182,21 +184,21 @@ where
 
 ### InternedCodec Implementations (`interned/codec.rs`)
 
-**JsonInternedCodec:**
+**LegacyTextInternedCodec:**
 ```rust
-impl InternedCodec for JsonInternedCodec {
+impl InternedCodec for LegacyTextInternedCodec {
     fn decode_with_interner(&self, bytes: &[u8], interner: &Interner)
         -> Result<InnerValue, CodecError> {
-        crate::codecs::interned::json::json_to_inner(interner, bytes)
+        crate::codecs::interned::legacy_text::text_to_inner(interner, bytes)
     }
 
     fn encode_with_interner(&self, value: &InnerValue, interner: &Interner)
         -> Result<Vec<u8>, CodecError> {
-        crate::codecs::interned::json::inner_to_json(interner, value)
+        crate::codecs::interned::legacy_text::inner_to_text(interner, value)
     }
 
     fn format_name(&self) -> &'static str {
-        "JSON"
+        "LegacyText"
     }
 }
 ```
@@ -220,19 +222,19 @@ impl InternedCodec for MsgPackInternedCodec {
 }
 ```
 
-### JSON Interning Functions (`interned/json.rs`)
+### Legacy Text Interning Functions (`interned/legacy_text.rs`)
 
 **Important:** These functions work directly with InnerValue. UserValue is deprecated and only for tests.
 
 ```rust
-pub fn json_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue, CodecError>
-pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>, CodecError>
+pub fn text_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue, CodecError>
+pub fn inner_to_text(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>, CodecError>
 ```
 
 **Type Handling:**
 
-| Rust Type | JSON Handling |
-|-----------|---------------|
+| Rust Type | Legacy Text Handling |
+|-----------|----------------------|
 | Null | `null` |
 | Bool | `true`/`false` |
 | Int(i64) | number |
@@ -241,14 +243,14 @@ pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>,
 | Str | string |
 | Bin | array of numbers `[1, 2, 3]` |
 | List | array |
-| Set | array (no Set type in JSON) |
+| Set | array (no Set type in the legacy text format) |
 | Map | object (keys interned) |
 
 **Special Cases:**
 - **Large u64**: If `u <= i64::MAX`, store as Int. Otherwise as string.
 - **Non-finite Float**: `Infinity`, `NaN` stored as string.
 - **Binary**: Stored as array of numbers for simplicity (not base64).
-- **Sets**: No native Set type in JSON, stored as arrays.
+- **Sets**: No native Set type in the legacy text format, stored as arrays.
 
 ### MessagePack Interning Functions (`interned/messagepack.rs`)
 
@@ -268,13 +270,13 @@ pub fn inner_to_msgpack(interner: &Interner, value: &InnerValue) -> Result<Vec<u
 | Str | String |
 | Bin | Binary |
 | List | Array |
-| Set | Array (same as JSON) |
+| Set | Array (same as legacy text format) |
 | Map | Map (keys must be strings, then interned) |
 
 **Note:** Uses `rmpv` crate for value representation, then converts to InnerValue.
 
 **Special Cases:**
-- **Large u64**: Same as JSON - store as Int if fits, else as string.
+- **Large u64**: Same as legacy text format - store as Int if fits, else as string.
 - **Very large integers**: Stored as strings.
 - **Extension types**: Stored as `Bin` for now.
 - **Map keys**: Must be strings in MessagePack, error otherwise.
@@ -329,8 +331,8 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue
 
 ## Type Mapping Summary
 
-| Value Variant | JSON | MessagePack |
-|--------------|------|-------------|
+| Value Variant | Legacy Text | MessagePack |
+|--------------|-------------|-------------|
 | Nil | `null` | nil |
 | Bool | `true`/`false` | bool |
 | Int(i64) | number | int64 |
@@ -345,20 +347,20 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue
 
 | Format | Size | Encode Speed | Decode Speed | Human Readable | Notes |
 |---------|-------|--------------|----------------|----------------|-------|
-| JSON | 100% | 1x | 1x | ✅ Yes | serde_json |
+| LegacyText | 100% | 1x | 1x | ✅ Yes | orphaned/inactive |
 | MessagePack | ~60% | 1.2x | 1.3x | ❌ No | rmp_serde |
 | Bincode | ~50% | 2x | 2x | ❌ No | Functions only |
 
 ## Usage Examples
 
-### Basic Codec (JSON)
+### Basic Codec (MessagePack)
 
 ```rust
 use shamir_types::codecs::Codec;
-use shamir_types::codecs::basic::JsonCodec;
+use shamir_types::codecs::basic::MessagePackCodec;
 use shamir_types::types::value::UserValue;
 
-let codec = JsonCodec;
+let codec = MessagePackCodec;
 let value = UserValue::Str("Hello".to_string());
 
 // Serialize
@@ -372,18 +374,18 @@ let decoded: UserValue = codec.decode(&bytes)?;
 
 ```rust
 use shamir_types::codecs::interned::InternedCodec;
-use shamir_types::codecs::interned::JsonInternedCodec;
+use shamir_types::codecs::interned::MsgPackInternedCodec;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::value::InnerValue;
 
 let interner = Interner::new();
-let codec: Box<dyn InternedCodec> = JsonInternedCodec.into();
+let codec: Box<dyn InternedCodec> = MsgPackInternedCodec.into();
 
-// JSON → InnerValue (keys automatically interned)
-let json_bytes = br#"{"name":"Alice"}"#;
-let inner_value = codec.decode_with_interner(json_bytes, &interner)?;
+// MessagePack → InnerValue (keys automatically interned)
+let msgpack_bytes = rmp_serde::to_vec_named(&QueryValue::Map(/* {"name":"Alice"} */)).unwrap();
+let inner_value = codec.decode_with_interner(&msgpack_bytes, &interner)?;
 
-// InnerValue → JSON (keys automatically de-interned)
+// InnerValue → MessagePack (keys automatically de-interned)
 let output = codec.encode_with_interner(&inner_value, &interner)?;
 ```
 
@@ -403,14 +405,7 @@ let result: i32 = from_bytes(&bytes)?;
 
 ## Best Practices
 
-### When to Use JSON
-- Human-readable logs
-- Debugging
-- API responses (REST)
-- Configuration files
-- External data exchange
-
-### When to Use MessagePack
+### When to Use MessagePack (preferred)
 - Network transmission (compact binary)
 - Large datasets (size matters)
 - Performance-critical paths
@@ -431,12 +426,12 @@ let result: i32 = from_bytes(&bytes)?;
 ## Test Coverage
 
 ### Basic Codec Tests
-- ✅ JSON roundtrip for all types
+- ✅ LegacyText roundtrip for all types (inactive — file orphaned)
 - ✅ MessagePack roundtrip for all types
 - ✅ Bincode roundtrip for all types
 
 ### Interned Codec Tests
-- ✅ JSON ↔ InnerValue conversion with interning
+- ✅ LegacyText ↔ InnerValue conversion with interning
 - ✅ MessagePack ↔ InnerValue conversion with interning
 - ✅ Key interning on decode
 - ✅ Key de-interning on encode
@@ -521,11 +516,11 @@ Adding new codecs:
 
 ```rust
 // For basic codecs
-use shamir_db::codecs::{Codec, CodecError, JsonCodec, MessagePackCodec};
+use shamir_db::codecs::{Codec, CodecError, MessagePackCodec};
 
 // For interned codecs
-use shamir_db::codecs::interned::{InternedCodec, CodecFormat, JsonInternedCodec, MsgPackInternedCodec};
-use shamir_db::codecs::interned::{json_to_inner, inner_to_json, msgpack_to_inner, inner_to_msgpack};
+use shamir_db::codecs::interned::{InternedCodec, CodecFormat, MsgPackInternedCodec};
+use shamir_db::codecs::interned::{msgpack_to_inner, inner_to_msgpack};
 use shamir_db::codecs::interned::{intern_string_key, deintern_key};
 
 // For bincode

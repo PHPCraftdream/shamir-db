@@ -23,20 +23,20 @@ import type { Filter } from './filter.js';
 // Re-export TableRefWire for the write builder.
 export type { TableRefWire } from './query.js';
 
-// ── JSON value ───────────────────────────────────────────────────────
+// ── Wire value ───────────────────────────────────────────────────────
 
 /**
- * Recursive JSON value type. Mirrors `serde_json::Value` used in
- * write-operation fields (`InsertOp.values`, `UpdateOp.set`, `SetOp.key`,
- * `SetOp.value`).
+ * Recursive MessagePack-compatible wire value type. Represents any value
+ * carried in write-operation fields (`InsertOp.values`, `UpdateOp.set`,
+ * `SetOp.key`, `SetOp.value`) as decoded from the msgpack wire encoding.
  */
-export type Json =
+export type WireValue =
   | null
   | boolean
   | number
   | string
-  | Json[]
-  | { [key: string]: Json };
+  | WireValue[]
+  | { [key: string]: WireValue };
 
 // ── Update select types ──────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ export interface UpdateSelect {
  */
 export interface InsertOp {
   insert_into: TableRefWire;
-  values: Json[];
+  values: WireValue[];
 }
 
 /**
@@ -81,7 +81,7 @@ export interface InsertOp {
 export interface UpdateOp {
   update: TableRefWire;
   where?: Filter;
-  set: Json;
+  set: WireValue;
   select?: UpdateSelect;
 }
 
@@ -91,8 +91,8 @@ export interface UpdateOp {
  */
 export interface SetOp {
   set: TableRefWire;
-  key: Json;
-  value: Json;
+  key: WireValue;
+  value: WireValue;
 }
 
 /**

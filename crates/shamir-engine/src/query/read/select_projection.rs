@@ -74,8 +74,7 @@ impl SelectProjection {
     /// Project a single record to QueryValue.
     ///
     /// Mirrors the deleted `project` exactly — same branching, same field/func
-    /// handling — but builds `QueryValue` (string-keyed) instead of
-    /// `serde_json::Value`.
+    /// handling — but builds a `QueryValue` (string-keyed) map.
     pub fn project_value(
         &self,
         record: &(impl RecordRef + ?Sized),

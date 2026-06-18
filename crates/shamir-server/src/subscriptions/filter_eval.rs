@@ -69,7 +69,7 @@ pub fn filter_matches_bytes(
 ///
 /// Retained for callers that already hold a decoded `InnerValue` (e.g.
 /// the journal-backfill path where `decode_record_value_inner` was already
-/// called for JSON conversion).
+/// called for value decoding).
 pub fn filter_matches_inner(
     filter: &Filter,
     value: &InnerValue,

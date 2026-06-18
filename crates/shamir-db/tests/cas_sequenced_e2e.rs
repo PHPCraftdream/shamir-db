@@ -22,7 +22,7 @@
 //! The validator and the test compute the expected hash through the **same**
 //! `shamir_funclib::canonical::canonical_hash` over a string-keyed
 //! `QueryValue`, so the two sides agree bit-for-bit. Records use string fields
-//! only, so the JSON read-back round-trips to the identical `QueryValue` the
+//! only, so the msgpack read-back round-trips to the identical `QueryValue` the
 //! validator hashes.
 
 use std::sync::Arc;

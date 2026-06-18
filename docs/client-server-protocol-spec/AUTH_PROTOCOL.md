@@ -871,7 +871,7 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ## 16. Test Vectors
 
-**Release blocker для v1.** Файл `docs/client-server-protocol-spec/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
+**Release blocker для v1.** Файл `docs/client-server-protocol-spec/test-vectors/auth_v1.msgpack` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
 
 ### Example: auth_message hex dump
 
@@ -907,7 +907,7 @@ auth_message bytes:
 Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 149 bytes
 ```
 
-Полный test-vectors JSON содержит:
+Полный test-vectors файл содержит:
 - `kdf_canonical_string` (legacy compat reference)
 - `Argon2id(password="hello world!1", salt=fixed, params=defaults)` → 32-byte output
 - `client_proof`, `server_signature`, `identity_sig` для полного flow

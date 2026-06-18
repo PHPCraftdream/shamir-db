@@ -1,9 +1,9 @@
 //! Tests for `Batch::sub_batch`, `IntoBatchOp for SubBatchOp`, and `val::param`.
 
-use serde_json::json;
 use shamir_collections::new_map;
 use shamir_query_types::batch::{BatchOp, SubBatchOp};
 use shamir_query_types::filter::FilterValue;
+use shamir_types::mpack;
 
 use crate::batch::Batch;
 use crate::query::Query;
@@ -87,16 +87,18 @@ fn param_builds_param_value() {
         "param() must produce FilterValue::Param"
     );
 
-    let json = serde_json::to_value(&fv).unwrap();
+    let bytes = rmp_serde::to_vec_named(&fv).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode");
     assert_eq!(
-        json,
-        json!({ "$param": "uid" }),
+        got,
+        mpack!({ "$param": "uid" }),
         "Param must serialise as {{\"$param\":\"...\"}}"
     );
 
     // Round-trip.
-    let back: FilterValue = serde_json::from_value(json).unwrap();
-    assert_eq!(back, fv, "Param must round-trip through serde");
+    let back: FilterValue = rmp_serde::from_slice(&bytes).expect("round-trip");
+    assert_eq!(back, fv, "Param must round-trip through msgpack");
 }
 
 // ============================================================================
@@ -116,15 +118,19 @@ fn sub_batch_handle_for_outer_ref() {
     // handle.column("result") must produce a $query ref with alias @proc and
     // path [].result — identical to the existing Handle behaviour.
     let col_ref = handle.column("result");
-    let json = serde_json::to_value(&col_ref).unwrap();
-    assert_eq!(json["$query"], "@proc", "alias must be @proc");
-    assert_eq!(json["path"], "[].result", "column path must be [].result");
+    let bytes = rmp_serde::to_vec_named(&col_ref).expect("serialize col_ref");
+    let qv: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode col_ref");
+    assert_eq!(qv["$query"], "@proc", "alias must be @proc");
+    assert_eq!(qv["path"], "[].result", "column path must be [].result");
 
     // handle.first().field("id") must produce @proc[0].id.
     let row_ref = handle.first().field("id");
-    let json2 = serde_json::to_value(&row_ref).unwrap();
-    assert_eq!(json2["$query"], "@proc");
-    assert_eq!(json2["path"], "[0].id");
+    let bytes2 = rmp_serde::to_vec_named(&row_ref).expect("serialize row_ref");
+    let qv2: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes2).expect("decode row_ref");
+    assert_eq!(qv2["$query"], "@proc");
+    assert_eq!(qv2["path"], "[0].id");
 }
 
 // ============================================================================

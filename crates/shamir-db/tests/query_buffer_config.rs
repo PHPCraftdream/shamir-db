@@ -2,8 +2,6 @@
 //! `ShamirDb::execute`. All batch requests are built with
 //! `shamir_query_builder` and round-tripped through MessagePack.
 
-use serde_json::json;
-
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
@@ -43,9 +41,9 @@ async fn get_buffer_config_returns_null_when_unset() {
         .await
         .unwrap();
 
-    let row = serde_json::to_value(resp.results["cfg"].records[0].as_value().into_owned()).unwrap();
-    assert_eq!(row["table"], json!("users"));
-    assert_eq!(row["repo"], json!("main"));
+    let row = resp.results["cfg"].records[0].as_value().into_owned();
+    assert_eq!(row["table"], "users");
+    assert_eq!(row["repo"], "main");
     assert!(row["config"].is_null());
 }
 
@@ -69,11 +67,10 @@ async fn set_then_get_buffer_config_via_ddl() {
         .unwrap();
 
     // Set echoes back the persisted config.
-    let set_row =
-        serde_json::to_value(set_resp.results["set"].records[0].as_value().into_owned()).unwrap();
-    assert_eq!(set_row["set_buffer_config"], json!("users"));
-    assert_eq!(set_row["config"]["max_bytes"], json!(1_048_576));
-    assert_eq!(set_row["config"]["ttl_ms"], json!(7000));
+    let set_row = set_resp.results["set"].records[0].as_value().into_owned();
+    assert_eq!(set_row["set_buffer_config"], "users");
+    assert_eq!(set_row["config"]["max_bytes"].as_i64(), Some(1_048_576));
+    assert_eq!(set_row["config"]["ttl_ms"].as_i64(), Some(7000));
 
     let mut b = Batch::new();
     b.id(2);
@@ -83,15 +80,14 @@ async fn set_then_get_buffer_config_via_ddl() {
         .await
         .unwrap();
 
-    let got_row =
-        serde_json::to_value(resp.results["after"].records[0].as_value().into_owned()).unwrap();
+    let got_row = resp.results["after"].records[0].as_value().into_owned();
     let cfg = &got_row["config"];
     assert!(!cfg.is_null());
-    assert_eq!(cfg["max_bytes"], json!(1_048_576));
-    assert_eq!(cfg["max_entries"], json!(500));
-    assert_eq!(cfg["ttl_ms"], json!(7000));
-    assert_eq!(cfg["flush_interval_ms"], json!(333));
-    assert_eq!(cfg["flush_batch_size"], json!(48));
+    assert_eq!(cfg["max_bytes"].as_i64(), Some(1_048_576));
+    assert_eq!(cfg["max_entries"].as_i64(), Some(500));
+    assert_eq!(cfg["ttl_ms"].as_i64(), Some(7000));
+    assert_eq!(cfg["flush_interval_ms"].as_i64(), Some(333));
+    assert_eq!(cfg["flush_batch_size"].as_i64(), Some(48));
 }
 
 #[tokio::test]
@@ -131,17 +127,17 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let alter_row = serde_json::to_value(
-        alter_resp.results["alter"].records[0]
-            .as_value()
-            .into_owned(),
-    )
-    .unwrap();
-    assert_eq!(alter_row["config"]["flush_interval_ms"], json!(1000));
+    let alter_row = alter_resp.results["alter"].records[0]
+        .as_value()
+        .into_owned();
+    assert_eq!(
+        alter_row["config"]["flush_interval_ms"].as_i64(),
+        Some(1000)
+    );
     assert!(alter_row["config"]["ttl_ms"].is_null());
     // Untouched knobs survived.
-    assert_eq!(alter_row["config"]["max_bytes"], json!(1_048_576));
-    assert_eq!(alter_row["config"]["max_entries"], json!(500));
+    assert_eq!(alter_row["config"]["max_bytes"].as_i64(), Some(1_048_576));
+    assert_eq!(alter_row["config"]["max_entries"].as_i64(), Some(500));
 
     let mut b = Batch::new();
     b.id(3);
@@ -150,12 +146,11 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let got_row =
-        serde_json::to_value(resp.results["after"].records[0].as_value().into_owned()).unwrap();
+    let got_row = resp.results["after"].records[0].as_value().into_owned();
     let got = &got_row["config"];
-    assert_eq!(got["flush_interval_ms"], json!(1000));
+    assert_eq!(got["flush_interval_ms"].as_i64(), Some(1000));
     assert!(got["ttl_ms"].is_null());
-    assert_eq!(got["max_bytes"], json!(1_048_576));
+    assert_eq!(got["max_bytes"].as_i64(), Some(1_048_576));
 }
 
 #[tokio::test]
@@ -193,12 +188,11 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         .await
         .unwrap();
 
-    let alter_row =
-        serde_json::to_value(resp.results["alter"].records[0].as_value().into_owned()).unwrap();
+    let alter_row = resp.results["alter"].records[0].as_value().into_owned();
     let cfg = &alter_row["config"];
-    assert_eq!(cfg["max_entries"], json!(9999));
+    assert_eq!(cfg["max_entries"].as_i64(), Some(9999));
     // ttl_ms was NOT in the patch -- must equal the seeded value.
-    assert_eq!(cfg["ttl_ms"], json!(7000));
+    assert_eq!(cfg["ttl_ms"].as_i64(), Some(7000));
 }
 
 #[tokio::test]
@@ -223,13 +217,12 @@ async fn alter_starts_from_default_when_no_prior_config() {
         .await
         .unwrap();
 
-    let alter_row2 =
-        serde_json::to_value(resp.results["alter"].records[0].as_value().into_owned()).unwrap();
+    let alter_row2 = resp.results["alter"].records[0].as_value().into_owned();
     let cfg = &alter_row2["config"];
-    assert_eq!(cfg["max_entries"], json!(42));
+    assert_eq!(cfg["max_entries"].as_i64(), Some(42));
     // Other fields are the engine defaults (defined in MemBufferConfig::default).
-    assert_eq!(cfg["flush_interval_ms"], json!(500));
-    assert_eq!(cfg["flush_batch_size"], json!(256));
+    assert_eq!(cfg["flush_interval_ms"].as_i64(), Some(500));
+    assert_eq!(cfg["flush_batch_size"].as_i64(), Some(256));
 }
 
 #[tokio::test]
@@ -258,11 +251,10 @@ async fn set_buffer_config_persists_into_info_store() {
         .await
         .unwrap();
 
-    let get_row =
-        serde_json::to_value(resp.results["get"].records[0].as_value().into_owned()).unwrap();
+    let get_row = resp.results["get"].records[0].as_value().into_owned();
     let cfg = &get_row["config"];
-    assert_eq!(cfg["max_bytes"], json!(1_048_576));
-    assert_eq!(cfg["ttl_ms"], json!(7000));
+    assert_eq!(cfg["max_bytes"].as_i64(), Some(1_048_576));
+    assert_eq!(cfg["ttl_ms"].as_i64(), Some(7000));
 }
 
 #[tokio::test]

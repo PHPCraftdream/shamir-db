@@ -10,7 +10,7 @@ use super::FilterValue;
 ///
 /// # Examples
 ///
-/// ```json
+/// ```text
 /// // Simple (no args)
 /// { "$fn": "NOW" }
 /// { "$fn": "UUID" }

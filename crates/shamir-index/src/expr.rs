@@ -37,7 +37,7 @@ pub enum IndexExpr {
         len: u32,
     },
     /// Traverse into a nested map by interned keys.
-    JsonPath(Box<IndexExpr>, Vec<u64>),
+    NestedPath(Box<IndexExpr>, Vec<u64>),
     /// Concatenate N expressions' string results.
     Concat(Vec<IndexExpr>),
     /// Integer modulo (useful for shard/partition indexes).
@@ -102,7 +102,7 @@ impl IndexExpr {
                 other => Err(type_err("string", &other)),
             },
 
-            IndexExpr::JsonPath(inner, segments) => {
+            IndexExpr::NestedPath(inner, segments) => {
                 let val = inner.eval(rec)?;
                 resolve_path(&val, segments)
             }

@@ -1,6 +1,6 @@
-//! Tests for common query parsers from JSON
+//! Tests for common query parsers from QueryValue
 //!
-//! All tests use JSON strings as source, parse to QueryValue, then convert to structs.
+//! All tests construct QueryValue directly via mpack! and pass to the parsers.
 
 use crate::query::common::{
     agg_func_from_str, aggregate_field_from_value, expr_from_value, expr_value_from_value,
@@ -10,6 +10,7 @@ use crate::query::common::{
 use crate::query::read::{
     AggFunc, AggregateField, NullsOrder, OrderDirection, Pagination, SelectExpr, SelectExprValue,
 };
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 // ============================================================================
@@ -18,13 +19,11 @@ use shamir_types::types::value::QueryValue;
 
 #[test]
 fn test_order_by_single_asc() {
-    let json = r#"{
+    let value = mpack!({
         "items": [
             { "field": "name", "order": "asc" }
         ]
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let order = order_by_from_value(&value).unwrap();
 
     assert_eq!(order.items.len(), 1);
@@ -35,13 +34,11 @@ fn test_order_by_single_asc() {
 
 #[test]
 fn test_order_by_single_desc() {
-    let json = r#"{
+    let value = mpack!({
         "items": [
             { "field": "created_at", "order": "desc" }
         ]
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let order = order_by_from_value(&value).unwrap();
 
     assert_eq!(order.items.len(), 1);
@@ -51,14 +48,12 @@ fn test_order_by_single_desc() {
 
 #[test]
 fn test_order_by_with_nulls() {
-    let json = r#"{
+    let value = mpack!({
         "items": [
             { "field": "created_at", "order": "desc", "nulls": "last" },
             { "field": "name", "order": "asc", "nulls": "first" }
         ]
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let order = order_by_from_value(&value).unwrap();
 
     assert_eq!(order.items.len(), 2);
@@ -68,8 +63,7 @@ fn test_order_by_with_nulls() {
 
 #[test]
 fn test_order_by_item_asc() {
-    let json = r#"{ "field": "name", "order": "asc" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "field": "name", "order": "asc" });
     let item = order_by_item_from_value(&value).unwrap();
     assert_eq!(item.direction, OrderDirection::Asc);
     assert_eq!(item.field, vec!["name".to_string()]);
@@ -77,8 +71,7 @@ fn test_order_by_item_asc() {
 
 #[test]
 fn test_order_by_item_desc() {
-    let json = r#"{ "field": "date", "order": "desc" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "field": "date", "order": "desc" });
     let item = order_by_item_from_value(&value).unwrap();
     assert_eq!(item.direction, OrderDirection::Desc);
     assert_eq!(item.field, vec!["date".to_string()]);
@@ -90,8 +83,7 @@ fn test_order_by_item_desc() {
 
 #[test]
 fn test_limit_only() {
-    let json = r#"{ "limit": 10 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "limit": 10 });
     let p = pagination_from_value(&value).unwrap();
     assert_eq!(
         p,
@@ -104,8 +96,7 @@ fn test_limit_only() {
 
 #[test]
 fn test_limit_with_offset() {
-    let json = r#"{ "limit": 10, "offset": 20 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "limit": 10, "offset": 20 });
     let p = pagination_from_value(&value).unwrap();
     assert_eq!(
         p,
@@ -118,8 +109,7 @@ fn test_limit_with_offset() {
 
 #[test]
 fn test_offset_only() {
-    let json = r#"{ "offset": 50 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "offset": 50 });
     let p = pagination_from_value(&value).unwrap();
     assert_eq!(
         p,
@@ -136,8 +126,7 @@ fn test_offset_only() {
 
 #[test]
 fn test_page_based() {
-    let json = r#"{ "page": 2, "page_size": 10 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "page": 2, "page_size": 10 });
     let p = pagination_from_value(&value).unwrap();
     assert_eq!(
         p,
@@ -150,8 +139,7 @@ fn test_page_based() {
 
 #[test]
 fn test_page_based_page_1() {
-    let json = r#"{ "page": 1, "page_size": 25 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "page": 1, "page_size": 25 });
     let p = pagination_from_value(&value).unwrap();
     assert_eq!(
         p,
@@ -164,16 +152,14 @@ fn test_page_based_page_1() {
 
 #[test]
 fn test_page_based_missing_page_size() {
-    let json = r#"{ "page": 2 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "page": 2 });
     let result = pagination_from_value(&value);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_not_an_object_pagination() {
-    let json = r#""not an object""#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = QueryValue::Str("not an object".to_string());
     let result = pagination_from_value(&value);
     assert!(matches!(result, Err(QueryParseError::InvalidType(_, _))));
 }
@@ -184,8 +170,7 @@ fn test_not_an_object_pagination() {
 
 #[test]
 fn test_group_by_single_field() {
-    let json = r#"{ "fields": ["department"] }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "fields": ["department"] });
     let group = group_by_from_value(&value).unwrap();
     assert_eq!(group.fields, vec![vec!["department".to_string()]]);
     assert!(group.having.is_none());
@@ -193,8 +178,7 @@ fn test_group_by_single_field() {
 
 #[test]
 fn test_group_by_multiple_fields() {
-    let json = r#"{ "fields": ["department", "role"] }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "fields": ["department", "role"] });
     let group = group_by_from_value(&value).unwrap();
     assert_eq!(
         group.fields,
@@ -204,16 +188,14 @@ fn test_group_by_multiple_fields() {
 
 #[test]
 fn test_group_by_with_having() {
-    let json = r#"{
+    let value = mpack!({
         "fields": ["customer_id"],
         "having": {
             "op": "gt",
             "field": "count",
             "value": 5
         }
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let group = group_by_from_value(&value).unwrap();
 
     assert_eq!(group.fields, vec![vec!["customer_id".to_string()]]);
@@ -236,24 +218,21 @@ fn test_agg_func_from_str() {
 
 #[test]
 fn test_aggregate_field_field() {
-    let json = r#"{ "type": "field", "name": "salary" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "field", "name": "salary" });
     let field = aggregate_field_from_value(&value).unwrap();
     assert!(matches!(field, AggregateField::Field(name) if name == vec!["salary".to_string()]));
 }
 
 #[test]
 fn test_aggregate_field_all() {
-    let json = r#"{ "type": "all" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "all" });
     let field = aggregate_field_from_value(&value).unwrap();
     assert!(matches!(field, AggregateField::All));
 }
 
 #[test]
 fn test_aggregate_field_string() {
-    let json = r#""salary""#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = QueryValue::Str("salary".to_string());
     let field = aggregate_field_from_value(&value).unwrap();
     assert!(matches!(field, AggregateField::Field(name) if name == vec!["salary".to_string()]));
 }
@@ -264,16 +243,14 @@ fn test_aggregate_field_string() {
 
 #[test]
 fn test_expr_field() {
-    let json = r#"{ "type": "field", "name": "price" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "field", "name": "price" });
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(expr, SelectExpr::Field { path } if path == vec!["price".to_string()]));
 }
 
 #[test]
 fn test_expr_literal_string() {
-    let json = r#"{ "type": "literal", "value": "hello" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "literal", "value": "hello" });
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
@@ -283,8 +260,7 @@ fn test_expr_literal_string() {
 
 #[test]
 fn test_expr_literal_int() {
-    let json = r#"{ "type": "literal", "value": 42 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "literal", "value": 42 });
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
@@ -296,8 +272,7 @@ fn test_expr_literal_int() {
 
 #[test]
 fn test_expr_literal_bool() {
-    let json = r#"{ "type": "literal", "value": true }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "literal", "value": true });
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
@@ -309,8 +284,7 @@ fn test_expr_literal_bool() {
 
 #[test]
 fn test_expr_literal_null() {
-    let json = r#"{ "type": "literal", "value": null }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "type": "literal", "value": null });
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
@@ -323,35 +297,35 @@ fn test_expr_literal_null() {
 #[test]
 fn test_expr_value_types() {
     // Null
-    let v: QueryValue = serde_json::from_str("null").unwrap();
+    let v = QueryValue::Null;
     assert!(matches!(
         expr_value_from_value(&v),
         Ok(SelectExprValue::Null)
     ));
 
     // Bool
-    let v: QueryValue = serde_json::from_str("true").unwrap();
+    let v = QueryValue::Bool(true);
     assert!(matches!(
         expr_value_from_value(&v),
         Ok(SelectExprValue::Bool(true))
     ));
 
     // Int
-    let v: QueryValue = serde_json::from_str("42").unwrap();
+    let v = QueryValue::Int(42);
     assert!(matches!(
         expr_value_from_value(&v),
         Ok(SelectExprValue::Int(42))
     ));
 
     // Float
-    let v: QueryValue = serde_json::from_str("3.14").unwrap();
+    let v = QueryValue::F64(3.25);
     assert!(matches!(
         expr_value_from_value(&v),
         Ok(SelectExprValue::Float(_))
     ));
 
     // String
-    let v: QueryValue = serde_json::from_str(r#""hello""#).unwrap();
+    let v = QueryValue::Str("hello".to_string());
     assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::String(s)) if s == "hello"));
 }
 
@@ -361,24 +335,21 @@ fn test_expr_value_types() {
 
 #[test]
 fn test_error_not_an_object() {
-    let json = r#""not an object""#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = QueryValue::Str("not an object".to_string());
     let result = filter_from_value(&value);
     assert!(matches!(result, Err(QueryParseError::InvalidType(_, _))));
 }
 
 #[test]
 fn test_error_missing_field() {
-    let json = r#"{ "op": "eq" }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "op": "eq" });
     let result = filter_from_value(&value);
     assert!(matches!(result, Err(QueryParseError::MissingField(_))));
 }
 
 #[test]
 fn test_error_unknown_filter_op() {
-    let json = r#"{ "op": "unknown", "field": "x", "value": 1 }"#;
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "op": "unknown", "field": "x", "value": 1 });
     let result = filter_from_value(&value);
     assert!(matches!(result, Err(QueryParseError::UnknownFilterOp(_))));
 }

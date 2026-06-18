@@ -1,10 +1,21 @@
 //! Serde round-trip + behaviour tests for `Retention`, `PurgeHistoryOp`,
 //! and `PurgeScope` (temporal T2 admin DTOs).
 
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::admin::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention};
 use crate::batch::BatchOp;
+
+fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
+    let bytes = rmp_serde::to_vec_named(v).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
+    let bytes = rmp_serde::to_vec_named(&qv).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
 
 // ---------------------------------------------------------------------------
 // Retention — serde + helpers
@@ -49,7 +60,7 @@ fn retention_current_only_requires_all_three() {
     assert!(!r2.is_current_only());
 }
 
-/// `Retention` with all knobs set round-trips through JSON.
+/// `Retention` with all knobs set round-trips through msgpack.
 #[test]
 fn retention_all_knobs_round_trip() {
     let r = Retention {
@@ -57,26 +68,29 @@ fn retention_all_knobs_round_trip() {
         max_count: Some(1000),
         min_count: Some(10),
     };
-    let json_val = serde_json::to_value(&r).expect("serialize");
+    let qv = to_qv(&r);
     assert_eq!(
-        json_val,
-        json!({
-            "max_age_secs": 86400,
-            "max_count": 1000,
-            "min_count": 10
+        qv,
+        mpack!({
+            "max_age_secs": 86400_i64,
+            "max_count": 1000_i64,
+            "min_count": 10_i64
         })
     );
 
-    let back: Retention = serde_json::from_value(json_val).expect("deserialize");
+    let back: Retention = from_qv(qv);
     assert_eq!(back, r);
 }
 
-/// Default `Retention` (all-None) serializes to `{}` — no keys on wire.
+/// Default `Retention` (all-None) serializes to an empty map — no keys on wire.
 #[test]
 fn retention_default_serializes_empty() {
     let r = Retention::default();
-    let json_val = serde_json::to_value(&r).expect("serialize");
-    assert!(json_val.as_object().unwrap().is_empty());
+    let qv = to_qv(&r);
+    match &qv {
+        QueryValue::Map(m) => assert!(m.is_empty()),
+        other => panic!("expected empty Map, got {other:?}"),
+    }
 }
 
 /// Partial retention (only `max_age_secs`) round-trips and omits the rest.
@@ -86,10 +100,10 @@ fn retention_partial_round_trip() {
         max_age_secs: Some(3600),
         ..Default::default()
     };
-    let json_val = serde_json::to_value(&r).expect("serialize");
-    assert_eq!(json_val, json!({ "max_age_secs": 3600 }));
+    let qv = to_qv(&r);
+    assert_eq!(qv, mpack!({ "max_age_secs": 3600_i64 }));
 
-    let back: Retention = serde_json::from_value(json_val).expect("deserialize");
+    let back: Retention = from_qv(qv);
     assert_eq!(back, r);
 }
 
@@ -160,13 +174,13 @@ fn purge_scope_older_than_round_trip() {
     let scope = PurgeScope::OlderThan {
         timestamp: 1_700_000_000_000,
     };
-    let json_val = serde_json::to_value(&scope).expect("serialize");
+    let qv = to_qv(&scope);
     assert_eq!(
-        json_val,
-        json!({ "older_than": { "timestamp": 1700000000000u64 } })
+        qv,
+        mpack!({ "older_than": { "timestamp": @ QueryValue::Int(1_700_000_000_000_i64) } })
     );
 
-    let back: PurgeScope = serde_json::from_value(json_val).expect("deserialize");
+    let back: PurgeScope = from_qv(qv);
     assert_eq!(back, scope);
 }
 
@@ -174,10 +188,10 @@ fn purge_scope_older_than_round_trip() {
 #[test]
 fn purge_scope_older_than_age_round_trip() {
     let scope = PurgeScope::OlderThanAge { age_secs: 86400 };
-    let json_val = serde_json::to_value(&scope).expect("serialize");
-    assert_eq!(json_val, json!({ "older_than_age": { "age_secs": 86400 } }));
+    let qv = to_qv(&scope);
+    assert_eq!(qv, mpack!({ "older_than_age": { "age_secs": 86400_i64 } }));
 
-    let back: PurgeScope = serde_json::from_value(json_val).expect("deserialize");
+    let back: PurgeScope = from_qv(qv);
     assert_eq!(back, scope);
 }
 
@@ -191,29 +205,29 @@ fn purge_history_op_older_than_round_trip() {
             timestamp: 1_600_000_000_000,
         },
     };
-    let json_val = serde_json::to_value(&op).expect("serialize");
+    let qv = to_qv(&op);
     assert_eq!(
-        json_val,
-        json!({
+        qv,
+        mpack!({
             "purge_history": "users",
             "repo": "main",
-            "scope": { "older_than": { "timestamp": 1600000000000u64 } }
+            "scope": { "older_than": { "timestamp": @ QueryValue::Int(1_600_000_000_000_i64) } }
         })
     );
 
-    let back: PurgeHistoryOp = serde_json::from_value(json_val).expect("deserialize");
+    let back: PurgeHistoryOp = from_qv(qv);
     assert_eq!(back, op);
 }
 
-/// `PurgeHistoryOp` deserializes from JSON that omits `repo` —
+/// `PurgeHistoryOp` deserializes from a payload that omits `repo` —
 /// defaults to `"main"`.
 #[test]
 fn purge_history_op_repo_defaults_to_main() {
-    let json_val = json!({
+    let qv = mpack!({
         "purge_history": "events",
-        "scope": { "older_than_age": { "age_secs": 3600 } }
+        "scope": { "older_than_age": { "age_secs": 3600_i64 } }
     });
-    let op: PurgeHistoryOp = serde_json::from_value(json_val).expect("deserialize");
+    let op: PurgeHistoryOp = from_qv(qv);
     assert_eq!(op.purge_history, "events");
     assert_eq!(op.repo, "main");
     assert_eq!(op.scope, PurgeScope::OlderThanAge { age_secs: 3600 });
@@ -231,17 +245,17 @@ fn changes_since_op_round_trip() {
         repo: "main".to_string(),
         limit: Some(500),
     };
-    let json_val = serde_json::to_value(&op).expect("serialize");
+    let qv = to_qv(&op);
     assert_eq!(
-        json_val,
-        json!({
-            "changes_since": 42,
+        qv,
+        mpack!({
+            "changes_since": 42_i64,
             "repo": "main",
-            "limit": 500
+            "limit": 500_i64
         })
     );
 
-    let back: ChangesSinceOp = serde_json::from_value(json_val).expect("deserialize");
+    let back: ChangesSinceOp = from_qv(qv);
     assert_eq!(back, op);
 }
 
@@ -253,29 +267,32 @@ fn changes_since_op_defaults_repo_and_omits_limit() {
         repo: "main".to_string(),
         limit: None,
     };
-    let json_val = serde_json::to_value(&op).expect("serialize");
+    let qv = to_qv(&op);
     // `limit` is skipped; `repo` is present (default_fn only affects decode).
-    assert_eq!(json_val["changes_since"], json!(7));
-    assert_eq!(json_val["repo"], json!("main"));
-    assert!(json_val.get("limit").is_none(), "limit must be omitted");
+    assert_eq!(
+        qv.get("changes_since").and_then(QueryValue::as_i64),
+        Some(7)
+    );
+    assert_eq!(qv.get("repo").and_then(QueryValue::as_str), Some("main"));
+    assert!(qv.get("limit").is_none(), "limit must be omitted");
 
-    // JSON without `repo` deserializes with repo == "main".
-    let minimal = json!({ "changes_since": 7 });
-    let back: ChangesSinceOp = serde_json::from_value(minimal).expect("deserialize");
+    // Payload without `repo` deserializes with repo == "main".
+    let minimal = mpack!({ "changes_since": 7_i64 });
+    let back: ChangesSinceOp = from_qv(minimal);
     assert_eq!(back.repo, "main");
     assert_eq!(back.limit, None);
     assert_eq!(back.changes_since, 7);
 }
 
-/// JSON with a `changes_since` key deserializes to `BatchOp::ChangesSince`.
+/// A payload with a `changes_since` key deserializes to `BatchOp::ChangesSince`.
 #[test]
 fn batch_op_dispatch_changes_since() {
-    let j = json!({
-        "changes_since": 10,
+    let j = mpack!({
+        "changes_since": 10_i64,
         "repo": "main",
-        "limit": 100
+        "limit": 100_i64
     });
-    let op: BatchOp = serde_json::from_value(j).expect("deserialize BatchOp");
+    let op: BatchOp = from_qv(j);
     match &op {
         BatchOp::ChangesSince(cs) => {
             assert_eq!(cs.changes_since, 10);
@@ -288,8 +305,8 @@ fn batch_op_dispatch_changes_since() {
     assert!(op.table_ref().is_none(), "ChangesSince has no table_ref");
 
     // Round-trip back through serialize.
-    let back = serde_json::to_value(&op).expect("serialize");
-    let op2: BatchOp = serde_json::from_value(back).expect("deserialize");
+    let back_qv = to_qv(&op);
+    let op2: BatchOp = from_qv(back_qv);
     assert_eq!(op, op2);
 }
 
@@ -298,14 +315,14 @@ fn batch_op_dispatch_changes_since() {
 /// a `purge_history` payload still parses to `BatchOp::PurgeHistory`.
 #[test]
 fn changes_since_does_not_break_existing_batch_op_parsing() {
-    let ins = json!({ "insert_into": "users", "values": [] });
-    let ins_op: BatchOp = serde_json::from_value(ins).expect("deserialize Insert");
+    let ins = mpack!({ "insert_into": "users", "values": [] });
+    let ins_op: BatchOp = from_qv(ins);
     assert!(matches!(ins_op, BatchOp::Insert(_)));
 
-    let ph = json!({
+    let ph = mpack!({
         "purge_history": "events",
-        "scope": { "older_than_age": { "age_secs": 60 } }
+        "scope": { "older_than_age": { "age_secs": 60_i64 } }
     });
-    let ph_op: BatchOp = serde_json::from_value(ph).expect("deserialize PurgeHistory");
+    let ph_op: BatchOp = from_qv(ph);
     assert!(matches!(ph_op, BatchOp::PurgeHistory(_)));
 }

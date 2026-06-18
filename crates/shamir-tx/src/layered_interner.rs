@@ -72,7 +72,7 @@ impl<'a> LayeredInterner<'a> {
     }
 
     /// Sync version of [`touch`] for use in sync code paths
-    /// (e.g., `json_value_to_inner_layered`).
+    /// (e.g., `msgpack_value_to_inner_layered`).
     ///
     /// Uses `scc::HashMap::entry` (sync) instead of `entry_async`.
     pub fn touch_sync(&self, key: &str) -> u64 {

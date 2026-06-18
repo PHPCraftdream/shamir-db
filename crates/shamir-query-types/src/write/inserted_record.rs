@@ -9,7 +9,7 @@ use shamir_types::types::value::{QueryValue, Value};
 /// A single record returned inside [`WriteResult`](super::WriteResult).
 ///
 /// Wire shape is a msgpack map of fields plus `_id` — built directly from
-/// `QueryValue` + `RecordId` without allocating a `serde_json::Map`.
+/// `QueryValue` + `RecordId` without allocating an intermediate map.
 ///
 /// * `id` — when `Some`, `_id` is injected in sorted-key position during
 ///   serialization. When `None`, only the `fields` map is serialized — used
@@ -28,8 +28,7 @@ pub struct InsertedRecord {
 impl Serialize for InsertedRecord {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let InsertedRecord { id, fields } = self;
-        // Emit in sorted-key order so wire bytes are deterministic and
-        // byte-identical to what a BTreeMap-ordered serde_json::Map would emit.
+        // Emit in sorted-key order so wire bytes are deterministic.
         let id_str = id.as_ref().map(|r| r.to_string());
         match fields {
             Value::Map(m) => {

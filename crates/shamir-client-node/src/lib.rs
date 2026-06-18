@@ -191,24 +191,21 @@ impl ShamirClient {
         client.ping().await.map_err(to_napi)
     }
 
-    /// Execute a `BatchRequest` (passed as a JS object) against the
-    /// named database. Returns the full `BatchResponse` as a JS object.
+    /// Execute a `BatchRequest` (passed as a MessagePack-encoded `Buffer`)
+    /// against the named database. Returns the full `BatchResponse` as a
+    /// MessagePack-encoded `Buffer`.
     #[napi]
-    pub async fn execute(
-        &self,
-        db: String,
-        batch: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let batch_req: core::BatchRequest = serde_json::from_value(batch).map_err(|e| {
-            Error::from_reason(format!("invalid batch payload: {e}"))
-        })?;
+    pub async fn execute(&self, db: String, batch: Buffer) -> Result<Buffer> {
+        let batch_req: core::BatchRequest = rmp_serde::from_slice(&batch[..])
+            .map_err(|e| Error::from_reason(format!("invalid batch payload: {e}")))?;
         let guard = self.inner.lock().await;
         let client = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
         let response = client.execute(&db, batch_req).await.map_err(to_napi)?;
-        serde_json::to_value(&response)
-            .map_err(|e| Error::from_reason(format!("encode response: {e}")))
+        let bytes = rmp_serde::to_vec_named(&response)
+            .map_err(|e| Error::from_reason(format!("encode response: {e}")))?;
+        Ok(Buffer::from(bytes))
     }
 
     /// Create a new SCRAM-authenticatable user. Requires the current

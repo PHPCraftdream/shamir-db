@@ -349,8 +349,6 @@ dependencies = [
  "pin-project-lite",
  "rustversion",
  "serde",
- "serde_json",
- "serde_path_to_error",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -3606,17 +3604,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_path_to_error"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
-dependencies = [
- "itoa",
- "serde",
- "serde_core",
-]
-
-[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3720,7 +3707,6 @@ dependencies = [
  "scc",
  "serde",
  "serde_bytes",
- "serde_json",
  "shamir-collections",
  "shamir-connect",
  "shamir-db",
@@ -3796,7 +3782,6 @@ dependencies = [
  "rmp-serde",
  "rustls",
  "serde",
- "serde_json",
  "serial_test",
  "shamir-bench-utils",
  "shamir-collections",
@@ -3838,7 +3823,6 @@ dependencies = [
  "scc",
  "serde",
  "serde_bytes",
- "serde_json",
  "serial_test",
  "shamir-bench-utils",
  "shamir-collections",
@@ -3903,7 +3887,6 @@ dependencies = [
  "rust_decimal",
  "scc",
  "serde",
- "serde_json",
  "serial_test",
  "shamir-collections",
  "shamir-storage",
@@ -3922,7 +3905,6 @@ version = "0.1.0"
 dependencies = [
  "rmp-serde",
  "serde",
- "serde_json",
  "shamir-collections",
  "shamir-query-builder-macros",
  "shamir-query-types",
@@ -3949,7 +3931,6 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_bytes",
- "serde_json",
  "sha2",
  "shamir-collections",
  "shamir-types",
@@ -4009,7 +3990,6 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_bytes",
- "serde_json",
  "serial_test",
  "shamir-bench-utils",
  "shamir-client",
@@ -4194,7 +4174,6 @@ dependencies = [
  "log",
  "scc",
  "serde",
- "serde_json",
  "shamir-collections",
  "shamir-funclib",
  "shamir-types",

@@ -172,7 +172,7 @@ fn distinct_repos(queries: &[Query]) -> HashSet<String> {
 
 ## 4.6. Wire-format расширение
 
-```jsonc
+```text
 // BatchRequest
 {
     "id": 1,

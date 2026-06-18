@@ -31,7 +31,7 @@ shamir-index 110 · shamir-server 40 · shamir-tx 21. (wasm-host/db/connect —
 | # | Кластер | Цель | Устранимо? |
 |---|---|---|---|
 | C1 | `Value<K>` enum + serde/Hash | **IRREDUCIBLE** — выживает как QueryValue; удаляем alias | — |
-| C2 | id-ключевые кодеки (messagepack/json/legacy tools) | bytes/lens для чтения; delete deprecated tools.rs; `query_value_to_inner` (write-mint) остаётся | partial |
+| C2 | id-ключевые кодеки (messagepack/legacy tools) | bytes/lens для чтения; delete deprecated tools.rs; `query_value_to_inner` (write-mint) остаётся | partial |
 | C3 | `RecordRef` leaf API (`materialize_at`→InnerValue) | `RecordValue`/`ScalarRef` для скалярных листьев | partial |
 | C4 | engine `get`/`get_many` валюта (bulk 360) | `get_bytes`/`get_many_bytes` + линза у callers | **ДА** |
 | C5 | агрегаторы (`AggState::Min/Max{&InnerValue}`) | leaf-bytes/ScalarRef borrow; после C4 | ДА (lifetimes) |
@@ -43,7 +43,7 @@ shamir-index 110 · shamir-server 40 · shamir-tx 21. (wasm-host/db/connect —
 | C11 | bare-scalar fallback (write-exec/doctor/record_cow) | **irreducible-ish** (линза только map-root; legacy скаляры) | нет |
 
 shamir-types 202: IRREDUCIBLE ядро = `Value<K>` enum+serde (~60, → QueryValue);
-REMOVABLE = `inner_to_json*`, deprecated `legacy/tools.rs`, InnerValue-сигнатуры
+REMOVABLE = `inner_to_legacy*`, deprecated `legacy/tools.rs`, InnerValue-сигнатуры
 `materialize_at`/`for_each_field`.
 
 ## Этапы (dependency-ordered, identity-gated)
@@ -58,7 +58,7 @@ REMOVABLE = `inner_to_json*`, deprecated `legacy/tools.rs`, InnerValue-сигн�
 | S5 | C7-1 | funclib `registry.rs`/`agg.rs`: alias InnerValue→QueryValue | compile gate | trivial |
 | S6 | C7-2 | 12 funclib-категорий: механ. InnerValue→QueryValue (**parallel, disjoint**) | per-fn value-equality | medium (parallel) |
 | S7 | C6+C7-3 | callers: resolve.rs args, aggregate feed, write_helpers, wasm-host argon2 | $fn/computed/agg parity | medium |
-| S8 | C2/C3 | сузить `materialize_at`→RecordValue; удалить мёртвые inner_to_json* | no prod caller | medium |
+| S8 | C2/C3 | сузить `materialize_at`→RecordValue; удалить мёртвые inner_to_legacy* | no prod caller | medium |
 | **S9** | C8 | **по S0**: (b) bump формата + rebuild-on-open + lens-native hash + covering→QueryValue; ИЛИ (a) discriminant-stable hasher + frozen golden + rustc-canary | **PERSISTED byte-identity** (a) или migration parity (b) | **hard (highest)** |
 | S10 | C10/C11 | аудит+документировать холодный пол (recovery/mint/bare-scalar) | doc-пасс | trivial |
 

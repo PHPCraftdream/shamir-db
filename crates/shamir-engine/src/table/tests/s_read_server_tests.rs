@@ -252,7 +252,7 @@ async fn s_read_projection_convergence() {
 
 /// An aggregate query with `ResultEncoding::Id` must fall back to the Name
 /// path (because aggregates require server-side computation and de-interning).
-/// The result is correct (`Direct`/`Json`) and not `IdBytes`.
+/// The result is correct (`Direct`/msgpack-encoded) and not `IdBytes`.
 #[tokio::test]
 async fn s_read_aggregate_falls_back_to_name() {
     let (table, repo) = setup_empty_table().await;

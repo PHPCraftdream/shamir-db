@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { Db } from '../db.js';
 import type { ExecCtx } from '../exec-ctx.js';
 import type { BatchResponse, QueryResult } from '../types/batch.js';
-import type { Json } from '../types/write.js';
+import type { WireValue } from '../types/write.js';
 import { Query } from '../builders/query.js';
 import { Batch } from '../builders/batch.js';
 import { filter } from '../builders/filter.js';
@@ -36,7 +36,7 @@ function fakeClient(captured: Captured[]) {
     records: [{ id: 'fake', ok: true }],
   };
   const okBatch: BatchResponse = {
-    id: 1 as Json,
+    id: 1 as WireValue,
     results: { _: okResult },
     execution_plan: [],
     execution_time_us: 0,
@@ -45,7 +45,7 @@ function fakeClient(captured: Captured[]) {
     execute: async (db: string, batch: object): Promise<BatchResponse> => {
       captured.push({ db, batch });
       return {
-        id: ((batch as { id?: unknown }).id ?? 1) as Json,
+        id: ((batch as { id?: unknown }).id ?? 1) as WireValue,
         results: { _: okResult },
         execution_plan: [],
         execution_time_us: 0,
@@ -337,11 +337,11 @@ describe('Db handle (unit)', () => {
   function fakeLiveClient(subId: number) {
     const router = new SubscriptionRouter();
     const resp: BatchResponse = {
-      id: 1 as Json,
+      id: 1 as WireValue,
       results: {
         messages: {
           records: [],
-          value: { subscription_grant: true, sources_count: 1, sub: subId } as Json,
+          value: { subscription_grant: true, sources_count: 1, sub: subId } as WireValue,
         },
       },
       execution_plan: [],
@@ -385,12 +385,12 @@ describe('Db handle (unit)', () => {
   it('db.runLive: aliases without a numeric sub are not turned into handles', async () => {
     const router = new SubscriptionRouter();
     const resp: BatchResponse = {
-      id: 1 as Json,
+      id: 1 as WireValue,
       results: {
         // A regular read result — no value.sub. Must NOT produce a handle.
         plain: { records: [{ id: 'x' }] },
         // value present but not an object — must NOT produce a handle.
-        scalar: { records: [], value: 42 as Json },
+        scalar: { records: [], value: 42 as WireValue },
       },
       execution_plan: [],
       execution_time_us: 0,
@@ -422,7 +422,7 @@ describe('Db.tx() (unit)', () => {
 
   const okResult: QueryResult = { records: [{ ok: true }] };
   const okBatchResponse: BatchResponse = {
-    id: 1 as Json,
+    id: 1 as WireValue,
     results: { _: okResult },
     execution_plan: [],
     execution_time_us: 0,
@@ -619,7 +619,7 @@ describe('Db.run edge cases', () => {
   function emptyResultClient() {
     return {
       execute: async (): Promise<BatchResponse> => ({
-        id: 1 as Json,
+        id: 1 as WireValue,
         results: {},
         execution_plan: [],
         execution_time_us: 0,

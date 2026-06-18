@@ -23,7 +23,7 @@ the dedicated workspace crates:
 
 Inside the database, the canonical entry point is the **Batch API**:
 `ShamirDb::execute(db_name, &BatchRequest) -> BatchResponse`. It covers reads,
-writes, DDL, and auth ops as a single JSON/MessagePack-shaped surface, with
+writes, DDL, and auth ops as a single MessagePack-shaped surface, with
 cross-query references via `{"$query": "@alias[].field"}`. See
 [`shamir-engine::query::batch`](../../../../shamir-engine/src/query/batch/README.md).
 

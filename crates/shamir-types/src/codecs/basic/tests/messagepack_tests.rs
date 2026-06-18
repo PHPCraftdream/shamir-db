@@ -51,10 +51,10 @@ fn test_messagepack_roundtrip() {
 }
 
 #[test]
-fn test_json_to_msgpack_conversion_with_all_hints() {
-    // Build the rich UserValue directly (the old test went through JsonCodec
-    // with type-hint prefixes; the value produced by that step is constructed
-    // here explicitly so the msgpack round-trip assertion is unchanged).
+fn test_msgpack_conversion_with_all_hints() {
+    // Build the rich UserValue directly (the old test went through a legacy
+    // text codec with type-hint prefixes; the value produced by that step is
+    // constructed here explicitly so the msgpack round-trip assertion is unchanged).
     let msgpack_codec = MessagePackCodec;
 
     let mut expected_set = new_set();

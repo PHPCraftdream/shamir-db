@@ -153,12 +153,10 @@ pub fn apply_pagination<T>(
 // Distinct
 // ============================================================================
 
-/// Remove duplicate `QueryValue` rows using a canonical json key for
-/// deduplication, matching the semantics of the json-based
-/// `apply_distinct`. The canonical key reproduces the lossy
-/// `From<QueryValue> for serde_json::Value` coercion (Dec/Big→String,
-/// Bin→Array, Set→Array) so that e.g. `Dec("1.0")` and `Str("1.0")`
-/// deduplicate identically to the old json path.
+/// Remove duplicate `QueryValue` rows using a canonical key for
+/// deduplication. The canonical key reproduces the lossy
+/// coercion applied historically (Dec/Big→String, Bin→Array, Set→Array)
+/// so that e.g. `Dec("1.0")` and `Str("1.0")` deduplicate identically.
 pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
     // Two-pass borrow pattern: HashableQueryValue<'a> borrows &'a QueryValue,
     // so we can't hold both the map key (reference into records) and own records

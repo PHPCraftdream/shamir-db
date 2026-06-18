@@ -10,8 +10,6 @@
 //!      *their* database — without being a global admin — but not users
 //!      scoped elsewhere, unscoped users, or users belonging to another db.
 
-use serde_json::json;
-
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
@@ -46,37 +44,37 @@ fn one_op(op: impl shamir_query_builder::batch::IntoBatchOp) -> BatchRequest {
 
 #[test]
 fn create_user_op_serde_round_trip_with_database() {
-    let op: CreateUserOp = serde_json::from_value(json!({
-        "create_user": "bob",
-        "password": "pw",
-        "roles": [
-            "readonly"
-        ],
-        "database": "testdb"
-    }))
-    .unwrap();
+    let op = CreateUserOp {
+        create_user: "bob".to_string(),
+        password: "pw".to_string().into(),
+        roles: vec!["readonly".to_string()],
+        profile: None,
+        database: Some("testdb".to_string()),
+    };
     assert_eq!(op.create_user, "bob");
     assert_eq!(op.database.as_deref(), Some("testdb"));
 
-    // Serialize → deserialize must preserve the scope.
-    let back = serde_json::to_value(&op).unwrap();
-    assert_eq!(back["database"], "testdb");
-    let op2: CreateUserOp = serde_json::from_value(back).unwrap();
+    // Serialize via msgpack → deserialize must preserve the scope.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let op2: CreateUserOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(op2.database, op.database);
 }
 
 #[test]
 fn create_user_op_serde_omits_database_when_absent() {
-    let op: CreateUserOp = serde_json::from_value(json!({
-        "create_user": "bob",
-        "password": "pw"
-    }))
-    .unwrap();
+    let op = CreateUserOp {
+        create_user: "bob".to_string(),
+        password: "pw".to_string().into(),
+        roles: vec![],
+        profile: None,
+        database: None,
+    };
     assert_eq!(op.database, None);
 
     // skip_serializing_if = Option::is_none → no key when unset.
-    let back = serde_json::to_value(&op).unwrap();
-    assert!(back.get("database").is_none());
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let op2: CreateUserOp = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(op2.database, None);
 }
 
 // ===========================================================================

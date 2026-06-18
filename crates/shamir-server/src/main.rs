@@ -81,9 +81,9 @@ enum Subcmd {
         /// Restrict the resource tree to a single database.
         #[arg(long, value_name = "DB")]
         db: Option<String>,
-        /// Emit raw JSON instead of the rendered ASCII tree.
+        /// Emit the raw QueryValue dump instead of the rendered ASCII tree.
         #[arg(long)]
-        json: bool,
+        pretty: bool,
         /// Online mode: connect to a running server at `host:port` and
         /// request the tree over TLS+SCRAM (requires admin credentials).
         #[arg(long, value_name = "ADDR")]
@@ -170,7 +170,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
         Some(Subcmd::AccessTree {
             depth,
             db,
-            json,
+            pretty,
             connect,
             server_name,
             user,
@@ -179,7 +179,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
             let args = shamir_server::access_tree::AccessTreeArgs {
                 depth,
                 db,
-                json,
+                pretty,
                 connect,
                 server_name,
                 user,

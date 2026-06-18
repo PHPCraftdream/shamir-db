@@ -142,7 +142,7 @@ Adversarial 5-lens arc review; all findings remediated:
 
 ### Movement B — Measure → Accelerate (perf) · ✅ DONE
 - R / P shipped pre-arc.
-- M1 (single-column columnar ORDER BY) + M2 (streaming JSON projection for
+- M1 (single-column columnar ORDER BY) + M2 (streaming msgpack projection for
   SELECT *, 3.4×) + B1 overhead guard bench landed.
 - **Opt O (covering index) — ✅ DONE** (see P3 below). DDL `include:[...]` +
   per-index meta; covered-projection write-side; versioned covering-posting

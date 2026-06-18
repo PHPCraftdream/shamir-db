@@ -1,22 +1,22 @@
-//! Tests for SELECT Query parsing from JSON
+//! Tests for SELECT Query parsing from QueryValue
 //!
-//! All tests use JSON strings as source, parse to QueryValue, then convert to Query.
+//! All tests construct QueryValue directly via mpack! and pass to the parser.
 
 use crate::query::filter::Filter;
 use crate::query::read::query_from_value;
 use crate::query::read::{ReadQuery, SelectItem};
 use crate::query::TableRef;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-/// Parse JSON string to QueryValue, then to Query
-fn parse_query(json: &str) -> ReadQuery {
-    let query_value: QueryValue = serde_json::from_str(json).expect("Invalid JSON");
-    query_from_value(&query_value).expect("Failed to parse query")
+/// Construct a ReadQuery from a QueryValue produced by mpack!.
+fn parse_query(value: QueryValue) -> ReadQuery {
+    query_from_value(&value).expect("Failed to parse query")
 }
 
 #[test]
-fn test_parse_simple_query_from_json() {
-    let json = r#"{
+fn test_parse_simple_query_from_value() {
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -33,9 +33,7 @@ fn test_parse_simple_query_from_json() {
             "limit": 10,
             "offset": 0
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.from, TableRef::new("users"));
     assert_eq!(query.select.items.len(), 1);
@@ -52,7 +50,7 @@ fn test_parse_simple_query_from_json() {
 
 #[test]
 fn test_parse_select_fields() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -61,16 +59,14 @@ fn test_parse_select_fields() {
                 { "type": "field", "path": "age" }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 3);
 }
 
 #[test]
 fn test_parse_select_with_aggregation() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "select": {
             "items": [
@@ -90,16 +86,14 @@ fn test_parse_select_with_aggregation() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert_eq!(query.select.items.len(), 3);
 }
 
 #[test]
 fn test_parse_complex_filter() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "where": {
             "op": "and",
@@ -116,9 +110,7 @@ fn test_parse_complex_filter() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.r#where.is_some());
     let filter = query.r#where.unwrap();
@@ -127,7 +119,7 @@ fn test_parse_complex_filter() {
 
 #[test]
 fn test_parse_deeply_nested_filters() {
-    let json = r#"{
+    let query = parse_query(mpack!({
         "from": "users",
         "where": {
             "op": "and",
@@ -169,9 +161,7 @@ fn test_parse_deeply_nested_filters() {
                 }
             ]
         }
-    }"#;
-
-    let query = parse_query(json);
+    }));
 
     assert!(query.r#where.is_some());
     let filter = query.r#where.unwrap();

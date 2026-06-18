@@ -13,7 +13,7 @@ pub enum FilterValue {
     Int(i64),
     Float(f64),
     String(String),
-    Binary(Vec<u8>),
+    Binary(#[serde(with = "serde_bytes")] Vec<u8>),
     Array(Vec<FilterValue>),
     /// Reference to another field in the same document
     FieldRef {

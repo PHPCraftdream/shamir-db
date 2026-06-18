@@ -12,9 +12,9 @@ use shamir_types::types::value::QueryValue;
 /// Sort `QueryValue` rows by ORDER BY items.
 ///
 /// Uses the canonical-key approach: sort keys are extracted to match the
-/// semantics of the former json-based ORDER BY exactly — in particular
+/// semantics of the pre-J1 ORDER BY exactly — in particular
 /// `Dec`/`Big` values are compared as their `to_string()` form
-/// (lexicographic, matching the json coercion), and `Bin`/`Set` map to
+/// (lexicographic, preserving prior coercion semantics), and `Bin`/`Set` map to
 /// `Other` (unsortable, preserving insertion order via stable sort).
 pub fn apply_order_by_qv(records: &mut Vec<QueryValue>, order_by: &OrderBy) {
     if order_by.items.is_empty() || records.len() <= 1 {
@@ -58,10 +58,10 @@ enum QvSortKey {
 impl QvSortKey {
     /// Extract a canonical sort key from a `QueryValue` field reference.
     /// - `Int` -> I64, `F64` -> F64, `Bool` -> Bool, `Str` -> Str (cloned)
-    /// - `Dec(d)` -> Str(d.to_string()) -- matches json's String coercion
-    /// - `Big(b)` -> Str(b.to_string()) -- matches json's String coercion
+    /// - `Dec(d)` -> Str(d.to_string()) -- canonical string form
+    /// - `Big(b)` -> Str(b.to_string()) -- canonical string form
     /// - `Null` / missing -> Null
-    /// - `Bin`, `Set`, `List`, `Map` -> Other (unsortable, same as json)
+    /// - `Bin`, `Set`, `List`, `Map` -> Other (unsortable)
     fn from_query_value(v: &QueryValue) -> Self {
         match v {
             QueryValue::Null => QvSortKey::Null,

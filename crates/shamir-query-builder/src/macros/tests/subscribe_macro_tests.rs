@@ -9,9 +9,16 @@ use crate::filter as filter_mod;
 // ── helpers ────────────────────────────────────────────────────────
 
 fn assert_eq_wire(a: &SubscribeOp, b: &SubscribeOp) {
-    let ja = serde_json::to_value(a).unwrap();
-    let jb = serde_json::to_value(b).unwrap();
-    assert_eq!(ja, jb, "wire JSON mismatch:\n  left:  {ja}\n  right: {jb}");
+    let bytes_a = rmp_serde::to_vec_named(a).expect("serialize a");
+    let bytes_b = rmp_serde::to_vec_named(b).expect("serialize b");
+    let ja: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_a).expect("decode a");
+    let jb: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_b).expect("decode b");
+    assert_eq!(
+        ja, jb,
+        "wire shape mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
+    );
 }
 
 // ── tests ──────────────────────────────────────────────────────────

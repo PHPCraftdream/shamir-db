@@ -1,9 +1,9 @@
 //! Tests for Access tree, chmod / chown / chgrp, Group DDL, Auth users / roles,
 //! and `res` helpers.
 
-use serde_json::json;
 use shamir_query_types::auth::{Action, Effect, Permission, Resource};
 use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::ddl;
 
@@ -19,7 +19,7 @@ fn access_tree_defaults() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "access_tree": true
         })
     );
@@ -32,7 +32,7 @@ fn access_tree_with_depth() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "access_tree": true,
             "depth": 2
         })
@@ -45,7 +45,7 @@ fn access_tree_with_db() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "access_tree": true,
             "depth": 1,
             "db": "mydb"
@@ -63,7 +63,7 @@ fn chmod_table_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chmod": {
                 "table": ["mydb", "main", "users"]
             },
@@ -79,7 +79,7 @@ fn chmod_function_namespace_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chmod": {
                 "function_namespace": true
             },
@@ -94,7 +94,7 @@ fn chown_database_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chown": {
                 "database": "testdb"
             },
@@ -110,7 +110,7 @@ fn chown_function_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chown": {
                 "function": "my_fn"
             },
@@ -125,7 +125,7 @@ fn chgrp_store_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chgrp": {
                 "store": ["testdb", "main"]
             },
@@ -140,7 +140,7 @@ fn chgrp_null_group_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "chgrp": {
                 "database": "testdb"
             },
@@ -159,7 +159,7 @@ fn create_group_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "create_group": "devs"
         })
     );
@@ -174,7 +174,7 @@ fn drop_group_by_name_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_group": {
                 "name": "devs"
             }
@@ -188,7 +188,7 @@ fn drop_group_by_id_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_group": {
                 "id": 3
             }
@@ -207,7 +207,7 @@ fn add_group_member_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "add_group_member": {
                 "name": "devs"
             },
@@ -223,7 +223,7 @@ fn remove_group_member_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "remove_group_member": {
                 "id": 1
             },
@@ -242,7 +242,7 @@ fn create_user_minimal() {
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "alice");
     assert_eq!(j["password"], "s3cret");
-    assert_eq!(j["roles"], json!([]));
+    assert_eq!(j["roles"], mpack!([]));
     assert!(op.is_admin());
 }
 
@@ -254,8 +254,8 @@ fn create_user_full() {
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "bob");
-    assert_eq!(j["roles"], json!(["admin", "viewer"]));
-    assert_eq!(j["profile"], json!({"department": "eng"}));
+    assert_eq!(j["roles"], mpack!(["admin", "viewer"]));
+    assert_eq!(j["profile"], mpack!({"department": "eng"}));
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn drop_user_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_user": "alice"
         })
     );
@@ -276,7 +276,7 @@ fn drop_user_with_hmac() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_user": "alice",
             "hmac": "abc"
         })
@@ -295,7 +295,7 @@ fn create_role_wire() {
     let j = roundtrip(&op);
     assert_eq!(j["create_role"], "viewer");
     assert_eq!(j["permissions"][0]["effect"], "allow");
-    assert_eq!(j["permissions"][0]["actions"], json!(["read"]));
+    assert_eq!(j["permissions"][0]["actions"], mpack!(["read"]));
     assert!(op.is_admin());
 }
 
@@ -305,7 +305,7 @@ fn drop_role_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_role": "viewer"
         })
     );
@@ -317,7 +317,7 @@ fn drop_role_with_hmac() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "drop_role": "viewer",
             "hmac": "ff"
         })
@@ -330,7 +330,7 @@ fn grant_role_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "grant_role": "admin",
             "user": "alice"
         })
@@ -344,7 +344,7 @@ fn revoke_role_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "revoke_role": "admin",
             "user": "alice"
         })
@@ -355,47 +355,40 @@ fn revoke_role_wire() {
 // res helpers
 // ============================================================================
 
+fn res_to_wire<T: serde::Serialize>(r: &T) -> QueryValue {
+    let bytes = rmp_serde::to_vec_named(r).expect("serialize");
+    rmp_serde::from_slice(&bytes).expect("decode")
+}
+
 #[test]
 fn res_database() {
     let r = ddl::res::database("mydb");
-    assert_eq!(
-        serde_json::to_value(&r).expect("ser"),
-        json!({"database": "mydb"})
-    );
+    assert_eq!(res_to_wire(&r), mpack!({"database": "mydb"}));
 }
 
 #[test]
 fn res_store() {
     let r = ddl::res::store("mydb", "main");
-    assert_eq!(
-        serde_json::to_value(&r).expect("ser"),
-        json!({"store": ["mydb", "main"]})
-    );
+    assert_eq!(res_to_wire(&r), mpack!({"store": ["mydb", "main"]}));
 }
 
 #[test]
 fn res_table() {
     let r = ddl::res::table("mydb", "main", "users");
     assert_eq!(
-        serde_json::to_value(&r).expect("ser"),
-        json!({"table": ["mydb", "main", "users"]})
+        res_to_wire(&r),
+        mpack!({"table": ["mydb", "main", "users"]})
     );
 }
 
 #[test]
 fn res_function() {
     let r = ddl::res::function("my_fn");
-    assert_eq!(
-        serde_json::to_value(&r).expect("ser"),
-        json!({"function": "my_fn"})
-    );
+    assert_eq!(res_to_wire(&r), mpack!({"function": "my_fn"}));
 }
 
 #[test]
 fn res_function_namespace() {
     let r = ddl::res::function_namespace();
-    assert_eq!(
-        serde_json::to_value(&r).expect("ser"),
-        json!({"function_namespace": true})
-    );
+    assert_eq!(res_to_wire(&r), mpack!({"function_namespace": true}));
 }

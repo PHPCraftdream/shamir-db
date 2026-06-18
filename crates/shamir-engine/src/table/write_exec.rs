@@ -236,8 +236,8 @@ impl TableManager {
         all_ids.extend_from_slice(&idmsgpack_ids);
 
         // Skip result-map assembly for fire-and-forget inserts
-        // (return_result=false) — avoids per-row serde_json::Map build
-        // and QueryValue→json::Value clone on the hot batch-insert path.
+        // (return_result=false) — avoids per-row QueryValue map build
+        // and clone on the hot batch-insert path.
         let records = if return_result {
             let mut records =
                 build_insert_result_records(&resolved_values, &all_ids[..resolved_values.len()]);
@@ -420,7 +420,7 @@ impl TableManager {
                 // - new_qv: overlay the string-keyed resolved_set on top of old_qv
                 //   (no overlay-minted interned ids to resolve — the overlay keys
                 //   are already strings in resolved_set). This matches the W3a
-                //   result-JSON pattern and avoids the "Interned key not found"
+                //   result-QueryValue pattern and avoids the "Interned key not found"
                 //   failure that would occur if we de-interned new_bytes through
                 //   the base-only reverse snapshot (new_bytes may contain overlay-
                 //   minted key ids not yet in base).
@@ -463,7 +463,7 @@ impl TableManager {
                     UpdateReturnMode::Unchanged => !changed,
                 };
                 if should_include {
-                    // Build the result JSON from the old record (base-interned
+                    // Build the result QueryValue from the old record (base-interned
                     // keys — always safe) overlaid with the resolved SET fields
                     // (string-keyed QueryValue — no overlay ids). Decoding
                     // new_bytes via the base interner would fail when op.set
@@ -696,7 +696,7 @@ impl TableManager {
                 }
                 _ => {
                     return Err(shamir_storage::error::DbError::Validation(
-                        "SET key must be a JSON object".to_string(),
+                        "SET key must be a map object".to_string(),
                     ))
                 }
             };
@@ -707,7 +707,7 @@ impl TableManager {
                 InnerValue::Map(m) => m.clone(),
                 _ => {
                     return Err(shamir_storage::error::DbError::Validation(
-                        "SET value must be a JSON object".to_string(),
+                        "SET value must be a map object".to_string(),
                     ))
                 }
             };
@@ -869,8 +869,8 @@ impl TableManager {
 
 /// Build the `Vec<InsertedRecord>` result for an INSERT response.
 ///
-/// Returns `Direct` variants — no `serde_json::Map` is allocated per row.
-/// The serialiser emits the same msgpack map shape as the old `Json` path.
+/// Returns `Direct` variants — no per-row map allocation needed.
+/// The serialiser emits the same msgpack map shape as the old legacy path.
 fn build_insert_result_records(
     resolved_values: &[std::borrow::Cow<'_, QueryValue>],
     ids: &[RecordId],

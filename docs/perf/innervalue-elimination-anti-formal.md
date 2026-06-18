@@ -31,7 +31,7 @@ id-ключевого дерева была главным тормозом). Е
 
 Аудит (часть гейта):
 ```
-grep -rnE "inner_value_to_query_value|query_value_to_inner|InnerValue::from_bytes|inner_to_json_value" \
+grep -rnE "inner_value_to_query_value|query_value_to_inner|InnerValue::from_bytes|inner_to_legacy_value" \
   crates --include=*.rs | grep -vE "/tests/|_tests\.rs|/bench"
 ```
 Каждое вхождение на per-op/per-row пути — подозреваемый. На холодных границах

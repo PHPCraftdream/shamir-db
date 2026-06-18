@@ -9,7 +9,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { Json } from '../types/write.js';
+import type { WireValue } from '../types/write.js';
 import type {
   BatchOpInput,
   QueryEntry,
@@ -44,7 +44,7 @@ interface BatchClient {
 
 /** Fluent builder for a `BatchRequest`. */
 export class Batch {
-  private readonly idValue: Json;
+  private readonly idValue: WireValue;
   private nameValue: string | undefined;
   private transactionalValue = false;
   private isolationValue: IsolationLevel | undefined;
@@ -55,12 +55,12 @@ export class Batch {
   private limitsValue: BatchLimits | undefined;
   private ctxValue: ExecCtx | null = null;
 
-  private constructor(id: Json) {
+  private constructor(id: WireValue) {
     this.idValue = id;
   }
 
   /** Create a new batch with the given request `id` (defaults to `1`). */
-  static create(id: Json = 1): Batch {
+  static create(id: WireValue = 1): Batch {
     return new Batch(id);
   }
 

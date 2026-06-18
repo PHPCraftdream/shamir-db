@@ -2,7 +2,7 @@
 //!
 //! Existing benches all use narrow records (~20 fields of small values),
 //! which leaves the behaviour of S.H.A.M.I.R. on records carrying real
-//! blobs (article text, base64 images, JSON state) completely unmeasured.
+//! blobs (article text, base64 images, serialised state) completely unmeasured.
 //!
 //! Three concrete questions this bench answers:
 //!
@@ -199,7 +199,7 @@ fn bench_read_by_size(c: &mut Criterion) {
 // subscription hot-path) at the large-value end of the spectrum.
 // --------------------------------------------------------------------------
 
-/// Insert one record carrying the given JSON value, tap the changefeed
+/// Insert one record carrying the given QueryValue, tap the changefeed
 /// before the insert, return the Put change's value bytes.
 async fn capture_change_bytes(row: QueryValue) -> (Arc<ShamirDb>, Bytes) {
     let shamir = fresh_db().await;

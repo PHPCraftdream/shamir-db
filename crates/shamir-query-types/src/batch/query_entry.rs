@@ -14,7 +14,7 @@ use super::batch_op::BatchOp;
 ///
 /// # Examples
 ///
-/// ```json
+/// ```text
 /// // Query
 /// { "from": "users", "where": { "op": "eq", "field": "status", "value": "active" } }
 ///

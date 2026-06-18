@@ -1,3 +1,5 @@
+use shamir_types::types::value::QueryValue;
+
 use crate::validator::ValidationError;
 
 #[test]
@@ -6,15 +8,23 @@ fn serde_with_field() {
         field: Some(vec!["address".into(), "zip".into()]),
         code: "invalid_zip".into(),
     };
-    let json = serde_json::to_value(&err).unwrap();
+    let bytes = rmp_serde::to_vec_named(&err).unwrap();
+    let decoded: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    // field must be a list ["address", "zip"]
+    let field_val = decoded.get("field").expect("field key present");
+    assert!(matches!(field_val, QueryValue::List(_)));
+    if let QueryValue::List(items) = field_val {
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_str(), Some("address"));
+        assert_eq!(items[1].as_str(), Some("zip"));
+    }
+    // code must be "invalid_zip"
     assert_eq!(
-        json,
-        serde_json::json!({
-            "field": ["address", "zip"],
-            "code": "invalid_zip"
-        })
+        decoded.get("code").and_then(QueryValue::as_str),
+        Some("invalid_zip")
     );
-    let back: ValidationError = serde_json::from_value(json).unwrap();
+
+    let back: ValidationError = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, err);
 }
 
@@ -24,22 +34,26 @@ fn serde_without_field() {
         field: None,
         code: "at_least_one_contact".into(),
     };
-    let json = serde_json::to_value(&err).unwrap();
-    // `field` must be absent, not `null`.
-    assert!(json.get("field").is_none());
-    assert_eq!(json["code"], "at_least_one_contact");
+    let bytes = rmp_serde::to_vec_named(&err).unwrap();
+    let decoded: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    // `field` must be absent, not null.
+    assert!(decoded.get("field").is_none());
+    assert_eq!(
+        decoded.get("code").and_then(QueryValue::as_str),
+        Some("at_least_one_contact")
+    );
 
-    let back: ValidationError = serde_json::from_value(json).unwrap();
+    let back: ValidationError = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, err);
 }
 
 #[test]
-fn serde_round_trip_json_string() {
+fn serde_round_trip_msgpack() {
     let err = ValidationError {
         field: Some(vec!["name".into()]),
         code: "too_short".into(),
     };
-    let s = serde_json::to_string(&err).unwrap();
-    let back: ValidationError = serde_json::from_str(&s).unwrap();
+    let bytes = rmp_serde::to_vec_named(&err).unwrap();
+    let back: ValidationError = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, err);
 }

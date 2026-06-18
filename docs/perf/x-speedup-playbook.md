@@ -175,11 +175,11 @@ Estimated win: multiplicative for tables with many backends; Ã—B reduction in
 Risk: medium (touches IndexBackend trait).
 Attack hint: split `IndexBackend` into `SyncBackend` + `VectorBackend` subtraits, pre-bucketed in registry.
 
-## Target 6: ACL/computed scan + `serde_json::Value::from(v.clone())` round-trip in `resolve_computed_record` runs per row even when no `$fn`
+## Target 6: ACL/computed scan + `QueryValue::from(v.clone())` round-trip in `resolve_computed_record` runs per row even when no `$fn`
 File:line: crates/shamir-engine/src/table/write_helpers.rs:82-120
-Current shape: For every record, even when no field is computed, code allocates `obj.values().any(is_computed_field)`-scan; when present it builds a `serde_json::Map` of all literal fields via `Value::from(v.clone())` per row.
-What's wasteful: clone-to-json round-trip per row; `serde_json::from_value` for every `$fn` arg; then `inner_to_json_value` back. Pure conversion churn on the hot insert.
-Ã—N proposal: Skip the json round-trip â€” evaluate `$fn` against the existing `QueryValue`/`InnerValue` literal map directly via a typed evaluator; cache the "no `$fn`" predicate as a single fast scan returning a bool, computed once for the batch when a homogeneous schema is known.
+Current shape: For every record, even when no field is computed, code allocates `obj.values().any(is_computed_field)`-scan; when present it builds a `QueryValue` map of all literal fields via `Value::from(v.clone())` per row.
+What's wasteful: clone-to-value round-trip per row; `rmp_serde::from_slice` for every `$fn` arg; then `inner_to_query_value` back. Pure conversion churn on the hot insert.
+Ã—N proposal: Skip the value round-trip â€” evaluate `$fn` against the existing `QueryValue`/`InnerValue` literal map directly via a typed evaluator; cache the “no `$fn`” predicate as a single fast scan returning a bool, computed once for the batch when a homogeneous schema is known.
 Estimated win: multiplicative for inserts that use computed fields; otherwise small (still removes the `any()` allocation chain).
 Risk: medium.
 Attack hint: add `eval_write_value_qv(fv, &TMap<String,QueryValue>, â€¦)` taking QueryValue refs directly.
@@ -292,18 +292,18 @@ Estimated win: medium (per-row alloc removal).
 Risk: low
 Attack hint: extend the `pre_resolved` pattern; return Cow from resolve.
 
-## Target 8: read_collecting collects then re-iterates with `.into_iter().map(json::Value::from).collect()` 
+## Target 8: read_collecting collects then re-iterates with `.into_iter().map(QueryValue::from).collect()` 
 File:line: crates/shamir-engine/src/table/read_exec.rs:497-498, 512-515
-Current shape: Builds `Vec<QueryRecord>`, then `result.into_iter().map(serde_json::Value::from).collect()` (full JSON tree alloc per record), then post-processing, then maps back to `QueryRecord::Json`.
-What's wasteful: For ORDER BY / DISTINCT paths, every projected row is converted to serde_json::Value (deep tree alloc per row) just to drive `apply_order_by` / `apply_distinct` / `apply_pagination`.
-Ã—N proposal: Make `apply_order_by`/`apply_distinct`/`apply_pagination` operate on `QueryValue` directly (it's already the native type); eliminate the QueryRecordâ†”json::Valueâ†”QueryRecord round-trip.
+Current shape: Builds `Vec<QueryRecord>`, then `result.into_iter().map(QueryValue::from).collect()` (full value tree alloc per record), then post-processing, then maps back to `QueryRecord::Direct`.
+What's wasteful: For ORDER BY / DISTINCT paths, every projected row is converted to QueryValue (deep tree alloc per row) just to drive `apply_order_by` / `apply_distinct` / `apply_pagination`.
+Ã—N proposal: Make `apply_order_by`/`apply_distinct`/`apply_pagination` operate on `QueryValue` directly (it's already the native type); eliminate the QueryRecordâ†”QueryValueâ†”QueryRecord round-trip.
 Estimated win: multiplicative for ORDER BY/DISTINCT (currently 2Ã— allocation of the entire result set).
 Risk: medium (touches order/distinct internals)
-Attack hint: port `Hashable`/`Ord` helpers from `HashableJson` to `QueryValue`.
+Attack hint: port `Hashable`/`Ord` helpers from `HashableQueryValue` to `QueryValue`.
 
 ## Target 9: ORDER BY sort path is O(N log N) materialize+sort instead of top-K heap
 File:line: crates/shamir-engine/src/table/read_exec.rs:503-508
-Current shape: For `ORDER BY x LIMIT K` without a sorted-index match, the full `json_result` vec is sorted, then paginated.
+Current shape: For `ORDER BY x LIMIT K` without a sorted-index match, the full `result` vec is sorted, then paginated.
 What's wasteful: Sorts all N matches when only top K are needed. Bytes-prefilter + collect = N rows projected + N log N sort vs. O(N log K) with a bounded heap.
 Ã—N proposal: Top-K min-heap of size K+skip when both ORDER BY and a finite LIMIT exist (no index). Project only the K winners (not all N).
 Estimated win: multiplicative (large N, small K â€” e.g. N=1M, K=10 â†’ 60000Ã— sort work avoided + 99.999% projection avoided).
@@ -580,14 +580,14 @@ Estimated win: medium (constant-factor 2Ã—, but compounds with Target 5)
 Risk: low
 Attack hint: collect surviving target indices in a stack SmallVec on first pass.
 
-## Target 7: Initial snapshot uses serde_json::json!{} per record and serde_json::to_vec
+## Target 7: Initial snapshot uses per-record msgpack map build + `rmp_serde::to_vec`
 File:line: bridge.rs:189-196
-Current shape: builds a serde_json::Value object per record then serialises.
-What's wasteful: huge alloc churn per row; also payload format here is *JSON*, but live deliveries go through make_event_data which is also JSON over msgpack envelope â€” duplicate code path that bypasses deliver_cache entirely.
+Current shape: builds a `QueryValue` map object per record then serialises.
+What's wasteful: huge alloc churn per row; also payload format here is msgpack, but live deliveries go through make_event_data which uses msgpack envelope â€” duplicate code path that bypasses deliver_cache entirely.
 Ã—N proposal: call make_event_data with a synthesised RecordChange (or share EventData<'_> serializer); also batches: build snapshot output as a single Vec via streaming serializer.
 Estimated win: large (per row in snapshot, often the largest single burst)
 Risk: low
-Attack hint: unify with payload::EventData; use serde_json::Serializer on a reused Vec<u8> buffer.
+Attack hint: unify with payload::EventData; use `rmp_serde` serializer on a reused Vec<u8> buffer.
 
 ## Target 8: bridge.rs targets cloning Strings per source on startup AND filter.clone() every Query rebuild
 File:line: bridge.rs:48-58, 174
@@ -709,12 +709,12 @@ Estimated win: large (bytes on wire + alloc count). For Ping/Pong / TxOpened / e
 Risk: medium (wire compatibility â€” gated on query_version bump)
 Attack hint: positional msgpack + buffer reuse via ConnectionServices
 
-## Target 10: subscribe_handler mutates response JSON via `serde_json::Value::Object` map.insert
+## Target 10: subscribe_handler mutates response via `QueryValue::Map` insert
 File:line: crates/shamir-server/src/db_handler/subscribe_handler.rs:56-60
-Current shape: After spawning the bridge, the handler reaches into the already-built response and mutates a `serde_json::Map` â€” RandomState hasher, dyn-typed Value, per-key heap String.
-What's wasteful: Every subscribe pays a `serde_json::Value` mutation tax. Also keeps `serde_json::Value` on the hot path of the new wire (`QueryResult.value` is JSON Value rather than typed msgpack). Field name "sub" is constant â€” recomputed each call.
-Ã—N proposal: Add a typed `sub_id: Option<u64>` to `QueryResult` and drop the JSON Object mutation step; the bridge writes the typed field directly. Removes serde_json from the subscribe hot path entirely.
-Estimated win: medium per subscription activation; structurally cleans a JSON-Value leak in the response path
+Current shape: After spawning the bridge, the handler reaches into the already-built response and mutates a `QueryValue::Map` â€” RandomState hasher, dyn-typed Value, per-key heap String.
+What's wasteful: Every subscribe pays a `QueryValue::Map` mutation tax. Also keeps the legacy value path on the hot path of the new wire (`QueryResult.value` is a value map rather than typed msgpack). Field name “sub” is constant â€” recomputed each call.
+Ã—N proposal: Add a typed `sub_id: Option<u64>` to `QueryResult` and drop the Value map mutation step; the bridge writes the typed field directly. Removes legacy value from the subscribe hot path entirely.
+Estimated win: medium per subscription activation; structurally cleans a value-map leak in the response path
 Risk: medium (wire field add, but additive)
 Attack hint: typed field on QueryResult, no Value::Object editing
 ```

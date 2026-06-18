@@ -1,6 +1,7 @@
 //! Tests for the `q!` proc-macro.
 
 use shamir_query_types::read::ReadQuery;
+use shamir_types::mpack;
 
 use crate::filter as filter_mod;
 use crate::q;
@@ -11,9 +12,29 @@ use crate::write;
 // ── helpers ────────────────────────────────────────────────────────
 
 fn assert_same_wire(a: &ReadQuery, b: &ReadQuery) {
-    let ja = serde_json::to_value(a).unwrap();
-    let jb = serde_json::to_value(b).unwrap();
-    assert_eq!(ja, jb, "wire JSON mismatch:\n  left:  {ja}\n  right: {jb}");
+    let bytes_a = rmp_serde::to_vec_named(a).expect("serialize a");
+    let bytes_b = rmp_serde::to_vec_named(b).expect("serialize b");
+    let ja: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_a).expect("decode a");
+    let jb: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_b).expect("decode b");
+    assert_eq!(
+        ja, jb,
+        "wire shape mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
+    );
+}
+
+fn assert_same_wire_value<T: serde::Serialize + PartialEq + std::fmt::Debug>(a: &T, b: &T) {
+    let bytes_a = rmp_serde::to_vec_named(a).expect("serialize a");
+    let bytes_b = rmp_serde::to_vec_named(b).expect("serialize b");
+    let ja: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_a).expect("decode a");
+    let jb: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_b).expect("decode b");
+    assert_eq!(
+        ja, jb,
+        "wire shape mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
+    );
 }
 
 // ── from only ──────────────────────────────────────────────────────
@@ -150,13 +171,15 @@ fn q_compound_where() {
     assert_same_wire(&from_macro, &from_builder);
 }
 
-// ── wire JSON snapshot ─────────────────────────────────────────────
+// ── wire shape snapshot ─────────────────────────────────────────────
 
 #[test]
-fn q_wire_json_snapshot() {
+fn q_wire_msgpack_snapshot() {
     let rq = q!(from users where age > 18 limit 10);
-    let got = serde_json::to_value(&rq).unwrap();
-    let expected = serde_json::json!({
+    let bytes = rmp_serde::to_vec_named(&rq).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode");
+    let expected = mpack!({
         "from": "users",
         "select": {
             "items": [{"type": "all"}],
@@ -427,12 +450,7 @@ fn q_insert_single_row() {
     let from_builder = write::insert("users")
         .row(write::doc().set("name", "Alice").set("age", 30))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "insert single row mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 #[test]
@@ -448,12 +466,7 @@ fn q_insert_multiple_rows() {
         .row(write::doc().set("name", "Alice").set("age", 30))
         .row(write::doc().set("name", "Bob").set("age", 25))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "insert multiple rows mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 #[test]
@@ -471,12 +484,7 @@ fn q_insert_with_computed_field() {
                 .set("email_norm", func("strings/lower", [col("email")])),
         )
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "insert computed mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 #[test]
@@ -487,12 +495,7 @@ fn q_insert_repo_qualified() {
     let from_builder = write::Insert::with_repo("main", "users")
         .row(write::doc().set("name", "Alice"))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "insert repo qualified mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 // ── update ────────────────────────────────────────────────────────
@@ -510,12 +513,7 @@ fn q_update_with_complex_where() {
             filter_mod::not(filter_mod::is_null("email")),
         ]))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "update complex where mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 #[test]
@@ -524,12 +522,7 @@ fn q_update_without_where() {
     let from_builder = write::update("users")
         .set(write::doc().set("active", false))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "update without where mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 // ── delete ────────────────────────────────────────────────────────
@@ -552,12 +545,7 @@ fn q_delete_complex_where() {
             filter_mod::lt("age", 18),
         ]))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "delete complex where mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 // ── upsert ────────────────────────────────────────────────────────
@@ -571,9 +559,7 @@ fn q_upsert_key_value() {
         .key(write::doc().set("id", "k1"))
         .value(write::doc().set("v", 42))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(ja, jb, "upsert mismatch:\n  left:  {ja}\n  right: {jb}");
+    assert_same_wire_value(&from_macro, &from_builder);
 }
 
 // ── batch composition ────────────────────────────────────────────
@@ -593,11 +579,15 @@ fn q_write_composes_into_batch() {
             .build(),
     );
 
-    let ja = serde_json::to_value(batch_macro.build()).unwrap();
-    let jb = serde_json::to_value(batch_builder.build()).unwrap();
+    let bytes_macro = rmp_serde::to_vec_named(&batch_macro.build()).expect("serialize macro");
+    let bytes_builder = rmp_serde::to_vec_named(&batch_builder.build()).expect("serialize builder");
+    let ja: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_macro).expect("decode macro");
+    let jb: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_builder).expect("decode builder");
     assert_eq!(
         ja, jb,
-        "batch composition mismatch:\n  left:  {ja}\n  right: {jb}"
+        "batch composition mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
     );
 }
 
@@ -637,17 +627,19 @@ fn q_call_no_args() {
 }
 
 #[test]
-fn q_call_wire_json() {
+fn q_call_wire_msgpack() {
     use shamir_query_types::call::CallOp;
 
     let op: CallOp = q!(call my_fn(42, "hello", true));
-    let json = serde_json::to_value(&op).unwrap();
-    let expected = serde_json::json!({
+    let bytes = rmp_serde::to_vec_named(&op).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode");
+    let expected = mpack!({
         "call": "my_fn",
         "params": [42, "hello", true],
         "repo": "main"
     });
-    assert_eq!(json, expected);
+    assert_eq!(got, expected);
 }
 
 #[test]
@@ -658,10 +650,11 @@ fn q_call_with_query_ref_expr() {
     let op: CallOp = q!(call process(qref("users", "[0].id"), 100));
     assert_eq!(op.call, "process");
     assert_eq!(op.params.len(), 2);
-    // First param is a $query ref
-    let json = serde_json::to_value(&op.params[0]).unwrap();
-    assert_eq!(json["$query"], "@users");
-    assert_eq!(json["path"], "[0].id");
+    // First param is a $query ref — verify via QueryValue.
+    let bytes = rmp_serde::to_vec_named(&op.params[0]).expect("serialize");
+    let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).expect("decode");
+    assert_eq!(qv["$query"], "@users");
+    assert_eq!(qv["path"], "[0].id");
 }
 
 #[test]
@@ -691,10 +684,5 @@ fn q_insert_trailing_comma() {
     let from_builder = write::insert("users")
         .row(write::doc().set("name", "Alice").set("age", 30))
         .build();
-    let ja = serde_json::to_value(&from_macro).unwrap();
-    let jb = serde_json::to_value(&from_builder).unwrap();
-    assert_eq!(
-        ja, jb,
-        "insert trailing comma mismatch:\n  left:  {ja}\n  right: {jb}"
-    );
+    assert_same_wire_value(&from_macro, &from_builder);
 }

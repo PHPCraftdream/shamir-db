@@ -18,7 +18,7 @@ fn default_repo() -> String {
 /// entries whose id is strictly greater than `since` (delta refresh) —
 /// the client caches the full dict locally and only pulls the tail.
 ///
-/// ```json
+/// ```text
 /// { "interner_dump": "main" }
 /// { "interner_dump": "main", "since": 12 }
 /// ```
@@ -40,7 +40,7 @@ pub struct InternerDumpOp {
 /// assigns (almost certainly NOT 42) — the interner is the sole id
 /// authority.
 ///
-/// ```json
+/// ```text
 /// { "interner_touch": "main", "names": ["age", "name", "42"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

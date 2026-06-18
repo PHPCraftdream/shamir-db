@@ -10,7 +10,7 @@ use crate::response::{BatchResponseExt, ResponseError};
 use crate::Query;
 
 // ============================================================================
-// Helpers: build test fixtures without serde_json
+// Helpers: build test fixtures using QueryValue directly
 // ============================================================================
 
 /// Build a `QueryRecord::Direct` from a `QueryValue` map.

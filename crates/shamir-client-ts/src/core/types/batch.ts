@@ -24,7 +24,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { Json } from './write.js';
+import type { WireValue } from './write.js';
 import type { ReadQuery } from './query.js';
 import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
 import type { DdlOp } from './ddl.js';
@@ -101,7 +101,7 @@ export interface BatchLimits {
  * builder.
  */
 export interface BatchRequest {
-  id: Json;
+  id: WireValue;
   name?: string;
   transactional?: true;
   isolation?: IsolationLevel;
@@ -136,14 +136,15 @@ export interface PaginationInfo {
  * Query result — every batch entry (read / write / DDL / admin) comes
  * back as a `QueryResult`.
  *
- * `records` are JSON objects (field → value); each field value is `Json`.
- * A scalar/array answer from a stored function lands in `value`, not here.
+ * `records` are msgpack-decoded objects (field → value); each field value
+ * is a `WireValue`. A scalar/array answer from a stored function lands in
+ * `value`, not here.
  */
 export interface QueryResult {
-  records: Array<Record<string, Json>>;
+  records: Array<Record<string, WireValue>>;
   stats?: QueryStats;
   pagination?: PaginationInfo;
-  value?: Json;
+  value?: WireValue;
 }
 
 /** Transaction metadata (present on transactional batches). */
@@ -158,7 +159,7 @@ export interface TransactionInfo {
 
 /** Batch response envelope. */
 export interface BatchResponse {
-  id: Json;
+  id: WireValue;
   results: Record<string, QueryResult>;
   execution_plan: string[][];
   execution_time_us: number;

@@ -1,4 +1,5 @@
 use shamir_collections::TMap;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::admin::{GroupRef, ResourceRef};
@@ -8,10 +9,18 @@ use crate::batch::{
 };
 use crate::filter::FilterValue;
 
-fn roundtrip(json: &str) -> BatchOp {
-    // Parse from JSON (human-readable test data) then round-trip through
-    // msgpack — the same codec the live wire uses.
-    let op: BatchOp = serde_json::from_str(json).unwrap();
+fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
+    let bytes = rmp_serde::to_vec_named(&qv).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
+    let bytes = rmp_serde::to_vec_named(v).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn roundtrip_op(qv: QueryValue) -> BatchOp {
+    let op: BatchOp = from_qv(qv);
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let op2: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(op, op2);
@@ -20,16 +29,14 @@ fn roundtrip(json: &str) -> BatchOp {
 
 #[test]
 fn start_migration_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "start_migration": "users",
         "repo": "main",
         "dst_repo": "cold",
         "dst_engine": "redb",
         "dst_path": "/data/cold",
         "hmac": "deadbeef"
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::StartMigration(m) => {
             assert_eq!(m.start_migration, "users");
@@ -47,13 +54,11 @@ fn start_migration_serde() {
 
 #[test]
 fn start_migration_defaults() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "start_migration": "logs",
         "dst_repo": "archive",
         "dst_engine": "fjall"
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::StartMigration(m) => {
             assert_eq!(m.repo, "main");
@@ -66,7 +71,7 @@ fn start_migration_defaults() {
 
 #[test]
 fn commit_migration_serde() {
-    let op = roundtrip(r#"{"commit_migration": "mig-001", "hmac": "abcd1234"}"#);
+    let op = roundtrip_op(mpack!({"commit_migration": "mig-001", "hmac": "abcd1234"}));
     match &op {
         BatchOp::CommitMigration(m) => {
             assert_eq!(m.commit_migration, "mig-001");
@@ -79,7 +84,7 @@ fn commit_migration_serde() {
 
 #[test]
 fn rollback_migration_serde() {
-    let op = roundtrip(r#"{"rollback_migration": "mig-001", "hmac": "ff00"}"#);
+    let op = roundtrip_op(mpack!({"rollback_migration": "mig-001", "hmac": "ff00"}));
     match &op {
         BatchOp::RollbackMigration(m) => {
             assert_eq!(m.rollback_migration, "mig-001");
@@ -91,7 +96,7 @@ fn rollback_migration_serde() {
 
 #[test]
 fn migration_status_serde() {
-    let op = roundtrip(r#"{"migration_status": "mig-001"}"#);
+    let op = roundtrip_op(mpack!({"migration_status": "mig-001"}));
     match &op {
         BatchOp::MigrationStatus(m) => assert_eq!(m.migration_status, "mig-001"),
         _ => panic!("expected MigrationStatus"),
@@ -101,57 +106,57 @@ fn migration_status_serde() {
 
 #[test]
 fn batch_request_parses_isolation_field() {
-    let json = serde_json::json!({
-        "id": 1,
+    let qv = mpack!({
+        "id": 1_i64,
         "transactional": true,
         "isolation": "serializable",
         "queries": {}
     });
-    let req: BatchRequest = serde_json::from_value(json).unwrap();
+    let req: BatchRequest = from_qv(qv);
     assert!(req.transactional);
     assert_eq!(req.isolation, Some("serializable".to_string()));
 }
 
 #[test]
 fn batch_request_isolation_defaults_to_none() {
-    let json = serde_json::json!({
-        "id": 2,
+    let qv = mpack!({
+        "id": 2_i64,
         "transactional": true,
         "queries": {}
     });
-    let req: BatchRequest = serde_json::from_value(json).unwrap();
+    let req: BatchRequest = from_qv(qv);
     assert!(req.isolation.is_none());
 }
 
 #[test]
 fn batch_request_parses_durability_field() {
-    let json = serde_json::json!({
-        "id": 3,
+    let qv = mpack!({
+        "id": 3_i64,
         "durability": "synced",
         "queries": {}
     });
-    let req: BatchRequest = serde_json::from_value(json).unwrap();
+    let req: BatchRequest = from_qv(qv);
     assert_eq!(req.durability, Some("synced".to_string()));
 }
 
 #[test]
 fn batch_request_durability_defaults_to_none() {
-    let json = serde_json::json!({
-        "id": 4,
+    let qv = mpack!({
+        "id": 4_i64,
         "queries": {}
     });
-    let req: BatchRequest = serde_json::from_value(json).unwrap();
+    let req: BatchRequest = from_qv(qv);
     assert!(req.durability.is_none());
 }
 
 #[test]
 fn batch_request_durability_not_serialized_when_none() {
-    let json = serde_json::json!({
-        "id": 5,
+    let qv = mpack!({
+        "id": 5_i64,
         "queries": {}
     });
-    let req: BatchRequest = serde_json::from_value(json).unwrap();
-    let back = serde_json::to_value(&req).unwrap();
+    let req: BatchRequest = from_qv(qv);
+    let back = to_qv(&req);
     assert!(back.get("durability").is_none());
 }
 
@@ -164,10 +169,16 @@ fn transaction_info_committed_roundtrip() {
     assert_eq!(info.commit_version, Some(105));
     assert!(info.materialized);
 
-    let json = serde_json::to_value(&info).unwrap();
-    assert_eq!(json["status"], "committed");
-    assert_eq!(json["materialized"], true);
-    assert!(json.get("reason").is_none()); // skip_serializing_if
+    let qv = to_qv(&info);
+    assert_eq!(
+        qv.get("status").and_then(QueryValue::as_str),
+        Some("committed")
+    );
+    assert_eq!(
+        qv.get("materialized").and_then(QueryValue::as_bool),
+        Some(true)
+    );
+    assert!(qv.get("reason").is_none()); // skip_serializing_if
 }
 
 #[test]
@@ -176,9 +187,15 @@ fn transaction_info_aborted_roundtrip() {
     assert!(!info.is_committed());
     assert_eq!(info.reason, Some("tx_conflict".to_string()));
 
-    let json = serde_json::to_value(&info).unwrap();
-    assert_eq!(json["status"], "aborted");
-    assert_eq!(json["reason"], "tx_conflict");
+    let qv = to_qv(&info);
+    assert_eq!(
+        qv.get("status").and_then(QueryValue::as_str),
+        Some("aborted")
+    );
+    assert_eq!(
+        qv.get("reason").and_then(QueryValue::as_str),
+        Some("tx_conflict")
+    );
 }
 
 #[test]
@@ -189,11 +206,17 @@ fn transaction_info_deferred_materialization_roundtrip() {
     assert!(info.is_committed());
     assert!(!info.materialized);
 
-    let json = serde_json::to_value(&info).unwrap();
-    assert_eq!(json["status"], "committed");
-    assert_eq!(json["materialized"], false);
+    let qv = to_qv(&info);
+    assert_eq!(
+        qv.get("status").and_then(QueryValue::as_str),
+        Some("committed")
+    );
+    assert_eq!(
+        qv.get("materialized").and_then(QueryValue::as_bool),
+        Some(false)
+    );
 
-    let back: TransactionInfo = serde_json::from_value(json).unwrap();
+    let back: TransactionInfo = from_qv(qv);
     assert_eq!(back, info);
     assert!(!back.materialized);
 }
@@ -203,13 +226,13 @@ fn transaction_info_missing_materialized_defaults_true() {
     // Backward-compat: a payload serialized before `materialized`
     // existed (field absent) must deserialize to the fully-applied
     // common case (materialized=true), not a deferred commit.
-    let json = serde_json::json!({
-        "tx_id": 5,
+    let qv = mpack!({
+        "tx_id": 5_i64,
         "status": "committed",
-        "snapshot_version": 100,
-        "commit_version": 105
+        "snapshot_version": 100_i64,
+        "commit_version": 105_i64
     });
-    let info: TransactionInfo = serde_json::from_value(json).unwrap();
+    let info: TransactionInfo = from_qv(qv);
     assert!(info.is_committed());
     assert!(
         info.materialized,
@@ -223,14 +246,12 @@ fn transaction_info_missing_materialized_defaults_true() {
 
 #[test]
 fn chmod_table_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chmod": {
             "table": ["mydb", "main", "users"]
         },
-        "mode": 448
-    }"#,
-    );
+        "mode": 448_i64
+    }));
     match &op {
         BatchOp::Chmod(c) => {
             assert_eq!(c.mode, 0o700);
@@ -248,14 +269,12 @@ fn chmod_table_serde() {
 
 #[test]
 fn chown_database_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chown": {
             "database": "testdb"
         },
-        "owner": 7
-    }"#,
-    );
+        "owner": 7_i64
+    }));
     match &op {
         BatchOp::Chown(c) => {
             assert_eq!(c.owner, 7);
@@ -272,14 +291,12 @@ fn chown_database_serde() {
 
 #[test]
 fn chgrp_store_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chgrp": {
             "store": ["testdb", "main"]
         },
-        "group": 3
-    }"#,
-    );
+        "group": 3_i64
+    }));
     match &op {
         BatchOp::Chgrp(c) => {
             assert_eq!(c.group, Some(3));
@@ -290,14 +307,12 @@ fn chgrp_store_serde() {
 
 #[test]
 fn chgrp_null_group_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chgrp": {
             "database": "testdb"
         },
         "group": null
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::Chgrp(c) => {
             assert!(c.group.is_none());
@@ -308,11 +323,9 @@ fn chgrp_null_group_serde() {
 
 #[test]
 fn create_group_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "create_group": "devs"
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::CreateGroup(c) => {
             assert_eq!(c.create_group, "devs");
@@ -323,13 +336,11 @@ fn create_group_serde() {
 
 #[test]
 fn drop_group_by_name_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "drop_group": {
             "name": "devs"
         }
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::DropGroup(d) => match &d.drop_group {
             GroupRef::Name { name } => assert_eq!(name, "devs"),
@@ -341,13 +352,11 @@ fn drop_group_by_name_serde() {
 
 #[test]
 fn drop_group_by_id_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "drop_group": {
-            "id": 3
+            "id": 3_i64
         }
-    }"#,
-    );
+    }));
     match &op {
         BatchOp::DropGroup(d) => match &d.drop_group {
             GroupRef::Id { id } => assert_eq!(*id, 3),
@@ -359,14 +368,12 @@ fn drop_group_by_id_serde() {
 
 #[test]
 fn add_group_member_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "add_group_member": {
             "name": "devs"
         },
-        "user": 42
-    }"#,
-    );
+        "user": 42_i64
+    }));
     match &op {
         BatchOp::AddGroupMember(a) => {
             assert_eq!(a.user, 42);
@@ -377,14 +384,12 @@ fn add_group_member_serde() {
 
 #[test]
 fn remove_group_member_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "remove_group_member": {
-            "id": 1
+            "id": 1_i64
         },
-        "user": 42
-    }"#,
-    );
+        "user": 42_i64
+    }));
     match &op {
         BatchOp::RemoveGroupMember(r) => {
             assert_eq!(r.user, 42);
@@ -399,50 +404,52 @@ fn remove_group_member_serde() {
 
 #[test]
 fn query_entry_after_nonempty_roundtrip() {
-    let json = serde_json::json!({
+    let qv = mpack!({
         "from": "orders",
         "return_result": true,
         "after": ["create_tbl"]
     });
-    let entry: QueryEntry = serde_json::from_value(json).unwrap();
+    let entry: QueryEntry = from_qv(qv);
     assert_eq!(entry.after, vec!["create_tbl".to_string()]);
 
-    let back = serde_json::to_value(&entry).unwrap();
-    assert_eq!(
-        back.get("after").and_then(|v| v.as_array()).unwrap(),
-        &[serde_json::json!("create_tbl")]
-    );
+    let back = to_qv(&entry);
+    let after_list = back.get("after").expect("after key present");
+    if let QueryValue::List(items) = after_list {
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].as_str(), Some("create_tbl"));
+    } else {
+        panic!("expected List for 'after', got {after_list:?}");
+    }
 
-    let entry2: QueryEntry = serde_json::from_value(back).unwrap();
+    let bytes = rmp_serde::to_vec_named(&entry).unwrap();
+    let entry2: QueryEntry = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(entry, entry2);
 }
 
 #[test]
-fn query_entry_empty_after_omitted_from_json() {
-    let json = serde_json::json!({
+fn query_entry_empty_after_omitted_from_wire() {
+    let qv = mpack!({
         "from": "orders",
         "return_result": true
     });
-    let entry: QueryEntry = serde_json::from_value(json).unwrap();
+    let entry: QueryEntry = from_qv(qv);
     assert!(entry.after.is_empty());
 
-    let back = serde_json::to_value(&entry).unwrap();
+    let back = to_qv(&entry);
     assert!(
         back.get("after").is_none(),
-        "empty `after` must NOT appear in serialized JSON"
+        "empty `after` must NOT appear in serialized output"
     );
 }
 
 #[test]
 fn chmod_function_namespace_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chmod": {
             "function_namespace": true
         },
-        "mode": 493
-    }"#,
-    );
+        "mode": 493_i64
+    }));
     match &op {
         BatchOp::Chmod(c) => {
             assert_eq!(c.mode, 0o755);
@@ -457,12 +464,10 @@ fn chmod_function_namespace_serde() {
 
 #[test]
 fn access_tree_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "access_tree": true,
-        "depth": 2
-    }"#,
-    );
+        "depth": 2_i64
+    }));
     match &op {
         BatchOp::AccessTree(a) => {
             assert!(a.access_tree);
@@ -477,7 +482,7 @@ fn access_tree_serde() {
 
 #[test]
 fn access_tree_defaults_serde() {
-    let op = roundtrip(r#"{"access_tree": true}"#);
+    let op = roundtrip_op(mpack!({"access_tree": true}));
     match &op {
         BatchOp::AccessTree(a) => {
             assert!(a.access_tree);
@@ -512,15 +517,15 @@ fn nested_batch_serde_roundtrip() {
     let sub = SubBatchOp { batch: inner, bind };
     let op = BatchOp::Batch(sub);
 
-    // Verify the JSON Serialize output has the expected keys (Serialize impl check).
-    let json = serde_json::to_string(&op).unwrap();
+    // Verify the serialized output has the expected keys.
+    let qv = to_qv(&op);
     assert!(
-        json.contains("\"batch\""),
-        "serialized JSON must have 'batch' key"
+        qv.get("batch").is_some(),
+        "serialized output must have 'batch' key"
     );
     assert!(
-        json.contains("\"bind\""),
-        "serialized JSON must have 'bind' key"
+        qv.get("bind").is_some(),
+        "serialized output must have 'bind' key"
     );
 
     // Round-trip through msgpack — the wire codec.
@@ -549,10 +554,10 @@ fn nested_batch_empty_bind_omitted() {
         bind: TMap::default(),
     });
 
-    let json = serde_json::to_string(&op).unwrap();
+    let qv = to_qv(&op);
     assert!(
-        !json.contains("\"bind\""),
-        "empty bind must NOT appear in serialized JSON"
+        qv.get("bind").is_none(),
+        "empty bind must NOT appear in serialized output"
     );
 
     // Verify msgpack round-trip also works for the empty-bind case.
@@ -563,8 +568,7 @@ fn nested_batch_empty_bind_omitted() {
 
 #[test]
 fn nested_batch_dispatch_by_batch_key() {
-    let json = r#"{"batch": {"id": 1, "queries": {}}}"#;
-    let op: BatchOp = serde_json::from_str(json).unwrap();
+    let op: BatchOp = from_qv(mpack!({"batch": {"id": 1_i64, "queries": {}}}));
     assert!(matches!(op, BatchOp::Batch(_)));
 }
 
@@ -594,10 +598,11 @@ fn nested_batch_is_admin() {
 #[test]
 fn filter_value_param_serde() {
     let v = FilterValue::Param { name: "uid".into() };
-    let json = serde_json::to_string(&v).unwrap();
-    assert_eq!(json, r#"{"$param":"uid"}"#);
+    let bytes = rmp_serde::to_vec_named(&v).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.get("$param").and_then(QueryValue::as_str), Some("uid"));
 
-    let back: FilterValue = serde_json::from_str(&json).unwrap();
+    let back: FilterValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(v, back);
 }
 
@@ -608,14 +613,12 @@ fn batch_limits_default_nesting_depth() {
 
 #[test]
 fn chown_function_serde() {
-    let op = roundtrip(
-        r#"{
+    let op = roundtrip_op(mpack!({
         "chown": {
             "function": "my_fn"
         },
-        "owner": 10
-    }"#,
-    );
+        "owner": 10_i64
+    }));
     match &op {
         BatchOp::Chown(c) => match &c.chown {
             ResourceRef::Function { function } => {
@@ -646,12 +649,12 @@ fn batch_request_interner_epochs_omitted_when_empty() {
         interner_epochs: TMap::default(),
         result_encoding: ResultEncoding::default(),
     };
-    let json = serde_json::to_string(&req).unwrap();
+    let qv = to_qv(&req);
     assert!(
-        !json.contains("interner_epochs"),
-        "empty interner_epochs must be omitted: {json}"
+        qv.get("interner_epochs").is_none(),
+        "empty interner_epochs must be omitted: {qv:?}"
     );
-    let back: BatchRequest = serde_json::from_str(&json).unwrap();
+    let back: BatchRequest = from_qv(qv);
     assert_eq!(req, back);
 }
 
@@ -673,12 +676,12 @@ fn batch_request_interner_epochs_roundtrip() {
         interner_epochs: epochs,
         result_encoding: ResultEncoding::default(),
     };
-    let json = serde_json::to_string(&req).unwrap();
+    let qv = to_qv(&req);
     assert!(
-        json.contains("interner_epochs"),
-        "non-empty interner_epochs must appear: {json}"
+        qv.get("interner_epochs").is_some(),
+        "non-empty interner_epochs must appear: {qv:?}"
     );
-    let back: BatchRequest = serde_json::from_str(&json).unwrap();
+    let back: BatchRequest = from_qv(qv);
     assert_eq!(req, back);
     assert_eq!(back.interner_epochs.get("repo_a"), Some(&5u64));
     assert_eq!(back.interner_epochs.get("repo_b"), Some(&42u64));
@@ -686,9 +689,9 @@ fn batch_request_interner_epochs_roundtrip() {
 
 #[test]
 fn batch_request_backward_compat_old_peer_no_field() {
-    // An old client that doesn't know interner_epochs sends JSON without it.
-    let json = r#"{"id":1,"queries":{}}"#;
-    let req: BatchRequest = serde_json::from_str(json).unwrap();
+    // An old client that doesn't know interner_epochs sends a payload without it.
+    let qv = mpack!({"id": 1_i64, "queries": {}});
+    let req: BatchRequest = from_qv(qv);
     assert!(req.interner_epochs.is_empty());
 }
 
@@ -702,12 +705,12 @@ fn batch_response_interner_delta_omitted_when_empty() {
         transaction: None,
         interner_delta: TMap::default(),
     };
-    let json = serde_json::to_string(&resp).unwrap();
+    let qv = to_qv(&resp);
     assert!(
-        !json.contains("interner_delta"),
-        "empty interner_delta must be omitted: {json}"
+        qv.get("interner_delta").is_none(),
+        "empty interner_delta must be omitted: {qv:?}"
     );
-    let back: BatchResponse = serde_json::from_str(&json).unwrap();
+    let back: BatchResponse = from_qv(qv);
     assert_eq!(resp, back);
 }
 
@@ -729,12 +732,12 @@ fn batch_response_interner_delta_roundtrip() {
         transaction: None,
         interner_delta: delta,
     };
-    let json = serde_json::to_string(&resp).unwrap();
+    let qv = to_qv(&resp);
     assert!(
-        json.contains("interner_delta"),
-        "non-empty interner_delta must appear: {json}"
+        qv.get("interner_delta").is_some(),
+        "non-empty interner_delta must appear: {qv:?}"
     );
-    let back: BatchResponse = serde_json::from_str(&json).unwrap();
+    let back: BatchResponse = from_qv(qv);
     assert_eq!(resp, back);
     let d = back.interner_delta.get("main").expect("main delta");
     assert_eq!(d.epoch, 10);
@@ -744,9 +747,14 @@ fn batch_response_interner_delta_roundtrip() {
 
 #[test]
 fn batch_response_backward_compat_old_peer_no_field() {
-    // An old server that doesn't know interner_delta sends JSON without it.
-    let json = r#"{"id":1,"results":{},"execution_plan":[],"execution_time_us":0}"#;
-    let resp: BatchResponse = serde_json::from_str(json).unwrap();
+    // An old server that doesn't know interner_delta sends a payload without it.
+    let qv = mpack!({
+        "id": 1_i64,
+        "results": {},
+        "execution_plan": [],
+        "execution_time_us": 0_i64
+    });
+    let resp: BatchResponse = from_qv(qv);
     assert!(resp.interner_delta.is_empty());
 }
 
@@ -758,8 +766,8 @@ fn batch_response_backward_compat_old_peer_no_field() {
 /// with `ResultEncoding::Name` as the default — backward-compat preserved.
 #[test]
 fn batch_request_result_encoding_defaults_to_name() {
-    let json = r#"{"id":1,"queries":{}}"#;
-    let req: BatchRequest = serde_json::from_str(json).unwrap();
+    let qv = mpack!({"id": 1_i64, "queries": {}});
+    let req: BatchRequest = from_qv(qv);
     assert_eq!(
         req.result_encoding,
         ResultEncoding::Name,

@@ -1,6 +1,5 @@
 //! End-to-end tests for auth operations via ShamirDb::execute.
 
-use serde_json::json;
 use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
@@ -68,8 +67,7 @@ async fn test_list_users() {
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    let rec =
-        serde_json::to_value(resp.results["list"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
     let users = rec["users"].as_array().unwrap();
     assert_eq!(users.len(), 2);
 
@@ -184,8 +182,7 @@ async fn test_list_roles() {
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    let rec =
-        serde_json::to_value(resp.results["list"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
     let roles = rec["roles"].as_array().unwrap();
     assert_eq!(roles.len(), 1);
     assert_eq!(roles[0]["name"], "analyst");
@@ -259,13 +256,12 @@ async fn test_grant_and_revoke_role() {
     b.list_users("list", ddl::list_users());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let rec =
-        serde_json::to_value(resp.results["list"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
     let users = rec["users"].as_array().unwrap();
     let alice = &users[0];
     let roles = alice["roles"].as_array().unwrap();
-    assert!(roles.contains(&json!("readonly")));
-    assert!(roles.contains(&json!("analyst")));
+    assert!(roles.iter().any(|r| r == "readonly"));
+    assert!(roles.iter().any(|r| r == "analyst"));
 
     // Revoke role
     let mut b = Batch::new();
@@ -284,13 +280,12 @@ async fn test_grant_and_revoke_role() {
     b.list_users("list", ddl::list_users());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let rec =
-        serde_json::to_value(resp.results["list"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
     let users = rec["users"].as_array().unwrap();
     let alice = &users[0];
     let roles = alice["roles"].as_array().unwrap();
-    assert!(roles.contains(&json!("readonly")));
-    assert!(!roles.contains(&json!("analyst")));
+    assert!(roles.iter().any(|r| r == "readonly"));
+    assert!(!roles.iter().any(|r| r == "analyst"));
 }
 
 // ============================================================================
@@ -338,8 +333,7 @@ async fn test_create_role_with_row_filter() {
     b.list_roles("list", ddl::list_roles());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let rec =
-        serde_json::to_value(resp.results["list"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
     let roles = rec["roles"].as_array().unwrap();
     let eu_role = &roles[0];
     assert_eq!(eu_role["name"], "eu_manager");

@@ -27,7 +27,7 @@ import type {
   ReadQuery,
 } from '../types/query.js';
 import type { QueryResult } from '../types/batch.js';
-import type { Json } from '../types/write.js';
+import type { WireValue } from '../types/write.js';
 import type { ExecCtx } from '../exec-ctx.js';
 import { and } from './filter.js';
 import { field as selectField } from './select.js';
@@ -308,7 +308,7 @@ export class Query {
   }
 
   /** Shortcut: `.ex()` then return `.records`. */
-  async rows(): Promise<Array<Record<string, Json>>> {
+  async rows(): Promise<Array<Record<string, WireValue>>> {
     return (await this.ex()).records;
   }
 

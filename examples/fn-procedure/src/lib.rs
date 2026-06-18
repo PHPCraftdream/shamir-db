@@ -13,7 +13,7 @@ use shamir_sdk::prelude::*;
 
 /// Lists all rows from the table whose name is passed as `"table"` param.
 ///
-/// ```json
+/// ```text
 /// { "table": "users" }   →   [ { "id": 1, ... }, ... ]
 /// ```
 #[shamir_sdk::procedure]

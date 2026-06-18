@@ -10,9 +10,9 @@ use super::result_encoding::ResultEncoding;
 
 /// Batch request containing multiple queries.
 ///
-/// # JSON Format
+/// # Wire Format
 ///
-/// ```json
+/// ```text
 /// {
 ///   "name": "my_batch",
 ///   "transactional": false,

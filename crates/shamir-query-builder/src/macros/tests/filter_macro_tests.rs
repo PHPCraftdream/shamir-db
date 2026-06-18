@@ -1,7 +1,7 @@
 //! Tests for the `filter!` proc-macro.
 
-use serde_json::json;
 use shamir_query_types::filter::Filter;
+use shamir_types::mpack;
 
 use crate::filter as filter_mod;
 use crate::val::*;
@@ -14,11 +14,19 @@ use crate::filter;
 
 // ── helpers ────────────────────────────────────────────────────────
 
-/// Compare via wire JSON (order-insensitive for structural equality).
+/// Compare via msgpack-decoded QueryValue (order-insensitive for structural
+/// equality).
 fn assert_same_wire(a: &Filter, b: &Filter) {
-    let ja = serde_json::to_value(a).unwrap();
-    let jb = serde_json::to_value(b).unwrap();
-    assert_eq!(ja, jb, "wire JSON mismatch:\n  left:  {ja}\n  right: {jb}");
+    let bytes_a = rmp_serde::to_vec_named(a).expect("serialize a");
+    let bytes_b = rmp_serde::to_vec_named(b).expect("serialize b");
+    let ja: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_a).expect("decode a");
+    let jb: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes_b).expect("decode b");
+    assert_eq!(
+        ja, jb,
+        "wire shape mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
+    );
 }
 
 // ── basic comparisons ──────────────────────────────────────────────
@@ -154,13 +162,15 @@ fn filter_complex_spec_example() {
     assert_same_wire(&from_macro, &expected);
 }
 
-// ── wire JSON snapshot ─────────────────────────────────────────────
+// ── wire shape snapshot ─────────────────────────────────────────────
 
 #[test]
-fn filter_wire_json_snapshot() {
+fn filter_wire_msgpack_snapshot() {
     let f = filter!(status == "active" && age > 18);
-    let got = serde_json::to_value(&f).unwrap();
-    let expected = json!({
+    let bytes = rmp_serde::to_vec_named(&f).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode");
+    let expected = mpack!({
         "op": "and",
         "filters": [
             {

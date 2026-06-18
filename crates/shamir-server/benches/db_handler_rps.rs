@@ -12,7 +12,6 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use serde_json::json;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -24,8 +23,11 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::upsert;
 use shamir_server::db_handler::{DbRequest, ShamirDbHandler};
 
 fn fixture_session() -> Session {
@@ -65,34 +67,33 @@ fn build_loaded_handler(count: usize) -> (ShamirDbHandler, Session, tokio::runti
         let handler = ShamirDbHandler::new(Arc::new(shamir));
         let session = fixture_session();
 
-        // Seed `count` records via one batch of Set ops. Done through
-        // the handler so we know the table really has the data the
+        // Seed `count` records via one batch of upsert ops built through
+        // the query builder so we know the table really has the data the
         // bench query will read.
         let cities = ["NYC", "LA", "Boston", "Seattle"];
-        let mut queries = serde_json::Map::new();
+        let mut seed_batch = Batch::new();
+        seed_batch.id("seed");
+        seed_batch.return_only(std::iter::empty::<String>());
         for i in 0..count {
             let city = cities[i % 4];
-            queries.insert(
-                format!("s{}", i),
-                json!({
-                    "set": "users",
-                    "key": { "id": format!("user-{}", i) },
-                    "value": {
-                        "id": format!("user-{}", i),
-                        "name": format!("Name {}", i),
-                        "age": (i % 100) as i64,
-                        "city": city,
-                        "active": i % 2 == 0,
-                    }
-                }),
+            let id = format!("user-{i}");
+            seed_batch.upsert(
+                format!("s{i}"),
+                upsert("users")
+                    .key(doc! { "id" => id.clone() })
+                    .value(doc! {
+                        "id"     => id.clone(),
+                        "name"   => format!("Name {i}"),
+                        "age"    => (i % 100) as i64,
+                        "city"   => city.to_string(),
+                        "active" => i % 2 == 0
+                    }),
             );
         }
-        let seed_body = json!({ "id": "seed", "queries": queries, "return_all": false });
-        let batch: BatchRequest = serde_json::from_value(seed_body).unwrap();
         let seed_req = DbRequest::Execute {
             query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
             db: "prod".into(),
-            batch,
+            batch: seed_batch.build(),
         };
         let bytes = rmp_serde::to_vec_named(&seed_req).unwrap();
         handler
@@ -105,15 +106,14 @@ fn build_loaded_handler(count: usize) -> (ShamirDbHandler, Session, tokio::runti
     (handler, session, rt)
 }
 
-/// Encode a `DbRequest::Execute` for `prod` from a JSON batch body. The
+/// Encode a `DbRequest::Execute` for `prod` from a pre-built `Batch`. The
 /// resulting bytes are what the bench `handle()` call decodes on every
 /// iteration — same path as production wire traffic.
-fn encode_execute(body: serde_json::Value) -> Vec<u8> {
-    let batch: BatchRequest = serde_json::from_value(body).unwrap();
+fn encode_execute(batch: Batch) -> Vec<u8> {
     let req = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
-        batch,
+        batch: batch.build(),
     };
     rmp_serde::to_vec_named(&req).unwrap()
 }
@@ -154,24 +154,18 @@ fn bench(c: &mut Criterion) {
     //    order_by + pagination. Same shape as a typical "list page" query.
     {
         let (handler, session, rt) = build_loaded_handler(100);
-        let read_bytes = encode_execute(json!({
-            "id": "rd",
-            "queries": {
-                "page": {
-                    "from": "users",
-                    "where": { "op": "gte", "field": ["age"], "value": 30 },
-                    "select": {
-                        "items": [
-                            { "type": "field", "path": ["name"] },
-                            { "type": "field", "path": ["age"] },
-                            { "type": "field", "path": ["city"] },
-                        ]
-                    },
-                    "order_by": { "items": [{ "field": ["age"], "direction": "desc" }] },
-                    "pagination": { "mode": "LimitOffset", "limit": 20, "offset": 0 }
-                }
-            }
-        }));
+        let mut read_batch = Batch::new();
+        read_batch.id("rd");
+        read_batch.query(
+            "page",
+            Query::from("users")
+                .where_gte("age", 30i64)
+                .select(["name", "age", "city"])
+                .order_by_desc("age")
+                .limit(20)
+                .offset(0),
+        );
+        let read_bytes = encode_execute(read_batch);
         g.bench_function("execute_read_filter_sort_limit_100records", |b| {
             b.iter(|| {
                 rt.block_on(async {
@@ -193,12 +187,10 @@ fn bench(c: &mut Criterion) {
     //    cost of returning the full row set.
     {
         let (handler, session, rt) = build_loaded_handler(100);
-        let read_bytes = encode_execute(json!({
-            "id": "rd2",
-            "queries": {
-                "all": { "from": "users" }
-            }
-        }));
+        let mut read_batch = Batch::new();
+        read_batch.id("rd2");
+        read_batch.query("all", Query::from("users"));
+        let read_bytes = encode_execute(read_batch);
         g.bench_function("execute_full_scan_100records", |b| {
             b.iter(|| {
                 rt.block_on(async {

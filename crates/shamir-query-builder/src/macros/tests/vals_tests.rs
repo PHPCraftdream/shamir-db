@@ -1,6 +1,7 @@
 //! Tests for the `vals!` macro.
 
 use shamir_query_types::filter::FilterValue;
+use shamir_types::mpack;
 
 use crate::val::lit;
 
@@ -33,9 +34,11 @@ fn vals_macro_trailing_comma() {
 }
 
 #[test]
-fn vals_macro_wire_json() {
+fn vals_macro_wire_shape() {
     let v = vals![1, "hello", true];
-    let json = serde_json::to_value(&v).unwrap();
-    let expected = serde_json::json!([1, "hello", true]);
-    assert_eq!(json, expected);
+    let bytes = rmp_serde::to_vec_named(&v).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode");
+    let expected = mpack!([1, "hello", true]);
+    assert_eq!(got, expected);
 }

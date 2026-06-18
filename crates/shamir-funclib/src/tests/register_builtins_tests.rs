@@ -30,7 +30,7 @@ fn register_builtins_contains_a_sample_from_each_category() {
         ("arrays", "arrays/length"),
         ("cast", "cast/to_int"),
         ("datetime", "datetime/now"),
-        ("json", "json/type_of"),
+        ("value_nav", "value_nav/type_of"),
         ("validate", "validate/is_email"),
         ("encode", "encode/base64_enc"),
         ("object", "object/entries"),
@@ -48,10 +48,10 @@ fn register_builtins_contains_a_sample_from_each_category() {
 #[test]
 fn previously_colliding_names_now_coexist() {
     let reg = register_builtins();
-    // json/keys and object/keys both exist (previously last-wins dropped one).
+    // value_nav/keys and object/keys both exist (previously last-wins dropped one).
     assert!(
-        reg.get("json/keys").is_some(),
-        "json/keys missing — collision not resolved"
+        reg.get("value_nav/keys").is_some(),
+        "value_nav/keys missing — collision not resolved"
     );
     assert!(
         reg.get("object/keys").is_some(),

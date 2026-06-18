@@ -1,18 +1,20 @@
 use crate::batch::Batch;
 use crate::ddl;
 use crate::query::Query;
+use crate::wire::ToWire;
 use shamir_query_types::admin::GroupRef;
+use shamir_types::types::value::QueryValue;
 
 /// Helper: build two batches — one using the first-class DDL method, one using
-/// `b.op()` — and assert their serialized JSON is identical.
+/// `b.op()` — and assert their wire shapes are identical via msgpack round-trip.
 fn assert_same_wire(first_class: impl FnOnce(&mut Batch), escape_hatch: impl FnOnce(&mut Batch)) {
     let mut b1 = Batch::new();
     first_class(&mut b1);
-    let j1 = serde_json::to_value(b1.build()).unwrap();
+    let j1 = b1.build().to_query_value().unwrap();
 
     let mut b2 = Batch::new();
     escape_hatch(&mut b2);
-    let j2 = serde_json::to_value(b2.build()).unwrap();
+    let j2 = b2.build().to_query_value().unwrap();
 
     assert_eq!(j1, j2);
 }
@@ -285,12 +287,15 @@ fn mixed_ddl_and_dml_batch() {
     );
     b2.query("q", Query::from("users").select(["id"]));
 
-    let j1 = serde_json::to_value(b1.build()).unwrap();
-    let j2 = serde_json::to_value(b2.build()).unwrap();
+    let j1 = b1.build().to_query_value().unwrap();
+    let j2 = b2.build().to_query_value().unwrap();
     assert_eq!(j1, j2);
 
     // Verify structure: 4 entries, all return_result = true
-    let queries = j1["queries"].as_object().unwrap();
+    let queries = match &j1["queries"] {
+        QueryValue::Map(m) => m,
+        other => panic!("expected Map for queries, got {other:?}"),
+    };
     assert_eq!(queries.len(), 4);
     for (_alias, entry) in queries {
         assert_eq!(entry["return_result"], true);

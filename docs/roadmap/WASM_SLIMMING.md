@@ -100,7 +100,7 @@ knob. Companion: [`SDK_AUTHORING.md`](./SDK_AUTHORING.md),
 > `query-types`' value type lived in the heavy `shamir-types`, so the guest
 > couldn't pull the query DTOs / builder without it. **Investigation of the
 > actual code disproved this:** `query-types` has **no `QueryValue`** — its
-> DTOs carry payloads as `serde_json::Value` and filter literals as a
+DTOs carry payloads as `QueryValue` and filter literals as a
 > self-contained `FilterValue`. Its *only* threads into `shamir-types` were
 > (a) the `TMap`/`TSet` aliases and (b) the host-only `ResourcePath` adapter
 > in one admin method. Both were cut by the **thin-waist** instead:

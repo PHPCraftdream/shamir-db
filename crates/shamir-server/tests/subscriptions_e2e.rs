@@ -612,8 +612,8 @@ async fn unsubscribe_stops_push() {
 // ============================================================================
 //
 // The changefeed ships records as MessagePack with `u64` interned map keys
-// (`InnerValue`). A direct `serde_json::Value` decode of those bytes fails
-// (JSON requires string keys), so the bridge MUST de-intern through the
+// (`InnerValue`). A direct string-keyed decode of those bytes fails because
+// interned keys are numeric, so the bridge MUST de-intern through the
 // table's interner before filter evaluation and before writing the `value`
 // field of the Event payload. This test exercises both ends:
 //
@@ -621,7 +621,7 @@ async fn unsubscribe_stops_push() {
 //   * a matched Put (thread_id=42) MUST push exactly one Event whose
 //     `data.value` round-trips back to a string-keyed object containing
 //     `thread_id: 42`. (Pre-fix this assertion failed: `value` was absent
-//     because the JSON decode of interned-key msgpack returned Err.)
+//     because the msgpack decode of interned-key msgpack returned Err.)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn value_filter_on_put_is_respected() {

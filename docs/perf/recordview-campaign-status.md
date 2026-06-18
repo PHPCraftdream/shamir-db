@@ -3,21 +3,21 @@
 # RecordView / MessagePack-pass-through — текущая картина
 
 Живой обзор кампании. Дополняет: `record-view-migration.md` (исходный спек),
-`endgame-msgpack-passthrough.md` (north-star wire-pass-through + JSON),
+`endgame-msgpack-passthrough.md` (north-star wire-pass-through + legacy text elimination),
 `r5-deintern-plan.md`, `wave2-*-plan.md`, `wave2-autonomy-decisions.md`.
 
 ---
 
 ## 1. Суть (north-star)
 
-**Сервер = линза над id-ключевым MessagePack.** Дерево `InnerValue` и JSON —
+**Сервер = линза над id-ключевым MessagePack.** Дерево `InnerValue` и legacy text encoding —
 прочь с горячих путей; интернинг/де-интернинг на **клиенте**; **storage-байты =
 wire-байты** (как получили → провалидировали линзой → записали verbatim; как
 считали с диска → отдали). API остаётся имя-based; v1-совместимость сохранена.
 
-**Конечная цель (#61):** ноль `InnerValue` + ноль JSON во всём проекте.
+**Конечная цель (#61):** ноль `InnerValue` + ноль legacy text encoding во всём проекте.
 `InnerValue` выживает ТОЛЬКО за оправданными холодными границами (recovery-кодек,
-byte-identity хеш индекса); JSON — ТОЛЬКО как v1-inbound `QueryRecord::Json` +
+byte-identity хеш индекса); legacy text encoding — ТОЛЬКО как v1-inbound `QueryRecord::Legacy` +
 control-plane (admin/system).
 
 ---
@@ -44,18 +44,18 @@ control-plane (admin/system).
 |---|---|---|
 | types-W1 | `fcdca96` | `validate_keys_resolve` (security-спина) + `record_view_to_id_msgpack` |
 | qt-dto | `8bd81f8` | wire-DTO: records_idmsgpack / QueryRecord::IdBytes / result_encoding |
-| S-json | `eaae672` | мёртвый JSON ingest-кодек удалён |
+| S-legacy | `eaae672` | мёртвый legacy text ingest-кодек удалён |
 | S-write | `44f4ddb` | сервер принимает id-keyed запись + validate + verbatim |
 | S-read | `41f7fb5` | сервер отдаёт id-keyed чтение (SELECT* verbatim / проекция; fallback Name) |
 | version-neg | `416a98a` | протокол v2 (сервер анонсирует, клиент пишет) + фикс latent positional-msgpack |
 | S-client | `df285dd` | клиент интернит на send + де-интернит на recv → **pass-through ЖИВОЙ** |
 
-### JSON-elimination read-result (#60, идёт)
+### Legacy-text-elimination read-result (#60, идёт)
 | Шаг | Коммит | Суть |
 |---|---|---|
 | #60 A+B+C | `56ad49b` | paginate/distinct/order_by → QueryValue (canonical-key byte-identity) |
-| #60 D+E | `8958fd9` | Path B scans + aggregate/HAVING → QueryValue (Direct lazy-json cache) |
-| #60 F+G | `09eff50` | MIN/MAX/COUNT shortcut + temporal _version → QueryValue → **read-result production json-free** |
+| #60 D+E | `8958fd9` | Path B scans + aggregate/HAVING → QueryValue (Direct lazy-legacy cache) |
+| #60 F+G | `09eff50` | MIN/MAX/COUNT shortcut + temporal _version → QueryValue → **read-result production legacy-free** |
 | W3d-2 (#62) | `0da6873` | non-tx execute_set reroute → implicit-tx → execute_set_tx (tree-merge + dead non-tx changefeed прочь) |
 
 ### Supply-chain
@@ -84,21 +84,21 @@ engine owned-value §5b-границы. **De-generify отвергнут** (zero
 S9b закрыл V1→V2 разрыв index-hash (rebuild-on-open). Метод закрытия #61 —
 **документация прибытия**, не вынужденный ноль.
 
-**#60 ЗАКРЫТ** (`09eff50`): read-result production-путь json-free. json-twins
-(`hashable_json` бэкит production canonical-key; `apply_select`/`project`-twin —
+**#60 ЗАКРЫТ** (`09eff50`): read-result production-путь legacy-free. legacy-twins
+(`hashable_legacy` бэкит production canonical-key; `apply_select`/`project`-twin —
 bench/example-вызовы) остаются, но НЕ на production-пути. #62 ЗАКРЫТ (`0da6873`).
 
-**Честный предел JSON:** `QueryRecord::Json` variant + `inner_to_json_value`/
-`json_value_to_inner` остаются (v1-inbound + control-plane/computed) — не
+**Честный предел legacy text encoding:** `QueryRecord::Legacy` variant + `inner_to_legacy_value`/
+`legacy_value_to_inner` остаются (v1-inbound + control-plane/computed) — не
 удаляются. Достижимо: read-result *production* эмитит только `Direct(QueryValue)`,
-ноль `json::Value` строится для результатов.
+ноль legacy `Value` строится для результатов.
 
 ---
 
 ## 4. Где на дуге
 
 **Кампания завершена честной формой.** Pass-through полный и живой, запись
-tree-free на всех путях, read-result production json-free, горячие пути
+tree-free на всех путях, read-result production legacy-free, горячие пути
 (read/filter/aggregate/stream/temporal) линз-нативны (RecordView/ScalarRef/
 bytes-проекция), index V1→V2 авто-мигрирует на открытии, а неустранимый
 InnerValue-пол **назван и задокументирован** (`innervalue-floor.md`). Дуга

@@ -20,7 +20,7 @@ pub struct InsertOp {
 }
 ```
 
-```json
+```
 {"insert_into": "users", "values": [{"name": "Alice"}, {"name": "Bob"}]}
 ```
 
@@ -39,7 +39,7 @@ pub struct UpdateOp {
 }
 ```
 
-```json
+```
 {
   "update": "users",
   "where": {"op": "eq", "field": ["status"], "value": "inactive"},
@@ -67,7 +67,7 @@ pub struct DeleteOp {
 }
 ```
 
-```json
+```
 {"delete_from": "users", "where": {"op": "eq", "field": ["status"], "value": "deleted"}}
 ```
 
@@ -83,7 +83,7 @@ pub struct SetOp {
 }
 ```
 
-```json
+```
 {
   "set": "users",
   "key": {"email": "alice@example.com"},
