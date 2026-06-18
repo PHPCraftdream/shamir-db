@@ -43,8 +43,7 @@ impl Doc {
     pub fn set(mut self, key: impl Into<String>, value: impl Into<FilterValue>) -> Self {
         let fv: FilterValue = value.into();
         // FilterValue and QueryValue share the same serde wire encoding.
-        // Round-trip via msgpack to produce a QueryValue without any
-        // serde_json::Value intermediate.
+        // Round-trip via msgpack to produce a QueryValue.
         let bytes =
             rmp_serde::to_vec_named(&fv).expect("FilterValue msgpack serialization is infallible");
         let qv: QueryValue =

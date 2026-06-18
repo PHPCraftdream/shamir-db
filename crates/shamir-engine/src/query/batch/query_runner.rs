@@ -681,9 +681,9 @@ pub(super) async fn execute_single_impl(
 /// Convert WriteResult to QueryResult for BatchResponse compatibility.
 ///
 /// C1: fold each already-built [`InsertedRecord`] straight into a
-/// [`QueryRecord::Inserted`] — NO `serde_json::to_value` re-materialisation.
-/// The old path serialised every row a SECOND time (per-record
-/// `serde_json::Map` allocation) just to wrap it in `QueryRecord::Json`;
+/// [`QueryRecord::Inserted`] — no re-materialisation.
+/// The old path serialised every row a SECOND time (per-record map
+/// allocation) just to wrap it in `QueryRecord::Inserted`;
 /// `QueryRecord::Inserted` serialises via the same `InsertedRecord` impl, so
 /// the wire bytes are byte-identical while the duplicate build is gone.
 pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {

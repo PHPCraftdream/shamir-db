@@ -133,7 +133,7 @@ fn truncation_detected_after_restart() {
     drop(appender);
     drop(chain);
 
-    // Manually truncate last 3 lines from the JSON log.
+    // Manually truncate last 3 lines from the audit log.
     let log_path = dir.path().join("audit.log");
     let contents = std::fs::read_to_string(&log_path).unwrap();
     let mut lines: Vec<&str> = contents.lines().collect();

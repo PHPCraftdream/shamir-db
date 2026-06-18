@@ -67,7 +67,7 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 
 ### Простой запрос
 
-```json
+```
 {
   "from": "users",
   "where": {"op": "eq", "field": ["status"], "value": "active"},
@@ -79,7 +79,7 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 
 ### С агрегациями и GROUP BY
 
-```json
+```
 {
   "from": "orders",
   "select": {
@@ -98,7 +98,7 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 
 ### Page-based пагинация
 
-```json
+```
 {
   "from": "products",
   "pagination": {"mode": "Page", "page": 3, "page_size": 25},

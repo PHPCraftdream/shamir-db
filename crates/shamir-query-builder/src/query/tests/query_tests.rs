@@ -1,8 +1,8 @@
 //! Tests for the `Query` builder — every clause type is verified against
-//! exact wire JSON and round-tripped through serde.
+//! exact wire shape and round-tripped through msgpack.
 
-use serde_json::{json, Value};
 use shamir_query_types::read::{OrderByItem, ReadQuery};
+use shamir_types::mpack;
 
 use crate::filter::{self, FilterExt};
 use crate::query::{Conds, Query};
@@ -11,12 +11,14 @@ use crate::val::*;
 
 // ── helpers ────────────────────────────────────────────────────────
 
-/// Serialize the built `ReadQuery` to JSON, assert equality, then
-/// round-trip back and assert structural equality.
-fn assert_wire(rq: ReadQuery, expected: Value) {
-    let got = serde_json::to_value(&rq).expect("serialize");
-    assert_eq!(got, expected, "wire JSON mismatch");
-    let back: ReadQuery = serde_json::from_value(got).expect("deserialize");
+/// Serialize the built `ReadQuery` to msgpack-decoded QueryValue, assert
+/// equality, then round-trip back and assert structural equality.
+fn assert_wire(rq: ReadQuery, expected: shamir_types::types::value::QueryValue) {
+    let bytes = rmp_serde::to_vec_named(&rq).expect("serialize");
+    let got: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(&bytes).expect("decode QueryValue");
+    assert_eq!(got, expected, "wire shape mismatch");
+    let back: ReadQuery = rmp_serde::from_slice(&bytes).expect("round-trip");
     assert_eq!(back, rq, "round-trip mismatch");
 }
 
@@ -27,7 +29,7 @@ fn test_from_default_repo() {
     let rq = Query::from("users").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {
                 "items": [{"type": "all"}],
@@ -42,7 +44,7 @@ fn test_with_repo() {
     let rq = Query::with_repo("analytics", "events").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": ["analytics", "events"],
             "select": {
                 "items": [{"type": "all"}],
@@ -59,7 +61,7 @@ fn test_select_strings() {
     let rq = Query::from("users").select(["id", "name", "age"]).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {
                 "items": [
@@ -85,7 +87,7 @@ fn test_select_items() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {
                 "items": [
@@ -110,7 +112,7 @@ fn test_distinct() {
     let rq = Query::from("users").select(["email"]).distinct().build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {
                 "items": [{"type": "field", "path": ["email"]}],
@@ -127,7 +129,7 @@ fn test_where_eq() {
     let rq = Query::from("users").where_eq("status", "active").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -146,7 +148,7 @@ fn test_where_ne() {
     let rq = Query::from("users").where_ne("status", "banned").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -165,7 +167,7 @@ fn test_where_gt() {
     let rq = Query::from("users").where_gt("age", 18).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "gt", "field": ["age"], "value": 18}
@@ -178,7 +180,7 @@ fn test_where_gte() {
     let rq = Query::from("users").where_gte("age", 18).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "gte", "field": ["age"], "value": 18}
@@ -191,7 +193,7 @@ fn test_where_lt() {
     let rq = Query::from("users").where_lt("age", 65).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "lt", "field": ["age"], "value": 65}
@@ -204,7 +206,7 @@ fn test_where_lte() {
     let rq = Query::from("users").where_lte("score", 100).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "lte", "field": ["score"], "value": 100}
@@ -222,7 +224,7 @@ fn test_and_chaining() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -245,7 +247,7 @@ fn test_where_in() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -264,7 +266,7 @@ fn test_where_not_in() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -283,7 +285,7 @@ fn test_like() {
     let rq = Query::from("users").like("name", "Al%").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "like", "field": ["name"], "pattern": "Al%"}
@@ -296,7 +298,7 @@ fn test_ilike() {
     let rq = Query::from("users").ilike("email", "%@GMAIL%").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "i_like", "field": ["email"], "pattern": "%@GMAIL%"}
@@ -309,7 +311,7 @@ fn test_regex() {
     let rq = Query::from("users").regex("name", "^A.*z$").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "regex", "field": ["name"], "pattern": "^A.*z$"}
@@ -324,7 +326,7 @@ fn test_where_null() {
     let rq = Query::from("users").where_null("deleted_at").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "is_null", "field": ["deleted_at"]}
@@ -337,7 +339,7 @@ fn test_where_not_null() {
     let rq = Query::from("users").where_not_null("email").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "is_not_null", "field": ["email"]}
@@ -350,7 +352,7 @@ fn test_where_exists() {
     let rq = Query::from("users").where_exists("avatar").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "exists", "field": ["avatar"]}
@@ -363,7 +365,7 @@ fn test_where_not_exists() {
     let rq = Query::from("users").where_not_exists("temp_flag").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "not_exists", "field": ["temp_flag"]}
@@ -378,7 +380,7 @@ fn test_where_contains() {
     let rq = Query::from("posts").where_contains("tags", "rust").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "posts",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {"op": "contains", "field": ["tags"], "value": "rust"}
@@ -393,7 +395,7 @@ fn test_where_contains_any() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "posts",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -412,7 +414,7 @@ fn test_where_contains_all() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "posts",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -431,7 +433,7 @@ fn test_where_between() {
     let rq = Query::from("users").where_between("age", 18, 65).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -453,7 +455,7 @@ fn test_fts() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "articles",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -474,7 +476,7 @@ fn test_where_drop_in() {
     let rq = Query::from("t").where_(f).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "t",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -498,7 +500,7 @@ fn test_or_where_eq() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -522,7 +524,7 @@ fn test_or_where_drop_in() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -547,7 +549,7 @@ fn test_where_group() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -579,7 +581,7 @@ fn test_where_group_or() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -609,7 +611,7 @@ fn test_where_group_or_codeigniter_pattern() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "where": {
@@ -639,7 +641,7 @@ fn test_group_by_single() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "orders",
             "select": {
                 "items": [
@@ -662,7 +664,7 @@ fn test_group_by_many() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "orders",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "group_by": {
@@ -683,7 +685,7 @@ fn test_group_by_having() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "orders",
             "select": {
                 "items": [
@@ -706,7 +708,7 @@ fn test_having_without_group_by() {
     let rq = Query::from("t").having(filter::gt("cnt", 5)).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "t",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "group_by": {
@@ -724,7 +726,7 @@ fn test_order_by_asc() {
     let rq = Query::from("users").order_by_asc("name").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "order_by": {
@@ -739,7 +741,7 @@ fn test_order_by_desc() {
     let rq = Query::from("users").order_by_desc("age").build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "order_by": {
@@ -756,7 +758,7 @@ fn test_order_by_item_with_nulls() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "order_by": {
@@ -778,7 +780,7 @@ fn test_order_by_multiple() {
         .build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "order_by": {
@@ -798,7 +800,7 @@ fn test_limit() {
     let rq = Query::from("users").limit(20).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "pagination": {"mode": "LimitOffset", "limit": 20, "offset": 0}
@@ -811,7 +813,7 @@ fn test_limit_offset() {
     let rq = Query::from("users").limit(20).offset(40).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "pagination": {"mode": "LimitOffset", "limit": 20, "offset": 40}
@@ -825,7 +827,7 @@ fn test_offset_then_limit() {
     let rq = Query::from("users").offset(10).limit(5).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 10}
@@ -840,7 +842,7 @@ fn test_page() {
     let rq = Query::from("users").page(3, 25).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "pagination": {"mode": "Page", "page": 3, "page_size": 25}
@@ -855,7 +857,7 @@ fn test_count_total() {
     let rq = Query::from("users").count_total(true).build();
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {"items": [{"type": "all"}], "distinct": false},
             "count_total": true
@@ -922,7 +924,7 @@ fn test_kitchen_sink() {
 
     assert_wire(
         rq,
-        json!({
+        mpack!({
             "from": "users",
             "select": {
                 "items": [

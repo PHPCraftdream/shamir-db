@@ -10,7 +10,7 @@
 //!
 //! Detailed phase breakdown via `examples/prof_order_by.rs`
 //! (`cargo run --release --example prof_order_by`):
-//!   - Pure `Vec<json::Value>` permutation:        ~1.3 ms
+//!   - Pure `Vec<QueryValue>` permutation:          ~1.3 ms
 //!   - Pre-extracted sort + permute (no lookup):   ~5.3 ms
 //!   - Full apply_order_by (with comparator lookup): ~35 ms
 //!   - Lookup + value-swap overhead:               ~30 ms (= 85% of sort)

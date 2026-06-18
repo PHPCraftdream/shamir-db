@@ -5,12 +5,11 @@
 //! result against explicit expected values, including the Dec/Big/Bin/Set
 //! edge cases where canonical-key mapping is essential for correct dedup.
 //!
-//! The old JSON-twin parity checks (comparing against the now-deleted
-//! apply_distinct / apply_select JSON path) have been replaced with
+//! The old parity checks (comparing against the now-deleted
+//! apply_distinct / apply_select legacy path) have been replaced with
 //! concrete assertions against known-correct QueryValue results.
 
 use bytes::Bytes;
-use serde_json as json;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
@@ -34,11 +33,6 @@ fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
         m.insert((*k).to_string(), v.clone());
     }
     QueryValue::Map(m)
-}
-
-/// Serialise a QueryValue slice to json::Values for comparison.
-fn to_json(qvs: &[QueryValue]) -> Vec<json::Value> {
-    qvs.iter().map(|v| json::to_value(v).unwrap()).collect()
 }
 
 // ============================================================================
@@ -100,10 +94,9 @@ fn distinct_qv_scalar_duplicates() {
 
     // 3 distinct values, insertion-order preserved
     assert_eq!(result.len(), 3);
-    let r = to_json(&result);
-    assert_eq!(r[0]["a"], 1);
-    assert_eq!(r[1]["a"], 2);
-    assert_eq!(r[2]["a"], 3);
+    assert_eq!(result[0]["a"], QueryValue::Int(1));
+    assert_eq!(result[1]["a"], QueryValue::Int(2));
+    assert_eq!(result[2]["a"], QueryValue::Int(3));
 }
 
 #[test]
@@ -121,9 +114,11 @@ fn distinct_qv_dec_vs_str_same_dedup_class() {
     // Dec("1.0") and Str("1.0") share the same canonical key → deduplicate
     assert_eq!(result.len(), 2, "Dec and Str with same string should dedup");
     // First seen (Dec) is kept; Int(2) is distinct
-    let r = to_json(&result);
-    assert_eq!(r[0]["v"], "1.0"); // Dec serialises to String in JSON
-    assert_eq!(r[1]["v"], 2);
+    assert!(
+        matches!(&result[0]["v"], QueryValue::Dec(_)),
+        "first row should have Dec value"
+    );
+    assert_eq!(result[1]["v"], QueryValue::Int(2));
 }
 
 #[test]
@@ -139,9 +134,11 @@ fn distinct_qv_big_vs_str_same_dedup_class() {
 
     // Big(42) and Str("42") share the same canonical key → deduplicate
     assert_eq!(result.len(), 2, "Big and Str with same string should dedup");
-    let r = to_json(&result);
-    assert_eq!(r[0]["v"], "42"); // Big serialises to String in JSON
-    assert_eq!(r[1]["v"], 99);
+    assert!(
+        matches!(&result[0]["v"], QueryValue::Big(_)),
+        "first row should have Big value"
+    );
+    assert_eq!(result[1]["v"], QueryValue::Int(99));
 }
 
 #[test]
@@ -192,10 +189,9 @@ fn order_by_qv_int_asc() {
     let order = OrderBy::asc("age");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["age"], 35);
+    assert_eq!(qvs[0]["age"], QueryValue::Int(25));
+    assert_eq!(qvs[1]["age"], QueryValue::Int(30));
+    assert_eq!(qvs[2]["age"], QueryValue::Int(35));
 }
 
 #[test]
@@ -209,10 +205,9 @@ fn order_by_qv_int_desc() {
     let order = OrderBy::desc("age");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["age"], 35);
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["age"], 25);
+    assert_eq!(qvs[0]["age"], QueryValue::Int(35));
+    assert_eq!(qvs[1]["age"], QueryValue::Int(30));
+    assert_eq!(qvs[2]["age"], QueryValue::Int(25));
 }
 
 #[test]
@@ -226,10 +221,9 @@ fn order_by_qv_f64() {
     let order = OrderBy::asc("v");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["v"], 1.0);
-    assert_eq!(r[1]["v"], 2.25);
-    assert_eq!(r[2]["v"], 3.5);
+    assert_eq!(qvs[0]["v"], QueryValue::F64(1.0));
+    assert_eq!(qvs[1]["v"], QueryValue::F64(2.25));
+    assert_eq!(qvs[2]["v"], QueryValue::F64(3.5));
 }
 
 #[test]
@@ -244,11 +238,10 @@ fn order_by_qv_mixed_int_float() {
     let order = OrderBy::asc("v");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["v"], 0.5);
-    assert_eq!(r[1]["v"], 1);
-    assert_eq!(r[2]["v"], 2.5);
-    assert_eq!(r[3]["v"], 3);
+    assert_eq!(qvs[0]["v"], QueryValue::F64(0.5));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(1));
+    assert_eq!(qvs[2]["v"], QueryValue::F64(2.5));
+    assert_eq!(qvs[3]["v"], QueryValue::Int(3));
 }
 
 #[test]
@@ -262,10 +255,9 @@ fn order_by_qv_string() {
     let order = OrderBy::asc("s");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["s"], "apple");
-    assert_eq!(r[1]["s"], "banana");
-    assert_eq!(r[2]["s"], "cherry");
+    assert_eq!(qvs[0]["s"], QueryValue::Str("apple".into()));
+    assert_eq!(qvs[1]["s"], QueryValue::Str("banana".into()));
+    assert_eq!(qvs[2]["s"], QueryValue::Str("cherry".into()));
 }
 
 #[test]
@@ -284,17 +276,16 @@ fn order_by_qv_null_first_last() {
         }]);
         apply_order_by_qv(&mut qvs, &order);
 
-        let r = to_json(&qvs);
         match nulls {
             NullsOrder::First => {
-                assert!(r[0]["v"].is_null(), "null should be first");
-                assert_eq!(r[1]["v"], 5);
-                assert_eq!(r[2]["v"], 10);
+                assert!(qvs[0]["v"].is_null(), "null should be first");
+                assert_eq!(qvs[1]["v"], QueryValue::Int(5));
+                assert_eq!(qvs[2]["v"], QueryValue::Int(10));
             }
             NullsOrder::Last => {
-                assert_eq!(r[0]["v"], 5);
-                assert_eq!(r[1]["v"], 10);
-                assert!(r[2]["v"].is_null(), "null should be last");
+                assert_eq!(qvs[0]["v"], QueryValue::Int(5));
+                assert_eq!(qvs[1]["v"], QueryValue::Int(10));
+                assert!(qvs[2]["v"].is_null(), "null should be last");
             }
         }
     }
@@ -316,17 +307,16 @@ fn order_by_qv_desc_nulls_first_last() {
         }]);
         apply_order_by_qv(&mut qvs, &order);
 
-        let r = to_json(&qvs);
         match nulls {
             NullsOrder::First => {
-                assert!(r[0]["v"].is_null(), "null should be first");
-                assert_eq!(r[1]["v"], 10);
-                assert_eq!(r[2]["v"], 5);
+                assert!(qvs[0]["v"].is_null(), "null should be first");
+                assert_eq!(qvs[1]["v"], QueryValue::Int(10));
+                assert_eq!(qvs[2]["v"], QueryValue::Int(5));
             }
             NullsOrder::Last => {
-                assert_eq!(r[0]["v"], 10);
-                assert_eq!(r[1]["v"], 5);
-                assert!(r[2]["v"].is_null(), "null should be last");
+                assert_eq!(qvs[0]["v"], QueryValue::Int(10));
+                assert_eq!(qvs[1]["v"], QueryValue::Int(5));
+                assert!(qvs[2]["v"].is_null(), "null should be last");
             }
         }
     }
@@ -345,11 +335,14 @@ fn order_by_qv_dec_lexicographic() {
     let order = OrderBy::asc("d");
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
     // Lexicographic order: "10.0" < "2.0" < "9.0"
-    assert_eq!(r[0]["d"], "10.0");
-    assert_eq!(r[1]["d"], "2.0");
-    assert_eq!(r[2]["d"], "9.0");
+    let extract_dec_str = |qv: &QueryValue| match qv {
+        QueryValue::Dec(d) => d.to_string(),
+        _ => panic!("expected Dec"),
+    };
+    assert_eq!(extract_dec_str(&qvs[0]["d"]), "10.0");
+    assert_eq!(extract_dec_str(&qvs[1]["d"]), "2.0");
+    assert_eq!(extract_dec_str(&qvs[2]["d"]), "9.0");
 }
 
 #[test]
@@ -371,9 +364,8 @@ fn order_by_qv_bin_is_unsortable() {
     apply_order_by_qv(&mut qvs, &order);
 
     // Insertion order preserved (both are "Other")
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["n"], 2);
-    assert_eq!(r[1]["n"], 1);
+    assert_eq!(qvs[0]["n"], QueryValue::Int(2));
+    assert_eq!(qvs[1]["n"], QueryValue::Int(1));
 }
 
 #[test]
@@ -400,15 +392,14 @@ fn order_by_qv_multiple_fields() {
     let order = OrderBy::new([OrderByItem::asc("city"), OrderByItem::asc("age")]);
     apply_order_by_qv(&mut qvs, &order);
 
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["city"], "LA");
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["city"], "LA");
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["city"], "NYC");
-    assert_eq!(r[2]["age"], 30);
-    assert_eq!(r[3]["city"], "NYC");
-    assert_eq!(r[3]["age"], 35);
+    assert_eq!(qvs[0]["city"], QueryValue::Str("LA".into()));
+    assert_eq!(qvs[0]["age"], QueryValue::Int(25));
+    assert_eq!(qvs[1]["city"], QueryValue::Str("LA".into()));
+    assert_eq!(qvs[1]["age"], QueryValue::Int(30));
+    assert_eq!(qvs[2]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(qvs[2]["age"], QueryValue::Int(30));
+    assert_eq!(qvs[3]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(qvs[3]["age"], QueryValue::Int(35));
 }
 
 #[test]
@@ -461,9 +452,8 @@ fn combined_distinct_order_paginate_qv() {
 
     // page = [2, 3]
     assert_eq!(q_paged.len(), 2);
-    let r = to_json(&q_paged);
-    assert_eq!(r[0]["v"], 2);
-    assert_eq!(r[1]["v"], 3);
+    assert_eq!(q_paged[0]["v"], QueryValue::Int(2));
+    assert_eq!(q_paged[1]["v"], QueryValue::Int(3));
     let info = q_info.unwrap();
     assert_eq!(info.total_count, Some(4));
 }
@@ -472,9 +462,6 @@ fn combined_distinct_order_paginate_qv() {
 fn combined_with_dec_divergence_case() {
     // Dec("1.0") and Str("1.0") should dedup to one row (canonical-key),
     // then sort correctly among other values.
-    // Canonical: Dec→String, so Dec("1.0")→"1.0" and Str("1.0")→"1.0" collide.
-    // Dec("2.0")→"2.0", Dec("3.0")→"3.0".
-    // Sorted lexicographically: "1.0" < "2.0" < "3.0".
     let qvs = vec![
         qv_map(&[("v", QueryValue::Dec("3.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Str("1.0".into()))]),
@@ -489,11 +476,15 @@ fn combined_with_dec_divergence_case() {
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("v"));
 
-    let r = to_json(&q_sorted);
     // Lex order of string forms: "1.0" < "2.0" < "3.0"
-    assert_eq!(r[0]["v"], "1.0");
-    assert_eq!(r[1]["v"], "2.0");
-    assert_eq!(r[2]["v"], "3.0");
+    let str_of = |qv: &QueryValue| match qv {
+        QueryValue::Str(s) => s.clone(),
+        QueryValue::Dec(d) => d.to_string(),
+        _ => panic!("expected Str or Dec"),
+    };
+    assert_eq!(str_of(&q_sorted[0]["v"]), "1.0");
+    assert_eq!(str_of(&q_sorted[1]["v"]), "2.0");
+    assert_eq!(str_of(&q_sorted[2]["v"]), "3.0");
 }
 
 #[test]
@@ -508,11 +499,10 @@ fn order_by_qv_bool_asc_desc() {
 
     let order = OrderBy::asc("b");
     apply_order_by_qv(&mut qvs, &order);
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["b"], false);
-    assert_eq!(r[1]["b"], false);
-    assert_eq!(r[2]["b"], true);
-    assert_eq!(r[3]["b"], true);
+    assert_eq!(qvs[0]["b"], QueryValue::Bool(false));
+    assert_eq!(qvs[1]["b"], QueryValue::Bool(false));
+    assert_eq!(qvs[2]["b"], QueryValue::Bool(true));
+    assert_eq!(qvs[3]["b"], QueryValue::Bool(true));
 
     // DESC: true > false
     let mut qvs = vec![
@@ -522,9 +512,8 @@ fn order_by_qv_bool_asc_desc() {
 
     let order = OrderBy::desc("b");
     apply_order_by_qv(&mut qvs, &order);
-    let r = to_json(&qvs);
-    assert_eq!(r[0]["b"], true);
-    assert_eq!(r[1]["b"], false);
+    assert_eq!(qvs[0]["b"], QueryValue::Bool(true));
+    assert_eq!(qvs[1]["b"], QueryValue::Bool(false));
 }
 
 // ============================================================================
@@ -600,14 +589,13 @@ fn select_value_specific_fields() {
     let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
 
-    let r = to_json(&result);
-    assert_eq!(r[0]["name"], "Alice");
-    assert_eq!(r[0]["age"], 30);
-    assert_eq!(r[0]["city"], "NYC");
-    assert_eq!(r[1]["name"], "Bob");
-    assert_eq!(r[1]["age"], 25);
-    assert_eq!(r[2]["name"], "Carol");
-    assert_eq!(r[2]["age"], 35);
+    assert_eq!(result[0]["name"], QueryValue::Str("Alice".into()));
+    assert_eq!(result[0]["age"], QueryValue::Int(30));
+    assert_eq!(result[0]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(result[1]["name"], QueryValue::Str("Bob".into()));
+    assert_eq!(result[1]["age"], QueryValue::Int(25));
+    assert_eq!(result[2]["name"], QueryValue::Str("Carol".into()));
+    assert_eq!(result[2]["age"], QueryValue::Int(35));
 }
 
 #[test]
@@ -619,12 +607,11 @@ fn select_value_all_returns_all_fields() {
     let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
 
-    let r = to_json(&result);
     // All four fields present
-    assert_eq!(r[0]["name"], "Alice");
-    assert_eq!(r[0]["age"], 30);
-    assert_eq!(r[0]["city"], "NYC");
-    assert_eq!(r[0]["score"], 1.5);
+    assert_eq!(result[0]["name"], QueryValue::Str("Alice".into()));
+    assert_eq!(result[0]["age"], QueryValue::Int(30));
+    assert_eq!(result[0]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(result[0]["score"], QueryValue::F64(1.5));
 }
 
 #[test]
@@ -643,11 +630,10 @@ fn path_b_distinct_order_qv() {
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("age"));
 
-    let r = to_json(&q_sorted);
     // sorted by age: 25, 30, 35
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["age"], 35);
+    assert_eq!(q_sorted[0]["age"], QueryValue::Int(25));
+    assert_eq!(q_sorted[1]["age"], QueryValue::Int(30));
+    assert_eq!(q_sorted[2]["age"], QueryValue::Int(35));
 }
 
 // ── Stage E: aggregate pipeline QueryValue assertions ───────────────────────
@@ -683,28 +669,26 @@ fn aggregate_group_by_all_funcs() {
         &ctx,
     );
 
-    let r = to_json(&result);
-
     // Groups sorted alphabetically: LA, NYC.
-    assert_eq!(r.len(), 2);
-    assert_eq!(r[0]["city"], "LA");
-    assert_eq!(r[0]["cnt"], 2);
-    assert_eq!(r[0]["sum_age"], 50);
-    assert_eq!(r[0]["avg_age"], 25.0);
-    assert_eq!(r[0]["min_age"], 25);
-    assert_eq!(r[0]["max_age"], 25);
-    assert_eq!(r[1]["city"], "NYC");
-    assert_eq!(r[1]["cnt"], 2);
-    assert_eq!(r[1]["sum_age"], 65);
-    assert_eq!(r[1]["avg_age"], 32.5);
-    assert_eq!(r[1]["min_age"], 30);
-    assert_eq!(r[1]["max_age"], 35);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["city"], QueryValue::Str("LA".into()));
+    assert_eq!(result[0]["cnt"], QueryValue::Int(2));
+    assert_eq!(result[0]["sum_age"], QueryValue::Int(50));
+    assert_eq!(result[0]["avg_age"], QueryValue::F64(25.0));
+    assert_eq!(result[0]["min_age"], QueryValue::Int(25));
+    assert_eq!(result[0]["max_age"], QueryValue::Int(25));
+    assert_eq!(result[1]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(result[1]["cnt"], QueryValue::Int(2));
+    assert_eq!(result[1]["sum_age"], QueryValue::Int(65));
+    assert_eq!(result[1]["avg_age"], QueryValue::F64(32.5));
+    assert_eq!(result[1]["min_age"], QueryValue::Int(30));
+    assert_eq!(result[1]["max_age"], QueryValue::Int(35));
 }
 
 #[test]
 fn aggregate_sum_float_serialisation() {
-    // Sum of floats: the QV path must produce F64 that serialises identically
-    // to json Number::from_f64. Total score = 1.5+2.5+3.5+0.5 = 8.0.
+    // Sum of floats must produce F64 that serialises identically via msgpack.
+    // Total score = 1.5+2.5+3.5+0.5 = 8.0.
     let interner = Interner::default();
     let records = make_test_records(&interner);
 
@@ -716,16 +700,19 @@ fn aggregate_sum_float_serialisation() {
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
-    let qv_json = json::to_value(&result[0]).unwrap();
-    let qv_bytes = json::to_vec(&qv_json).unwrap();
+    let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
 
     let total = 1.5 + 2.5 + 3.5 + 0.5; // = 8.0
-    let expected_json = json::json!({"total_score": total});
-    let expected_bytes = json::to_vec(&expected_json).unwrap();
+    let expected_map = QueryValue::Map({
+        let mut m = new_map_wc(1);
+        m.insert("total_score".to_string(), QueryValue::F64(total));
+        m
+    });
+    let expected_bytes = rmp_serde::to_vec_named(&expected_map).unwrap();
 
     assert_eq!(
         qv_bytes, expected_bytes,
-        "Sum(float) F64 serialisation must match json Number::from_f64"
+        "Sum(float) F64 msgpack serialisation must match expected"
     );
 }
 
@@ -753,16 +740,15 @@ fn aggregate_having_filters_correctly() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
 
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0]["city"], "NYC");
-    assert_eq!(r[0]["sum_age"], 65);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["city"], QueryValue::Str("NYC".into()));
+    assert_eq!(result[0]["sum_age"], QueryValue::Int(65));
 }
 
 #[test]
 fn aggregate_avg_float_serialisation() {
-    // Avg produces F64 — must serialise identically to json Number::from_f64.
+    // Avg produces F64 — must serialise identically via msgpack.
     // avg(score) = (1.5+2.5+3.5+0.5)/4 = 2.0
     let interner = Interner::default();
     let records = make_test_records(&interner);
@@ -775,22 +761,25 @@ fn aggregate_avg_float_serialisation() {
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
-    let qv_json = json::to_value(&result[0]).unwrap();
-    let qv_bytes = json::to_vec(&qv_json).unwrap();
+    let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
 
     let avg = (1.5 + 2.5 + 3.5 + 0.5) / 4.0; // = 2.0
-    let expected_json = json::json!({"avg_score": avg});
-    let expected_bytes = json::to_vec(&expected_json).unwrap();
+    let expected_map = QueryValue::Map({
+        let mut m = new_map_wc(1);
+        m.insert("avg_score".to_string(), QueryValue::F64(avg));
+        m
+    });
+    let expected_bytes = rmp_serde::to_vec_named(&expected_map).unwrap();
 
     assert_eq!(
         qv_bytes, expected_bytes,
-        "Avg F64 serialisation must match json Number::from_f64"
+        "Avg F64 msgpack serialisation must match expected"
     );
 }
 
 #[test]
 fn aggregate_count_as_int() {
-    // Count produces Int(i64) — must serialise identically to json Number(u64).
+    // Count produces Int(i64) — must serialise identically via msgpack.
     let interner = Interner::default();
     let records = make_test_records(&interner);
 
@@ -800,15 +789,18 @@ fn aggregate_count_as_int() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let qv_json = json::to_value(&result[0]).unwrap();
-    let qv_bytes = json::to_vec(&qv_json).unwrap();
+    let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
 
-    let expected_json = json::json!({"cnt": 4});
-    let expected_bytes = json::to_vec(&expected_json).unwrap();
+    let expected_map = QueryValue::Map({
+        let mut m = new_map_wc(1);
+        m.insert("cnt".to_string(), QueryValue::Int(4));
+        m
+    });
+    let expected_bytes = rmp_serde::to_vec_named(&expected_map).unwrap();
 
     assert_eq!(
         qv_bytes, expected_bytes,
-        "Count serialisation must match json Number"
+        "Count msgpack serialisation must match expected"
     );
 }
 
@@ -830,13 +822,12 @@ fn aggregate_all_no_group() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let r = to_json(&result);
 
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0]["cnt"], 4);
-    assert_eq!(r[0]["sum_age"], 115);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["cnt"], QueryValue::Int(4));
+    assert_eq!(result[0]["sum_age"], QueryValue::Int(115));
     // avg_age = 115/4 = 28.75
-    assert_eq!(r[0]["avg_age"], 28.75);
-    assert_eq!(r[0]["min_age"], 25);
-    assert_eq!(r[0]["max_age"], 35);
+    assert_eq!(result[0]["avg_age"], QueryValue::F64(28.75));
+    assert_eq!(result[0]["min_age"], QueryValue::Int(25));
+    assert_eq!(result[0]["max_age"], QueryValue::Int(35));
 }

@@ -1,5 +1,5 @@
 //! Audit log rotation: when the active file crosses `max_size_bytes`,
-//! it's renamed to `audit_log.jsonl.<unix_nanos>` and a fresh file is
+//! it's renamed to `audit_log.log.<unix_nanos>` and a fresh file is
 //! opened for subsequent writes. The HMAC chain continues unbroken.
 
 use std::time::Duration;
@@ -30,7 +30,7 @@ async fn rotation_kicks_in_after_threshold() {
     // Tiny 1 KB threshold so the test only has to write a handful of entries.
     let appender = RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
 
-    // Write enough entries to comfortably cross 1 KB. Each JSON line is
+    // Write enough entries to comfortably cross 1 KB. Each log line is
     // ~250 bytes, so 10 entries = ~2.5 KB.
     for i in 0..10 {
         appender.append_entry(&make_entry(i));

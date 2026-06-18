@@ -218,16 +218,16 @@ in subscription filters).
 
 **Status**: DEFERRED — измерить hot-path вклад перед implementation.
 
-### 10. shamir-types json_to_inner custom Deserializer (T-types-2)
+### 10. shamir-types legacy_to_inner custom Deserializer (T-types-2)
 
-**Цель**: `json_to_inner` сейчас double-parse через `serde_json::Value`
-intermediate. Custom Deserializer строит InnerValue напрямую.
+**Цель**: `legacy_to_inner` сейчас double-parse через intermediate value.
+Custom Deserializer строит InnerValue напрямую.
 
 **Блок**: не атаковали. Mirror of opt_crush #8 (zero-copy msgpack
-decoder, done), но для JSON path.
+decoder, done), но для legacy text path.
 
-**Status**: DEFERRED — JSON path менее hot чем msgpack (msgpack — wire,
-JSON — REST/legacy). Применить когда станет горячим.
+**Status**: DEFERRED — legacy text path менее hot чем msgpack (msgpack — wire,
+legacy text — REST/admin). Применить когда станет горячим.
 
 ### 11. shamir-types base58 lookup table (T-types-5)
 
@@ -334,7 +334,7 @@ under one guard then drains in batch_size chunks via Vec::drain — это
 | 7 | wire format bump v1 | release-stage |
 | 8 | funclib enum dispatch | medium scope, ripple |
 | 9 | InnerValue Hash cache | measure first |
-| 10 | json_to_inner custom Deserializer | low-priority path |
+| 10 | legacy_to_inner custom Deserializer | low-priority path |
 | 11 | base58 lookup table | very low ROI |
 | 12 | async_trait → GAT | huge, 9 backend ripple |
 | 13 | CachedStore lazy load | measure boot impact |

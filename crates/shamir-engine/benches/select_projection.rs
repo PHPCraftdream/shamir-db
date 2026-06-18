@@ -1,8 +1,8 @@
 //! SELECT projection / `apply_select_value` benchmark.
 //!
 //! Quantifies the cost of building `QueryValue` per record and serialising
-//! to bytes. Replaces the old JSON-based benchmarks (apply_select /
-//! apply_select_to_bytes) which were removed as part of J1 JSON elimination.
+//! to bytes. Replaces the old legacy benchmarks (apply_select /
+//! apply_select_to_bytes) which were removed as part of J1 elimination.
 //!
 //! Scenarios:
 //!   - select_all_100k          — `SELECT *` over 100k records (full Map clone)
@@ -127,7 +127,7 @@ fn bench(c: &mut Criterion) {
             || (),
             |_| {
                 let projected = apply_select_value(&raw_records, &select_all, &interner);
-                let bytes = serde_json::to_vec(&projected).unwrap();
+                let bytes = rmp_serde::to_vec_named(&projected).unwrap();
                 black_box(bytes);
             },
             BatchSize::SmallInput,

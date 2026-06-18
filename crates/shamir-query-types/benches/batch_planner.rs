@@ -6,35 +6,53 @@
 //! topological sort. Pure CPU, no I/O.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use serde_json::json;
+use shamir_collections::TMap;
+use shamir_types::types::value::QueryValue;
 
-use shamir_query_types::batch::{BatchLimits, BatchPlanner, BatchRequest};
+use shamir_query_types::batch::{BatchLimits, BatchOp, BatchPlanner, BatchRequest, QueryEntry};
+use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_query_types::read::ReadQuery;
 
 fn make_batch(n: usize, chain: bool) -> BatchRequest {
-    let mut queries = serde_json::Map::new();
+    let mut queries: TMap<String, QueryEntry> = TMap::default();
     for i in 0..n {
         let alias = format!("q{i}");
-        if chain && i > 0 {
-            queries.insert(
-                alias,
-                json!({
-                    "from": "t",
-                    "where": {
-                        "op": "eq",
-                        "field": ["id"],
-                        "value": {"$query": format!("q{}", i - 1), "path": "[0].id"}
-                    }
-                }),
-            );
+        let op = if chain && i > 0 {
+            let prev = format!("q{}", i - 1);
+            let mut rq = ReadQuery::new("t");
+            rq.r#where = Some(Filter::Eq {
+                field: vec!["id".to_string()],
+                value: FilterValue::QueryRef {
+                    alias: prev,
+                    path: Some("[0].id".to_string()),
+                },
+            });
+            BatchOp::Read(rq)
         } else {
-            queries.insert(alias, json!({"from": "t"}));
-        }
+            BatchOp::Read(ReadQuery::new("t"))
+        };
+        queries.insert(
+            alias,
+            QueryEntry {
+                op,
+                return_result: true,
+                after: Vec::new(),
+            },
+        );
     }
-    serde_json::from_value(json!({
-        "id": 1,
-        "queries": queries,
-    }))
-    .unwrap()
+    BatchRequest {
+        id: QueryValue::Int(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
+        result_encoding: Default::default(),
+    }
 }
 
 fn bench_planner(c: &mut Criterion) {

@@ -5,12 +5,13 @@ Bit-exact reference values for spec compliance. **Release blocker per AUTH §16.
 ## Files
 
 - `auth_message_default.json` — canonical `auth_message` for the inline example in spec §16
+- `auth_message_default.toml` — same vector in TOML format
 
 ## Layout
 
-Each JSON test vector follows this schema:
+Each test vector follows this schema (stored as a plain key-value document):
 
-```json
+```
 {
   "name": "human-readable description",
   "spec_section": "AUTH §...",
@@ -23,7 +24,7 @@ Each JSON test vector follows this schema:
 
 When implementing a new operation, add a vector here BEFORE writing the impl:
 1. Compute the expected output by hand (or with a known-good external tool).
-2. Add to JSON.
+2. Add the vector to the appropriate file.
 3. Reference the vector in a `#[test]` that asserts impl output matches.
 
 This enforces TDD per AGENTS.md and protects cross-language interop with the

@@ -173,25 +173,22 @@ fn assert_parity(label: &str, live: &QueryResult, tree: &QueryResult) {
         tree.records.len()
     );
 
-    let mut live_json: Vec<serde_json::Value> = live
-        .records
-        .iter()
-        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
-        .collect();
-    let mut tree_json: Vec<serde_json::Value> = tree
-        .records
-        .iter()
-        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
-        .collect();
-    live_json.sort_by_key(|a| a.to_string());
-    tree_json.sort_by_key(|a| a.to_string());
+    // Sort records by their msgpack encoding for stable comparison
+    // (scan order may differ between the two paths).
+    let to_sorted_bytes = |records: &[QueryRecord]| -> Vec<Vec<u8>> {
+        let mut v: Vec<Vec<u8>> = records
+            .iter()
+            .map(|r| rmp_serde::to_vec_named(&r.as_value()).expect("msgpack serialization failed"))
+            .collect();
+        v.sort();
+        v
+    };
 
-    for (i, (l, t)) in live_json.iter().zip(tree_json.iter()).enumerate() {
-        assert_eq!(
-            l, t,
-            "{}: record {} mismatch\nlive: {}\ntree: {}",
-            label, i, l, t
-        );
+    let live_sorted = to_sorted_bytes(&live.records);
+    let tree_sorted = to_sorted_bytes(&tree.records);
+
+    for (i, (l, t)) in live_sorted.iter().zip(tree_sorted.iter()).enumerate() {
+        assert_eq!(l, t, "{}: record {} msgpack mismatch", label, i);
     }
 }
 
@@ -261,13 +258,11 @@ async fn s3_parity_distinct() {
         .records
         .iter()
         .filter_map(|r| {
-            serde_json::to_value(r.as_value().into_owned())
-                .ok()
-                .and_then(|jv| {
-                    jv.get("city")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })
+            let qv = r.as_value();
+            match &qv["city"] {
+                shamir_types::types::value::QueryValue::Str(s) => Some(s.clone()),
+                _ => None,
+            }
         })
         .collect();
     cities.sort();
@@ -314,8 +309,11 @@ async fn s3_parity_order_by() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::to_value(r.as_value().into_owned()).unwrap();
-            json.get("age").and_then(|v| v.as_i64())
+            let qv = r.as_value();
+            match &qv["age"] {
+                shamir_types::types::value::QueryValue::Int(n) => Some(*n),
+                _ => None,
+            }
         })
         .collect();
     assert_eq!(ages, vec![Some(25), Some(28), Some(30), Some(35), Some(40)]);
@@ -347,8 +345,11 @@ async fn s3_parity_filter_order_limit() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::to_value(r.as_value().into_owned()).unwrap();
-            json.get("age").and_then(|v| v.as_i64())
+            let qv = r.as_value();
+            match &qv["age"] {
+                shamir_types::types::value::QueryValue::Int(n) => Some(*n),
+                _ => None,
+            }
         })
         .collect();
     assert_eq!(ages, vec![Some(40), Some(35)]);

@@ -925,7 +925,7 @@ async fn param_in_insert_nested() {
     let rows = inserted.as_array().expect("ins.records must be array");
     assert_eq!(rows.len(), 1, "must have inserted 1 row");
     // The stored record is a flat record; nested objects may be serialised as
-    // nested JSON. We verify via a direct read.
+    // nested msgpack maps. We verify via a direct read.
     drop(resp);
 
     let mut read_queries = new_map();

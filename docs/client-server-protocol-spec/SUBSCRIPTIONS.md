@@ -109,7 +109,7 @@ Ordering rules:
 
 Wire discriminator: `"subscribe"` key on the op.
 
-```json
+```msgpack
 {
   "subscribe": [
     { "table": "users", "events": "all" }
@@ -133,7 +133,7 @@ runs first, then the snapshot, then the `ready` frame, then live events.
 
 ## 4. SubscriptionSource
 
-```json
+```msgpack
 { "table": "orders",            "events": "put",    "filter": { "field": "status", "eq": "open" } }
 { "table": ["hot", "sessions"], "events": "delete"                                                  }
 ```
@@ -160,22 +160,22 @@ Externally tagged. Exactly one of:
 
 | Wire form                                | Variant   | Pushed payload (`data` field of PushEnvelope)                                  |
 |------------------------------------------|-----------|--------------------------------------------------------------------------------|
-| `"records"`                              | Records   | UTF-8 JSON `{ table, op, key, commit_version, value? }`. `value` only on Put.  |
-| `"keys"`                                 | Keys      | UTF-8 JSON `{ table, op, key, commit_version }`. No value, both ops.           |
+| `"records"`                              | Records   | MessagePack `{ table, op, key, commit_version, value? }`. `value` only on Put.  |
+| `"keys"`                                 | Keys      | MessagePack `{ table, op, key, commit_version }`. No value, both ops.           |
 | `{ "batch": SubBatchOp }`                | Batch     | MessagePack-encoded `BatchResponse` of the reactive sub-batch.                 |
 | `{ "call": CallOp }`                     | Call      | MessagePack-encoded `BatchResponse` wrapping the call result.                  |
 
 Examples:
 
-```json
+```msgpack
 "deliver": "records"
 ```
 
-```json
+```msgpack
 "deliver": { "batch": { "batch": { /* BatchRequest */ }, "bind": { "$now": 1700000000 } } }
 ```
 
-```json
+```msgpack
 "deliver": { "call": { "fn": "audit.log", "args": { "event": "$event.op" } } }
 ```
 
@@ -201,7 +201,7 @@ collide with `$event.*`; collisions are overwritten by the injected values.
 The server answers a `SubscribeOp` with a normal `BatchResponse`. The query result for
 the subscribe alias has `value` set to a grant object:
 
-```json
+```msgpack
 {
   "rid": 42,
   "results": {
@@ -228,7 +228,7 @@ address push frames; the client's alias is not echoed.
 
 `UnsubscribeOp` returns the same envelope shape with:
 
-```json
+```msgpack
 { "unsubscribe_grant": true, "sub_id": 7 }
 ```
 
@@ -267,12 +267,12 @@ tree produces the rejection with the offending variant name in the error message
 
 Server-initiated frame. Always carries the `"push"` key (no `"rid"`).
 
-```json
+```msgpack
 {
   "push": "event",
   "sub": 7,
   "seq": 12,
-  "data": "<msgpack-or-json-bytes>",
+  "data": "<msgpack-bytes>",
   "gap_at": null
 }
 ```
@@ -320,7 +320,7 @@ subscription as dead after either.
 
 > Internally the changefeed ships record values as MessagePack with `u64` interned map
 > keys. The server resolves these to string keys via the table's interner before
-> running the filter. **Clients always see string-keyed JSON in payloads**; the
+> running the filter. **Clients always see string-keyed MessagePack payloads**; the
 > on-wire representation never leaks interned ids.
 
 Failure modes (all **fail-closed** — the event is dropped, not delivered):
@@ -364,7 +364,7 @@ errored out) the entries SHOULD be evicted on connection close.
 
 Wire discriminator: `"unsubscribe"` key on the op.
 
-```json
+```msgpack
 { "unsubscribe": 7 }
 ```
 

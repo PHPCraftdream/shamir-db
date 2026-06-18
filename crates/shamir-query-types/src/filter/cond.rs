@@ -11,7 +11,7 @@ use super::{Filter, FilterValue};
 ///
 /// # Examples
 ///
-/// ```json
+/// ```text
 /// {
 ///   "$cond": {
 ///     "if": { "op": "eq", "field": "active", "value": true },
@@ -22,7 +22,7 @@ use super::{Filter, FilterValue};
 /// ```
 ///
 /// Nested conditions:
-/// ```json
+/// ```text
 /// {
 ///   "$cond": {
 ///     "if": { "op": "gte", "field": "score", "value": 100 },

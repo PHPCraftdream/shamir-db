@@ -5,11 +5,11 @@
 Из дизайн-пасса @aoh.
 
 ## Решающий факт
-Сервер re-парсит insert через serde_json::Value (batch_op.rs:215), который
+Сервер re-парсит insert через legacy QueryValue (batch_op.rs:215), который
 УНИЧТОЖАЕТ бинарные map-ключи. → id-ключевой insert НЕ может ехать в InsertOp.values;
 нужен отдельный opaque-bytes op. И encode-skip НЕ материален: query_value_to_storage_bytes
 уже single-pass, §9.4 id-валидация (get_str на ключ) съедает экономию. Реальный выигрыш —
-только обход serde_json-double-materialization (спекулятивно). Wave 2 УЖЕ убрал дерево.
+только обход double-materialization (спекулятивно). Wave 2 УЖЕ убрал дерево.
 
 ## ЧАСТЬ A — ambient epoch-delta (GO, делаем)
 «Клиент шлёт максимум — сервер дослыает». Backward-compat, переиспользует entries_after.

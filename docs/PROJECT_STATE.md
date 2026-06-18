@@ -200,7 +200,7 @@ paths.
   import). Example guest 337 KB.
 - **Runtime perf**: InstancePre cache (per-call −40 %); AOT disk cache (~2×
   restart compile); pooling allocator + CoW (+12 % concurrent); M1
-  single-column columnar ORDER BY fast path; M2 streaming JSON projection for
+  single-column columnar ORDER BY fast path; M2 streaming msgpack projection for
   SELECT * (3.4×); H₂ `Persistable` trait + `PersistRegistry`.
 - Quality: **21 crates, ~2912 lib tests** + integration; property tests
   (`proptest`: version codec + SSI read-set validation); **29 benchmarks**

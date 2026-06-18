@@ -5,9 +5,9 @@
 //!
 //! Run: cargo run --release --example prof_order_by
 //!
-//! Note: J1 migration — apply_select (JSON) removed; harness now uses
+//! Note: J1 migration — apply_select (legacy value path) removed; harness now uses
 //! apply_select_value (QueryValue) + apply_order_by_qv. Key-extraction
-//! analysis uses QueryValue::Map field access instead of json::Value::get.
+//! analysis uses QueryValue::Map field access.
 
 use std::time::Instant;
 

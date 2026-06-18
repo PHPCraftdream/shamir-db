@@ -200,21 +200,19 @@ fn test_pagination_is_none() {
 }
 
 // ============================================================================
-// Parser: JSON → Pagination (tested via common_parser_tests)
+// Parser: QueryValue → Pagination
 // ============================================================================
 
 #[test]
 fn test_parse_page_based_query() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "users",
         "limit": { "page": 3, "page_size": 20 },
         "count_total": true
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert_eq!(query.from, crate::query::TableRef::new("users"));
@@ -231,14 +229,12 @@ fn test_parse_page_based_query() {
 #[test]
 fn test_parse_limit_offset_query_backward_compat() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "users",
         "limit": { "limit": 10, "offset": 20 }
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(
@@ -254,11 +250,9 @@ fn test_parse_limit_offset_query_backward_compat() {
 #[test]
 fn test_parse_no_pagination() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{ "from": "users" }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let value = mpack!({ "from": "users" });
     let query = query_from_value(&value).unwrap();
 
     assert!(query.pagination.is_none());
@@ -267,15 +261,13 @@ fn test_parse_no_pagination() {
 #[test]
 fn test_parse_count_total_false_explicit() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "users",
         "limit": { "page": 1, "page_size": 10 },
         "count_total": false
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(
@@ -291,14 +283,12 @@ fn test_parse_count_total_false_explicit() {
 #[test]
 fn test_parse_limit_only_full_query() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "products",
         "limit": { "limit": 50 }
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(
@@ -313,14 +303,12 @@ fn test_parse_limit_only_full_query() {
 #[test]
 fn test_parse_page_based_without_count_total() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "logs",
         "limit": { "page": 5, "page_size": 100 }
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(
@@ -336,16 +324,14 @@ fn test_parse_page_based_without_count_total() {
 #[test]
 fn test_parse_page_1_edge_case() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "users",
         "where": { "op": "eq", "field": "active", "value": true },
         "limit": { "page": 1, "page_size": 25 },
         "count_total": true
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(
@@ -367,14 +353,12 @@ fn test_parse_page_1_edge_case() {
 #[test]
 fn test_parse_offset_only_full_query() {
     use crate::query::read::query_from_value;
-    use shamir_types::types::value::QueryValue;
+    use shamir_types::mpack;
 
-    let json = r#"{
+    let value = mpack!({
         "from": "events",
         "limit": { "offset": 100 }
-    }"#;
-
-    let value: QueryValue = serde_json::from_str(json).unwrap();
+    });
     let query = query_from_value(&value).unwrap();
 
     assert!(matches!(

@@ -580,7 +580,7 @@ impl RedbAuditAppender {
     }
 
     /// Rotate the current log file: fsync close, rename to
-    /// `audit_log.jsonl.<unix_nanos>`, open a fresh file. Caller MUST
+    /// `audit_log.log.<unix_nanos>`, open a fresh file. Caller MUST
     /// hold the `log_file` mutex (the `&mut File` parameter is the lock
     /// guard's deref).
     fn rotate_locked(&self, current: &mut File) -> Result<(), AppenderError> {
@@ -597,7 +597,7 @@ impl RedbAuditAppender {
         let stem = rotated
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "audit_log.jsonl".to_string());
+            .unwrap_or_else(|| "audit_log.log".to_string());
         rotated.set_file_name(format!("{stem}.{ts_ns:020}"));
         std::fs::rename(&self.log_path, &rotated)?;
         // Open a new empty file in place.

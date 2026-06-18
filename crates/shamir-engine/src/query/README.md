@@ -5,7 +5,7 @@
 
 ## BatchRequest
 
-```json
+```
 {
   "id": "req-001",
   "queries": {
@@ -26,7 +26,7 @@
 
 ## BatchResponse
 
-```json
+```
 {
   "id": "req-001",
   "results": {
@@ -68,7 +68,7 @@
 
 ## Read (SELECT)
 
-```json
+```
 {
   "from": "users",
   "select": { ... },
@@ -82,14 +82,14 @@
 
 ### from — таблица
 
-```json
+```
 "from": "users"                    // repo "main" по умолчанию
 "from": ["archive", "logs"]       // явный repo
 ```
 
 ### select
 
-```json
+```
 "select": {
   "items": [
     {"type": "all"},
@@ -109,7 +109,7 @@
 
 #### Сравнение
 
-```json
+```
 {"op": "eq",  "field": ["status"], "value": "active"}
 {"op": "ne",  "field": ["role"],   "value": "guest"}
 {"op": "gt",  "field": ["age"],    "value": 18}
@@ -120,7 +120,7 @@
 
 #### Логические
 
-```json
+```
 {"op": "and", "filters": [ ... ]}
 {"op": "or",  "filters": [ ... ]}
 {"op": "not", "filter": { ... }}
@@ -128,7 +128,7 @@
 
 #### Null / Exists
 
-```json
+```
 {"op": "is_null",     "field": ["email"]}
 {"op": "is_not_null", "field": ["email"]}
 {"op": "exists",      "field": ["metadata"]}
@@ -137,14 +137,14 @@
 
 #### In / Not In
 
-```json
+```
 {"op": "in",     "field": ["status"], "values": ["active", "pending"]}
 {"op": "not_in", "field": ["role"],   "values": ["banned", "suspended"]}
 ```
 
 #### Паттерны
 
-```json
+```
 {"op": "like",  "field": ["name"], "pattern": "%alice%"}
 {"op": "ilike", "field": ["name"], "pattern": "%ALICE%"}
 {"op": "regex", "field": ["email"], "pattern": "^[a-z]+@"}
@@ -152,7 +152,7 @@
 
 #### Содержание (строки, массивы, множества)
 
-```json
+```
 {"op": "contains",     "field": ["tags"], "value": "urgent"}
 {"op": "contains_any", "field": ["tags"], "values": ["urgent", "critical"]}
 {"op": "contains_all", "field": ["tags"], "values": ["reviewed", "approved"]}
@@ -160,19 +160,19 @@
 
 #### Диапазон
 
-```json
+```
 {"op": "between", "field": ["age"], "from": 18, "to": 65}
 ```
 
 #### Ссылка на другое поле
 
-```json
+```
 {"op": "gt", "field": ["salary"], "value": {"$ref": ["min_salary"]}}
 ```
 
 #### Ссылка на результат другого запроса ($query)
 
-```json
+```
 {"op": "eq", "field": ["user_id"], "value": {"$query": "users", "path": "[0].id"}}
 {"op": "in", "field": ["status"],  "values": [{"$query": "allowed_statuses", "path": "[].code"}]}
 ```
@@ -181,14 +181,14 @@
 
 Пути к полям — массивы строк:
 
-```json
+```
 ["name"]                     // простое поле
 ["user", "address", "city"]  // вложенное поле
 ```
 
 ### group_by
 
-```json
+```
 "group_by": {
   "fields": [["city"], ["status"]],
   "having": {"op": "gt", "field": ["count"], "value": 5}
@@ -197,7 +197,7 @@
 
 ### order_by
 
-```json
+```
 "order_by": {
   "items": [
     {"field": ["age"], "direction": "desc"},
@@ -210,7 +210,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ### limit (pagination)
 
-```json
+```
 "limit": {"mode": "LimitOffset", "limit": 10, "offset": 20}
 "limit": {"mode": "Page", "page": 3, "page_size": 25}
 ```
@@ -219,7 +219,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ## Insert
 
-```json
+```
 {
   "insert_into": "users",
   "values": [
@@ -233,7 +233,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ## Update
 
-```json
+```
 {
   "update": "users",
   "where": {"op": "eq", "field": ["status"], "value": "inactive"},
@@ -252,7 +252,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ## Delete
 
-```json
+```
 {
   "delete_from": "users",
   "where": {"op": "eq", "field": ["status"], "value": "deleted"}
@@ -263,7 +263,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ## Set (upsert)
 
-```json
+```
 {
   "set": "users",
   "key": {"email": "alice@example.com"},
@@ -279,7 +279,7 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 Запросы в batch могут ссылаться на результаты друг друга:
 
-```json
+```
 {
   "id": 1,
   "queries": {
@@ -316,14 +316,14 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 
 ### Create/Drop Database
 
-```json
+```
 {"create_db": "mydb"}
 {"drop_db": "mydb"}
 ```
 
 ### Create/Drop Repository
 
-```json
+```
 {"create_repo": "hot_cache", "engine": "in_memory", "tables": ["sessions", "tokens"]}
 {"drop_repo": "hot_cache"}
 ```
@@ -334,7 +334,7 @@ Disk-движкам требуется поле `path`.
 
 ### Create/Drop Table
 
-```json
+```
 {"create_table": "products", "repo": "main"}
 {"drop_table": "products", "repo": "main"}
 ```
@@ -343,7 +343,7 @@ Disk-движкам требуется поле `path`.
 
 ### Create/Drop Index
 
-```json
+```
 {"create_index": "email_idx", "table": "users", "fields": [["email"]], "unique": true}
 {"drop_index": "email_idx", "table": "users"}
 ```
@@ -358,7 +358,7 @@ Disk-движкам требуется поле `path`.
 
 ### List
 
-```json
+```
 {"list": "databases"}
 {"list": "repos"}
 {"list": "tables", "repo": "main"}
@@ -374,7 +374,7 @@ Disk-движкам требуется поле `path`.
 
 ### Users
 
-```json
+```
 {"create_user": "alice", "password": "...", "roles": ["readonly"]}
 {"drop_user": "alice"}
 {"grant_role": "analyst", "user": "alice"}
@@ -384,7 +384,7 @@ Disk-движкам требуется поле `path`.
 
 ### Roles
 
-```json
+```
 {
   "create_role": "analyst",
   "permissions": [
@@ -407,7 +407,7 @@ Disk-движкам требуется поле `path`.
 
 ### Permission structure
 
-```json
+```
 {
   "effect": "allow",
   "actions": ["read", "insert"],
@@ -423,7 +423,7 @@ Disk-движкам требуется поле `path`.
 
 ## Лимиты безопасности
 
-```json
+```
 "limits": {
   "max_queries": 50,
   "max_dependency_depth": 10,

@@ -77,7 +77,7 @@ impl FnEntry {
 
 /// Name → [`FnEntry`] table. When functions are registered via
 /// [`in_folder`](Self::in_folder), names are folder-qualified (`"math/abs"`,
-/// `"json/keys"`); a direct [`register`](Self::register) with no active folder
+/// `"value_nav/keys"`); a direct [`register`](Self::register) with no active folder
 /// inserts the plain name as-is.
 #[derive(Default)]
 pub struct ScalarRegistry {
@@ -107,7 +107,7 @@ impl ScalarRegistry {
     }
 
     /// Register everything `f` registers under a `folder/` prefix, so
-    /// categories that share a plain name (json/keys vs object/keys,
+    /// categories that share a plain name (value_nav/keys vs object/keys,
     /// math/min vs arrays/min) don't collide. Aligns with the
     /// function-folder catalogue (#118).
     pub fn in_folder<F: FnOnce(&mut Self)>(&mut self, folder: &str, f: F) {

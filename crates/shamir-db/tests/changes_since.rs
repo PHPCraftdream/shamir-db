@@ -10,8 +10,6 @@
 
 use std::time::Duration;
 
-use serde_json::json;
-
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -21,6 +19,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_types::types::value::QueryValue;
 
 /// Standard in-memory test fixture: database `testdb`, repo `main`, table
 /// `users`. Mirrors the `purge_history.rs` / `retention_ddl.rs` setup.
@@ -53,8 +52,8 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
 }
 
 /// Run `ChangesSince { changes_since: cursor }` against `(testdb, main)` and
-/// return the parsed result object `{ changes_since, events, gap_at }`.
-async fn run_changes_since(shamir: &ShamirDb, cursor: u64) -> serde_json::Value {
+/// return the parsed result object `{ changes_since, events, gap_at }` as a `QueryValue`.
+async fn run_changes_since(shamir: &ShamirDb, cursor: u64) -> QueryValue {
     let mut b = Batch::new();
     b.id(2);
     b.changes_since("cs", ddl::changes_since(cursor));
@@ -62,7 +61,7 @@ async fn run_changes_since(shamir: &ShamirDb, cursor: u64) -> serde_json::Value 
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .expect("ChangesSince execute");
-    serde_json::to_value(resp.results["cs"].records[0].as_value().into_owned()).unwrap()
+    resp.results["cs"].records[0].as_value().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +83,7 @@ async fn changes_since_zero_returns_committed_events_ascending() {
     insert_user(&shamir, "alice3").await;
 
     // Poll until the journal has caught up.
-    let mut result = serde_json::Value::Null;
+    let mut result = QueryValue::Null;
     for _ in 0..100 {
         result = run_changes_since(&shamir, 0).await;
         if result["events"].as_array().map(|a| a.len()).unwrap_or(0) >= 3 {
@@ -115,21 +114,21 @@ async fn changes_since_zero_returns_committed_events_ascending() {
     }
 
     // The echoed cursor matches the request.
-    assert_eq!(result["changes_since"], json!(0u64));
+    assert_eq!(result["changes_since"].as_u64(), Some(0u64));
     // gap_at is present in the result shape (null when no gap — the normal
     // case for these low-volume writes).
     assert!(
         result.get("gap_at").is_some(),
         "gap_at must be surfaced to the client (null or a version)"
     );
-    assert_eq!(result["gap_at"], json!(null), "no gap expected here");
+    assert!(result["gap_at"].is_null(), "no gap expected here");
 
     // Sanity: each event names the repo and the users table.
     for ev in events {
-        assert_eq!(ev["repo"], json!("main"));
+        assert_eq!(ev["repo"].as_str(), Some("main"));
         let changes = ev["changes"].as_array().expect("changes is an array");
         assert!(!changes.is_empty(), "each event carries >= 1 record change");
-        assert_eq!(changes[0]["table"], json!("users"));
+        assert_eq!(changes[0]["table"].as_str(), Some("users"));
     }
 }
 
@@ -151,7 +150,11 @@ async fn changes_since_high_cursor_returns_fewer_events() {
         let result = run_changes_since(&shamir, 0).await;
         if let Some(arr) = result["events"].as_array() {
             if !arr.is_empty() {
-                if let Some(Some(v)) = arr.iter().map(|e| e["commit_version"].as_u64()).max() {
+                if let Some(v) = arr
+                    .iter()
+                    .filter_map(|e| e["commit_version"].as_u64())
+                    .max()
+                {
                     highest = v;
                     break;
                 }
@@ -169,8 +172,8 @@ async fn changes_since_high_cursor_returns_fewer_events() {
         "cursor at the highest version must return no events, got {}",
         events.len()
     );
-    assert_eq!(result["changes_since"], json!(highest));
-    assert_eq!(result["gap_at"], json!(null));
+    assert_eq!(result["changes_since"].as_u64(), Some(highest));
+    assert!(result["gap_at"].is_null());
 }
 
 // ---------------------------------------------------------------------------

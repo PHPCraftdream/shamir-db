@@ -1,6 +1,5 @@
 //! Function folders and introspection listing tests.
 
-use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::ShamirDb;
@@ -8,6 +7,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::ddl::WriteOp;
 use shamir_types::access::{Actor, ResourcePath};
+use shamir_types::types::value::QueryValue;
 
 use super::helpers::*;
 
@@ -26,21 +26,23 @@ async fn create_function_folder_persists_mkdir_p() {
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    let result =
-        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let result = resp.results["op"].records[0].as_value().into_owned();
     assert_eq!(
-        result["created_function_folder"],
-        json!(["reports", "daily"])
+        result["created_function_folder"].as_array().unwrap(),
+        &[
+            QueryValue::Str("reports".to_string()),
+            QueryValue::Str("daily".to_string()),
+        ]
     );
     // Both intermediate and leaf folders should be created.
     let created = result["created"].as_array().unwrap();
     assert!(
-        created.contains(&json!("reports")),
+        created.iter().any(|v| v == "reports"),
         "should have created 'reports', got: {:?}",
         created
     );
     assert!(
-        created.contains(&json!("reports/daily")),
+        created.iter().any(|v| v == "reports/daily"),
         "should have created 'reports/daily', got: {:?}",
         created
     );
@@ -57,13 +59,13 @@ async fn create_function_folder_idempotent() {
 
     // First create
     let resp = db.execute("testdb", &req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let created = rec["created"].as_array().unwrap();
     assert_eq!(created.len(), 1);
 
     // Second create → no error, but nothing new created.
     let resp = db.execute("testdb", &req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let created = rec["created"].as_array().unwrap();
     assert_eq!(
         created.len(),
@@ -189,8 +191,7 @@ async fn list_functions_over_wire() {
     b.list_functions("op", ddl::list_functions());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let result =
-        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let result = resp.results["op"].records[0].as_value().into_owned();
     let fns = result["functions"].as_array().unwrap();
     assert!(
         fns.iter().any(|f| f == "fn_alpha"),
@@ -217,7 +218,7 @@ async fn list_functions_filtered_by_folder() {
     b.list_functions("op", ddl::list_functions().folder("math"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let fns = rec["functions"].as_array().unwrap();
     assert_eq!(fns.len(), 2, "should have 2 math functions, got: {:?}", fns);
     assert!(fns.iter().any(|f| f == "math/add"));
@@ -256,7 +257,7 @@ async fn list_validators_all_over_wire() {
     b.list_all_validators("op", ddl::list_all_validators());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let items = rec["validators"].as_array().unwrap();
     assert!(!items.is_empty(), "should have at least one validator");
     let v = items
@@ -284,14 +285,14 @@ async fn list_function_folders_over_wire() {
     b.list_function_folders("op", ddl::list_function_folders());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let folders = rec["function_folders"].as_array().unwrap();
     assert!(
-        folders.contains(&json!("reports")),
+        folders.iter().any(|v| v == "reports"),
         "should contain 'reports'"
     );
     assert!(
-        folders.contains(&json!("reports/daily")),
+        folders.iter().any(|v| v == "reports/daily"),
         "should contain 'reports/daily'"
     );
 }
@@ -318,7 +319,7 @@ async fn list_function_folders_filtered_by_parent() {
     b.list_function_folders("op", ddl::list_function_folders().parent("alpha"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let rec = serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
     let folders = rec["function_folders"].as_array().unwrap();
     assert_eq!(
         folders.len(),

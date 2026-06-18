@@ -1,5 +1,5 @@
 //! Read-query DTO module — query shape, ordering, pagination, results.
-//! Execution (`exec`) and JSON parsing (`parser`) live in shamir-engine.
+//! Execution (`exec`) and query parsing (`parser`) live in shamir-engine.
 
 pub mod agg;
 pub mod group_by;

@@ -129,7 +129,7 @@ fn principal_id_is_deterministic_and_distinct() {
 #[test]
 fn principal_id_always_fits_i64() {
     // The catalogue stores ids as i64; every principal id must be
-    // <= i64::MAX so it survives the JSON→InnerValue→msgpack round-trip
+    // <= i64::MAX so it survives the wire encoding→InnerValue→msgpack round-trip
     // (the root cause of the empty group-member bug in HIGH-7).
     for name in [
         "",

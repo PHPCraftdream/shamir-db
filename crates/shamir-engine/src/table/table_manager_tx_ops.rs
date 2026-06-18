@@ -502,7 +502,7 @@ impl TableManager {
     /// INVARIANT (Dec/Big/Set guard): `staged[i]` was produced by
     /// `query_value_to_storage_bytes`, which encodes Dec/Big/Set as
     /// `serialize_str` (msgpack `str`), and the source `QueryValue` from
-    /// JSON / `resolve_computed_record` never yields Dec/Big/Set variants.
+    /// QueryValue / `resolve_computed_record` never yields Dec/Big/Set variants.
     /// Therefore both the tree path (via `InnerValue`) and the lens path
     /// (via `RecordView`) see the SAME `Str` for what used to be Dec/Big,
     /// so index-key extraction agrees byte-for-byte. If a future msgpack-client

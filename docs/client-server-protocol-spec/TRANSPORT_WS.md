@@ -19,7 +19,7 @@ Native клиент пытающийся `/shamir/v1/browser` → допусти
 
 2.2. WS binary frames только. Text frames → close 1003 (`unsupported data`).
 
-2.3. **Только msgpack** wire encoding. JSON canonical удалён в v1.
+2.3. **Только msgpack** wire encoding. Legacy text-encoding canonical удалён в v1.
 
 2.4. **TLS 1.3 0-RTT запрещён** для WSS (сервер не должен принимать early data). Same as TCP+TLS (TRANSPORT_TCP §3.5) — защита от replay 0-RTT данных + forward secrecy.
 

@@ -9,7 +9,7 @@
 //!   identity, ticket key, audit chain key, bootstrap state.
 //! - [`user_directory`] — durable `UserDirectory` impl backed by redb.
 //! - [`audit_appender`] — durable `AuditAppender` impl with HMAC-chained
-//!   JSON-line log + checkpoint.
+//!   tab-separated log + checkpoint.
 //! - [`connection`] — accept loop + per-connection orchestration.
 //! - [`scheduler`] — background tasks (gc, checkpoint, identity finalize).
 //! - [`db_handler`] — `RequestHandler` bridge to `ShamirDb` query layer.

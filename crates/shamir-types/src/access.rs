@@ -24,7 +24,7 @@ pub const OWNER_SYSTEM: u64 = 0;
 ///
 /// Hashes the username with fxhash and masks to 63 bits so the id always
 /// fits an `i64`: the catalogue stores integers as `i64` (owner /
-/// group-member ids round-trip through JSON→InnerValue→msgpack), and a
+/// group-member ids round-trip through the wire encoding→InnerValue→msgpack), and a
 /// `u64` above `i64::MAX` would be lost on read-back. The wire session
 /// layer and the access-tree resolver both call this, so an owner id on a
 /// resource resolves back to the same username everywhere. The reserved

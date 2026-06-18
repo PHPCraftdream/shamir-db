@@ -26,14 +26,14 @@
 
 ### Базы данных
 
-```json
+```
 {"create_db": "mydb"}
 {"drop_db": "mydb"}
 ```
 
 ### Репозитории
 
-```json
+```
 {"create_repo": "hot_cache", "engine": "in_memory", "tables": ["sessions", "tokens"]}
 {"drop_repo": "hot_cache"}
 ```
@@ -42,7 +42,7 @@
 
 ### Таблицы
 
-```json
+```
 {"create_table": "products", "repo": "main"}
 {"drop_table": "products", "repo": "main"}
 ```
@@ -51,14 +51,14 @@
 
 ### Индексы
 
-```json
+```
 {"create_index": "email_idx", "table": "users", "fields": [["email"]], "unique": true}
 {"drop_index": "email_idx", "table": "users"}
 ```
 
 ### Листинг
 
-```json
+```
 {"list": "databases"}
 {"list": "repos"}
 {"list": "tables", "repo": "main"}

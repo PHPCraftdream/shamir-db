@@ -13,7 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { connect } from '../index.js';
-import type { ShamirClient, BatchResponse, Json } from '../index.js';
+import type { ShamirClient, BatchResponse, WireValue } from '../index.js';
 import {
   Query,
   Batch,
@@ -241,12 +241,12 @@ async function seed(
   client: ShamirClient,
   db: string,
   table: string,
-  records: Array<Record<string, Json>>,
+  records: Array<Record<string, WireValue>>,
   keyFields: string[] = ['id'],
 ): Promise<BatchResponse> {
   const queries: Record<string, object> = {};
   records.forEach((r, i) => {
-    const key: Record<string, Json> = {};
+    const key: Record<string, WireValue> = {};
     for (const k of keyFields) key[k] = r[k];
     queries[`s${i}`] = write.upsert(table, key, r);
   });
@@ -384,7 +384,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       await seed(client!, filterDb, 't', filterSeed);
     });
 
-    async function filteredRead(where: ReturnType<typeof filter.eq>): Promise<Array<Record<string, Json>>> {
+    async function filteredRead(where: ReturnType<typeof filter.eq>): Promise<Array<Record<string, WireValue>>> {
       const resp = br(await Batch.create('r')
         .add('r', Query.from('t').where(where))
         .execute(client!, filterDb));
@@ -569,7 +569,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
           bucket: i % 3,
         });
       }
-      await seed(client!, pageDb, 'items', records as Array<Record<string, Json>>);
+      await seed(client!, pageDb, 'items', records as Array<Record<string, WireValue>>);
     });
 
     it('sort/page: order_by score asc', async () => {
@@ -1171,7 +1171,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // Inner batch: INSERT a log entry whose ref_user column comes from $param uid.
       // The row value uses the raw { $param: 'uid' } wire shape — P3b feature.
-      // We cast to unknown→Record to work around the strict Json type (the server
+      // We cast to unknown→Record to work around the strict WireValue type (the server
       // accepts $param objects in insert values starting from this commit).
       const innerInsert = Batch.create('inner-insert').add(
         'ins',

@@ -130,9 +130,9 @@ impl OwnedScalar {
 
 /// Typed hashable key fragment used to bucket records under GROUP BY.
 ///
-/// S4: built directly from the lens leaf (`ScalarRef`) — no `inner_to_json`
+/// S4: built directly from the lens leaf (`ScalarRef`) — no extra
 /// round-trip per record. Composite (Map/List/Set/Dec/Big) group fields stay
-/// rare; they fall back to a `Box<str>` JSON canonical form materialised once
+/// rare; they fall back to a `Box<str>` canonical form materialised once
 /// at the boundary (one `materialize_at` per row for that field only).
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum GroupKeyItem {
@@ -166,19 +166,18 @@ pub(super) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) -> GroupKeyItem {
 ///
 /// Converts `InnerValue` → `QueryValue` via the interner, then serialises to
 /// a canonical string that matches the equivalence classes of the old
-/// `serde_json::Value::to_string()` path — preserving grouping behaviour.
+/// string-keyed path — preserving grouping behaviour.
 #[inline]
 pub(super) fn group_key_item_complex(val: &InnerValue, interner: &Interner) -> GroupKeyItem {
     let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
     GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
 }
 
-/// Produce a canonical JSON-compatible string for a `QueryValue` that matches
-/// the string `serde_json::Value::to_string()` would emit after the old
-/// `From<QueryValue> for serde_json::Value` coercion.
+/// Produce a canonical string for a `QueryValue` that matches the equivalence
+/// classes of the pre-J3 code path.
 ///
 /// This gives the same GROUP BY equivalence classes as the pre-J3 code path,
-/// with no serde_json allocation.
+/// with no external allocations.
 fn query_value_canonical_str(qv: &QueryValue) -> String {
     match qv {
         QueryValue::Null => "null".to_string(),
@@ -192,11 +191,9 @@ fn query_value_canonical_str(qv: &QueryValue) -> String {
         QueryValue::Int(i) => i.to_string(),
         QueryValue::F64(f) => {
             if f.is_finite() {
-                // serde_json serialises finite f64 via ryu; use the same
-                // precision by relying on Rust's default float formatter which
-                // also uses Grisu/Dragon and produces the shortest
-                // round-trip representation — matching serde_json output for
-                // the values we receive.
+                // Finite f64: use Rust's default float formatter which
+                // uses Grisu/Dragon and produces the shortest round-trip
+                // representation.
                 format!("{f}")
             } else {
                 // Non-finite f64 becomes a quoted string in the old path.
@@ -206,12 +203,10 @@ fn query_value_canonical_str(qv: &QueryValue) -> String {
         QueryValue::Dec(d) => format!("\"{}\"", d),
         QueryValue::Big(b) => format!("\"{}\"", b),
         QueryValue::Str(s) => {
-            // Escape the string the same way serde_json does:
-            // backslash and double-quote are the only characters that must be
-            // escaped for the ASCII content that appears in group keys. Full
-            // unicode escaping is not needed because serde_json's compact mode
-            // writes non-ASCII chars as UTF-8 (no \uXXXX), and that is what
-            // we replicate here.
+            // Escape the string: backslash and double-quote are the only
+            // characters that must be escaped for the ASCII content that
+            // appears in group keys. Full unicode escaping is not needed —
+            // non-ASCII chars are written as UTF-8 (no \uXXXX).
             let mut out = String::with_capacity(s.len() + 2);
             out.push('"');
             for c in s.chars() {
@@ -235,7 +230,7 @@ fn query_value_canonical_str(qv: &QueryValue) -> String {
             out
         }
         QueryValue::Bin(bytes) => {
-            // Old path: Bin → serde_json Array([byte as i64, ...]).
+            // Bin → canonical Array([byte as i64, ...]) representation.
             let mut out = String::with_capacity(bytes.len() * 3 + 2);
             out.push('[');
             for (i, &b) in bytes.iter().enumerate() {
@@ -523,7 +518,7 @@ impl AggAccum {
             } => {
                 if has_float {
                     let total = sum_f + sum_i as f64;
-                    // Match json Number::from_f64 semantics: NaN/Inf → Null.
+                    // NaN/Inf → Null (non-finite float result).
                     if total.is_finite() {
                         QueryValue::F64(total)
                     } else {
@@ -580,7 +575,7 @@ fn intern_field_path_keys(field: &[String], interner: &Interner) -> Option<Vec<I
 // build_aggregate_object
 // ============================================================================
 
-/// Build a JSON object from select items for a group of records.
+/// Build a QueryValue map from select items for a group of records.
 ///
 /// S4: the group is walked as `&[(RecordId, Bytes)]`; a per-row `RecordView`
 /// (with a bare-scalar `InnerValue::from_bytes` fallback) supplies every
@@ -958,7 +953,7 @@ pub fn apply_group_by(
 
 /// Resolve a single group-by field to a `GroupKeyItem` from a `RecordRef`
 /// lens. Scalar leaves go through the lens directly; container / Dec / Big
-/// leaves fall back to one `materialize_at` + JSON canonical form (rare).
+/// leaves fall back to one `materialize_at` + canonical string form (rare).
 #[inline]
 fn group_key_from_lens<R: RecordRef + ?Sized>(
     record: &R,

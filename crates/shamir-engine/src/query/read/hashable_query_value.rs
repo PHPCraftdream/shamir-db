@@ -1,30 +1,30 @@
 //! `HashableQueryValue` — `Hash + Eq` wrapper for `QueryValue`.
 //!
 //! Provides deduplication equivalence classes that are **identical** to those
-//! produced by the old `From<QueryValue> for serde_json::Value` coercion path:
+//! produced by the old lossy coercion path:
 //!
 //! | Variant | Canonical form |
 //! |---------|---------------|
-//! | `Null`  | json Null      |
-//! | `Bool`  | json Bool      |
-//! | `Int`   | json Number(i64) |
-//! | `F64(finite)` | json Number(f64 bits) |
-//! | `F64(non-finite)` | json String(f.to_string()) |
-//! | `Dec(d)` | json String(d.to_string()) — **same class as `Str(d.to_string())`** |
-//! | `Big(b)` | json String(b.to_string()) — **same class as `Str(b.to_string())`** |
-//! | `Str(s)` | json String(s) |
-//! | `Bin(b)` | json Array([Number(byte as i64), ...]) |
-//! | `List(l)` | json Array([...]) recursively |
-//! | `Set(s)` | json Array([...]) in iteration order |
-//! | `Map(m)` | json Object({...}) in insertion order |
+//! | `Null`  | Null           |
+//! | `Bool`  | Bool           |
+//! | `Int`   | Number(i64)    |
+//! | `F64(finite)` | Number(f64 bits) |
+//! | `F64(non-finite)` | String(f.to_string()) |
+//! | `Dec(d)` | String(d.to_string()) — **same class as `Str(d.to_string())`** |
+//! | `Big(b)` | String(b.to_string()) — **same class as `Str(b.to_string())`** |
+//! | `Str(s)` | String(s) |
+//! | `Bin(b)` | Array([Number(byte as i64), ...]) |
+//! | `List(l)` | Array([...]) recursively |
+//! | `Set(s)` | Array([...]) in iteration order |
+//! | `Map(m)` | Object({...}) in insertion order |
 //!
-//! No serde_json allocations are performed — everything is a structural walk.
+//! Everything is a structural walk — no external allocations.
 
 use shamir_types::types::value::QueryValue;
 
 /// Wrapper that gives `QueryValue` a `Hash + Eq` implementation whose
-/// equivalence classes exactly match those of
-/// `HashableJson(serde_json::Value::from(qv))`.
+/// equivalence classes exactly match those of the old coercion-based
+/// canonical form.
 pub(super) struct HashableQueryValue<'a>(pub(super) &'a QueryValue);
 
 impl PartialEq for HashableQueryValue<'_> {
@@ -40,7 +40,7 @@ impl std::hash::Hash for HashableQueryValue<'_> {
     }
 }
 
-// ── Tag constants (mirror serde_json Value discriminants used by hash_json) ──
+// ── Tag constants (mirror canonical-form discriminants used by hash_qv) ──
 
 const TAG_NULL: u8 = 0;
 const TAG_BOOL: u8 = 1;
@@ -49,58 +49,55 @@ const TAG_STRING: u8 = 3;
 const TAG_ARRAY: u8 = 4;
 const TAG_OBJECT: u8 = 5;
 
-// Number sub-tags (mirror hash_json's branches)
+// Number sub-tags (mirror hash_qv's branches)
 const NUM_I64: u8 = 0;
 const NUM_F64: u8 = 2;
 
 // ── Hash ─────────────────────────────────────────────────────────────────────
 
-/// Hash `qv` using the same canonical form as `hash_json(Value::from(qv), h)`.
+/// Hash `qv` using the canonical form that preserves equivalence classes.
 pub(super) fn hash_qv<H: std::hash::Hasher>(qv: &QueryValue, h: &mut H) {
     match qv {
-        // Null → json Null
+        // Null → canonical Null
         QueryValue::Null => h.write_u8(TAG_NULL),
 
-        // Bool → json Bool
+        // Bool → canonical Bool
         QueryValue::Bool(b) => {
             h.write_u8(TAG_BOOL);
             h.write_u8(*b as u8);
         }
 
-        // Int(i) → json Number via i64.into() → as_i64() succeeds → sub-tag 0
+        // Int(i) → canonical Number(i64) → sub-tag 0
         QueryValue::Int(i) => {
             h.write_u8(TAG_NUMBER);
             h.write_u8(NUM_I64);
             h.write_i64(*i);
         }
 
-        // F64(f) → json Number via Number::from_f64(f) — returns None for
-        // non-finite → String(f.to_string()) for NaN/±inf, otherwise Number.
-        // In hash_json a finite f64 never satisfies as_i64()/as_u64(), so it
-        // falls to as_f64() → sub-tag 2, bits.
+        // F64(f) → canonical Number (finite) or String (non-finite).
+        // A finite f64 uses sub-tag 2 with raw bits.
         QueryValue::F64(f) => {
             if f.is_finite() {
                 h.write_u8(TAG_NUMBER);
                 h.write_u8(NUM_F64);
                 h.write_u64(f.to_bits());
             } else {
-                // Non-finite: Number::from_f64 returns None → String fallback.
+                // Non-finite: canonical String fallback.
                 hash_str_value(h, &f.to_string());
             }
         }
 
-        // Dec(d) → json String(d.to_string()) — same class as Str(d.to_string())
+        // Dec(d) → canonical String(d.to_string()) — same class as Str(d.to_string())
         QueryValue::Dec(d) => hash_str_value(h, &d.to_string()),
 
-        // Big(b) → json String(b.to_string()) — same class as Str(b.to_string())
+        // Big(b) → canonical String(b.to_string()) — same class as Str(b.to_string())
         QueryValue::Big(b) => hash_str_value(h, &b.to_string()),
 
-        // Str(s) → json String(s)
+        // Str(s) → canonical String(s)
         QueryValue::Str(s) => hash_str_value(h, s),
 
-        // Bin(bytes) → json Array([Number(byte as i64), ...])
-        // Each byte b: byte.into() → serde_json Number from u8, as_i64() succeeds
-        // (fits in i64) → sub-tag 0, value = b as i64.
+        // Bin(bytes) → canonical Array([Number(byte as i64), ...])
+        // Each byte b fits in i64 → sub-tag 0, value = b as i64.
         QueryValue::Bin(bytes) => {
             h.write_u8(TAG_ARRAY);
             h.write_u64(bytes.len() as u64);
@@ -111,7 +108,7 @@ pub(super) fn hash_qv<H: std::hash::Hasher>(qv: &QueryValue, h: &mut H) {
             }
         }
 
-        // List(l) → json Array([...]) recursively
+        // List(l) → canonical Array([...]) recursively
         QueryValue::List(l) => {
             h.write_u8(TAG_ARRAY);
             h.write_u64(l.len() as u64);
@@ -120,7 +117,7 @@ pub(super) fn hash_qv<H: std::hash::Hasher>(qv: &QueryValue, h: &mut H) {
             }
         }
 
-        // Set(s) → json Array([...]) in TSet iteration order
+        // Set(s) → canonical Array([...]) in TSet iteration order
         QueryValue::Set(s) => {
             h.write_u8(TAG_ARRAY);
             h.write_u64(s.len() as u64);
@@ -129,10 +126,8 @@ pub(super) fn hash_qv<H: std::hash::Hasher>(qv: &QueryValue, h: &mut H) {
             }
         }
 
-        // Map(m) → json Object in IndexMap insertion order.
-        // In hash_json Object iteration uses serde_json::Map which preserves
-        // insertion order (also IndexMap-backed). Our TMap<String, _> is also
-        // IndexMap-backed so iteration order matches.
+        // Map(m) → canonical Object in IndexMap insertion order.
+        // Our TMap<String, _> is IndexMap-backed so iteration order is stable.
         QueryValue::Map(m) => {
             h.write_u8(TAG_OBJECT);
             h.write_u64(m.len() as u64);
@@ -145,7 +140,7 @@ pub(super) fn hash_qv<H: std::hash::Hasher>(qv: &QueryValue, h: &mut H) {
     }
 }
 
-/// Emit the bytes for a canonical json String value.
+/// Emit the bytes for a canonical String value.
 #[inline]
 fn hash_str_value<H: std::hash::Hasher>(h: &mut H, s: &str) {
     h.write_u8(TAG_STRING);
@@ -155,8 +150,7 @@ fn hash_str_value<H: std::hash::Hasher>(h: &mut H, s: &str) {
 
 // ── Eq ───────────────────────────────────────────────────────────────────────
 
-/// Structural equality that mirrors `serde_json::Value::eq` after the
-/// `From<QueryValue>` coercion.
+/// Structural equality that mirrors the canonical coercion-based equality.
 ///
 /// Key cross-type equalities:
 /// - `Dec(a) == Str(b)`  iff  `a.to_string() == b`
@@ -214,9 +208,8 @@ fn canonical_eq(a: &QueryValue, b: &QueryValue) -> bool {
         (QueryValue::Bin(x), QueryValue::Bin(y)) => x == y,
         // Bin vs List: a Bin[b0,b1,...] becomes Array of Numbers; a List would need
         // to consist of Int(b) values to be equal. This is technically possible but
-        // extremely unlikely; the old code compared serde_json::Value structurally, so
-        // we must replicate: Bin(bytes) == List(items) iff items are exactly
-        // [Int(bytes[0] as i64), Int(bytes[1] as i64), ...].
+        // extremely unlikely; we must replicate: Bin(bytes) == List(items) iff items
+        // are exactly [Int(bytes[0] as i64), Int(bytes[1] as i64), ...].
         (QueryValue::Bin(bytes), QueryValue::List(items))
         | (QueryValue::List(items), QueryValue::Bin(bytes)) => {
             if bytes.len() != items.len() {
@@ -228,7 +221,7 @@ fn canonical_eq(a: &QueryValue, b: &QueryValue) -> bool {
                 .all(|(&b, item)| matches!(item, QueryValue::Int(i) if *i == b as i64))
         }
 
-        // List vs List, Set vs Set, List vs Set (all become Array in json)
+        // List vs List, Set vs Set, List vs Set (all map to canonical Array)
         (QueryValue::List(x), QueryValue::List(y)) => {
             x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| canonical_eq(a, b))
         }

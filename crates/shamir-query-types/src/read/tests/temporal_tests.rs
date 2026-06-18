@@ -1,18 +1,29 @@
 //! Serde round-trip tests for `Temporal` and `At` — every variant
 //! and the partial-fields case for `History`.
 
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::read::{At, OrderDirection, Temporal};
+
+fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
+    let bytes = rmp_serde::to_vec_named(v).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
+    let bytes = rmp_serde::to_vec_named(&qv).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
 
 /// `At::Version` round-trips with the expected wire shape.
 #[test]
 fn at_version_round_trip() {
     let at = At::Version(42);
-    let json_val = serde_json::to_value(&at).expect("serialize");
-    assert_eq!(json_val, json!({ "version": 42 }));
+    let qv = to_qv(&at);
+    assert_eq!(qv, mpack!({ "version": 42_i64 }));
 
-    let back: At = serde_json::from_value(json_val).expect("deserialize");
+    let back: At = from_qv(qv);
     assert_eq!(back, at);
 }
 
@@ -20,10 +31,13 @@ fn at_version_round_trip() {
 #[test]
 fn at_timestamp_round_trip() {
     let at = At::Timestamp(1_700_000_000_000);
-    let json_val = serde_json::to_value(&at).expect("serialize");
-    assert_eq!(json_val, json!({ "timestamp": 1700000000000u64 }));
+    let qv = to_qv(&at);
+    assert_eq!(
+        qv,
+        mpack!({ "timestamp": @ QueryValue::Int(1_700_000_000_000_i64) })
+    );
 
-    let back: At = serde_json::from_value(json_val).expect("deserialize");
+    let back: At = from_qv(qv);
     assert_eq!(back, at);
 }
 
@@ -41,13 +55,10 @@ fn temporal_as_of_round_trip() {
     let t = Temporal::AsOf {
         at: At::Version(99),
     };
-    let json_val = serde_json::to_value(&t).expect("serialize");
-    assert_eq!(
-        json_val,
-        json!({ "kind": "as_of", "at": { "version": 99 } })
-    );
+    let qv = to_qv(&t);
+    assert_eq!(qv, mpack!({ "kind": "as_of", "at": { "version": 99_i64 } }));
 
-    let back: Temporal = serde_json::from_value(json_val).expect("deserialize");
+    let back: Temporal = from_qv(qv);
     assert_eq!(back, t);
     assert!(!back.is_latest());
 }
@@ -61,19 +72,19 @@ fn temporal_history_full_round_trip() {
         limit: Some(100),
         order: OrderDirection::Desc,
     };
-    let json_val = serde_json::to_value(&t).expect("serialize");
+    let qv = to_qv(&t);
     assert_eq!(
-        json_val,
-        json!({
+        qv,
+        mpack!({
             "kind": "history",
-            "from": { "version": 1 },
-            "to": { "timestamp": 2000 },
-            "limit": 100,
+            "from": { "version": 1_i64 },
+            "to": { "timestamp": 2000_i64 },
+            "limit": 100_i64,
             "order": "desc"
         })
     );
 
-    let back: Temporal = serde_json::from_value(json_val).expect("deserialize");
+    let back: Temporal = from_qv(qv);
     assert_eq!(back, t);
 }
 
@@ -87,18 +98,18 @@ fn temporal_history_partial_from_only() {
         limit: None,
         order: OrderDirection::Asc,
     };
-    let json_val = serde_json::to_value(&t).expect("serialize");
+    let qv = to_qv(&t);
     // `to`, `limit` absent; `order` present because it's not skip-serialized.
     assert_eq!(
-        json_val,
-        json!({
+        qv,
+        mpack!({
             "kind": "history",
-            "from": { "version": 5 },
+            "from": { "version": 5_i64 },
             "order": "asc"
         })
     );
 
-    let back: Temporal = serde_json::from_value(json_val).expect("deserialize");
+    let back: Temporal = from_qv(qv);
     assert_eq!(back, t);
 }
 
@@ -111,29 +122,29 @@ fn temporal_history_partial_limit_only() {
         limit: Some(50),
         order: OrderDirection::Asc,
     };
-    let json_val = serde_json::to_value(&t).expect("serialize");
+    let qv = to_qv(&t);
     assert_eq!(
-        json_val,
-        json!({
+        qv,
+        mpack!({
             "kind": "history",
-            "limit": 50,
+            "limit": 50_i64,
             "order": "asc"
         })
     );
 
-    let back: Temporal = serde_json::from_value(json_val).expect("deserialize");
+    let back: Temporal = from_qv(qv);
     assert_eq!(back, t);
 }
 
-/// `Temporal::History` deserializes from JSON that omits `order` —
+/// `Temporal::History` deserializes from msgpack that omits `order` —
 /// defaults to `Asc`.
 #[test]
 fn temporal_history_order_defaults_to_asc() {
-    let json_val = json!({
+    let qv = mpack!({
         "kind": "history",
-        "from": { "timestamp": 100 }
+        "from": { "timestamp": 100_i64 }
     });
-    let t: Temporal = serde_json::from_value(json_val).expect("deserialize");
+    let t: Temporal = from_qv(qv);
     match t {
         Temporal::History {
             from,

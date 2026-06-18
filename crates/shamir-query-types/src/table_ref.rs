@@ -1,6 +1,6 @@
 //! Table reference with optional repository qualifier.
 //!
-//! Supports two JSON formats:
+//! Supports two wire formats:
 //! - `"users"` → repo="main", table="users"
 //! - `["hot", "sessions"]` → repo="hot", table="sessions"
 

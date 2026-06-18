@@ -5,8 +5,8 @@ use shamir_types::types::value::{InnerValue, QueryValue, Value};
 /// keys) using the given interner. Used by `run_validators` to build the
 /// `record` / `old_record` params that a validator receives.
 ///
-/// This is a lightweight recursive conversion that avoids the JSON
-/// round-trip of `inner_to_json_value` + `json_value_to_inner`.
+/// This is a lightweight recursive conversion that avoids the legacy
+/// round-trip of the old `inner_to_value` + `value_to_inner` pair.
 pub fn inner_to_query_value(value: &InnerValue, interner: &Interner) -> Result<QueryValue, String> {
     inner_to_query_value_with(value, &|key| interner.with_str(key, |s| s.to_string()))
 }

@@ -36,7 +36,7 @@ import type {
 } from '../types/admin.js';
 
 import type { Filter } from '../types/filter.js';
-import type { Json } from '../types/write.js';
+import type { WireValue } from '../types/write.js';
 
 import {
   canonicalDropUser,
@@ -155,7 +155,7 @@ export function permission(
 export function createUser(
   name: string,
   password: string,
-  opts?: { roles?: string[]; profile?: Json; database?: string },
+  opts?: { roles?: string[]; profile?: WireValue; database?: string },
 ): CreateUserOp {
   const op: CreateUserOp = {
     create_user: name,

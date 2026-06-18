@@ -18,7 +18,7 @@ fn default_repo() -> String {
 ///
 /// # Wire format
 ///
-/// ```json
+/// ```text
 /// {
 ///     "call": "my_procedure",
 ///     "params": [1, "hello", true],

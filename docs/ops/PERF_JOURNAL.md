@@ -134,12 +134,12 @@ intermediate'ов на per-record hot path.
 | Commit | Сделано | Δ |
 |--------|---------|----|
 | `8164582` | **msgpack encode** — `InternedRef<'a>` direct serde stream (no rmpv::Value tree) | **2.99×** (13.09 → 4.38 ms) |
-| `d1e49ca` | **HAVING** — `json_value_to_inner` direct walk вместо `to_vec`+parse | **1.66×** (13.57 → 8.18 ms) |
+| `d1e49ca` | **HAVING** — `legacy_value_to_inner` direct walk вместо `to_vec`+parse | **1.66×** (13.57 → 8.18 ms) |
 | `655ba4c` | **Filter `resolve_field`** — borrow leaf вместо `Option<InnerValue>` clone | **1.22–1.25×** (243→195 µs, 698→573 µs) |
-| `5f1e793` | **GROUP BY** — typed `GroupKeyItem` enum + lazy `inner_to_json_value` через Entry::Vacant + `IndexMap::sort_keys()` | **2.48–4.70×** (1.37–6.07 → 0.55–1.29 ms) |
+| `5f1e793` | **GROUP BY** — typed `GroupKeyItem` enum + lazy `inner_to_query_value` через Entry::Vacant + `IndexMap::sort_keys()` | **2.48–4.70×** (1.37–6.07 → 0.55–1.29 ms) |
 | `4448909` | **Filter pre-resolve literals** — `Option<InnerValue>` cached на compile (Compare/Contains/Between) | **~1.2×** (160→137 µs, 404→330 µs) |
-| `49b41c1` | **DISTINCT** — `HashableJson` structural walk + FxHash вместо `record.to_string()` | **1.5–1.66×** (6.69→4.04 ms, 7.41→4.94 ms) |
-| `30b7947` | **json encode** — `InternedRef<'a>` direct serde stream (no `json::Value` tree) | **3.27×** (11.65 → 3.57 ms) |
+| `49b41c1` | **DISTINCT** — `HashableQueryValue` structural walk + FxHash вместо `record.to_string()` | **1.5–1.66×** (6.69→4.04 ms, 7.41→4.94 ms) |
+| `30b7947` | **legacy text encode** — `InternedRef<'a>` direct serde stream (no intermediate value tree) | **3.27×** (11.65 → 3.57 ms) |
 
 Главный приём: replaced **intermediate value tree** на **direct
 serde stream**. Это убирает один pass (build tree) + per-node alloc.
@@ -241,9 +241,9 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | count(*) via RecordCounter | **3383×** at N=10K | `f8552a0` |
 | count(*) WHERE indexed_eq via BTreeSet::len | **22×** at N=10K | `66d7b5d` |
 | Counter cache | bulk_insert −29% | `a3013c7` |
-| HAVING json::Value direct walk | **1.66×** | `d1e49ca` |
+| HAVING legacy-value direct walk | **1.66×** | `d1e49ca` |
 | Filter resolve_field borrow | **1.22–1.25×** | `655ba4c` |
-| GROUP BY typed key + lazy json | **2.5–4.7×** | `5f1e793` |
+| GROUP BY typed key + lazy QueryValue | **2.5–4.7×** | `5f1e793` |
 | Filter pre-resolve literals | **~1.2×** | `4448909` |
 | DISTINCT structural hash | **1.5–1.66×** | `49b41c1` |
 | SelectProjection borrow + pre-keys | **3.06×** | `42720a4` |
@@ -255,7 +255,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | # | Win | Commit |
 |---|-----|--------|
 | msgpack direct serde stream | **2.99×** | `8164582` |
-| json direct serde stream | **3.27×** | `30b7947` |
+| legacy text direct serde stream | **3.27×** | `30b7947` |
 
 ### Interner
 | # | Win | Commit |
@@ -291,7 +291,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | `run_blocking` audit (db_handler) | #60 closed | Уже использует `tokio::task::block_in_place + Handle::current().block_on`. Правильный паттерн — НЕ spawn_blocking (без context switch). |
 | Audit log sync emission | #59 closed | `AuditAppender` уже имеет Strict + Batched modes. Production default = Batched (mutex.lock + Vec::push). Уже оптимально. |
 | TableManager lookup кэш в Session | #64 closed | DashMap<String, ...>::get ~100ns на 32µs request = 0.3%. Cache добавит invalidation complexity (table drop). Win не оправдан без profile signal. |
-| apply_select streaming (без Vec<json::Value>) | #63 closed | QueryResult.records: Vec<serde_json::Value> — публичный API. Streaming требует менять QueryResult shape (impl Serialize), broad refactor в query/batch/dispatch. Win неясен без profile (msgpack encode walks equally). Откладываю до architectural redesign. |
+| apply_select streaming (без Vec<QueryValue>) | #63 closed | QueryResult.records: Vec<QueryValue> — публичный API. Streaming требует менять QueryResult shape (impl Serialize), broad refactor в query/batch/dispatch. Win неясен без profile (msgpack encode walks equally). Откладываю до architectural redesign. |
 
 ---
 
@@ -320,8 +320,8 @@ crates/
 ├── shamir-types/benches/
 │   ├── record_id.rs               — RecordId::new() (R3)
 │   ├── codec_msgpack.rs           — inner_to_msgpack encode (R4)
-│   ├── codec_json_encode.rs       — inner_to_json encode (R5)
-│   └── codec_json_roundtrip.rs    — to_vec+parse vs direct walk (R4)
+│   ├── codec_legacy_encode.rs     — inner_to_legacy encode (R5)
+│   └── codec_legacy_roundtrip.rs  — to_vec+parse vs direct walk (R4)
 ├── shamir-engine/benches/
 │   ├── wal_recovery.rs            — list_inflight scan (R3)
 │   ├── interner_concurrent.rs     — touch_ind / get_str под потоками (R3)

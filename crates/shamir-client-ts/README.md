@@ -325,7 +325,7 @@ const resp = await Batch.create('my-batch')
   .add('products', Query.from('products'))
   .execute(client, 'my_app');
 
-resp.results.users.records;      // typed Json[]
+resp.results.users.records;      // typed Record[]
 resp.execution_plan;              // string[][] — stages
 ```
 

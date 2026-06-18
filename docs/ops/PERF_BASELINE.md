@@ -728,7 +728,7 @@ the counter by N, then updates indexes per-record. Index batching
 is left to a later sprint — for an unindexed table this is the
 full perf story.
 
-`execute_insert` now converts all JSON values upfront, calls
+`execute_insert` now converts all input values upfront, calls
 `insert_many`, and builds the result records. Same observable
 semantics; cost shape moves from "N small fsyncs" to "1 big fsync".
 
@@ -768,7 +768,7 @@ timing and OS write-back behavior, not architectural.
 - **fjall** regressed (+8–19 %).** The default loop impl in
   `Store::insert_many` is identical work to the previous path
   (`for value in op.values { self.insert(...) }`), so any difference
-  is engine-side. Suspected cause: the new path converts ALL JSON to
+  is engine-side. Suspected cause: the new path converts ALL input values to
   InnerValue upfront before any backend writes, holding ~N entries in
   a working `Vec<InnerValue>`. fjall's LSM memtable is sensitive to
   write timing — the change in pause pattern between writes seems

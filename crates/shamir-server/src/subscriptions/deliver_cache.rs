@@ -8,10 +8,10 @@ use shamir_collections::THasher;
 /// Global deliver-data cache shared across ALL bridge tasks.
 ///
 /// For `DeliverMode::Records` and `DeliverMode::Keys`, the serialised payload
-/// (`Vec<u8>`) is deterministic given (change, commit_version, value_json) —
+/// (`Vec<u8>`) is deterministic given (change, commit_version, value) —
 /// identical across all subscribers. This cache ensures the payload is built
 /// once and shared as `Arc<Vec<u8>>` across N bridges, eliminating redundant
-/// `serde_json::to_vec` + `rmp_serde::from_slice` (key decode) per subscriber.
+/// msgpack encode + interned-key decode per subscriber.
 ///
 /// Key: (db_id, repo_hash, commit_version, change_index, mode_discriminant).
 /// `db_id` is the `Arc<ShamirDb>` pointer address cast to `u64`, uniquely

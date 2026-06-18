@@ -19,7 +19,7 @@ use tokio::sync::OnceCell;
 ///   `ShamirDb::get_table_interner_cell`), so callers can do
 ///   `cell.get().unwrap()` synchronously for filter field-path resolution.
 ///
-/// JSON conversion (`RecordRef::to_json_value` or `inner_to_json_value`)
+/// Value decoding (`RecordRef` resolution or `InnerValue` construction)
 /// only happens when the event passes the filter and must be delivered,
 /// eliminating the decode + alloc on rejected events.
 ///

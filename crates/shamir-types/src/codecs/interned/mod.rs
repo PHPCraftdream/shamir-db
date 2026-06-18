@@ -1,10 +1,10 @@
+pub mod codec;
 pub mod common;
-pub mod json;
 pub mod messagepack;
 pub mod projection;
 pub mod validate_keys;
 
-pub use json::{
+pub use codec::{
     inner_value_to_query_value, query_value_to_inner, query_value_to_inner_with,
     record_view_deintern_with, record_view_to_query_value,
 };

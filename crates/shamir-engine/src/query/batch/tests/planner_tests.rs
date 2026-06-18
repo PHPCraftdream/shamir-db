@@ -2,11 +2,11 @@
 //!
 //! All tests use the Batch builder to construct BatchRequests.
 
-use serde_json::json;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::doc;
 use shamir_query_builder::{ddl, write};
+use shamir_types::mpack;
 
 use crate::query::batch::{BatchLimits, BatchPlanner, BatchRequest};
 
@@ -595,12 +595,12 @@ fn test_after_orders_into_later_stage() {
 
 #[test]
 fn test_after_unknown_alias_error() {
-    // Raw JSON by design: this is a planner *validation* test. The builder's
-    // `after()` takes a Handle, so it cannot construct an `after` referencing
-    // an alias that isn't registered — which is exactly the invalid input this
-    // test must feed the planner. Like the parser tests, the raw wire form is
+    // mpack! + rmp_serde by design: this is a planner *validation* test. The
+    // builder's `after()` takes a Handle, so it cannot construct an `after`
+    // referencing an alias that isn't registered — which is exactly the invalid
+    // input this test must feed the planner. The raw wire form (msgpack) is
     // the thing under test, not a builder gap.
-    let json = json!({
+    let raw = mpack!({
         "id": 1,
         "queries": {
             "a": {
@@ -610,8 +610,8 @@ fn test_after_unknown_alias_error() {
             }
         }
     });
-
-    let request: BatchRequest = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+    let request: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(
         matches!(
@@ -626,11 +626,11 @@ fn test_after_unknown_alias_error() {
 
 #[test]
 fn test_after_circular_dependency() {
-    // Raw JSON by design: a mutual `after` (circular) needs forward
+    // mpack! + rmp_serde by design: a mutual `after` (circular) needs forward
     // references the Handle-based `after()` cannot express — and that
     // impossibility is the point. This validation test feeds the planner the
-    // invalid wire form directly, like the parser tests.
-    let json = json!({
+    // invalid wire form (msgpack) directly.
+    let raw = mpack!({
         "id": 1,
         "queries": {
             "a": {
@@ -645,8 +645,8 @@ fn test_after_circular_dependency() {
             }
         }
     });
-
-    let request: BatchRequest = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+    let request: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(
         matches!(
@@ -662,8 +662,8 @@ fn test_after_circular_dependency() {
 fn test_after_with_at_prefix_normalizes() {
     // `after: ["@a"]` should normalize to alias "a".
     // The builder's after() always uses bare aliases, so to test the
-    // @-prefix normalization in the planner we use raw JSON for the after field.
-    let json = json!({
+    // @-prefix normalization in the planner we use the msgpack wire form directly.
+    let raw = mpack!({
         "id": 1,
         "queries": {
             "a": {
@@ -677,8 +677,8 @@ fn test_after_with_at_prefix_normalizes() {
             }
         }
     });
-
-    let request: BatchRequest = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+    let request: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);

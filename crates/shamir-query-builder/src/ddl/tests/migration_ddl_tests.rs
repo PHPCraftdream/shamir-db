@@ -1,6 +1,6 @@
 //! Tests for Migration DDL: start / commit / rollback / status.
 
-use serde_json::json;
+use shamir_types::mpack;
 
 use crate::ddl;
 
@@ -19,7 +19,7 @@ fn start_migration_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "start_migration": "users",
             "repo": "main",
             "dst_repo": "cold",
@@ -49,7 +49,7 @@ fn commit_migration_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "commit_migration": "mig-001",
             "hmac": "abcd1234"
         })
@@ -62,7 +62,7 @@ fn rollback_migration_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "rollback_migration": "mig-001",
             "hmac": "ff00"
         })
@@ -75,7 +75,7 @@ fn migration_status_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "migration_status": "mig-001"
         })
     );

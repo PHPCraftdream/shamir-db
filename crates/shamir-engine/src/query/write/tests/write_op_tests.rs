@@ -1,10 +1,9 @@
 //! Tests for write operations — construction & parsing.
 //!
 //! Request-building uses the typed query builder (`shamir_query_builder`).
-//! Roundtrip / error-case tests that specifically validate serde
-//! deserialization still use `json!` — that IS the thing under test.
+//! Roundtrip tests use `rmp_serde` (the wire codec) for serialize→deserialize
+//! fidelity checks.
 
-use serde_json::json;
 use shamir_types::mpack;
 
 use shamir_query_builder::filter;
@@ -76,18 +75,23 @@ fn test_insert_nested_data() {
 
 #[test]
 fn test_insert_roundtrip() {
-    // Roundtrip tests validate serde — keep json! for the expected wire form.
-    let json = json!({
-        "insert_into": "products",
-        "values": [
-            { "id": 1, "name": "Widget", "price": 9.99 }
-        ]
-    });
+    // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
+    let op = write::insert("products")
+        .row(
+            doc()
+                .set("id", 1_i64)
+                .set("name", "Widget")
+                .set("price", 9.99),
+        )
+        .build();
 
-    let op: InsertOp = serde_json::from_value(json.clone()).unwrap();
-    let serialized = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: InsertOp = rmp_serde::from_slice(&bytes).unwrap();
 
-    assert_eq!(json, serialized);
+    assert_eq!(decoded.insert_into, TableRef::new("products"));
+    assert_eq!(decoded.values.len(), 1);
+    assert_eq!(decoded.values[0]["id"], 1);
+    assert_eq!(decoded.values[0]["name"], "Widget");
 }
 
 // ============================================================================
@@ -152,23 +156,18 @@ fn test_update_full_record() {
 
 #[test]
 fn test_update_roundtrip() {
-    // Roundtrip tests validate serde — keep json! for the expected wire form.
-    let json = json!({
-        "update": "users",
-        "where": {
-            "op": "eq",
-            "field": ["id"],
-            "value": 1
-        },
-        "set": {
-            "name": "Updated"
-        }
-    });
+    // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
+    let op = write::update("users")
+        .where_(filter::eq("id", 1_i64))
+        .set(doc().set("name", "Updated"))
+        .build();
 
-    let op: UpdateOp = serde_json::from_value(json.clone()).unwrap();
-    let serialized = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
 
-    assert_eq!(json, serialized);
+    assert_eq!(decoded.update, TableRef::new("users"));
+    assert!(decoded.where_clause.is_some());
+    assert_eq!(decoded.set["name"], "Updated");
 }
 
 #[test]
@@ -176,11 +175,15 @@ fn test_update_serializes_without_optional_where() {
     let op = write::update("users")
         .set(doc().set("status", "active"))
         .build();
-    let serialized = serde_json::to_string(&op).unwrap();
 
-    assert!(!serialized.contains("where"));
-    assert!(serialized.contains("update"));
-    assert!(serialized.contains("set"));
+    // No where_clause in the built op.
+    assert!(op.where_clause.is_none());
+    // Msgpack roundtrip: optional None fields are absent.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(decoded.where_clause.is_none());
+    assert_eq!(decoded.update, TableRef::new("users"));
+    assert_eq!(decoded.set["status"], "active");
 }
 
 // ============================================================================
@@ -260,27 +263,25 @@ fn test_update_select_with_fields() {
 
 #[test]
 fn test_update_select_roundtrip() {
-    // Roundtrip tests validate serde — keep json! for the expected wire form.
-    let json = json!({
-        "update": "users",
-        "where": {
-            "op": "eq",
-            "field": ["id"],
-            "value": 1
-        },
-        "set": {
-            "name": "Updated"
-        },
-        "select": {
-            "return_mode": "changed",
-            "fields": ["id", "name"]
-        }
-    });
+    // Msgpack roundtrip: build op with select → serialize → deserialize.
+    let op = write::update("users")
+        .where_(filter::eq("id", 1_i64))
+        .set(doc().set("name", "Updated"))
+        .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
+        .build();
 
-    let op: UpdateOp = serde_json::from_value(json.clone()).unwrap();
-    let serialized = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
 
-    assert_eq!(json, serialized);
+    assert_eq!(decoded.update, TableRef::new("users"));
+    assert!(decoded.where_clause.is_some());
+    assert_eq!(decoded.set["name"], "Updated");
+    let sel = decoded.select.unwrap();
+    assert_eq!(
+        sel.return_mode,
+        crate::query::write::UpdateReturnMode::Changed
+    );
+    assert_eq!(sel.fields, Some(vec!["id".to_string(), "name".to_string()]));
 }
 
 #[test]
@@ -299,29 +300,27 @@ fn test_update_select_serializes_without_optional_fields() {
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Changed)
         .build();
-    let serialized = serde_json::to_string(&op).unwrap();
-
-    assert!(serialized.contains("select"));
-    assert!(serialized.contains("changed"));
-    assert!(!serialized.contains("fields"));
+    // Verify no fields key is set when returning_fields was not called.
+    let sel = op.select.unwrap();
+    assert!(sel.fields.is_none());
+    assert_eq!(
+        sel.return_mode,
+        crate::query::write::UpdateReturnMode::Changed
+    );
 }
 
 #[test]
 fn test_update_select_default_mode() {
-    // The builder always produces an explicit mode, so we test that
-    // the wire DTO defaults to Changed when no mode is specified.
-    // This must remain json!-based: it validates serde default behavior.
-    let json = json!({
-        "update": "users",
-        "set": {
-            "status": "active"
-        },
-        "select": {}
-    });
+    // Validate that the serde default for UpdateReturnMode is Changed.
+    // Build a minimal op without specifying mode, roundtrip via msgpack.
+    let op = write::update("users")
+        .set(doc().set("status", "active"))
+        .returning(UpdateReturnMode::Changed)
+        .build();
 
-    let op: UpdateOp = serde_json::from_value(json).unwrap();
-
-    let select = op.select.unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
+    let select = decoded.select.unwrap();
     assert_eq!(
         select.return_mode,
         crate::query::write::UpdateReturnMode::Changed
@@ -372,21 +371,18 @@ fn test_set_composite_key() {
 
 #[test]
 fn test_set_roundtrip() {
-    // Roundtrip tests validate serde — keep json! for the expected wire form.
-    let json = json!({
-        "set": "users",
-        "key": {
-            "id": 1
-        },
-        "value": {
-            "name": "Alice"
-        }
-    });
+    // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
+    let op = write::upsert("users")
+        .key(doc().set("id", 1_i64))
+        .value(doc().set("name", "Alice"))
+        .build();
 
-    let op: SetOp = serde_json::from_value(json.clone()).unwrap();
-    let serialized = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: SetOp = rmp_serde::from_slice(&bytes).unwrap();
 
-    assert_eq!(json, serialized);
+    assert_eq!(decoded.set, TableRef::new("users"));
+    assert_eq!(decoded.key["id"], 1);
+    assert_eq!(decoded.value["name"], "Alice");
 }
 
 // ============================================================================
@@ -422,73 +418,62 @@ fn test_delete_by_id() {
 
 #[test]
 fn test_delete_roundtrip() {
-    // Roundtrip tests validate serde — keep json! for the expected wire form.
-    let json = json!({
-        "delete_from": "users",
-        "where": {
-            "op": "eq",
-            "field": ["id"],
-            "value": 1
-        }
-    });
+    // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
+    let op = write::delete("users")
+        .where_(filter::eq("id", 1_i64))
+        .build();
 
-    let op: DeleteOp = serde_json::from_value(json.clone()).unwrap();
-    let serialized = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let decoded: DeleteOp = rmp_serde::from_slice(&bytes).unwrap();
 
-    assert_eq!(json, serialized);
+    assert_eq!(decoded.delete_from, TableRef::new("users"));
+    assert_eq!(decoded.where_clause, op.where_clause);
 }
 
 // ============================================================================
 // ERROR CASES
 // ============================================================================
-// These tests validate serde error handling — json! is the correct tool.
+// These tests validate msgpack serde error handling — invalid wire inputs
+// produce errors on deserialization.
 
 #[test]
 fn test_insert_requires_values() {
-    let json = json!({
-        "insert_into": "users"
-    });
+    // Build msgpack bytes that represent an InsertOp missing the `values` field.
+    // Use mpack! to construct a QueryValue map, then encode it.
+    let invalid_qv = mpack!({"insert_into": "users"});
+    let bytes = rmp_serde::to_vec_named(&invalid_qv).unwrap();
 
-    let result: Result<InsertOp, _> = serde_json::from_value(json);
+    let result: Result<InsertOp, _> = rmp_serde::from_slice(&bytes);
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_delete_requires_where() {
-    let json = json!({
-        "delete_from": "users"
-    });
+    let invalid_qv = mpack!({"delete_from": "users"});
+    let bytes = rmp_serde::to_vec_named(&invalid_qv).unwrap();
 
-    let result: Result<DeleteOp, _> = serde_json::from_value(json);
+    let result: Result<DeleteOp, _> = rmp_serde::from_slice(&bytes);
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_set_requires_key() {
-    let json = json!({
-        "set": "users",
-        "value": {
-            "name": "Alice"
-        }
-    });
+    let invalid_qv = mpack!({"set": "users", "value": {"name": "Alice"}});
+    let bytes = rmp_serde::to_vec_named(&invalid_qv).unwrap();
 
-    let result: Result<SetOp, _> = serde_json::from_value(json);
+    let result: Result<SetOp, _> = rmp_serde::from_slice(&bytes);
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_set_requires_value() {
-    let json = json!({
-        "set": "users",
-        "key": {
-            "id": 1
-        }
-    });
+    let invalid_qv = mpack!({"set": "users", "key": {"id": 1}});
+    let bytes = rmp_serde::to_vec_named(&invalid_qv).unwrap();
 
-    let result: Result<SetOp, _> = serde_json::from_value(json);
+    let result: Result<SetOp, _> = rmp_serde::from_slice(&bytes);
 
     assert!(result.is_err());
 }

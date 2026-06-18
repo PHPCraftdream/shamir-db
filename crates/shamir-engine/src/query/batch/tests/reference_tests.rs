@@ -1,6 +1,6 @@
-//! Tests for QueryReference parsing using JSON-like test cases
+//! Tests for QueryReference parsing
 //!
-//! Tests are organized as JSON-like test cases for documentation purposes.
+//! Tests are organized as structured test cases for documentation purposes.
 
 use crate::query::batch::{QueryPath, QueryReference};
 

@@ -1,6 +1,6 @@
 //! GROUP BY hot loop bench. `apply_group_by` builds a key per record
 //! to look up its group bucket. The baseline path is:
-//!   resolve_field -> inner_to_json_value -> json::Value::to_string
+//!   resolve_field -> inner_to_query_value -> canonical_str
 //!   -> push to Vec<String> -> Vec::join("|")
 //!
 //! That's a per-record string allocation just to drive a BTreeMap

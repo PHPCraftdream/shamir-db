@@ -148,7 +148,7 @@ at scale/width.**
 - **Don't build O** for narrow records / small datasets / `SELECT *` —
   P + streaming already flattened the curve there (B0).
 - When built, O must compose with M2: covered query →
-  `index → projected InnerValue → inner_to_json` (streaming), touching
+  `index → projected InnerValue → inner_to_msgpack` (streaming), touching
   **neither data_store nor a Value tree**. `include: [...]` is a plain
   `create_index` DTO field (OQL — no text parsing).
 
@@ -239,17 +239,17 @@ covered-query recognition`, `perf(index): index-only covered range scan`).
 
 ---
 
-## Phase B4 — M2: streaming JSON serializer (~2–3 days, conditional)
+## Phase B4 — M2: streaming msgpack serializer (~2–3 days, conditional)
 
 **Bench (verdict, committed):** `benches/select_projection.rs`. Symptom:
 `apply_select` is **61.6 %** of the pipeline, 800k allocs / 100k records
 (per `examples/count_allocs_read_pipeline.rs`).
 
-1. Add `inner_to_json_writer(value, interner, writer)` **alongside**
-   `inner_to_json_value` — wraps `serde_json::Serializer` over a byte
+1. Add `inner_to_msgpack_writer(value, interner, writer)` **alongside**
+   `inner_to_query_value` — wraps `rmp_serde::Serializer` over a byte
    writer, walks `InnerValue` once, no intermediate `Value` tree. Not
    wired up yet.
-2. **Equivalence tests:** streaming bytes parsed back == `inner_to_json_value`.
+2. **Equivalence tests:** streaming bytes parsed back == `inner_to_query_value`.
 3. **Bench** streaming vs tree on the 100k fixture (`select_then_serialize`).
 4. **Kill-criterion:** wire into `apply_select` (when the consumer is a
    byte writer — the wire codec) **only if ≥ 30 %** win on
@@ -257,7 +257,7 @@ covered-query recognition`, `perf(index): index-only covered range scan`).
    the tree path. ORDER BY / DISTINCT keep the tree (need in-memory
    inspection).
 
-**Commit:** `perf(read): streaming JSON projection (bypass Value tree)` —
+**Commit:** `perf(read): streaming msgpack projection (bypass Value tree)` —
 or `chore: drop streaming-serializer experiment (sub-30%)` if killed.
 
 ---
@@ -342,7 +342,7 @@ index DDL** (`include`) — the Postgres model where a covering index is a
 deliberate cost/benefit choice. It is NOT enabled for non-covering indexes and
 does not touch the non-eligible read path → **no default regression**.
 Beautiful follow-ups, deferred until a workload needs them:
-- **terminal-form projection** (store the interned-key `InnerValue` / M2-JSON
+- **terminal-form projection** (store the interned-key `InnerValue` / M2-msgpack
   fragment in the posting) to shrink the reconstruction premium toward zero;
 - **width-ratio / cardinality cost gate** so the planner engages index-only
   only when `record_size / projection_size` (or estimated cache-miss cost) is

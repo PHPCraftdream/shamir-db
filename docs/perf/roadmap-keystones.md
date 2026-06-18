@@ -44,7 +44,7 @@
 Ключ III — Ленивый Дуал (механически приложить паттерн)
   #2  Interner dense+sparse split   = Vec + scc::HashMap
   #9  InnerValue Hash cache          = Value + OnceLock<u64>
-  #10 json_to_inner zero-copy        = зеркало msgpack-#8 (done)
+  #10 legacy_to_inner zero-copy        = зеркало msgpack-#8 (done)
   образец: #12 StagedRow (DONE) = Live(InnerValue) + OnceLock<Bytes>
 
 Measure-first (ждут сигнала, не преграды)
@@ -90,13 +90,13 @@ decode/deliver-кэшей подписок.
 |---|---|---|---|
 | #9 InnerValue Hash cache | `Value + OnceLock<u64>` | `shamir-types/types/value.rs` | medium (+ Hash impl) |
 | #2 Interner dense+sparse | dense `Vec` (touch_ind) + sparse `scc::HashMap` (touch_with_id) | `shamir-types/core/interner/` | medium 150-300 LOC |
-| #10 json_to_inner | зеркало msgpack zerocopy (#8 done) | `shamir-types/codecs/interned/json.rs` | medium |
+| #10 legacy_to_inner | зеркало msgpack zerocopy (#8 done) | `shamir-types/codecs/interned/legacy.rs` | medium |
 
 **Правило исполнения.** Каждый — самостоятельный /opti-цикл. Перед #9 —
 измерить hot-path вклад Map/Set хеширования (вероятно subscription
 filters). #2 требует careful coherence-анализа между dense и sparse под
-concurrency. #10 — когда JSON-путь станет горячим (сейчас msgpack — wire,
-JSON — REST/legacy).
+concurrency. #10 — когда legacy-путь станет горячим (сейчас msgpack — wire,
+legacy text — REST/admin).
 
 ---
 

@@ -64,7 +64,7 @@ Persy, Canopy, InMemory + a Cached wrapper), each behind a Cargo
 feature. There are no types, no queries here — only key/value.
 
 **`shamir-types` is the foundation.** The Value model, MessagePack
-codecs (plus a legacy JSON codec), `RecordId` (a 16-byte timestamped ULID), and the
+codecs (plus a legacy text-encoding codec), `RecordId` (a 16-byte timestamped ULID), and the
 `Interner` (`String → u64` for memory economy). Nothing above it
 violates its abstractions, and it knows nothing of storage or
 sessions.

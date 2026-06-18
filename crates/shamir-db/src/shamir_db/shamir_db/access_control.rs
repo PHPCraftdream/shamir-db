@@ -392,7 +392,7 @@ impl ShamirDb {
     /// Assemble the access-control tree as a structured [`QueryValue`] map.
     ///
     /// Shape (see [`shamir_query_types::admin::AccessTreeOp`]):
-    /// ```json
+    /// ```text
     /// {
     ///   "resources": { "name": "/", "kind": "root", "owner": 0,
     ///                  "owner_name": "system", "group": null,
@@ -419,7 +419,7 @@ impl ShamirDb {
         // ── principals first, so resource nodes resolve owner/group names ──
         let mut name_of: TFxMap<u64, String> = TFxMap::default();
         name_of.insert(OWNER_SYSTEM, "system".to_string());
-        let mut users_json: Vec<QueryValue> = Vec::new();
+        let mut users_list: Vec<QueryValue> = Vec::new();
         for rec in self.system_store.load_users().await? {
             if let Some(uname) = rec.get("name").and_then(|v| v.as_str()) {
                 let id = principal_id(uname);
@@ -427,13 +427,13 @@ impl ShamirDb {
                 let mut m = new_map();
                 m.insert("id".to_string(), QueryValue::Int(id as i64));
                 m.insert("name".to_string(), QueryValue::Str(uname.to_string()));
-                users_json.push(QueryValue::Map(m));
+                users_list.push(QueryValue::Map(m));
             }
         }
-        users_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        users_list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
         let mut group_name_of: TFxMap<u64, String> = TFxMap::default();
-        let mut groups_json: Vec<QueryValue> = Vec::new();
+        let mut groups_list: Vec<QueryValue> = Vec::new();
         for rec in self.system_store.load_groups().await? {
             let Some(gid) = rec.get("group_id").and_then(|v| v.as_u64()) else {
                 continue;
@@ -469,9 +469,9 @@ impl ShamirDb {
             gm.insert("id".to_string(), QueryValue::Int(gid as i64));
             gm.insert("name".to_string(), QueryValue::Str(gname));
             gm.insert("members".to_string(), QueryValue::List(members));
-            groups_json.push(QueryValue::Map(gm));
+            groups_list.push(QueryValue::Map(gm));
         }
-        groups_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        groups_list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
         // ── resource hierarchy (Root → Database → Store → Table) ──
         let max_depth = depth.unwrap_or(3).min(3);
@@ -548,8 +548,8 @@ impl ShamirDb {
         }
 
         let mut principals = new_map();
-        principals.insert("users".to_string(), QueryValue::List(users_json));
-        principals.insert("groups".to_string(), QueryValue::List(groups_json));
+        principals.insert("users".to_string(), QueryValue::List(users_list));
+        principals.insert("groups".to_string(), QueryValue::List(groups_list));
 
         let mut result = new_map();
         result.insert("resources".to_string(), root);

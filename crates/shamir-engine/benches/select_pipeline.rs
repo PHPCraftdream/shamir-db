@@ -11,7 +11,7 @@
 //!
 //! Bench drives `apply_select_value` over 1000 records, 5 selected fields.
 //!
-//! Note: J1 migration — apply_select (JSON) removed; bench now uses
+//! Note: J1 migration — apply_select (legacy value path) removed; bench now uses
 //! apply_select_value (QueryValue path) + apply_order_by_qv.
 
 use std::sync::Arc;
@@ -277,41 +277,49 @@ fn bench_pushdown(c: &mut Criterion) {
         let interner = rt.block_on(table.interner().get()).unwrap();
 
         // (A) push-down active: WHERE + LIMIT 10, no ORDER BY.
-        let q_pushdown: ReadQuery = serde_json::from_value(serde_json::json!({
-            "from": "rows",
-            "where": {"op": "eq", "field": ["status"], "value": "active"},
-            "select": {
-                "items": [
-                    {"type": "field", "path": ["name"]},
-                    {"type": "field", "path": ["age"]},
-                    {"type": "field", "path": ["score"]},
-                    {"type": "field", "path": ["email"]}
-                ],
-                "distinct": false
-            },
-            "pagination": {"mode": "LimitOffset", "limit": 10}
-        }))
-        .unwrap();
+        let q_pushdown: ReadQuery = {
+            use shamir_types::mpack;
+            let raw = mpack!({
+                "from": "rows",
+                "where": {"op": "eq", "field": ["status"], "value": "active"},
+                "select": {
+                    "items": [
+                        {"type": "field", "path": ["name"]},
+                        {"type": "field", "path": ["age"]},
+                        {"type": "field", "path": ["score"]},
+                        {"type": "field", "path": ["email"]}
+                    ],
+                    "distinct": false
+                },
+                "pagination": {"mode": "LimitOffset", "limit": 10}
+            });
+            let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+            rmp_serde::from_slice(&bytes).unwrap()
+        };
 
         // (B) push-down disabled: same shape + ORDER BY name (no sorted
         //     index → falls to `read_collecting` which projects every
         //     match before sorting + truncating).
-        let q_full: ReadQuery = serde_json::from_value(serde_json::json!({
-            "from": "rows",
-            "where": {"op": "eq", "field": ["status"], "value": "active"},
-            "select": {
-                "items": [
-                    {"type": "field", "path": ["name"]},
-                    {"type": "field", "path": ["age"]},
-                    {"type": "field", "path": ["score"]},
-                    {"type": "field", "path": ["email"]}
-                ],
-                "distinct": false
-            },
-            "order_by": {"items": [{"field": ["name"], "direction": "asc"}]},
-            "pagination": {"mode": "LimitOffset", "limit": 10}
-        }))
-        .unwrap();
+        let q_full: ReadQuery = {
+            use shamir_types::mpack;
+            let raw = mpack!({
+                "from": "rows",
+                "where": {"op": "eq", "field": ["status"], "value": "active"},
+                "select": {
+                    "items": [
+                        {"type": "field", "path": ["name"]},
+                        {"type": "field", "path": ["age"]},
+                        {"type": "field", "path": ["score"]},
+                        {"type": "field", "path": ["email"]}
+                    ],
+                    "distinct": false
+                },
+                "order_by": {"items": [{"field": ["name"], "direction": "asc"}]},
+                "pagination": {"mode": "LimitOffset", "limit": 10}
+            });
+            let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+            rmp_serde::from_slice(&bytes).unwrap()
+        };
 
         group.throughput(Throughput::Elements(10));
 

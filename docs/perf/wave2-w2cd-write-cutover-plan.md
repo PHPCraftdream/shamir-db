@@ -34,8 +34,8 @@
 
 ## Dec/Big инвариант (FLAG, не блокер insert)
 RecordView::materialize_at декодит Dec/Big как Str (на проводе str). НО insert-QueryValue
-НИКОГДА не даёт Dec/Big/Set (JSON-источник + resolve_computed_record схлопывает Dec→Str
-через inner_to_json_value). → дерево и линза видят Str, согласны. Тест-инвариант +
+НИКОГДА не даёт Dec/Big/Set (QueryValue-источник + resolve_computed_record схлопывает Dec→Str
+через inner_to_query_value). → дерево и линза видят Str, согласны. Тест-инвариант +
 guard-коммент в insert_tx_many_bytes. ФОРВАРД-ХАЗАРД: если появится QueryValue-источник
 с Dec/Big (msgpack-клиент), Dec/Big-ключевой индекс под линзой разойдётся — гейтить
 debug-assert/typed-encoder тогда.

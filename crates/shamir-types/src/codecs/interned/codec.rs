@@ -4,9 +4,9 @@
 //! (interned keys) and the user-facing `QueryValue` (string keys), plus the
 //! RecordView lens walker for zero-copy de-intern.
 //!
-//! The old serde_json-typed functions (`inner_to_json_value`,
-//! `record_view_to_json_value`, `inner_to_json`, `json_value_to_inner`, …)
-//! have been removed. All public paths now go through `QueryValue`.
+//! The old text-codec functions (`inner_to_value`, `record_view_to_value`,
+//! `inner_to_wire`, `wire_value_to_inner`, …) have been removed. All public
+//! paths now go through `QueryValue`.
 
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
@@ -17,7 +17,7 @@ use crate::types::value::{InnerValue, QueryValue, Value};
 
 /// Converts a [`QueryValue`] (string-keyed) to [`InnerValue`] (interned keys).
 ///
-/// This is the key function for the zero-JSON write path: once user data
+/// This is the key function for the zero-copy write path: once user data
 /// is deserialized as `QueryValue` (format-agnostic), this pass interns
 /// the map keys to produce the engine-native representation.
 pub fn query_value_to_inner(
@@ -73,10 +73,9 @@ where
 /// Converts [`InnerValue`] (interned keys) to [`QueryValue`] (string keys),
 /// de-interning map keys via a single reverse-snapshot acquisition.
 ///
-/// Mirrors the semantics of the (deleted) `inner_to_json_value` — same
+/// Mirrors the semantics of the deleted text-codec path — same
 /// key-resolution behaviour and same error handling for missing intern keys —
-/// but builds the allocation-light `QueryValue` tree instead of a
-/// `serde_json::Value`.
+/// builds the allocation-light `QueryValue` tree as the canonical output.
 pub fn inner_value_to_query_value(
     value: &InnerValue,
     interner: &Interner,

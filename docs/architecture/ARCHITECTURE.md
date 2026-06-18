@@ -120,7 +120,7 @@ Value Type System
 - from_bytes(): Deserialize from MessagePack
 - Full serde support with custom deserializer for type hints
 
-**Type Hints (for UserValue / legacy JSON deserialization only):**
+**Type Hints (for UserValue / legacy text-encoding deserialization only):**
 - i:prefix -> Int
 - u:prefix -> UInt
 - float:prefix -> Float
@@ -188,12 +188,12 @@ Codec System
 
 **Available Codecs:**
 1. MessagePack: Binary, rmp-serde (primary format — records and wire)
-2. JSON: Human-readable, serde_json (legacy/v1 wire; kept for tooling interop only)
+2. Legacy text encoding: Human-readable (legacy/v1 wire; kept for tooling interop only)
 
 **Type Mapping:**
 
-| Rust Type | MessagePack | JSON (legacy) |
-|-----------|-------------|---------------|
+| Rust Type | MessagePack | Legacy text encoding |
+|-----------|-------------|----------------------|
 | Null | nil | null |
 | Bool | bool | true/false |
 | Int(i64) | int64 | number |
@@ -210,11 +210,11 @@ Codec System
 | Format | Size | Encode | Decode |
 |--------|------|-------|--------|
 | MessagePack | ~60% | 1.2x | 1.3x |
-| JSON (legacy) | 100% | 1x | 1x |
+| Legacy text encoding | 100% | 1x | 1x |
 
 **Key Differences:**
 - MessagePack: Primary storage and wire format; no type-hint prefixes needed
-- JSON (legacy): Type hint support (i:, u:, float:, dec:, big:, arr:, set:) via UserValue; being phased out of the wire
+- Legacy text encoding: Type hint support (i:, u:, float:, dec:, big:, arr:, set:) via UserValue; being phased out of the wire
 - BigInt/Decimal: Serialized as strings in both formats for precision preservation
 
 ## arch-008-concurrency
@@ -303,7 +303,7 @@ Development Protocol (TDD)
 - Don't change unrelated code
 - Don't change unrelated comments
 - Make only targeted changes
-- In tests: JSON/MessagePack literals must be formatted, multi-line
+- In tests: MessagePack/QueryValue literals must be formatted, multi-line
 - mod.rs files only contain exports
 - Tests in separate tests/ folder, not in implementation files
 
@@ -619,11 +619,11 @@ const client = await connect({
 
 The raw wire shapes below document the handshake protocol (wire form; clients build this via `connect()`):
 
-```json
+```msgpack
 { "op": "auth_init", "username": "admin", "client_nonce": "<bytes>" }
 ```
 
-```json
+```msgpack
 { "op": "auth_finish", "client_proof": "<bytes>" }
 ```
 
@@ -889,7 +889,7 @@ const info = await client.txCommit('my_app', opened.tx_handle);
 
 Wire form for raw transaction protocol (wire form; clients build this via the builder):
 
-```json
+```msgpack
 { "op": "tx_begin",   "db": "my_app", "repo": "main" }
 { "op": "tx_execute", "tx_handle": 1, "batch": { "…": "…" } }
 { "op": "tx_commit",  "tx_handle": 1 }

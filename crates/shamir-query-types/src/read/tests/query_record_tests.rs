@@ -1,6 +1,6 @@
 //! Tests for `QueryRecord` QueryValue-native accessor methods.
 //!
-//! All test data is built with `mpack!` — no `serde_json::json!` or raw JSON strings.
+//! All test data is built with `mpack!` — no raw wire-format strings.
 
 use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
@@ -33,7 +33,7 @@ fn inserted_direct_row() -> QueryRecord {
     QueryRecord::Inserted(rec)
 }
 
-fn json_row() -> QueryRecord {
+fn deserialized_row() -> QueryRecord {
     // Build via msgpack round-trip so we get a deserialized Direct variant.
     let qv = mpack!({ "name": "bob", "age": 25 });
     let bytes = rmp_serde::to_vec_named(&qv).unwrap();
@@ -55,7 +55,7 @@ fn as_value_direct_borrows() {
 #[test]
 fn as_value_deserialized_direct_borrows() {
     // After Stage C the deserializer produces Direct; as_value() borrows.
-    let row = json_row();
+    let row = deserialized_row();
     let v = row.as_value();
     // Direct path borrows — no allocation.
     assert!(matches!(v, std::borrow::Cow::Borrowed(_)));
@@ -116,8 +116,8 @@ fn get_value_owned_direct() {
 
 #[test]
 fn get_value_owned_deserialized() {
-    // json_row() now produces a Direct via msgpack round-trip.
-    let row = json_row();
+    // deserialized_row() now produces a Direct via msgpack round-trip.
+    let row = deserialized_row();
     let v = row.get_value_owned("age").expect("age present in row");
     assert_eq!(v.as_i64(), Some(25));
 }

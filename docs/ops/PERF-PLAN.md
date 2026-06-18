@@ -237,7 +237,7 @@ Acceptance criteria:
 
 - Хороший CPU constant-factor на scans и index maintenance.
 - Не стоит ожидать 3-5x на полный query, если bottleneck уже storage decode или
-  JSON projection.
+  msgpack projection.
 
 ### P1-3. `InternerKey(u64)` вместо `InternerKey(Bytes)` в памяти
 
@@ -270,7 +270,7 @@ Acceptance criteria:
 - Benchmarks:
   - map lookup by interned key;
   - filter scan;
-  - JSON/MessagePack decode/encode.
+  - MessagePack decode/encode.
 
 Ожидаемый эффект:
 
@@ -318,19 +318,19 @@ Acceptance criteria:
 - Добавить `Interner::with_str(id, |s| ...)` для zero-copy callback.
 - Или вернуть owned `UserKey` и конвертировать в `String` без второго clone.
 
-Эффект: заметен на JSON/MessagePack encode большого числа records, но это не
+Эффект: заметен на MessagePack encode большого числа records, но это не
 главный bottleneck index scans.
 
-### P2-2. HAVING без JSON roundtrip
+### P2-2. HAVING без legacy-value roundtrip
 
-`apply_group_by` строит JSON aggregate object, потом для HAVING делает
-`serde_json::to_vec` и `json_to_inner`.
+`apply_group_by` строит aggregate object, потом для HAVING делает
+msgpack serialization и re-parse via `inner`.
 
 Что сделать:
 
 - Строить aggregate object как `InnerValue::Map`.
 - HAVING применять к `InnerValue`.
-- JSON строить после HAVING.
+- Encode строить после HAVING.
 
 Эффект: только GROUP BY/HAVING workloads.
 
@@ -400,7 +400,7 @@ P1-3 можно поднять перед P1-2.
 - bulk insert 10K without indexes;
 - bulk insert 10K with normal + unique + sorted indexes;
 - UPDATE 10K rows, small patch over wide records;
-- JSON/MessagePack encode/decode roundtrip for projected records.
+- MessagePack encode/decode roundtrip for projected records.
 
 Для каждого результата фиксировать:
 

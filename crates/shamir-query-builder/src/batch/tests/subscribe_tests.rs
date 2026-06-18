@@ -12,8 +12,9 @@ use crate::{filter, val};
 #[test]
 fn subscribe_table_round_trip() {
     let op = Subscribe::table("messages").build();
-    let json = serde_json::to_value(&op).unwrap();
-    let decoded: shamir_query_types::subscribe::SubscribeOp = serde_json::from_value(json).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).expect("serialize");
+    let decoded: shamir_query_types::subscribe::SubscribeOp =
+        rmp_serde::from_slice(&bytes).expect("deserialize");
     assert_eq!(decoded, op);
 }
 

@@ -337,7 +337,7 @@ impl std::error::Error for AuditError {}
 ///
 /// Production deployments wrap an `AuditChain` + a `AuditAppender` so
 /// each `append` also persists the entry's canonical bytes + hmac to
-/// JSON-line / sqlite / etc.
+/// sqlite / etc.
 pub trait AuditAppender: Send + Sync {
     /// Persist one entry. The implementation is free to batch BUT must
     /// fsync at least every 5 seconds (per spec §3.3 + IMPL §1.3).

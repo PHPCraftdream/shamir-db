@@ -47,7 +47,7 @@ Body: msgpack({ ...result... })
 Response 401 / Body: msgpack({"error": "session_expired"})
 ```
 
-**Только msgpack** wire encoding (то же что и WS binary frames). JSON опция удалена в v1 — single encoding путь упрощает имплементацию и закрывает класс interop bugs. curl-friendliness достигается через CLI tool или `xxd`/`msgpack-cli` обёртки.
+**Только msgpack** wire encoding (то же что и WS binary frames). Legacy text-encoding опция удалена в v1 — single encoding путь упрощает имплементацию и закрывает класс interop bugs. curl-friendliness достигается через CLI tool или `xxd`/`msgpack-cli` обёртки.
 
 **Bearer не cookie:**
 - Нет CSRF surface

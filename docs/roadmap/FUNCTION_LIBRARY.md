@@ -8,7 +8,7 @@ functions over numbers, strings, arrays, columns, geo, time, crypto.
 
 | Shape | Layer | Cardinality | Indexable? | Today |
 |---|---|---|---|---|
-| **Scalar / row** | scalar registry → `IndexExpr` | 1 record → 1 value | **yes** (pure) | Lower/Upper/Trim/Length/Substring/JsonPath/Concat/Mod/Coalesce |
+| **Scalar / row** | scalar registry → `IndexExpr` | 1 record → 1 value | **yes** (pure) | Lower/Upper/Trim/Length/Substring/ValuePath/Concat/Mod/Coalesce |
 | **Aggregate / column** | `AggregateFn` + GROUP BY | N records → 1 value | n/a | Count/Sum/Avg/Min/Max |
 | **Procedural** | `ShamirFunction` (WASM + builtins) | side-effects / DB / non-deterministic | no | argon2id |
 
@@ -77,9 +77,9 @@ Procedural functions (random / uuid / argon2 / asym / PQC) stay in the existing
 | `/array` | scalar | length, get, slice, contains, index_of, first, last, flatten, distinct, sort, join, sum/min/max/avg-over-elements |
 | `/cast` | scalar | to_int, to_float, to_dec, to_string, to_bool, parse_int, parse_float, try_cast |
 | `/datetime` | scalar | now (unixtime), parse(rfc3339), format, year, month, day, hour, minute, second, weekday, is_weekend, add/sub(secs/days), diff_secs, start_of(day/week/month), truncate(unit), to_epoch_ms/s, from_epoch_ms/s, age |
-| `/json` | scalar | get/path, array_length, keys, type, exists |
-| `/validate` | scalar (→ pairs with #142) | is_email, is_url, is_uuid, is_ipv4/v6, is_phone, luhn (card), in_range, matches(regex), is_json, is_empty, len_between |
-| `/encode` | scalar | base64_enc/dec, base64url, hex_enc/dec, base32, url_encode/decode, html_escape, json_escape |
+| `/value` | scalar | get/path, array_length, keys, type, exists |
+| `/validate` | scalar (→ pairs with #142) | is_email, is_url, is_uuid, is_ipv4/v6, is_phone, luhn (card), in_range, matches(regex), is_value, is_empty, len_between |
+| `/encode` | scalar | base64_enc/dec, base64url, hex_enc/dec, base32, url_encode/decode, html_escape, value_escape |
 | `/object` | scalar | keys, values, entries, has_key, get_path, merge, pick, omit |
 | `/text` | scalar | normalize(NFC/NFKC), slugify, levenshtein/edit_distance, jaro_winkler, word_count, truncate_ellipsis |
 | `/id` | procedural | uuid_v4, uuid_v7, ulid, nanoid |
@@ -170,7 +170,7 @@ tells which.
   end-to-end (e.g. `/math/abs`, `/str/lower` via Call) to prove the path +
   indexability. **Everything after is just populating registries.**
 - **P1 — /math + /str + /array + /cast** (pure scalars; per-fn tests).
-- **P2 — /datetime + /json** (settle the timestamp convention).
+- **P2 — /datetime + /value** (settle the timestamp convention).
 - **P3 — /agg** (in `shamir-funclib`): the `Aggregator` trait + `AggRegistry` +
   the MVP aggregators (count, count_distinct, sum, avg, min, max, median,
   stddev, variance, percentile, first, last, string_agg, array_agg, bool_and/or,

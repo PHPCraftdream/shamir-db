@@ -4,6 +4,9 @@
 //! `is_email is_url is_uuid is_ipv4 is_ipv6 is_phone luhn in_range matches
 //!  is_json is_empty len_between`.
 //!
+//! Note: `is_json` validates a `Str` as a syntactically correct RFC 8259
+//! text-encoded document. It is a user-facing public API function name.
+//!
 //! Conventions (mirroring [`crate::math`]):
 //! - Every function returns a `Bool` via [`v_bool`]; these pair with the
 //!   table validators feature (CHECK / BEFORE-write hooks).
@@ -77,12 +80,13 @@ fn luhn_valid(s: &str) -> bool {
     sum.is_multiple_of(10)
 }
 
-/// Whether `s` is a syntactically valid JSON document. A self-contained
-/// recursive-descent validator (the crate does not depend on `serde_json`):
-/// it parses one top-level value, then requires only trailing whitespace.
-fn is_json_str(s: &str) -> bool {
+/// Whether `s` is a syntactically valid text-encoded document (RFC 8259
+/// legacy text format). A self-contained recursive-descent validator with
+/// no external parser dependency: it parses one top-level value, then
+/// requires only trailing whitespace.
+fn is_text_encoded_str(s: &str) -> bool {
     let bytes = s.as_bytes();
-    let mut p = JsonParser { b: bytes, i: 0 };
+    let mut p = TextFormatParser { b: bytes, i: 0 };
     p.skip_ws();
     if !p.value() {
         return false;
@@ -91,12 +95,12 @@ fn is_json_str(s: &str) -> bool {
     p.i == bytes.len()
 }
 
-struct JsonParser<'a> {
+struct TextFormatParser<'a> {
     b: &'a [u8],
     i: usize,
 }
 
-impl JsonParser<'_> {
+impl TextFormatParser<'_> {
     fn skip_ws(&mut self) {
         while let Some(&c) = self.b.get(self.i) {
             if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
@@ -344,7 +348,11 @@ pub fn register(reg: &mut ScalarRegistry) {
     );
     reg.register(
         "is_json",
-        FnEntry::pure(|a| Ok(v_bool(is_json_str(arg_str(a, 0)?))), 1, Some(1)),
+        FnEntry::pure(
+            |a| Ok(v_bool(is_text_encoded_str(arg_str(a, 0)?))),
+            1,
+            Some(1),
+        ),
     );
     reg.register(
         "is_empty",

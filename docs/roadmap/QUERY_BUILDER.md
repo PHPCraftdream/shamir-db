@@ -21,7 +21,7 @@ you build is exactly what goes on the wire, and the existing planner / engine
 handle it unchanged.
 
 Consequences:
-- The crate depends only on `shamir-query-types` + `serde`/`serde_json`. No
+- The crate depends only on `shamir-query-types` + `serde`/`rmp_serde`. No
   engine, no tokio → it compiles to **WASM** for browser clients.
 - `shamir-client` re-exports it and adds the async `execute(batch)` call.
 - Bugs can only be ergonomics bugs, never wire-divergence bugs.
@@ -233,7 +233,7 @@ aliases.)
 ### 4.2 Dependencies in writes, too
 
 `$query` refs work in `insert`/`set`/`update` values (the planner recurses
-JSON), so handles compose into `Doc`:
+msgpack), so handles compose into `Doc`:
 
 ```rust
 let user = b.query("u", Query::from("users").where_eq("email", "a@x").select(["id"]));
@@ -333,7 +333,7 @@ So the builder's response helpers are: `result/rows_as/row_as/get_as`,
 
 ```
 crates/shamir-query-builder/
-├── Cargo.toml            # deps: shamir-query-types, serde, serde_json
+├── Cargo.toml            # deps: shamir-query-types, serde, rmp_serde
 └── src/
     ├── lib.rs            # re-exports
     ├── val.rs            # lit/col/func/qref + From impls  → FilterValue
@@ -366,7 +366,7 @@ re-exports the builder so app code has a single import.
 - **P5 — `response`:** typed extraction + error surface (after confirming the
   response error shape).
 - **P6 — client wiring + test migration (#151):** `Client::execute`, then port
-  the existing query tests (`serde_json::json!` literals) onto the builder.
+  the existing query tests (msgpack literals) onto the builder.
 - **P7 (later) — typed admin/auth/migration ops** beyond the `.op()` escape
   hatch.
 

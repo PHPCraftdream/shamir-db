@@ -29,7 +29,7 @@
 
 `filter_from_value` рекурсивно парсит `QueryValue`-объект с ключом `"op"`:
 
-```json
+```
 {"op": "eq", "field": ["status"], "value": "active"}
 
 {"op": "and", "filters": [
@@ -53,7 +53,7 @@ Null: `is_null`, `is_not_null`
 
 Пути к полям — массивы строк (без парсинга строк с точками):
 
-```json
+```
 "field": ["user", "address", "city"]
 ```
 
@@ -64,7 +64,7 @@ Null: `is_null`, `is_not_null`
 
 Значения в фильтрах поддерживают несколько форматов:
 
-```json
+```
 "value": "active"                              // литерал
 "value": {"$ref": ["other_field"]}             // ссылка на поле записи
 "value": {"$query": "alias", "path": "[0].id"} // ссылка на результат другого запроса

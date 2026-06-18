@@ -66,22 +66,38 @@ async fn pick_free_port() -> SocketAddr {
     addr
 }
 
-async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+/// Raw HTTP GET returning status code and body bytes (needed for binary
+/// responses such as the msgpack `/info` endpoint).
+async fn http_get_raw(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     let mut buf = Vec::new();
     s.read_to_end(&mut buf).await.unwrap();
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    // Crude HTTP parse: status line is "HTTP/1.1 NNN ..."
-    let status: u16 = text
+    // Crude HTTP parse: headers are always ASCII, so find "\r\n\r\n" in bytes.
+    let hdr_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(buf.len());
+    let hdr = String::from_utf8_lossy(&buf[..hdr_end]);
+    let status: u16 = hdr
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(text.len());
-    (status, text[body_start..].to_string())
+    let body_start = hdr_end + 4;
+    let body = if body_start <= buf.len() {
+        buf[body_start..].to_vec()
+    } else {
+        Vec::new()
+    };
+    (status, body)
+}
+
+async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+    let (status, body) = http_get_raw(addr, path).await;
+    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -138,19 +154,20 @@ async fn endpoints_return_expected_codes_and_content() {
         &body.chars().take(500).collect::<String>()
     );
 
-    // /info — pretty JSON.
-    let (status, body) = http_get(obs_addr, "/info").await;
+    // /info — msgpack-encoded server info.
+    let (status, body) = http_get_raw(obs_addr, "/info").await;
     assert_eq!(status, 200, "info status");
-    assert!(
-        body.contains("uptime_seconds"),
-        "info body fields, got {:?}",
-        body
-    );
-    assert!(
-        body.contains("\"ready\":true"),
-        "info should say ready=true, got {:?}",
-        body
-    );
+    #[derive(serde::Deserialize)]
+    struct InfoBody {
+        uptime_seconds: u64,
+        ready: bool,
+    }
+    let info: InfoBody = rmp_serde::from_slice(&body)
+        .unwrap_or_else(|e| panic!("info body should decode as msgpack InfoBody: {e}"));
+    assert!(info.ready, "info should say ready=true");
+    // uptime_seconds is always present (just decoded it); sanity-check
+    // it's a reasonable value (server just booted).
+    assert!(info.uptime_seconds < 60, "uptime sanity");
 
     handle.shutdown().await;
 }

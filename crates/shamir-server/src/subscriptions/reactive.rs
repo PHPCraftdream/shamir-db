@@ -36,7 +36,7 @@ fn inject_event_bindings(
 }
 
 /// Build a wrapper `BatchRequest` that wraps a sub-batch with merged bindings,
-/// execute it, and return the msgpack-encoded response (or JSON error).
+/// execute it, and return the msgpack-encoded response (or error bytes).
 pub(super) async fn execute_reactive_batch(
     db: &ShamirDb,
     db_name: &str,

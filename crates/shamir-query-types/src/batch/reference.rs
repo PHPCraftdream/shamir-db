@@ -27,7 +27,7 @@
 //!
 //! References are used in filter values with the `$query` key:
 //!
-//! ```json
+//! ```text
 //! {
 //!   "op": "eq",
 //!   "field": "user_id",
@@ -37,7 +37,7 @@
 //!
 //! Or with explicit path:
 //!
-//! ```json
+//! ```text
 //! {
 //!   "value": {
 //!     "$query": "users",

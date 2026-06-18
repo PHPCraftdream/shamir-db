@@ -76,7 +76,7 @@ The heavy lifting is already shipped — a procedure call is "almost there":
 
 ### A. Result format — `QueryResult.value` vs records-mapping
 `QueryResult` today is `{ records: Vec<Value>, stats, pagination }`.
-- **Option A1 (recommended): add `value: Option<serde_json::Value>`** to
+- **Option A1 (recommended): add `value: Option<QueryValue>`** to
   `QueryResult`, serde-skipped when `None`. A procedure puts a non-tabular
   answer (scalar / object) in `value`; a tabular answer stays in
   `records`. Clean, unambiguous, backward-compatible.

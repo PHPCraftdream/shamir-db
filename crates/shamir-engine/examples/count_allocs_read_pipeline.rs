@@ -7,24 +7,24 @@
 //! Run:
 //!   cargo run --release --example count_allocs_read_pipeline
 //!
-//! Note: J1 migration — apply_select (JSON) removed; pipeline now uses
+//! Note: J1 migration — apply_select (legacy value path) removed; pipeline now uses
 //! apply_select_value (QueryValue) + apply_order_by_qv. The allocation
 //! counts will differ from the 2026-05-26 baseline below, which measured
-//! the JSON path.
+//! the legacy path.
 //!
-//! Measured 2026-05-26 (release build, 100k records, full read pipeline, JSON path):
+//! Measured 2026-05-26 (release build, 100k records, full read pipeline, legacy path):
 //!   - Total allocations:        1 600 007
 //!   - Total bytes allocated:    140.5 MB
 //!   - Allocs per record:         16.0
 //!   - Bytes per record:          1 474
 //!
-//! Phase breakdown (JSON path):
+//! Phase breakdown (legacy path):
 //!   - apply_select:     800 002 allocs  (8.0/rec)   68.7 MB  61.6% of time
 //!   - apply_order_by:   800 005 allocs  (8.0/rec)   71.8 MB  14.9% of time
 //!   - apply_pagination:       0 allocs                0 MB   23.6% of time
 //!
 //! Verdict: >5% — PROCEED with #70 (arena allocator). The read pipeline
-//! is allocation-bound. Every per-record json::Map + String key can be
+//! is allocation-bound. Every per-record Map + String key can be
 //! served from a bump allocator that resets per query.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -186,7 +186,7 @@ fn main() {
     println!("║  QUERY-SCOPED ALLOCATION BASELINE  (#107)                 ║");
     println!("╚════════════════════════════════════════════════════════════╝");
     println!();
-    println!("Records: {n}  (QueryValue path — JSON path removed in J1)");
+    println!("Records: {n}  (QueryValue path — legacy path removed in J1)");
     println!();
 
     println!("── Phase timings ──────────────────────────────────────────");

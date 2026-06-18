@@ -19,7 +19,7 @@
 | Категория | Что | Где |
 |---|---|---|
 | Логи | `tracing` + `EnvFilter` из config | `main.rs`, `server.rs` |
-| Audit-цепочка | HMAC-chain + JSON-line + checkpoint | `audit_appender.rs` |
+| Audit-цепочка | HMAC-chain + audit-line + checkpoint | `audit_appender.rs` |
 | Per-subnet rate limit | `auth_init` token-bucket + restart warmup | `shamir-connect::rate_limit` |
 | Lockout | exponential backoff + 5 min idle GC | `shamir-connect::lockout` |
 | Argon2id concurrency cap | semaphore `try_acquire` | config `argon2_concurrent_max` |
@@ -54,7 +54,7 @@
 
 | # | Задача | Время | Что и зачем |
 |---|--------|-------|-------------|
-| 1 | Observability HTTP-сервер: `/healthz`, `/readyz`, `/metrics`, `/info` | ~4 ч | **P0 #1 и #6 объединены** — один маленький HTTP-сервер (axum/hyper, обычно `127.0.0.1:9090`). `/healthz` boolean alive (для K8s liveness, держим простым), `/readyz` boolean готовности (для traffic gating), `/metrics` стандартный Prometheus формат с **process metrics** (`process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_threads`, `process_io_read_bytes_total`, `process_io_write_bytes_total`) + application metrics (sessions, connections, auth attempts). `/info` опциональный pretty-JSON для curl-debug'инга. Используем crate `metrics-process` — кроссплатформенно, эмитит стандартные имена которые node_exporter / Grafana уже понимают. Background poller раз в 5 сек обновляет кэш (~30-50 μs работы), probes читают атомики (~ns). Overhead: 0.001% CPU |
+| 1 | Observability HTTP-сервер: `/healthz`, `/readyz`, `/metrics`, `/info` | ~4 ч | **P0 #1 и #6 объединены** — один маленький HTTP-сервер (axum/hyper, обычно `127.0.0.1:9090`). `/healthz` boolean alive (для K8s liveness, держим простым), `/readyz` boolean готовности (для traffic gating), `/metrics` стандартный Prometheus формат с **process metrics** (`process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_threads`, `process_io_read_bytes_total`, `process_io_write_bytes_total`) + application metrics (sessions, connections, auth attempts). `/info` опциональный pretty-printed msgpack для curl-debug'инга. Используем crate `metrics-process` — кроссплатформенно, эмитит стандартные имена которые node_exporter / Grafana уже понимают. Background poller раз в 5 сек обновляет кэш (~30-50 μs работы), probes читают атомики (~ns). Overhead: 0.001% CPU |
 | 2 | Backups | ~3 ч | `Database::backup()` + CLI `shamir-server backup --to /path`. Кэш regenerate'ит, но user data → терять нельзя |
 | 3 | Global max-connections cap | ~2 ч | Atomic counter, отказ accept'а при лимите. Без этого DDoS = OOM |
 | 4 | Pre-handshake read/write timeout | ~1 ч | Slow-loris защита. Одна `tokio::time::timeout` на auth_init read |
@@ -99,7 +99,7 @@
 | **Encryption at rest** | LUKS / cloud-managed encryption (EBS, GCP PD) делают это лучше + transparent. SQLCipher-style — много кода, slow, ключи всё равно нужно где-то хранить → та же проблема |
 | **HSM/KMS** для большинства | Если seed файл с `chmod 600` + диск зашифрован — этого достаточно для всего кроме FedRAMP-grade compliance. Откладываем до compliance-driver |
 | **Schema migrations infrastructure** | Сейчас одна версия. Преждевременная оптимизация. Сделаем когда впервые понадобится |
-| **Audit query API** | `jq` + `tail -f` + `grep` работают на JSON-line файле. Admin API — сахар. Если есть Splunk/ELK — туда отправлять важнее чем API |
+| **Audit query API** | `jq` + `tail -f` + `grep` работают на audit-line файле. Admin API — сахар. Если есть Splunk/ELK — туда отправлять важнее чем API |
 | ~~**Query result streaming (cursor)**~~ ← **изменено** | Изначальный аргумент "10 MB достаточно" был патерналистским — за пользователя нельзя решать. Промежуточное решение: configurable `max_result_size_bytes` (P0 #10). Полный streaming с cursor/cancellation/multi-frame — отдельный major feature в P2, делать когда появится конкретный use-case (ETL с GB-датасетами и backpressure-требованиями) |
 | **Connection draining metrics** | Часть P0 #6 (Prometheus metrics) |
 | **Replication / HA** | Не "10 часов задача" — это **месяц** работы (Raft consensus или conflict resolution). Отдельный major feature, не пункт в roadmap |

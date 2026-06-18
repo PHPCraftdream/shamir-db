@@ -222,7 +222,7 @@ impl Session {
     pub fn principal_id(&self) -> u64 {
         // Mask to 63 bits so the id always fits an i64: the catalogue stores
         // integers as i64 (owner / group-member ids round-trip through
-        // JSON→InnerValue→msgpack), and a u64 above i64::MAX would be lost on
+        // InnerValue→msgpack), and a u64 above i64::MAX would be lost on
         // read-back. 63 bits of fxhash is ample for principal identity.
         fxhash::hash64(&self.username) & (i64::MAX as u64)
     }

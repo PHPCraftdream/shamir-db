@@ -1,6 +1,5 @@
 //! Tests for the read query execution pipeline (exec.rs).
 
-use serde_json::json;
 use shamir_types::mpack;
 
 use crate::query::filter::eval_context::FilterContext;
@@ -13,13 +12,6 @@ use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
-
-/// Convert a slice of QueryValue to Vec<json::Value> for assertion convenience.
-fn to_json(qvs: &[QueryValue]) -> Vec<serde_json::Value> {
-    qvs.iter()
-        .map(|v| serde_json::to_value(v).unwrap())
-        .collect()
-}
 
 /// S4 helper: encode `InnerValue` records to `Bytes` for the lens-fed
 /// aggregate pipeline.
@@ -80,9 +72,8 @@ fn select_all() {
 
     let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
-    let r = to_json(&result);
-    assert_eq!(r[0]["name"], "Alice");
-    assert_eq!(r[0]["age"], 30);
+    assert_eq!(result[0]["name"], "Alice");
+    assert_eq!(result[0]["age"], 30_i64);
 }
 
 #[test]
@@ -93,9 +84,8 @@ fn select_specific_fields() {
 
     let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
-    let r = to_json(&result);
-    assert_eq!(r[0]["name"], "Alice");
-    assert_eq!(r[0]["age"], 30);
+    assert_eq!(result[0]["name"], "Alice");
+    assert_eq!(result[0]["age"], 30_i64);
     // city should not be present
     match &result[0] {
         QueryValue::Map(m) => assert!(!m.contains_key("city")),
@@ -113,9 +103,11 @@ fn select_with_alias() {
     };
 
     let result = apply_select_value(&records, &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r[0]["user_name"], "Alice");
-    assert!(r[0].get("name").is_none());
+    assert_eq!(result[0]["user_name"], "Alice");
+    match &result[0] {
+        QueryValue::Map(m) => assert!(!m.contains_key("name")),
+        _ => panic!("expected QueryValue::Map"),
+    }
 }
 
 #[test]
@@ -128,9 +120,8 @@ fn select_nonexistent_field_returns_null() {
     };
 
     let result = apply_select_value(&records, &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r[0]["name"], "Alice");
-    assert!(r[0]["nonexistent"].is_null());
+    assert_eq!(result[0]["name"], "Alice");
+    assert!(result[0]["nonexistent"].is_null());
 }
 
 // ============================================================================
@@ -151,10 +142,9 @@ fn select_scalar_function_projection() {
     };
 
     let result = apply_select_value(&records, &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r[0]["name"], "Alice");
-    assert_eq!(r[0]["upper_name"], "ALICE");
-    assert_eq!(r[1]["upper_name"], "BOB");
+    assert_eq!(result[0]["name"], "Alice");
+    assert_eq!(result[0]["upper_name"], "ALICE");
+    assert_eq!(result[1]["upper_name"], "BOB");
 }
 
 #[test]
@@ -172,8 +162,7 @@ fn select_scalar_function_nested_and_literal() {
     };
 
     let result = apply_select_value(&records, &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r[0]["shout"], "NYC!");
+    assert_eq!(result[0]["shout"], "NYC!");
 }
 
 #[test]
@@ -216,12 +205,11 @@ fn group_by_count() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
-    assert_eq!(r.len(), 2);
-    assert_eq!(r[0]["city"], "LA");
-    assert_eq!(r[0]["cnt"], 2);
-    assert_eq!(r[1]["city"], "NYC");
-    assert_eq!(r[1]["cnt"], 2);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["city"], "LA");
+    assert_eq!(result[0]["cnt"], 2_i64);
+    assert_eq!(result[1]["city"], "NYC");
+    assert_eq!(result[1]["cnt"], 2_i64);
 }
 
 #[test]
@@ -248,13 +236,12 @@ fn group_by_sum_avg() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
-    assert_eq!(r[0]["city"], "LA");
-    assert_eq!(r[0]["total_age"], 50);
-    assert_eq!(r[0]["avg_age"], 25.0);
-    assert_eq!(r[1]["city"], "NYC");
-    assert_eq!(r[1]["total_age"], 65);
-    assert_eq!(r[1]["avg_age"], 32.5);
+    assert_eq!(result[0]["city"], "LA");
+    assert_eq!(result[0]["total_age"], 50_i64);
+    assert_eq!(result[0]["avg_age"], 25.0_f64);
+    assert_eq!(result[1]["city"], "NYC");
+    assert_eq!(result[1]["total_age"], 65_i64);
+    assert_eq!(result[1]["avg_age"], 32.5_f64);
 }
 
 #[test]
@@ -281,11 +268,10 @@ fn group_by_min_max() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
-    assert_eq!(r[0]["min_age"], 25);
-    assert_eq!(r[0]["max_age"], 25);
-    assert_eq!(r[1]["min_age"], 30);
-    assert_eq!(r[1]["max_age"], 35);
+    assert_eq!(result[0]["min_age"], 25_i64);
+    assert_eq!(result[0]["max_age"], 25_i64);
+    assert_eq!(result[1]["min_age"], 30_i64);
+    assert_eq!(result[1]["max_age"], 35_i64);
 }
 
 #[test]
@@ -311,9 +297,8 @@ fn group_by_having() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0]["city"], "NYC");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["city"], "NYC");
 }
 
 #[test]
@@ -388,10 +373,9 @@ fn aggregate_all_count_sum() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r.len(), 1);
-    assert_eq!(r[0]["total"], 4);
-    assert_eq!(r[0]["sum_age"], 115);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["total"], 4_i64);
+    assert_eq!(result[0]["sum_age"], 115_i64);
 }
 
 // ============================================================================
@@ -408,10 +392,9 @@ fn order_by_asc() {
 
     let order = OrderBy::asc("age");
     apply_order_by_qv(&mut records, &order);
-    let r = to_json(&records);
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["age"], 35);
+    assert_eq!(records[0]["age"], 25_i64);
+    assert_eq!(records[1]["age"], 30_i64);
+    assert_eq!(records[2]["age"], 35_i64);
 }
 
 #[test]
@@ -424,10 +407,9 @@ fn order_by_desc() {
 
     let order = OrderBy::desc("age");
     apply_order_by_qv(&mut records, &order);
-    let r = to_json(&records);
-    assert_eq!(r[0]["age"], 35);
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["age"], 25);
+    assert_eq!(records[0]["age"], 35_i64);
+    assert_eq!(records[1]["age"], 30_i64);
+    assert_eq!(records[2]["age"], 25_i64);
 }
 
 #[test]
@@ -441,15 +423,14 @@ fn order_by_multiple_fields() {
 
     let order = OrderBy::new([OrderByItem::asc("city"), OrderByItem::asc("age")]);
     apply_order_by_qv(&mut records, &order);
-    let r = to_json(&records);
-    assert_eq!(r[0]["city"], "LA");
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["city"], "LA");
-    assert_eq!(r[1]["age"], 30);
-    assert_eq!(r[2]["city"], "NYC");
-    assert_eq!(r[2]["age"], 30);
-    assert_eq!(r[3]["city"], "NYC");
-    assert_eq!(r[3]["age"], 35);
+    assert_eq!(records[0]["city"], "LA");
+    assert_eq!(records[0]["age"], 25_i64);
+    assert_eq!(records[1]["city"], "LA");
+    assert_eq!(records[1]["age"], 30_i64);
+    assert_eq!(records[2]["city"], "NYC");
+    assert_eq!(records[2]["age"], 30_i64);
+    assert_eq!(records[3]["city"], "NYC");
+    assert_eq!(records[3]["age"], 35_i64);
 }
 
 #[test]
@@ -463,11 +444,10 @@ fn order_by_nulls_first() {
 
     let order = OrderBy::new([OrderByItem::asc("age").nulls_first()]);
     apply_order_by_qv(&mut records, &order);
-    let r = to_json(&records);
     // Bob (no age) must come first
-    assert!(r[0].get("age").is_none() || r[0]["age"].is_null());
-    assert_eq!(r[1]["age"], 25);
-    assert_eq!(r[2]["age"], 30);
+    assert!(records[0]["age"].is_null());
+    assert_eq!(records[1]["age"], 25_i64);
+    assert_eq!(records[2]["age"], 30_i64);
 }
 
 #[test]
@@ -481,10 +461,9 @@ fn order_by_nulls_last() {
 
     let order = OrderBy::new([OrderByItem::asc("age").nulls_last()]);
     apply_order_by_qv(&mut records, &order);
-    let r = to_json(&records);
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["age"], 30);
-    assert!(r[2].get("age").is_none() || r[2]["age"].is_null());
+    assert_eq!(records[0]["age"], 25_i64);
+    assert_eq!(records[1]["age"], 30_i64);
+    assert!(records[2]["age"].is_null());
 }
 
 #[test]
@@ -501,8 +480,7 @@ fn order_by_single_record() {
     let order = OrderBy::desc("age");
     apply_order_by_qv(&mut records, &order);
     assert_eq!(records.len(), 1);
-    let r = to_json(&records);
-    assert_eq!(r[0]["age"], 30);
+    assert_eq!(records[0]["age"], 30_i64);
 }
 
 #[test]
@@ -516,10 +494,9 @@ fn order_by_explicit_null_value() {
     let order = OrderBy::asc("age");
     apply_order_by_qv(&mut records, &order);
     // Default ASC -> NullsOrder::Last
-    let r = to_json(&records);
-    assert_eq!(r[0]["age"], 25);
-    assert_eq!(r[1]["age"], 30);
-    assert!(r[2]["age"].is_null());
+    assert_eq!(records[0]["age"], 25_i64);
+    assert_eq!(records[1]["age"], 30_i64);
+    assert!(records[2]["age"].is_null());
 }
 
 #[test]
@@ -534,10 +511,9 @@ fn order_by_mixed_types() {
     apply_order_by_qv(&mut records, &order);
     // Mixed types compare as Equal in the default comparator,
     // so original order is preserved (stable sort).
-    let r = to_json(&records);
-    assert_eq!(r[0]["val"], "hello");
-    assert_eq!(r[1]["val"], 42);
-    assert_eq!(r[2]["val"], true);
+    assert_eq!(records[0]["val"], "hello");
+    assert_eq!(records[1]["val"], 42_i64);
+    assert_eq!(records[2]["val"], true);
 }
 
 #[test]
@@ -550,10 +526,9 @@ fn order_by_empty_items() {
     let order = OrderBy::new([]);
     apply_order_by_qv(&mut records, &order);
     // Empty order_by -> no sort -> original order preserved
-    let r = to_json(&records);
-    assert_eq!(r[0]["name"], "Carol");
-    assert_eq!(r[1]["name"], "Alice");
-    assert_eq!(r[2]["name"], "Bob");
+    assert_eq!(records[0]["name"], "Carol");
+    assert_eq!(records[1]["name"], "Alice");
+    assert_eq!(records[2]["name"], "Bob");
 }
 
 // ============================================================================
@@ -562,7 +537,7 @@ fn order_by_empty_items() {
 
 #[test]
 fn pagination_limit_offset() {
-    let records = vec![json!(1), json!(2), json!(3), json!(4), json!(5)];
+    let records: Vec<QueryValue> = (1..=5).map(QueryValue::Int).collect();
 
     let pagination = Pagination::LimitOffset {
         limit: Some(2),
@@ -570,7 +545,7 @@ fn pagination_limit_offset() {
     };
     let (result, info) = apply_pagination(records, &pagination, true);
 
-    assert_eq!(result, vec![json!(2), json!(3)]);
+    assert_eq!(result, vec![QueryValue::Int(2), QueryValue::Int(3)]);
     let info = info.unwrap();
     assert_eq!(info.total_count, Some(5));
     assert!(info.has_next);
@@ -579,12 +554,12 @@ fn pagination_limit_offset() {
 
 #[test]
 fn pagination_page_based() {
-    let records = vec![json!(1), json!(2), json!(3), json!(4), json!(5)];
+    let records: Vec<QueryValue> = (1..=5).map(QueryValue::Int).collect();
 
     let pagination = Pagination::page(2, 2);
     let (result, info) = apply_pagination(records, &pagination, true);
 
-    assert_eq!(result, vec![json!(3), json!(4)]);
+    assert_eq!(result, vec![QueryValue::Int(3), QueryValue::Int(4)]);
     let info = info.unwrap();
     assert_eq!(info.total_count, Some(5));
     assert_eq!(info.current_page, Some(2));
@@ -594,7 +569,7 @@ fn pagination_page_based() {
 
 #[test]
 fn pagination_count_total_false() {
-    let records = vec![json!(1), json!(2), json!(3)];
+    let records: Vec<QueryValue> = (1..=3).map(QueryValue::Int).collect();
 
     let pagination = Pagination::LimitOffset {
         limit: Some(2),
@@ -602,22 +577,22 @@ fn pagination_count_total_false() {
     };
     let (result, info) = apply_pagination(records, &pagination, false);
 
-    assert_eq!(result, vec![json!(1), json!(2)]);
+    assert_eq!(result, vec![QueryValue::Int(1), QueryValue::Int(2)]);
     let info = info.unwrap();
     assert_eq!(info.total_count, None);
 }
 
 #[test]
 fn pagination_none_no_count() {
-    let records = vec![json!(1), json!(2)];
+    let records: Vec<QueryValue> = (1..=2).map(QueryValue::Int).collect();
     let pagination = Pagination::None;
     let (result, info) = apply_pagination(records, &pagination, false);
-    assert_eq!(result, vec![json!(1), json!(2)]);
+    assert_eq!(result, vec![QueryValue::Int(1), QueryValue::Int(2)]);
     assert!(info.is_none());
 }
 
 // ============================================================================
-// apply_distinct_qv tests (migrated from JSON apply_distinct)
+// apply_distinct_qv tests (migrated from legacy apply_distinct)
 // ============================================================================
 
 #[test]
@@ -641,11 +616,9 @@ fn distinct_removes_duplicates() {
 
     let result = apply_distinct_qv(records);
     assert_eq!(result.len(), 3);
-    // Verify expected values via JSON serialisation
-    let r = to_json(&result);
-    assert_eq!(r[0]["a"], 1);
-    assert_eq!(r[1]["a"], 2);
-    assert_eq!(r[2]["a"], 3);
+    assert_eq!(result[0]["a"], QueryValue::Int(1));
+    assert_eq!(result[1]["a"], QueryValue::Int(2));
+    assert_eq!(result[2]["a"], QueryValue::Int(3));
 }
 
 // ============================================================================
@@ -694,16 +667,15 @@ fn aggregate_fn_median_per_group() {
         &interner,
         &ctx,
     );
-    let r = to_json(&result);
 
     // Groups are emitted in alphabetical key order: LA, then NYC.
-    assert_eq!(r.len(), 2);
-    assert_eq!(r[0]["city"], "LA");
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["city"], "LA");
     // LA ages [25, 25] -> lower-median = 25.
-    assert_eq!(r[0]["med_age"], 25);
-    assert_eq!(r[1]["city"], "NYC");
+    assert_eq!(result[0]["med_age"], 25_i64);
+    assert_eq!(result[1]["city"], "NYC");
     // NYC ages [30, 35] -> lower-median (even n) = 30.
-    assert_eq!(r[1]["med_age"], 30);
+    assert_eq!(result[1]["med_age"], 30_i64);
 }
 
 #[test]
@@ -718,10 +690,9 @@ fn aggregate_fn_count_distinct_all_rows() {
     assert!(has_aggregates(&select));
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r.len(), 1);
+    assert_eq!(result.len(), 1);
     // Distinct cities across the four rows: NYC, LA -> 2.
-    assert_eq!(r[0]["cities"], 2);
+    assert_eq!(result[0]["cities"], 2_i64);
 }
 
 #[test]
@@ -734,8 +705,7 @@ fn aggregate_fn_unknown_name_is_null() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let r = to_json(&result);
-    assert_eq!(r.len(), 1);
+    assert_eq!(result.len(), 1);
     // An unregistered aggregate yields a null cell, never a panic.
-    assert_eq!(r[0]["x"], serde_json::Value::Null);
+    assert!(result[0]["x"].is_null());
 }

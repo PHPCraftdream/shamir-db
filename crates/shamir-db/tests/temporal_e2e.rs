@@ -20,7 +20,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::json;
 use tokio::time::timeout;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
@@ -34,6 +33,7 @@ use shamir_query_builder::filter::eq;
 use shamir_query_builder::write::{insert, update};
 use shamir_query_builder::Query;
 use shamir_query_types::admin::{PurgeScope, Retention};
+use shamir_types::types::value::QueryValue;
 
 // ---------------------------------------------------------------------------
 // Fixtures & helpers
@@ -136,7 +136,7 @@ async fn recv_version(
 
 /// Run a `Query` (any temporal mode) filtered by `name` and return its
 /// record list. The query already carries its target table via `Query::from`.
-async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<serde_json::Value> {
+async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<QueryValue> {
     let mut b = Batch::new();
     b.id(3);
     b.query("q", q.where_eq("name", "alice").clone());
@@ -147,13 +147,13 @@ async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<serde_json::Val
     resp.results["q"]
         .records
         .iter()
-        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
+        .map(|r| r.as_value().into_owned())
         .collect()
 }
 
 /// Run `ChangesSince { changes_since: cursor }` against `(db, main)` and
 /// return the parsed result object. Mirrors `changes_since.rs::run_changes_since`.
-async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> serde_json::Value {
+async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> QueryValue {
     let mut b = Batch::new();
     b.id(4);
     b.changes_since("cs", ddl::changes_since(cursor));
@@ -161,7 +161,7 @@ async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> serde_js
         .execute(db, &b.to_request_via_msgpack())
         .await
         .expect("ChangesSince execute");
-    serde_json::to_value(resp.results["cs"].records[0].as_value().into_owned()).unwrap()
+    resp.results["cs"].records[0].as_value().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +292,7 @@ async fn temporal_lifecycle_e2e() {
     // Exercises T4-changes-since. The durable journal is flushed async by a
     // background writer, so we poll until the expected count lands (mirrors
     // `changes_since.rs`).
-    let mut result = serde_json::Value::Null;
+    let mut result = QueryValue::Null;
     for _ in 0..100 {
         result = run_changes_since(&shamir, "testdb", 0).await;
         if result["events"].as_array().map(|a| a.len()).unwrap_or(0) >= 4 {
@@ -320,11 +320,7 @@ async fn temporal_lifecycle_e2e() {
         result.get("gap_at").is_some(),
         "gap_at present in ChangesSince result"
     );
-    assert_eq!(
-        result["gap_at"],
-        json!(null),
-        "no gap in the low-volume case"
-    );
+    assert!(result["gap_at"].is_null(), "no gap in the low-volume case");
 
     // ── 6. PURGEHISTORY — absolute cutoff removes old versions ──────────
     // Exercises T4-purge. Use `OlderThan { timestamp }` (absolute, deterministic

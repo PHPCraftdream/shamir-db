@@ -3,8 +3,6 @@
 //! All batch requests are built with `shamir_query_builder` and round-tripped
 //! through MessagePack to mirror the real wire path.
 
-use serde_json::json;
-
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
@@ -47,10 +45,9 @@ async fn test_list_databases() {
         .await
         .unwrap();
 
-    let rec_val =
-        serde_json::to_value(resp.results["dbs"].records[0].as_value().into_owned()).unwrap();
-    let dbs = &rec_val["databases"];
-    assert!(dbs.as_array().unwrap().contains(&json!("testdb")));
+    let rec_val = resp.results["dbs"].records[0].as_value().into_owned();
+    let dbs = rec_val["databases"].as_array().unwrap();
+    assert!(dbs.iter().any(|v| v == "testdb"));
 }
 
 #[tokio::test]
@@ -65,10 +62,9 @@ async fn test_list_repos() {
         .await
         .unwrap();
 
-    let rec_val =
-        serde_json::to_value(resp.results["repos"].records[0].as_value().into_owned()).unwrap();
-    let repos = &rec_val["repos"];
-    assert!(repos.as_array().unwrap().contains(&json!("main")));
+    let rec_val = resp.results["repos"].records[0].as_value().into_owned();
+    let repos = rec_val["repos"].as_array().unwrap();
+    assert!(repos.iter().any(|v| v == "main"));
 }
 
 #[tokio::test]
@@ -83,10 +79,9 @@ async fn test_list_tables() {
         .await
         .unwrap();
 
-    let rec_val =
-        serde_json::to_value(resp.results["tables"].records[0].as_value().into_owned()).unwrap();
-    let tables = &rec_val["tables"];
-    assert!(tables.as_array().unwrap().contains(&json!("users")));
+    let rec_val = resp.results["tables"].records[0].as_value().into_owned();
+    let tables = rec_val["tables"].as_array().unwrap();
+    assert!(tables.iter().any(|v| v == "users"));
 }
 
 // ============================================================================
@@ -122,10 +117,9 @@ async fn test_create_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let rec_val =
-        serde_json::to_value(resp.results["repos"].records[0].as_value().into_owned()).unwrap();
-    let repos = &rec_val["repos"];
-    assert!(repos.as_array().unwrap().contains(&json!("hot_cache")));
+    let rec_val = resp.results["repos"].records[0].as_value().into_owned();
+    let repos = rec_val["repos"].as_array().unwrap();
+    assert!(repos.iter().any(|v| v == "hot_cache"));
 }
 
 #[tokio::test]
@@ -324,8 +318,7 @@ async fn test_list_indexes() {
         .await
         .unwrap();
 
-    let rec =
-        serde_json::to_value(resp.results["idxs"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["idxs"].records[0].as_value().into_owned();
     let indexes = rec["indexes"].as_array().unwrap();
     assert_eq!(indexes.len(), 2);
 
@@ -373,10 +366,9 @@ async fn test_create_table_then_use_it() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let rec =
-        serde_json::to_value(resp.results["tables"].records[0].as_value().into_owned()).unwrap();
+    let rec = resp.results["tables"].records[0].as_value().into_owned();
     let tables = rec["tables"].as_array().unwrap();
-    assert!(tables.contains(&json!("products")));
+    assert!(tables.iter().any(|v| v == "products"));
 
     // Actually insert data into the new table
     let mut b = Batch::new();

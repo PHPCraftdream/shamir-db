@@ -254,8 +254,8 @@ Operational note: pure-plain embedded deployments — это explicit limitation
 
 Append-only structured log в `__system__/audit_log` (или structured tracing с file backend).
 
-JSON-line (одна запись на строку, no inner whitespace в production):
-```json
+Audit-line (одна запись на строку, no inner whitespace в production):
+```text
 {"seq":42,"ts_ns":1717000000000000000,"event":"auth_success","transport":"tcp","user":"alice","ip_subnet":"192.0.2.0/24","session_id_prefix":"a1b2c3d4","result":"ok","details":{},"prev_hmac":"base64url(32)","hmac":"base64url(32)"}
 ```
 
@@ -602,7 +602,7 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 
 ## 11. Test Plan (release blockers)
 
-11.1. **Test vectors** — `docs/client-server-protocol-spec/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
+11.1. **Test vectors** — `docs/client-server-protocol-spec/test-vectors/auth_v1.msgpack` обязателен (см. AUTH §16).
 
 11.2. **Integration tests:**
 - Full TCP+TLS auth round-trip

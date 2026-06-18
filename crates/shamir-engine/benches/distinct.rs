@@ -1,11 +1,11 @@
 //! DISTINCT hot loop bench.
 //!
-//! `apply_distinct_qv` uses a canonical json key (HashableJson) for
+//! `apply_distinct_qv` uses a canonical hashable key (HashableQueryValue) for
 //! deduplication. For a result with N records of M fields that's N×O(M)
 //! walk-and-hash operations per record. The walk-and-hash path skips
 //! per-record string serialisation entirely vs the legacy string path.
 //!
-//! Note: J1 migration — apply_distinct (JSON) removed; bench now uses
+//! Note: J1 migration — apply_distinct (legacy value path) removed; bench now uses
 //! apply_distinct_qv (QueryValue path) which is the production function.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};

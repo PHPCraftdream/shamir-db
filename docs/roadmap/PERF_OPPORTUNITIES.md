@@ -181,7 +181,7 @@ syscall ~1 µs → 1 ms из 25 ms bulk_insert = 4 %.
 Batch allocator (1024 ids worth of randomness one call) сводит к
 **1 syscall на 1000 inserts**. Win 3–8 %, эффорт 1-2 ч.
 
-#### 10. JSON parsing на каждом execute() — **DEFER (Opt N)**
+#### 10. Query parsing на каждом execute() — **DEFER (Opt N)**
 
 Re-parse одного и того же query shape. Win 10–30 % только на
 **стационарном** workload (UI dashboards с фиксированным набором
@@ -596,14 +596,14 @@ On 100k records, 5 fields, release build:
 
 | Phase                                     | Time    |
 |-------------------------------------------|---------|
-| Pure `Vec<json::Value>` permutation       | ~1.3 ms |
+| Pure `Vec<QueryValue>` permutation       | ~1.3 ms |
 | Pre-extracted sort + permute (no lookup)  | ~5.3 ms |
 | Full `apply_order_by` (current, post-#67) | ~37 ms  |
 | Lookup + value-swap overhead              | ~30 ms  |
 
 `Value::get` lookup inside the comparator is **85 % of ORDER BY time**
 and **17 % of the whole read pipeline**. Pre-extracting sort keys
-(commit `fe1c822`) replaced the per-comparison `compare_json_values`
+(commit `fe1c822`) replaced the per-comparison `compare_values`
 with a typed `SortKey` enum and bought ~15-20 % wall-clock. The
 remaining ~6× gap is enum-tag matching + SmallVec cache pressure
 inside `compare_sort_keys`.
@@ -637,7 +637,7 @@ idle machine.** Numbers are noise when other workloads run in
 parallel — two implementation attempts on 2026-05-27 produced
 unreliable measurements for exactly this reason.
 
-### M2. Streaming JSON serializer — bypass intermediate `Value` tree
+### M2. Streaming msgpack serializer — bypass intermediate `Value` tree
 
 **Measurement.** `crates/shamir-engine/examples/count_allocs_read_pipeline.rs`
 (allocator-counter on the realistic read pipeline). 100k records,
@@ -654,29 +654,29 @@ SELECT * → ORDER BY → LIMIT 100:
 The dominant cost is **not** string clones (bench in commit `d037318`
 ruled them out: owned-move conversion was 1 % away from the borrow
 version, within noise). The structural overhead lives in
-`json::Map::new()` per record + `serde_json::Number::from_*` per
-numeric field + the eventual `serde_json::to_vec(&Value)` pass that
+`QueryValue::Map::new()` per record + numeric conversion per
+numeric field + the eventual `rmp_serde::to_vec(&Value)` pass that
 serialises the tree all over again.
 
-**Implementation.** Add a streaming path alongside `inner_to_json_value`:
+**Implementation.** Add a streaming path alongside `inner_to_query_value`:
 
 ```rust
-inner_to_json_writer(value: &InnerValue, interner: &Interner, writer: &mut impl io::Write)
+inner_to_msgpack_writer(value: &InnerValue, interner: &Interner, writer: &mut impl io::Write)
 ```
 
-Wraps `serde_json::Serializer::new(writer)` over a `Vec<u8>` /
+Wraps `rmp_serde::Serializer::new(writer)` over a `Vec<u8>` /
 `BytesMut`, walks `InnerValue` once, writes bytes directly. No
-intermediate `serde_json::Value` tree. The executor picks the
+intermediate `QueryValue` tree. The executor picks the
 streaming path when the consumer is a byte writer (the wire codec),
 falls back to the tree when ORDER BY or DISTINCT need to inspect the
 projection in memory.
 
 **Phases.**
 
-1. Helper `inner_to_json_writer` lands alongside the old function. Not
+1. Helper `inner_to_msgpack_writer` lands alongside the old function. Not
    wired up.
 2. Equivalence unit tests: streaming output parsed back equals
-   `inner_to_json_value`.
+   `inner_to_query_value`.
 3. Bench: streaming vs tree on the realistic 100k fixture.
 4. If ≥ 30 % win on the streaming scenario → wire into `apply_select`
    when a byte writer is available. Otherwise close as not-worth-it.
@@ -687,7 +687,7 @@ projection in memory.
 - `select_all/select_all_100k`                     — current `SELECT *` projection cost
 - `select_few_fields/select_2_of_6_fields_100k`    — partial projection
 - `select_then_serialize/select_all_then_serialize_100k` — full wire path:
-  build `Vec<json::Value>` then `serde_json::to_vec`. The streaming
+  build `Vec<QueryValue>` then `rmp_serde::to_vec`. The streaming
   path replaces both phases and competes against this single number.
 
 **Target.** `select_then_serialize` baseline → ≥ 30 % reduction. All

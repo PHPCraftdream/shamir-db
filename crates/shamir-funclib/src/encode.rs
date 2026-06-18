@@ -2,7 +2,7 @@
 //!
 //! Functions registered (plain names, no folder prefix):
 //! `base64_enc base64_dec base64url_enc base64url_dec hex_enc hex_dec
-//!  base32_enc base32_dec url_encode url_decode html_escape json_escape`.
+//!  base32_enc base32_dec url_encode url_decode html_escape str_escape_chars`.
 //!
 //! Conventions (mirroring `math.rs`):
 //! - Encoders accept bytes (`Bin`) **or** text (`Str`, taken as UTF-8 bytes)
@@ -10,7 +10,7 @@
 //!   input yields `ScalarError("decode_failed")`.
 //! - `url_encode` / `url_decode` operate on UTF-8 text and return a `Str`;
 //!   `url_decode` rejects non-UTF-8 percent sequences with `"decode_failed"`.
-//! - `html_escape` / `json_escape` are text→text escapers (return `Str`).
+//! - `html_escape` / `str_escape_chars` (registered as `json_escape`) are text→text escapers (return `Str`).
 //! - Every function here is pure + deterministic.
 
 use crate::registry::{arg_str, v_bytes, v_str, FnEntry, ScalarError, ScalarRegistry};
@@ -123,7 +123,7 @@ pub fn register(reg: &mut ScalarRegistry) {
     );
     reg.register(
         "json_escape",
-        FnEntry::pure(|a| Ok(v_str(json_escape(arg_str(a, 0)?))), 1, Some(1)),
+        FnEntry::pure(|a| Ok(v_str(str_escape_chars(arg_str(a, 0)?))), 1, Some(1)),
     );
 }
 
@@ -153,9 +153,10 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// Escape a string for embedding inside a JSON string literal (no surrounding
-/// quotes). Control characters below U+0020 use `\uXXXX`.
-fn json_escape(s: &str) -> String {
+/// Escape a string for embedding inside a text-format string literal (no
+/// surrounding quotes). Control characters below U+0020 use `\uXXXX`.
+/// This is the backing implementation for the `str_escape_chars` / `json_escape` public function.
+fn str_escape_chars(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

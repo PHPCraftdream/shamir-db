@@ -9,12 +9,12 @@ use shamir_types::access::ResourcePath;
 // ResourceRef — wire-friendly securable resource reference
 // ============================================================================
 
-/// A JSON-friendly reference to a securable resource that maps to
+/// Wire-encodable reference to a securable resource that maps to
 /// [`ResourcePath`].
 ///
 /// # Shapes
 ///
-/// ```json
+/// ```text
 /// { "database": "mydb" }
 /// { "store": ["mydb", "main"] }
 /// { "table": ["mydb", "main", "users"] }
@@ -63,7 +63,7 @@ impl ResourceRef {
 
 /// Reference to a group — either by name or by numeric id.
 ///
-/// ```json
+/// ```text
 /// { "name": "devs" }
 /// { "id": 3 }
 /// ```
@@ -80,7 +80,7 @@ pub enum GroupRef {
 
 /// Change mode bits on a securable resource.
 ///
-/// ```json
+/// ```text
 /// { "chmod": { "table": ["db", "main", "users"] }, "mode": 448 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ pub struct ChmodOp {
 
 /// Change owner on a securable resource.
 ///
-/// ```json
+/// ```text
 /// { "chown": { "table": ["db", "main", "users"] }, "owner": 7 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,7 +102,7 @@ pub struct ChownOp {
 
 /// Change group on a securable resource. `group: null` clears the group.
 ///
-/// ```json
+/// ```text
 /// { "chgrp": { "table": ["db", "main", "users"] }, "group": 3 }
 /// { "chgrp": { "table": ["db", "main", "users"] }, "group": null }
 /// ```
@@ -114,7 +114,7 @@ pub struct ChgrpOp {
 
 /// Create a new group.
 ///
-/// ```json
+/// ```text
 /// { "create_group": "devs" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,7 +124,7 @@ pub struct CreateGroupOp {
 
 /// Drop an existing group by name or id.
 ///
-/// ```json
+/// ```text
 /// { "drop_group": { "name": "devs" } }
 /// { "drop_group": { "id": 3 } }
 /// ```
@@ -135,7 +135,7 @@ pub struct DropGroupOp {
 
 /// Add a user to a group.
 ///
-/// ```json
+/// ```text
 /// { "add_group_member": { "name": "devs" }, "user": 42 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ pub struct AddGroupMemberOp {
 
 /// Remove a user from a group.
 ///
-/// ```json
+/// ```text
 /// { "remove_group_member": { "name": "devs" }, "user": 42 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,7 +164,7 @@ pub struct RemoveGroupMemberOp {
 /// every node, plus the principals (users and groups with membership)
 /// and the stored functions with their mode/setuid.
 ///
-/// ```json
+/// ```text
 /// { "access_tree": true }
 /// { "access_tree": true, "depth": 2 }
 /// { "access_tree": true, "db": "mydb" }

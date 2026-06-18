@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::ShamirDb;
-use shamir_types::codecs::interned::json::inner_value_to_query_value;
+use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::value::{InnerValue, QueryValue};
 use tokio::sync::OnceCell;

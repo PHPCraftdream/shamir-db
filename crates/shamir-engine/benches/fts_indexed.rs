@@ -18,7 +18,7 @@
 //!   - `brute_*`   — the table has **no** FTS index. The same query
 //!     falls through to the brute scan path (`Filter::matches()` per
 //!     record), exactly like `fts_brute_*_1000` in `filter_eval.rs`
-//!     but now including the `get_many` / `inner_to_json_value` tail
+//!     but now including the `get_many` / materialisation tail
 //!     so both numbers measure the *same units of work*.
 //!
 //! Corpus mirrors `filter_eval.rs`: 1000 records whose searched field
@@ -205,7 +205,7 @@ fn bench_fts(c: &mut Criterion) {
 // N=10000 — indexed_or:  ~23.5  ms   brute_or:  ~18.6 ms   (~within noise)
 //
 // At both N values, the per-call materialisation tail in `read_exec.rs`
-// (`get_many` + `inner_to_json_value` for matched rows) dominates the
+// (`get_many` + msgpack-decode for matched rows) dominates the
 // predicate cost. The original N=1000 numbers below stand as the
 // reference shape; the N=10000 sample run did NOT widen the indexed/brute
 // gap on this corpus the way we expected — likely because `"user"`
@@ -219,7 +219,7 @@ fn bench_fts(c: &mut Criterion) {
 //   - On 1000 rows with `where_` returning every doc ("or" mode), the
 //     indexed path is ~1.37x faster than brute (1.47 ms vs 2.02 ms):
 //     the index skips the per-doc tokenise+match loop, but still
-//     materialises and JSON-encodes all 1000 rows via `get_many` —
+//     materialises and msgpack-encodes all 1000 rows via `get_many` —
 //     that tail dominates.
 //   - On the "and" mode (0 hits) the two paths are within noise:
 //     brute's scan is cheap when the predicate fails on the first
@@ -237,7 +237,7 @@ fn bench_fts(c: &mut Criterion) {
 //   fts_brute_and_1000        ~tens of µs  (matches() per record only)
 //   fts_brute_or_1000         ~tens of µs
 // — confirming that for N=1000 the materialisation tail in
-// `read_exec.rs` (get_many + inner_to_json_value) is the bottleneck,
+// `read_exec.rs` (get_many + msgpack-decode) is the bottleneck,
 // not the predicate. The FTS index removes the predicate cost but
 // inherits the materialisation cost.
 

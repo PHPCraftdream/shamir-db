@@ -27,7 +27,7 @@ engine_perf -- bulk_insert` (QUICK). Before (текущий HEAD) → реали
 |---|---:|---:|---|
 | WriteResult→QueryResult (+ build в write_exec) | ~24000 | ~28% | `return_flagged` строит ответ по строкам **дважды**, бенч выбрасывает |
 | substitute_params + deep-eq `values==op.values` + owned_op.clone | ~15000 | ~18% | O(N) глубокое сравнение 1000 записей + 2 клона |
-| JSON→InnerValue + интернинг полей | ~11000 | ~13% | layered-interner пересобирается на batch |
+| wire→InnerValue + интернинг полей | ~11000 | ~13% | layered-interner пересобирается на batch |
 | wal_ops_from_tx (клон тел в WalOpV2 + re-parse RecordId) | ~8500 | ~10% | ещё одна копия всех тел |
 | msgpack-encode тел (stage) | ~6000 | 7% | |
 | overlay scc::TreeIndex + cell publish (per-row) | ~5600 | 7% | |
@@ -74,7 +74,7 @@ return_result) отдаёт **байт-идентичный** наблюдаем
 
 | Цикл | Δ (измерено) | Коммит | Суть |
 |---|---|---|---|
-| **C1+C2** | 89.7→62.7, **−30%** | `78c7610` | убрать двойную сборку ответа (`QueryRecord::Inserted` + lazy-json-кэш) + O(N) deep-eq `values==op.values` → `contains_param_ref` скан |
+| **C1+C2** | 89.7→62.7, **−30%** | `78c7610` | убрать двойную сборку ответа (`QueryRecord::Inserted` + lazy-value-кэш) + O(N) deep-eq `values==op.values` → `contains_param_ref` скан |
 | C3 wal_ops | **0 (шум)** | откат | атрибуция профиля завышена; per-row тела уже refcounted Bytes |
 | C4 single-row skips | **шум (≤1%)** | откат | backpressure/join_all амортизированы; single-row «1.1ms» = cold-start lazy-init, не та метрика |
 | **C5 overlay-remap** | 62.7→54.5, **−13%** | `408d7cd` | implicit insert интернит в base напрямую → `rewrite_set_inner` deep-walk не выполняется (паттерн C1) |
@@ -84,12 +84,12 @@ return_result) отдаёт **байт-идентичный** наблюдаем
 реализованы по её числам и оказались измеренным нулём. Надёжный метод — **ablation:
 выключить фазу, замерить САМ бенч; Δ над variance (~±2µs) = реальная стоимость.**
 Ablation вскрыл единственную над-variance redundancy после C1+C2 (overlay-remap,
-−6.6µs) → C5. Прочее (JSON→InnerValue конверсия, msgpack-encode, overlay-publish)
+−6.6µs) → C5. Прочее (wire→InnerValue конверсия, msgpack-encode, overlay-publish)
 ablation подтвердил как **необходимую** работу — bulk-путь **у пола**.
 
 ### Где дальше (за пределами дешёвой обвязки)
 Дешёвые redundant-win'ы исчерпаны (×1.65 взято). Дальше — **большие/архитектурные**:
-- ускорить **необходимую** per-row конверсию/encode (JSON→InnerValue, msgpack);
+- ускорить **необходимую** per-row конверсию/encode (wire→InnerValue, msgpack);
 - **disk/sustained-трек**: batch-drain (`set_many` на окно) + group-commit batching
   (см. `durability-model.md` / `capstone-subplan.md`) — поднимает backend-bandwidth;
 - **cold-start** (lazy-init дренажа/gate/interner) — для эфемерных репо.

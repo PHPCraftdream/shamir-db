@@ -96,8 +96,10 @@ async fn access_tree_over_the_wire_as_admin() {
         .expect("execute");
     let qr = resp.results.get("tree").expect("tree result present");
     let rec = qr.records.first().expect("one record");
-    let rec_json = serde_json::to_value(rec.as_value().into_owned()).unwrap();
-    let tree = &rec_json["access_tree"];
+    let rec_val = rec.as_value();
+    let tree = rec_val
+        .get("access_tree")
+        .expect("access_tree field present");
 
     // Resource root assembled.
     assert_eq!(
@@ -118,8 +120,8 @@ async fn access_tree_over_the_wire_as_admin() {
         "argon2id builtin present in functions"
     );
     // Principals section is always shaped (arrays present).
-    assert!(tree["principals"]["users"].is_array());
-    assert!(tree["principals"]["groups"].is_array());
+    assert!(tree["principals"]["users"].as_array().is_some());
+    assert!(tree["principals"]["groups"].as_array().is_some());
 
     handle.shutdown().await;
 }

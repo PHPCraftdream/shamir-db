@@ -23,7 +23,7 @@ use super::sub_batch_op::SubBatchOp;
 
 /// Batch operation - can be a read or a write operation.
 ///
-/// Detected by unique key in JSON object:
+/// Detected by unique key in the wire map:
 /// - `from` → Read
 /// - `insert_into` → Insert
 /// - `update` → Update (has `set` field too, but `update` is the discriminator)
@@ -193,9 +193,7 @@ impl Serialize for BatchOp {
 impl<'de> Deserialize<'de> for BatchOp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Buffer the map as a format-agnostic QueryValue first.
-        // When the wire format is msgpack this avoids materialising a
-        // serde_json::Value tree — QueryValue deserialises natively
-        // from any serde format.
+        // QueryValue deserialises natively from any serde format.
         use shamir_types::types::value::{QueryValue, Value};
 
         let qv = QueryValue::deserialize(deserializer)?;
@@ -209,12 +207,10 @@ impl<'de> Deserialize<'de> for BatchOp {
         let has = |k: &str| keys.iter().any(|s| s == k);
 
         // Re-encode the QueryValue through msgpack so that each typed-op
-        // struct can use its own serde::Deserialize impl without going
-        // through a serde_json::Value trampoline.  The msgpack encoding
-        // is byte-identical to what the wire carries when the caller is
-        // already on msgpack, and is a faithful round-trip for JSON
-        // callers (tests) too, because QueryValue's Serialize output is
-        // format-agnostic.
+        // struct can use its own serde::Deserialize impl.  The msgpack
+        // encoding is byte-identical to what the wire carries when the
+        // caller is already on msgpack, and is a faithful round-trip for
+        // test callers because QueryValue's Serialize is format-agnostic.
         let bytes = rmp_serde::to_vec_named(&qv).map_err(serde::de::Error::custom)?;
 
         /// Decode msgpack bytes into a typed op struct.

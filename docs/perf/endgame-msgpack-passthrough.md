@@ -34,7 +34,7 @@ intern/de-intern/дерева на операцию**.
 | Чтение результат | R5: де-интернинг прямо с линзы ✓ | сервер **всё ещё де-интернит** в имя-ключевое → отдать id-msgpack, де-интернинг **на клиента** |
 | Запись insert (hot) | прямой энкодер, без дерева ✓ | wire **имя-ключевой**, сервер **интернит per-write** → клиент шлёт id-msgpack, сервер пишет verbatim |
 | Клиент-интернер | кеш + touch + dump + ambient-delta ✓ | клиент **не интернит на отправке** / **не де-интернит ответ** |
-| JSON-приём записей | `json_to_inner` принимает | удалить (костыль) |
+| Legacy text ingest записей | `legacy_to_inner` принимает | удалить (костыль) |
 
 ---
 
@@ -46,32 +46,32 @@ intern/de-intern/дерева на операцию**.
   запись байт **verbatim**. Серверный per-write интернинг исчезает.
 - **S-read** (новая): id-ключевой read-wire. `SELECT *` = буквальный pass-through
   storage-байт; проекция = линза→id-msgpack-подмножество; клиент де-интернит.
-  **R5 переезжает на клиента**; серверные `inner_to_json` /
+  **R5 переезжает на клиента**; серверные `inner_to_legacy` /
   `inner_value_to_query_value` уходят с горячего read-пути.
 - **S-client** (достройка Stage 5): intern-on-send + de-intern-on-recv +
   батч-pre-touch. Кеш/ambient-delta уже есть.
-- **S-json (ЯВНАЯ ЦЕЛЬ — full JSON elimination)**: убрать JSON из data-плоскости
+- **S-legacy (ЯВНАЯ ЦЕЛЬ — full legacy text elimination)**: убрать legacy text encoding из data-плоскости
   **полностью** и удалить все связанные типы/кодеки. Масштаб: `serde_json`/
-  `json::Value` — **742 вхождения / 120 файлов**, почти все крейты. Разбивка:
+  legacy `Value` — **742 вхождения / 120 файлов**, почти все крейты. Разбивка:
   - **GO (внутреннее):** доминирующий потребитель — весь **read-result pipeline**
-    (`query/read/*`: project/order/aggregate/distinct строят `json::Value`) →
-    перевести на `QueryValue`/id-msgpack; wire-DTO (`query-types` несут json::Value)
-    → id-msgpack; удалить `json_to_inner`/`inner_to_json*`/`QueryValue↔json` мост
-    (`types/value.rs`, `codecs/interned/json.rs`).
-  - **Не-стены:** funclib `json.rs` = 3 сайта (работает на InnerValue, не serde_json);
-    wasm `host_call.rs` = 0 serde_json.
+    (`query/read/*`: project/order/aggregate/distinct строят legacy `Value`) →
+    перевести на `QueryValue`/id-msgpack; wire-DTO (`query-types` несут legacy Value)
+    → id-msgpack; удалить `legacy_to_inner`/`inner_to_legacy*`/`QueryValue↔legacy` мост
+    (`types/value.rs`, `codecs/interned/legacy.rs`).
+  - **Не-стены:** funclib `value.rs` = 3 сайта (работает на InnerValue, без legacy-text-encoding зависимости);
+    wasm `host_call.rs` = 0 legacy-text-encoding imports.
   - **Граница (решение):** FFI napi (`shamir-client-node`) + TS (`shamir-client-ts`)
     — формат внешнего API; вне дефолт-workspace; full-removal там = внешние клиенты
     только msgpack (продуктовое решение).
   - **Контрол-плоскость** (`shamir-db` admin/system) — под-развилка: типизировать/
-    msgpack vs оставить JSON только в admin.
+    msgpack vs оставить legacy text encoding только в admin.
   Это отдельная под-кампания по крейтам (фундамент: types → query-types → engine‖…).
 - **W3** (исслед. @aoh): update/delete тоже tree-free — вписывается как «запись
   полностью без дерева».
 
 **Итог:** горячий путь сервера = чистая линза над msgpack.
 
-**КОНЕЧНАЯ ЦЕЛЬ (расширена по запросу): ноль `InnerValue` + ноль JSON ВЕЗДЕ.**
+**КОНЕЧНАЯ ЦЕЛЬ (расширена по запросу): ноль `InnerValue` + ноль legacy text encoding ВЕЗДЕ.**
 Три холодных якоря `InnerValue` — это уже не «оставить», а **финальные цели
 устранения**:
 1. **recovery/doctor codec** (`to_bytes`/`from_bytes`) — заменить decode-таргет
@@ -84,8 +84,8 @@ intern/de-intern/дерева на операцию**.
    Возможен отдельный sub-проект; если миграция не окупается — «везде кроме
    index-hash» как честно принятый предел.
 
-JSON «везде» = S-json (мёртвый кодек) + переписать read-result pipeline
-(`json::Value`→`QueryValue`/id-msgpack, ядро S-read) + решить control-plane +
+Legacy text encoding «везде» = S-legacy (мёртвый кодек) + переписать read-result pipeline
+(legacy `Value`→`QueryValue`/id-msgpack, ядро S-read) + решить control-plane +
 граница FFI. См. задачу-umbrella «🎯 КОНЕЧНАЯ ЦЕЛЬ».
 
 ---
@@ -100,10 +100,10 @@ JSON «везде» = S-json (мёртвый кодек) + переписать 
    (funclib/дерево). Остаётся серверным исключением, не pass-through.
 3. **Проекция/агрегация** — `SELECT *` pass-through; подмножество/GROUP
    BY/computed = линза-обработка, но на выходе **id-msgpack** (не де-интернинг).
-4. **Scope удаления JSON** — убираем JSON для **payload'ов записей**;
+4. **Scope удаления legacy text encoding** — убираем legacy text encoding для **payload'ов записей**;
    control/query-plane и debug — отдельная развилка (оставить vs полный
    msgpack-протокол).
-5. **Breaking change** — id-msgpack wire + удаление JSON ломают старых клиентов →
+5. **Breaking change** — id-msgpack wire + удаление legacy text encoding ломают старых клиентов →
    version-bump протокола / жёсткий cutover.
 
 ---

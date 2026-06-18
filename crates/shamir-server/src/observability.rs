@@ -23,7 +23,7 @@
 //!   the process metrics every 5 s; HTTP requests just render the
 //!   recorder's current snapshot (~ns work).
 //!
-//! * **`/info`** — pretty JSON for curl-debugging by an operator.
+//! * **`/info`** — pretty-printed server info for curl-debugging by an operator.
 //!   Snapshots a few interesting fields out of the registry. Optional
 //!   convenience.
 //!
@@ -43,10 +43,10 @@ use arc_swap::ArcSwap;
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use metrics_process::Collector;
@@ -383,5 +383,11 @@ async fn info_handler(State(s): State<AppState>) -> Response {
             .collect(),
         ready: s.state.ready.load(Ordering::Acquire),
     };
-    (StatusCode::OK, Json(body)).into_response()
+    let bytes = rmp_serde::to_vec_named(&body).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/msgpack")],
+        bytes,
+    )
+        .into_response()
 }

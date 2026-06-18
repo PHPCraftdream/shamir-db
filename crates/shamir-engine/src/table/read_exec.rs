@@ -565,7 +565,7 @@ impl TableManager {
 
         if needs_full_collect {
             // S-read fallback: ORDER BY / GROUP BY / DISTINCT / aggregates
-            // require in-memory collection and JSON-based post-processing.
+            // require in-memory collection and QueryValue-based post-processing.
             // Id encoding is not applicable here — fall back to Name.
             self.read_collecting(
                 query,
@@ -611,7 +611,7 @@ impl TableManager {
     ///
     /// For GROUP BY / aggregates — accumulates raw InnerValues (needed for
     /// field extraction). For plain SELECT + ORDER BY / DISTINCT — accumulates
-    /// already-projected JSON values (smaller footprint than raw records).
+    /// already-projected QueryValues (smaller footprint than raw records).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_collecting(
         &self,
@@ -738,7 +738,7 @@ impl TableManager {
                 .collect()
         };
 
-        // Post-process directly on QueryValue — no json round-trip.
+        // Post-process directly on QueryValue — no legacy round-trip.
         // Both aggregate and non-aggregate paths now produce QueryValue
         // and go through the QV post-processors.
         if query.select.distinct {

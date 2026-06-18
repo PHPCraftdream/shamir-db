@@ -62,7 +62,7 @@ Each `QueryEntry` holds a `#[serde(flatten)] op: BatchOp` plus
 
 ### 1.2 BatchOp dispatch
 
-`BatchOp` is a 40+ variant enum detected by a unique JSON key
+`BatchOp` is a 40+ variant enum detected by a unique msgpack key
 (`types.rs:179–388`). The deserialiser walks `contains_key` checks in
 priority order — `from` → `insert_into` → `update` → `delete_from` →
 DDL ops → `set` (last, because `UpdateOp` also has a `set` field).
@@ -167,7 +167,7 @@ Batch {
 }
 ```
 
-The discriminating key is `"queries"` — a JSON object is recognised as a
+The discriminating key is `"queries"` — a msgpack map is recognised as a
 sub-batch when it contains the key `"queries"` (a map). This is unique:
 no other `BatchOp` variant serialises a `queries` field at the top
 level. The planner's key-dispatch chain in `types.rs:187` gains one
@@ -175,7 +175,7 @@ check:
 
 ```rust
 } else if obj.contains_key("queries") {
-    serde_json::from_value(value)
+    rmp_serde::from_slice(&value)
         .map(BatchOp::Batch)
         .map_err(serde::de::Error::custom)
 }
@@ -193,7 +193,7 @@ accidental misuse and keeps the serde shape clean.
 
 ### 2.2 Serde shape (wire)
 
-```json
+```msgpack
 {
   "id": 1,
   "queries": {
@@ -237,10 +237,10 @@ the topological order (the outer entry depends on the sub-batch entry
 `"sub"`). Resolution at eval time walks deeper: `resolved_refs["sub"]`
 yields a `QueryResult` whose `value` is the sub-batch's results map,
 and the `.orders[0].id` tail is resolved through the existing
-`resolve_json_path` machinery (`eval.rs:215+`).
+`resolve_path` machinery (`eval.rs:215+`).
 
 **Result shape for a sub-batch:** `QueryResult` with `value =
-Some(<results map as JSON>)` — a JSON object keyed by the sub-batch's
+Some(<results map as msgpack>)` — a msgpack map keyed by the sub-batch's
 inner aliases, each value being the inner `QueryResult` serialised.
 `records` is empty; `stats` / `pagination` are `None`.
 

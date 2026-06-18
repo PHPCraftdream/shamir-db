@@ -19,7 +19,7 @@
 //!   * counters.redb        (replay counters)
 //!   * shamir_db_meta.redb  (database / repo metadata)
 //!   * shamir_db_default_main.redb (the data we wrote)
-//!   * wire_tables.json     (registry of tables created over the wire)
+//!   * wire_tables.mpack    (registry of tables created over the wire)
 //!   * cert.pem / key.pem   (TLS material — without it the second boot
 //!   * cert.pem / key.pem   (TLS material — without it the second boot
 //!     would generate a NEW Ed25519 + new server pub-key,
@@ -348,8 +348,8 @@ async fn backup_then_restore_recovers_data() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     eprintln!("data_dir before backup: {:?}", pre_backup_files);
-    let wt = std::fs::read_to_string(data_dir.join("wire_tables.json")).unwrap_or_default();
-    eprintln!("wire_tables.json: {}", wt);
+    let wt = std::fs::read_to_string(data_dir.join("wire_tables.mpack")).unwrap_or_default();
+    eprintln!("wire_tables.mpack: {}", wt);
     let main_size = std::fs::metadata(data_dir.join("shamir_db_default_main.redb"))
         .map(|m| m.len())
         .unwrap_or(0);

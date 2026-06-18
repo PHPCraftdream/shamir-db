@@ -54,10 +54,10 @@
 - **ambient epoch-delta — GO, реализую.** Элегантный механизм пользователя (клиент шлёт
   epoch, сервер дослыает дельту); backward-compat, переиспользует entries_after. Убирает
   отдельные dump-round-trip'ы.
-- **id-ключевой insert — ОТЛОЖЕН (honest NO-GO без бенча).** serde_json::Value в
+- **id-ключевой insert — ОТЛОЖЕН (honest NO-GO без бенча).** msgpack `QueryValue` в
   BatchOp::deserialize уничтожает бинарные ключи → нужен отдельный opaque-bytes op; и
   encode-skip НЕ материален (§9.4-валидация съедает; query_value_to_storage_bytes уже
-  single-pass; Wave 2 уже убрал дерево). Реальный выигрыш — лишь обход serde_json-double-
+  single-pass; Wave 2 уже убрал дерево). Реальный выигрыш — лишь обход double-
   materialization, спекулятивно → bench-first отдельной задачей, не строить сложность
   ради недоказанного. Красота = не плодить параллельный wire-формат без доказанного win.
 

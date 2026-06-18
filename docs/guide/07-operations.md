@@ -184,7 +184,7 @@ observability: {
 || `listeners[]` | Сетевые endpoints (TCP / WebSocket, TLS-профили) |
 || `tls` | Пути к сертификату и ключу |
 || `security` | Таймауты, лимиты соединений, query limits |
-|| `audit` | Audit log с ротацией (JSONL-формат файла) |
+|| `audit` | Audit log с ротацией (audit-line-формат файла) |
 || `observability` | Адрес HTTP-сервера метрик |
 
 ### Валидация при старте
@@ -202,7 +202,7 @@ observability: {
 curl http://127.0.0.1:9090/healthz   # → 200 OK "ok\n"
 curl http://127.0.0.1:9090/readyz     # → 200 (ready) или 503 (not yet)
 curl http://127.0.0.1:9090/metrics    # → Prometheus text format
-curl http://127.0.0.1:9090/info       # → JSON: uptime, bound_addrs, ready
+curl http://127.0.0.1:9090/info       # → msgpack: uptime, bound_addrs, ready
 ```
 
 ### `/healthz`
@@ -236,7 +236,7 @@ Prometheus text format. Метрики:
 
 ### `/info`
 
-```json
+```msgpack
 {
   "uptime_seconds": 3600,
   "bound_addrs": ["0.0.0.0:7331", "0.0.0.0:7332"],
@@ -338,7 +338,7 @@ audit: {
 }
 ```
 
-Audit-лог в формате JSONL с HMAC-chain (каждая запись включает HMAC от предыдущей).
+Audit-лог в audit-line-формате с HMAC-chain (каждая запись включает HMAC от предыдущей).
 Ротация по размеру; устаревшие файлы удаляются автоматически.
 События: аутентификация, DDL, ACL-изменения, admin-операции.
 

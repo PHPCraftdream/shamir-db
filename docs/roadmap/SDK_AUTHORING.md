@@ -61,7 +61,7 @@ low-level `ctx.db().query(Option<Value>)`.
 parked behind "slim the guest query crate first," which the docs framed as
 the wide `shamir-value` refactor (WASM_SLIMMING P4). Investigation showed
 that premise was **false**: `query-types` has no `QueryValue` — its DTOs use
-`serde_json::Value` + a self-contained `FilterValue`, and its only ties to
+`QueryValue` + a self-contained `FilterValue`, and its only ties to
 the heavy `shamir-types` were the `TMap`/`TSet` aliases and a host-only
 `ResourcePath` adapter. Three surgical cuts replaced P4:
 
@@ -96,7 +96,7 @@ the heavy `shamir-types` were the `TMap`/`TSet` aliases and a host-only
 7. Tests: native-fn e2e (`builder_execute_e2e.rs`) drives
    `ctx.db_gateway().execute()` → real engine under a real actor;
    guest example compiles to `wasm32` at **337 KB** vs the 71 KB no-builder
-   baseline (builder + DTOs + serde_json + indexmap, no heavy graph).
+   baseline (builder + DTOs + rmp_serde + indexmap, no heavy graph).
 > The engine never enters the guest: the guest **describes** the batch
 > (DTO), the host **executes**. One query language, one builder, one
 > executor, three callers — network client, in-process client, guest

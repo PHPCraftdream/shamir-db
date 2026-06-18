@@ -383,7 +383,7 @@ async fn execute_set_tx_update_path() {
 }
 
 // ---------------------------------------------------------------------------
-// W2d Dec/Big invariant: insert QueryValue never yields Dec/Big/Set (JSON
+// W2d Dec/Big invariant: insert QueryValue never yields Dec/Big/Set (msgpack
 // source + resolve_computed_record collapses Dec→Str). Both the tree path
 // (InnerValue) and the lens path (RecordView) see Str for a decimal-as-string
 // field, so index-key extraction agrees. This test proves it.
@@ -400,7 +400,7 @@ async fn w2d_dec_big_invariant_index_key_parity() {
     let price_id = price_k.id();
     let score_k = interner.touch_ind("score").unwrap().into_key();
 
-    // Build an InnerValue map with a decimal-as-string (the form JSON +
+    // Build an InnerValue map with a decimal-as-string (the form msgpack +
     // resolve_computed_record produces) and a float.
     let mut m = new_map();
     m.insert(price_k, InnerValue::Str("123.45".into())); // Dec → Str on the wire

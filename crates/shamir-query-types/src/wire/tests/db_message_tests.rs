@@ -1,7 +1,18 @@
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::TransactionInfo;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+
+fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
+    let bytes = rmp_serde::to_vec_named(v).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
+
+fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
+    let bytes = rmp_serde::to_vec_named(&qv).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
+}
 
 #[test]
 fn current_query_lang_version_is_two() {
@@ -17,24 +28,27 @@ fn tx_begin_request_roundtrip_and_tag() {
         repo: "main".into(),
         isolation: Some("serializable".into()),
     };
-    let v = serde_json::to_value(&req).unwrap();
-    assert_eq!(v["op"], "tx_begin");
-    assert_eq!(v["repo"], "main");
-    assert_eq!(v["isolation"], "serializable");
+    let v = to_qv(&req);
+    assert_eq!(v.get("op").and_then(QueryValue::as_str), Some("tx_begin"));
+    assert_eq!(v.get("repo").and_then(QueryValue::as_str), Some("main"));
+    assert_eq!(
+        v.get("isolation").and_then(QueryValue::as_str),
+        Some("serializable")
+    );
 
-    let back: DbRequest = serde_json::from_value(v).unwrap();
+    let back: DbRequest = from_qv(v);
     assert!(matches!(back, DbRequest::TxBegin { repo, .. } if repo == "main"));
 }
 
 #[test]
 fn tx_begin_isolation_optional_and_query_version_defaults() {
     // Minimal payload — no isolation, no query_version (older/min client).
-    let v = json!({
+    let v = mpack!({
         "op": "tx_begin",
         "db": "app",
         "repo": "main"
     });
-    let req: DbRequest = serde_json::from_value(v).unwrap();
+    let req: DbRequest = from_qv(v);
     match req {
         DbRequest::TxBegin {
             query_version,
@@ -53,36 +67,46 @@ fn tx_begin_isolation_optional_and_query_version_defaults() {
 
 #[test]
 fn tx_execute_request_roundtrip() {
-    let v = json!({
+    let v = mpack!({
         "op": "tx_execute",
         "db": "app",
-        "tx_handle": 42,
+        "tx_handle": 42_i64,
         "batch": {
-            "id": 1,
+            "id": 1_i64,
             "queries": {}
         }
     });
-    let req: DbRequest = serde_json::from_value(v).unwrap();
+    let req: DbRequest = from_qv(v);
     assert!(matches!(req, DbRequest::TxExecute { tx_handle, .. } if tx_handle == 42));
 }
 
 #[test]
 fn tx_commit_and_rollback_request_tags() {
-    let commit = serde_json::to_value(&DbRequest::TxCommit {
+    let commit = to_qv(&DbRequest::TxCommit {
         db: "app".into(),
         tx_handle: 7,
-    })
-    .unwrap();
-    assert_eq!(commit["op"], "tx_commit");
-    assert_eq!(commit["tx_handle"], 7);
+    });
+    assert_eq!(
+        commit.get("op").and_then(QueryValue::as_str),
+        Some("tx_commit")
+    );
+    assert_eq!(
+        commit.get("tx_handle").and_then(QueryValue::as_i64),
+        Some(7)
+    );
 
-    let rollback = serde_json::to_value(&DbRequest::TxRollback {
+    let rollback = to_qv(&DbRequest::TxRollback {
         db: "app".into(),
         tx_handle: 7,
-    })
-    .unwrap();
-    assert_eq!(rollback["op"], "tx_rollback");
-    assert_eq!(rollback["tx_handle"], 7);
+    });
+    assert_eq!(
+        rollback.get("op").and_then(QueryValue::as_str),
+        Some("tx_rollback")
+    );
+    assert_eq!(
+        rollback.get("tx_handle").and_then(QueryValue::as_i64),
+        Some(7)
+    );
 }
 
 #[test]
@@ -92,11 +116,14 @@ fn tx_opened_response_roundtrip_and_tag() {
         snapshot_version: 1234,
         isolation: "snapshot".into(),
     };
-    let v = serde_json::to_value(&resp).unwrap();
-    assert_eq!(v["kind"], "tx_opened");
-    assert_eq!(v["tx_handle"], 99);
+    let v = to_qv(&resp);
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("tx_opened")
+    );
+    assert_eq!(v.get("tx_handle").and_then(QueryValue::as_i64), Some(99));
 
-    let back: DbResponse = serde_json::from_value(v).unwrap();
+    let back: DbResponse = from_qv(v);
     assert!(matches!(
         back,
         DbResponse::TxOpened { snapshot_version, .. } if snapshot_version == 1234
@@ -107,11 +134,18 @@ fn tx_opened_response_roundtrip_and_tag() {
 fn tx_committed_response_carries_transaction_info() {
     let info = TransactionInfo::committed(5, 100, 105, true);
     let resp = DbResponse::TxCommitted { transaction: info };
-    let v = serde_json::to_value(&resp).unwrap();
-    assert_eq!(v["kind"], "tx_committed");
-    assert_eq!(v["transaction"]["status"], "committed");
+    let v = to_qv(&resp);
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("tx_committed")
+    );
+    let tx = v.get("transaction").expect("transaction key");
+    assert_eq!(
+        tx.get("status").and_then(QueryValue::as_str),
+        Some("committed")
+    );
 
-    let back: DbResponse = serde_json::from_value(v).unwrap();
+    let back: DbResponse = from_qv(v);
     assert!(matches!(
         back,
         DbResponse::TxCommitted { transaction } if transaction.is_committed()
@@ -120,7 +154,10 @@ fn tx_committed_response_carries_transaction_info() {
 
 #[test]
 fn tx_rolled_back_response_tag() {
-    let v = serde_json::to_value(&DbResponse::TxRolledBack { tx_handle: 3 }).unwrap();
-    assert_eq!(v["kind"], "tx_rolled_back");
-    assert_eq!(v["tx_handle"], 3);
+    let v = to_qv(&DbResponse::TxRolledBack { tx_handle: 3 });
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("tx_rolled_back")
+    );
+    assert_eq!(v.get("tx_handle").and_then(QueryValue::as_i64), Some(3));
 }

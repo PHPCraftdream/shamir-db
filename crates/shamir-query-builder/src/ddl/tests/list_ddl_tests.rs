@@ -1,6 +1,6 @@
 //! Tests for List ops and list functions / validators / folders.
 
-use serde_json::json;
+use shamir_types::mpack;
 
 use crate::ddl;
 
@@ -16,7 +16,7 @@ fn list_databases_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "databases"
         })
     );
@@ -29,7 +29,7 @@ fn list_repos_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "repos"
         })
     );
@@ -41,7 +41,7 @@ fn list_tables_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "tables",
             "repo": "main"
         })
@@ -54,7 +54,7 @@ fn list_tables_custom_repo() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "tables",
             "repo": "hot"
         })
@@ -67,7 +67,7 @@ fn list_indexes_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "indexes",
             "table": "users",
             "repo": "main"
@@ -81,7 +81,7 @@ fn list_users_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "users"
         })
     );
@@ -93,7 +93,7 @@ fn list_roles_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "roles"
         })
     );
@@ -109,7 +109,7 @@ fn list_functions_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "functions"
         })
     );
@@ -122,7 +122,7 @@ fn list_functions_with_folder_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "functions",
             "folder": "math"
         })
@@ -135,7 +135,7 @@ fn list_all_validators_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "validators"
         })
     );
@@ -148,7 +148,7 @@ fn list_function_folders_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "function_folders"
         })
     );
@@ -161,7 +161,7 @@ fn list_function_folders_with_parent_wire() {
     let j = roundtrip(&op);
     assert_eq!(
         j,
-        json!({
+        mpack!({
             "list": "function_folders",
             "parent": "alpha"
         })

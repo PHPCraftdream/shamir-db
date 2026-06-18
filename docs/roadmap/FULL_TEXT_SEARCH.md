@@ -223,9 +223,9 @@ Filter::FtsMatch {
 }
 ```
 
-Wire shape (JSON — wire form; clients build this via the query builder):
+Wire shape (msgpack — wire form; clients build this via the query builder):
 
-```json
+```msgpack
 { "create_fts_index": "by_body",
   "table": "docs",
   "fields": [["title"], ["body"]],
@@ -460,7 +460,7 @@ When an `FtsMatch` filter is present, each result record gets a
 synthetic `_score` field. `ORDER BY` and `SELECT` can reference it
 (wire form; clients build this via the query builder):
 
-```json
+```msgpack
 { "from": "docs",
   "where": { "op": "fts_match", "field": ["body"], "query": "rust embedded" },
   "order_by": { "items": [{ "field": ["_score"], "direction": "desc" }] },

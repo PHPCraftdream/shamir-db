@@ -11,9 +11,9 @@ use super::transaction_info::TransactionInfo;
 
 /// Batch response with results.
 ///
-/// # JSON Format
+/// # Wire Format
 ///
-/// ```json
+/// ```text
 /// {
 ///   "results": {
 ///     "users": [...],

@@ -91,7 +91,7 @@ impl ShamirAdminExecutor {
             "interner_dump": @(QueryValue::Str(op.interner_dump.clone())),
             "epoch": @(QueryValue::Int(epoch as i64)),
             "entries": @(QueryValue::List(entries.into_iter().map(|(id, name)| {
-                // Wire format: [id, name] — id first, matching the original JSON shape.
+                // Wire format: [id, name] — id first, matching the original wire shape.
                 QueryValue::List(vec![QueryValue::Int(id as i64), QueryValue::Str(name)])
             }).collect())),
         })))

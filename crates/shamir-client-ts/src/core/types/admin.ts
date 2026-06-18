@@ -20,7 +20,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { Json } from './write.js';
+import type { WireValue } from './write.js';
 import type { Filter } from './filter.js';
 import type { HmacSigner } from './ddl.js';
 
@@ -162,7 +162,7 @@ export interface CreateUserOp {
   create_user: string;
   password: string;
   roles: string[];
-  profile?: Json;
+  profile?: WireValue;
   database?: string;
 }
 

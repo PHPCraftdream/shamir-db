@@ -77,7 +77,7 @@ let matches = callback.matches(&record, &ctx);
 Filter-операции задаются через `QueryValue` (строится query builder'ом);
 на проводе они кодируются в MessagePack.
 
-```json
+```
 {"op": "eq", "field": ["status"], "value": "active"}
 {"op": "between", "field": ["age"], "from": 18, "to": 65}
 {"op": "in", "field": ["role"], "values": ["admin", "moderator"]}

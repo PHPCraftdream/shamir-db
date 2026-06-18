@@ -1,11 +1,11 @@
-use crate::json;
 use crate::registry::ScalarRegistry;
+use crate::value_nav;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
     let mut r = ScalarRegistry::new();
-    json::register(&mut r);
+    value_nav::register(&mut r);
     r
 }
 

@@ -64,7 +64,7 @@ pub fn any_target_interested_indexed(
 /// `bytes_decoded` carries the raw msgpack record bytes and the table's
 /// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to construct a
 /// zero-copy `RecordView` lens for filter evaluation.
-/// JSON conversion is not performed here -- that is deferred to the deliver path.
+/// Value decoding is not performed here -- that is deferred to the deliver path.
 pub fn matches_any_indexed(
     targets: &[(String, String, EventMask, Option<Filter>)],
     index: &TargetIndex,

@@ -1,4 +1,4 @@
-use crate::codecs::interned::json::inner_value_to_query_value;
+use crate::codecs::interned::codec::inner_value_to_query_value;
 use crate::core::interner::Interner;
 use crate::types::common::{new_map, new_set};
 use crate::types::value::{InnerValue, QueryValue, Value};
@@ -8,7 +8,7 @@ use crate::types::value::{InnerValue, QueryValue, Value};
 //
 // These tests verify that inner_value_to_query_value produces the correct
 // QueryValue for each InnerValue variant without going through the (deleted)
-// JSON codec.
+// text-based codec.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -79,7 +79,7 @@ fn parity_list() {
     }
 }
 
-// Dec: direct path preserves the Dec variant (the old JSON path was lossy → Str).
+// Dec: direct path preserves the Dec variant (the old text-codec path was lossy → Str).
 #[test]
 fn parity_dec_direct_preserves_type() {
     let interner = Interner::new();
@@ -89,7 +89,7 @@ fn parity_dec_direct_preserves_type() {
     assert_eq!(direct, QueryValue::Dec(d), "direct path must preserve Dec");
 }
 
-// Big: direct path preserves the Big variant (the old JSON path was lossy → Str).
+// Big: direct path preserves the Big variant (the old text-codec path was lossy → Str).
 #[test]
 fn parity_big_direct_preserves_type() {
     let interner = Interner::new();
@@ -99,7 +99,7 @@ fn parity_big_direct_preserves_type() {
     assert_eq!(direct, QueryValue::Big(b), "direct path must preserve Big");
 }
 
-// Bin: direct path preserves the Bin variant (the old JSON path was lossy → List of Int).
+// Bin: direct path preserves the Bin variant (the old text-codec path was lossy → List of Int).
 #[test]
 fn parity_bin_direct_preserves_type() {
     let interner = Interner::new();
@@ -113,7 +113,7 @@ fn parity_bin_direct_preserves_type() {
     );
 }
 
-// Non-finite F64: direct path preserves the F64 variant (the old JSON path was lossy → Str).
+// Non-finite F64: direct path preserves the F64 variant (the old text-codec path was lossy → Str).
 #[test]
 fn parity_f64_non_finite_direct_preserves_type() {
     let interner = Interner::new();
@@ -128,7 +128,7 @@ fn parity_f64_non_finite_direct_preserves_type() {
     }
 }
 
-// Set: direct path preserves the Set variant (the old JSON path was lossy → List).
+// Set: direct path preserves the Set variant (the old text-codec path was lossy → List).
 #[test]
 fn parity_set_direct_preserves_type() {
     let interner = Interner::new();

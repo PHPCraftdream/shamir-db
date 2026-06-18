@@ -8,7 +8,7 @@
 //! `(name, id)` answer into the per-`(db, repo)` cache. Parsing the admin
 //! payload out of `QueryResult.records` uses the QueryValue-native accessors
 //! (`as_value()` / `QueryValue::get` / `as_u64` / `as_str` / `as_array`);
-//! no serde_json is involved on the read path.
+//! no deserialisation is involved on the read path — only QueryValue accessors.
 //!
 //! §9.4 discipline (single source of truth): ids enter the cache ONLY via
 //! [`FieldMap::insert_entry`](crate::interner_cache::FieldMap::insert_entry),
@@ -37,7 +37,7 @@ use crate::Client;
 /// Parsed `interner_dump` admin payload.
 ///
 /// Wire shape (server handler `admin_interner.rs`):
-/// ```json
+/// ```text
 /// { "interner_dump": "<repo>", "epoch": <u64>, "entries": [[id, name], ...] }
 /// ```
 /// (`entries` is id-first.)
@@ -50,7 +50,7 @@ struct DumpPayload {
 /// Parsed `interner_touch` admin payload.
 ///
 /// Wire shape (server handler `admin_interner.rs`):
-/// ```json
+/// ```text
 /// { "interner_touch": "<repo>", "epoch": <u64>, "mappings": [[name, id], ...] }
 /// ```
 /// (`mappings` is name-first — note the asymmetry with `entries`.)
@@ -64,7 +64,7 @@ struct TouchPayload {
 /// a protocol error if the admin payload is absent.
 ///
 /// Returns `Cow::Borrowed` for the `Direct` variant (the common post-Stage-A
-/// path for admin ops); `Cow::Owned` for the `Json` / `Inserted` variants.
+/// path for admin ops); `Cow::Owned` for the `Encoded` / `Inserted` variants.
 fn first_record_value<'a>(
     resp: &'a BatchResponse,
     alias: &str,
@@ -340,7 +340,7 @@ impl Client {
     /// is the "smart-write path" that already pre-touches all fields, so the
     /// FieldMap is guaranteed warm and de-interning always succeeds without an
     /// extra roundtrip. The lower-level `execute` method does NOT set this —
-    /// admin/interner callers that call `execute` directly get Json rows, which
+    /// admin/interner callers that call `execute` directly get name-keyed rows, which
     /// is backward-compatible. This design keeps the smart path fully transparent
     /// to callers (all rows come back as name-keyed `QueryValue`) while not
     /// touching unrelated code.
@@ -519,7 +519,7 @@ fn encode_record_idmsgpack(
 ///
 /// This function is only called from `execute_with_touch` on v2 responses.
 /// It is a no-op if no IdBytes rows are present (v1 responses, or responses
-/// from non-insert ops that return Json rows).
+/// from non-insert ops that return name-keyed rows).
 ///
 /// **Repo selection:** the caller passes the repos that were targeted by the
 /// batch — these are exactly the repos whose FieldMaps are pre-warmed by

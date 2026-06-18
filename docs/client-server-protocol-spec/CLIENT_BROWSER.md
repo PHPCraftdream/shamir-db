@@ -26,7 +26,7 @@ WebCrypto не имеет Argon2id и Ed25519. Минимум полифилов
 
 ## 2. Зависимости (npm)
 
-```json
+```text
 {
   "dependencies": {
     "argon2-browser": "^1.18.0",
