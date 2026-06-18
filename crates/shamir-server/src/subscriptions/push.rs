@@ -5,6 +5,7 @@ use serde::Serialize;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_types::subscribe::deliver_mode::DeliverMode;
 use shamir_tunables::instance_defaults::SLOW_CONSUMER_THRESHOLD;
@@ -35,11 +36,11 @@ pub(super) async fn make_deliver_data(
     db_name: &str,
     actor: &Actor,
     change: &shamir_tx::changefeed::RecordChange,
-    value_json: Option<&serde_json::Value>,
+    value_qv: Option<&QueryValue>,
     commit_version: u64,
 ) -> Vec<u8> {
     match deliver {
-        DeliverMode::Records => make_event_data(change, value_json, commit_version),
+        DeliverMode::Records => make_event_data(change, value_qv, commit_version),
         DeliverMode::Keys => make_keys_data(&change.table, &change.op, &change.key, commit_version),
         DeliverMode::Batch(sub_batch) => {
             execute_reactive_batch(db, db_name, actor, sub_batch, change, commit_version).await
