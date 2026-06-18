@@ -102,7 +102,7 @@ shamir-server service install
 Конфиг — файл в формате Ktav (подмножество JSON5: комментарии, trailing
 commas). Минимальный конфиг (для e2e-тестов):
 
-```json
+```ktav
 {
     data_dir: "/tmp/shamir-test",
     listeners: [{
@@ -184,7 +184,7 @@ observability: {
 || `listeners[]` | Сетевые endpoints (TCP / WebSocket, TLS-профили) |
 || `tls` | Пути к сертификату и ключу |
 || `security` | Таймауты, лимиты соединений, query limits |
-|| `audit` | JSONL audit log с ротацией |
+|| `audit` | Audit log с ротацией (JSONL-формат файла) |
 || `observability` | Адрес HTTP-сервера метрик |
 
 ### Валидация при старте
@@ -338,7 +338,7 @@ audit: {
 }
 ```
 
-JSONL-файл с HMAC-chain (каждая запись включает HMAC от предыдущей).
+Audit-лог в формате JSONL с HMAC-chain (каждая запись включает HMAC от предыдущей).
 Ротация по размеру; устаревшие файлы удаляются автоматически.
 События: аутентификация, DDL, ACL-изменения, admin-операции.
 

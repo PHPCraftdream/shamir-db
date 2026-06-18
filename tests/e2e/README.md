@@ -43,8 +43,8 @@ What it does:
 - The native binding loads on the host platform.
 - The Rust SDK's TLS+SCRAM handshake interoperates with a real server
   binary (not just an in-process `ServerLauncher` test).
-- BatchRequest/BatchResponse round-trip cleanly across the JSON/JS
-  boundary.
+- BatchRequest/BatchResponse round-trip cleanly across the napi/JS
+  boundary (MessagePack encoding).
 - The release-mode server is functional end-to-end.
 
 For pure-Rust integration tests (in-process `ServerLauncher`, no

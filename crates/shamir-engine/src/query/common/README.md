@@ -14,7 +14,7 @@
 
 | Функция | Входные данные | Результат |
 |---------|---------------|-----------|
-| `filter_from_value` | QueryValue (JSON-подобный объект) | `Filter` |
+| `filter_from_value` | `QueryValue` | `Filter` |
 | `filter_value_from_value` | QueryValue | `FilterValue` |
 | `group_by_from_value` | QueryValue | `GroupBy` |
 | `order_by_from_value` | QueryValue | `OrderBy` |
@@ -27,7 +27,7 @@
 
 ## Парсинг фильтров
 
-`filter_from_value` рекурсивно парсит JSON-объект с ключом `"op"`:
+`filter_from_value` рекурсивно парсит `QueryValue`-объект с ключом `"op"`:
 
 ```json
 {"op": "eq", "field": ["status"], "value": "active"}

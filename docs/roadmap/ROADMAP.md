@@ -51,7 +51,7 @@ Future features beyond v1 spec. Не нормативные, не binding обе
 ## Database Engine (вне scope auth spec)
 
 > **Query language: OQL — окончательно, никакого «v2».** Язык запросов —
-> объектный (DTO: `Filter`/`ReadQuery`/`BatchRequest`), msgpack/JSON,
+> объектный (DTO: `Filter`/`ReadQuery`/`BatchRequest`), MessagePack,
 > строится типизированным билдером / `q!` / `filter!`. Текстового/SQL-
 > фронтенда не будет **никогда** — это принцип, а не отсутствие парсера:
 > «запрос-как-текст» порождает инъекции, парсер-баги/DoS, prepared-

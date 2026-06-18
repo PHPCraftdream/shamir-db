@@ -208,7 +208,7 @@ role_b: allow read on orders WHERE region = "europe"
 
 Результат: без ограничений (role_a даёт полный доступ к таблице).
 
-## Управление через JSON API
+## Управление через Batch API
 
 ### Users
 

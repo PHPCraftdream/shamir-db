@@ -3,7 +3,7 @@
 ## Обзор
 
 Модуль `filter` реализует систему фильтрации для WHERE, HAVING, UPDATE и DELETE.
-Фильтры описываются как JSON AST, затем компилируются в дерево `FilterCallback`
+Фильтры описываются как AST из `QueryValue`/MessagePack, затем компилируются в дерево `FilterCallback`
 для быстрого вычисления на InnerValue записях.
 
 ## Ключевые типы
@@ -35,7 +35,7 @@ Tagged enum (по полю `op`) с 22 вариантами:
 
 Значения в фильтрах. Поддерживает литералы и ссылки:
 
-| Вариант | JSON | Описание |
+| Вариант | Пример (QueryValue) | Описание |
 |---------|------|----------|
 | `Null` | `null` | Null значение |
 | `Bool` | `true` | Булево |
@@ -72,7 +72,10 @@ let matches = callback.matches(&record, &ctx);
 `compile_filter()` рекурсивно обходит AST `Filter` и создаёт дерево реализаций
 `FilterCallback`. Каждый узел хранит пред-интернированные пути для O(1) доступа.
 
-## JSON примеры
+## Примеры фильтров
+
+Filter-операции задаются через `QueryValue` (строится query builder'ом);
+на проводе они кодируются в MessagePack.
 
 ```json
 {"op": "eq", "field": ["status"], "value": "active"}
@@ -103,10 +106,10 @@ DTO-типы (`Filter`, `FilterValue`, `Cond`, `FilterExpr`, `FilterExprOp`,
 ## Архитектура
 
 ```
-JSON → Filter (AST) → compile_filter() → FilterCallback tree
-                                              │
-                                              ▼
-                                   record.matches(ctx) → bool
+QueryValue/MessagePack → Filter (AST) → compile_filter() → FilterCallback tree
+                                                                    │
+                                                                    ▼
+                                                       record.matches(ctx) → bool
 ```
 
 Фильтры используются в: ReadQuery (WHERE), GroupBy (HAVING), UpdateOp, DeleteOp,

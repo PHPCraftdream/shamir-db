@@ -411,9 +411,9 @@ On range query that touches only `included_fields`, the data store
 is **never opened**. Index scan returns the answer directly.
 True O(log N + K) on disk.
 
-DDL:
+DDL (wire form — MessagePack on the wire; clients build this via the query builder):
 
-```json
+```
 { "create_index": "by_age_with_email",
   "table": "users",
   "fields": [["age"]],

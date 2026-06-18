@@ -14,7 +14,7 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 - ✅ Async streaming with batch generators
 - ✅ High-level Table engine with UserValue/InnerValue transformations
 - ✅ Multi-database / multi-repo system store with durable metadata
-- ✅ JSON-based Batch query API: WHERE / SELECT / GROUP BY / ORDER BY / LIMIT / pagination
+- ✅ Batch query API (MessagePack/QueryValue): WHERE / SELECT / GROUP BY / ORDER BY / LIMIT / pagination
 - ✅ Cross-query references via `{"$query": "@alias[].field"}`
 - ✅ Admin DDL (Create/Drop Db / Repo / Table / Index, List)
 - ✅ Auth ops (Create/Drop User / Role, Grant / Revoke)
@@ -29,7 +29,7 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 
 **Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
 - 🔜 Browser WASM client (Argon2id in Web Worker)
-- 🔜 SQL-like query frontend (today: structured JSON queries)
+- 🔜 SQL-like query frontend (today: structured QueryValue/MessagePack queries)
 - 🔜 QUIC transport
 - 🔜 Post-quantum hybrid handshake
 

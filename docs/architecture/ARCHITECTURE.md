@@ -120,7 +120,7 @@ Value Type System
 - from_bytes(): Deserialize from MessagePack
 - Full serde support with custom deserializer for type hints
 
-**JSON Type Hints (for UserValue only):**
+**Type Hints (for UserValue / legacy JSON deserialization only):**
 - i:prefix -> Int
 - u:prefix -> UInt
 - float:prefix -> Float
@@ -187,35 +187,35 @@ Each backend manages cursors differently:
 Codec System
 
 **Available Codecs:**
-1. JSON: Human-readable, serde_json
-2. MessagePack: Binary, rmp-serde (primary format)
+1. MessagePack: Binary, rmp-serde (primary format — records and wire)
+2. JSON: Human-readable, serde_json (legacy/v1 wire; kept for tooling interop only)
 
 **Type Mapping:**
 
-| Rust Type | JSON | MessagePack |
-|-----------|------|-------------|
-| Null | null | nil |
-| Bool | true/false | bool |
-| Int(i64) | number | int64 |
-| UInt(u64) | number | uint64 |
-| Float(f64) | number | float64 |
-| String | string | str |
-| Binary | base64 string | bin |
+| Rust Type | MessagePack | JSON (legacy) |
+|-----------|-------------|---------------|
+| Null | nil | null |
+| Bool | bool | true/false |
+| Int(i64) | int64 | number |
+| UInt(u64) | uint64 | number |
+| Float(f64) | float64 | number |
+| String | str | string |
+| Binary | bin | base64 string |
 | Array | array | array |
-| Object | object | map |
-| Decimal | string (decimal) | str (decimal) |
-| BigInt | string (bigint) | str (bigint) |
+| Object | map | object |
+| Decimal | str (decimal) | string (decimal) |
+| BigInt | str (bigint) | string (bigint) |
 
 **Performance:**
 | Format | Size | Encode | Decode |
 |--------|------|-------|--------|
-| JSON | 100% | 1x | 1x |
 | MessagePack | ~60% | 1.2x | 1.3x |
+| JSON (legacy) | 100% | 1x | 1x |
 
 **Key Differences:**
-- JSON: Type hints support (i:, u:, float:, dec:, big:, arr:, set:)
-- MessagePack: No type hints, more compact
-- BigInt/Decimal: Both serialized as strings for precision preservation
+- MessagePack: Primary storage and wire format; no type-hint prefixes needed
+- JSON (legacy): Type hint support (i:, u:, float:, dec:, big:, arr:, set:) via UserValue; being phased out of the wire
+- BigInt/Decimal: Serialized as strings in both formats for precision preservation
 
 ## arch-008-concurrency
 
@@ -303,7 +303,7 @@ Development Protocol (TDD)
 - Don't change unrelated code
 - Don't change unrelated comments
 - Make only targeted changes
-- In tests: JSON must be formatted, multi-line
+- In tests: JSON/MessagePack literals must be formatted, multi-line
 - mod.rs files only contain exports
 - Tests in separate tests/ folder, not in implementation files
 
@@ -395,14 +395,14 @@ return Ok(None);  // Хеш совпал, но данные разные (кол
 Query Language (OQL — Object Query Language)
 
 **Design Philosophy:**
-- JSON-native: Queries are JSON objects (the wire shape)
+- Object-native: Queries are typed DTOs carried as MessagePack on the wire
 - Familiar: MongoDB-style find/update syntax
 - Index-aware: Query planner uses indexes automatically
 - Pipeline-based: Composable operations
 
 **Principle: OQL (Object Query Language) — no text language, ever.**
 SDBQL is an *object* query language: a query is a typed data structure
-(`Filter` / `ReadQuery` / `BatchRequest` DTO) carried as msgpack/JSON and
+(`Filter` / `ReadQuery` / `BatchRequest` DTO) carried as MessagePack and
 built by the typed builder / `q!` / `filter!`. There will **never** be a
 textual / SQL frontend or a "v2" parser. This is a deliberate, permanent
 decision, not a missing feature. Queries-as-text is the single root

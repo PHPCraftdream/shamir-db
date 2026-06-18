@@ -67,7 +67,7 @@ pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
 #[deprecated]
 pub type UserValue = Value<String>;
 
-// Query values (for JSON query parsing)
+// Query values: the in-memory representation for query AST / filter nodes
 pub type QueryValue = Value<String>;
 
 // Internal: uses compact InternerKey IDs

@@ -110,7 +110,7 @@ aliases, sorts dependencies into parallel stages, and runs each stage
 concurrently. Reads use index scans automatically when `where` is `Eq` / `In`
 on an indexed field; otherwise full scan.
 
-For the JSON wire format see
+For the `BatchRequest`/`QueryValue` query format see
 [`query/batch/README.md`](query/batch/README.md) and
 [`query/README.md`](query/README.md).
 
