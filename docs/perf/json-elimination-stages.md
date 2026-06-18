@@ -1,12 +1,30 @@
 בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
 
-# Приземлённый staged-план: элиминация JSON (агрессивный scope)
+# Приземлённый staged-план: элиминация JSON (МАКСИМАЛЬНЫЙ scope)
 
 Продолжает InnerValue-кампанию (`innervalue-floor.md`) для второй оси цели #61:
-**ноль JSON**. Scope выбран пользователем — **агрессивный**: увести JSON с
-production read/hot-путей И схлопнуть v1 `QueryRecord::Json` + query-builder на
-**msgpack-only** (ломает v1-клиентов → bump протокола + миграция клиентского
-SDK). Неустранимый пол — задокументировать.
+**ноль JSON**. Scope (решение пользователя, финальное): **полностью удалить
+библиотеку `serde_json` из всех 12 крейтов** и починить код; тесты — на
+**query-builders + MessagePack** (ноль `json!`-литералов). Ломает v1-клиентов
+(принято). Никакого «пола» — `serde_json` уходит из workspace целиком.
+
+## Масштаб (замер)
+12 крейтов с зависимостью, ~2400 call-sites, ~113 `json!`. Линчпин:
+`query-builder` (477) сам эмитит `serde_json::Value`; `query-types` (419) —
+wire-DTO. Удаление = **переархитектура wire JSON→MessagePack/QueryValue**.
+
+## Порядок (по графу зависимостей — острие первым)
+1. **Фундамент:** `QueryValue` как динамический value-тип вместо
+   `serde_json::Value`; wire-DTO (`query-types`) + builder → emit
+   `QueryValue`/msgpack; убрать `json.rs`-codec из `types`.
+2. **Потребители:** engine → db → server → client (call-sites отваливаются по
+   мере смены wire).
+3. **Мелочь:** funclib/tx/wasm-host/connect.
+4. **Тесты:** `json!` → builders + msgpack.
+5. **Cargo.toml:** `serde_json` вон из каждого крейта (критерий завершения).
+
+Старый «детвиннинг + пол» ниже (J-I..J-IV) — теперь ПОДЭТАПЫ фундамента/потребителей,
+а не финал. `json-floor.md` НЕ будет — пол = пустой.
 
 Дисциплина — та же, что у InnerValue:
 - **анти-формально**: метрика — построение `json::Value` на горячем, не grep;
