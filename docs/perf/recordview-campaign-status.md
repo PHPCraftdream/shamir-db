@@ -73,8 +73,16 @@ msgpack хендшейк; read-only-batch repo-collect.
 
 | Приоритет | Задача |
 |---|---|
-| сейчас | **3 холодных якоря InnerValue** (терминал #61): recovery/doctor-кодек; funclib (почти не-стена — осталась обёртка inner_to_json_value, в осн. мигрирована); **index-hash leaf** (самый трудный — persisted byte-identity, нужна discriminant-стабильная схема ИЛИ index-format rebuild-миграция, ИЛИ принятый предел) |
-| хвост | #55 (X-remap холодный), #41 (Stage 6 спекулятивно) |
+| бэклог | #82 (DX value-API над QueryValue для процедур — после #61); #55 (X-remap холодный); #41 (Stage 6 спекулятивно); #72 (INSERT…RETURNING ResultEncoding::Id); #83 (test.sh .exe fallback) |
+
+**Терминал #61 ДОСТИГНУТ честной формой** (`8649de0`): движение `E1–E6` +
+`I1` + `S9b` + `S10`. Финальная серия точечных устранений валюты увела
+оставшуюся id-материализацию с горячего, а неустранимый пол **задокументирован**
+(`docs/perf/innervalue-floor.md`): production-`InnerValue` ~654 (с ~1004) сведён
+к 4 категориям — библиотека типа, byte-identity index-якоря, recovery-якоря,
+engine owned-value §5b-границы. **De-generify отвергнут** (zero-cost generic).
+S9b закрыл V1→V2 разрыв index-hash (rebuild-on-open). Метод закрытия #61 —
+**документация прибытия**, не вынужденный ноль.
 
 **#60 ЗАКРЫТ** (`09eff50`): read-result production-путь json-free. json-twins
 (`hashable_json` бэкит production canonical-key; `apply_select`/`project`-twin —
@@ -89,10 +97,13 @@ bench/example-вызовы) остаются, но НЕ на production-пути
 
 ## 4. Где на дуге
 
-**Сердце кампании — сделано и доказано:** pass-through полный и живой, запись
-tree-free на всех путях, read-result почти json-free. Остаток — **долизывание**
-(#60 F+G — мелко) и **холодные якоря** (funclib/recovery — средне; index-hash —
-трудно/возможный принятый предел).
+**Кампания завершена честной формой.** Pass-through полный и живой, запись
+tree-free на всех путях, read-result production json-free, горячие пути
+(read/filter/aggregate/stream/temporal) линз-нативны (RecordView/ScalarRef/
+bytes-проекция), index V1→V2 авто-мигрирует на открытии, а неустранимый
+InnerValue-пол **назван и задокументирован** (`innervalue-floor.md`). Дуга
+сошлась: широкое (веер по крейтам) → узкое (точечные устранения) → точка
+(прибытие #61). Дальше — за порогом: #82 (DX над устоявшимся QueryValue).
 
 **Метод (весь путь):** design-pass `@aoh` перед крупным/рисковым → byte-identity
 golden-тест на каждом персист/wire-шаге → коммит между этапами → агенты пишут
