@@ -725,10 +725,10 @@ async fn f4b_nontx_insert_crash_recovery() {
         repo.commit_tx(tx).await.unwrap();
 
         // Capture the assigned record id from the returned result record.
-        let id_str = wr.records[0].as_json()["_id"]
-            .as_str()
-            .expect("_id present in insert result")
-            .to_string();
+        let id_str = wr.records[0]
+            .get_value_owned("_id")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .expect("_id present in insert result");
         rid = id_str.parse::<RecordId>().expect("parse RecordId");
 
         // === Phase B: SIMULATED CRASH — drop without clean shutdown. ===
@@ -810,10 +810,10 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
             .expect("field must be in base interner after implicit insert")
             .id();
 
-        let id_str = wr.records[0].as_json()["_id"]
-            .as_str()
-            .expect("_id present in insert result")
-            .to_string();
+        let id_str = wr.records[0]
+            .get_value_owned("_id")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .expect("_id present in insert result");
         rid = id_str.parse::<RecordId>().expect("parse RecordId");
 
         // === Phase B: SIMULATED CRASH — drop without clean shutdown. ===

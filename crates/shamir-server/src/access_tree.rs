@@ -160,9 +160,8 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Value
         .first()
         .ok_or_else(|| anyhow!("empty access_tree result"))?;
     Ok(rec
-        .as_json()
-        .get("access_tree")
-        .cloned()
+        .get_value_owned("access_tree")
+        .map(serde_json::Value::from)
         .unwrap_or(Value::Null))
 }
 

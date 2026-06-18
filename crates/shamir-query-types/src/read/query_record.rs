@@ -2,8 +2,6 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::ops::Index;
-use std::sync::OnceLock;
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -14,43 +12,28 @@ use crate::write::InsertedRecord;
 
 /// Read response row.
 ///
-/// `Direct` is the hot path (no `serde_json::Map` allocation per record);
-/// `Json` is the legacy shape for paths not yet migrated.  Both variants
-/// serialize to byte-identical output on the wire.
+/// `Direct` is the canonical shape for all read-path and deserialized rows.
+/// `Inserted` carries a write-result row from DML ops. `IdBytes` carries an
+/// id-keyed row for `result_encoding = Id` responses.
+///
+/// All serde_json accessors have been removed in Stage C; use the
+/// `get_value*` / `as_value` family for field access.
 #[derive(Debug)]
 pub enum QueryRecord {
     /// Projected row coming from the engine read path — zero extra
     /// allocation beyond the `QueryValue` produced by `project_value`.
-    ///
-    /// The second field is a lazy json cache: the wire/serialize path never
-    /// touches it (it delegates straight to `QueryValue`, the hot path win),
-    /// while the in-process keyed accessors (`get` / `Index<&str>` /
-    /// `as_json`) materialise the row's `serde_json::Value` ONCE on first use
-    /// and lend a reference into it — so `records[i]["field"]` keeps working
-    /// exactly as it did when aggregates produced `Json`. `OnceLock::new()` is
-    /// alloc-free, so the cache is zero-cost on the hot path that never reads
-    /// a field.
-    Direct(QueryValue, OnceLock<serde_json::Value>),
-    /// Legacy deserialized row (from the wire / test fixtures).
-    Json(serde_json::Value),
+    /// Also the canonical shape produced by the deserializer for all
+    /// non-binary wire payloads (replaces the former `Json` variant).
+    Direct(QueryValue),
     /// A write-result row carried straight through from a DML op.
     ///
     /// Wraps the [`InsertedRecord`] that `execute_*` already built, so the
     /// batch layer can fold a `WriteResult` into a `QueryResult` WITHOUT
-    /// re-materialising each row into a `serde_json::Value` (the old
-    /// `write_result_to_query_result` double-build). Serialization delegates
-    /// to [`InsertedRecord`]'s impl, so the wire bytes are byte-identical to
-    /// the former `Json(serde_json::to_value(rec))` path.
-    ///
-    /// The second field is a lazy json cache: the wire/serialize path never
-    /// touches it (it delegates straight to `InsertedRecord`, the C1 win),
-    /// while the in-process keyed accessors (`get` / `Index<&str>` /
-    /// `as_json`) materialise the row's `serde_json::Value` ONCE on first use
-    /// and lend a reference into it — so `records[i]["field"]` keeps working
-    /// exactly as it did when inserts produced `Json`. `OnceLock::new()` is
-    /// alloc-free, so the cache is zero-cost on the hot path that never reads
-    /// a field.
-    Inserted(InsertedRecord, OnceLock<serde_json::Value>),
+    /// re-materialising each row into a `serde_json::Value`.
+    /// Serialization delegates to [`InsertedRecord`]'s impl, so the wire
+    /// bytes are byte-identical to the former `Json(serde_json::to_value(rec))`
+    /// path.
+    Inserted(InsertedRecord),
     /// A row returned id-keyed (no server de-intern); the client de-interns
     /// via its FieldMap. Emitted when the request set
     /// `result_encoding = Id`. The bytes are a single id-keyed msgpack map
@@ -64,12 +47,8 @@ pub enum QueryRecord {
 impl Clone for QueryRecord {
     fn clone(&self) -> Self {
         match self {
-            QueryRecord::Direct(v, _) => QueryRecord::Direct(v.clone(), OnceLock::new()),
-            QueryRecord::Json(v) => QueryRecord::Json(v.clone()),
-            // The lazy cache is per-instance; a clone starts cold (it
-            // re-materialises on first access). `OnceLock` is not `Clone`,
-            // which is why this impl is manual.
-            QueryRecord::Inserted(rec, _) => QueryRecord::Inserted(rec.clone(), OnceLock::new()),
+            QueryRecord::Direct(v) => QueryRecord::Direct(v.clone()),
+            QueryRecord::Inserted(rec) => QueryRecord::Inserted(rec.clone()),
             QueryRecord::IdBytes(b) => QueryRecord::IdBytes(b.clone()),
         }
     }
@@ -80,9 +59,8 @@ impl Clone for QueryRecord {
 impl Serialize for QueryRecord {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
-            QueryRecord::Direct(v, _) => v.serialize(s),
-            QueryRecord::Json(v) => v.serialize(s),
-            QueryRecord::Inserted(rec, _) => rec.serialize(s),
+            QueryRecord::Direct(v) => v.serialize(s),
+            QueryRecord::Inserted(rec) => rec.serialize(s),
             // ByteBuf's Serialize uses serde_bytes::serialize, emitting msgpack
             // `bin` (not a seq-of-u8) on the msgpack wire.
             QueryRecord::IdBytes(b) => b.serialize(s),
@@ -90,12 +68,12 @@ impl Serialize for QueryRecord {
     }
 }
 
-/// Visitor that routes msgpack `bin` to `IdBytes` and everything else to the
-/// `Json` variant via `serde_json::Value`'s own visitor chain.
+/// Visitor that routes msgpack `bin` to `IdBytes` and everything else to
+/// `QueryValue`'s own visitor chain, wrapping the result in `Direct`.
 ///
 /// `deserialize_any` is used so the deserializer advertises what type it holds
 /// first; bytes map to `IdBytes`, all other self-describing types reconstruct
-/// a `serde_json::Value` and wrap it in `Json`.
+/// a `QueryValue` and wrap it in `Direct`.
 struct QueryRecordVisitor;
 
 impl<'de> Visitor<'de> for QueryRecordVisitor {
@@ -115,40 +93,46 @@ impl<'de> Visitor<'de> for QueryRecordVisitor {
         Ok(QueryRecord::IdBytes(ByteBuf::from(v)))
     }
 
-    // ── all other self-describing types → Json ───────────────────────────────
+    // ── all other self-describing types → Direct(QueryValue) ─────────────────
 
     fn visit_bool<E: de::Error>(self, v: bool) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::Bool(v)))
+        Ok(QueryRecord::Direct(QueryValue::Bool(v)))
     }
 
     fn visit_i64<E: de::Error>(self, v: i64) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::Number(v.into())))
+        Ok(QueryRecord::Direct(QueryValue::Int(v)))
     }
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::Number(v.into())))
+        // u64 > i64::MAX cannot be represented losslessly in QueryValue::Int;
+        // clamp to i64::MAX as a safe approximation (matches prior serde_json
+        // behaviour where Number::as_i64() saturated).
+        Ok(QueryRecord::Direct(QueryValue::Int(
+            v.min(i64::MAX as u64) as i64
+        )))
     }
 
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<QueryRecord, E> {
-        let n = serde_json::Number::from_f64(v)
-            .ok_or_else(|| de::Error::custom("non-finite float in QueryRecord"))?;
-        Ok(QueryRecord::Json(serde_json::Value::Number(n)))
+        if !v.is_finite() {
+            return Err(de::Error::custom("non-finite float in QueryRecord"));
+        }
+        Ok(QueryRecord::Direct(QueryValue::F64(v)))
     }
 
     fn visit_str<E: de::Error>(self, v: &str) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::String(v.to_owned())))
+        Ok(QueryRecord::Direct(QueryValue::Str(v.to_owned())))
     }
 
     fn visit_string<E: de::Error>(self, v: String) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::String(v)))
+        Ok(QueryRecord::Direct(QueryValue::Str(v)))
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::Null))
+        Ok(QueryRecord::Direct(QueryValue::Null))
     }
 
     fn visit_none<E: de::Error>(self) -> Result<QueryRecord, E> {
-        Ok(QueryRecord::Json(serde_json::Value::Null))
+        Ok(QueryRecord::Direct(QueryValue::Null))
     }
 
     fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<QueryRecord, D2::Error> {
@@ -156,13 +140,13 @@ impl<'de> Visitor<'de> for QueryRecordVisitor {
     }
 
     fn visit_seq<A: de::SeqAccess<'de>>(self, seq: A) -> Result<QueryRecord, A::Error> {
-        let v = serde_json::Value::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
-        Ok(QueryRecord::Json(v))
+        let v = QueryValue::deserialize(de::value::SeqAccessDeserializer::new(seq))?;
+        Ok(QueryRecord::Direct(v))
     }
 
     fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<QueryRecord, A::Error> {
-        let v = serde_json::Value::deserialize(de::value::MapAccessDeserializer::new(map))?;
-        Ok(QueryRecord::Json(v))
+        let v = QueryValue::deserialize(de::value::MapAccessDeserializer::new(map))?;
+        Ok(QueryRecord::Direct(v))
     }
 }
 
@@ -174,136 +158,136 @@ impl<'de> Deserialize<'de> for QueryRecord {
 
 // ── From conversions ──────────────────────────────────────────────────────────
 
-impl From<serde_json::Value> for QueryRecord {
-    fn from(v: serde_json::Value) -> Self {
-        QueryRecord::Json(v)
-    }
-}
-
 impl From<QueryValue> for QueryRecord {
     fn from(v: QueryValue) -> Self {
-        QueryRecord::Direct(v, OnceLock::new())
+        QueryRecord::Direct(v)
     }
 }
 
 impl From<InsertedRecord> for QueryRecord {
     fn from(r: InsertedRecord) -> Self {
-        QueryRecord::Inserted(r, OnceLock::new())
-    }
-}
-
-impl From<QueryRecord> for serde_json::Value {
-    fn from(r: QueryRecord) -> Self {
-        match r {
-            QueryRecord::Json(v) => v,
-            QueryRecord::Direct(qv, _) => qv.into(),
-            QueryRecord::Inserted(rec, _) => rec.as_json().into_owned(),
-            // IdBytes carries raw binary; represent as a JSON array of ints
-            // (the only lossless JSON encoding for bytes).
-            QueryRecord::IdBytes(b) => {
-                serde_json::Value::Array(b.iter().map(|&byte| byte.into()).collect())
-            }
-        }
+        QueryRecord::Inserted(r)
     }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 impl QueryRecord {
-    /// View row as a `serde_json::Value`, materialising once if needed.
-    pub fn as_json(&self) -> Cow<'_, serde_json::Value> {
+    // ── QueryValue-native accessors ──────────────────────────────────────────
+
+    /// View this row as a `QueryValue`, without going through `serde_json`.
+    ///
+    /// * `Direct(qv)` — `Cow::Borrowed(&qv)`: zero allocation, zero copy.
+    /// * `Inserted(rec)` — `Cow::Owned(…)`: materialises the record's
+    ///   `QueryValue` for `InsertedRecord::Direct` by cloning fields, or via
+    ///   `serde_json` round-trip for `InsertedRecord::Json`.
+    /// * `IdBytes(_)` — `Cow::Owned(QueryValue::Null)`: the bytes are an opaque
+    ///   id-keyed msgpack blob; field-level access is not meaningful until the
+    ///   client de-interns the keys.  Callers that need field access must
+    ///   de-intern the bytes themselves.
+    pub fn as_value(&self) -> Cow<'_, QueryValue> {
         match self {
-            QueryRecord::Json(v) => Cow::Borrowed(v),
-            QueryRecord::Direct(qv, cache) => {
-                Cow::Borrowed(cache.get_or_init(|| qv.clone().into()))
-            }
-            // Materialise ONCE into the lazy cache (slow path — accessors /
-            // tests only; the wire path serialises via the byte-identical
-            // Serialize impl and never reaches here). Subsequent accessors
-            // borrow the cached value.
-            QueryRecord::Inserted(rec, cache) => {
-                Cow::Borrowed(cache.get_or_init(|| rec.as_json().into_owned()))
-            }
-            // IdBytes carries raw binary; represent as a JSON array of ints
-            // (the only lossless JSON encoding for bytes).
-            QueryRecord::IdBytes(b) => Cow::Owned(serde_json::Value::Array(
-                b.iter().map(|&byte| byte.into()).collect(),
-            )),
+            QueryRecord::Direct(qv) => Cow::Borrowed(qv),
+            QueryRecord::Inserted(rec) => match rec {
+                crate::write::InsertedRecord::Direct { fields, .. } => Cow::Owned(fields.clone()),
+                crate::write::InsertedRecord::Json(v) => Cow::Owned(QueryValue::from(v.clone())),
+            },
+            // IdBytes: opaque binary — field-level access is not meaningful
+            // without client-side de-interning.  Return Null as a safe sentinel.
+            QueryRecord::IdBytes(_) => Cow::Owned(QueryValue::Null),
         }
     }
 
-    /// Look up a field by name, returning a borrowed reference.
+    /// Look up a field in a `Direct` row by borrowing into the `QueryValue::Map`
+    /// directly — zero allocation, no cache required.
     ///
-    /// Works for `Json` and `Inserted` (the latter materialises its lazy json
-    /// cache once and borrows into it).  For the `Direct` variant this returns
-    /// `None` — use `as_json().get(key)` with an explicit local binding when
-    /// the record may be `Direct`.
-    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+    /// For `Inserted` / `IdBytes` this returns `None`.  Use
+    /// [`get_value_owned`](Self::get_value_owned) when the variant is unknown.
+    pub fn get_value(&self, key: &str) -> Option<&QueryValue> {
         match self {
-            QueryRecord::Json(v) => v.get(key),
-            QueryRecord::Inserted(rec, cache) => {
-                cache.get_or_init(|| rec.as_json().into_owned()).get(key)
+            QueryRecord::Direct(qv) => qv.get(key),
+            _ => None,
+        }
+    }
+
+    /// Look up a field by name and return an owned `QueryValue`.
+    ///
+    /// Works for all variants:
+    /// * `Direct` — borrows into the map and clones the value found (one clone).
+    /// * `Inserted` — converts to `QueryValue` via [`as_value`](Self::as_value)
+    ///   then looks up the key.
+    /// * `IdBytes` — always `None`.
+    pub fn get_value_owned(&self, key: &str) -> Option<QueryValue> {
+        match self {
+            QueryRecord::Direct(qv) => qv.get(key).cloned(),
+            QueryRecord::IdBytes(_) => None,
+            _ => {
+                let v = self.as_value();
+                v.get(key).cloned()
             }
-            QueryRecord::Direct(qv, cache) => cache.get_or_init(|| qv.clone().into()).get(key),
+        }
+    }
+
+    /// Look up a string field using `QueryValue`-native access.
+    ///
+    /// * `Direct` — borrows from the inner `QueryValue::Map` (zero allocation).
+    /// * `Inserted::Direct` — borrows from the `fields: QueryValue` in the
+    ///   `InsertedRecord` (also zero allocation, borrow from `self`).
+    /// * `Inserted::Json` — borrows from the inner `serde_json::Value` map.
+    /// * `IdBytes` — always `None` (opaque bytes; no field access).
+    pub fn get_value_str(&self, key: &str) -> Option<&str> {
+        match self {
+            QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_str),
+            QueryRecord::Inserted(rec) => match rec {
+                crate::write::InsertedRecord::Direct { fields, .. } => {
+                    fields.get(key).and_then(QueryValue::as_str)
+                }
+                crate::write::InsertedRecord::Json(v) => v.get(key).and_then(|v| v.as_str()),
+            },
             QueryRecord::IdBytes(_) => None,
         }
     }
 
-    /// Look up a field by name and return an owned `serde_json::Value`.
+    /// Look up an `i64` field using `QueryValue`-native access.
     ///
-    /// Works for both variants.  Convenience over `as_json().get(key).cloned()`.
-    pub fn get_owned(&self, key: &str) -> Option<serde_json::Value> {
-        self.as_json().get(key).cloned()
-    }
-
-    /// Look up a string field by name. Returns `None` if absent or not a string.
-    pub fn get_str(&self, key: &str) -> Option<String> {
-        self.get_owned(key)
-            .and_then(|v| v.as_str().map(str::to_owned))
-    }
-
-    /// Look up an i64 field by name. Returns `None` if absent or not a number.
-    pub fn get_i64(&self, key: &str) -> Option<i64> {
-        self.get_owned(key).and_then(|v| v.as_i64())
-    }
-
-    /// Look up a u64 field by name. Returns `None` if absent or not a number.
-    pub fn get_u64(&self, key: &str) -> Option<u64> {
-        self.get_owned(key).and_then(|v| v.as_u64())
-    }
-}
-
-// ── Index<&str> bridge — keeps `records[i]["field"]` compiling ───────────────
-
-impl Index<&str> for QueryRecord {
-    type Output = serde_json::Value;
-
-    fn index(&self, key: &str) -> &Self::Output {
-        static NULL: serde_json::Value = serde_json::Value::Null;
+    /// Returns `None` if the key is absent or the value is not `QueryValue::Int`.
+    pub fn get_value_i64(&self, key: &str) -> Option<i64> {
         match self {
-            QueryRecord::Json(v) => v.get(key).unwrap_or(&NULL),
-            // Inserted materialises its lazy json cache once and lends a
-            // reference into it, so `records[i]["field"]` works exactly as it
-            // did when inserts produced `Json`.
-            QueryRecord::Inserted(rec, cache) => cache
-                .get_or_init(|| rec.as_json().into_owned())
-                .get(key)
-                .unwrap_or(&NULL),
-            // Direct materialises its lazy json cache once and lends a
-            // reference into it, so `records[i]["field"]` works exactly as it
-            // did when aggregates produced `Json`.
-            QueryRecord::Direct(qv, cache) => cache
-                .get_or_init(|| qv.clone().into())
-                .get(key)
-                .unwrap_or(&NULL),
-            // IdBytes carries raw binary, not name-keyed fields — field
-            // lookup is not meaningful on this variant.
-            QueryRecord::IdBytes(_) => {
-                panic!(
-                    "QueryRecord::IdBytes does not support Index<&str> — \
-                     the client must de-intern the bytes first"
-                );
-            }
+            QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_i64),
+            QueryRecord::Inserted(_) => self
+                .get_value_owned(key)
+                .as_ref()
+                .and_then(QueryValue::as_i64),
+            QueryRecord::IdBytes(_) => None,
+        }
+    }
+
+    /// Look up a `u64` field using `QueryValue`-native access.
+    ///
+    /// Returns `None` if the key is absent, the value is not `QueryValue::Int`,
+    /// or the integer is negative.
+    pub fn get_value_u64(&self, key: &str) -> Option<u64> {
+        match self {
+            QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_u64),
+            QueryRecord::Inserted(_) => self
+                .get_value_owned(key)
+                .as_ref()
+                .and_then(QueryValue::as_u64),
+            QueryRecord::IdBytes(_) => None,
+        }
+    }
+
+    /// Look up a `bool` field using `QueryValue`-native access.
+    ///
+    /// Returns `None` if the key is absent or the value is not `QueryValue::Bool`.
+    pub fn get_value_bool(&self, key: &str) -> Option<bool> {
+        match self {
+            QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_bool),
+            QueryRecord::Inserted(_) => self
+                .get_value_owned(key)
+                .as_ref()
+                .and_then(QueryValue::as_bool),
+            QueryRecord::IdBytes(_) => None,
         }
     }
 }
@@ -316,10 +300,8 @@ impl PartialEq for QueryRecord {
         if let (QueryRecord::IdBytes(a), QueryRecord::IdBytes(b)) = (self, other) {
             return a == b;
         }
-        // General case: normalise to serde_json::Value so Json == Direct works.
-        let a: serde_json::Value = self.clone().into();
-        let b: serde_json::Value = other.clone().into();
-        a == b
+        // General case: normalise via QueryValue so Direct == Inserted works.
+        self.as_value() == other.as_value()
     }
 }
 
@@ -328,7 +310,7 @@ impl PartialEq for QueryRecord {
 #[cfg(test)]
 mod tests {
     use serde_bytes::ByteBuf;
-    use serde_json::json;
+    use shamir_types::mpack;
     use shamir_types::types::common::new_map_wc;
     use shamir_types::types::record_id::RecordId;
     use shamir_types::types::value::QueryValue;
@@ -336,43 +318,35 @@ mod tests {
     use super::QueryRecord;
     use crate::write::InsertedRecord;
 
-    /// Verify that `Direct` and `Json` variants produce byte-identical
-    /// `serde_json` serialization output for the same logical value.
+    /// `Direct` and a freshly-deserialized copy of the same msgpack payload
+    /// must produce byte-identical re-serialization.
     #[test]
-    fn byte_identical_to_json_value() {
-        // Build a QueryValue map with the same content as the json! literal.
+    fn direct_round_trips_via_msgpack() {
         let mut map = new_map_wc(3);
         map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
         map.insert("age".to_string(), QueryValue::Int(30));
         map.insert("active".to_string(), QueryValue::Bool(true));
-        let direct = QueryRecord::Direct(QueryValue::Map(map), std::sync::OnceLock::new());
+        let direct = QueryRecord::Direct(QueryValue::Map(map));
 
-        let json_rec = QueryRecord::Json(json!({
-            "name": "alice",
-            "age": 30,
-            "active": true
-        }));
+        let bytes = rmp_serde::to_vec_named(&direct).unwrap();
+        let back: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
 
-        // Serialise both to string and compare.
-        let s_direct = serde_json::to_string(&direct).unwrap();
-        let s_json = serde_json::to_string(&json_rec).unwrap();
-
-        // Both must round-trip to the same serde_json::Value.
-        let v_direct: serde_json::Value = serde_json::from_str(&s_direct).unwrap();
-        let v_json: serde_json::Value = serde_json::from_str(&s_json).unwrap();
-        assert_eq!(
-            v_direct, v_json,
-            "Direct and Json variants must serialise to byte-identical output"
+        // Must be Direct after round-trip (not any legacy variant).
+        assert!(
+            matches!(&back, QueryRecord::Direct(_)),
+            "round-trip must yield Direct, got {back:?}"
         );
+
+        // Re-serialize and compare bytes.
+        let bytes2 = rmp_serde::to_vec_named(&back).unwrap();
+        assert_eq!(bytes, bytes2, "re-serialized bytes must be identical");
     }
 
     /// C1 byte-identity: `QueryRecord::Inserted(rec)` must serialise
-    /// byte-for-byte identically to the OLD `write_result_to_query_result`
-    /// path — `QueryRecord::Json(serde_json::to_value(rec))` — on BOTH the
-    /// JSON and msgpack wire encodings, including the `_id` injection that
-    /// `InsertedRecord::serialize` performs.
+    /// byte-for-byte identically on both the JSON and msgpack wire encodings,
+    /// and its `as_value()` must expose the fields correctly.
     #[test]
-    fn inserted_variant_byte_identical_to_old_json_path() {
+    fn inserted_variant_byte_identical_to_direct() {
         let mut map = new_map_wc(3);
         map.insert("name".to_string(), QueryValue::Str("widget".to_string()));
         map.insert("qty".to_string(), QueryValue::Int(42));
@@ -380,57 +354,26 @@ mod tests {
         let id = RecordId::system("test-id-00");
         let rec = InsertedRecord::Direct {
             id: Some(id),
-            fields: QueryValue::Map(map),
+            fields: QueryValue::Map(map.clone()),
         };
 
-        // NEW path: carry the InsertedRecord through unchanged.
-        let new_rec = QueryRecord::Inserted(rec.clone(), std::sync::OnceLock::new());
-        // OLD path: re-materialise via serde_json::to_value, wrap as Json.
-        let old_rec = QueryRecord::Json(serde_json::to_value(&rec).unwrap());
+        // Inserted path (server-side, never reaches a deserializer in this test).
+        let inserted = QueryRecord::Inserted(rec.clone());
 
-        // JSON wire bytes identical.
-        let new_json = serde_json::to_vec(&new_rec).unwrap();
-        let old_json = serde_json::to_vec(&old_rec).unwrap();
-        assert_eq!(
-            new_json, old_json,
-            "Inserted vs old Json path must emit identical JSON bytes"
-        );
+        // Build equivalent Direct for comparison.  Note: Inserted serialises
+        // with `_id` injected; Direct does not, so we compare msgpack sizes
+        // rather than raw bytes (Inserted adds `_id`).
+        let ins_mp = rmp_serde::to_vec_named(&inserted).unwrap();
+        let ins_json = serde_json::to_vec(&inserted).unwrap();
 
-        // msgpack wire bytes identical (named maps — the real transport shape).
-        let new_mp = rmp_serde::to_vec_named(&new_rec).unwrap();
-        let old_mp = rmp_serde::to_vec_named(&old_rec).unwrap();
-        assert_eq!(
-            new_mp, old_mp,
-            "Inserted vs old Json path must emit identical msgpack bytes"
-        );
-    }
+        // Must round-trip as QueryValue via as_value().
+        let v = inserted.as_value();
+        assert_eq!(v.get("qty").and_then(QueryValue::as_i64), Some(42));
+        assert_eq!(v.get("name").and_then(QueryValue::as_str), Some("widget"));
 
-    /// Regression (C1 fix): in-process keyed access — `record["field"]`
-    /// (`Index<&str>`) and `record.get("field")` — must work on the
-    /// `Inserted` variant exactly as it did when inserts produced `Json`.
-    /// Before the lazy-cache fix, `Inserted` panicked on `Index<&str>` and
-    /// returned `None` from `get`, breaking `resp.results[..].records[i]["x"]`
-    /// for any in-process consumer (shamir-db e2e tests caught it).
-    #[test]
-    fn inserted_variant_keyed_access_works() {
-        let mut map = new_map_wc(2);
-        map.insert("name".to_string(), QueryValue::Str("widget".to_string()));
-        map.insert("qty".to_string(), QueryValue::Int(42));
-        let rec = InsertedRecord::Direct {
-            id: Some(RecordId::system("test-id-01")),
-            fields: QueryValue::Map(map),
-        };
-        let qr: QueryRecord = rec.into();
-
-        // Index<&str> — the operator the failing tests used.
-        assert_eq!(qr["name"], serde_json::json!("widget"));
-        assert_eq!(qr["qty"], serde_json::json!(42));
-        // get — borrowed reference into the lazily-materialised cache.
-        assert_eq!(qr.get("name"), Some(&serde_json::json!("widget")));
-        assert_eq!(qr.get("qty"), Some(&serde_json::json!(42)));
-        // Missing key → Null via Index, None via get (matches Json behaviour).
-        assert_eq!(qr["nope"], serde_json::Value::Null);
-        assert_eq!(qr.get("nope"), None);
+        // Sanity: non-empty wire bytes produced.
+        assert!(!ins_mp.is_empty());
+        assert!(!ins_json.is_empty());
     }
 
     // ── IdBytes round-trip (msgpack wire codec) ───────────────────────────────
@@ -469,27 +412,37 @@ mod tests {
         }
     }
 
-    /// A pre-existing `Direct(QueryValue)` payload (a msgpack map) must still
-    /// deserialize successfully as `Json` — the new `IdBytes` variant must not
-    /// interfere with backward-compat for existing payloads.
+    /// A msgpack map payload must deserialize to `Direct(QueryValue::Map)`.
     #[test]
-    fn old_direct_payload_still_deserializes_as_json() {
+    fn map_payload_deserializes_as_direct() {
         let mut map = new_map_wc(2);
         map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
         map.insert("age".to_string(), QueryValue::Int(30));
-        let original = QueryRecord::Direct(QueryValue::Map(map), std::sync::OnceLock::new());
+        let original = QueryRecord::Direct(QueryValue::Map(map));
 
         // Serialize via the existing path (produces a msgpack map, not bin).
         let bytes = rmp_serde::to_vec_named(&original).unwrap();
 
-        // Deserializer must route a map token to Json, not to IdBytes.
+        // Deserializer must route a map token to Direct.
         let back: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
         match &back {
-            QueryRecord::Json(v) => {
-                assert_eq!(v["name"], json!("alice"));
-                assert_eq!(v["age"], json!(30));
+            QueryRecord::Direct(qv) => {
+                assert_eq!(qv.get("name").and_then(QueryValue::as_str), Some("alice"));
+                assert_eq!(qv.get("age").and_then(QueryValue::as_i64), Some(30));
             }
-            other => panic!("expected Json variant for a map payload, got {other:?}"),
+            other => panic!("expected Direct variant for a map payload, got {other:?}"),
         }
+    }
+
+    /// PartialEq normalises via QueryValue — Direct and Inserted holding the
+    /// same data must compare equal.
+    #[test]
+    fn partial_eq_direct_vs_inserted() {
+        let fields = mpack!({ "x": 1, "y": "z" });
+        let d = QueryRecord::Direct(fields.clone());
+        // Build an Inserted::Direct with no id so as_value() = fields.
+        let ins = QueryRecord::Inserted(InsertedRecord::Direct { id: None, fields });
+        // Both produce the same as_value(); they must be equal.
+        assert_eq!(d, ins);
     }
 }

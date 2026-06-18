@@ -62,7 +62,7 @@ async fn run_changes_since(shamir: &ShamirDb, cursor: u64) -> serde_json::Value 
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .expect("ChangesSince execute");
-    resp.results["cs"].records[0].as_json().into_owned()
+    serde_json::Value::from(resp.results["cs"].records[0].as_value().into_owned())
 }
 
 // ---------------------------------------------------------------------------

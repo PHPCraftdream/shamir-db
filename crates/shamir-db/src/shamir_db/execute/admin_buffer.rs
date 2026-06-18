@@ -1,13 +1,13 @@
 //! Admin handlers: GetBufferConfig, SetBufferConfig, AlterBufferConfig.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, apply_patch, dto_from_storage, storage_from_dto};
+use super::helpers::{admin_result, apply_patch, dto_from_storage, storage_from_dto, to_qv};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_get_buffer_config(
@@ -52,15 +52,15 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         let payload = match cfg {
-            Some(c) => json!({
-                "table": op.get_buffer_config,
-                "repo": op.repo,
-                "config": dto_from_storage(&c),
+            Some(c) => mpack!({
+                "table": @(QueryValue::Str(op.get_buffer_config.clone())),
+                "repo": @(QueryValue::Str(op.repo.clone())),
+                "config": @(to_qv(&dto_from_storage(&c))),
             }),
-            None => json!({
-                "table": op.get_buffer_config,
-                "repo": op.repo,
-                "config": serde_json::Value::Null,
+            None => mpack!({
+                "table": @(QueryValue::Str(op.get_buffer_config.clone())),
+                "repo": @(QueryValue::Str(op.repo.clone())),
+                "config": null,
             }),
         };
         Ok(admin_result(payload))
@@ -108,10 +108,10 @@ impl ShamirAdminExecutor {
             .set_buffer_config(&storage_cfg)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "set_buffer_config": op.set_buffer_config,
-            "repo": op.repo,
-            "config": dto_from_storage(&storage_cfg),
+        Ok(admin_result(mpack!({
+            "set_buffer_config": @(QueryValue::Str(op.set_buffer_config.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
+            "config": @(to_qv(&dto_from_storage(&storage_cfg))),
         })))
     }
 
@@ -157,10 +157,10 @@ impl ShamirAdminExecutor {
             .alter_buffer_config(|c| apply_patch(c, &patch))
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "alter_buffer_config": op.alter_buffer_config,
-            "repo": op.repo,
-            "config": dto_from_storage(&updated),
+        Ok(admin_result(mpack!({
+            "alter_buffer_config": @(QueryValue::Str(op.alter_buffer_config.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
+            "config": @(to_qv(&dto_from_storage(&updated))),
         })))
     }
 }

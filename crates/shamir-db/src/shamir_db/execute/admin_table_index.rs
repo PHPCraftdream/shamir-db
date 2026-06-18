@@ -1,10 +1,10 @@
 //! Admin handlers: CreateTable, DropTable, CreateIndex, DropIndex.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, apply_table_retention};
@@ -29,11 +29,11 @@ impl ShamirAdminExecutor {
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_table(&op.repo, &op.create_table) {
                 if op.if_not_exists {
-                    return Ok(admin_result(json!({
-                        "created_table": op.create_table,
-                        "repo": op.repo,
+                    return Ok(admin_result(mpack!({
+                        "created_table": @(QueryValue::Str(op.create_table.clone())),
+                        "repo": @(QueryValue::Str(op.repo.clone())),
                         "created": false,
-                        "existed": true
+                        "existed": true,
                     })));
                 }
                 return Err(err_code(
@@ -71,11 +71,11 @@ impl ShamirAdminExecutor {
             .await?;
         }
 
-        Ok(admin_result(json!({
-            "created_table": op.create_table,
-            "repo": op.repo,
+        Ok(admin_result(mpack!({
+            "created_table": @(QueryValue::Str(op.create_table.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
             "created": true,
-            "existed": false
+            "existed": false,
         })))
     }
 
@@ -109,9 +109,10 @@ impl ShamirAdminExecutor {
             .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"dropped_table": op.drop_table, "existed": removed}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_table": @(QueryValue::Str(op.drop_table.clone())),
+            "existed": @(QueryValue::Bool(removed)),
+        })))
     }
 
     pub(super) async fn handle_create_index(
@@ -156,11 +157,11 @@ impl ShamirAdminExecutor {
         };
         if already_exists {
             if op.if_not_exists {
-                return Ok(admin_result(json!({
-                    "created_index": op.create_index,
-                    "table": op.table,
+                return Ok(admin_result(mpack!({
+                    "created_index": @(QueryValue::Str(op.create_index.clone())),
+                    "table": @(QueryValue::Str(op.table.clone())),
                     "created": false,
-                    "existed": true
+                    "existed": true,
                 })));
             }
             return Err(err_code(
@@ -189,10 +190,10 @@ impl ShamirAdminExecutor {
                 .create_index_v2(op)
                 .await
                 .map_err(|e| err(e.to_string()))?;
-            return Ok(admin_result(json!({
-                "created_index": op.create_index,
-                "table": op.table,
-                "index_type": op.index_type,
+            return Ok(admin_result(mpack!({
+                "created_index": @(QueryValue::Str(op.create_index.clone())),
+                "table": @(QueryValue::Str(op.table.clone())),
+                "index_type": @(op.index_type.as_deref().map(|t| QueryValue::Str(t.to_string())).unwrap_or(QueryValue::Null)),
             })));
         }
 
@@ -224,11 +225,11 @@ impl ShamirAdminExecutor {
                 .map_err(|e| err(e.to_string()))?;
         }
 
-        Ok(admin_result(json!({
-            "created_index": op.create_index,
-            "table": op.table,
-            "unique": op.unique,
-            "sorted": op.sorted
+        Ok(admin_result(mpack!({
+            "created_index": @(QueryValue::Str(op.create_index.clone())),
+            "table": @(QueryValue::Str(op.table.clone())),
+            "unique": @(QueryValue::Bool(op.unique)),
+            "sorted": @(QueryValue::Bool(op.sorted)),
         })))
     }
 
@@ -278,9 +279,9 @@ impl ShamirAdminExecutor {
                 .map_err(|e| err(e.to_string()))?
         };
 
-        Ok(admin_result(json!({
-            "dropped_index": op.drop_index,
-            "existed": removed
+        Ok(admin_result(mpack!({
+            "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
+            "existed": @(QueryValue::Bool(removed)),
         })))
     }
 }

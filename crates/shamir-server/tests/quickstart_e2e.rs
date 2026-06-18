@@ -67,8 +67,8 @@ async fn quickstart_kv_in_default_store() {
     let resp = client.execute("default", get_b.build()).await.expect("get");
     let rows = &resp.results["g"].records;
     assert_eq!(rows.len(), 1, "one row for user:42");
-    assert_eq!(rows[0]["name"], "Alice");
-    assert_eq!(rows[0]["score"], 7);
+    assert_eq!(rows[0].get_value_str("name"), Some("Alice"));
+    assert_eq!(rows[0].get_value_i64("score"), Some(7));
 
     handle.shutdown().await;
 }

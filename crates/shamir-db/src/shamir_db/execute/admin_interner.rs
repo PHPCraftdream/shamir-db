@@ -4,11 +4,11 @@
 //! They are transport-only: the server resolves ids / names; building a
 //! client-side auto-cache is deferred to Stage 5.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
@@ -87,10 +87,13 @@ impl ShamirAdminExecutor {
             .map(|(k, u)| (k.id(), u.as_str().to_owned()))
             .collect();
 
-        Ok(admin_result(json!({
-            "interner_dump": op.interner_dump,
-            "epoch": epoch,
-            "entries": entries,
+        Ok(admin_result(mpack!({
+            "interner_dump": @(QueryValue::Str(op.interner_dump.clone())),
+            "epoch": @(QueryValue::Int(epoch as i64)),
+            "entries": @(QueryValue::List(entries.into_iter().map(|(id, name)| {
+                // Wire format: [id, name] — id first, matching the original JSON shape.
+                QueryValue::List(vec![QueryValue::Int(id as i64), QueryValue::Str(name)])
+            }).collect())),
         })))
     }
 
@@ -171,10 +174,12 @@ impl ShamirAdminExecutor {
             .max()
             .unwrap_or(0);
 
-        Ok(admin_result(json!({
-            "interner_touch": op.interner_touch,
-            "epoch": epoch,
-            "mappings": mappings,
+        Ok(admin_result(mpack!({
+            "interner_touch": @(QueryValue::Str(op.interner_touch.clone())),
+            "epoch": @(QueryValue::Int(epoch as i64)),
+            "mappings": @(QueryValue::List(mappings.into_iter().map(|(name, id)| {
+                QueryValue::List(vec![QueryValue::Str(name), QueryValue::Int(id as i64)])
+            }).collect())),
         })))
     }
 }

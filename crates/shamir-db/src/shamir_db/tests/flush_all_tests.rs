@@ -85,7 +85,7 @@ async fn buffered_commit_survives_graceful_flush_all() {
         1,
         "data must survive restart after flush_all"
     );
-    let r0 = records[0].as_json();
+    let r0 = records[0].as_value();
     assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
     assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }

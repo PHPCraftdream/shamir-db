@@ -167,11 +167,9 @@ async fn idmsgpack_byte_identity_convergence() {
     assert_eq!(res_a.affected, 1, "path-A must insert 1 record");
 
     let id_a_str = res_a.records[0]
-        .as_json()
-        .get("_id")
-        .and_then(|v| v.as_str())
-        .expect("path-A: _id must be present in result")
-        .to_string();
+        .get_value_owned("_id")
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .expect("path-A: _id must be present in result");
     let id_a: RecordId = id_a_str.parse().expect("_id must be a valid RecordId");
 
     // ── Path B: id-keyed via `records_idmsgpack` ─────────────────────────
@@ -473,26 +471,41 @@ async fn idmsgpack_return_result_records_match_affected() {
 
     // Each returned row must carry an `_id` and the correct field names.
     for (i, rec) in result.records.iter().enumerate() {
-        let json = rec.as_json();
         assert!(
-            json.get("_id").is_some(),
+            rec.get_value_owned("_id").is_some(),
             "record[{i}] must have _id in RETURNING row"
         );
         assert!(
-            json.get("name").is_some(),
+            rec.get_value_owned("name").is_some(),
             "record[{i}] must have 'name' (de-interned) in RETURNING row"
         );
         assert!(
-            json.get("age").is_some(),
+            rec.get_value_owned("age").is_some(),
             "record[{i}] must have 'age' (de-interned) in RETURNING row"
         );
     }
 
     // Verify field values match what was inserted.
-    assert_eq!(result.records[0].as_json()["name"], "Alice");
-    assert_eq!(result.records[0].as_json()["age"], 30);
-    assert_eq!(result.records[1].as_json()["name"], "Bob");
-    assert_eq!(result.records[1].as_json()["age"], 25);
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Alice".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("age"),
+        Some(shamir_types::types::value::QueryValue::Int(30))
+    );
+    assert_eq!(
+        result.records[1].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Bob".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[1].get_value_owned("age"),
+        Some(shamir_types::types::value::QueryValue::Int(25))
+    );
 }
 
 /// Mixed INSERT: both `values` and `records_idmsgpack` populated,
@@ -546,6 +559,16 @@ async fn mixed_values_and_idmsgpack_return_result() {
     );
 
     // Values-branch row first, then id-keyed row.
-    assert_eq!(result.records[0].as_json()["name"], "Alice");
-    assert_eq!(result.records[1].as_json()["name"], "Bob");
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Alice".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[1].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Bob".to_string()
+        ))
+    );
 }

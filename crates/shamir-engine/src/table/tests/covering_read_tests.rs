@@ -117,10 +117,7 @@ async fn covering_index_only_matches_full_fetch() {
     let mut emails: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| {
-            r.get_owned("email")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
+        .filter_map(|r| r.get_value_str("email").map(str::to_owned))
         .collect();
     emails.sort();
 
@@ -190,10 +187,7 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
     let pre_emails: Vec<String> = pre
         .records
         .iter()
-        .filter_map(|r| {
-            r.get_owned("email")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
+        .filter_map(|r| r.get_value_str("email").map(str::to_owned))
         .collect();
     assert!(
         pre_emails.iter().any(|e| e == "r@example.com"),
@@ -217,10 +211,7 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
     let emails: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| {
-            r.get_owned("email")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
+        .filter_map(|r| r.get_value_str("email").map(str::to_owned))
         .collect();
 
     // r@example.com must NOT appear — that would be a phantom read.

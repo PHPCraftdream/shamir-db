@@ -1,18 +1,47 @@
 use serde::Deserialize;
-use serde_json::json;
+use shamir_collections::TMap;
 use shamir_query_types::batch::{BatchResponse, TransactionInfo};
-use shamir_query_types::read::QueryResult;
+use shamir_query_types::read::{QueryRecord, QueryResult};
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::Batch;
 use crate::response::{BatchResponseExt, ResponseError};
 use crate::Query;
 
 // ============================================================================
-// Helper: build a BatchResponse from JSON
+// Helpers: build test fixtures without serde_json
 // ============================================================================
 
-fn resp_from_json(val: serde_json::Value) -> BatchResponse {
-    serde_json::from_value(val).expect("BatchResponse should deserialize")
+/// Build a `QueryRecord::Direct` from a `QueryValue` map.
+fn record(v: QueryValue) -> QueryRecord {
+    QueryRecord::from(v)
+}
+
+/// Build a `QueryResult` from a vec of `QueryRecord`s.
+fn qresult(records: Vec<QueryRecord>) -> QueryResult {
+    QueryResult {
+        records,
+        stats: None,
+        pagination: None,
+        value: None,
+    }
+}
+
+/// Build a minimal `BatchResponse` with the given results map.
+fn batch_resp(
+    results: TMap<String, QueryResult>,
+    execution_plan: Vec<Vec<String>>,
+    transaction: Option<TransactionInfo>,
+) -> BatchResponse {
+    BatchResponse {
+        id: QueryValue::Int(1),
+        results,
+        execution_plan,
+        execution_time_us: 0,
+        transaction,
+        interner_delta: TMap::default(),
+    }
 }
 
 /// A small test struct for typed deserialization.
@@ -28,18 +57,12 @@ struct User {
 
 #[test]
 fn result_returns_query_result_when_present() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 1, "name": "Alice"}
-                ]
-            }
-        },
-        "execution_plan": [["users"]],
-        "execution_time_us": 42
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![record(mpack!({"id": 1, "name": "Alice"}))]),
+    );
+    let resp = batch_resp(results, vec![vec!["users".to_owned()]], None);
 
     let qr = resp.result("users");
     assert!(qr.is_some());
@@ -48,45 +71,34 @@ fn result_returns_query_result_when_present() {
 
 #[test]
 fn result_returns_none_when_absent() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     assert!(resp.result("missing").is_none());
 }
 
 #[test]
 fn rows_returns_records_when_present() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 1, "name": "Alice"},
-                    {"id": 2, "name": "Bob"}
-                ]
-            }
-        },
-        "execution_plan": [["users"]],
-        "execution_time_us": 10
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![
+            record(mpack!({"id": 1, "name": "Alice"})),
+            record(mpack!({"id": 2, "name": "Bob"})),
+        ]),
+    );
+    let resp = batch_resp(results, vec![vec!["users".to_owned()]], None);
 
     let rows = resp.rows("users");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["name"], "Alice");
+    assert_eq!(
+        rows[0].get_value_owned("name"),
+        Some(QueryValue::Str("Alice".to_owned()))
+    );
 }
 
 #[test]
 fn rows_returns_empty_slice_when_absent() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     let rows = resp.rows("nope");
     assert!(rows.is_empty());
@@ -98,19 +110,15 @@ fn rows_returns_empty_slice_when_absent() {
 
 #[test]
 fn rows_as_deserializes_all_records() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 1, "name": "Alice"},
-                    {"id": 2, "name": "Bob"}
-                ]
-            }
-        },
-        "execution_plan": [["users"]],
-        "execution_time_us": 10
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![
+            record(mpack!({"id": 1, "name": "Alice"})),
+            record(mpack!({"id": 2, "name": "Bob"})),
+        ]),
+    );
+    let resp = batch_resp(results, vec![vec!["users".to_owned()]], None);
 
     let users: Vec<User> = resp.rows_as("users").unwrap();
     assert_eq!(users.len(), 2);
@@ -132,12 +140,7 @@ fn rows_as_deserializes_all_records() {
 
 #[test]
 fn rows_as_missing_alias_returns_error() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     let err = resp.rows_as::<User>("absent").unwrap_err();
     assert!(
@@ -148,18 +151,13 @@ fn rows_as_missing_alias_returns_error() {
 
 #[test]
 fn rows_as_deserialize_failure() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "bad": {
-                "records": [
-                    {"id": "not_a_number", "name": "X"}
-                ]
-            }
-        },
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    // "id" is a string here — should fail to deserialize into `User.id: u64`.
+    let mut results = TMap::default();
+    results.insert(
+        "bad".to_owned(),
+        qresult(vec![record(mpack!({"id": "not_a_number", "name": "X"}))]),
+    );
+    let resp = batch_resp(results, vec![], None);
 
     let err = resp.rows_as::<User>("bad").unwrap_err();
     assert!(
@@ -174,18 +172,12 @@ fn rows_as_deserialize_failure() {
 
 #[test]
 fn row_as_valid_index() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 10, "name": "Zara"}
-                ]
-            }
-        },
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![record(mpack!({"id": 10, "name": "Zara"}))]),
+    );
+    let resp = batch_resp(results, vec![], None);
 
     let user: User = resp.row_as("users", 0).unwrap();
     assert_eq!(
@@ -199,18 +191,12 @@ fn row_as_valid_index() {
 
 #[test]
 fn row_as_out_of_range() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 1, "name": "A"}
-                ]
-            }
-        },
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![record(mpack!({"id": 1, "name": "A"}))]),
+    );
+    let resp = batch_resp(results, vec![], None);
 
     let err = resp.row_as::<User>("users", 5).unwrap_err();
     match err {
@@ -229,12 +215,7 @@ fn row_as_out_of_range() {
 
 #[test]
 fn row_as_missing_alias() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     let err = resp.row_as::<User>("gone", 0).unwrap_err();
     assert!(matches!(err, ResponseError::MissingAlias(ref a) if a == "gone"));
@@ -249,18 +230,12 @@ fn get_via_handle() {
     let mut b = Batch::new();
     let h = b.query("users", Query::from("users"));
 
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 1, "name": "Alice"}
-                ]
-            }
-        },
-        "execution_plan": [["users"]],
-        "execution_time_us": 5
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![record(mpack!({"id": 1, "name": "Alice"}))]),
+    );
+    let resp = batch_resp(results, vec![vec!["users".to_owned()]], None);
 
     let qr: &QueryResult = resp.get(&h).expect("handle lookup should succeed");
     assert_eq!(qr.records.len(), 1);
@@ -271,19 +246,15 @@ fn get_rows_via_handle() {
     let mut b = Batch::new();
     let h = b.query("orders", Query::from("orders"));
 
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "orders": {
-                "records": [
-                    {"total": 100},
-                    {"total": 200}
-                ]
-            }
-        },
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "orders".to_owned(),
+        qresult(vec![
+            record(mpack!({"total": 100})),
+            record(mpack!({"total": 200})),
+        ]),
+    );
+    let resp = batch_resp(results, vec![], None);
 
     let rows = resp.get_rows(&h);
     assert_eq!(rows.len(), 2);
@@ -294,18 +265,12 @@ fn get_as_via_handle() {
     let mut b = Batch::new();
     let h = b.query("users", Query::from("users"));
 
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {
-            "users": {
-                "records": [
-                    {"id": 5, "name": "Eve"}
-                ]
-            }
-        },
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![record(mpack!({"id": 5, "name": "Eve"}))]),
+    );
+    let resp = batch_resp(results, vec![], None);
 
     let users: Vec<User> = resp.get_as(&h).unwrap();
     assert_eq!(users.len(), 1);
@@ -323,12 +288,7 @@ fn get_via_handle_absent() {
     let mut b = Batch::new();
     let h = b.query("missing", Query::from("missing"));
 
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     assert!(resp.get(&h).is_none());
     assert!(resp.get_rows(&h).is_empty());
@@ -344,12 +304,7 @@ fn get_via_handle_absent() {
 
 #[test]
 fn is_committed_true_when_no_transaction() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0
-    }));
+    let resp = batch_resp(TMap::default(), vec![], None);
 
     assert!(resp.is_committed());
     assert!(resp.transaction().is_none());
@@ -358,18 +313,15 @@ fn is_committed_true_when_no_transaction() {
 
 #[test]
 fn is_committed_true_when_tx_committed() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0,
-        "transaction": {
-            "tx_id": 42,
-            "status": "committed",
-            "snapshot_version": 100,
-            "commit_version": 101
-        }
-    }));
+    let tx = TransactionInfo {
+        tx_id: 42,
+        status: "committed".to_owned(),
+        snapshot_version: Some(100),
+        commit_version: Some(101),
+        reason: None,
+        materialized: true,
+    };
+    let resp = batch_resp(TMap::default(), vec![], Some(tx));
 
     assert!(resp.is_committed());
     let tx: &TransactionInfo = resp.transaction().unwrap();
@@ -380,17 +332,15 @@ fn is_committed_true_when_tx_committed() {
 
 #[test]
 fn is_committed_false_when_tx_aborted() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [],
-        "execution_time_us": 0,
-        "transaction": {
-            "tx_id": 7,
-            "status": "aborted",
-            "reason": "tx_conflict"
-        }
-    }));
+    let tx = TransactionInfo {
+        tx_id: 7,
+        status: "aborted".to_owned(),
+        snapshot_version: None,
+        commit_version: None,
+        reason: Some("tx_conflict".to_owned()),
+        materialized: true,
+    };
+    let resp = batch_resp(TMap::default(), vec![], Some(tx));
 
     assert!(!resp.is_committed());
     assert_eq!(resp.abort_reason(), Some("tx_conflict"));
@@ -402,16 +352,12 @@ fn is_committed_false_when_tx_aborted() {
 
 #[test]
 fn execution_plan_passthrough() {
-    let resp = resp_from_json(json!({
-        "id": 1,
-        "results": {},
-        "execution_plan": [
-            ["users", "products"],
-            ["orders"],
-            ["stats"]
-        ],
-        "execution_time_us": 999
-    }));
+    let plan = vec![
+        vec!["users".to_owned(), "products".to_owned()],
+        vec!["orders".to_owned()],
+        vec!["stats".to_owned()],
+    ];
+    let resp = batch_resp(TMap::default(), plan, None);
 
     let plan = resp.execution_plan();
     assert_eq!(plan.len(), 3);

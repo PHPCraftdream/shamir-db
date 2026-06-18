@@ -71,7 +71,7 @@ async fn synced_batch_survives_immediate_drop() {
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(records.len(), 1, "synced batch must survive immediate drop");
-    let r0 = records[0].as_json();
+    let r0 = records[0].as_value();
     assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
     assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }
@@ -112,8 +112,14 @@ async fn buffered_batch_executes_successfully() {
     let insert = b.to_request_via_msgpack();
     let resp = shamir.execute("appdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 1);
-    assert_eq!(resp.results["ins"].records[0]["name"], "widget");
-    assert_eq!(resp.results["ins"].records[0]["qty"], 42);
+    assert_eq!(
+        resp.results["ins"].records[0].get_value_str("name"),
+        Some("widget")
+    );
+    assert_eq!(
+        resp.results["ins"].records[0].get_value_i64("qty"),
+        Some(42)
+    );
 
     shamir.flush_all().await.unwrap();
 }

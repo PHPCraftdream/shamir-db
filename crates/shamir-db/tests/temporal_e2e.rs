@@ -147,7 +147,7 @@ async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<serde_json::Val
     resp.results["q"]
         .records
         .iter()
-        .map(|r| r.as_json().into_owned())
+        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
         .collect()
 }
 
@@ -161,7 +161,7 @@ async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> serde_js
         .execute(db, &b.to_request_via_msgpack())
         .await
         .expect("ChangesSince execute");
-    resp.results["cs"].records[0].as_json().into_owned()
+    serde_json::Value::from(resp.results["cs"].records[0].as_value().into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +207,12 @@ async fn temporal_lifecycle_e2e() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["ct"].records[0].as_json()["created_table"],
-        json!("users")
+        resp.results["ct"].records[0].get_value_str("created_table"),
+        Some("users")
     );
     assert_eq!(
-        resp.results["ct"].records[0].as_json()["created"],
-        json!(true)
+        resp.results["ct"].records[0].get_value_bool("created"),
+        Some(true)
     );
     // Fails if CreateTable silently drops the retention knob.
     let policy = table_retention(&shamir, "testdb", "main", "users").await;
@@ -354,10 +354,10 @@ async fn temporal_lifecycle_e2e() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let result = resp.results["ph"].records[0].as_json();
-    assert_eq!(result["purge_history"], json!("users"));
-    assert_eq!(result["repo"], json!("main"));
-    let purged = result["purged"].as_u64().expect("purged is u64");
+    let rec = &resp.results["ph"].records[0];
+    assert_eq!(rec.get_value_str("purge_history"), Some("users"));
+    assert_eq!(rec.get_value_str("repo"), Some("main"));
+    let purged = rec.get_value_u64("purged").expect("purged is u64");
     // At least one old version (ts < 25_000) must be reclaimed.
     // Fails if purge_below_ts's ts-predicate path is broken (purged == 0).
     assert!(
@@ -424,10 +424,13 @@ async fn temporal_lifecycle_e2e() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["sr"].records[0].as_json()["set_retention"],
-        json!("users")
+        resp.results["sr"].records[0].get_value_str("set_retention"),
+        Some("users")
     );
-    assert_eq!(resp.results["sr"].records[0].as_json()["ok"], json!(true));
+    assert_eq!(
+        resp.results["sr"].records[0].get_value_bool("ok"),
+        Some(true)
+    );
     // Fails if SetRetention didn't take effect on the MvccStore.
     let after = table_retention(&shamir, "testdb", "main", "users").await;
     assert_eq!(after.max_count, Some(2), "live policy now max_count=2");

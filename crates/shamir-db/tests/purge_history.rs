@@ -10,8 +10,6 @@
 //!   live snapshot is kept even when the ts predicate would otherwise cover it.
 //! - A principal without `Manage` permission is denied `PurgeHistory`.
 
-use serde_json::json;
-
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -157,10 +155,10 @@ async fn purge_older_than_age_removes_old_versions() {
         .unwrap();
 
     // Result shape: { "purge_history": "users", "repo": "main", "purged": N }
-    let result = resp.results["ph"].records[0].as_json();
-    assert_eq!(result["purge_history"], json!("users"));
-    assert_eq!(result["repo"], json!("main"));
-    let purged = result["purged"].as_u64().expect("purged is u64");
+    let rec = &resp.results["ph"].records[0];
+    assert_eq!(rec.get_value_str("purge_history"), Some("users"));
+    assert_eq!(rec.get_value_str("repo"), Some("main"));
+    let purged = rec.get_value_u64("purged").expect("purged is u64");
     // At least 1 version (v1@ts=1_000) must have been purged.
     // If purge_below_ts were broken (e.g., skipped all entries), purged == 0
     // and the test fails.
@@ -234,10 +232,10 @@ async fn purge_older_than_absolute_timestamp() {
         .await
         .unwrap();
 
-    let result = resp.results["ph"].records[0].as_json();
-    assert_eq!(result["purge_history"], json!("users"));
-    assert_eq!(result["repo"], json!("main"));
-    let purged = result["purged"].as_u64().expect("purged is u64");
+    let rec = &resp.results["ph"].records[0];
+    assert_eq!(rec.get_value_str("purge_history"), Some("users"));
+    assert_eq!(rec.get_value_str("repo"), Some("main"));
+    let purged = rec.get_value_u64("purged").expect("purged is u64");
     // v1 @ts=1_000 must have been purged.
     // If purge_below_ts's ts-predicate path were broken, purged == 0.
     assert!(

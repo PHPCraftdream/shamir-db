@@ -1,13 +1,13 @@
 //! Admin handlers: Chmod, Chown, Chgrp, CreateGroup, DropGroup, AddGroupMember, RemoveGroupMember, AccessTree.
 
-use serde_json::json;
-
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::admin_result;
+use super::helpers::{admin_result, to_qv};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_chmod(
@@ -41,9 +41,9 @@ impl ShamirAdminExecutor {
             .set_resource_meta(&path, &meta)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "chmod": serde_json::to_value(&op.chmod).map_err(|e| err(e.to_string()))?,
-            "mode": op.mode,
+        Ok(admin_result(mpack!({
+            "chmod": @(to_qv(&op.chmod)),
+            "mode": @(QueryValue::Int(op.mode as i64)),
         })))
     }
 
@@ -78,9 +78,9 @@ impl ShamirAdminExecutor {
             .set_resource_meta(&path, &meta)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "chown": serde_json::to_value(&op.chown).map_err(|e| err(e.to_string()))?,
-            "owner": op.owner,
+        Ok(admin_result(mpack!({
+            "chown": @(to_qv(&op.chown)),
+            "owner": @(QueryValue::Int(op.owner as i64)),
         })))
     }
 
@@ -115,9 +115,9 @@ impl ShamirAdminExecutor {
             .set_resource_meta(&path, &meta)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "chgrp": serde_json::to_value(&op.chgrp).map_err(|e| err(e.to_string()))?,
-            "group": op.group,
+        Ok(admin_result(mpack!({
+            "chgrp": @(to_qv(&op.chgrp)),
+            "group": @(match op.group { Some(g) => QueryValue::Int(g as i64), None => QueryValue::Null }),
         })))
     }
 
@@ -148,9 +148,9 @@ impl ShamirAdminExecutor {
             .create_group(&op.create_group)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "created_group": op.create_group,
-            "group_id": group_id,
+        Ok(admin_result(mpack!({
+            "created_group": @(QueryValue::Str(op.create_group.clone())),
+            "group_id": @(QueryValue::Int(group_id as i64)),
         })))
     }
 
@@ -185,8 +185,8 @@ impl ShamirAdminExecutor {
             .drop_group(group_id)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "dropped_group_id": group_id,
+        Ok(admin_result(mpack!({
+            "dropped_group_id": @(QueryValue::Int(group_id as i64)),
         })))
     }
 
@@ -221,9 +221,9 @@ impl ShamirAdminExecutor {
             .add_group_member(group_id, op.user)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "added_to_group": group_id,
-            "user": op.user,
+        Ok(admin_result(mpack!({
+            "added_to_group": @(QueryValue::Int(group_id as i64)),
+            "user": @(QueryValue::Int(op.user as i64)),
         })))
     }
 
@@ -258,9 +258,9 @@ impl ShamirAdminExecutor {
             .remove_group_member(group_id, op.user)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "removed_from_group": group_id,
-            "user": op.user,
+        Ok(admin_result(mpack!({
+            "removed_from_group": @(QueryValue::Int(group_id as i64)),
+            "user": @(QueryValue::Int(op.user as i64)),
         })))
     }
 
@@ -297,6 +297,8 @@ impl ShamirAdminExecutor {
             .access_tree(op.depth, op.db.as_deref())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({ "access_tree": tree })))
+        Ok(admin_result(
+            mpack!({ "access_tree": @(QueryValue::from(tree)) }),
+        ))
     }
 }

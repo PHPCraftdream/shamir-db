@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::json;
+use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -186,20 +187,20 @@ async fn v2_e2e_roundtrip_insert_read() {
         );
 
         // The record must have come back as name-keyed (de-interned by client).
-        // as_json() works on both Direct and Json variants.
-        let rec_json = result.records[0].as_json();
+        // as_value() is zero-alloc for Direct rows (the post-deintern shape).
+        let rec = result.records[0].as_value();
         assert_eq!(
-            rec_json.get("name").and_then(|v| v.as_str()),
+            rec.get("name").and_then(QueryValue::as_str),
             Some("widget"),
             "name field must round-trip"
         );
         assert_eq!(
-            rec_json.get("price").and_then(|v| v.as_i64()),
+            rec.get("price").and_then(QueryValue::as_i64),
             Some(9),
             "price field must round-trip"
         );
         assert_eq!(
-            rec_json.get("active").and_then(|v| v.as_bool()),
+            rec.get("active").and_then(QueryValue::as_bool),
             Some(true),
             "active field must round-trip"
         );
@@ -248,14 +249,14 @@ async fn v2_section_9_4_numeric_string_field_name() {
         );
 
         // Verify the field named "42" round-trips correctly as a string key.
-        let rec_json = result.records[0].as_json();
-        let val = rec_json.get("42");
+        let rec = result.records[0].as_value();
+        let val = rec.get("42");
         assert!(
             val.is_some(),
             "§9.4: field named '42' must be present in the response as string key '42'"
         );
         assert_eq!(
-            val.and_then(|v| v.as_str()),
+            val.and_then(QueryValue::as_str),
             Some("numeric-name-value"),
             "§9.4: field value must round-trip"
         );
@@ -327,7 +328,7 @@ async fn v2_new_field_pre_touch_and_roundtrip() {
         let found = result
             .records
             .iter()
-            .any(|rec| rec.as_json().get(unique_field).is_some());
+            .any(|rec| rec.as_value().get(unique_field).is_some());
         assert!(found, "new field must appear in at least one read record");
 
         client
@@ -419,7 +420,7 @@ async fn v2_deintern_unknown_id_refresh() {
     let found = result
         .records
         .iter()
-        .any(|rec| rec.as_json().get("refresh_field").is_some());
+        .any(|rec| rec.as_value().get("refresh_field").is_some());
     assert!(
         found,
         "after de-intern via refresh_repo, 'refresh_field' must appear in a record"

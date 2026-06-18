@@ -1,11 +1,12 @@
 //! Admin handlers: CreateFunction, DropFunction, RenameFunction, CreateFunctionFolder.
 
 use base64::Engine;
-use serde_json::json;
 
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, validate_name_component};
@@ -68,9 +69,9 @@ impl ShamirAdminExecutor {
                 "create_function requires either 'source' or 'wasm'".to_string()
             ));
         }
-        Ok(admin_result(
-            json!({"created_function": op.create_function}),
-        ))
+        Ok(admin_result(mpack!({
+            "created_function": @(QueryValue::Str(op.create_function.clone())),
+        })))
     }
 
     pub(super) async fn handle_drop_function(
@@ -109,9 +110,10 @@ impl ShamirAdminExecutor {
             .drop_function_as(&op.drop_function, self.actor.clone())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"dropped_function": op.drop_function, "existed": existed}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
+            "existed": @(QueryValue::Bool(existed)),
+        })))
     }
 
     pub(super) async fn handle_rename_function(
@@ -149,9 +151,10 @@ impl ShamirAdminExecutor {
             .rename_function_as(&op.rename_function, &op.to, self.actor.clone())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"renamed_function": op.rename_function, "to": op.to}),
-        ))
+        Ok(admin_result(mpack!({
+            "renamed_function": @(QueryValue::Str(op.rename_function.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+        })))
     }
 
     pub(super) async fn handle_create_function_folder(
@@ -204,9 +207,13 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
-        Ok(admin_result(json!({
-            "created_function_folder": op.create_function_folder,
-            "created": created,
+        Ok(admin_result(mpack!({
+            "created_function_folder": @(QueryValue::List(
+                op.create_function_folder.iter().map(|s| QueryValue::Str(s.clone())).collect(),
+            )),
+            "created": @(QueryValue::List(
+                created.into_iter().map(QueryValue::Str).collect(),
+            )),
         })))
     }
 }

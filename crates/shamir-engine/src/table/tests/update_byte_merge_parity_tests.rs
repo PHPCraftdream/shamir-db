@@ -416,7 +416,12 @@ async fn update_indexed_field_reflected_in_index() {
         .unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0].as_json()["city"], "LA");
+    assert_eq!(
+        result.records[0].get_value_owned("city"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "LA".to_string()
+        ))
+    );
 
     // The old posting (NYC) should yield no results.
     let find_nyc = w::update("users")
@@ -463,6 +468,16 @@ async fn update_new_field_with_returning() {
         .unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0].as_json()["name"], "Bob");
-    assert_eq!(result.records[0].as_json()["email"], "bob@example.com");
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Bob".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("email"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "bob@example.com".to_string()
+        ))
+    );
 }

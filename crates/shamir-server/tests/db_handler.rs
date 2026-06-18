@@ -251,14 +251,8 @@ async fn read_with_filter_order_limit_returns_full_payload() {
     assert_eq!(qr.records.len(), 2, "limit=2 should yield exactly 2 rows");
 
     // ORDER BY qty DESC over {3,4,5} → top two are 5 then 4.
-    assert_eq!(
-        qr.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
-        Some(5)
-    );
-    assert_eq!(
-        qr.records[1].as_json().get("qty").and_then(|v| v.as_i64()),
-        Some(4)
-    );
+    assert_eq!(qr.records[0].get_value_i64("qty"), Some(5));
+    assert_eq!(qr.records[1].get_value_i64("qty"), Some(4));
 
     // Stats and pagination metadata flow through.
     assert!(qr.stats.is_some(), "stats should be returned");
@@ -443,8 +437,8 @@ async fn admin_batch_allowed_for_superuser() {
     };
     let rows = &resp2.results.get("rd").expect("rd alias").records;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].get("sku").and_then(|v| v.as_str()), Some("X1"));
-    assert_eq!(rows[0].get("stock").and_then(|v| v.as_i64()), Some(42));
+    assert_eq!(rows[0].get_value_str("sku"), Some("X1"));
+    assert_eq!(rows[0].get_value_i64("stock"), Some(42));
 }
 
 // --------------------------------------------------------------------------

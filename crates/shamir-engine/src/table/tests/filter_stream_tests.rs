@@ -13,6 +13,7 @@ use crate::repo::RepoConfig;
 use crate::table::tests::stream_utils::collect_filter_stream;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -398,7 +399,7 @@ async fn test_filter_stream_with_query_ref() {
     refs.insert(
         "threshold".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"min_score": 70}))],
+            records: vec![QueryRecord::Direct(mpack!({"min_score": 70}))],
             stats: None,
             pagination: None,
             value: None,
@@ -480,7 +481,7 @@ async fn test_filter_stream_query_ref_in_and() {
     refs.insert(
         "config".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"min_age": 25}))],
+            records: vec![QueryRecord::Direct(mpack!({"min_age": 25}))],
             stats: None,
             pagination: None,
             value: None,
@@ -489,7 +490,7 @@ async fn test_filter_stream_query_ref_in_and() {
     refs.insert(
         "scoring".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"cutoff": 60}))],
+            records: vec![QueryRecord::Direct(mpack!({"cutoff": 60}))],
             stats: None,
             pagination: None,
             value: None,
@@ -528,9 +529,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
     refs.insert(
         "vip_list".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(
-                serde_json::json!({"score_threshold": 90}),
-            )],
+            records: vec![QueryRecord::Direct(mpack!({"score_threshold": 90}))],
             stats: None,
             pagination: None,
             value: None,
@@ -568,7 +567,7 @@ async fn test_filter_stream_not_query_ref() {
     refs.insert(
         "limits".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"max_age": 30}))],
+            records: vec![QueryRecord::Direct(mpack!({"max_age": 30}))],
             stats: None,
             pagination: None,
             value: None,
@@ -604,7 +603,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
     refs.insert(
         "age_range".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"min": 24, "max": 31}))],
+            records: vec![QueryRecord::Direct(mpack!({"min": 24, "max": 31}))],
             stats: None,
             pagination: None,
             value: None,
@@ -613,7 +612,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
     refs.insert(
         "status_config".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"allowed": "active"}))],
+            records: vec![QueryRecord::Direct(mpack!({"allowed": "active"}))],
             stats: None,
             pagination: None,
             value: None,
@@ -703,7 +702,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
     refs.insert(
         "bonus".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"threshold": 50}))],
+            records: vec![QueryRecord::Direct(mpack!({"threshold": 50}))],
             stats: None,
             pagination: None,
             value: None,
@@ -803,8 +802,8 @@ async fn test_filter_stream_in_query_ref_column() {
         "whitelist".to_string(),
         QueryResult {
             records: vec![
-                QueryRecord::Json(serde_json::json!({"status": "active"})),
-                QueryRecord::Json(serde_json::json!({"status": "inactive"})),
+                QueryRecord::Direct(mpack!({"status": "active"})),
+                QueryRecord::Direct(mpack!({"status": "inactive"})),
             ],
             stats: None,
             pagination: None,
@@ -842,8 +841,8 @@ async fn test_filter_stream_not_in_query_ref_column() {
         "exclude_scores".to_string(),
         QueryResult {
             records: vec![
-                QueryRecord::Json(serde_json::json!({"val": 45})),
-                QueryRecord::Json(serde_json::json!({"val": 70})),
+                QueryRecord::Direct(mpack!({"val": 45})),
+                QueryRecord::Direct(mpack!({"val": 70})),
             ],
             stats: None,
             pagination: None,
@@ -886,8 +885,8 @@ async fn test_filter_stream_in_query_ref_nested_and() {
         "allowed_statuses".to_string(),
         QueryResult {
             records: vec![
-                QueryRecord::Json(serde_json::json!({"s": "active"})),
-                QueryRecord::Json(serde_json::json!({"s": "inactive"})),
+                QueryRecord::Direct(mpack!({"s": "active"})),
+                QueryRecord::Direct(mpack!({"s": "inactive"})),
             ],
             stats: None,
             pagination: None,
@@ -897,7 +896,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
     refs.insert(
         "min_scores".to_string(),
         QueryResult {
-            records: vec![QueryRecord::Json(serde_json::json!({"threshold": 60}))],
+            records: vec![QueryRecord::Direct(mpack!({"threshold": 60}))],
             stats: None,
             pagination: None,
             value: None,
@@ -940,8 +939,8 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
         "blacklist".to_string(),
         QueryResult {
             records: vec![
-                QueryRecord::Json(serde_json::json!({"n": "Dave"})),
-                QueryRecord::Json(serde_json::json!({"n": "Eve"})),
+                QueryRecord::Direct(mpack!({"n": "Dave"})),
+                QueryRecord::Direct(mpack!({"n": "Eve"})),
             ],
             stats: None,
             pagination: None,

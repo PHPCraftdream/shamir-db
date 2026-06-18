@@ -25,9 +25,9 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     );
     let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
-    let result = resp.results["op"].records[0].as_json();
-    assert_eq!(result["created_validator"], "v_reject");
-    assert!(result.get("id").is_some(), "should return validator id");
+    let rec = &resp.results["op"].records[0];
+    assert_eq!(rec.get_value_str("created_validator"), Some("v_reject"));
+    assert!(rec.get_value("id").is_some(), "should return validator id");
 
     // Step 2: bind_validator over the wire
     let mut b = Batch::new();
@@ -42,8 +42,8 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     let bind_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &bind_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0].as_json()["bound_validator"],
-        "v_reject"
+        resp.results["op"].records[0].get_value_str("bound_validator"),
+        Some("v_reject")
     );
 
     // Step 3: insert should fail (validator rejects)
@@ -71,7 +71,10 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     );
     let unbind_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &unbind_req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
 
     // Step 5: insert should now succeed
     let resp = db.execute("testdb", &insert_req).await;
@@ -100,8 +103,8 @@ async fn create_function_over_wire() {
     let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0].as_json()["created_function"],
-        "wire_echo"
+        resp.results["op"].records[0].get_value_str("created_function"),
+        Some("wire_echo")
     );
 
     // Verify the function is in the catalogue
@@ -170,7 +173,7 @@ async fn create_function_folder_over_wire() {
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    let result = resp.results["op"].records[0].as_json();
+    let result = serde_json::Value::from(resp.results["op"].records[0].as_value().into_owned());
     assert_eq!(
         result["created_function_folder"],
         json!(["reports", "daily"])
@@ -224,7 +227,10 @@ async fn drop_function_over_wire() {
     b.drop_function("op", ddl::drop_function("fn_drop_test"));
     let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
 
     // Verify removed from catalogue
     let functions = db.list_functions().await.unwrap();
@@ -255,10 +261,13 @@ async fn rename_function_over_wire() {
     let rename_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0].as_json()["renamed_function"],
-        "fn_old"
+        resp.results["op"].records[0].get_value_str("renamed_function"),
+        Some("fn_old")
     );
-    assert_eq!(resp.results["op"].records[0].as_json()["to"], "fn_new");
+    assert_eq!(
+        resp.results["op"].records[0].get_value_str("to"),
+        Some("fn_new")
+    );
 
     let functions = db.list_functions().await.unwrap();
     assert!(functions.contains(&"fn_new".to_string()));
@@ -286,10 +295,13 @@ async fn rename_validator_over_wire() {
     let rename_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0].as_json()["renamed_validator"],
-        "v_old"
+        resp.results["op"].records[0].get_value_str("renamed_validator"),
+        Some("v_old")
     );
-    assert_eq!(resp.results["op"].records[0].as_json()["to"], "v_new");
+    assert_eq!(
+        resp.results["op"].records[0].get_value_str("to"),
+        Some("v_new")
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -329,7 +341,7 @@ async fn list_validators_over_wire() {
     b.list_validators("op", ddl::list_validators("users").db("testdb"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let result = resp.results["op"].records[0].as_json();
+    let result = serde_json::Value::from(resp.results["op"].records[0].as_value().into_owned());
     let validators = result["validators"].as_array().unwrap();
     assert!(
         !validators.is_empty(),

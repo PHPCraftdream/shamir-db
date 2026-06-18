@@ -153,6 +153,29 @@ impl InsertedRecord {
             }
         }
     }
+
+    /// Look up a field by name and return an owned `QueryValue`.
+    ///
+    /// * `Direct` — zero-allocation lookup into the `QueryValue::Map`.
+    ///   The synthetic `_id` field (stored in `id: Option<RecordId>`) is
+    ///   looked up from `id` rather than `fields`.
+    /// * `Json` — looks up the key in the `serde_json::Value` map and
+    ///   converts to `QueryValue`.
+    pub fn get_value_owned(&self, key: &str) -> Option<QueryValue> {
+        match self {
+            InsertedRecord::Direct { id, fields } => {
+                if key == "_id" {
+                    return id.as_ref().map(|r| QueryValue::Str(r.to_string()));
+                }
+                fields.get(key).cloned()
+            }
+            InsertedRecord::Json(v) => {
+                let field_val = v.get(key)?;
+                // Convert serde_json::Value → QueryValue via From impl.
+                Some(QueryValue::from(field_val.clone()))
+            }
+        }
+    }
 }
 
 // ── PartialEq (for tests) ──────────────────────────────────────────────────

@@ -14,8 +14,6 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
@@ -176,9 +174,9 @@ async fn drop_table_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = resp.results["d"].records[0].as_json();
-    assert_eq!(row["dropped_table"], json!("items"));
-    assert_eq!(row["existed"], json!(true));
+    let rec = &resp.results["d"].records[0];
+    assert_eq!(rec.get_value_str("dropped_table"), Some("items"));
+    assert_eq!(rec.get_value_bool("existed"), Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -277,8 +275,8 @@ async fn drop_db_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = resp.results["d"].records[0].as_json();
-    assert_eq!(row["dropped"], json!("victim"));
+    let rec = &resp.results["d"].records[0];
+    assert_eq!(rec.get_value_str("dropped"), Some("victim"));
 }
 
 // --------------------------------------------------------------------------
@@ -353,9 +351,9 @@ async fn drop_index_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = resp.results["d"].records[0].as_json();
-    assert_eq!(row["dropped_index"], json!("by_id"));
-    assert_eq!(row["existed"], json!(true));
+    let rec = &resp.results["d"].records[0];
+    assert_eq!(rec.get_value_str("dropped_index"), Some("by_id"));
+    assert_eq!(rec.get_value_bool("existed"), Some(true));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -512,8 +510,8 @@ async fn create_table_passes_without_hmac() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = resp.results["t"].records[0].as_json();
-    assert_eq!(row["created_table"], json!("x"));
+    let rec = &resp.results["t"].records[0];
+    assert_eq!(rec.get_value_str("created_table"), Some("x"));
 }
 
 // --------------------------------------------------------------------------

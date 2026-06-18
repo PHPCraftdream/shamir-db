@@ -105,9 +105,9 @@ async fn migration_preserves_fts_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
-        .as_str()
-        .unwrap()
+    let migration_id = mig.results["m"].records[0]
+        .get_value_str("migration_id")
+        .expect("migration_id must be a string")
         .to_string();
 
     let mut b = Batch::new();
@@ -194,9 +194,9 @@ async fn migration_preserves_functional_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
-        .as_str()
-        .unwrap()
+    let migration_id = mig.results["m"].records[0]
+        .get_value_str("migration_id")
+        .expect("migration_id must be a string")
         .to_string();
 
     let mut b = Batch::new();
@@ -275,7 +275,7 @@ async fn migration_preserves_vector_index() {
     assert_eq!(src_records.len(), 3);
     let src_label_strs: Vec<String> = src_records
         .iter()
-        .map(|r| r.get_str("label").unwrap())
+        .map(|r| r.get_value_str("label").unwrap().to_string())
         .collect();
     let src_labels: Vec<&str> = src_label_strs.iter().map(String::as_str).collect();
     let src_stats = src_resp.results["q"].stats.as_ref().expect("src stats");
@@ -288,9 +288,9 @@ async fn migration_preserves_vector_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
-        .as_str()
-        .unwrap()
+    let migration_id = mig.results["m"].records[0]
+        .get_value_str("migration_id")
+        .expect("migration_id must be a string")
         .to_string();
 
     let mut b = Batch::new();
@@ -313,7 +313,7 @@ async fn migration_preserves_vector_index() {
     assert_eq!(dst_records.len(), 3);
     let dst_label_strs: Vec<String> = dst_records
         .iter()
-        .map(|r| r.get_str("label").unwrap())
+        .map(|r| r.get_value_str("label").unwrap().to_string())
         .collect();
     let dst_labels: Vec<&str> = dst_label_strs.iter().map(String::as_str).collect();
     let dst_stats = dst_resp.results["q"].stats.as_ref().expect("dst stats");

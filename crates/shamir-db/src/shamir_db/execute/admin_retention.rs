@@ -1,13 +1,13 @@
 //! Admin handlers: SetRetention, PurgeHistory, ChangesSince.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, apply_table_retention, resolve_table_mvcc};
+use super::helpers::{admin_result, apply_table_retention, resolve_table_mvcc, to_qv};
 
 impl ShamirAdminExecutor {
     // T3: change a live table's history-retention policy on the fly.
@@ -54,10 +54,10 @@ impl ShamirAdminExecutor {
             policy,
         )
         .await?;
-        Ok(admin_result(json!({
-            "set_retention": op.set_retention,
-            "repo": op.repo,
-            "ok": true
+        Ok(admin_result(mpack!({
+            "set_retention": @(QueryValue::Str(op.set_retention.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
+            "ok": true,
         })))
     }
 
@@ -139,10 +139,10 @@ impl ShamirAdminExecutor {
             .purge_below_ts(cutoff)
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "purge_history": op.purge_history,
-            "repo": op.repo,
-            "purged": purged
+        Ok(admin_result(mpack!({
+            "purge_history": @(QueryValue::Str(op.purge_history.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
+            "purged": @(QueryValue::Int(purged as i64)),
         })))
     }
 
@@ -201,17 +201,17 @@ impl ShamirAdminExecutor {
                 )))
             }
         };
-        // Serialize the events via serde_json (ChangelogEvent is
-        // Serialize). gap_at is surfaced verbatim (null when no gap).
-        let events_json: Vec<serde_json::Value> = jr
-            .events
-            .iter()
-            .map(|e| serde_json::to_value(e).map_err(|e| err(e.to_string())))
-            .collect::<Result<_, _>>()?;
-        Ok(admin_result(json!({
-            "changes_since": op.changes_since,
-            "events": events_json,
-            "gap_at": jr.gap_at,
+        // Serialize the events via msgpack round-trip (ChangelogEvent is Serialize).
+        // gap_at is surfaced verbatim (null when no gap).
+        let events_qv: Vec<QueryValue> = jr.events.iter().map(to_qv).collect();
+        let gap_at_qv = match jr.gap_at {
+            Some(v) => QueryValue::Int(v as i64),
+            None => QueryValue::Null,
+        };
+        Ok(admin_result(mpack!({
+            "changes_since": @(QueryValue::Int(op.changes_since as i64)),
+            "events": @(QueryValue::List(events_qv)),
+            "gap_at": @(gap_at_qv),
         })))
     }
 }

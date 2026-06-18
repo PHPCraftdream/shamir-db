@@ -14,7 +14,6 @@
 //! metadata roundtrip (visibility, security, secret_grants).
 
 use async_trait::async_trait;
-use serde_json::json;
 use shamir_db::query::batch::{BatchRequest, BatchResponse};
 use shamir_db::shamir_db::{FunctionSource, SystemStoreConfig};
 use shamir_db::ShamirDb;
@@ -686,8 +685,8 @@ async fn wasm_function_inserts_and_queries() {
         1,
         "independent read should find exactly 1 persisted row"
     );
-    assert_eq!(records[0].as_json()["id"], json!(1));
-    assert_eq!(records[0].as_json()["name"], json!("neo"));
+    assert_eq!(records[0].get_value_i64("id"), Some(1));
+    assert_eq!(records[0].get_value_str("name"), Some("neo"));
 }
 
 /// A WASM function inserts a doc then reads it back by key via `db_get`.
@@ -717,8 +716,8 @@ async fn wasm_function_get_by_key() {
     let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].as_json()["id"], json!(42));
-    assert_eq!(records[0].as_json()["name"], json!("trinity"));
+    assert_eq!(records[0].get_value_i64("id"), Some(42));
+    assert_eq!(records[0].get_value_str("name"), Some("trinity"));
 }
 
 // ── Slice 8c: HTTP egress tests ──────────────────────────────────────

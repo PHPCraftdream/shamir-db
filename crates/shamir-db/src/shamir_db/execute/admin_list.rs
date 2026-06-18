@@ -1,11 +1,11 @@
 //! Admin handler: List.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::ListOp;
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
@@ -32,7 +32,9 @@ impl ShamirAdminExecutor {
                     .await
                     .map_err(err_access)?;
                 let dbs = self.shamir.list_dbs();
-                Ok(admin_result(json!({"databases": dbs})))
+                Ok(admin_result(mpack!({
+                    "databases": @(QueryValue::List(dbs.into_iter().map(QueryValue::Str).collect())),
+                })))
             }
             ListOp::Repos => {
                 self.shamir
@@ -48,7 +50,9 @@ impl ShamirAdminExecutor {
                     .get_db(&self.db_name)
                     .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
                 let repos = db.list_repos();
-                Ok(admin_result(json!({"repos": repos})))
+                Ok(admin_result(mpack!({
+                    "repos": @(QueryValue::List(repos.into_iter().map(QueryValue::Str).collect())),
+                })))
             }
             ListOp::Tables { repo } => {
                 self.shamir
@@ -64,7 +68,10 @@ impl ShamirAdminExecutor {
                     .get_db(&self.db_name)
                     .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
                 let tables = db.list_tables(repo).map_err(|e| err(e.to_string()))?;
-                Ok(admin_result(json!({"tables": tables, "repo": repo})))
+                Ok(admin_result(mpack!({
+                    "tables": @(QueryValue::List(tables.into_iter().map(QueryValue::Str).collect())),
+                    "repo": @(QueryValue::Str(repo.clone())),
+                })))
             }
             ListOp::Users => {
                 self.shamir
@@ -89,19 +96,21 @@ impl ShamirAdminExecutor {
                     .read(&query, &ctx)
                     .await
                     .map_err(|e| err(e.to_string()))?;
-                // Strip password_hash from output
-                let users: Vec<serde_json::Value> = result
+                // Strip password_hash from output using QueryValue-native access.
+                let users: Vec<QueryValue> = result
                     .records
                     .into_iter()
                     .map(|r| {
-                        let mut jv = serde_json::Value::from(r);
-                        if let Some(obj) = jv.as_object_mut() {
-                            obj.remove("password_hash");
+                        let mut qv = r.as_value().into_owned();
+                        if let QueryValue::Map(ref mut m) = qv {
+                            m.shift_remove("password_hash");
                         }
-                        jv
+                        qv
                     })
                     .collect();
-                Ok(admin_result(json!({"users": users})))
+                Ok(admin_result(mpack!({
+                    "users": @(QueryValue::List(users)),
+                })))
             }
             ListOp::Roles => {
                 self.shamir
@@ -126,7 +135,14 @@ impl ShamirAdminExecutor {
                     .read(&query, &ctx)
                     .await
                     .map_err(|e| err(e.to_string()))?;
-                Ok(admin_result(json!({"roles": result.records})))
+                let roles: Vec<QueryValue> = result
+                    .records
+                    .into_iter()
+                    .map(|r| r.as_value().into_owned())
+                    .collect();
+                Ok(admin_result(mpack!({
+                    "roles": @(QueryValue::List(roles)),
+                })))
             }
             ListOp::Indexes { table, repo } => {
                 self.shamir
@@ -147,25 +163,27 @@ impl ShamirAdminExecutor {
                     .map_err(|e| err(e.to_string()))?;
                 let interner = tm.interner().get().await.map_err(|e| err(e.to_string()))?;
 
-                let mut indexes = Vec::new();
+                let mut indexes: Vec<QueryValue> = Vec::new();
                 for def in tm.index_manager_ref().iter_indexes() {
                     let name = interner
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
                         .map(|k| k.as_str().to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());
-                    indexes.push(json!({"name": name, "unique": false}));
+                    indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": false}));
                 }
                 for def in tm.index_manager_ref().iter_unique_indexes() {
                     let name = interner
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
                         .map(|k| k.as_str().to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());
-                    indexes.push(json!({"name": name, "unique": true}));
+                    indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": true}));
                 }
 
-                Ok(admin_result(
-                    json!({"indexes": indexes, "table": table, "repo": repo}),
-                ))
+                Ok(admin_result(mpack!({
+                    "indexes": @(QueryValue::List(indexes)),
+                    "table": @(QueryValue::Str(table.clone())),
+                    "repo": @(QueryValue::Str(repo.clone())),
+                })))
             }
             ListOp::Functions { folder } => {
                 self.shamir
@@ -185,7 +203,9 @@ impl ShamirAdminExecutor {
                     };
                     names.retain(|n| n.starts_with(&prefix_slash));
                 }
-                Ok(admin_result(json!({"functions": names})))
+                Ok(admin_result(mpack!({
+                    "functions": @(QueryValue::List(names.into_iter().map(QueryValue::Str).collect())),
+                })))
             }
             ListOp::Validators => {
                 self.shamir
@@ -193,18 +213,20 @@ impl ShamirAdminExecutor {
                     .await
                     .map_err(err_access)?;
                 let validators = self.shamir.list_validators();
-                let items: Vec<serde_json::Value> = validators
+                let items: Vec<QueryValue> = validators
                     .iter()
                     .map(|(id, name)| {
                         let bound = self.shamir.validators().bound_tables(id);
-                        json!({
-                            "id": id.to_string(),
-                            "name": name,
-                            "bound_in": bound,
+                        mpack!({
+                            "id": @(QueryValue::Str(id.to_string())),
+                            "name": @(QueryValue::Str(name.clone())),
+                            "bound_in": @(QueryValue::List(bound.into_iter().map(QueryValue::Str).collect())),
                         })
                     })
                     .collect();
-                Ok(admin_result(json!({"validators": items})))
+                Ok(admin_result(mpack!({
+                    "validators": @(QueryValue::List(items)),
+                })))
             }
             ListOp::FunctionFolders { parent } => {
                 self.shamir
@@ -224,7 +246,9 @@ impl ShamirAdminExecutor {
                     };
                     folders.retain(|f| f.starts_with(&prefix_slash));
                 }
-                Ok(admin_result(json!({"function_folders": folders})))
+                Ok(admin_result(mpack!({
+                    "function_folders": @(QueryValue::List(folders.into_iter().map(QueryValue::Str).collect())),
+                })))
             }
         }
     }

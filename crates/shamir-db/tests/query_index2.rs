@@ -72,7 +72,7 @@ async fn fts_index_and_query() {
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1, "expected 1 record, got {records:?}");
-    assert_eq!(records[0].as_json()["body"], "hello rust world");
+    assert_eq!(records[0].get_value_str("body"), Some("hello rust world"));
     // Verify the FTS index was used (BM25-ranked).
     let stats = resp.results["q"].stats.as_ref().expect("stats present");
     assert_eq!(stats.index_used.as_deref(), Some("index2_ranked"));
@@ -148,7 +148,7 @@ async fn functional_lower_eq() {
     let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].as_json()["name"], "alice");
+    assert_eq!(records[0].get_value_str("name"), Some("alice"));
     let stats = resp.results["q"].stats.as_ref().expect("stats");
     assert_eq!(stats.index_used.as_deref(), Some("index2"));
 }
@@ -206,7 +206,7 @@ async fn vector_hnsw_similarity() {
     assert_eq!(records.len(), 2, "expected top-2, got {records:?}");
     let label_strs: Vec<String> = records
         .iter()
-        .map(|r| r.get_str("label").unwrap())
+        .map(|r| r.get_value_str("label").unwrap().to_string())
         .collect();
     let labels: Vec<&str> = label_strs.iter().map(String::as_str).collect();
     assert!(labels.contains(&"x"), "x should be in top-2: {labels:?}");
@@ -239,7 +239,7 @@ async fn fts_brute_force_fallback() {
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].as_json()["body"], "hello world");
+    assert_eq!(records[0].get_value_str("body"), Some("hello world"));
     // No FTS index -> full-scan fallback (not "index2").
     let stats = resp.results["q"].stats.as_ref().expect("stats");
     assert_ne!(stats.index_used.as_deref(), Some("index2"));
@@ -337,7 +337,7 @@ async fn fts_stemmed_en_query() {
         1,
         "stemmed query 'running' should match 'running fast'"
     );
-    assert_eq!(records[0].as_json()["body"], "running fast");
+    assert_eq!(records[0].get_value_str("body"), Some("running fast"));
 }
 
 // ============================================================================
@@ -377,7 +377,7 @@ async fn fts_stopwords_filtered() {
         1,
         "stopword 'the' should be filtered, match on 'cat'"
     );
-    assert_eq!(records[0].as_json()["body"], "the cat sat");
+    assert_eq!(records[0].get_value_str("body"), Some("the cat sat"));
 }
 
 // ============================================================================
@@ -443,7 +443,7 @@ async fn fts_ngram_query() {
         1,
         "ngram query 'hello' should match only 'hello world', got {records:?}"
     );
-    assert_eq!(records[0].as_json()["body"], "hello world");
+    assert_eq!(records[0].get_value_str("body"), Some("hello world"));
 }
 
 // ============================================================================
@@ -497,7 +497,7 @@ async fn fts_stemmed_fr_query() {
         1,
         "French stemmed query 'chats' (plural) should match 'les chats noirs'"
     );
-    assert_eq!(records[0].as_json()["body"], "les chats noirs");
+    assert_eq!(records[0].get_value_str("body"), Some("les chats noirs"));
 }
 
 // ============================================================================

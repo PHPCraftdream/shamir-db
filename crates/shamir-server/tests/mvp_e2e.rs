@@ -371,14 +371,8 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
         DbResponse::Batch { response } => {
             let rd = response.results.get("rd").expect("rd alias");
             assert_eq!(rd.records.len(), 1, "one record present");
-            assert_eq!(
-                rd.records[0].as_json().get("sku").and_then(|v| v.as_str()),
-                Some("X1")
-            );
-            assert_eq!(
-                rd.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
-                Some(42)
-            );
+            assert_eq!(rd.records[0].get_value_str("sku"), Some("X1"));
+            assert_eq!(rd.records[0].get_value_i64("qty"), Some(42));
         }
         other => panic!("step C expected Batch, got {:?}", other),
     }

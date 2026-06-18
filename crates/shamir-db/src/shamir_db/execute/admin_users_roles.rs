@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, hash_password};
+use super::helpers::{admin_result, hash_password, to_qv};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_user(
@@ -52,7 +52,7 @@ impl ShamirAdminExecutor {
             profile: op.profile.clone(),
             database: op.database.clone(),
         };
-        let user_json = serde_json::to_value(&user).map_err(|e| err(e.to_string()))?;
+        let user_qv = to_qv(&user);
         let table = self
             .shamir
             .system_store()
@@ -61,8 +61,8 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.create_user}).into(),
-            value: user_json.into(),
+            key: mpack!({"name": @(QueryValue::Str(op.create_user.clone()))}),
+            value: user_qv,
         };
         // W3d-2: route through the implicit-tx file-WAL path.
         self.shamir
@@ -75,7 +75,9 @@ impl ShamirAdminExecutor {
             .persist()
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({"created_user": op.create_user})))
+        Ok(admin_result(mpack!({
+            "created_user": @(QueryValue::Str(op.create_user.clone())),
+        })))
     }
 
     pub(super) async fn handle_drop_user(
@@ -124,12 +126,17 @@ impl ShamirAdminExecutor {
                 .read(&lookup, &ctx)
                 .await
                 .map_err(|e| err(e.to_string()))?;
-            existing.records.first().and_then(|rec| {
-                rec.as_json()
-                    .get("database")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
+            existing
+                .records
+                .first()
+                .and_then(|rec| rec.get_value_owned("database"))
+                .and_then(|v| {
+                    if let QueryValue::Str(s) = v {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
         };
         self.authorize_user_lifecycle(scope.as_deref())
             .await
@@ -163,9 +170,10 @@ impl ShamirAdminExecutor {
                 })
             })
             .await?;
-        Ok(admin_result(
-            json!({"dropped_user": op.drop_user, "existed": result.affected > 0}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_user": @(QueryValue::Str(op.drop_user.clone())),
+            "existed": @(QueryValue::Bool(result.affected > 0)),
+        })))
     }
 
     pub(super) async fn handle_create_role(
@@ -194,7 +202,7 @@ impl ShamirAdminExecutor {
             name: op.create_role.clone(),
             permissions: op.permissions.clone(),
         };
-        let role_json = serde_json::to_value(&role).map_err(|e| err(e.to_string()))?;
+        let role_qv = to_qv(&role);
         let table = self
             .shamir
             .system_store()
@@ -203,8 +211,8 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("roles"),
-            key: json!({"name": op.create_role}).into(),
-            value: role_json.into(),
+            key: mpack!({"name": @(QueryValue::Str(op.create_role.clone()))}),
+            value: role_qv,
         };
         // W3d-2: route through the implicit-tx file-WAL path.
         self.shamir
@@ -217,7 +225,9 @@ impl ShamirAdminExecutor {
             .persist()
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({"created_role": op.create_role})))
+        Ok(admin_result(mpack!({
+            "created_role": @(QueryValue::Str(op.create_role.clone())),
+        })))
     }
 
     pub(super) async fn handle_drop_role(
@@ -273,9 +283,10 @@ impl ShamirAdminExecutor {
                 })
             })
             .await?;
-        Ok(admin_result(
-            json!({"dropped_role": op.drop_role, "existed": result.affected > 0}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_role": @(QueryValue::Str(op.drop_role.clone())),
+            "existed": @(QueryValue::Bool(result.affected > 0)),
+        })))
     }
 
     pub(super) async fn handle_grant_role(
@@ -308,7 +319,7 @@ impl ShamirAdminExecutor {
             .clone();
         let _user_guard = user_lock.lock().await;
 
-        // Read user, add role, write back
+        // Read user, add role, write back using QueryValue-native access.
         let table = self
             .shamir
             .system_store()
@@ -337,16 +348,23 @@ impl ShamirAdminExecutor {
                 format!("User '{}' not found", op.user),
             ));
         }
-        let mut user_json = result.records[0].as_json().into_owned();
-        if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
-            if !roles.contains(&json!(op.grant_role)) {
-                roles.push(json!(op.grant_role));
+        // Mutate the user record's `roles` list using QueryValue map operations.
+        let mut user_qv = result.records[0].as_value().into_owned();
+        if let QueryValue::Map(ref mut m) = user_qv {
+            let roles = m
+                .entry("roles".to_string())
+                .or_insert(QueryValue::List(Vec::new()));
+            if let QueryValue::List(ref mut list) = roles {
+                let new_role = QueryValue::Str(op.grant_role.clone());
+                if !list.contains(&new_role) {
+                    list.push(new_role);
+                }
             }
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.user}).into(),
-            value: user_json.into(),
+            key: mpack!({"name": @(QueryValue::Str(op.user.clone()))}),
+            value: user_qv,
         };
         // W3d-2: route through the implicit-tx file-WAL path.
         self.shamir
@@ -359,9 +377,10 @@ impl ShamirAdminExecutor {
             .persist()
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"granted_role": op.grant_role, "user": op.user}),
-        ))
+        Ok(admin_result(mpack!({
+            "granted_role": @(QueryValue::Str(op.grant_role.clone())),
+            "user": @(QueryValue::Str(op.user.clone())),
+        })))
     }
 
     pub(super) async fn handle_revoke_role(
@@ -422,14 +441,19 @@ impl ShamirAdminExecutor {
                 format!("User '{}' not found", op.user),
             ));
         }
-        let mut user_json = result.records[0].as_json().into_owned();
-        if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
-            roles.retain(|r| r != &json!(op.revoke_role));
+        // Remove the role from the user record's `roles` list using QueryValue
+        // map operations.
+        let mut user_qv = result.records[0].as_value().into_owned();
+        if let QueryValue::Map(ref mut m) = user_qv {
+            if let Some(QueryValue::List(ref mut list)) = m.get_mut("roles") {
+                let revoke_role = QueryValue::Str(op.revoke_role.clone());
+                list.retain(|r| r != &revoke_role);
+            }
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.user}).into(),
-            value: user_json.into(),
+            key: mpack!({"name": @(QueryValue::Str(op.user.clone()))}),
+            value: user_qv,
         };
         // W3d-2: route through the implicit-tx file-WAL path.
         self.shamir
@@ -442,8 +466,9 @@ impl ShamirAdminExecutor {
             .persist()
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"revoked_role": op.revoke_role, "user": op.user}),
-        ))
+        Ok(admin_result(mpack!({
+            "revoked_role": @(QueryValue::Str(op.revoke_role.clone())),
+            "user": @(QueryValue::Str(op.user.clone())),
+        })))
     }
 }

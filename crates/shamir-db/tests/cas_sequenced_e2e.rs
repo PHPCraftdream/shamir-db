@@ -190,33 +190,6 @@ fn read_all_request(id: &str) -> BatchRequest {
     b.to_request_via_msgpack()
 }
 
-/// Convert a JSON object record into a string-keyed `QueryValue::Map`.
-///
-/// Records in these tests are flat string→string maps, so this mirrors exactly
-/// the `QueryValue` the validator hashes (the engine stores strings and reads
-/// them back as JSON strings).
-fn json_record_to_query_value(v: &serde_json::Value) -> QueryValue {
-    match v {
-        serde_json::Value::Null => QueryValue::Null,
-        serde_json::Value::Bool(b) => QueryValue::Bool(*b),
-        serde_json::Value::String(s) => QueryValue::Str(s.clone()),
-        serde_json::Value::Number(n) => {
-            // Tests use string fields only; keep ints exact if any appear.
-            QueryValue::Int(n.as_i64().expect("test records use string/int only"))
-        }
-        serde_json::Value::Array(a) => {
-            QueryValue::List(a.iter().map(json_record_to_query_value).collect())
-        }
-        serde_json::Value::Object(o) => {
-            let mut m = new_map();
-            for (k, val) in o {
-                m.insert(k.clone(), json_record_to_query_value(val));
-            }
-            QueryValue::Map(m)
-        }
-    }
-}
-
 /// Read the single stored `docs` row back and compute its canonical content
 /// hash — exactly the value a writer must present as `_prev_hash` next.
 async fn current_hash(db: &ShamirDb) -> String {
@@ -226,7 +199,7 @@ async fn current_hash(db: &ShamirDb) -> String {
         .unwrap();
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1, "expected exactly one stored row");
-    canonical_hash(&json_record_to_query_value(&records[0].as_json()))
+    canonical_hash(&records[0].as_value())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -265,8 +238,8 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["all"].records[0].as_json()["body"],
-        json!("v2")
+        resp.results["all"].records[0].get_value_str("body"),
+        Some("v2")
     );
 
     // Stale replay: another writer still holds hash(v1) and tries to update
@@ -296,8 +269,8 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["all"].records[0].as_json()["body"],
-        json!("v2"),
+        resp.results["all"].records[0].get_value_str("body"),
+        Some("v2"),
         "the stale write must not have overwritten v2"
     );
 }
@@ -349,8 +322,8 @@ async fn cas_correct_chain_passes_each_step() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["all"].records[0].as_json()["body"],
-        json!("v3"),
+        resp.results["all"].records[0].get_value_str("body"),
+        Some("v3"),
         "the chain v1→v2→v3 must have advanced the row to v3"
     );
 }
