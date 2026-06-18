@@ -51,10 +51,12 @@ if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev
     # Binary exists but not on PATH? Check common locations.
     _found=""
     for _dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"; do
-        if [ -x "$_dir/cargo-nextest" ]; then
-            _found="$_dir"
-            break
-        fi
+        for _ext in "" ".exe"; do
+            if [ -x "$_dir/cargo-nextest$_ext" ]; then
+                _found="$_dir"
+                break 2
+            fi
+        done
     done
     if [ -n "$_found" ]; then
         export PATH="$_found:$PATH"
