@@ -383,6 +383,64 @@ impl Value<String> {
 }
 
 // ============================================================================
+// Primitive → QueryValue conversions (ergonomic construction)
+// ============================================================================
+
+impl From<i64> for Value<String> {
+    fn from(v: i64) -> Self {
+        Value::Int(v)
+    }
+}
+
+impl From<i32> for Value<String> {
+    fn from(v: i32) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<u32> for Value<String> {
+    fn from(v: u32) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<u64> for Value<String> {
+    fn from(v: u64) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<usize> for Value<String> {
+    fn from(v: usize) -> Self {
+        Value::Int(v as i64)
+    }
+}
+
+impl From<bool> for Value<String> {
+    fn from(v: bool) -> Self {
+        Value::Bool(v)
+    }
+}
+
+impl From<f64> for Value<String> {
+    fn from(v: f64) -> Self {
+        Value::F64(v)
+    }
+}
+
+impl From<String> for Value<String> {
+    fn from(v: String) -> Self {
+        Value::Str(v)
+    }
+}
+
+impl From<&str> for Value<String> {
+    fn from(v: &str) -> Self {
+        Value::Str(v.to_owned())
+    }
+}
+
+// ============================================================================
 // Conversions: serde_json::Value ↔ QueryValue
 // ============================================================================
 

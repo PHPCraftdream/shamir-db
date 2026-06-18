@@ -176,15 +176,16 @@ impl<'a> QueryRunner<'a> {
             // $query path resolution.
             //
             // `resolve_query_ref_value` in eval.rs checks `qr.value` first
-            // (Call-result path). We store the inner results map as a JSON
-            // object in `value` so outer ops can access sub-aliases:
+            // (Call-result path). We store the inner results map as a QueryValue
+            // Map in `value` so outer ops can access sub-aliases:
             //   $query @sub[0].records[0].id  — NOT supported (records empty)
             //   $query @sub.alias_name[0].id  — walks value.alias_name[0].id
             //
-            // The inner results are already JSON (QueryResult::records are
-            // Vec<serde_json::Value>), so we serialise the entire results map
-            // directly.
-            let value = serde_json::to_value(&inner_response.results).ok();
+            // Round-trip via msgpack: QueryResult's Serialize is well-defined
+            // and produces the same wire shape as QueryValue's Deserialize expects.
+            let value = rmp_serde::to_vec_named(&inner_response.results)
+                .ok()
+                .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok());
             return Ok(QueryResult {
                 records: Vec::new(),
                 stats: None,
@@ -253,27 +254,30 @@ impl<'a> QueryRunner<'a> {
                 }
             }
 
+            let mut grant_map = new_map();
+            grant_map.insert("subscription_grant".to_string(), QueryValue::Bool(true));
+            grant_map.insert(
+                "sources_count".to_string(),
+                QueryValue::Int(op.subscribe.len() as i64),
+            );
             return Ok(QueryResult {
                 records: Vec::new(),
                 stats: None,
                 pagination: None,
-                value: Some(serde_json::json!({
-                    "subscription_grant": true,
-                    "sources_count": op.subscribe.len()
-                })),
+                value: Some(QueryValue::Map(grant_map)),
             });
         }
 
         // Unsubscribe — return a grant marker; real deactivation is server-side.
         if let BatchOp::Unsubscribe(op) = &entry.op {
+            let mut grant_map = new_map();
+            grant_map.insert("unsubscribe_grant".to_string(), QueryValue::Bool(true));
+            grant_map.insert("sub_id".to_string(), QueryValue::Int(op.unsubscribe as i64));
             return Ok(QueryResult {
                 records: Vec::new(),
                 stats: None,
                 pagination: None,
-                value: Some(serde_json::json!({
-                    "unsubscribe_grant": true,
-                    "sub_id": op.unsubscribe
-                })),
+                value: Some(QueryValue::Map(grant_map)),
             });
         }
 

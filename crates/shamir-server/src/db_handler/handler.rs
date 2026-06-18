@@ -343,7 +343,7 @@ impl ShamirDbHandler {
                         threshold_us = self.slow_query.threshold_us,
                         db = db_name,
                         queries = batch.queries.len(),
-                        request_id = %response.id,
+                        request_id = ?response.id,
                         "slow query",
                     );
                 }

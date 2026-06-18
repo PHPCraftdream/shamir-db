@@ -24,6 +24,7 @@ use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 
 use shamir_connect::common::kdf_params::KdfParams;
@@ -507,7 +508,7 @@ async fn batch_response_echoes_request_id() {
         DbResponse::Batch { response } => {
             assert_eq!(
                 response.id,
-                json!("client-correlation-token-42"),
+                QueryValue::Str("client-correlation-token-42".into()),
                 "BatchResponse.id should echo BatchRequest.id verbatim"
             );
         }

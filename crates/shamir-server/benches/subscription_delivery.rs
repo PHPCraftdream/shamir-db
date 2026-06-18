@@ -145,14 +145,22 @@ async fn subscribe_and_get_id(
             .await
             .unwrap(),
     );
+    use shamir_types::types::value::QueryValue;
     match resp {
-        DbResponse::Batch { response } => response
-            .results
-            .get("m")
-            .and_then(|qr| qr.value.as_ref())
-            .and_then(|v| v.get("sub"))
-            .and_then(|s| s.as_u64())
-            .expect("sub id"),
+        DbResponse::Batch { response } => {
+            let v = response
+                .results
+                .get("m")
+                .and_then(|qr| qr.value.as_ref())
+                .expect("subscribe result has no value");
+            match v {
+                QueryValue::Map(m) => match m.get("sub") {
+                    Some(QueryValue::Int(id)) => *id as u64,
+                    other => panic!("sub field not Int: {:?}", other),
+                },
+                other => panic!("value not Map: {:?}", other),
+            }
+        }
         other => panic!("expected Batch response, got {:?}", other),
     }
 }

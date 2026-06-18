@@ -1,4 +1,5 @@
 use shamir_collections::{new_map, TMap};
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::planner::BatchPlanner;
 use crate::batch::{
@@ -40,7 +41,7 @@ fn sub_batch_entry(inner: BatchRequest, bind: TMap<String, FilterValue>) -> Quer
 
 fn empty_batch_request() -> BatchRequest {
     BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -56,7 +57,7 @@ fn empty_batch_request() -> BatchRequest {
 
 fn batch_request_with_queries(queries: TMap<String, QueryEntry>) -> BatchRequest {
     BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,

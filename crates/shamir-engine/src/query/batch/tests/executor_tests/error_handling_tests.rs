@@ -1,11 +1,11 @@
 //! Error handling and validation tests for the batch executor.
 
-use serde_json::json;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_types::access::Actor;
+use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::execute_batch;
 
@@ -87,7 +87,7 @@ async fn test_request_id_echoed() {
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
-    assert_eq!(resp.id, json!("req-42"));
+    assert_eq!(resp.id, QueryValue::Str("req-42".into()));
 
     // Numeric ID
     let mut b = Batch::new();
@@ -97,5 +97,5 @@ async fn test_request_id_echoed() {
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
-    assert_eq!(resp.id, json!(123));
+    assert_eq!(resp.id, QueryValue::Int(123));
 }

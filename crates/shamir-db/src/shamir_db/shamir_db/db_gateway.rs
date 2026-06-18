@@ -128,7 +128,7 @@ impl DbGateway for FacadeDbGateway {
             },
         );
         let req = BatchRequest {
-            id: json!("db_get"),
+            id: QueryValue::Str("db_get".into()),
             name: None,
             transactional: false,
             isolation: None,
@@ -188,7 +188,7 @@ impl DbGateway for FacadeDbGateway {
             },
         );
         let req = BatchRequest {
-            id: json!("db_insert"),
+            id: QueryValue::Str("db_insert".into()),
             name: None,
             transactional: false,
             isolation: None,
@@ -271,7 +271,7 @@ impl DbGateway for FacadeDbGateway {
             },
         );
         let req = BatchRequest {
-            id: json!("db_query"),
+            id: QueryValue::Str("db_query".into()),
             name: None,
             transactional: false,
             isolation: None,

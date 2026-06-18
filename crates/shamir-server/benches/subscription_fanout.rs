@@ -200,15 +200,25 @@ async fn setup_subscribers(handler: &ShamirDbHandler, n: usize) -> (Vec<Subscrib
                 .await
                 .unwrap(),
         );
-        let sub_id = match resp {
-            DbResponse::Batch { response } => response
-                .results
-                .get("m")
-                .and_then(|qr| qr.value.as_ref())
-                .and_then(|v| v.get("sub"))
-                .and_then(|s| s.as_u64())
-                .expect("sub id"),
-            _ => panic!("expected Batch response"),
+        let sub_id = {
+            use shamir_types::types::value::QueryValue;
+            match resp {
+                DbResponse::Batch { response } => {
+                    let v = response
+                        .results
+                        .get("m")
+                        .and_then(|qr| qr.value.as_ref())
+                        .expect("subscribe result has no value");
+                    match v {
+                        QueryValue::Map(m) => match m.get("sub") {
+                            Some(QueryValue::Int(id)) => *id as u64,
+                            other => panic!("sub field not Int: {:?}", other),
+                        },
+                        other => panic!("value not Map: {:?}", other),
+                    }
+                }
+                _ => panic!("expected Batch response"),
+            }
         };
 
         subs.push(Subscriber {
