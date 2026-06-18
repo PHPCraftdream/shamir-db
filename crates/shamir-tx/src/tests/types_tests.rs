@@ -13,23 +13,20 @@ fn isolation_level_serde_roundtrip() {
         IsolationLevel::Pessimistic,
     ];
     for lvl in &levels {
-        let s = serde_json::to_string(lvl).unwrap();
-        let back: IsolationLevel = serde_json::from_str(&s).unwrap();
+        let bytes = rmp_serde::to_vec_named(lvl).unwrap();
+        let back: IsolationLevel = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(*lvl, back);
     }
-    // Wire format check
-    assert_eq!(
-        serde_json::to_string(&IsolationLevel::Snapshot).unwrap(),
-        r#""snapshot""#
-    );
-    assert_eq!(
-        serde_json::to_string(&IsolationLevel::Serializable).unwrap(),
-        r#""serializable""#
-    );
-    assert_eq!(
-        serde_json::to_string(&IsolationLevel::Pessimistic).unwrap(),
-        r#""pessimistic""#
-    );
+    // Wire-name check: rmp_serde encodes unit enum variants as their serde name
+    // (string). Deserializing each payload as String reveals the wire identifier
+    // used by shamir-db::execute::db_tx match arms.
+    let wire_name = |lvl: &IsolationLevel| -> String {
+        let bytes = rmp_serde::to_vec_named(lvl).unwrap();
+        rmp_serde::from_slice::<String>(&bytes).unwrap()
+    };
+    assert_eq!(wire_name(&IsolationLevel::Snapshot), "snapshot");
+    assert_eq!(wire_name(&IsolationLevel::Serializable), "serializable");
+    assert_eq!(wire_name(&IsolationLevel::Pessimistic), "pessimistic");
 }
 
 #[test]

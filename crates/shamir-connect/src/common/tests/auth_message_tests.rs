@@ -1,6 +1,6 @@
 //! Tests for canonical `auth_message` byte layout (spec §4.1).
 //!
-//! The reference vector lives in `test-vectors/auth_message_default.json`
+//! The reference vector lives in `test-vectors/auth_message_default.toml`
 //! and is the spec §16 inline example. Any change here breaks interop with
 //! every other implementation (browser SDK, future Go/Python clients).
 
@@ -9,7 +9,7 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 
-const TEST_VECTOR_JSON: &str = include_str!("../../../test-vectors/auth_message_default.json");
+const TEST_VECTOR_TOML: &str = include_str!("../../../test-vectors/auth_message_default.toml");
 
 #[derive(serde::Deserialize)]
 struct Vector {
@@ -60,7 +60,7 @@ fn hex_to_array<const N: usize>(s: &str) -> [u8; N] {
 
 #[test]
 fn matches_spec_section_16_inline_vector() {
-    let v: Vector = serde_json::from_str(TEST_VECTOR_JSON).unwrap();
+    let v: Vector = toml::from_str(TEST_VECTOR_TOML).unwrap();
 
     let username = NormalizedUsername::from_raw(&v.inputs.username).unwrap();
     let client_nonce = hex_to_array::<32>(&v.inputs.client_nonce_hex);

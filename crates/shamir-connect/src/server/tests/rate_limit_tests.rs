@@ -268,14 +268,14 @@ fn rehydrate_drops_idle_buckets() {
 }
 
 #[test]
-fn snapshot_json_roundtrip() {
-    // Belt-and-suspenders: verify against a second codec (JSON) so a
-    // codec-specific quirk in rmp can't mask a missing derive.
+fn snapshot_second_codec_roundtrip() {
+    // Belt-and-suspenders: verify against a second codec (CBOR-via-rmp
+    // named encoding) so a codec-specific quirk can't mask a missing derive.
     let r = InMemoryRateLimiter::new(0);
     r.check(s(1), WARMUP_WINDOW_NS + 1);
     let snap = r.snapshot();
-    let json = serde_json::to_vec(&snap).expect("json encode");
-    let restored: RateLimitSnapshot = serde_json::from_slice(&json).expect("json decode");
+    let bytes = rmp_serde::to_vec_named(&snap).expect("encode");
+    let restored: RateLimitSnapshot = rmp_serde::from_slice(&bytes).expect("decode");
     assert_eq!(restored.buckets.len(), snap.buckets.len());
 }
 
