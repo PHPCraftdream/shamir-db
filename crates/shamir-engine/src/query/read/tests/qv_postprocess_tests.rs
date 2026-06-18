@@ -716,7 +716,7 @@ fn aggregate_sum_float_serialisation() {
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
-    let qv_json = json::Value::from(result[0].clone());
+    let qv_json = json::to_value(&result[0]).unwrap();
     let qv_bytes = json::to_vec(&qv_json).unwrap();
 
     let total = 1.5 + 2.5 + 3.5 + 0.5; // = 8.0
@@ -775,7 +775,7 @@ fn aggregate_avg_float_serialisation() {
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
     assert_eq!(result.len(), 1);
 
-    let qv_json = json::Value::from(result[0].clone());
+    let qv_json = json::to_value(&result[0]).unwrap();
     let qv_bytes = json::to_vec(&qv_json).unwrap();
 
     let avg = (1.5 + 2.5 + 3.5 + 0.5) / 4.0; // = 2.0
@@ -800,7 +800,7 @@ fn aggregate_count_as_int() {
     };
 
     let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
-    let qv_json = json::Value::from(result[0].clone());
+    let qv_json = json::to_value(&result[0]).unwrap();
     let qv_bytes = json::to_vec(&qv_json).unwrap();
 
     let expected_json = json::json!({"cnt": 4});

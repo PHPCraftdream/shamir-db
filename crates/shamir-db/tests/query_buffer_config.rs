@@ -43,7 +43,7 @@ async fn get_buffer_config_returns_null_when_unset() {
         .await
         .unwrap();
 
-    let row = serde_json::Value::from(resp.results["cfg"].records[0].as_value().into_owned());
+    let row = serde_json::to_value(resp.results["cfg"].records[0].as_value().into_owned()).unwrap();
     assert_eq!(row["table"], json!("users"));
     assert_eq!(row["repo"], json!("main"));
     assert!(row["config"].is_null());
@@ -70,7 +70,7 @@ async fn set_then_get_buffer_config_via_ddl() {
 
     // Set echoes back the persisted config.
     let set_row =
-        serde_json::Value::from(set_resp.results["set"].records[0].as_value().into_owned());
+        serde_json::to_value(set_resp.results["set"].records[0].as_value().into_owned()).unwrap();
     assert_eq!(set_row["set_buffer_config"], json!("users"));
     assert_eq!(set_row["config"]["max_bytes"], json!(1_048_576));
     assert_eq!(set_row["config"]["ttl_ms"], json!(7000));
@@ -83,7 +83,8 @@ async fn set_then_get_buffer_config_via_ddl() {
         .await
         .unwrap();
 
-    let got_row = serde_json::Value::from(resp.results["after"].records[0].as_value().into_owned());
+    let got_row =
+        serde_json::to_value(resp.results["after"].records[0].as_value().into_owned()).unwrap();
     let cfg = &got_row["config"];
     assert!(!cfg.is_null());
     assert_eq!(cfg["max_bytes"], json!(1_048_576));
@@ -130,11 +131,12 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let alter_row = serde_json::Value::from(
+    let alter_row = serde_json::to_value(
         alter_resp.results["alter"].records[0]
             .as_value()
             .into_owned(),
-    );
+    )
+    .unwrap();
     assert_eq!(alter_row["config"]["flush_interval_ms"], json!(1000));
     assert!(alter_row["config"]["ttl_ms"].is_null());
     // Untouched knobs survived.
@@ -148,7 +150,8 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let got_row = serde_json::Value::from(resp.results["after"].records[0].as_value().into_owned());
+    let got_row =
+        serde_json::to_value(resp.results["after"].records[0].as_value().into_owned()).unwrap();
     let got = &got_row["config"];
     assert_eq!(got["flush_interval_ms"], json!(1000));
     assert!(got["ttl_ms"].is_null());
@@ -191,7 +194,7 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         .unwrap();
 
     let alter_row =
-        serde_json::Value::from(resp.results["alter"].records[0].as_value().into_owned());
+        serde_json::to_value(resp.results["alter"].records[0].as_value().into_owned()).unwrap();
     let cfg = &alter_row["config"];
     assert_eq!(cfg["max_entries"], json!(9999));
     // ttl_ms was NOT in the patch -- must equal the seeded value.
@@ -221,7 +224,7 @@ async fn alter_starts_from_default_when_no_prior_config() {
         .unwrap();
 
     let alter_row2 =
-        serde_json::Value::from(resp.results["alter"].records[0].as_value().into_owned());
+        serde_json::to_value(resp.results["alter"].records[0].as_value().into_owned()).unwrap();
     let cfg = &alter_row2["config"];
     assert_eq!(cfg["max_entries"], json!(42));
     // Other fields are the engine defaults (defined in MemBufferConfig::default).
@@ -255,7 +258,8 @@ async fn set_buffer_config_persists_into_info_store() {
         .await
         .unwrap();
 
-    let get_row = serde_json::Value::from(resp.results["get"].records[0].as_value().into_owned());
+    let get_row =
+        serde_json::to_value(resp.results["get"].records[0].as_value().into_owned()).unwrap();
     let cfg = &get_row["config"];
     assert_eq!(cfg["max_bytes"], json!(1_048_576));
     assert_eq!(cfg["ttl_ms"], json!(7000));

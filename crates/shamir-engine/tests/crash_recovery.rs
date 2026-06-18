@@ -45,6 +45,7 @@ use futures::StreamExt;
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::mpack;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
@@ -843,7 +844,7 @@ async fn run_child_scenario_w2d(path: PathBuf) {
     // interned before — this triggers the overlay-id → remap-on-bytes path
     // at commit. On the implicit path field names go straight to base.
     let record = if implicit {
-        serde_json::json!({
+        mpack!({
             "int_field": 42,
             "float_field": 99.5,
             "str_field": "hello w2d",
@@ -852,11 +853,10 @@ async fn run_child_scenario_w2d(path: PathBuf) {
             "list_field": [10, 20, 30]
         })
     } else {
-        serde_json::json!({
+        mpack!({
             "int_field": 99,
             "float_field": 88.8,
             "str_field": "interactive w2d",
-            // Brand-new field name not in base interner → overlay → remap
             "w2d_new_field": "newness",
             "nested": { "deep": "value" },
             "list_field": [1, 2, 3]
@@ -865,7 +865,7 @@ async fn run_child_scenario_w2d(path: PathBuf) {
 
     let op = shamir_query_types::write::InsertOp {
         insert_into: shamir_query_types::TableRef::new(TABLE),
-        values: vec![record.into()],
+        values: vec![record],
         records_idmsgpack: Vec::new(),
     };
 
@@ -907,8 +907,9 @@ fn spawn_child_w2d(phase: &str, repo_path: &Path, implicit: bool) -> std::proces
 }
 
 /// Read back all records from a table after recovery and return them as
-/// JSON for comparison.
-async fn read_all_records(tbl: &TableManager) -> Vec<serde_json::Value> {
+/// QueryValues for comparison.
+async fn read_all_records(tbl: &TableManager) -> Vec<shamir_types::types::value::QueryValue> {
+    use shamir_types::codecs::interned::inner_value_to_query_value;
     let stream = tbl.list_stream(256);
     futures::pin_mut!(stream);
     let mut records = Vec::new();
@@ -916,9 +917,8 @@ async fn read_all_records(tbl: &TableManager) -> Vec<serde_json::Value> {
     while let Some(batch) = stream.next().await {
         for (_id, cow) in batch.expect("list_stream batch") {
             let record = cow.into_inner().expect("decode record");
-            let json = shamir_types::codecs::interned::inner_to_json_value(&record, interner)
-                .expect("to_json");
-            records.push(json);
+            let qv = inner_value_to_query_value(&record, interner).expect("to_query_value");
+            records.push(qv);
         }
     }
     records
@@ -954,18 +954,18 @@ async fn w2d_implicit_crash_phase4_recovers_diverse_record() {
     let records = read_all_records(&tbl).await;
     assert_eq!(records.len(), 1, "exactly one record after recovery");
     let rec = &records[0];
-    assert_eq!(rec["int_field"], serde_json::json!(42));
-    assert_eq!(rec["str_field"], serde_json::json!("hello w2d"));
-    // Floats survive as f64 (JSON number).
+    assert_eq!(rec["int_field"], 42i64);
+    assert_eq!(rec["str_field"], "hello w2d");
+    // Floats survive as f64.
     let expected_float: f64 = 99.5;
     assert!(
         (rec["float_field"].as_f64().unwrap() - expected_float).abs() < 1e-9,
         "float field preserved"
     );
     // Nested map + list survive.
-    assert_eq!(rec["nested"]["inner_key"], serde_json::json!("inner_val"));
-    assert_eq!(rec["nested"]["inner_num"], serde_json::json!(7));
-    assert_eq!(rec["list_field"], serde_json::json!([10, 20, 30]));
+    assert_eq!(rec["nested"]["inner_key"], "inner_val");
+    assert_eq!(rec["nested"]["inner_num"], 7i64);
+    assert_eq!(rec["list_field"], mpack!([10, 20, 30]));
 }
 
 /// W2d INTERACTIVE-tx crash at phase4 with a NEW field name: the overlay-id →
@@ -996,11 +996,10 @@ async fn w2d_interactive_new_field_crash_phase4_recovers() {
     let records = read_all_records(&tbl).await;
     assert_eq!(records.len(), 1, "exactly one record after recovery");
     let rec = &records[0];
-    assert_eq!(rec["str_field"], serde_json::json!("interactive w2d"));
+    assert_eq!(rec["str_field"], "interactive w2d");
     // The brand-new field name survived the overlay→remap→crash→recover cycle.
     assert_eq!(
-        rec["w2d_new_field"],
-        serde_json::json!("newness"),
+        rec["w2d_new_field"], "newness",
         "new field name must be readable after overlay remap + recovery"
     );
 }

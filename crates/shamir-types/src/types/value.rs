@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 use crate::core::interner::InternerKey;
-use crate::types::common::{new_map, new_map_wc, TMap, TSet};
+use crate::types::common::{new_map_wc, TMap, TSet};
 use bytes::Bytes;
 use fxhash::FxHasher;
 use num_bigint::BigInt;
@@ -489,79 +489,6 @@ impl From<String> for Value<String> {
 impl From<&str> for Value<String> {
     fn from(v: &str) -> Self {
         Value::Str(v.to_owned())
-    }
-}
-
-// ============================================================================
-// Conversions: serde_json::Value ↔ QueryValue
-// ============================================================================
-
-impl From<serde_json::Value> for Value<String> {
-    fn from(jv: serde_json::Value) -> Self {
-        match jv {
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(b) => Value::Bool(b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value::Int(i)
-                } else if let Some(f) = n.as_f64() {
-                    Value::F64(f)
-                } else if let Some(u) = n.as_u64() {
-                    if u <= i64::MAX as u64 {
-                        Value::Int(u as i64)
-                    } else {
-                        Value::Str(u.to_string())
-                    }
-                } else {
-                    Value::Str(n.to_string())
-                }
-            }
-            serde_json::Value::String(s) => Value::Str(s),
-            serde_json::Value::Array(arr) => {
-                Value::List(arr.into_iter().map(Value::from).collect())
-            }
-            serde_json::Value::Object(map) => {
-                let mut m = new_map();
-                for (k, v) in map {
-                    m.insert(k, Value::from(v));
-                }
-                Value::Map(m)
-            }
-        }
-    }
-}
-
-impl From<Value<String>> for serde_json::Value {
-    fn from(qv: Value<String>) -> Self {
-        match qv {
-            Value::Null => serde_json::Value::Null,
-            Value::Bool(b) => serde_json::Value::Bool(b),
-            Value::Int(i) => serde_json::Value::Number(i.into()),
-            Value::F64(f) => serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .unwrap_or_else(|| serde_json::Value::String(f.to_string())),
-            Value::Dec(d) => serde_json::Value::String(d.to_string()),
-            Value::Big(b) => serde_json::Value::String(b.to_string()),
-            Value::Str(s) => serde_json::Value::String(s),
-            Value::Bin(b) => serde_json::Value::Array(
-                b.iter()
-                    .map(|&byte| serde_json::Value::Number(byte.into()))
-                    .collect(),
-            ),
-            Value::List(l) => {
-                serde_json::Value::Array(l.into_iter().map(serde_json::Value::from).collect())
-            }
-            Value::Set(s) => {
-                serde_json::Value::Array(s.into_iter().map(serde_json::Value::from).collect())
-            }
-            Value::Map(m) => {
-                let mut obj = serde_json::Map::new();
-                for (k, v) in m {
-                    obj.insert(k, serde_json::Value::from(v));
-                }
-                serde_json::Value::Object(obj)
-            }
-        }
     }
 }
 

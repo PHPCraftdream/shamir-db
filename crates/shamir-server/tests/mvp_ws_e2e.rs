@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use shamir_types::mpack;
 use tempfile::TempDir;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{Connector, MaybeTlsStream};
@@ -330,7 +330,7 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     ins_batch.upsert(
         "ins",
         shamir_query_builder::write::upsert("ws_items")
-            .key(json!({"id": "a"}))
+            .key(mpack!({"id": "a"}))
             .value(shamir_query_builder::doc! { "id" => "a", "n" => 7 }),
     );
     let ins = ins_batch.build();

@@ -14,6 +14,7 @@ use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
 use shamir_storage::types::Store;
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -165,7 +166,7 @@ async fn execute_update_leaves_table_consistent_on_success() {
 
     let op = write::update("users")
         .where_(filter::eq("city", "city_0"))
-        .set(serde_json::json!({ "score": 999 }))
+        .set(mpack!({ "score": 999 }))
         .build();
 
     let result = super::write_exec_tests::update_via_tx(&repo, &table, &op, &refs)

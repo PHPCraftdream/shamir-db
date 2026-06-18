@@ -22,6 +22,12 @@ disallowed_types = "deny"
 opt-level = 0
 codegen-units = 14
 incremental = true
+# `line-tables-only` keeps panic backtraces with file:line but drops the
+# bulk of debug info (full `.pdb` per binary). With `--all-targets` +
+# nextest building dozens of separate test binaries, full debuginfo was
+# the dominant source of `target/` bloat; this roughly halves per-build
+# size while leaving backtraces readable.
+debug = "line-tables-only"
 
 [profile.release]
 lto = "fat"

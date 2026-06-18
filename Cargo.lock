@@ -4157,7 +4157,6 @@ dependencies = [
  "rmpv",
  "rust_decimal",
  "serde",
- "serde_json",
  "serial_test",
  "shamir-bench-utils",
  "shamir-collections",

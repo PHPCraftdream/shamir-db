@@ -173,7 +173,8 @@ async fn create_function_folder_over_wire() {
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    let result = serde_json::Value::from(resp.results["op"].records[0].as_value().into_owned());
+    let result =
+        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
     assert_eq!(
         result["created_function_folder"],
         json!(["reports", "daily"])
@@ -341,7 +342,8 @@ async fn list_validators_over_wire() {
     b.list_validators("op", ddl::list_validators("users").db("testdb"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let result = serde_json::Value::from(resp.results["op"].records[0].as_value().into_owned());
+    let result =
+        serde_json::to_value(resp.results["op"].records[0].as_value().into_owned()).unwrap();
     let validators = result["validators"].as_array().unwrap();
     assert!(
         !validators.is_empty(),

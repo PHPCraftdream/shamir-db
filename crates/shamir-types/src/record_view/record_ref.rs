@@ -8,10 +8,7 @@
 //!
 //! Static dispatch only: consumers take `&impl RecordRef`, never `dyn`.
 
-use crate::codecs::interned::{
-    inner_to_json_value, inner_value_to_query_value, record_view_to_json_value,
-    record_view_to_query_value,
-};
+use crate::codecs::interned::{inner_value_to_query_value, record_view_to_query_value};
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::kind::Kind;
 use crate::record_view::record_value::RecordValue;
@@ -109,12 +106,6 @@ pub trait RecordRef {
     ///
     /// Returns `QueryValue::Null` on a de-intern error (missing key in interner).
     fn to_query_value(&self, interner: &Interner) -> QueryValue;
-
-    /// De-intern and convert the whole record to a [`serde_json::Value::Object`].
-    /// Same routing as `to_query_value` (tree vs lens path).
-    ///
-    /// Returns `serde_json::Value::Null` on a de-intern error.
-    fn to_json_value(&self, interner: &Interner) -> serde_json::Value;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,10 +221,6 @@ impl RecordRef for InnerValue {
 
     fn to_query_value(&self, interner: &Interner) -> QueryValue {
         inner_value_to_query_value(self, interner).unwrap_or(QueryValue::Null)
-    }
-
-    fn to_json_value(&self, interner: &Interner) -> serde_json::Value {
-        inner_to_json_value(self, interner).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -360,10 +347,6 @@ impl RecordRef for RecordView<'_> {
 
     fn to_query_value(&self, interner: &Interner) -> QueryValue {
         record_view_to_query_value(self, interner).unwrap_or(QueryValue::Null)
-    }
-
-    fn to_json_value(&self, interner: &Interner) -> serde_json::Value {
-        record_view_to_json_value(self, interner).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -570,12 +553,6 @@ impl<'a> RecordRef for HavingView<'a> {
     fn to_query_value(&self, _interner: &Interner) -> QueryValue {
         // The row IS already a QueryValue — return a clone.
         self.row.clone()
-    }
-
-    fn to_json_value(&self, _interner: &Interner) -> serde_json::Value {
-        // The row IS already a QueryValue — serialise directly. (HAVING never
-        // calls this; kept for RecordRef contract completeness.)
-        serde_json::to_value(self.row).unwrap_or(serde_json::Value::Null)
     }
 }
 

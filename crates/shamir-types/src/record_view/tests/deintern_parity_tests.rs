@@ -4,14 +4,11 @@
 //!   record_view_to_query_value(&RecordView::new(&bytes)?, interner)
 //!     == inner_value_to_query_value(&InnerValue::from_bytes(&bytes)?, interner)
 //!
-//! and analogously for `_json_value`. Both sides consume the SAME bytes, each
-//! through its own decoder. If any shape diverges, the test fails with a
-//! diagnostic — divergences must be reported, not papered over.
+//! Both sides consume the SAME bytes, each through its own decoder. If any
+//! shape diverges, the test fails with a diagnostic — divergences must be
+//! reported, not papered over.
 
-use crate::codecs::interned::{
-    inner_to_json_value, inner_value_to_query_value, record_view_to_json_value,
-    record_view_to_query_value,
-};
+use crate::codecs::interned::{inner_value_to_query_value, record_view_to_query_value};
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::RecordView;
 use crate::types::common::new_map_wc;
@@ -42,34 +39,13 @@ fn assert_query_value_parity(bytes: &[u8], interner: &Interner, label: &str) {
     );
 }
 
-/// Assert both de-intern paths (json::Value) agree for the given storage bytes.
-fn assert_json_value_parity(bytes: &[u8], interner: &Interner, label: &str) {
-    let tree_iv = InnerValue::from_bytes(bytes).unwrap_or_else(|e| {
-        panic!("from_bytes failed for '{label}': {e}");
-    });
-    let lens_view = RecordView::new(bytes).unwrap_or_else(|e| {
-        panic!("RecordView::new failed for '{label}': {e}");
-    });
-
-    let tree_jv = inner_to_json_value(&tree_iv, interner)
-        .unwrap_or_else(|e| panic!("inner_to_json_value failed for '{label}': {e}"));
-    let lens_jv = record_view_to_json_value(&lens_view, interner)
-        .unwrap_or_else(|e| panic!("record_view_to_json_value failed for '{label}': {e}"));
-
-    assert_eq!(
-        tree_jv, lens_jv,
-        "json::Value parity FAIL for '{label}':\n  tree: {tree_jv:?}\n  lens: {lens_jv:?}"
-    );
-}
-
 /// Helper: build an `InnerValue::Map` record, serialise to storage bytes,
-/// then assert both parity predicates.
+/// then assert QueryValue parity.
 fn assert_parity_for_record(inner: InnerValue, interner: &Interner, label: &str) {
     let bytes = inner.to_bytes().unwrap_or_else(|e| {
         panic!("to_bytes failed for '{label}': {e}");
     });
     assert_query_value_parity(&bytes, interner, label);
-    assert_json_value_parity(&bytes, interner, label);
 }
 
 // ─── flat scalar shapes ──────────────────────────────────────────────────────
@@ -104,13 +80,9 @@ fn deintern_parity_flat_f64() {
 
 #[test]
 fn deintern_parity_flat_f64_non_finite() {
-    // F64 non-finite (inf / -inf / nan) — the encoder stores them as-is in
-    // msgpack; the decoder restores them. Both the tree path and the lens path
-    // must produce the same serde_json::Value::String representation.
-    // NOTE: NaN is special — NaN != NaN by IEEE. We use bit-level comparison
-    // for the QueryValue side (F64 PartialEq in QueryValue uses standard f64
-    // semantics, so NaN != NaN). We verify structural agreement by comparing
-    // the JSON serialisation (both emit the same string).
+    // F64 non-finite (inf / -inf) — the encoder stores them as-is in msgpack;
+    // the decoder restores them. Both the tree path and the lens path must
+    // produce the same QueryValue. F64 PartialEq is well-defined for inf/-inf.
     let interner = Interner::new();
     let mut m = new_map_wc(2);
     m.insert(ik(&interner, "inf"), InnerValue::F64(f64::INFINITY));
@@ -120,13 +92,6 @@ fn deintern_parity_flat_f64_non_finite() {
     let tree_iv = InnerValue::from_bytes(&bytes).unwrap();
     let lens_view = RecordView::new(&bytes).unwrap();
 
-    let tree_jv = inner_to_json_value(&tree_iv, &interner).unwrap();
-    let lens_jv = record_view_to_json_value(&lens_view, &interner).unwrap();
-    assert_eq!(
-        tree_jv, lens_jv,
-        "json::Value parity FAIL for non-finite f64"
-    );
-    // For QueryValue: F64 PartialEq is well-defined for inf/-inf.
     let tree_qv = inner_value_to_query_value(&tree_iv, &interner).unwrap();
     let lens_qv = record_view_to_query_value(&lens_view, &interner).unwrap();
     assert_eq!(
@@ -342,22 +307,6 @@ fn deintern_parity_u64_above_i64_max() {
         tree_qv, lens_qv,
         "unexpected equality: the known u64>i64::MAX divergence appears to have been resolved \
          — revisit this test"
-    );
-
-    // JSON side: tree gives Number(Int), lens gives String(decimal).
-    let tree_jv = inner_to_json_value(&tree_iv, &interner).expect("tree jv u64>max");
-    let lens_jv = record_view_to_json_value(&lens_view, &interner).expect("lens jv u64>max");
-    assert!(
-        matches!(tree_jv, serde_json::Value::Object(ref m) if m.contains_key("big")),
-        "tree json side unexpected: {tree_jv:?}"
-    );
-    assert!(
-        matches!(lens_jv, serde_json::Value::Object(ref m) if m.contains_key("big")),
-        "lens json side unexpected: {lens_jv:?}"
-    );
-    assert_ne!(
-        tree_jv, lens_jv,
-        "unexpected json equality on u64>i64::MAX divergence"
     );
 }
 

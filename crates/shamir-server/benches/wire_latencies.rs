@@ -34,7 +34,8 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use shamir_bench_utils as bu;
 use shamir_connect::common::time::UnixNanos;
@@ -120,7 +121,7 @@ fn tx_execute_bytes(tx_handle: u64, n: usize) -> Vec<u8> {
         b.upsert(
             format!("s{i}"),
             upsert("items")
-                .key(json!({ "id": id }))
+                .key(mpack!({ "id": @(QueryValue::from(id.as_str())) }))
                 .value(doc! { "id" => id.clone(), "qty" => i as i64 }),
         );
     }

@@ -176,12 +176,12 @@ fn assert_parity(label: &str, live: &QueryResult, tree: &QueryResult) {
     let mut live_json: Vec<serde_json::Value> = live
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
         .collect();
     let mut tree_json: Vec<serde_json::Value> = tree
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
         .collect();
     live_json.sort_by_key(|a| a.to_string());
     tree_json.sort_by_key(|a| a.to_string());
@@ -261,10 +261,13 @@ async fn s3_parity_distinct() {
         .records
         .iter()
         .filter_map(|r| {
-            serde_json::Value::from(r.as_value().into_owned())
-                .get("city")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+            serde_json::to_value(r.as_value().into_owned())
+                .ok()
+                .and_then(|jv| {
+                    jv.get("city")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
         })
         .collect();
     cities.sort();
@@ -311,7 +314,7 @@ async fn s3_parity_order_by() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::Value::from(r.as_value().into_owned());
+            let json = serde_json::to_value(r.as_value().into_owned()).unwrap();
             json.get("age").and_then(|v| v.as_i64())
         })
         .collect();
@@ -344,7 +347,7 @@ async fn s3_parity_filter_order_limit() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::Value::from(r.as_value().into_owned());
+            let json = serde_json::to_value(r.as_value().into_owned()).unwrap();
             json.get("age").and_then(|v| v.as_i64())
         })
         .collect();

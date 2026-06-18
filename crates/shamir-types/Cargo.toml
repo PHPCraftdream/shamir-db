@@ -11,7 +11,6 @@ shamir-collections = { path = "../shamir-collections" }
 # Core data model
 smallvec = "1.11"
 serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.149"
 indexmap = { version = "2.7", features = ["serde"] }
 fxhash = "0.2.1"
 dashmap = "6.1.0"
@@ -61,13 +60,6 @@ harness = false
 name = "codec_msgpack"
 harness = false
 
-[[bench]]
-name = "codec_json_encode"
-harness = false
-
-[[bench]]
-name = "json_clone"
-harness = false
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples

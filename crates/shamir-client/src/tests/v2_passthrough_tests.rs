@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::json;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -156,7 +156,7 @@ async fn v2_e2e_roundtrip_insert_read() {
         b.id("w1");
         b.insert(
             "ins",
-            insert("items").row(json!({
+            insert("items").row(mpack!({
                 "name": "widget",
                 "price": 9,
                 "active": true
@@ -226,7 +226,7 @@ async fn v2_section_9_4_numeric_string_field_name() {
         b.id("ins-42");
         b.insert(
             "ins",
-            insert("items").row(json!({ "42": "numeric-name-value" })),
+            insert("items").row(mpack!({ "42": "numeric-name-value" })),
         );
         client
             .execute_with_touch("v2db", b.build())
@@ -302,7 +302,7 @@ async fn v2_new_field_pre_touch_and_roundtrip() {
         b.id("new-f");
         b.insert(
             "ins",
-            insert("items").row(json!({ unique_field: "hello-new-field" })),
+            insert("items").row(mpack!({ unique_field: "hello-new-field" })),
         );
         client
             .execute_with_touch("v2db", b.build())
@@ -368,7 +368,7 @@ async fn v2_deintern_unknown_id_refresh() {
         b.id("ins-rf");
         b.insert(
             "ins",
-            insert("items").row(json!({ "refresh_field": "refresh-value" })),
+            insert("items").row(mpack!({ "refresh_field": "refresh-value" })),
         );
         client_a
             .execute_with_touch("rfdb", b.build())

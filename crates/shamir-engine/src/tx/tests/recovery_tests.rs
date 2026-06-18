@@ -754,10 +754,18 @@ async fn f4b_nontx_insert_crash_recovery() {
         panic!("non-tx record {rid:?} must be recovered from the file WAL, got error: {e}")
     });
     let interner = tbl2.interner().get().await.unwrap();
-    let json = shamir_types::codecs::interned::inner_to_json_value(&read_back, interner).unwrap();
+    let qv =
+        shamir_types::codecs::interned::inner_value_to_query_value(&read_back, interner).unwrap();
+    let name_field = match &qv {
+        shamir_types::types::value::QueryValue::Map(m) => m.get("name").cloned(),
+        _ => None,
+    };
     assert_eq!(
-        json["name"], "nontx_durable",
-        "expected recovered non-tx record with name=nontx_durable, got {json:?}"
+        name_field,
+        Some(shamir_types::types::value::QueryValue::Str(
+            "nontx_durable".to_string()
+        )),
+        "expected recovered non-tx record with name=nontx_durable, got {qv:?}"
     );
 }
 
@@ -855,10 +863,16 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
         panic!("record {rid:?} must be recovered from the file WAL, got error: {e}")
     });
     let interner = tbl2.interner().get().await.unwrap();
-    let json = shamir_types::codecs::interned::inner_to_json_value(&read_back, interner).unwrap();
+    let qv =
+        shamir_types::codecs::interned::inner_value_to_query_value(&read_back, interner).unwrap();
+    let c5_field = match &qv {
+        shamir_types::types::value::QueryValue::Map(m) => m.get("c5_fresh_field").cloned(),
+        _ => None,
+    };
     assert_eq!(
-        json["c5_fresh_field"], "v",
-        "recovered record must decode the new field correctly, got {json:?}"
+        c5_field,
+        Some(shamir_types::types::value::QueryValue::Str("v".to_string())),
+        "recovered record must decode the new field correctly, got {qv:?}"
     );
 }
 

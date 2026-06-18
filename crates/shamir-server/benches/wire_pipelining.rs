@@ -38,6 +38,8 @@
 //! * Multi-thread runtime with ≥ 4 workers — real parallelism is required;
 //!   a current-thread runtime would serialise all spawned tasks.
 
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -121,7 +123,7 @@ fn execute_bytes_with_durability(i: usize, durability: Option<&str>) -> Vec<u8> 
     b.upsert(
         format!("w{i}"),
         upsert("items")
-            .key(serde_json::json!({ "id": id }))
+            .key(mpack!({ "id": @(QueryValue::from(id.as_str())) }))
             .value(doc! { "id" => id.clone(), "v" => i as i64 }),
     );
     let req = DbRequest::Execute {

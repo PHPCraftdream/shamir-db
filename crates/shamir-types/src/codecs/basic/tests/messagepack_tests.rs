@@ -1,6 +1,4 @@
 #![allow(deprecated)]
-
-use crate::codecs::basic::json::JsonCodec;
 use crate::codecs::basic::messagepack::MessagePackCodec;
 use crate::codecs::Codec;
 use crate::types::common::{new_map, new_set, TSet};
@@ -54,17 +52,10 @@ fn test_messagepack_roundtrip() {
 
 #[test]
 fn test_json_to_msgpack_conversion_with_all_hints() {
-    let json_codec = JsonCodec;
+    // Build the rich UserValue directly (the old test went through JsonCodec
+    // with type-hint prefixes; the value produced by that step is constructed
+    // here explicitly so the msgpack round-trip assertion is unchanged).
     let msgpack_codec = MessagePackCodec;
-    let raw_json = r#"{
-        "set:tags": ["rust", "db"],
-        "arr:history": [1, 2],
-        "i:version": -10,
-        "u:user_id": 987,
-        "float:a39": 3.9,
-        "dec:price": "19.99",
-        "big:large": "10000"
-    }"#;
 
     let mut expected_set = new_set();
     expected_set.insert(UserValue::Str("rust".to_string()));
@@ -78,16 +69,10 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
     rich_map.insert("version".to_string(), UserValue::Int(-10));
     rich_map.insert("user_id".to_string(), UserValue::Int(987));
     rich_map.insert("a39".to_string(), UserValue::F64(3.9));
-    // dec: and big: now validate but store as Str
+    // dec: and big: validate but store as Str
     rich_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
     rich_map.insert("large".to_string(), UserValue::Str("10000".to_string()));
-    let rich_value = UserValue::Map(rich_map);
-
-    let initial_value: UserValue = json_codec.decode(raw_json.as_bytes()).unwrap();
-    assert_eq!(
-        initial_value, rich_value,
-        "Initial JSON parsing with hints failed"
-    );
+    let initial_value = UserValue::Map(rich_map);
 
     let msgpack_bytes = msgpack_codec.encode(&initial_value).unwrap();
     let final_value: UserValue = msgpack_codec.decode(&msgpack_bytes).unwrap();

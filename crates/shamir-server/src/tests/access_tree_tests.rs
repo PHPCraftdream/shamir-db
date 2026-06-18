@@ -1,7 +1,5 @@
-use serde_json::json;
-
 use crate::access_tree::{mode_str, render};
-use shamir_types::types::value::QueryValue;
+use shamir_types::mpack;
 
 #[test]
 fn mode_str_renders_posix() {
@@ -16,44 +14,41 @@ fn mode_str_renders_posix() {
 
 #[test]
 fn render_draws_hierarchy_and_resolves_names() {
-    // Built in layers to keep the `json!` macro nesting shallow.
-    let table = json!({
+    // Built in layers to keep the macro nesting shallow.
+    let table = mpack!({
         "name": "users", "kind": "table",
         "owner": 42, "owner_name": "alice",
         "group": 3, "group_name": "devs",
-        "mode": 0o750, "setuid": false, "children": []
+        "mode": 488, "setuid": false, "children": []
     });
-    let store = json!({
+    let store = mpack!({
         "name": "main", "kind": "store", "owner": 0, "owner_name": "system",
-        "group": null, "group_name": null, "mode": 0o775, "setuid": false,
-        "children": [table]
+        "group": null, "group_name": null, "mode": 509, "setuid": false,
+        "children": [@table]
     });
-    let db = json!({
+    let db = mpack!({
         "name": "mydb", "kind": "database", "owner": 0, "owner_name": "system",
-        "group": null, "group_name": null, "mode": 0o775, "setuid": false,
-        "children": [store]
+        "group": null, "group_name": null, "mode": 509, "setuid": false,
+        "children": [@store]
     });
-    let resources = json!({
+    let resources = mpack!({
         "name": "/", "kind": "root", "owner": 0, "owner_name": "system",
-        "group": null, "group_name": null, "mode": 0o777, "setuid": false,
-        "children": [db]
+        "group": null, "group_name": null, "mode": 511, "setuid": false,
+        "children": [@db]
     });
-    let functions = json!([
-        {"name": "argon2id", "owner": 0, "owner_name": "system",
-         "group": null, "group_name": null, "mode": 0o777, "setuid": false, "builtin": true}
-    ]);
-    let principals = json!({
+    let functions = mpack!([{
+        "name": "argon2id", "owner": 0, "owner_name": "system",
+        "group": null, "group_name": null, "mode": 511, "setuid": false, "builtin": true
+    }]);
+    let principals = mpack!({
         "users": [{"id": 42, "name": "alice"}],
         "groups": [{"id": 3, "name": "devs", "members": [{"id": 42, "name": "alice"}]}]
     });
-    let tree_json = json!({
-        "resources": resources,
-        "functions": functions,
-        "principals": principals,
+    let tree = mpack!({
+        "resources": @resources,
+        "functions": @functions,
+        "principals": @principals,
     });
-    // serde round-trip test: the subject is the wire format, so we convert
-    // serde_json::Value → QueryValue to exercise render with live types.
-    let tree = QueryValue::from(tree_json);
 
     let out = render(&tree);
     // Hierarchy + labels.

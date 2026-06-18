@@ -7,8 +7,8 @@ use shamir_query_builder::ddl;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
-use serde_json::json;
 use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath};
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 /// Find a child node by its `name`, panicking if absent. Children order
@@ -41,8 +41,8 @@ async fn access_tree_structure_meta_and_principals() {
         let table = shamir.system_store().users_table().await.unwrap();
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({ "name": "alice" }).into(),
-            value: json!({ "name": "alice" }).into(),
+            key: mpack!({ "name": "alice" }),
+            value: mpack!({ "name": "alice" }),
         };
         shamir
             .system_store()

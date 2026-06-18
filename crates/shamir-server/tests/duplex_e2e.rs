@@ -14,7 +14,8 @@
 //! 4. **`resume_then_concurrent`** — full auth → ticket → resume → 4 concurrent
 //!    pings on the resumed connection all succeed.
 
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -107,7 +108,7 @@ async fn concurrent_executes_return_correct_results() {
             b.upsert(
                 "w",
                 shamir_query_builder::write::upsert("items_e2e")
-                    .key(json!({"sku": sku}))
+                    .key(mpack!({"sku": @(QueryValue::from(*sku))}))
                     .value(shamir_query_builder::doc! {
                         "sku" => *sku,
                         "qty" => 1,

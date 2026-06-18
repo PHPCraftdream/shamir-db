@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde_json::{json, Value as JsonValue};
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
 
 use shamir_bench_utils as bu;
@@ -55,25 +56,37 @@ const CITIES: &[&str] = &[
 ];
 const DOMAINS: &[&str] = &["example.com", "test.org", "demo.io"];
 
-fn gen_user(i: usize) -> JsonValue {
-    json!({
-        "id":            format!("u{:08}", i),
-        "name":          format!(
-                            "{} {}",
-                            FIRST_NAMES[i % FIRST_NAMES.len()],
-                            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
-                        ),
-        "email":         format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()]),
-        "age":           18 + ((i * 37) % 60) as i64,
-        "city":          CITIES[i % CITIES.len()],
-        "score":         ((i * 7919) % 1000) as i64,
-        "active":        !i.is_multiple_of(3),
-        "created_at_ns": 1_700_000_000_000_000_000_u64 + (i as u64 * 60_000_000_000),
-        "tags":          vec![
-                            format!("tag_{}", i % 10),
-                            format!("tag_{}", (i / 10) % 7),
-                        ],
-    })
+fn gen_user(i: usize) -> QueryValue {
+    let mut m = new_map();
+    m.insert("id".into(), QueryValue::from(format!("u{:08}", i)));
+    m.insert(
+        "name".into(),
+        QueryValue::from(format!(
+            "{} {}",
+            FIRST_NAMES[i % FIRST_NAMES.len()],
+            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
+        )),
+    );
+    m.insert(
+        "email".into(),
+        QueryValue::from(format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()])),
+    );
+    m.insert("age".into(), QueryValue::from(18 + ((i * 37) % 60) as i64));
+    m.insert("city".into(), QueryValue::from(CITIES[i % CITIES.len()]));
+    m.insert("score".into(), QueryValue::from(((i * 7919) % 1000) as i64));
+    m.insert("active".into(), QueryValue::Bool(!i.is_multiple_of(3)));
+    m.insert(
+        "created_at_ns".into(),
+        QueryValue::from(1_700_000_000_000_000_000_i64 + (i as i64 * 60_000_000_000)),
+    );
+    m.insert(
+        "tags".into(),
+        QueryValue::List(vec![
+            QueryValue::from(format!("tag_{}", i % 10)),
+            QueryValue::from(format!("tag_{}", (i / 10) % 7)),
+        ]),
+    );
+    QueryValue::Map(m)
 }
 
 /// Wide record generator — same core fields as `gen_user` PLUS ~20 extra
@@ -88,7 +101,7 @@ fn gen_user(i: usize) -> JsonValue {
 ///   notes        — ~100-char string
 ///   priority     — integer 0..9
 ///   department   — one of 8 strings
-fn gen_user_wide(i: usize) -> JsonValue {
+fn gen_user_wide(i: usize) -> QueryValue {
     const DEPARTMENTS: &[&str] = &[
         "Engineering",
         "Marketing",
@@ -117,45 +130,108 @@ fn gen_user_wide(i: usize) -> JsonValue {
         FIRST_NAMES[i % FIRST_NAMES.len()],
         i % 365,
     );
-    json!({
-        "id":            format!("u{:08}", i),
-        "name":          format!(
-                            "{} {}",
-                            FIRST_NAMES[i % FIRST_NAMES.len()],
-                            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
-                        ),
-        "email":         format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()]),
-        "age":           18 + ((i * 37) % 60) as i64,
-        "city":          CITIES[i % CITIES.len()],
-        "score":         ((i * 7919) % 1000) as i64,
-        "active":        !i.is_multiple_of(3),
-        "created_at_ns": 1_700_000_000_000_000_000_u64 + (i as u64 * 60_000_000_000),
-        "tags":          vec![
-                            format!("tag_{}", i % 10),
-                            format!("tag_{}", (i / 10) % 7),
-                        ],
-        // --- extra wide fields ---
-        "bio":           bio,
-        "notes":         notes,
-        "department":    DEPARTMENTS[i % DEPARTMENTS.len()],
-        "priority":      (i % 10) as i64,
-        "field_00":      format!("extra_str_field_zero_{}", i),
-        "field_01":      ((i * 3) % 10_000) as i64,
-        "field_02":      format!("extra_str_field_two_{}", i * 2),
-        "field_03":      ((i * 5) % 10_000) as i64,
-        "field_04":      format!("extra_str_field_four_{}", i),
-        "field_05":      ((i * 7) % 10_000) as i64,
-        "field_06":      format!("extra_str_field_six_{}", i),
-        "field_07":      ((i * 11) % 10_000) as i64,
-        "field_08":      format!("extra_str_field_eight_{}", i),
-        "field_09":      ((i * 13) % 10_000) as i64,
-        "field_10":      format!("extra_str_field_ten_{}", i),
-        "field_11":      ((i * 17) % 10_000) as i64,
-        "field_12":      format!("extra_str_field_twelve_{}", i),
-        "field_13":      ((i * 19) % 10_000) as i64,
-        "field_14":      format!("extra_str_field_fourteen_{}", i),
-        "field_15":      ((i * 23) % 10_000) as i64,
-    })
+    let mut m = new_map();
+    m.insert("id".into(), QueryValue::from(format!("u{:08}", i)));
+    m.insert(
+        "name".into(),
+        QueryValue::from(format!(
+            "{} {}",
+            FIRST_NAMES[i % FIRST_NAMES.len()],
+            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
+        )),
+    );
+    m.insert(
+        "email".into(),
+        QueryValue::from(format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()])),
+    );
+    m.insert("age".into(), QueryValue::from(18 + ((i * 37) % 60) as i64));
+    m.insert("city".into(), QueryValue::from(CITIES[i % CITIES.len()]));
+    m.insert("score".into(), QueryValue::from(((i * 7919) % 1000) as i64));
+    m.insert("active".into(), QueryValue::Bool(!i.is_multiple_of(3)));
+    m.insert(
+        "created_at_ns".into(),
+        QueryValue::from(1_700_000_000_000_000_000_i64 + (i as i64 * 60_000_000_000)),
+    );
+    m.insert(
+        "tags".into(),
+        QueryValue::List(vec![
+            QueryValue::from(format!("tag_{}", i % 10)),
+            QueryValue::from(format!("tag_{}", (i / 10) % 7)),
+        ]),
+    );
+    // --- extra wide fields ---
+    m.insert("bio".into(), QueryValue::from(bio));
+    m.insert("notes".into(), QueryValue::from(notes));
+    m.insert(
+        "department".into(),
+        QueryValue::from(DEPARTMENTS[i % DEPARTMENTS.len()]),
+    );
+    m.insert("priority".into(), QueryValue::from((i % 10) as i64));
+    m.insert(
+        "field_00".into(),
+        QueryValue::from(format!("extra_str_field_zero_{}", i)),
+    );
+    m.insert(
+        "field_01".into(),
+        QueryValue::from(((i * 3) % 10_000) as i64),
+    );
+    m.insert(
+        "field_02".into(),
+        QueryValue::from(format!("extra_str_field_two_{}", i * 2)),
+    );
+    m.insert(
+        "field_03".into(),
+        QueryValue::from(((i * 5) % 10_000) as i64),
+    );
+    m.insert(
+        "field_04".into(),
+        QueryValue::from(format!("extra_str_field_four_{}", i)),
+    );
+    m.insert(
+        "field_05".into(),
+        QueryValue::from(((i * 7) % 10_000) as i64),
+    );
+    m.insert(
+        "field_06".into(),
+        QueryValue::from(format!("extra_str_field_six_{}", i)),
+    );
+    m.insert(
+        "field_07".into(),
+        QueryValue::from(((i * 11) % 10_000) as i64),
+    );
+    m.insert(
+        "field_08".into(),
+        QueryValue::from(format!("extra_str_field_eight_{}", i)),
+    );
+    m.insert(
+        "field_09".into(),
+        QueryValue::from(((i * 13) % 10_000) as i64),
+    );
+    m.insert(
+        "field_10".into(),
+        QueryValue::from(format!("extra_str_field_ten_{}", i)),
+    );
+    m.insert(
+        "field_11".into(),
+        QueryValue::from(((i * 17) % 10_000) as i64),
+    );
+    m.insert(
+        "field_12".into(),
+        QueryValue::from(format!("extra_str_field_twelve_{}", i)),
+    );
+    m.insert(
+        "field_13".into(),
+        QueryValue::from(((i * 19) % 10_000) as i64),
+    );
+    m.insert(
+        "field_14".into(),
+        QueryValue::from(format!("extra_str_field_fourteen_{}", i)),
+    );
+    m.insert(
+        "field_15".into(),
+        QueryValue::from(((i * 23) % 10_000) as i64),
+    );
+    QueryValue::Map(m)
 }
 
 // --------------------------------------------------------------------------
@@ -277,7 +353,7 @@ async fn fresh_db_membuffer_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
 
 /// Seed `n` records via a single `insert_into` op (does NOT scan).
 async fn seed_users(shamir: &ShamirDb, n: usize) {
-    let values: Vec<JsonValue> = (0..n).map(gen_user).collect();
+    let values: Vec<QueryValue> = (0..n).map(gen_user).collect();
     let mut b = Batch::new();
     b.id("seed")
         .return_flagged()
@@ -363,8 +439,8 @@ fn req_set_one(target_id: &str, score: i64) -> BatchRequest {
     b.id("s").return_flagged().upsert(
         "s",
         write::upsert("users")
-            .key(json!({ "id": target_id }))
-            .value(json!({ "id": target_id, "score": score, "name": "Updated", "active": true })),
+            .key(mpack!({ "id": @(QueryValue::from(target_id)) }))
+            .value(mpack!({ "id": @(QueryValue::from(target_id)), "score": @(QueryValue::from(score)), "name": "Updated", "active": true })),
     );
     b.build()
 }
@@ -389,7 +465,7 @@ fn req_update_by_id(target_id: &str) -> BatchRequest {
         "u",
         write::update("users")
             .where_(f::eq("id", target_id))
-            .set(json!({ "score": 1234 })),
+            .set(mpack!({ "score": 1234 })),
     );
     b.build()
 }
@@ -484,7 +560,7 @@ fn req_range_age_narrow() -> BatchRequest {
 }
 
 fn req_bulk_insert(start: usize, count: usize) -> BatchRequest {
-    let values: Vec<JsonValue> = (start..start + count).map(gen_user).collect();
+    let values: Vec<QueryValue> = (start..start + count).map(gen_user).collect();
     let mut b = Batch::new();
     b.id("b")
         .return_flagged()
@@ -1999,8 +2075,8 @@ fn bench_nested_batch(c: &mut Criterion) {
         b.upsert(
             "write",
             write::upsert("users")
-                .key(json!({ "id": TARGET }))
-                .value(json!({ "id": TARGET, "score": SCORE, "name": "Bench", "active": true })),
+                .key(mpack!({ "id": @(QueryValue::from(TARGET)) }))
+                .value(mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true })),
         );
         b.build()
     };
@@ -2016,8 +2092,8 @@ fn bench_nested_batch(c: &mut Criterion) {
             // Filter: where id = $param("uid")
             ib.upsert(
                 "write",
-                write::upsert("users").key(json!({ "id": TARGET })).value(
-                    json!({ "id": TARGET, "score": SCORE, "name": "Bench", "active": true }),
+                write::upsert("users").key(mpack!({ "id": @(QueryValue::from(TARGET)) })).value(
+                    mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true }),
                 ),
             );
             ib.build()
@@ -2192,8 +2268,8 @@ fn bench_concurrent_inserts(c: &mut Criterion) {
                                 let mut b = Batch::new();
                                 b.id(id).upsert(
                                     "ups",
-                                    write::upsert("users").key(json!({ "id": id })).value(
-                                        json!({ "id": id, "name": format!("w{id}"), "score": id }),
+                                    write::upsert("users").key(mpack!({ "id": @(QueryValue::from(id)) })).value(
+                                        mpack!({ "id": @(QueryValue::from(id)), "name": @(QueryValue::from(format!("w{id}"))), "score": @(QueryValue::from(id)) }),
                                     ),
                                 );
                                 let req = b.build();
@@ -2484,7 +2560,7 @@ fn bench_validator_overhead(c: &mut Criterion) {
 async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user).collect();
+        let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user).collect();
         let mut b = Batch::new();
         b.id(chunk_start)
             .insert("s", write::insert(table).rows(values));
@@ -2501,7 +2577,7 @@ async fn seed_users_wide(shamir: &ShamirDb, n: usize) {
 async fn seed_users_wide_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user_wide).collect();
+        let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user_wide).collect();
         let mut b = Batch::new();
         b.id(chunk_start)
             .insert("s", write::insert(table).rows(values));
