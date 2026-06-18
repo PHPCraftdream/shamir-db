@@ -16,6 +16,8 @@ import { signCanonical } from './hmac.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
 import type { PushEnvelope } from './types/subscribe.js';
+import { InternerCacheRegistry } from './field-map.js';
+import type { InternerDelta } from './field-map.js';
 
 /** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
 export interface TxOpened {
@@ -50,6 +52,8 @@ export class ShamirClient {
   private readonly _resumptionTicket: Uint8Array | undefined;
   private readonly _resumptionExpiresAtNs: bigint | undefined;
   private readonly subscriptionRouter = new SubscriptionRouter();
+  /** Per-`(db, repo)` field-name ↔ id cache (Stage 5-wire interner). */
+  private readonly _internerCache = new InternerCacheRegistry();
   private nextRequestId = 1;
 
   /**
@@ -423,22 +427,144 @@ export class ShamirClient {
    * callers read `.results` / `.execution_plan` / `.transaction` directly —
    * matching the napi binding's ergonomics. Throws on transport, protocol,
    * or DB-layer (`kind:"error"`) failures.
+   *
+   * Stage 5-wire interner integration (ambient sync):
+   * - Attaches `interner_epochs` from the client's cached epochs for `db`,
+   *   so the server knows which entries to include in its delta.
+   * - After receiving the response, merges any `interner_delta` entries into
+   *   the per-repo FieldMap caches.
    */
   async execute(db: string, batch: object): Promise<BatchResponse> {
+    // Attach ambient interner epochs so the server returns only the delta.
+    const epochs = this._internerCache.allEpochs(db);
+    const enrichedBatch: Record<string, unknown> =
+      typeof batch === 'object' && batch !== null
+        ? { ...(batch as Record<string, unknown>) }
+        : { ...(batch as object) };
+    if (Object.keys(epochs).length > 0) {
+      // Convert bigint epochs to numbers for msgpack serialisation. The
+      // epoch values are gap-free high-water marks and will fit in a JS
+      // safe integer for any realistic number of fields (2^53 fields would
+      // require a universe-sized interner). If they ever exceed
+      // Number.MAX_SAFE_INTEGER, @msgpack/msgpack encodes them as bigint
+      // automatically because we pass them as-is — but the server reads
+      // u64 and both are fine.
+      const wireEpochs: Record<string, bigint> = {};
+      for (const [repo, e] of Object.entries(epochs)) {
+        wireEpochs[repo] = e;
+      }
+      enrichedBatch['interner_epochs'] = wireEpochs;
+    }
+
     const r = await this.sendDbRequest({
       op: 'execute',
       query_version: 1,
       db,
-      batch,
+      batch: enrichedBatch,
     });
     // DbResponse::Batch is `{ kind: "batch", response: BatchResponse }` —
     // unwrap the envelope so callers get the BatchResponse directly.
     if (r.kind === 'batch' && r.response !== undefined) {
-      return r.response as BatchResponse;
+      const response = r.response as BatchResponse;
+      // Merge any interner_delta from the response into the local cache.
+      this.mergeInternerDelta(db, response);
+      return response;
     }
     throw new Error(
       `unexpected DbResponse kind for execute: ${(r.kind as string) ?? 'missing'}`,
     );
+  }
+
+  /**
+   * Merge `response.interner_delta` into the per-repo FieldMap caches for
+   * `db`. Called after every successful `execute` response.
+   *
+   * Monotonic: the FieldMap's `applyDelta` rejects stale epochs, so
+   * out-of-order or duplicate deltas are harmless.
+   */
+  private mergeInternerDelta(db: string, response: BatchResponse): void {
+    const delta = response.interner_delta;
+    if (delta === undefined || delta === null) return;
+    for (const [repo, repoDelta] of Object.entries(delta)) {
+      const fm = this._internerCache.getOrCreate(db, repo);
+      const normalised: InternerDelta = {
+        epoch: BigInt(repoDelta.epoch),
+        entries: repoDelta.entries.map(([id, name]) => [BigInt(id), name]),
+      };
+      fm.applyDelta(normalised);
+    }
+  }
+
+  /**
+   * Register field `names` against the server's interner for `(db, repo)`
+   * and merge the returned `(name, id)` mappings into the local cache.
+   *
+   * Returns the resolved `{ name → id }` map in input order. Idempotent:
+   * the server returns existing ids for already-interned names.
+   *
+   * Short-circuits when every name is already cached (no roundtrip).
+   */
+  async touchFields(
+    db: string,
+    repo: string,
+    names: string[],
+  ): Promise<Map<string, bigint>> {
+    const fm = this._internerCache.getOrCreate(db, repo);
+    const missing = fm.missingNames(names);
+
+    if (missing.length > 0) {
+      // Send an interner_touch op for the unknown names.
+      const alias = '_ic_touch';
+      const batch = {
+        id: '_ic_touch',
+        queries: {
+          [alias]: { interner_touch: repo, names: missing },
+        },
+      };
+      const resp = await this.execute(db, batch);
+      // Parse the touch payload: server returns
+      // `{ "interner_touch": "<repo>", "epoch": <u64>, "mappings": [[name, id], ...] }`
+      const result = resp.results[alias];
+      if (result !== undefined && result.records.length > 0) {
+        const rec = result.records[0] as Record<string, unknown>;
+        const epoch = rec['epoch'];
+        const mappings = rec['mappings'];
+        if (Array.isArray(mappings)) {
+          for (const pair of mappings as unknown[]) {
+            if (Array.isArray(pair) && pair.length === 2) {
+              const name = pair[0] as string;
+              const id = BigInt(pair[1] as number | bigint);
+              fm.insertEntry(name, id);
+            }
+          }
+        }
+        if (epoch !== undefined && epoch !== null) {
+          const bigEpoch = BigInt(epoch as number | bigint);
+          if (bigEpoch > fm.epoch()) {
+            // applyDelta with just the epoch bump
+            fm.applyDelta({ epoch: bigEpoch, entries: [] });
+          }
+        }
+      }
+    }
+
+    // Return resolved map for all requested names (both cached + freshly minted).
+    const result = new Map<string, bigint>();
+    for (const name of names) {
+      const id = fm.getId(name);
+      if (id !== undefined) {
+        result.set(name, id);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Access the interner cache registry. Allows callers to read cached
+   * field name ↔ id mappings without a roundtrip (cache-hit path only).
+   */
+  get internerCache(): InternerCacheRegistry {
+    return this._internerCache;
   }
 
   // ── Interactive (multi-call) transactions ─────────────────────────
