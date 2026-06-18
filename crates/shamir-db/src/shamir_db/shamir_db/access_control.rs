@@ -1,5 +1,5 @@
-use serde_json::json;
 use shamir_collections::TFxMap;
+use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::access::{
@@ -389,7 +389,7 @@ impl ShamirDb {
         }
     }
 
-    /// Assemble the access-control tree as structured JSON.
+    /// Assemble the access-control tree as a structured [`QueryValue`] map.
     ///
     /// Shape (see [`shamir_query_types::admin::AccessTreeOp`]):
     /// ```json
@@ -415,22 +415,25 @@ impl ShamirDb {
         &self,
         depth: Option<u32>,
         db_filter: Option<&str>,
-    ) -> DbResult<serde_json::Value> {
+    ) -> DbResult<QueryValue> {
         // ── principals first, so resource nodes resolve owner/group names ──
         let mut name_of: TFxMap<u64, String> = TFxMap::default();
         name_of.insert(OWNER_SYSTEM, "system".to_string());
-        let mut users_json: Vec<serde_json::Value> = Vec::new();
+        let mut users_json: Vec<QueryValue> = Vec::new();
         for rec in self.system_store.load_users().await? {
             if let Some(uname) = rec.get("name").and_then(|v| v.as_str()) {
                 let id = principal_id(uname);
                 name_of.insert(id, uname.to_string());
-                users_json.push(json!({ "id": id, "name": uname }));
+                let mut m = new_map();
+                m.insert("id".to_string(), QueryValue::Int(id as i64));
+                m.insert("name".to_string(), QueryValue::Str(uname.to_string()));
+                users_json.push(QueryValue::Map(m));
             }
         }
         users_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
         let mut group_name_of: TFxMap<u64, String> = TFxMap::default();
-        let mut groups_json: Vec<serde_json::Value> = Vec::new();
+        let mut groups_json: Vec<QueryValue> = Vec::new();
         for rec in self.system_store.load_groups().await? {
             let Some(gid) = rec.get("group_id").and_then(|v| v.as_u64()) else {
                 continue;
@@ -441,17 +444,32 @@ impl ShamirDb {
                 .unwrap_or_default()
                 .to_string();
             group_name_of.insert(gid, gname.clone());
-            let members: Vec<serde_json::Value> = rec
+            let members: Vec<QueryValue> = rec
                 .get("members")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|m| m.as_u64())
-                        .map(|m| json!({ "id": m, "name": name_of.get(&m).cloned() }))
+                        .map(|m| {
+                            let mut mm = new_map();
+                            mm.insert("id".to_string(), QueryValue::Int(m as i64));
+                            mm.insert(
+                                "name".to_string(),
+                                name_of
+                                    .get(&m)
+                                    .map(|n| QueryValue::Str(n.clone()))
+                                    .unwrap_or(QueryValue::Null),
+                            );
+                            QueryValue::Map(mm)
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
-            groups_json.push(json!({ "id": gid, "name": gname, "members": members }));
+            let mut gm = new_map();
+            gm.insert("id".to_string(), QueryValue::Int(gid as i64));
+            gm.insert("name".to_string(), QueryValue::Str(gname));
+            gm.insert("members".to_string(), QueryValue::List(members));
+            groups_json.push(QueryValue::Map(gm));
         }
         groups_json.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
@@ -465,13 +483,13 @@ impl ShamirDb {
                 Some(d) => self.list_dbs().into_iter().filter(|x| x == d).collect(),
                 None => self.list_dbs(),
             };
-            let mut db_children: Vec<serde_json::Value> = Vec::new();
+            let mut db_children: Vec<QueryValue> = Vec::new();
             for dbname in dbs {
                 let dm = self.resource_meta(&ResourcePath::database(&dbname)).await;
                 let mut dbnode = access_node(&dbname, "database", &dm, &name_of, &group_name_of);
                 if max_depth >= 2 {
                     if let Some(inst) = self.get_db(&dbname) {
-                        let mut store_children: Vec<serde_json::Value> = Vec::new();
+                        let mut store_children: Vec<QueryValue> = Vec::new();
                         for store in inst.list_repos() {
                             let sm = self
                                 .resource_meta(&ResourcePath::store(&dbname, &store))
@@ -480,7 +498,7 @@ impl ShamirDb {
                                 access_node(&store, "store", &sm, &name_of, &group_name_of);
                             if max_depth >= 3 {
                                 if let Ok(tables) = inst.list_tables(&store) {
-                                    let mut tnodes: Vec<serde_json::Value> = Vec::new();
+                                    let mut tnodes: Vec<QueryValue> = Vec::new();
                                     for t in tables {
                                         let tm = self
                                             .resource_meta(&ResourcePath::table(
@@ -495,62 +513,93 @@ impl ShamirDb {
                                             &group_name_of,
                                         ));
                                     }
-                                    snode["children"] = serde_json::Value::Array(tnodes);
+                                    if let QueryValue::Map(ref mut m) = snode {
+                                        m.insert("children".to_string(), QueryValue::List(tnodes));
+                                    }
                                 }
                             }
                             store_children.push(snode);
                         }
-                        dbnode["children"] = serde_json::Value::Array(store_children);
+                        if let QueryValue::Map(ref mut m) = dbnode {
+                            m.insert("children".to_string(), QueryValue::List(store_children));
+                        }
                     }
                 }
                 db_children.push(dbnode);
             }
-            root["children"] = serde_json::Value::Array(db_children);
+            if let QueryValue::Map(ref mut m) = root {
+                m.insert("children".to_string(), QueryValue::List(db_children));
+            }
         }
 
         // ── functions (flat for now; folders land in a later slice) ──
-        let mut functions: Vec<serde_json::Value> = Vec::new();
+        let mut functions: Vec<QueryValue> = Vec::new();
         for fname in self.list_functions().await? {
             let fm = self.resource_meta(&ResourcePath::function(&fname)).await;
             let mut fnode = access_node(&fname, "function", &fm, &name_of, &group_name_of);
-            if let Some(obj) = fnode.as_object_mut() {
-                obj.remove("children");
-                obj.insert(
+            if let QueryValue::Map(ref mut m) = fnode {
+                m.swap_remove("children");
+                m.insert(
                     "builtin".to_string(),
-                    serde_json::Value::Bool(self.function_meta(&fname).is_none()),
+                    QueryValue::Bool(self.function_meta(&fname).is_none()),
                 );
             }
             functions.push(fnode);
         }
 
-        Ok(json!({
-            "resources": root,
-            "functions": functions,
-            "principals": { "users": users_json, "groups": groups_json },
-        }))
+        let mut principals = new_map();
+        principals.insert("users".to_string(), QueryValue::List(users_json));
+        principals.insert("groups".to_string(), QueryValue::List(groups_json));
+
+        let mut result = new_map();
+        result.insert("resources".to_string(), root);
+        result.insert("functions".to_string(), QueryValue::List(functions));
+        result.insert("principals".to_string(), QueryValue::Map(principals));
+
+        Ok(QueryValue::Map(result))
     }
 }
 
-/// Build one access-tree node as JSON, resolving the owner/group ids to
-/// names via the supplied lookups. Callers attach `children` afterwards
-/// (leaf nodes keep the empty array; functions drop it).
+/// Build one access-tree node as a [`QueryValue`] map, resolving the
+/// owner/group ids to names via the supplied lookups. Callers attach
+/// `children` afterwards (leaf nodes keep the empty list; functions drop it).
 pub(super) fn access_node(
     name: &str,
     kind: &str,
     meta: &ResourceMeta,
     name_of: &TFxMap<u64, String>,
     group_name_of: &TFxMap<u64, String>,
-) -> serde_json::Value {
+) -> QueryValue {
     let owner_id = meta.owner.to_owner_id();
-    json!({
-        "name": name,
-        "kind": kind,
-        "owner": owner_id,
-        "owner_name": name_of.get(&owner_id).cloned(),
-        "group": meta.group,
-        "group_name": meta.group.and_then(|g| group_name_of.get(&g).cloned()),
-        "mode": meta.mode,
-        "setuid": Mode::is_setuid(meta.mode),
-        "children": [],
-    })
+    let mut m = new_map();
+    m.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    m.insert("kind".to_string(), QueryValue::Str(kind.to_string()));
+    m.insert("owner".to_string(), QueryValue::Int(owner_id as i64));
+    m.insert(
+        "owner_name".to_string(),
+        name_of
+            .get(&owner_id)
+            .map(|n| QueryValue::Str(n.clone()))
+            .unwrap_or(QueryValue::Null),
+    );
+    m.insert(
+        "group".to_string(),
+        meta.group
+            .map(|g| QueryValue::Int(g as i64))
+            .unwrap_or(QueryValue::Null),
+    );
+    m.insert(
+        "group_name".to_string(),
+        meta.group
+            .and_then(|g| group_name_of.get(&g))
+            .map(|n| QueryValue::Str(n.clone()))
+            .unwrap_or(QueryValue::Null),
+    );
+    m.insert("mode".to_string(), QueryValue::Int(meta.mode as i64));
+    m.insert(
+        "setuid".to_string(),
+        QueryValue::Bool(Mode::is_setuid(meta.mode)),
+    );
+    m.insert("children".to_string(), QueryValue::List(Vec::new()));
+    QueryValue::Map(m)
 }

@@ -9,10 +9,11 @@ use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
 use serde_json::json;
 use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath};
+use shamir_types::types::value::QueryValue;
 
 /// Find a child node by its `name`, panicking if absent. Children order
 /// is non-deterministic (dashmap iteration), so always look up by name.
-fn child<'a>(node: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+fn child<'a>(node: &'a QueryValue, name: &str) -> &'a QueryValue {
     node["children"]
         .as_array()
         .expect("children array")

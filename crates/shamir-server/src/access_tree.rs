@@ -17,12 +17,12 @@
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context};
-use serde_json::Value;
 use zeroize::Zeroizing;
 
 use shamir_client::{Client, ConnectOptions};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
+use shamir_types::types::value::QueryValue;
 
 use crate::config::Config;
 
@@ -45,10 +45,10 @@ pub struct AccessTreeArgs {
     pub password: Option<String>,
 }
 
-/// Fetch the access tree as JSON — offline (open `data_dir`) or online
+/// Fetch the access tree — offline (open `data_dir`) or online
 /// (`--connect`). The rendering/printing is left to the caller so this is
 /// directly testable.
-pub async fn fetch_tree(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<Value> {
+pub async fn fetch_tree(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<QueryValue> {
     match &args.connect {
         Some(addr) => fetch_online(args, addr).await,
         None => fetch_offline(config, args).await,
@@ -68,7 +68,7 @@ pub async fn run(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<()> {
 }
 
 /// Offline: open the durable system store and assemble the tree directly.
-async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<Value> {
+async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<QueryValue> {
     let meta_path = config.data_dir.join("shamir_db_meta.redb");
 
     // redb is single-writer: a fresh open fails while the file lock is still
@@ -110,7 +110,7 @@ async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result
 }
 
 /// Online: SCRAM-authenticate to a running server and request the tree.
-async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Value> {
+async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<QueryValue> {
     let user = args
         .user
         .as_deref()
@@ -161,16 +161,15 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Value
         .ok_or_else(|| anyhow!("empty access_tree result"))?;
     Ok(rec
         .get_value_owned("access_tree")
-        .map(serde_json::Value::from)
-        .unwrap_or(Value::Null))
+        .unwrap_or(QueryValue::Null))
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// Render the access-tree JSON as a human-readable ASCII tree.
-pub fn render(tree: &Value) -> String {
+/// Render the access-tree as a human-readable ASCII tree.
+pub fn render(tree: &QueryValue) -> String {
     let mut out = String::new();
 
     // ── resources ──
@@ -244,7 +243,7 @@ pub fn render(tree: &Value) -> String {
 
 /// Walk a resource node, appending `(tree_line, owner:group, mode)` rows.
 fn collect_rows(
-    node: &Value,
+    node: &QueryValue,
     prefix: &str,
     is_last: bool,
     is_root: bool,
@@ -275,7 +274,7 @@ fn collect_rows(
 }
 
 /// Human label for a resource node, by kind.
-fn node_label(node: &Value) -> String {
+fn node_label(node: &QueryValue) -> String {
     let name = node["name"].as_str().unwrap_or("?");
     match node["kind"].as_str().unwrap_or("") {
         "root" => "/".to_string(),
@@ -287,7 +286,7 @@ fn node_label(node: &Value) -> String {
 }
 
 /// `owner:group` label, preferring resolved names over numeric ids.
-fn owner_group(node: &Value) -> String {
+fn owner_group(node: &QueryValue) -> String {
     let owner = node["owner_name"]
         .as_str()
         .map(str::to_string)
@@ -300,7 +299,7 @@ fn owner_group(node: &Value) -> String {
     format!("{owner}:{group}")
 }
 
-fn mode_of(node: &Value) -> u16 {
+fn mode_of(node: &QueryValue) -> u16 {
     node["mode"].as_u64().unwrap_or(0) as u16
 }
 

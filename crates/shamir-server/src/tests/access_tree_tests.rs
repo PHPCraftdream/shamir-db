@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use crate::access_tree::{mode_str, render};
+use shamir_types::types::value::QueryValue;
 
 #[test]
 fn mode_str_renders_posix() {
@@ -45,11 +46,14 @@ fn render_draws_hierarchy_and_resolves_names() {
         "users": [{"id": 42, "name": "alice"}],
         "groups": [{"id": 3, "name": "devs", "members": [{"id": 42, "name": "alice"}]}]
     });
-    let tree = json!({
+    let tree_json = json!({
         "resources": resources,
         "functions": functions,
         "principals": principals,
     });
+    // serde round-trip test: the subject is the wire format, so we convert
+    // serde_json::Value → QueryValue to exercise render with live types.
+    let tree = QueryValue::from(tree_json);
 
     let out = render(&tree);
     // Hierarchy + labels.
