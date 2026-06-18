@@ -1,0 +1,113 @@
+בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
+
+# Приземлённый staged-план: элиминация JSON (агрессивный scope)
+
+Продолжает InnerValue-кампанию (`innervalue-floor.md`) для второй оси цели #61:
+**ноль JSON**. Scope выбран пользователем — **агрессивный**: увести JSON с
+production read/hot-путей И схлопнуть v1 `QueryRecord::Json` + query-builder на
+**msgpack-only** (ломает v1-клиентов → bump протокола + миграция клиентского
+SDK). Неустранимый пол — задокументировать.
+
+Дисциплина — та же, что у InnerValue:
+- **анти-формально**: метрика — построение `json::Value` на горячем, не grep;
+- один кластер/этап, ≤6–8 файлов, одна семантика;
+- агент пишет код **и сам гонит гейт** (fmt/clippy/test.sh/@e2e); оркестратор ревью+коммит;
+- byte-identity golden на каждом persist/wire-шаге;
+- **v1-break за чекпоинтом** — отдельное явное «go» перед Движением J-III.
+
+---
+
+## 0. Карта JSON-следа (production, ~600 узлов)
+
+| Кластер | ~Узлов | Класс | Движение |
+|---|---|---|---|
+| read-pipeline: `exec.rs`, `select_projection.rs project()`, `order.rs`, `hashable_json.rs`, `write_helpers.rs`, `resolve.rs` | ~90 | **canonical-key + apply_select JSON-twin** (живой!) | J-I |
+| changefeed: db `changelog.rs`, server `subscriptions/{payload,bridge}.rs` | ~30 | **JSON-wire payload клиентам** | J-II |
+| v1-wire DTO: query-types `query_record.rs`, `batch_op.rs`, `inserted_record.rs` | ~140 | **v1-протокол** (`QueryRecord::Json`) | J-III (break) |
+| builder: query-builder `batch.rs`, `wire/mod.rs`, … | ~38 | **producer JSON-форм** | J-III (break) |
+| client SDK: `shamir-client`, client-ts, client-node | ~11 | **msgpack-миграция клиента** | J-III (break) |
+| codec: types `json.rs`, `value.rs` | ~103 | **библиотека кодека** | J-IV (пол) |
+| control-plane: db `system_store.rs`, `access_control.rs`, `db_gateway.rs`, `helpers.rs` | ~84 | **admin/ACL/system** | J-IV (решение: пол vs миграция) |
+| wasm-host `meta.rs`, funclib, tx, access | ~14 | **boundary/config** | J-IV (пол) |
+
+---
+
+## Движение J-I — детвиннинг read-пути (БЕЗОПАСНО, без v1-break)
+
+`#60` увёл read-RESULT на `QueryValue`, но внутри пайплайна JSON ещё держит
+**canonical-key** и **apply_select-twin**. Это устранимо QueryValue-нативно.
+
+- **J1 — apply_select JSON-twin.** `select_projection.rs::project()` (JSON) +
+  `exec.rs::apply_select`/`proj.project` call-site. Подтвердить, что production
+  emits через `project_value`/`apply_select_value(_bytes)` (QueryValue), а
+  JSON-`project` — bench/example-twin → удалить мёртвый twin ИЛИ задокументировать
+  если ещё на live-control-пути. Размер: S–M, аудит.
+- **J2 — canonical-key детвин (distinct).** `hashable_json.rs` (`HashableJson`) +
+  `exec.rs::apply_distinct_qv` (строит `HashableJson(json::from(qv))` как ключ
+  дедупа). Ввести `HashableQueryValue` (Hash+Eq над `QueryValue` напрямую, те же
+  канонические биты) → дедуп без `json::Value`. Удалить JSON-`apply_distinct`
+  (twin) + `hashable_json.rs`. Критерий: distinct byte-identity. Размер: M.
+- **J3 — canonical-key детвин (group-by/aggregate).** `aggregate.rs:170`
+  (`inner_to_json_value` для group-key). Перевести group-key на QueryValue-нативный
+  канонический ключ (зеркало J2). Критерий: group_by parity. Размер: M.
+- **J4 — read-path остаток.** `order.rs` (31 — order-by канонизация?),
+  `write_helpers.rs`, `resolve.rs` JSON-узлы → QueryValue или задокументировать
+  §floor. Аудит. Размер: M.
+
+## Движение J-II — changefeed payload
+
+- **J5 — changefeed → решение payload-формата.** db `changelog.rs`
+  (`inner_to_json_value` lazily) + server `subscriptions/{payload,bridge}.rs`
+  (`to_json_value`). Это **wire-payload подписчикам**. Агрессивно: перевести на
+  msgpack-payload (как read-result pass-through) + миграция подписчик-клиента.
+  Альтернатива: оставить JSON-payload как control-plane-якорь. **Решение на
+  чекпоинте** (затрагивает клиентов). Размер: M–L.
+
+## Движение J-III — схлопывание v1-wire (АГРЕССИВНО — ЛОМАЕТ v1, ЧЕКПОИНТ)
+
+⚠️ **СТОП-чекпоинт перед J6.** Здесь ломается v1-протокол: нужен bump версии,
+депрекация `QueryRecord::Json`, миграция клиентского SDK. Outward-facing и
+трудно-обратимо — отдельное явное «go».
+
+- **J6 — протокол на msgpack-only.** query-types `query_record.rs`
+  (`QueryRecord::Json` → удалить/депрекировать), `batch_op.rs`,
+  `inserted_record.rs` → msgpack-only wire. Bump версии протокола (v2→v3).
+  Размер: L.
+- **J7 — builder msgpack-only.** query-builder: убрать `to_json_value`/`ToWire`
+  JSON-выход, оставить msgpack-builder. Размер: M–L.
+- **J8 — клиентский SDK.** `shamir-client` / client-ts / client-node → msgpack-only
+  send/recv. Размер: L (вне default workspace для node).
+
+## Движение J-IV — кодек-конфайнмент + запечатывание
+
+- **J9 — control-plane решение.** db `system_store.rs`/`access_control.rs`/
+  `db_gateway.rs` — admin/ACL/system на JSON. Решение: **пол** (admin-JSON
+  приемлем — человекочитаемый control-plane) ИЛИ миграция. По умолчанию — **пол**.
+- **J10 — codec-пол.** types `json.rs`/`value.rs` — что осталось после J-I..J-III
+  = библиотека (serde-derive, config, wasm-host meta, control-plane). Документировать.
+- **J-close — `docs/perf/json-floor.md`** + честный end-state + закрыть JSON-ось #61.
+
+---
+
+## Граф / чекпоинты
+
+```
+J1 → J2 → J3 → J4        (read-path, безопасно, параллельно по файлам с гейтом)
+        │
+        ▼
+   J5 (changefeed — решение payload)  ── ЧЕКПОИНТ (затрагивает подписчиков)
+        │
+        ▼
+ ⚠️ СТОП-ЧЕКПОИНТ ⚠️  (v1-break — явное «go»)
+        │
+   J6 → J7 → J8   (wire / builder / client — msgpack-only, bump протокола)
+        │
+        ▼
+   J9 → J10 → J-close   (control-plane решение, codec-пол, документирование)
+```
+
+## Анти-паттерны
+- ❌ снести `json::Value` там, где он = control-plane/config/serde-derive (это пол).
+- ❌ ломать v1-wire без bump протокола + чекпоинта.
+- ❌ 2+ кластера в этапе; агент гоняет git.
+- ✅ один кластер, byte-identity golden, гейт у оркестратора, v1-break за «go».
