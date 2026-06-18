@@ -4,11 +4,11 @@
 //! Uses a TableManager backed by any storage engine (redb for production,
 //! in_memory for tests).
 
-use serde_json::json;
-
 use shamir_types::access::{Actor, ResourceMeta};
+use shamir_types::codecs::interned::json::query_value_to_inner;
+use shamir_types::types::common::new_map;
+use shamir_types::types::value::QueryValue;
 
-use crate::codecs::interned::json_value_to_inner;
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::{RepoConfig, RepoInstance};
@@ -56,6 +56,22 @@ pub enum SystemStoreConfig {
 #[derive(Clone)]
 pub struct SystemStore {
     db: DbInstance,
+}
+
+/// Build a `QueryValue::Map` with a single string-keyed entry (for simple
+/// primary-key records).
+fn qv_map1(k1: &str, v1: QueryValue) -> QueryValue {
+    let mut m = new_map();
+    m.insert(k1.to_string(), v1);
+    QueryValue::Map(m)
+}
+
+/// Build a `QueryValue::Map` with two string-keyed entries.
+fn qv_map2(k1: &str, v1: QueryValue, k2: &str, v2: QueryValue) -> QueryValue {
+    let mut m = new_map();
+    m.insert(k1.to_string(), v1);
+    m.insert(k2.to_string(), v2);
+    QueryValue::Map(m)
 }
 
 impl SystemStore {
@@ -152,7 +168,7 @@ impl SystemStore {
     pub async fn save_database(
         &self,
         name: &str,
-        record: &serde_json::Value,
+        record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
         let mut rec = record.clone();
@@ -160,11 +176,11 @@ impl SystemStore {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let _inner =
-            json_value_to_inner(&rec, interner).map_err(|e| DbError::Codec(e.to_string()))?;
+            query_value_to_inner(&rec, interner).map_err(|e| DbError::Codec(e.to_string()))?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
-            key: json!({"name": name}).into(),
-            value: rec.into(),
+            key: qv_map1("name", QueryValue::Str(name.to_string())),
+            value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -186,7 +202,7 @@ impl SystemStore {
     }
 
     /// Load all database records.
-    pub async fn load_databases(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_databases(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -196,7 +212,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
@@ -213,18 +229,32 @@ impl SystemStore {
         path: Option<&str>,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
-        let mut record = json!({
-            "db_name": db_name,
-            "repo_name": repo_name,
-            "engine": engine,
-            "path": path,
-        });
+        let mut m = new_map();
+        m.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
+        m.insert(
+            "repo_name".to_string(),
+            QueryValue::Str(repo_name.to_string()),
+        );
+        m.insert("engine".to_string(), QueryValue::Str(engine.to_string()));
+        m.insert(
+            "path".to_string(),
+            match path {
+                Some(p) => QueryValue::Str(p.to_string()),
+                None => QueryValue::Null,
+            },
+        );
+        let mut record = QueryValue::Map(m);
         meta.inject_into(&mut record);
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),
-            key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
-            value: record.into(),
+            key: qv_map2(
+                "db_name",
+                QueryValue::Str(db_name.to_string()),
+                "repo_name",
+                QueryValue::Str(repo_name.to_string()),
+            ),
+            value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -261,7 +291,7 @@ impl SystemStore {
     }
 
     /// Load all repository records.
-    pub async fn load_repositories(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_repositories(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -271,7 +301,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
@@ -292,23 +322,37 @@ impl SystemStore {
         enable_indexes: bool,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
-        let mut record = json!({
-            "db_name": db_name,
-            "repo_name": repo_name,
-            "table_name": table_name,
-            "enable_indexes": enable_indexes,
-        });
+        let mut m = new_map();
+        m.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
+        m.insert(
+            "repo_name".to_string(),
+            QueryValue::Str(repo_name.to_string()),
+        );
+        m.insert(
+            "table_name".to_string(),
+            QueryValue::Str(table_name.to_string()),
+        );
+        m.insert(
+            "enable_indexes".to_string(),
+            QueryValue::Bool(enable_indexes),
+        );
+        let mut record = QueryValue::Map(m);
         meta.inject_into(&mut record);
         let table = self.table(TABLE_TABLES).await?;
+        let mut key_m = new_map();
+        key_m.insert("db_name".to_string(), QueryValue::Str(db_name.to_string()));
+        key_m.insert(
+            "repo_name".to_string(),
+            QueryValue::Str(repo_name.to_string()),
+        );
+        key_m.insert(
+            "table_name".to_string(),
+            QueryValue::Str(table_name.to_string()),
+        );
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_TABLES),
-            key: json!({
-                "db_name": db_name,
-                "repo_name": repo_name,
-                "table_name": table_name,
-            })
-            .into(),
-            value: record.into(),
+            key: QueryValue::Map(key_m),
+            value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -352,7 +396,7 @@ impl SystemStore {
 
     /// Load every persisted table-catalogue record (across all repos). The
     /// caller filters by `db_name` / `repo_name`.
-    pub async fn load_tables(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_tables(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_TABLES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -362,7 +406,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
@@ -371,12 +415,15 @@ impl SystemStore {
     // ========================================================================
 
     /// Save a setting.
-    pub async fn save_setting(&self, key: &str, value: &serde_json::Value) -> DbResult<()> {
+    pub async fn save_setting(&self, key: &str, value: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_SETTINGS).await?;
+        let mut rec_m = new_map();
+        rec_m.insert("key".to_string(), QueryValue::Str(key.to_string()));
+        rec_m.insert("value".to_string(), value.clone());
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_SETTINGS),
-            key: json!({"key": key}).into(),
-            value: json!({"key": key, "value": value}).into(),
+            key: qv_map1("key", QueryValue::Str(key.to_string())),
+            value: QueryValue::Map(rec_m),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -384,7 +431,7 @@ impl SystemStore {
     }
 
     /// Load a setting.
-    pub async fn load_setting(&self, key: &str) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_setting(&self, key: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_SETTINGS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -400,7 +447,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .and_then(|r| r.get_value_owned("value").map(serde_json::Value::from)))
+            .and_then(|r| r.get_value_owned("value")))
     }
 
     // ========================================================================
@@ -426,7 +473,7 @@ impl SystemStore {
     pub async fn save_function(
         &self,
         name: &str,
-        record: &serde_json::Value,
+        record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
         let mut rec = record.clone();
@@ -434,8 +481,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: json!({"name": name}).into(),
-            value: rec.into(),
+            key: qv_map1("name", QueryValue::Str(name.to_string())),
+            value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -462,7 +509,7 @@ impl SystemStore {
 
     /// Load every persisted user record (including `password_hash` —
     /// callers that surface these must strip secret fields themselves).
-    pub async fn load_users(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_users(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_USERS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -472,12 +519,12 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
     /// Load every persisted function catalogue record.
-    pub async fn load_functions(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_functions(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -487,12 +534,12 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
     /// Load a single function catalogue record by name.
-    pub async fn load_function(&self, name: &str) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_function(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -508,7 +555,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     // ========================================================================
@@ -518,16 +565,18 @@ impl SystemStore {
     /// Persist a group record. `group_id` is allocated by the caller
     /// (see [`ShamirDb::create_group`]).
     pub async fn save_group(&self, group_id: u64, name: &str, members: &[u64]) -> DbResult<()> {
-        let record = json!({
-            "group_id": group_id,
-            "name": name,
-            "members": members,
-        });
+        let members_list: Vec<QueryValue> =
+            members.iter().map(|&m| QueryValue::Int(m as i64)).collect();
+        let mut m = new_map();
+        m.insert("group_id".to_string(), QueryValue::Int(group_id as i64));
+        m.insert("name".to_string(), QueryValue::Str(name.to_string()));
+        m.insert("members".to_string(), QueryValue::List(members_list));
+        let record = QueryValue::Map(m);
         let table = self.table(TABLE_GROUPS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_GROUPS),
-            key: json!({"group_id": group_id}).into(),
-            value: record.into(),
+            key: qv_map1("group_id", QueryValue::Int(group_id as i64)),
+            value: record,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -536,7 +585,7 @@ impl SystemStore {
     }
 
     /// Load all group records.
-    pub async fn load_groups(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_groups(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_GROUPS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -546,12 +595,12 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
     /// Load a single group record by id.
-    pub async fn load_group(&self, group_id: u64) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_group(&self, group_id: u64) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_GROUPS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -567,7 +616,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Add a user to a group. Reads the group, appends the user, and
@@ -576,7 +625,8 @@ impl SystemStore {
         let rec = self.load_group(group_id).await?;
         let mut members: Vec<u64> = rec
             .as_ref()
-            .and_then(|r| r["members"].as_array())
+            .and_then(|r| r.get("members"))
+            .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_default();
         if !members.contains(&user_id) {
@@ -584,7 +634,8 @@ impl SystemStore {
         }
         let name = rec
             .as_ref()
-            .and_then(|r| r["name"].as_str())
+            .and_then(|r| r.get("name"))
+            .and_then(|v| v.as_str())
             .unwrap_or_default();
         self.save_group(group_id, name, &members).await
     }
@@ -595,13 +646,15 @@ impl SystemStore {
         let rec = self.load_group(group_id).await?;
         let mut members: Vec<u64> = rec
             .as_ref()
-            .and_then(|r| r["members"].as_array())
+            .and_then(|r| r.get("members"))
+            .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
             .unwrap_or_default();
         members.retain(|&m| m != user_id);
         let name = rec
             .as_ref()
-            .and_then(|r| r["name"].as_str())
+            .and_then(|r| r.get("name"))
+            .and_then(|v| v.as_str())
             .unwrap_or_default();
         self.save_group(group_id, name, &members).await
     }
@@ -626,7 +679,7 @@ impl SystemStore {
     // ========================================================================
 
     /// Load a single database record by name.
-    pub async fn load_database(&self, name: &str) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_database(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -642,7 +695,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Load a single repository record by (db_name, repo_name).
@@ -650,7 +703,7 @@ impl SystemStore {
         &self,
         db_name: &str,
         repo_name: &str,
-    ) -> DbResult<Option<serde_json::Value>> {
+    ) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -674,7 +727,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Load a single table catalogue record by (db, repo, table).
@@ -683,7 +736,7 @@ impl SystemStore {
         db_name: &str,
         repo_name: &str,
         table_name: &str,
-    ) -> DbResult<Option<serde_json::Value>> {
+    ) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_TABLES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -711,19 +764,19 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Persist a replacement database record (for `set_resource_meta`).
-    pub async fn save_database_meta(&self, name: &str, record: &serde_json::Value) -> DbResult<()> {
+    pub async fn save_database_meta(&self, name: &str, record: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let _inner =
-            json_value_to_inner(record, interner).map_err(|e| DbError::Codec(e.to_string()))?;
+            query_value_to_inner(record, interner).map_err(|e| DbError::Codec(e.to_string()))?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
-            key: json!({"name": name}).into(),
-            value: record.clone().into(),
+            key: qv_map1("name", QueryValue::Str(name.to_string())),
+            value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -732,14 +785,27 @@ impl SystemStore {
     }
 
     /// Persist a replacement repository record (for `set_resource_meta`).
-    pub async fn save_repository_meta(&self, record: &serde_json::Value) -> DbResult<()> {
-        let db_name = record["db_name"].as_str().unwrap_or_default();
-        let repo_name = record["repo_name"].as_str().unwrap_or_default();
+    pub async fn save_repository_meta(&self, record: &QueryValue) -> DbResult<()> {
+        let db_name = record
+            .get("db_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let repo_name = record
+            .get("repo_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),
-            key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
-            value: record.clone().into(),
+            key: qv_map2(
+                "db_name",
+                QueryValue::Str(db_name),
+                "repo_name",
+                QueryValue::Str(repo_name),
+            ),
+            value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -748,20 +814,31 @@ impl SystemStore {
     }
 
     /// Persist a replacement table catalogue record (for `set_resource_meta`).
-    pub async fn save_table_meta(&self, record: &serde_json::Value) -> DbResult<()> {
-        let db_name = record["db_name"].as_str().unwrap_or_default();
-        let repo_name = record["repo_name"].as_str().unwrap_or_default();
-        let table_name = record["table_name"].as_str().unwrap_or_default();
+    pub async fn save_table_meta(&self, record: &QueryValue) -> DbResult<()> {
+        let db_name = record
+            .get("db_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let repo_name = record
+            .get("repo_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let table_name = record
+            .get("table_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let table = self.table(TABLE_TABLES).await?;
+        let mut key_m = new_map();
+        key_m.insert("db_name".to_string(), QueryValue::Str(db_name));
+        key_m.insert("repo_name".to_string(), QueryValue::Str(repo_name));
+        key_m.insert("table_name".to_string(), QueryValue::Str(table_name));
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_TABLES),
-            key: json!({
-                "db_name": db_name,
-                "repo_name": repo_name,
-                "table_name": table_name,
-            })
-            .into(),
-            value: record.clone().into(),
+            key: QueryValue::Map(key_m),
+            value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -778,7 +855,7 @@ impl SystemStore {
     pub async fn save_validator(
         &self,
         name: &str,
-        record: &serde_json::Value,
+        record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
         let mut rec = record.clone();
@@ -786,8 +863,8 @@ impl SystemStore {
         let table = self.table(TABLE_VALIDATORS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_VALIDATORS),
-            key: json!({"name": name}).into(),
-            value: rec.into(),
+            key: qv_map1("name", QueryValue::Str(name.to_string())),
+            value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -813,7 +890,7 @@ impl SystemStore {
     }
 
     /// Load every persisted validator catalogue record.
-    pub async fn load_validators(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_validators(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_VALIDATORS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -823,12 +900,12 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
     /// Load a single validator catalogue record by name.
-    pub async fn load_validator(&self, name: &str) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_validator(&self, name: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_VALIDATORS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -844,20 +921,16 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Persist a replacement function catalogue record (for `set_resource_meta`).
-    pub async fn save_function_meta_record(
-        &self,
-        name: &str,
-        record: &serde_json::Value,
-    ) -> DbResult<()> {
+    pub async fn save_function_meta_record(&self, name: &str, record: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: json!({"name": name}).into(),
-            value: record.clone().into(),
+            key: qv_map1("name", QueryValue::Str(name.to_string())),
+            value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -875,7 +948,7 @@ impl SystemStore {
     pub async fn save_function_folder(
         &self,
         path_key: &str,
-        record: &serde_json::Value,
+        record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
         let mut rec = record.clone();
@@ -883,8 +956,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
-            key: json!({"path": path_key}).into(),
-            value: rec.into(),
+            key: qv_map1("path", QueryValue::Str(path_key.to_string())),
+            value: rec,
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;
@@ -910,7 +983,7 @@ impl SystemStore {
     }
 
     /// Load every persisted function folder catalogue record.
-    pub async fn load_function_folders(&self) -> DbResult<Vec<serde_json::Value>> {
+    pub async fn load_function_folders(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -920,15 +993,12 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+            .map(|r| r.as_value().into_owned())
             .collect())
     }
 
     /// Load a single function folder catalogue record by path key.
-    pub async fn load_function_folder(
-        &self,
-        path_key: &str,
-    ) -> DbResult<Option<serde_json::Value>> {
+    pub async fn load_function_folder(&self, path_key: &str) -> DbResult<Option<QueryValue>> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
@@ -944,20 +1014,20 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
+            .map(|r| r.as_value().into_owned()))
     }
 
     /// Persist a replacement function folder record (for `set_resource_meta`).
     pub async fn save_function_folder_meta(
         &self,
         path_key: &str,
-        record: &serde_json::Value,
+        record: &QueryValue,
     ) -> DbResult<()> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
-            key: json!({"path": path_key}).into(),
-            value: record.clone().into(),
+            key: qv_map1("path", QueryValue::Str(path_key.to_string())),
+            value: record.clone(),
         };
         self.set_via_implicit_tx(&table, &op).await?;
         table.interner().persist().await?;

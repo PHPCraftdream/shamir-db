@@ -11,6 +11,9 @@
 
 use std::fmt;
 
+use crate::types::common::new_map;
+use crate::types::value::QueryValue;
+
 /// Reserved u64 id for the `System` actor in persisted owner fields.
 ///
 /// `Actor::System` serialises to `OWNER_SYSTEM` in catalogue records;
@@ -191,33 +194,32 @@ impl ResourceMeta {
         }
     }
 
-    /// Inject `owner`/`group`/`mode` fields into a JSON catalogue record
-    /// for persistence. Safe to call on any `serde_json::Value::Object`.
-    pub fn inject_into(&self, rec: &mut serde_json::Value) {
-        if let Some(map) = rec.as_object_mut() {
+    /// Inject `owner`/`group`/`mode` fields into a `QueryValue::Map`
+    /// catalogue record for persistence.
+    pub fn inject_into(&self, rec: &mut QueryValue) {
+        if let QueryValue::Map(map) = rec {
             map.insert(
                 "owner".to_string(),
-                serde_json::Value::Number(self.owner.to_owner_id().into()),
+                // Store as i64: owner id is masked to i64::MAX in principal_id.
+                QueryValue::Int(self.owner.to_owner_id() as i64),
             );
             map.insert(
                 "group".to_string(),
                 match self.group {
-                    Some(gid) => serde_json::Value::Number(gid.into()),
-                    None => serde_json::Value::Null,
+                    Some(gid) => QueryValue::Int(gid as i64),
+                    None => QueryValue::Null,
                 },
             );
-            map.insert(
-                "mode".to_string(),
-                serde_json::Value::Number(self.mode.into()),
-            );
+            map.insert("mode".to_string(), QueryValue::Int(self.mode as i64));
         }
     }
 
-    /// Decode `owner`/`group`/`mode` from a persisted JSON catalogue record.
+    /// Decode `owner`/`group`/`mode` from a persisted `QueryValue` catalogue
+    /// record.
     ///
     /// Backward-compatible: records that lack any of the three fields fall
     /// back to [`ResourceMeta::open`] defaults.
-    pub fn from_record(rec: &serde_json::Value) -> Self {
+    pub fn from_record(rec: &QueryValue) -> Self {
         let owner = rec
             .get("owner")
             .and_then(|v| v.as_u64())
@@ -230,6 +232,25 @@ impl ResourceMeta {
             .and_then(|m| u16::try_from(m).ok())
             .unwrap_or(Mode::OPEN);
         Self { owner, group, mode }
+    }
+
+    /// Build a `QueryValue::Map` containing only the `owner`/`group`/`mode`
+    /// fields. Convenience for constructing fresh catalogue records.
+    pub fn to_query_value(&self) -> QueryValue {
+        let mut map = new_map();
+        map.insert(
+            "owner".to_string(),
+            QueryValue::Int(self.owner.to_owner_id() as i64),
+        );
+        map.insert(
+            "group".to_string(),
+            match self.group {
+                Some(gid) => QueryValue::Int(gid as i64),
+                None => QueryValue::Null,
+            },
+        );
+        map.insert("mode".to_string(), QueryValue::Int(self.mode as i64));
+        QueryValue::Map(map)
     }
 }
 

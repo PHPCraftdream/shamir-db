@@ -9,9 +9,11 @@ use crate::batch::{
 use crate::filter::FilterValue;
 
 fn roundtrip(json: &str) -> BatchOp {
+    // Parse from JSON (human-readable test data) then round-trip through
+    // msgpack — the same codec the live wire uses.
     let op: BatchOp = serde_json::from_str(json).unwrap();
-    let back = serde_json::to_string(&op).unwrap();
-    let op2: BatchOp = serde_json::from_str(&back).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let op2: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(op, op2);
     op
 }
@@ -510,6 +512,7 @@ fn nested_batch_serde_roundtrip() {
     let sub = SubBatchOp { batch: inner, bind };
     let op = BatchOp::Batch(sub);
 
+    // Verify the JSON Serialize output has the expected keys (Serialize impl check).
     let json = serde_json::to_string(&op).unwrap();
     assert!(
         json.contains("\"batch\""),
@@ -520,7 +523,9 @@ fn nested_batch_serde_roundtrip() {
         "serialized JSON must have 'bind' key"
     );
 
-    let back: BatchOp = serde_json::from_str(&json).unwrap();
+    // Round-trip through msgpack — the wire codec.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let back: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(op, back);
 }
 
@@ -549,6 +554,11 @@ fn nested_batch_empty_bind_omitted() {
         !json.contains("\"bind\""),
         "empty bind must NOT appear in serialized JSON"
     );
+
+    // Verify msgpack round-trip also works for the empty-bind case.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let back: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(op, back);
 }
 
 #[test]

@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde_json::json;
 
 use crate::access::Actor;
 use crate::engine::function::DbGateway;
@@ -7,6 +6,7 @@ use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry,
 use crate::engine::query::read::{ReadQuery, Temporal};
 use crate::engine::query::write::InsertOp;
 use crate::engine::query::TableRef;
+use crate::engine::query::{Filter, FilterValue};
 use crate::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -36,44 +36,51 @@ pub(super) struct FacadeDbGateway {
 }
 
 impl FacadeDbGateway {
-    /// Convert a `QueryValue` key into a JSON filter suitable for a `ReadQuery`.
+    /// Convert a [`QueryValue`] scalar into a [`FilterValue`] for use in a
+    /// `Filter::Eq` predicate.
+    fn qv_to_filter_value(val: &QueryValue) -> FilterValue {
+        match val {
+            QueryValue::Null => FilterValue::Null,
+            QueryValue::Bool(b) => FilterValue::Bool(*b),
+            QueryValue::Int(i) => FilterValue::Int(*i),
+            QueryValue::F64(f) => FilterValue::Float(*f),
+            QueryValue::Str(s) => FilterValue::String(s.clone()),
+            QueryValue::Bin(b) => FilterValue::Binary(b.clone()),
+            // For composite or array values fall back to Null — these are not
+            // expected as key components in the gateway's key_to_filter path.
+            _ => FilterValue::Null,
+        }
+    }
+
+    /// Convert a `QueryValue` key into a [`Filter`] suitable for a `ReadQuery`.
     ///
     /// Key convention:
     /// - `QueryValue::Map` → conjunction of `Eq` filters on each entry.
     /// - Scalar `QueryValue` (e.g. `Int`, `Str`) → `Eq` on the `"id"` field.
-    fn key_to_filter(key: &QueryValue) -> serde_json::Value {
+    ///
+    /// Returns `None` for an empty map (match-all / no filter).
+    fn key_to_filter(key: &QueryValue) -> Option<Filter> {
         match key {
             QueryValue::Map(entries) => {
                 if entries.is_empty() {
-                    return json!(null);
+                    return None;
                 }
-                let filters: Vec<serde_json::Value> = entries
+                let mut filters: Vec<Filter> = entries
                     .iter()
-                    .map(|(field, val)| {
-                        let json_val = serde_json::to_value(val).unwrap_or(json!(null));
-                        json!({
-                            "op": "eq",
-                            "field": [field],
-                            "value": json_val
-                        })
+                    .map(|(field, val)| Filter::Eq {
+                        field: vec![field.clone()],
+                        value: Self::qv_to_filter_value(val),
                     })
                     .collect();
                 if filters.len() == 1 {
-                    return filters.into_iter().next().unwrap_or(json!(null));
+                    return Some(filters.remove(0));
                 }
-                json!({
-                    "op": "and",
-                    "filters": filters
-                })
+                Some(Filter::And { filters })
             }
-            other => {
-                let json_val = serde_json::to_value(other).unwrap_or(json!(null));
-                json!({
-                    "op": "eq",
-                    "field": ["id"],
-                    "value": json_val
-                })
-            }
+            other => Some(Filter::Eq {
+                field: vec!["id".to_string()],
+                value: Self::qv_to_filter_value(other),
+            }),
         }
     }
 
@@ -90,20 +97,11 @@ impl DbGateway for FacadeDbGateway {
         table: &str,
         key: QueryValue,
     ) -> Result<Option<QueryValue>, String> {
-        let filter = Self::key_to_filter(&key);
+        let where_clause = Self::key_to_filter(&key);
         let table_ref = if repo == "main" {
             TableRef::new(table)
         } else {
             TableRef::with_repo(repo, table)
-        };
-
-        let where_clause = if filter.is_null() {
-            None
-        } else {
-            Some(
-                serde_json::from_value(filter)
-                    .map_err(|e| format!("get: filter parse error: {e}"))?,
-            )
         };
 
         let read_query = ReadQuery {
@@ -165,12 +163,9 @@ impl DbGateway for FacadeDbGateway {
             TableRef::with_repo(repo, table)
         };
 
-        let json_val =
-            serde_json::to_value(&doc).map_err(|e| format!("insert: doc encode error: {e}"))?;
-
         let insert_op = InsertOp {
             insert_into: table_ref,
-            values: vec![json_val.into()],
+            values: vec![doc],
             records_idmsgpack: Vec::new(),
         };
 
@@ -226,20 +221,7 @@ impl DbGateway for FacadeDbGateway {
             TableRef::with_repo(repo, table)
         };
 
-        let where_clause = match filter {
-            Some(f) => {
-                let json_filter = Self::key_to_filter(&f);
-                if json_filter.is_null() {
-                    None
-                } else {
-                    Some(
-                        serde_json::from_value(json_filter)
-                            .map_err(|e| format!("query: filter parse error: {e}"))?,
-                    )
-                }
-            }
-            None => None,
-        };
+        let where_clause = filter.as_ref().and_then(Self::key_to_filter);
 
         let read_query = ReadQuery {
             from: table_ref,

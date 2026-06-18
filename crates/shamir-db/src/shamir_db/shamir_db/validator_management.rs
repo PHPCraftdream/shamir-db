@@ -1,5 +1,4 @@
 use base64::Engine;
-use serde_json::json;
 use std::sync::Arc;
 
 use crate::access::{Actor, ResourceMeta};
@@ -114,15 +113,39 @@ impl ShamirDb {
             RecordId::new()
         };
 
-        let record = json!({
-            "name": name,
-            "_id": id.to_string(),
-            "wasm_b64": wasm_b64,
-            "wasm_hash": wasm_hash,
-            "lang": lang_tag,
-            "source": source_str,
-            "bound_in": [],
-        });
+        let mut m = shamir_types::types::common::new_map();
+        m.insert(
+            "name".to_string(),
+            shamir_types::types::value::QueryValue::Str(name.to_string()),
+        );
+        m.insert(
+            "_id".to_string(),
+            shamir_types::types::value::QueryValue::Str(id.to_string()),
+        );
+        m.insert(
+            "wasm_b64".to_string(),
+            shamir_types::types::value::QueryValue::Str(wasm_b64),
+        );
+        m.insert(
+            "wasm_hash".to_string(),
+            shamir_types::types::value::QueryValue::Str(wasm_hash),
+        );
+        m.insert(
+            "lang".to_string(),
+            shamir_types::types::value::QueryValue::Str(lang_tag.to_string()),
+        );
+        m.insert(
+            "source".to_string(),
+            match source_str {
+                Some(s) => shamir_types::types::value::QueryValue::Str(s),
+                None => shamir_types::types::value::QueryValue::Null,
+            },
+        );
+        m.insert(
+            "bound_in".to_string(),
+            shamir_types::types::value::QueryValue::List(vec![]),
+        );
+        let record = shamir_types::types::value::QueryValue::Map(m);
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
         self.system_store
@@ -200,7 +223,12 @@ impl ShamirDb {
         if let Some(mut rec) = old_record {
             let existing_meta = ResourceMeta::from_record(&rec);
             self.system_store.remove_validator(from).await?;
-            rec["name"] = json!(to);
+            if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
+                map.insert(
+                    "name".to_string(),
+                    shamir_types::types::value::QueryValue::Str(to.to_string()),
+                );
+            }
             self.system_store
                 .save_validator(to, &rec, &existing_meta)
                 .await?;
@@ -370,12 +398,19 @@ impl ShamirDb {
     /// durability insurance for `init` reload).
     pub(super) async fn persist_validator_bound_in(&self, name: &str, id: &RecordId) {
         let tables = self.validators.bound_tables(id);
-        let bound_json: Vec<serde_json::Value> =
-            tables.into_iter().map(serde_json::Value::String).collect();
+        let bound_list: Vec<shamir_types::types::value::QueryValue> = tables
+            .into_iter()
+            .map(shamir_types::types::value::QueryValue::Str)
+            .collect();
 
         if let Ok(Some(mut rec)) = self.system_store.load_validator(name).await {
             let existing_meta = ResourceMeta::from_record(&rec);
-            rec["bound_in"] = serde_json::Value::Array(bound_json);
+            if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
+                map.insert(
+                    "bound_in".to_string(),
+                    shamir_types::types::value::QueryValue::List(bound_list),
+                );
+            }
             if let Err(e) = self
                 .system_store
                 .save_validator(name, &rec, &existing_meta)

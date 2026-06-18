@@ -88,10 +88,10 @@ impl FunctionMeta {
         }
     }
 
-    /// Construct metadata from a persisted JSON record.
+    /// Construct metadata from a persisted `QueryValue` catalogue record.
     ///
     /// Missing fields fall back to defaults (Private / Invoker / empty).
-    pub fn from_record(rec: &serde_json::Value) -> Self {
+    pub fn from_record(rec: &shamir_types::types::value::QueryValue) -> Self {
         let visibility = rec
             .get("visibility")
             .and_then(|v| v.as_str())
@@ -118,20 +118,26 @@ impl FunctionMeta {
         }
     }
 
-    /// Inject metadata fields into a JSON record for persistence.
-    pub fn inject_into(&self, rec: &mut serde_json::Value) {
-        if let Some(map) = rec.as_object_mut() {
+    /// Inject metadata fields into a `QueryValue::Map` record for persistence.
+    pub fn inject_into(&self, rec: &mut shamir_types::types::value::QueryValue) {
+        if let shamir_types::types::value::QueryValue::Map(map) = rec {
             map.insert(
                 "visibility".to_string(),
-                serde_json::Value::String(self.visibility.to_string()),
+                shamir_types::types::value::QueryValue::Str(self.visibility.to_string()),
             );
             map.insert(
                 "security".to_string(),
-                serde_json::Value::String(self.security.to_string()),
+                shamir_types::types::value::QueryValue::Str(self.security.to_string()),
             );
+            // Build the secret_grants list as QueryValue::List.
+            let grants: Vec<shamir_types::types::value::QueryValue> = self
+                .secret_grants
+                .iter()
+                .map(|s| shamir_types::types::value::QueryValue::Str(s.clone()))
+                .collect();
             map.insert(
                 "secret_grants".to_string(),
-                serde_json::json!(self.secret_grants),
+                shamir_types::types::value::QueryValue::List(grants),
             );
         }
     }

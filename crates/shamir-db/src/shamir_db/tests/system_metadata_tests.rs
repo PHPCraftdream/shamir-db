@@ -7,7 +7,7 @@ use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
 use crate::shamir_db::SystemStoreConfig;
-use serde_json::json;
+use shamir_types::types::value::QueryValue;
 
 // ============================================================================
 // System store persistence tests
@@ -83,7 +83,7 @@ async fn test_settings_persistence() {
 
     shamir
         .system_store()
-        .save_setting("max_connections", &json!(100))
+        .save_setting("max_connections", &QueryValue::Int(100))
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn test_settings_persistence() {
         .load_setting("max_connections")
         .await
         .unwrap();
-    assert_eq!(val, Some(json!(100)));
+    assert_eq!(val, Some(QueryValue::Int(100)));
 }
 
 #[tokio::test]
