@@ -68,7 +68,7 @@ fn make_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
 }
 
 // ============================================================================
-// apply_select tests
+// apply_select_value tests
 // ============================================================================
 
 #[test]
@@ -77,10 +77,11 @@ fn select_all() {
     let records = make_records(&interner);
     let select = Select::all();
 
-    let result = apply_select(&records, &select, &interner);
+    let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
-    assert_eq!(result[0]["name"], "Alice");
-    assert_eq!(result[0]["age"], 30);
+    let r = to_json(&result);
+    assert_eq!(r[0]["name"], "Alice");
+    assert_eq!(r[0]["age"], 30);
 }
 
 #[test]
@@ -89,11 +90,16 @@ fn select_specific_fields() {
     let records = make_records(&interner);
     let select = Select::fields(["name", "age"]);
 
-    let result = apply_select(&records, &select, &interner);
+    let result = apply_select_value(&records, &select, &interner);
     assert_eq!(result.len(), 4);
-    assert_eq!(result[0]["name"], "Alice");
-    assert_eq!(result[0]["age"], 30);
-    assert!(result[0].get("city").is_none());
+    let r = to_json(&result);
+    assert_eq!(r[0]["name"], "Alice");
+    assert_eq!(r[0]["age"], 30);
+    // city should not be present
+    match &result[0] {
+        QueryValue::Map(m) => assert!(!m.contains_key("city")),
+        _ => panic!("expected QueryValue::Map"),
+    }
 }
 
 #[test]
@@ -105,9 +111,10 @@ fn select_with_alias() {
         distinct: false,
     };
 
-    let result = apply_select(&records, &select, &interner);
-    assert_eq!(result[0]["user_name"], "Alice");
-    assert!(result[0].get("name").is_none());
+    let result = apply_select_value(&records, &select, &interner);
+    let r = to_json(&result);
+    assert_eq!(r[0]["user_name"], "Alice");
+    assert!(r[0].get("name").is_none());
 }
 
 #[test]
@@ -119,9 +126,10 @@ fn select_nonexistent_field_returns_null() {
         distinct: false,
     };
 
-    let result = apply_select(&records, &select, &interner);
-    assert_eq!(result[0]["name"], "Alice");
-    assert!(result[0]["nonexistent"].is_null());
+    let result = apply_select_value(&records, &select, &interner);
+    let r = to_json(&result);
+    assert_eq!(r[0]["name"], "Alice");
+    assert!(r[0]["nonexistent"].is_null());
 }
 
 // ============================================================================
@@ -141,10 +149,11 @@ fn select_scalar_function_projection() {
         distinct: false,
     };
 
-    let result = apply_select(&records, &select, &interner);
-    assert_eq!(result[0]["name"], "Alice");
-    assert_eq!(result[0]["upper_name"], "ALICE");
-    assert_eq!(result[1]["upper_name"], "BOB");
+    let result = apply_select_value(&records, &select, &interner);
+    let r = to_json(&result);
+    assert_eq!(r[0]["name"], "Alice");
+    assert_eq!(r[0]["upper_name"], "ALICE");
+    assert_eq!(r[1]["upper_name"], "BOB");
 }
 
 #[test]
@@ -161,8 +170,9 @@ fn select_scalar_function_nested_and_literal() {
         distinct: false,
     };
 
-    let result = apply_select(&records, &select, &interner);
-    assert_eq!(result[0]["shout"], "NYC!");
+    let result = apply_select_value(&records, &select, &interner);
+    let r = to_json(&result);
+    assert_eq!(r[0]["shout"], "NYC!");
 }
 
 #[test]
@@ -174,8 +184,11 @@ fn select_scalar_function_unknown_is_null() {
         distinct: false,
     };
 
-    let result = apply_select(&records, &select, &interner);
-    assert_eq!(result[0]["x"], serde_json::Value::Null);
+    let result = apply_select_value(&records, &select, &interner);
+    match &result[0] {
+        QueryValue::Map(m) => assert_eq!(m.get("x"), Some(&QueryValue::Null)),
+        _ => panic!("expected QueryValue::Map"),
+    }
 }
 
 // ============================================================================
@@ -381,7 +394,7 @@ fn aggregate_all_count_sum() {
 }
 
 // ============================================================================
-// apply_order_by tests
+// apply_order_by tests (operates on Vec<json::Value> — kept as-is)
 // ============================================================================
 
 #[test]
@@ -591,24 +604,35 @@ fn pagination_none_no_count() {
 }
 
 // ============================================================================
-// apply_distinct tests
+// apply_distinct_qv tests (migrated from JSON apply_distinct)
 // ============================================================================
 
 #[test]
 fn distinct_removes_duplicates() {
+    use shamir_types::types::common::new_map_wc;
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
     let records = vec![
-        json!({"a": 1}),
-        json!({"a": 2}),
-        json!({"a": 1}),
-        json!({"a": 3}),
-        json!({"a": 2}),
+        qv_map(&[("a", QueryValue::Int(1))]),
+        qv_map(&[("a", QueryValue::Int(2))]),
+        qv_map(&[("a", QueryValue::Int(1))]),
+        qv_map(&[("a", QueryValue::Int(3))]),
+        qv_map(&[("a", QueryValue::Int(2))]),
     ];
 
-    let result = apply_distinct(records);
+    let result = apply_distinct_qv(records);
     assert_eq!(result.len(), 3);
-    assert_eq!(result[0], json!({"a": 1}));
-    assert_eq!(result[1], json!({"a": 2}));
-    assert_eq!(result[2], json!({"a": 3}));
+    // Verify expected values via JSON serialisation
+    let r = to_json(&result);
+    assert_eq!(r[0]["a"], 1);
+    assert_eq!(r[1]["a"], 2);
+    assert_eq!(r[2]["a"], 3);
 }
 
 // ============================================================================

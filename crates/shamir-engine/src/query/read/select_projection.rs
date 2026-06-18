@@ -1,12 +1,11 @@
 //! Pre-resolved SELECT projection — avoids re-interning paths per record.
 
-use serde_json as json;
 use smallvec::SmallVec;
 
-use crate::query::filter::eval::{intern_field_path, resolve_filter_query, resolve_filter_value};
+use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
 use crate::query::filter::{FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
-use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
+use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -15,10 +14,10 @@ use shamir_types::types::value::QueryValue;
 /// Pre-resolved select projection info (avoids re-interning paths per record).
 ///
 /// Output keys (alias or last path segment) are pre-allocated as
-/// `String` at compile time — `project()` clones them per record
+/// `String` at compile time — `project_value()` clones them per record
 /// instead of paying `to_string()` for each field on each row.
 pub struct SelectProjection {
-    /// true → just convert whole record to JSON
+    /// true → just convert whole record to QueryValue
     pub(super) is_all: bool,
     /// (interned_path, pre-built output key)
     pub(super) fields: Vec<(Option<Vec<u64>>, String)>,
@@ -26,7 +25,7 @@ pub struct SelectProjection {
     /// Evaluated per record via `resolve_filter_value`, reusing the filter
     /// value model (`$ref` / literals / nested `$fn`).
     pub(super) funcs: Vec<(String, FilterValue)>,
-    /// Empty resolved-refs map so `project` can build a `FilterContext`
+    /// Empty resolved-refs map so `project_value` can build a `FilterContext`
     /// without `$query` support (projection scalar fns see only the row).
     pub(super) empty_refs: TMap<String, QueryResult>,
 }
@@ -72,45 +71,11 @@ impl SelectProjection {
         }
     }
 
-    /// Project a single record to JSON.
-    pub fn project(&self, record: &(impl RecordRef + ?Sized), interner: &Interner) -> json::Value {
-        if self.is_all {
-            return record.to_json_value(interner);
-        }
-        if self.fields.is_empty() && self.funcs.is_empty() {
-            return json::Value::Object(json::Map::new());
-        }
-        let mut obj = json::Map::new();
-        for (interned_path, key) in &self.fields {
-            let val = interned_path
-                .as_ref()
-                .and_then(|p| {
-                    let ipath: SmallVec<[InternerKey; 4]> =
-                        p.iter().map(|&id| InternerKey::new(id)).collect();
-                    record.materialize_at(&ipath)
-                })
-                .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null);
-            obj.insert(key.clone(), val);
-        }
-        if !self.funcs.is_empty() {
-            let ctx = FilterContext::new(interner, &self.empty_refs);
-            for (key, fv) in &self.funcs {
-                let val = resolve_filter_value(fv, record, &ctx)
-                    .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
-                    .unwrap_or(json::Value::Null);
-                obj.insert(key.clone(), val);
-            }
-        }
-        json::Value::Object(obj)
-    }
-
     /// Project a single record to QueryValue.
     ///
-    /// Mirrors `project` exactly — same branching, same field/func
+    /// Mirrors the deleted `project` exactly — same branching, same field/func
     /// handling — but builds `QueryValue` (string-keyed) instead of
-    /// `serde_json::Value`.  Callers switch to this once the read path
-    /// stops needing `serde_json`.
+    /// `serde_json::Value`.
     pub fn project_value(
         &self,
         record: &(impl RecordRef + ?Sized),

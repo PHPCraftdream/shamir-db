@@ -1,34 +1,35 @@
 //! SELECT projection bench — no GROUP BY, no aggregates.
 //!
-//! `SelectProjection::project` is called once per record on every read
+//! `SelectProjection::project_value` is called once per record on every read
 //! query. Hot loop allocates:
 //!   - `resolve_field` clones the leaf (already optimised on the
 //!     filter side via `resolve_field_ref` — projection still uses
 //!     the owned variant);
-//!   - `inner_to_json_value` walks the leaf into json::Value;
+//!   - `inner_value_to_query_value` walks the leaf into QueryValue;
 //!   - `key.to_string()` allocates the output map key per field
 //!     per record (alias or last path segment).
 //!
-//! Bench drives `apply_select` over 1000 records, 5 selected fields.
+//! Bench drives `apply_select_value` over 1000 records, 5 selected fields.
+//!
+//! Note: J1 migration — apply_select (JSON) removed; bench now uses
+//! apply_select_value (QueryValue path) + apply_order_by_qv.
 
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use serde_json as json;
 use shamir_bench_utils as bu;
 use shamir_engine::query::filter::eval_context::FilterContext;
-use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
+use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, ReadQuery, Select, SelectItem,
 };
 use shamir_engine::repo::{BoxRepo, RepoInstance};
-use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
@@ -88,19 +89,19 @@ fn bench(c: &mut Criterion) {
         distinct: false,
     };
 
-    let mut group = c.benchmark_group("apply_select");
+    let mut group = c.benchmark_group("apply_select_value");
     group.throughput(Throughput::Elements(1000));
     group.bench_function("5_fields_1000_records", |b| {
-        b.iter(|| black_box(apply_select(&records, &select_5, &interner)))
+        b.iter(|| black_box(apply_select_value(&records, &select_5, &interner)))
     });
     group.bench_function("select_all_1000_records", |b| {
-        b.iter(|| black_box(apply_select(&records, &select_all, &interner)))
+        b.iter(|| black_box(apply_select_value(&records, &select_all, &interner)))
     });
     group.finish();
 
-    // Projected JSON for ORDER BY bench. Build once, clone per
+    // Projected QueryValues for ORDER BY bench. Build once, clone per
     // iteration so the sort is the only measured work.
-    let projected: Vec<json::Value> = apply_select(&records, &select_5, &interner);
+    let projected: Vec<QueryValue> = apply_select_value(&records, &select_5, &interner);
     let order_by_single = OrderBy {
         items: vec![OrderByItem {
             field: vec!["age".to_string()],
@@ -123,13 +124,13 @@ fn bench(c: &mut Criterion) {
         ],
     };
 
-    let mut g2 = c.benchmark_group("apply_order_by");
+    let mut g2 = c.benchmark_group("apply_order_by_qv");
     g2.throughput(Throughput::Elements(1000));
     g2.bench_function("single_int_1000", |b| {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_single);
+                apply_order_by_qv(&mut recs, &order_by_single);
                 black_box(recs);
             },
             criterion::BatchSize::SmallInput,
@@ -139,7 +140,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |mut recs| {
-                apply_order_by(&mut recs, &order_by_two);
+                apply_order_by_qv(&mut recs, &order_by_two);
                 black_box(recs);
             },
             criterion::BatchSize::SmallInput,
@@ -223,7 +224,7 @@ async fn build_table_with_n(n: usize) -> shamir_engine::table::TableManager {
     let instance = RepoInstance::new(
         "bench".into(),
         BoxRepo::InMemory(repo),
-        vec![TableConfig::new("rows".to_string())],
+        vec![shamir_engine::table::TableConfig::new("rows".to_string())],
     );
     let table = instance.get_table("rows").await.unwrap();
     let interner = table.interner().get().await.unwrap();
@@ -276,7 +277,7 @@ fn bench_pushdown(c: &mut Criterion) {
         let interner = rt.block_on(table.interner().get()).unwrap();
 
         // (A) push-down active: WHERE + LIMIT 10, no ORDER BY.
-        let q_pushdown: ReadQuery = serde_json::from_value(json::json!({
+        let q_pushdown: ReadQuery = serde_json::from_value(serde_json::json!({
             "from": "rows",
             "where": {"op": "eq", "field": ["status"], "value": "active"},
             "select": {
@@ -295,7 +296,7 @@ fn bench_pushdown(c: &mut Criterion) {
         // (B) push-down disabled: same shape + ORDER BY name (no sorted
         //     index → falls to `read_collecting` which projects every
         //     match before sorting + truncating).
-        let q_full: ReadQuery = serde_json::from_value(json::json!({
+        let q_full: ReadQuery = serde_json::from_value(serde_json::json!({
             "from": "rows",
             "where": {"op": "eq", "field": ["status"], "value": "active"},
             "select": {

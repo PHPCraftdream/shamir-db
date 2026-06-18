@@ -1,20 +1,24 @@
 //! Standalone timing harness for ORDER BY hotspot breakdown.
 //!
 //! Measures wall-clock time for each ORDER BY phase and isolates the cost
-//! of field resolution (get_json_field / Value::get) from sort/swap overhead.
+//! of field resolution from sort/swap overhead.
 //!
 //! Run: cargo run --release --example prof_order_by
+//!
+//! Note: J1 migration — apply_select (JSON) removed; harness now uses
+//! apply_select_value (QueryValue) + apply_order_by_qv. Key-extraction
+//! analysis uses QueryValue::Map field access instead of json::Value::get.
 
 use std::time::Instant;
 
-use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
+use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
 };
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 fn touch(interner: &Interner, s: &str) -> InternerKey {
     match interner.touch_ind(s).unwrap() {
@@ -64,9 +68,9 @@ fn main() {
         distinct: false,
     };
     let t1 = Instant::now();
-    let projected = apply_select(&raw, &select_all, &interner);
+    let projected: Vec<QueryValue> = apply_select_value(&raw, &select_all, &interner);
     let t_select = t1.elapsed();
-    println!("apply_select:            {t_select:?}");
+    println!("apply_select_value:      {t_select:?}");
 
     let order_by_email = OrderBy {
         items: vec![OrderByItem {
@@ -76,29 +80,29 @@ fn main() {
         }],
     };
 
-    // ── Run 1: Full apply_order_by (production path) ──────────────
+    // ── Run 1: Full apply_order_by_qv (production path) ──────────────
     let mut email_times = Vec::new();
     for i in 0..5 {
         let mut c = projected.clone();
         let t = Instant::now();
-        apply_order_by(&mut c, &order_by_email);
+        apply_order_by_qv(&mut c, &order_by_email);
         let e = t.elapsed();
         email_times.push(e);
         if i == 0 {
-            println!("apply_order_by (email):  {e:?}");
+            println!("apply_order_by_qv (email):  {e:?}");
         }
     }
 
     // ── Run 2: Sort with pre-extracted keys, in-place Value swaps ─
-    // This isolates the cost of per-comparison Value::get by removing it.
-    // The swap cost (moving json::Value) remains identical to production.
+    // This isolates the cost of per-comparison field access by removing it.
     let email_keys: Vec<String> = projected
         .iter()
-        .map(|v| {
-            v.get("email")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
+        .map(|v| match v {
+            QueryValue::Map(m) => match m.get("email") {
+                Some(QueryValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
         })
         .collect();
 
@@ -106,15 +110,15 @@ fn main() {
     for _ in 0..5 {
         let mut c = projected.clone();
         let keys = email_keys.clone();
-        // Strategy: sort an index array by pre-extracted keys, then
-        // permute the Values array by the sorted index. Measures
-        // sort_indices + apply_permutation cost only, no comparator
-        // lookup.
         let t = Instant::now();
         let mut idx: Vec<usize> = (0..c.len()).collect();
         idx.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
-        // Apply permutation: create new vec in sorted order
-        let sorted: Vec<_> = idx.into_iter().map(|i| std::mem::take(&mut c[i])).collect();
+        // Apply permutation: drain into Option vec, pick by index
+        let mut tmp: Vec<Option<QueryValue>> = c.drain(..).map(Some).collect();
+        let sorted: Vec<QueryValue> = idx
+            .into_iter()
+            .map(|i| tmp[i].take().expect("index used once"))
+            .collect();
         let e = t.elapsed();
         preextract_times.push(e);
         drop(sorted);
@@ -125,15 +129,16 @@ fn main() {
     );
 
     // ── Run 3: Just the permutation (no sort) ─────────────────────
-    // Measures the cost of moving 100k json::Value objects
+    // Measures the cost of moving 100k QueryValue objects
     let identity_perm: Vec<usize> = (0..projected.len()).collect();
     let mut permute_times = Vec::new();
     for _ in 0..5 {
         let mut c = projected.clone();
         let t = Instant::now();
-        let sorted: Vec<_> = identity_perm
+        let mut tmp: Vec<Option<QueryValue>> = c.drain(..).map(Some).collect();
+        let sorted: Vec<QueryValue> = identity_perm
             .iter()
-            .map(|&i| std::mem::take(&mut c[i]))
+            .map(|&i| tmp[i].take().expect("index used once"))
             .collect();
         let e = t.elapsed();
         permute_times.push(e);
@@ -150,11 +155,12 @@ fn main() {
         let t = Instant::now();
         let _keys: Vec<String> = projected
             .iter()
-            .map(|v| {
-                v.get("email")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
+            .map(|v| match v {
+                QueryValue::Map(m) => match m.get("email") {
+                    Some(QueryValue::Str(s)) => s.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
             })
             .collect();
         let e = t.elapsed();
@@ -177,11 +183,11 @@ fn main() {
     for i in 0..5 {
         let mut c = projected.clone();
         let t = Instant::now();
-        apply_order_by(&mut c, &order_by_score);
+        apply_order_by_qv(&mut c, &order_by_score);
         let e = t.elapsed();
         score_times.push(e);
         if i == 0 {
-            println!("apply_order_by (score):  {e:?}");
+            println!("apply_order_by_qv (score):  {e:?}");
         }
     }
 
@@ -189,11 +195,11 @@ fn main() {
     let t_clone = Instant::now();
     let _cloned = projected.clone();
     let t_clone_dur = t_clone.elapsed();
-    println!("clone 100k json Values:  {t_clone_dur:?}");
+    println!("clone 100k QueryValues:  {t_clone_dur:?}");
 
     // ── Pagination ────────────────────────────────────────────────
     let mut c_pag = projected.clone();
-    apply_order_by(&mut c_pag, &order_by_email);
+    apply_order_by_qv(&mut c_pag, &order_by_email);
     let t_pag = Instant::now();
     let (limited, _) = apply_pagination(
         c_pag,
@@ -222,34 +228,17 @@ fn main() {
     let min_permute = permute_times.iter().min().unwrap();
 
     println!("\n========== RESULTS ==========");
-    println!("Records: {n}");
+    println!("Records: {n}  (QueryValue path)");
     println!();
     println!("Phase timings (avg of 5):");
-    println!("  apply_order_by (email):      {avg_email:?}  (min: {min_email:?})");
-    println!("  apply_order_by (score):      {avg_score:?}");
+    println!("  apply_order_by_qv (email):   {avg_email:?}  (min: {min_email:?})");
+    println!("  apply_order_by_qv (score):   {avg_score:?}");
     println!("  sort+permute (pre-extracted):{avg_preextract:?}  (min: {min_preextract:?})");
     println!("  permute only (identity):     {avg_permute:?}  (min: {min_permute:?})");
     println!("  pre-extract email keys:      {avg_extract:?}");
-    println!("  apply_select (projection):   {t_select:?}");
+    println!("  apply_select_value (proj):   {t_select:?}");
     println!("  clone:                       {t_clone_dur:?}");
     println!("  apply_pagination (limit 100):{t_pag_dur:?}");
-
-    // Breakdown:
-    // full_sort = sort_logic + per_comparison_lookup + Value_swaps
-    // preextract_sort+permute = sort_logic + index_swaps + Value_permute
-    // permute_only = Value_permute
-    //
-    // So: sort_logic ≈ preextract_sort - permute_only (approximately, since index swap != Value swap)
-    // And: per_comparison_lookup ≈ full_sort - preextract_sort_and_permute
-    // But the pre-extracted sort uses index swaps (cheap) while the full sort
-    // uses Value swaps (expensive). To isolate lookup, we need to account for
-    // the swap difference.
-
-    // Better approach: sort_logic_and_swaps = preextract_sort + permute - index_sort
-    // Actually the cleanest comparison:
-    // - full_sort does: sort_by with lookup + Value swaps
-    // - preextract does: sort index (cheap swaps) + permute Values
-    // difference = lookup_cost + (Value_swaps_during_sort - index_swaps - one_permutation)
 
     println!("\n========== BREAKDOWN ==========");
     let pure_sort_with_permute = *min_preextract;
@@ -314,26 +303,25 @@ fn main() {
     println!();
     println!("Top hotspots (estimated from timing isolation):");
     println!(
-        "  1. Value::get (field lookup in comparator) + Value swap overhead — {:.0}% of sort",
+        "  1. Field lookup in comparator + swap overhead — {:.0}% of sort",
         overhead_pct
     );
     println!(
-        "  2. Pure sort logic (string comparison + index manipulation) — {:.0}% of sort",
+        "  2. Pure sort logic (comparison + index manipulation) — {:.0}% of sort",
         100.0 - overhead_pct
     );
     println!(
-        "  3. apply_select (projection to JSON) — dominant cost at {:.0}% of pipeline",
+        "  3. apply_select_value (projection) — {:.0}% of pipeline",
         t_select.as_secs_f64() / total_pipeline.as_secs_f64() * 100.0
     );
     println!();
     if overhead_pct > 10.0 {
-        println!("CONCLUSION: get_json_field / Value::get IS a significant hotspot");
+        println!("CONCLUSION: Field lookup IS a significant hotspot");
         println!(
-            "(~{:.0}% of sort time). Proceed with #67 (precomputed positions).",
+            "(~{:.0}% of sort time). Consider pre-extracted sort keys.",
             overhead_pct
         );
     } else {
-        println!("CONCLUSION: get_json_field / Value::get is NOT a bottleneck.");
-        println!("Close #67 as not-worth-it.");
+        println!("CONCLUSION: Field lookup is NOT a bottleneck.");
     }
 }

@@ -1,10 +1,11 @@
-//! Tests for SelectProjection — verifies that `project` and `project_value`
-//! produce semantically equivalent output (same key-value pairs).
+//! Tests for SelectProjection::project_value.
 //!
-//! Note: `serde_json::Map` uses a `BTreeMap` internally (sorted keys), while
-//! `QueryValue::Map` uses an insertion-ordered `TMap`.  Byte equality of
-//! msgpack is therefore not guaranteed for the select-all case.  We compare
-//! by converting both outputs to a canonical sorted-JSON string instead.
+//! Verifies that `project_value` produces the correct key-value pairs
+//! for select-all and explicit field projections.
+//!
+//! The old JSON-twin parity tests (comparing `project` against `project_value`)
+//! have been replaced with concrete expected-value assertions after `project`
+//! was removed in J1 JSON elimination.
 
 use std::sync::Arc;
 
@@ -26,18 +27,9 @@ fn make_record(interner: &Interner, fields: Vec<(&str, InnerValue)>) -> InnerVal
     InnerValue::Map(m)
 }
 
-/// Serialize QueryValue to a canonically-sorted JSON string for comparison.
-/// Sorting is done by serializing to serde_json::Value (which uses BTreeMap
-/// internally) and then serializing back to a string.
-fn canonical_json(qv: &QueryValue) -> String {
-    let j: serde_json::Value = serde_json::to_value(qv).expect("to_value");
-    serde_json::to_string(&j).expect("to_string")
-}
-
-/// Canonical "select all" — project and project_value must have the same
-/// key-value content.
+/// SELECT * via project_value returns all fields.
 #[test]
-fn project_and_project_value_select_all_are_wire_equivalent() {
+fn project_value_select_all_returns_all_fields() {
     let interner = Arc::new(Interner::new());
     let record = make_record(
         &interner,
@@ -50,23 +42,22 @@ fn project_and_project_value_select_all_are_wire_equivalent() {
 
     let select = Select::all();
     let proj = SelectProjection::new(&select, &interner);
-
-    let json_val = proj.project(&record, &interner);
     let qval = proj.project_value(&record, &interner);
 
-    // Canonicalize both through serde_json sorted-key serialization.
-    let canonical_json_val = serde_json::to_string(&json_val).expect("json_val to_string");
-    let canonical_qval = canonical_json(&qval);
-
-    assert_eq!(
-        canonical_json_val, canonical_qval,
-        "project and project_value differ for select-all"
-    );
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("name"), Some(&QueryValue::Str("Alice".to_string())));
+            assert_eq!(m.get("age"), Some(&QueryValue::Int(30)));
+            assert_eq!(m.get("active"), Some(&QueryValue::Bool(true)));
+            assert_eq!(m.len(), 3);
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
 }
 
-/// Explicit field projection — only named fields are returned.
+/// Explicit field projection returns only the named fields.
 #[test]
-fn project_and_project_value_field_projection_are_wire_equivalent() {
+fn project_value_field_projection_returns_named_fields_only() {
     let interner = Arc::new(Interner::new());
     let record = make_record(
         &interner,
@@ -91,20 +82,86 @@ fn project_and_project_value_field_projection_are_wire_equivalent() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner);
-
-    let json_val = proj.project(&record, &interner);
     let qval = proj.project_value(&record, &interner);
 
-    // Field projection output keys are pre-ordered (same order both paths),
-    // so byte-level msgpack equality holds here.
-    let json_bytes = serde_json::to_vec(&json_val).expect("json serialize");
-    let qval_from_json: QueryValue = serde_json::from_slice(&json_bytes).expect("json deserialize");
+    match &qval {
+        QueryValue::Map(m) => {
+            // "name" is projected as-is
+            assert_eq!(m.get("name"), Some(&QueryValue::Str("Bob".to_string())));
+            // "age" is projected with alias "years"
+            assert_eq!(m.get("years"), Some(&QueryValue::Int(25)));
+            // "age" key itself is absent (aliased)
+            assert!(
+                !m.contains_key("age"),
+                "original key should not appear when aliased"
+            );
+            // "score" is not in the select list
+            assert!(
+                !m.contains_key("score"),
+                "non-selected field should be absent"
+            );
+            assert_eq!(m.len(), 2);
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
+}
 
-    let bytes_a = rmp_serde::to_vec_named(&qval_from_json).expect("msgpack a");
-    let bytes_b = rmp_serde::to_vec_named(&qval).expect("msgpack b");
-
-    assert_eq!(
-        bytes_a, bytes_b,
-        "project and project_value differ for field projection"
+/// Missing field in projection results in QueryValue::Null.
+#[test]
+fn project_value_missing_field_is_null() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(
+        &interner,
+        vec![("name", InnerValue::Str("Carol".to_string()))],
     );
+
+    let select = Select {
+        items: vec![
+            SelectItem::Field {
+                path: vec!["name".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["nonexistent".to_string()],
+                alias: None,
+            },
+        ],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner);
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("name"), Some(&QueryValue::Str("Carol".to_string())));
+            assert_eq!(m.get("nonexistent"), Some(&QueryValue::Null));
+        }
+        _ => panic!("expected QueryValue::Map"),
+    }
+}
+
+/// Empty select (no items) returns QueryValue::Map with all fields (is_all path).
+#[test]
+fn project_value_empty_items_returns_all() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(
+        &interner,
+        vec![("x", InnerValue::Int(1)), ("y", InnerValue::Int(2))],
+    );
+
+    let select = Select {
+        items: vec![],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner);
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("x"), Some(&QueryValue::Int(1)));
+            assert_eq!(m.get("y"), Some(&QueryValue::Int(2)));
+            assert_eq!(m.len(), 2);
+        }
+        _ => panic!("expected QueryValue::Map"),
+    }
 }

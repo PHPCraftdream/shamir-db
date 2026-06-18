@@ -12,7 +12,7 @@ pub use crate::query::read::aggregate::{apply_aggregate_all, apply_group_by};
 use crate::query::read::hashable_json::HashableJson;
 pub use crate::query::read::order::{apply_order_by, apply_order_by_qv};
 pub use crate::query::read::select_projection::SelectProjection;
-use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
+pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -21,27 +21,10 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 // Select projection (public API)
 // ============================================================================
 
-/// Apply SELECT projection to raw records, producing JSON values.
-///
-/// Aggregate items (Aggregate, CountAll) are skipped here — they are handled
-/// by `apply_group_by` or `apply_aggregate_all`.
-pub fn apply_select(
-    records: &[(RecordId, InnerValue)],
-    select: &Select,
-    interner: &Interner,
-) -> Vec<json::Value> {
-    let proj = SelectProjection::new(select, interner);
-    records
-        .iter()
-        .map(|(_, record)| proj.project(record, interner))
-        .collect()
-}
-
 /// Apply SELECT projection to raw records, producing QueryValues.
 ///
-/// QueryValue twin of `apply_select` — calls `project_value` instead of
-/// `project`. Aggregate items are skipped (handled by the aggregate
-/// pipeline).
+/// QueryValue-native projection. Aggregate items are skipped (handled by the
+/// aggregate pipeline).
 pub fn apply_select_value(
     records: &[(RecordId, InnerValue)],
     select: &Select,
@@ -52,46 +35,6 @@ pub fn apply_select_value(
         .iter()
         .map(|(_, record)| proj.project_value(record, interner))
         .collect()
-}
-
-/// Streaming variant of `apply_select`: projects records and serialises
-/// each directly to JSON bytes via `inner_to_json` — bypassing the
-/// intermediate `json::Value` tree. Returns the same content as
-/// `serde_json::to_vec(&apply_select(...))` but in one pass for SELECT *.
-///
-/// Fast path: when `select` is `SELECT *` (all fields, no
-/// aggregates/functions), each record is serialised directly from its
-/// `InnerValue` via `inner_to_json`, which uses `InternedRef` (a zero-copy
-/// streaming Serialize) and never builds a `json::Value` tree.
-///
-/// General path (non-* selects): falls back to `apply_select` + `to_vec`.
-pub fn apply_select_to_bytes(
-    records: &[(RecordId, InnerValue)],
-    select: &Select,
-    interner: &Interner,
-) -> Vec<u8> {
-    use shamir_types::codecs::interned::json::inner_to_json;
-    // Fast path: SELECT * — serialise InnerValue directly, no json::Value.
-    let is_all =
-        select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
-    if is_all {
-        let mut buf = Vec::with_capacity(records.len() * 200 + 2);
-        buf.push(b'[');
-        for (i, (_, record)) in records.iter().enumerate() {
-            if i > 0 {
-                buf.push(b',');
-            }
-            match inner_to_json(interner, record) {
-                Ok(bytes) => buf.extend_from_slice(&bytes),
-                Err(_) => buf.extend_from_slice(b"null"),
-            }
-        }
-        buf.push(b']');
-        return buf;
-    }
-    // General path: project to json::Value tree, then serialise.
-    let projected = apply_select(records, select, interner);
-    json::to_vec(&projected).unwrap_or_default()
 }
 
 // ============================================================================
@@ -210,21 +153,6 @@ pub fn apply_pagination<T>(
 // ============================================================================
 // Distinct
 // ============================================================================
-
-/// Remove duplicate JSON values. Walks each value's structure for the
-/// hash instead of `record.to_string()` — no per-record JSON
-/// serialisation, no per-record `String` allocation.
-pub fn apply_distinct(records: Vec<json::Value>) -> Vec<json::Value> {
-    type Set = indexmap::IndexSet<HashableJson, std::hash::BuildHasherDefault<fxhash::FxHasher>>;
-    let mut seen: Set = indexmap::IndexSet::with_capacity_and_hasher(
-        records.len(),
-        std::hash::BuildHasherDefault::default(),
-    );
-    for record in records {
-        seen.insert(HashableJson(record));
-    }
-    seen.into_iter().map(|h| h.0).collect()
-}
 
 /// Remove duplicate `QueryValue` rows using a canonical json key for
 /// deduplication, matching the semantics of the json-based
