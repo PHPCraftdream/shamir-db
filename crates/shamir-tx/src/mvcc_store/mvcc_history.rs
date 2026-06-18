@@ -5,7 +5,7 @@ use shamir_storage::types::KvOp;
 use shamir_tunables::store_defaults::HISTORY_SCAN_BATCH;
 
 use super::version_entry::VersionEntry;
-use super::MvccStore;
+use super::{ts_key, MvccStore};
 use crate::version_codec::{decode_version_key, encode_version_key};
 
 impl MvccStore {
@@ -359,6 +359,22 @@ impl MvccStore {
         ops: &[KvOp],
         commit_version: u64,
     ) -> DbResult<()> {
+        // T1c + L2: resolve the commit timestamp BEFORE building history_ops
+        // so it can ride in the SAME atomic transact batch as the data ops.
+        // D2 P1d-2b: prefer the COMMIT-TIME millis stamped on the ack-path
+        // (`apply_committed_visible`) so the durable ts reflects commit time,
+        // not this (later) drain time. Cold recovery (overlay empty → no stamp)
+        // falls back to `now_millis()` — the pre-cutover behaviour (recovery
+        // never had the original ts). Remove the stamp once consumed
+        // (idempotent: a re-drain finds none and uses the fallback, but by then
+        // history already holds the correct ts).
+        let ts_ms = self
+            .pending_ts
+            .remove(&commit_version)
+            .map(|(_, ms)| ms)
+            .unwrap_or_else(|| self.now_millis());
+        let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
+
         // HIGH-3: batch the physical writes through `Store::transact`.
         // Per-op `set`/`remove` collapses to a single atomic write-tx on
         // backends that override `transact` — one fsync instead of N.
@@ -366,7 +382,10 @@ impl MvccStore {
         // C1: every committed key gets a log entry unconditionally — the log
         // is the universal version timeline. For KvOp::Remove the log entry is
         // a tombstone (empty value).
-        let mut history_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
+        //
+        // L2: the ts-key rides in the SAME batch — one durable write per
+        // version instead of two.
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(ops.len() + 1);
         for op in ops {
             let h_key = match op {
                 KvOp::Set(k, v) => KvOp::Set(encode_version_key(k, commit_version), v.clone()),
@@ -374,25 +393,13 @@ impl MvccStore {
             };
             history_ops.push(h_key);
         }
+        // L2: append the ts entry into the same atomic batch.
+        history_ops.push(KvOp::Set(ts_key(commit_version), ts_val));
 
-        // One batched write to history (current version + tombstones).
+        // One batched write to history (data + ts, atomic).
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
-
-        // T1c: record the commit timestamp. D2 P1d-2b: prefer the COMMIT-TIME
-        // millis stamped on the ack-path (`apply_committed_visible`) so the
-        // durable ts reflects commit time, not this (later) drain time. Cold
-        // recovery (overlay empty → no stamp) falls back to `now_millis()` —
-        // the pre-cutover behaviour (recovery never had the original ts).
-        // Remove the stamp once consumed (idempotent: a re-drain finds none and
-        // uses the fallback, but by then history already holds the correct ts).
-        let ts_ms = self
-            .pending_ts
-            .remove(&commit_version)
-            .map(|(_, ms)| ms)
-            .unwrap_or_else(|| self.now_millis());
-        self.record_ts_at(commit_version, ts_ms).await;
 
         // Seed the cell from the durable write (idempotent; needed on the cold
         // recovery path so a key whose value lives only in history reports the

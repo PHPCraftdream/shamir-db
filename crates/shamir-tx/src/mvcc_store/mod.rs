@@ -286,28 +286,10 @@ impl MvccStore {
         self.now_millis()
     }
 
-    /// T1c: record the commit timestamp for `version` under `ts_key(version)`
-    /// in `history`. Best-effort — a ts write failure is swallowed (the data
-    /// write already succeeded; a missing ts just means the age axis
-    /// conservatively keeps the version, never reclaims it wrongly). This
-    /// matches the eager-vacuum error policy.
-    pub(super) async fn record_ts(&self, version: u64) {
-        self.record_ts_at(version, self.now_millis()).await;
-    }
-
-    /// D2 P1d-2b: record an EXPLICIT commit timestamp `ms` for `version` under
-    /// `ts_key(version)` in `history`. Used by the drainer
-    /// ([`write_committed_to_history`](Self::write_committed_to_history)) to
-    /// stamp the COMMIT-time millis it captured on the ack-path, decoupling the
-    /// recorded ts from the (later) drain time. Best-effort like
-    /// [`record_ts`](Self::record_ts).
-    pub(super) async fn record_ts_at(&self, version: u64, ms: u64) {
-        let bytes = ms.to_le_bytes();
-        let _ = self
-            .history
-            .set(ts_key(version), Bytes::from(bytes.to_vec()))
-            .await;
-    }
+    // L2: `record_ts` and `record_ts_at` REMOVED — ts is now written
+    // atomically inside the same `history.transact` batch as the data op
+    // in every write path (set_versioned, set_versioned_many,
+    // delete_versioned, write_committed_to_history). No separate ts write.
 
     /// Set the history-retention policy (lock-free `ArcSwap` swap).
     /// Validates first; on invalid `min_count > max_count` the old policy is
@@ -536,25 +518,29 @@ impl MvccStore {
         let new_v = guard.version();
         self.publish_cell(key.clone(), new_v).await;
         let key_snapshot = key.clone();
-        // Single log write: the current version goes into the log (sole write).
+        // L2: single atomic log write — data + ts in one transact call.
+        // T1c: capture commit timestamp once for the age-retention axis.
+        let ts_ms = self.now_millis();
+        let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         self.history
-            .set(encode_version_key(&key_snapshot, new_v), value.clone())
+            .transact(vec![
+                KvOp::Set(encode_version_key(&key_snapshot, new_v), value.clone()),
+                KvOp::Set(ts_key(new_v), ts_val),
+            ])
             .await?;
         // P1c: dual-write — populate the overlay with the SAME (key, version)
         // → value pair, AFTER the durable history write succeeds but BEFORE
         // `guard.commit()` advances the reader-visible floor. Ordering rationale:
-        //  • after history.set: a failed history write (`?` above) must NOT leave
-        //    a visible overlay entry — otherwise an aborted write would surface
-        //    via `get_current` (the cell is already bumped). Inserting post-write
-        //    keeps "history.set failed ⇒ nothing written" intact.
+        //  • after history.transact: a failed history write (`?` above) must NOT
+        //    leave a visible overlay entry — otherwise an aborted write would
+        //    surface via `get_current` (the cell is already bumped). Inserting
+        //    post-write keeps "history.transact failed ⇒ nothing written" intact.
         //  • before guard.commit: by the time the version becomes reader-visible
         //    (floor advanced / Materialized), the overlay carries its value.
-        //  • no empty-window: between history.set returning and this insert the
-        //    cell reports `new_v` but history already holds the value, so any
+        //  • no empty-window: between history.transact returning and this insert
+        //    the cell reports `new_v` but history already holds the value, so any
         //    read resolves from history.
         self.overlay.insert(key.clone(), new_v, value);
-        // T1c: record the commit timestamp for the age-retention axis.
-        self.record_ts(new_v).await;
         // Mark the version Materialized and advance the reader-visible floor
         // from the resulting watermark (mirrors the tx commit path). This
         // replaces the direct `publish_committed_max(new_v)`.
@@ -611,8 +597,12 @@ impl MvccStore {
         // and marks its version Aborted, so the contiguous watermark advances
         // past the whole failed batch instead of wedging at the first version.
         let mut guards: Vec<VersionGuard> = Vec::with_capacity(items.len());
-        // Single log write — build history_ops (the sole durable write target).
-        let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len());
+        // L2: single atomic log write — data + ts for every version in one
+        // transact call. T1c: capture commit timestamp once for the whole batch.
+        let ts_ms = self.now_millis();
+        let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
+        // capacity: one data-op + one ts-op per item.
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             let guard = self.gate.assign_next_version_guarded();
@@ -622,9 +612,10 @@ impl MvccStore {
             guards.push(guard);
             max_v = new_v;
             history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
+            history_ops.push(KvOp::Set(ts_key(new_v), ts_val.clone()));
         }
 
-        // Single batched write to the log (sole durable write).
+        // Single batched write to the log (data + ts, atomic).
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
@@ -636,12 +627,6 @@ impl MvccStore {
         // so the overlay carries every value before any version becomes visible.
         for ((key, value), &new_v) in items.iter().zip(new_versions.iter()) {
             self.overlay.insert(key.clone(), new_v, value.clone());
-        }
-
-        // T1c: record the commit timestamp for every version in the batch
-        // (age-retention axis). Best-effort.
-        for &v in &new_versions {
-            self.record_ts(v).await;
         }
 
         // Mark every version Materialized and advance the reader-visible floor
@@ -690,10 +675,17 @@ impl MvccStore {
         let guard = self.gate.assign_next_version_guarded();
         let new_v = guard.version();
         self.publish_cell(key.clone(), new_v).await;
-        // Single log write: tombstone (empty value — MessagePack records are
-        // never zero-length, so empty is unambiguously a delete).
+        // L2: single atomic log write — tombstone + ts in one transact call.
+        // T1c: capture commit timestamp once for the age-retention axis.
+        let ts_ms = self.now_millis();
+        let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         self.history
-            .set(encode_version_key(&key, new_v), Bytes::new())
+            .transact(vec![
+                // Tombstone (empty value — MessagePack records are never
+                // zero-length, so empty is unambiguously a delete).
+                KvOp::Set(encode_version_key(&key, new_v), Bytes::new()),
+                KvOp::Set(ts_key(new_v), ts_val),
+            ])
             .await?;
         // P1c: dual-write — overlay tombstone (empty `Bytes`, same convention
         // as history), AFTER the durable tombstone write succeeds and BEFORE
@@ -703,8 +695,6 @@ impl MvccStore {
         // tombstone before the delete version becomes visible, with no empty
         // window (history holds the tombstone in the interim).
         self.overlay.insert(key.clone(), new_v, Bytes::new());
-        // T1c: record the commit timestamp for the age-retention axis.
-        self.record_ts(new_v).await;
         // Mark Materialized and advance the reader-visible floor from the
         // watermark (replaces the direct `publish_committed_max(new_v)`).
         guard.commit();

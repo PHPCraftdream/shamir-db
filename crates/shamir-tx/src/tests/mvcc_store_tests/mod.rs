@@ -12,5 +12,6 @@ pub mod overlay_merge_tests;
 pub mod overlay_ordering_tests;
 pub mod retention_tests;
 pub mod stream_tests;
+pub mod ts_atomicity_tests;
 pub mod version_tests;
 pub mod watermark_unify_tests;
