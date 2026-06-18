@@ -1,7 +1,8 @@
 #![allow(deprecated)]
 
 use crate::core::interner::InternerKey;
-use crate::types::common::{new_map_wc, TMap, TSet};
+use crate::types::common::{new_map, new_map_wc, TMap, TSet};
+use crate::types::value_error::ValueError;
 use bytes::Bytes;
 use fxhash::FxHasher;
 use num_bigint::BigInt;
@@ -431,6 +432,166 @@ impl Value<String> {
     /// Returns true if this value is a `List`.
     pub fn is_list(&self) -> bool {
         matches!(self, Value::List(_))
+    }
+
+    // -----------------------------------------------------------------------
+    // Default-fallback coercion
+    // -----------------------------------------------------------------------
+
+    /// Returns the string slice if this is a `Str`, otherwise returns
+    /// `default`.
+    pub fn as_str_or<'a>(&'a self, default: &'a str) -> &'a str {
+        match self {
+            Value::Str(s) => s.as_str(),
+            _ => default,
+        }
+    }
+
+    /// Returns the `i64` if this is an `Int`, otherwise returns `default`.
+    pub fn as_i64_or(&self, default: i64) -> i64 {
+        match self {
+            Value::Int(i) => *i,
+            _ => default,
+        }
+    }
+
+    /// Returns the string slice if this is a `Str`, or a [`ValueError`] that
+    /// names the field path and the actual type on failure.
+    ///
+    /// Use `path` to annotate the error message (e.g. `"user.name"`).  Pass
+    /// an empty string when operating on the root value.
+    pub fn require_str(&self, path: &str) -> Result<&str, ValueError> {
+        match self {
+            Value::Str(s) => Ok(s.as_str()),
+            other => Err(ValueError::TypeMismatch {
+                path: path.to_owned(),
+                expected: "str",
+                got: other.type_name(),
+            }),
+        }
+    }
+
+    /// Human-readable discriminant name (used in error messages).
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "int",
+            Value::F64(_) => "f64",
+            Value::Dec(_) => "decimal",
+            Value::Big(_) => "bigint",
+            Value::Str(_) => "str",
+            Value::Bin(_) => "bin",
+            Value::List(_) => "list",
+            Value::Set(_) => "set",
+            Value::Map(_) => "map",
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Path-based navigation
+    // -----------------------------------------------------------------------
+
+    /// Traverse a dotted path (e.g. `"user.address.city"`) and return an
+    /// immutable reference to the target value.
+    ///
+    /// Returns `None` when:
+    /// - any segment in the path does not exist, **or**
+    /// - an intermediate node is not a `Map` (non-map intermediate is treated
+    ///   as a miss, not an error).
+    ///
+    /// Use [`set_path`] for mutation and [`require_str`] / [`as_str_or`] for
+    /// typed extraction after navigation.
+    ///
+    /// [`set_path`]: Self::set_path
+    /// [`require_str`]: Self::require_str
+    /// [`as_str_or`]: Self::as_str_or
+    pub fn get_path(&self, path: &str) -> Option<&Value<String>> {
+        let mut cur = self;
+        for segment in path.split('.') {
+            match cur {
+                Value::Map(m) => cur = m.get(segment)?,
+                _ => return None,
+            }
+        }
+        Some(cur)
+    }
+
+    /// Traverse a dotted path and return a mutable reference to the target
+    /// value.
+    ///
+    /// Returns `None` when any segment is absent or an intermediate node is
+    /// not a `Map`.
+    pub fn get_path_mut(&mut self, path: &str) -> Option<&mut Value<String>> {
+        let mut cur = self;
+        for segment in path.split('.') {
+            match cur {
+                Value::Map(m) => cur = m.get_mut(segment)?,
+                _ => return None,
+            }
+        }
+        Some(cur)
+    }
+
+    /// Traverse a dotted path and set the value at the leaf, creating
+    /// intermediate `Map` nodes as needed.
+    ///
+    /// Returns the previous value at that path (`None` if the key was absent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValueError::NotAMap`] if any **existing** intermediate node
+    /// is not a `Map` (i.e. the path tries to descend through a `Str`,
+    /// `Int`, `List`, etc.).
+    pub fn set_path(
+        &mut self,
+        path: &str,
+        value: Value<String>,
+    ) -> Result<Option<Value<String>>, ValueError> {
+        let mut segments = path.split('.').peekable();
+        let mut cur = self;
+        let mut walked = String::new();
+
+        loop {
+            let segment = match segments.next() {
+                Some(s) => s,
+                None => {
+                    // Empty path — replace self.
+                    let prev = std::mem::replace(cur, value);
+                    return Ok(Some(prev));
+                }
+            };
+
+            // Build the "walked so far" path for error messages.
+            if !walked.is_empty() {
+                walked.push('.');
+            }
+            walked.push_str(segment);
+
+            if segments.peek().is_none() {
+                // Leaf: insert / replace.
+                match cur {
+                    Value::Map(m) => {
+                        return Ok(m.insert(segment.to_owned(), value));
+                    }
+                    _ => {
+                        return Err(ValueError::NotAMap { path: walked });
+                    }
+                }
+            } else {
+                // Intermediate: ensure we have a Map node to descend into.
+                match cur {
+                    Value::Map(m) => {
+                        cur = m
+                            .entry(segment.to_owned())
+                            .or_insert_with(|| Value::Map(new_map()));
+                    }
+                    _ => {
+                        return Err(ValueError::NotAMap { path: walked });
+                    }
+                }
+            }
+        }
     }
 }
 
