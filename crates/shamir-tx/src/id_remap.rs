@@ -5,6 +5,11 @@
 //! references to overlay ids (>= `OVERLAY_ID_BASE`). The executor calls
 //! [`remap_inner_value_bytes`] for each staged value to rewrite those
 //! references before the bytes hit `transact()`.
+//!
+//! §5b floor (#61): recovery anchor — replays staged id-keyed storage bytes
+//! during commit/recovery, where the name-keyed lens does not yet apply
+//! (no interner context at replay). See `docs/perf/innervalue-floor.md`
+//! (Category 3 — recovery anchors).
 
 // hasher-generic boundary: caller supplies the hasher (THasher at every call site)
 #[allow(clippy::disallowed_types)]

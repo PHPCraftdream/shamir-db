@@ -91,6 +91,10 @@ pub trait RecordRef {
     /// subtree, NEVER the whole record). The lens locates the value's msgpack
     /// sub-slice and calls `InnerValue::from_bytes(subslice)`; the tree
     /// descends and clones the subtree.
+    ///
+    /// §5b floor (#61): this is the documented escape hatch — it yields an
+    /// owned `InnerValue` for containers / Dec / Big that the zero-copy
+    /// `ScalarRef` lens cannot represent. See `docs/perf/innervalue-floor.md`.
     fn materialize_at(&self, path: &[InternerKey]) -> Option<InnerValue>;
 
     /// Visit each top-level `(InternerKey, materialised InnerValue)` pair.

@@ -2,6 +2,10 @@
 //!
 //! This module provides JSON encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
+//!
+//! §5b floor (#61): JSON codec — survives for v1-inbound `QueryRecord::Json`
+//! and control-plane only, off every hot path. See
+//! `docs/perf/innervalue-floor.md` (Category 1 — type library).
 
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
