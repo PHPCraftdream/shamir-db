@@ -110,6 +110,17 @@ export interface BatchRequest {
   return_all?: false;
   return_only?: string[];
   limits?: BatchLimits;
+  /**
+   * Per-repo interner epochs the client has cached (Stage 5-wire, Part A).
+   *
+   * Keyed by repo name; value is the client's current gap-free high-water
+   * epoch for that repo's interner. The server attaches a per-repo
+   * `WireInternerDelta` to the response for every entry here.
+   *
+   * Omitted when the registry has no warm entries (epoch = 0 for all repos).
+   * Backward-compatible: absent → server sends no delta.
+   */
+  interner_epochs?: Record<string, number | bigint>;
 }
 
 // ── Response types ──────────────────────────────────────────────────
@@ -157,6 +168,21 @@ export interface TransactionInfo {
   materialized: boolean;
 }
 
+/**
+ * Per-repo interner delta returned by the server in a `BatchResponse`
+ * (Stage 5-wire, Part A).
+ *
+ * Mirrors `shamir-query-types::batch::interner_delta::InternerDelta`.
+ * `epoch` and `entries[*][0]` are u64 on the wire; @msgpack/msgpack
+ * decodes them as `number` (safe range) or `bigint` (> MAX_SAFE_INTEGER).
+ * Consumers normalise to `bigint` via the FieldMap helpers.
+ */
+export interface WireInternerDelta {
+  epoch: number | bigint;
+  /** `[id, name]` pairs — id-first, matching `interner_dump` shape. */
+  entries: [number | bigint, string][];
+}
+
 /** Batch response envelope. */
 export interface BatchResponse {
   id: WireValue;
@@ -164,4 +190,10 @@ export interface BatchResponse {
   execution_plan: string[][];
   execution_time_us: number;
   transaction?: TransactionInfo;
+  /**
+   * Per-repo interner deltas for ambient cache sync (Stage 5-wire, Part A).
+   * Present only when the client advertised `interner_epochs` in the request.
+   * Keyed by repo name.
+   */
+  interner_delta?: Record<string, WireInternerDelta>;
 }
