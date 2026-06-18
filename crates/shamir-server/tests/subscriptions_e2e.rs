@@ -235,11 +235,11 @@ async fn basic_subscribe_yields_event_on_insert() {
 
     // Regression guard: the unfiltered Put path must also ship a de-interned
     // `value` object in the Event payload. If `make_event_data` ever drops
-    // back to raw interned-key msgpack, the JSON decode below will lose
+    // back to raw interned-key msgpack, the msgpack decode below will lose
     // `value` and this assertion will catch it.
     let data_bytes = env.data.as_ref().expect("Event frame missing data");
-    let payload: serde_json::Value =
-        serde_json::from_slice(data_bytes).expect("Event data is not JSON");
+    let payload: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(data_bytes).expect("Event data is not msgpack QueryValue");
     let value = payload
         .get("value")
         .expect("Event payload missing `value` field (interner-decode bug?)");
@@ -692,8 +692,8 @@ async fn value_filter_on_put_is_respected() {
     assert_eq!(env.sub, sub_id);
 
     let data_bytes = env.data.as_ref().expect("Event frame missing data");
-    let payload: serde_json::Value =
-        serde_json::from_slice(data_bytes).expect("Event data is not JSON");
+    let payload: shamir_types::types::value::QueryValue =
+        rmp_serde::from_slice(data_bytes).expect("Event data is not msgpack QueryValue");
     let value = payload
         .get("value")
         .expect("Event payload missing `value` field (interner-decode bug?)");

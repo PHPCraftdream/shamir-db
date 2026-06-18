@@ -27,21 +27,21 @@ use super::filter_eval::bytes_to_arc;
 use super::push::{make_deliver_data, try_push_event};
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
 
-/// Convert cached raw bytes + interner to a `serde_json::Value` for delivery.
+/// Convert cached raw bytes + interner to a `QueryValue` for delivery.
 ///
 /// Tries the zero-copy `RecordView` lens first; falls back to full
 /// `InnerValue` decode for bare-scalar / non-map records.
-fn bytes_to_json(bytes: &[u8], interner_cell: &OnceCell<Interner>) -> Option<serde_json::Value> {
+fn bytes_to_query_value(bytes: &[u8], interner_cell: &OnceCell<Interner>) -> Option<QueryValue> {
     let interner = interner_cell.get()?;
     // Try RecordView (zero-copy lens) first.
     if let Ok(view) = RecordView::new(bytes) {
-        // `to_json_value` returns Value::Null on de-intern error;
+        // `to_query_value` returns QueryValue::Null on de-intern error;
         // for a valid map that's the best we can do — return it.
-        return Some(view.to_json_value(interner));
+        return Some(view.to_query_value(interner));
     }
     // Fallback: full InnerValue decode for non-map records.
     let inner = InnerValue::from_bytes(bytes).ok()?;
-    Some(inner.to_json_value(interner))
+    Some(inner.to_query_value(interner))
 }
 
 /// Bridge task: subscribes to the changefeed broadcast for the relevant
@@ -161,11 +161,10 @@ pub(crate) async fn bridge_task(
                             ) {
                                 continue;
                             }
-                            // Convert bytes -> JSON lazily: only for events
+                            // Convert bytes -> QueryValue lazily: only for events
                             // that passed the filter and must be delivered.
-                            let value_json: Option<serde_json::Value> = match bytes_decoded.as_ref()
-                            {
-                                Some((bytes, cell)) => bytes_to_json(bytes, cell),
+                            let value_qv: Option<QueryValue> = match bytes_decoded.as_ref() {
+                                Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
                                 None => None,
                             };
                             let data = make_deliver_data(
@@ -174,7 +173,7 @@ pub(crate) async fn bridge_task(
                                 &db_name,
                                 &actor,
                                 change,
-                                value_json.as_ref(),
+                                value_qv.as_ref(),
                                 event.commit_version,
                             )
                             .await;
@@ -215,20 +214,25 @@ pub(crate) async fn bridge_task(
                         for qr in response.results.values() {
                             for record in &qr.records {
                                 let record_val = record.as_value();
-                                let key_value: serde_json::Value = record_val
-                                    .get("_id")
-                                    .cloned()
-                                    .unwrap_or(QueryValue::Null)
-                                    .into();
-                                let value_json: serde_json::Value = record_val.into_owned().into();
-                                let obj = serde_json::json!({
-                                    "table": target_table,
-                                    "op": "put",
-                                    "key": key_value,
-                                    "commit_version": 0,
-                                    "value": value_json
-                                });
-                                let data = serde_json::to_vec(&obj).unwrap_or_default();
+                                let key_qv: QueryValue =
+                                    record_val.get("_id").cloned().unwrap_or(QueryValue::Null);
+                                let value_qv: QueryValue = record_val.into_owned();
+                                #[derive(serde::Serialize)]
+                                struct SnapshotEvent<'x> {
+                                    table: &'x str,
+                                    op: &'x str,
+                                    key: &'x QueryValue,
+                                    value: &'x QueryValue,
+                                    commit_version: u64,
+                                }
+                                let obj = SnapshotEvent {
+                                    table: target_table,
+                                    op: "put",
+                                    key: &key_qv,
+                                    value: &value_qv,
+                                    commit_version: 0,
+                                };
+                                let data = rmp_serde::to_vec_named(&obj).unwrap_or_default();
                                 if !try_push_event(
                                     &push,
                                     sub_id,
@@ -334,15 +338,15 @@ pub(crate) async fn bridge_task(
                         ) {
                             continue;
                         }
-                        // Convert bytes -> JSON lazily (only for events
+                        // Convert bytes -> QueryValue lazily (only for events
                         // that passed the filter and must be delivered).
                         // The deliver cache stores the final serialized bytes
                         // so this conversion happens at most once per event.
-                        let value_json: Option<serde_json::Value> = match bytes_ref {
-                            Some((bytes, cell)) => bytes_to_json(bytes, cell),
+                        let value_qv: Option<QueryValue> = match bytes_ref {
+                            Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
                             None => None,
                         };
-                        let value_json_ref = value_json.as_ref();
+                        let value_qv_ref = value_qv.as_ref();
                         // For Records/Keys modes the payload is identical
                         // across all subscribers -- use the deliver cache to
                         // build it once and share via Arc.
@@ -373,7 +377,7 @@ pub(crate) async fn bridge_task(
                                     &db_name,
                                     &actor,
                                     change,
-                                    value_json_ref,
+                                    value_qv_ref,
                                     event.commit_version,
                                 )
                                 .await;
@@ -394,7 +398,7 @@ pub(crate) async fn bridge_task(
                                 &db_name,
                                 &actor,
                                 change,
-                                value_json_ref,
+                                value_qv_ref,
                                 event.commit_version,
                             )
                             .await;

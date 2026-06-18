@@ -78,7 +78,9 @@ pub(super) async fn execute_reactive_batch(
     match db.execute_as(actor.clone(), db_name, &wrapper).await {
         Ok(response) => rmp_serde::to_vec_named(&response).unwrap_or_default(),
         Err(e) => {
-            serde_json::to_vec(&serde_json::json!({"error": e.to_string()})).unwrap_or_default()
+            let mut m = TMap::default();
+            m.insert("error".to_string(), QueryValue::Str(e.to_string()));
+            rmp_serde::to_vec_named(&QueryValue::Map(m)).unwrap_or_default()
         }
     }
 }
@@ -151,7 +153,9 @@ pub(super) async fn execute_reactive_call(
     match db.execute_as(actor.clone(), db_name, &wrapper).await {
         Ok(response) => rmp_serde::to_vec_named(&response).unwrap_or_default(),
         Err(e) => {
-            serde_json::to_vec(&serde_json::json!({"error": e.to_string()})).unwrap_or_default()
+            let mut m = TMap::default();
+            m.insert("error".to_string(), QueryValue::Str(e.to_string()));
+            rmp_serde::to_vec_named(&QueryValue::Map(m)).unwrap_or_default()
         }
     }
 }
