@@ -10,6 +10,9 @@
 //! Single-writer-per-tx invariant: only the owning `TxContext` task
 //! may call mutating methods. There is no concurrent access — sharding
 //! and atomics from `scc::HashMap` added pure overhead with zero benefit.
+//!
+//! §5b floor (#61): staged Set/Remove operate on id-keyed storage bytes —
+//! recovery anchor. See `docs/perf/innervalue-floor.md` (Category 3).
 
 use bytes::Bytes;
 use shamir_collections::TMap;

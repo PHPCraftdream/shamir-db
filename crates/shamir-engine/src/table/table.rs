@@ -115,6 +115,9 @@ impl Table {
     /// Get an InnerValue by RecordId
     ///
     /// No conversion - returns InnerValue directly
+    ///
+    /// §5b floor (#61): owned point-read — returns a deserialized
+    /// `InnerValue` the caller owns. See `docs/perf/innervalue-floor.md`.
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();

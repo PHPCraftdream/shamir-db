@@ -323,6 +323,11 @@ impl TableManager {
     /// version observed at read time are recorded into the tx's read-set via
     /// [`record_read_shared`](shamir_tx::TxContext::record_read_shared) (a
     /// no-op under Snapshot isolation, so callers pay nothing there).
+    ///
+    /// §5b floor (#61): point-read API returns an OWNED `InnerValue` — the
+    /// caller owns the deserialized record. Narrowing this to the lens would
+    /// ripple across all callers. See `docs/perf/innervalue-floor.md`
+    /// (Category 4 — owned-value boundaries).
     pub async fn read_one_tx(
         &self,
         id: RecordId,
