@@ -10,9 +10,12 @@ use crate::query::filter::FilterContext;
 use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
+use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
+use shamir_types::codecs::interned::query_value_to_storage_bytes;
+use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -449,7 +452,11 @@ impl<'a> QueryRunner<'a> {
                         .await?
                     }
                 };
-                Ok(write_result_to_query_result(wr))
+                Ok(write_result_to_query_result_with_encoding(
+                    wr,
+                    self.result_encoding,
+                    interner,
+                ))
             }
 
             BatchOp::Update(op) => {
@@ -520,7 +527,11 @@ impl<'a> QueryRunner<'a> {
                         .await?
                     }
                 };
-                Ok(write_result_to_query_result(wr))
+                Ok(write_result_to_query_result_with_encoding(
+                    wr,
+                    self.result_encoding,
+                    interner,
+                ))
             }
 
             BatchOp::Delete(op) => {
@@ -569,7 +580,11 @@ impl<'a> QueryRunner<'a> {
                         .await?
                     }
                 };
-                Ok(write_result_to_query_result(wr))
+                Ok(write_result_to_query_result_with_encoding(
+                    wr,
+                    self.result_encoding,
+                    interner,
+                ))
             }
 
             BatchOp::Set(op) => {
@@ -638,7 +653,11 @@ impl<'a> QueryRunner<'a> {
                         .await?
                     }
                 };
-                Ok(write_result_to_query_result(wr))
+                Ok(write_result_to_query_result_with_encoding(
+                    wr,
+                    self.result_encoding,
+                    interner,
+                ))
             }
 
             // Admin ops are handled before this match via is_admin() check
@@ -686,9 +705,44 @@ pub(super) async fn execute_single_impl(
 /// allocation) just to wrap it in `QueryRecord::Inserted`;
 /// `QueryRecord::Inserted` serialises via the same `InsertedRecord` impl, so
 /// the wire bytes are byte-identical while the duplicate build is gone.
-pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
+///
+/// When `encoding == ResultEncoding::Id`, each RETURNING row is re-encoded
+/// into [`QueryRecord::IdBytes`] (id-keyed storage msgpack) via the table's
+/// interner — matching the Id-encoded read path.  Keys that fail to intern
+/// (unknown field names) are silently skipped; if encoding fails for a row
+/// it falls back to `QueryRecord::Inserted` so no data is lost.
+pub(super) fn write_result_to_query_result_with_encoding(
+    wr: WriteResult,
+    encoding: ResultEncoding,
+    interner: &Interner,
+) -> QueryResult {
+    let records: Vec<QueryRecord> =
+        if matches!(encoding, ResultEncoding::Id) && !wr.records.is_empty() {
+            wr.records
+                .into_iter()
+                .map(|rec| {
+                    // Re-encode the name-keyed fields to id-keyed storage bytes.
+                    // `get_ind` returns None for unknown keys — those are silently
+                    // omitted, consistent with the read-path projection behaviour.
+                    let intern_fn = |key: &str| {
+                        interner.get_ind(key).ok_or_else(|| {
+                            shamir_types::codecs::CodecError::Decode(format!(
+                                "write_result_to_query_result_with_encoding: unknown field '{key}'"
+                            ))
+                        })
+                    };
+                    match query_value_to_storage_bytes(&rec.fields, &intern_fn) {
+                        Ok(bytes) => QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref())),
+                        // Encoding failed (e.g. non-map value) — fall back gracefully.
+                        Err(_) => QueryRecord::from(rec),
+                    }
+                })
+                .collect()
+        } else {
+            wr.records.into_iter().map(QueryRecord::from).collect()
+        };
     QueryResult {
-        records: wr.records.into_iter().map(QueryRecord::from).collect(),
+        records,
         stats: Some(QueryStats {
             index_used: None,
             records_scanned: wr.affected,
