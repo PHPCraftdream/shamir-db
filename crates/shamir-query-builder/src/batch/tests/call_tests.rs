@@ -50,24 +50,34 @@ fn call_in_repo_sets_custom_repo() {
 }
 
 // ============================================================================
-// Wire JSON snapshot
+// Wire snapshot via QueryValue
 // ============================================================================
 
 #[test]
-fn call_wire_json_snapshot() {
+fn call_wire_snapshot() {
+    use crate::wire::ToWire;
+    use shamir_types::types::value::QueryValue;
+
     let mut b = Batch::new();
     b.call("p", "proc", [lit(1), lit("v")]);
-    let json = b.to_json_value().unwrap();
+    let qv = b.build().to_query_value().unwrap();
+    let entry = qv
+        .get("queries")
+        .and_then(|q| q.get("p"))
+        .expect("entry 'p'");
 
-    let expected_op = serde_json::json!({
-        "call": "proc",
-        "params": [1, "v"],
-        "repo": "main"
-    });
-    let entry = &json["queries"]["p"];
-    assert_eq!(entry["call"], expected_op["call"]);
-    assert_eq!(entry["params"], expected_op["params"]);
-    assert_eq!(entry["repo"], expected_op["repo"]);
+    assert_eq!(entry.get("call").and_then(|v| v.as_str()), Some("proc"));
+    assert_eq!(entry.get("repo").and_then(|v| v.as_str()), Some("main"));
+
+    // Verify params: [1, "v"]
+    let params = entry.get("params").expect("params key");
+    let list = match params {
+        QueryValue::List(l) => l,
+        other => panic!("expected List, got {other:?}"),
+    };
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].as_i64(), Some(1));
+    assert_eq!(list[1].as_str(), Some("v"));
 }
 
 // ============================================================================

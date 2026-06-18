@@ -1,34 +1,36 @@
 use std::sync::Arc;
 
 use super::ShamirDb;
-use shamir_types::codecs::interned::json::inner_to_json_value;
+use shamir_types::codecs::interned::json::inner_value_to_query_value;
 use shamir_types::core::interner::Interner;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 use tokio::sync::OnceCell;
 
 impl ShamirDb {
     /// Decode a changefeed `RecordChange.value` byte slice (MessagePack
     /// encoded `InnerValue` with interned `u64` map keys) back into a
-    /// `serde_json::Value` with string keys, using the named table's
-    /// interner for de-interning.
+    /// `QueryValue` with string keys, using the named table's interner for
+    /// de-interning.
     ///
     /// Returns `None` when the database / repo / table doesn't exist,
     /// the interner can't be loaded, or the bytes don't decode as a
-    /// valid `InnerValue` — callers (specifically the subscription
-    /// bridge's filter evaluator and event payload encoder) treat
-    /// `None` as fail-closed.
-    pub async fn decode_record_value_json(
+    /// valid `InnerValue` — callers treat `None` as fail-closed.
+    ///
+    /// For the hot subscription filter path prefer
+    /// [`decode_record_value_inner`] + lazy conversion, which skips the
+    /// de-intern cost for events that are filtered out before delivery.
+    pub async fn decode_record_value_query_value(
         &self,
         db: &str,
         repo: &str,
         table: &str,
         bytes: &[u8],
-    ) -> Option<serde_json::Value> {
+    ) -> Option<QueryValue> {
         let repo_instance = self.get_db(db)?.get_repo(repo)?;
         let table_manager = repo_instance.get_table(table).await.ok()?;
         let interner = table_manager.interner().get().await.ok()?;
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
-        inner_to_json_value(&inner, interner).ok()
+        inner_value_to_query_value(&inner, interner).ok()
     }
 
     /// Decode a changefeed `RecordChange.value` byte slice into an `InnerValue`
@@ -41,11 +43,11 @@ impl ShamirDb {
     /// Callers can therefore call `cell.get().unwrap()` synchronously for filter
     /// evaluation without any additional async overhead.
     ///
-    /// Cheaper than [`decode_record_value_json`] for the filter-only path: it
-    /// skips `inner_to_json_value` (interner reverse-lookup + JSON allocation)
+    /// Cheaper than [`decode_record_value_query_value`] for the filter-only
+    /// path: it skips the interner reverse-lookup and `QueryValue` allocation
     /// entirely, paying only the `rmp_serde::from_slice` decode.  The caller
-    /// converts to JSON lazily via [`inner_to_json_value`] only when the event
-    /// passes the filter and must be delivered.
+    /// converts to `QueryValue` lazily only when the event passes the filter
+    /// and must be delivered.
     pub async fn decode_record_value_inner(
         &self,
         db: &str,

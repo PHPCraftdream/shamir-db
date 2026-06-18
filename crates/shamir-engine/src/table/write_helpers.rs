@@ -32,11 +32,22 @@ pub(super) fn validator_failure_to_db_error(
 ) -> shamir_storage::error::DbError {
     match failure {
         ValidatorFailure::Failed(errors) => {
-            // Serialize the structured errors as a JSON array so the
-            // caller (and eventually the wire layer) gets field-bound
-            // codes. The `ValidationError` derives `Serialize`.
-            let json = serde_json::to_string(&errors).unwrap_or_else(|_| format!("{errors:?}"));
-            shamir_storage::error::DbError::ValidatorRejected(json)
+            // Build a typed text summary of field-bound errors without
+            // JSON serialisation. Each entry is rendered as
+            // "field.path: code" (record-level errors omit the path).
+            // The resulting string always contains every field path and
+            // code, so callers that do substring-contains checks on the
+            // error message (e.g. `msg.contains("stale")`) continue to
+            // work unchanged.
+            let msg = errors
+                .iter()
+                .map(|e| match &e.field {
+                    Some(path) => format!("{}: {}", path.join("."), e.code),
+                    None => e.code.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            shamir_storage::error::DbError::ValidatorRejected(msg)
         }
         ValidatorFailure::Missing { id } => shamir_storage::error::DbError::ValidatorInvalid(
             format!("validator {} not found in registry (fail-closed)", id),
@@ -106,10 +117,15 @@ pub(super) fn resolve_computed_record<'a>(
         if !is_computed_field(v) {
             continue;
         }
-        // Convert the computed field value to serde_json::Value for FilterValue parsing
-        let jv = serde_json::Value::from(v.clone());
+        // Deserialize the computed field value as FilterValue via the
+        // msgpack round-trip: QueryValue → rmp_serde bytes → FilterValue.
+        // Both types share the same serde shape (untagged enum), so the
+        // msgpack encoding produced by QueryValue is byte-identical to
+        // what FilterValue's deserializer expects — no JSON involved.
+        let bytes = rmp_serde::to_vec_named(v)
+            .map_err(|e| format!("computed field '{k}': msgpack encode: {e}"))?;
         let fv: FilterValue =
-            serde_json::from_value(jv).map_err(|e| format!("computed field '{k}': {e}"))?;
+            rmp_serde::from_slice(&bytes).map_err(|e| format!("computed field '{k}': {e}"))?;
         // C6 (#80): eval_write_value now returns QueryValue directly — the
         // $fn round-trip (inner→query→funclib→query→inner) is gone, and the
         // result flows straight into the (already QueryValue) record map.

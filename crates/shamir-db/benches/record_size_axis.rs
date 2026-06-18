@@ -15,9 +15,9 @@
 //!    Expected shape: roughly linear in N (memcpy + msgpack decode); a
 //!    super-linear step would indicate something pathological.
 //!
-//! 3. **De-intern cost** (`ShamirDb::decode_record_value_json`) on large
-//!    records. This path backs the subscription bridge. The existing
-//!    `decode_record_value_json` bench in `shamir-server` only covers
+//! 3. **De-intern cost** (`ShamirDb::decode_record_value_query_value`) on
+//!    large records. This path backs the subscription bridge. The existing
+//!    `decode_record_value_query_value` bench in `shamir-server` only covers
 //!    5- and 20-field narrow records. Question: does a single 100KB
 //!    string field stay O(1) at the interner level (one key, one big
 //!    value), and how does that compare to a 10KB object spread across
@@ -191,11 +191,10 @@ fn bench_read_by_size(c: &mut Criterion) {
 }
 
 // --------------------------------------------------------------------------
-// Group 3: decode_record_value_json_large — subscription bridge de-intern
+// Group 3: decode_record_value_qv_large — subscription bridge de-intern
 //
 // Captures real msgpack `RecordChange.value` bytes (same path as the
-// `shamir-server::subscription_hot_paths::decode_record_value_json`
-// fixture) at the large-value end of the spectrum.
+// subscription hot-path) at the large-value end of the spectrum.
 // --------------------------------------------------------------------------
 
 /// Insert one record carrying the given JSON value, tap the changefeed
@@ -229,9 +228,9 @@ async fn capture_change_bytes(row: JsonValue) -> (Arc<ShamirDb>, Bytes) {
     (shamir, value_bytes)
 }
 
-fn bench_decode_record_value_json_large(c: &mut Criterion) {
+fn bench_decode_record_value_qv_large(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("decode_record_value_json_large");
+    let mut group = c.benchmark_group("decode_record_value_qv_large");
 
     // Scenario A: one big string field, 10KB.
     let (db_a, bytes_a) = rt.block_on(capture_change_bytes(one_big_row("k", 10 * 1_024)));
@@ -242,7 +241,7 @@ fn bench_decode_record_value_json_large(c: &mut Criterion) {
             let bytes = bytes_a.clone();
             async move {
                 let v = db
-                    .decode_record_value_json(
+                    .decode_record_value_query_value(
                         black_box(DB),
                         black_box(REPO),
                         black_box(TABLE),
@@ -263,7 +262,7 @@ fn bench_decode_record_value_json_large(c: &mut Criterion) {
             let bytes = bytes_b.clone();
             async move {
                 let v = db
-                    .decode_record_value_json(
+                    .decode_record_value_query_value(
                         black_box(DB),
                         black_box(REPO),
                         black_box(TABLE),
@@ -285,7 +284,7 @@ fn bench_decode_record_value_json_large(c: &mut Criterion) {
             let bytes = bytes_c.clone();
             async move {
                 let v = db
-                    .decode_record_value_json(
+                    .decode_record_value_query_value(
                         black_box(DB),
                         black_box(REPO),
                         black_box(TABLE),
@@ -304,6 +303,6 @@ criterion_group!(
     benches,
     bench_insert_by_size,
     bench_read_by_size,
-    bench_decode_record_value_json_large,
+    bench_decode_record_value_qv_large,
 );
 criterion_main!(benches);
