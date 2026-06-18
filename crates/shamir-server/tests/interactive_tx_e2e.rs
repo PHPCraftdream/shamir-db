@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -123,13 +123,13 @@ async fn interactive_tx_happy_path_wire() {
     wb.upsert(
         "s1",
         upsert("items")
-            .key(json!({"id": "a"}))
+            .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 3 }),
     );
     wb.upsert(
         "s2",
         upsert("items")
-            .key(json!({"id": "b"}))
+            .key(mpack!({"id": "b"}))
             .value(doc! { "id" => "b", "qty" => 5 }),
     );
     let wres = decode(
@@ -250,7 +250,7 @@ async fn interactive_tx_rollback_discards_writes() {
     wb.upsert(
         "s1",
         upsert("items")
-            .key(json!({"id": "x"}))
+            .key(mpack!({"id": "x"}))
             .value(doc! { "id" => "x", "qty" => 9 }),
     );
     let _ = handler
@@ -336,7 +336,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     wb.upsert(
         "s",
         upsert("items")
-            .key(json!({"id": "a"}))
+            .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 1 }),
     );
     let res = decode(

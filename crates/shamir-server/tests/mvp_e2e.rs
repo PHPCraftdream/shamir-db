@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use shamir_types::mpack;
 use tempfile::TempDir;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -357,7 +357,7 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     rw_batch.upsert(
         "ins",
         shamir_query_builder::write::upsert("items")
-            .key(json!({"sku": "X1"}))
+            .key(mpack!({"sku": "X1"}))
             .value(shamir_query_builder::doc! { "sku" => "X1", "qty" => 42 }),
     );
     rw_batch.query("rd", shamir_query_builder::Query::from("items"));

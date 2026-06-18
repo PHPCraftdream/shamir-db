@@ -11,6 +11,7 @@ use shamir_query_types::batch::{
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -307,7 +308,7 @@ async fn sub_batch_atomic() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
-                values: vec![serde_json::json!({ "name": "atomic_test" }).into()],
+                values: vec![mpack!({ "name": "atomic_test" })],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,
@@ -319,7 +320,7 @@ async fn sub_batch_atomic() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("nonexistent_table"),
-                values: vec![serde_json::json!({ "name": "should_not_appear" }).into()],
+                values: vec![mpack!({ "name": "should_not_appear" })],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,
@@ -425,7 +426,7 @@ async fn tx_in_tx_rejected() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
-                values: vec![serde_json::json!({ "name": "tx_in_tx" }).into()],
+                values: vec![mpack!({ "name": "tx_in_tx" })],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,
@@ -727,7 +728,7 @@ async fn param_in_insert_values() {
         .unwrap();
 
     // Inner batch: insert one order using $param uid as column value.
-    let inner_insert_value = serde_json::json!({
+    let inner_insert_value = mpack!({
         "user_id": { "$param": "uid" },
         "note": "order1"
     });
@@ -737,7 +738,7 @@ async fn param_in_insert_values() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_insert_value.into()],
+                values: vec![inner_insert_value],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,
@@ -847,7 +848,7 @@ async fn param_in_insert_nested() {
     let resolver = setup().await;
 
     // Inner batch: insert a row with a nested object containing $param.
-    let inner_value = serde_json::json!({
+    let inner_value = mpack!({
         "meta": {
             "created_by": { "$param": "actor_id" }
         },
@@ -859,7 +860,7 @@ async fn param_in_insert_nested() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_value.into()],
+                values: vec![inner_value],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,
@@ -980,7 +981,7 @@ async fn param_in_insert_missing_param_errors() {
     let resolver = setup().await;
 
     // Inner insert references $param that is NOT in bind.
-    let inner_value = serde_json::json!({
+    let inner_value = mpack!({
         "user_id": { "$param": "ghost_param" }
     });
     let mut inner_queries = new_map();
@@ -989,7 +990,7 @@ async fn param_in_insert_missing_param_errors() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_value.into()],
+                values: vec![inner_value],
                 records_idmsgpack: Vec::new(),
             }),
             return_result: true,

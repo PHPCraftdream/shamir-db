@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::json;
+use shamir_types::mpack;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -139,7 +139,7 @@ async fn sdk_full_lifecycle() {
     batch.upsert(
         "ins",
         upsert("items")
-            .key(json!({"sku": "X1"}))
+            .key(mpack!({"sku": "X1"}))
             .value(doc! { "sku" => "X1", "qty" => 42 }),
     );
     batch.query("rd", Query::from("items"));

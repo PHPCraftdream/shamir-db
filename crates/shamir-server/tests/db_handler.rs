@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -183,31 +183,31 @@ async fn read_with_filter_order_limit_returns_full_payload() {
     b.upsert(
         "s1",
         upsert("items")
-            .key(json!({"id": "a"}))
+            .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 3 }),
     );
     b.upsert(
         "s2",
         upsert("items")
-            .key(json!({"id": "b"}))
+            .key(mpack!({"id": "b"}))
             .value(doc! { "id" => "b", "qty" => 1 }),
     );
     b.upsert(
         "s3",
         upsert("items")
-            .key(json!({"id": "c"}))
+            .key(mpack!({"id": "c"}))
             .value(doc! { "id" => "c", "qty" => 4 }),
     );
     b.upsert(
         "s4",
         upsert("items")
-            .key(json!({"id": "d"}))
+            .key(mpack!({"id": "d"}))
             .value(doc! { "id" => "d", "qty" => 1 }),
     );
     b.upsert(
         "s5",
         upsert("items")
-            .key(json!({"id": "e"}))
+            .key(mpack!({"id": "e"}))
             .value(doc! { "id" => "e", "qty" => 5 }),
     );
     let seed = execute_built("prod", b.build());
@@ -291,31 +291,31 @@ async fn multi_query_batch_with_query_reference() {
     b.upsert(
         "u1",
         upsert("users")
-            .key(json!({"id": 1}))
+            .key(mpack!({"id": 1}))
             .value(doc! { "id" => 1, "name" => "alice" }),
     );
     b.upsert(
         "u2",
         upsert("users")
-            .key(json!({"id": 2}))
+            .key(mpack!({"id": 2}))
             .value(doc! { "id" => 2, "name" => "bob" }),
     );
     b.upsert(
         "o1",
         upsert("orders")
-            .key(json!({"id": 100}))
+            .key(mpack!({"id": 100}))
             .value(doc! { "id" => 100, "user_id" => 1, "amt" => 9 }),
     );
     b.upsert(
         "o2",
         upsert("orders")
-            .key(json!({"id": 101}))
+            .key(mpack!({"id": 101}))
             .value(doc! { "id" => 101, "user_id" => 1, "amt" => 4 }),
     );
     b.upsert(
         "o3",
         upsert("orders")
-            .key(json!({"id": 102}))
+            .key(mpack!({"id": 102}))
             .value(doc! { "id" => 102, "user_id" => 2, "amt" => 7 }),
     );
     let seed = execute_built("prod", b.build());
@@ -420,7 +420,7 @@ async fn admin_batch_allowed_for_superuser() {
     b.upsert(
         "ins",
         upsert("inventory")
-            .key(json!({"sku": "X1"}))
+            .key(mpack!({"sku": "X1"}))
             .value(doc! { "sku" => "X1", "stock" => 42 }),
     );
     b.query("rd", Query::from("inventory"));
@@ -816,7 +816,7 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     b.upsert(
         "s",
         upsert("secret")
-            .key(json!({"id": 1}))
+            .key(mpack!({"id": 1}))
             .value(doc! { "id" => 1, "data" => "classified" }),
     );
     shamir.execute("acl", &b.build()).await.expect("seed");

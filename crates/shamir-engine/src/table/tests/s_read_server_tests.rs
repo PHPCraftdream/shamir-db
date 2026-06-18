@@ -26,6 +26,7 @@ use shamir_query_builder::write;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_query_types::read::{AggFunc, AggregateField, SelectItem};
 use shamir_types::codecs::interned::record_view_to_query_value;
+use shamir_types::mpack;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::common::new_map;
 
@@ -40,7 +41,7 @@ async fn insert_alice_and_get_bytes(
     repo: &crate::repo::RepoInstance,
 ) -> bytes::Bytes {
     let op = write::insert("users")
-        .row(serde_json::json!({ "name": "Alice", "age": 30, "city": "NYC" }))
+        .row(mpack!({ "name": "Alice", "age": 30, "city": "NYC" }))
         .build();
 
     let owned_op = op.clone();
@@ -258,8 +259,8 @@ async fn s_read_aggregate_falls_back_to_name() {
 
     // Insert two records so the aggregate is non-trivial.
     let op = write::insert("users")
-        .row(serde_json::json!({ "name": "Alice", "age": 30 }))
-        .row(serde_json::json!({ "name": "Bob",   "age": 25 }))
+        .row(mpack!({ "name": "Alice", "age": 30 }))
+        .row(mpack!({ "name": "Bob", "age": 25 }))
         .build();
     let owned_op = op.clone();
     let owned_table = table.clone();
@@ -307,12 +308,8 @@ async fn s_read_aggregate_falls_back_to_name() {
     );
 
     // The aggregate result must be correct: sum(30, 25) == 55.
-    let json_val = serde_json::Value::from(row.as_value().into_owned());
-    assert_eq!(
-        json_val["total_age"],
-        serde_json::json!(55),
-        "sum(age) must equal 55, got {json_val:?}"
-    );
+    let qv = row.as_value().into_owned();
+    assert_eq!(qv["total_age"], 55i64, "sum(age) must equal 55, got {qv:?}");
 }
 
 // ============================================================================

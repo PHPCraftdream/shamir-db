@@ -221,12 +221,12 @@ fn assert_parity(label: &str, live: &QueryResult, tree: &QueryResult) {
     let mut live_json: Vec<serde_json::Value> = live
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
         .collect();
     let mut tree_json: Vec<serde_json::Value> = tree
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
+        .map(|r| serde_json::to_value(r.as_value().into_owned()).unwrap())
         .collect();
     live_json.sort_by_key(|a| a.to_string());
     tree_json.sort_by_key(|a| a.to_string());
@@ -340,7 +340,7 @@ async fn parity_select_with_alias() {
     assert_parity("SELECT name AS full_name, age", &live, &tree);
 
     // Verify the alias key appears in the output
-    let first_json = serde_json::Value::from(live.records[0].as_value().into_owned());
+    let first_json = serde_json::to_value(live.records[0].as_value().into_owned()).unwrap();
     assert!(
         first_json.get("full_name").is_some(),
         "expected 'full_name' alias key in output"
@@ -504,7 +504,7 @@ async fn parity_group_by_agg() {
     // We don't compare against run_tree for GROUP BY because the tree
     // helper doesn't implement the full GROUP BY pipeline. Instead, we
     // verify the live result is non-empty and structurally valid.
-    let first_json = serde_json::Value::from(live.records[0].as_value().into_owned());
+    let first_json = serde_json::to_value(live.records[0].as_value().into_owned()).unwrap();
     assert!(
         first_json.get("city").is_some(),
         "GROUP BY output must contain city"
@@ -590,7 +590,7 @@ async fn parity_u64_overflow() {
     assert_eq!(live.records.len(), 1, "expected exactly Eve's record");
 
     // Verify the big_id value is the stringified u64::MAX
-    let json = serde_json::Value::from(live.records[0].as_value().into_owned());
+    let json = serde_json::to_value(live.records[0].as_value().into_owned()).unwrap();
     let big_id = json.get("big_id").expect("big_id field missing");
     assert_eq!(
         big_id.as_str().unwrap(),

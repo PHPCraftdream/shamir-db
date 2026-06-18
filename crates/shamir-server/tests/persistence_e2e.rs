@@ -22,7 +22,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -310,7 +311,7 @@ fn write_req(table: &str, sku: &str, qty: i64) -> DbRequest {
     b.upsert(
         "ins",
         shamir_query_builder::write::upsert(table)
-            .key(json!({"sku": sku}))
+            .key(mpack!({"sku": @(QueryValue::from(sku))}))
             .value(shamir_query_builder::doc! { "sku" => sku, "qty" => qty }),
     );
     DbRequest::Execute {

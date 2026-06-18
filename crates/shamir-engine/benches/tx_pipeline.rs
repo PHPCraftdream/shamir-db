@@ -30,6 +30,7 @@ use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::access::Actor;
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -123,11 +124,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                 op: BatchOp::Insert(InsertOp {
                                     insert_into: TableRef::new("bench_table"),
                                     values: (0..n)
-                                        .map(|i| {
-                                            shamir_types::types::value::QueryValue::from(
-                                                serde_json::json!({"i": i}),
-                                            )
-                                        })
+                                        .map(|i| mpack!({"i": @(QueryValue::from(i as i64))}))
                                         .collect(),
                                     records_idmsgpack: Vec::new(),
                                 }),
@@ -176,11 +173,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                 op: BatchOp::Insert(InsertOp {
                                     insert_into: TableRef::new("bench_table"),
                                     values: (0..n)
-                                        .map(|i| {
-                                            shamir_types::types::value::QueryValue::from(
-                                                serde_json::json!({"i": i}),
-                                            )
-                                        })
+                                        .map(|i| mpack!({"i": @(QueryValue::from(i as i64))}))
                                         .collect(),
                                     records_idmsgpack: Vec::new(),
                                 }),
@@ -250,12 +243,12 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                         let ic = iter_counter.fetch_add(1, Ordering::Relaxed);
                         let values: Vec<shamir_types::types::value::QueryValue> = (0..n)
                             .map(|i| {
-                                shamir_types::types::value::QueryValue::from(serde_json::json!({
+                                mpack!({
                                     // Disjoint across iterations via iter_counter prefix.
-                                    "email": format!("user_{ic}_{i}@example.com"),
-                                    "city": format!("c_{}", i % 8),
-                                    "score": i,
-                                }))
+                                    "email": @(QueryValue::from(format!("user_{ic}_{i}@example.com"))),
+                                    "city": @(QueryValue::from(format!("c_{}", i % 8))),
+                                    "score": @(QueryValue::from(i as i64)),
+                                })
                             })
                             .collect();
                         let mut queries = new_map();
@@ -496,9 +489,10 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                     let mut queries = new_map();
                     let values: Vec<shamir_types::types::value::QueryValue> = (0..n)
                         .map(|i| {
-                            shamir_types::types::value::QueryValue::from(
-                                serde_json::json!({"city": format!("c_{}", i % 8), "score": i}),
-                            )
+                            mpack!({
+                                "city": @(QueryValue::from(format!("c_{}", i % 8))),
+                                "score": @(QueryValue::from(i as i64)),
+                            })
                         })
                         .collect();
                     queries.insert(

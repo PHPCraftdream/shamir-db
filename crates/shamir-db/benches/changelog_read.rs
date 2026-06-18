@@ -26,7 +26,8 @@
 use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde_json::json;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -51,10 +52,10 @@ fn one_row_insert(i: usize) -> shamir_db::query::batch::BatchRequest {
     b.id("ins").transactional();
     b.insert(
         "i",
-        write::insert(TABLE).row(json!({
-            "id":   format!("u{:08}", i),
+        write::insert(TABLE).row(mpack!({
+            "id":   @(QueryValue::from(format!("u{:08}", i))),
             "name": "x",
-            "age":  (i % 90) as i64,
+            "age":  @(QueryValue::from((i % 90) as i64)),
         })),
     );
     b.build()

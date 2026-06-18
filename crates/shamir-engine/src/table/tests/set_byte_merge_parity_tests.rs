@@ -3,7 +3,7 @@
 //!
 //! The MERGE branch of `execute_set_tx` was cut over from an `InnerValue`
 //! merge tree to the byte-merge pipeline (`merge_storage_bytes` +
-//! `update_tx_bytes` + `run_validators_qv` + `record_view_to_json_value`),
+//! `update_tx_bytes` + `run_validators_qv` + `record_view_to_query_value`),
 //! mirroring W3c's `execute_update_tx` cutover. These tests prove the SET
 //! path agrees with the reference tree merge and that the behavioural
 //! guarantees hold end-to-end through the production implicit-tx + commit
@@ -36,6 +36,7 @@ use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::codecs::interned::merge_storage_bytes;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::mpack;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
@@ -542,14 +543,19 @@ async fn set_tx_update_path_counter_delta_zero() {
     let tbl = make_table().await;
 
     // Seed an existing record with email=a@b.c.
-    let interner = tbl.interner().get().await.unwrap();
-    let existing = serde_json::json!({ "email": "a@b.c", "name": "alice" });
-    let inner = shamir_types::codecs::interned::json_value_to_inner(&existing, interner).unwrap();
-    tbl.insert(&inner).await.unwrap();
+    let (tree, _) = make_record(
+        &tbl,
+        &[
+            ("email", InnerValue::Str("a@b.c".into())),
+            ("name", InnerValue::Str("alice".into())),
+        ],
+    )
+    .await;
+    tbl.insert(&tree).await.unwrap();
 
     let op = write::upsert("t")
-        .key(serde_json::json!({ "email": "a@b.c" }))
-        .value(serde_json::json!({ "name": "bob" }))
+        .key(mpack!({ "email": "a@b.c" }))
+        .value(mpack!({ "name": "bob" }))
         .build();
     let tx = set_into_tx(&tbl, &op).await;
 
@@ -566,14 +572,19 @@ async fn set_tx_update_path_counter_delta_zero() {
 #[tokio::test]
 async fn set_tx_noop_skips_staging() {
     let tbl = make_table().await;
-    let interner = tbl.interner().get().await.unwrap();
-    let existing = serde_json::json!({ "email": "a@b.c", "name": "alice" });
-    let inner = shamir_types::codecs::interned::json_value_to_inner(&existing, interner).unwrap();
-    tbl.insert(&inner).await.unwrap();
+    let (tree, _) = make_record(
+        &tbl,
+        &[
+            ("email", InnerValue::Str("a@b.c".into())),
+            ("name", InnerValue::Str("alice".into())),
+        ],
+    )
+    .await;
+    tbl.insert(&tree).await.unwrap();
 
     let op = write::upsert("t")
-        .key(serde_json::json!({ "email": "a@b.c" }))
-        .value(serde_json::json!({ "name": "alice" }))
+        .key(mpack!({ "email": "a@b.c" }))
+        .value(mpack!({ "name": "alice" }))
         .build();
     let tx = set_into_tx(&tbl, &op).await;
 

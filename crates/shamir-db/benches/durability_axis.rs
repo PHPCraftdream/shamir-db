@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde_json::{json, Value as JsonValue};
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
 
 use shamir_bench_utils as bu;
@@ -55,19 +56,19 @@ async fn fresh_db_redb(path: &std::path::Path) -> Arc<ShamirDb> {
 }
 
 /// Deterministic record generator — fixed shape, content seeded by `i`.
-fn gen_row(i: usize) -> JsonValue {
-    json!({
-        "id":    format!("u{:08}", i),
-        "name":  format!("User-{}", i),
-        "email": format!("user{}@example.com", i),
-        "age":   18 + ((i * 37) % 60) as i64,
-        "score": ((i * 7919) % 1000) as i64,
+fn gen_row(i: usize) -> QueryValue {
+    mpack!({
+        "id":    @(QueryValue::from(format!("u{:08}", i))),
+        "name":  @(QueryValue::from(format!("User-{}", i))),
+        "email": @(QueryValue::from(format!("user{}@example.com", i))),
+        "age":   @(QueryValue::from(18 + ((i * 37) % 60) as i64)),
+        "score": @(QueryValue::from(((i * 7919) % 1000) as i64)),
     })
 }
 
 /// Build a single batch carrying `n` rows under the given durability level.
 fn req_insert(n: usize, level: Durability) -> BatchRequest {
-    let rows: Vec<JsonValue> = (0..n).map(gen_row).collect();
+    let rows: Vec<QueryValue> = (0..n).map(gen_row).collect();
     let mut b = Batch::new();
     b.id("dur")
         .durability(level)

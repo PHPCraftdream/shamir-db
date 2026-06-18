@@ -47,7 +47,8 @@ async fn test_list_databases() {
         .await
         .unwrap();
 
-    let rec_val = serde_json::Value::from(resp.results["dbs"].records[0].as_value().into_owned());
+    let rec_val =
+        serde_json::to_value(resp.results["dbs"].records[0].as_value().into_owned()).unwrap();
     let dbs = &rec_val["databases"];
     assert!(dbs.as_array().unwrap().contains(&json!("testdb")));
 }
@@ -64,7 +65,8 @@ async fn test_list_repos() {
         .await
         .unwrap();
 
-    let rec_val = serde_json::Value::from(resp.results["repos"].records[0].as_value().into_owned());
+    let rec_val =
+        serde_json::to_value(resp.results["repos"].records[0].as_value().into_owned()).unwrap();
     let repos = &rec_val["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("main")));
 }
@@ -82,7 +84,7 @@ async fn test_list_tables() {
         .unwrap();
 
     let rec_val =
-        serde_json::Value::from(resp.results["tables"].records[0].as_value().into_owned());
+        serde_json::to_value(resp.results["tables"].records[0].as_value().into_owned()).unwrap();
     let tables = &rec_val["tables"];
     assert!(tables.as_array().unwrap().contains(&json!("users")));
 }
@@ -120,7 +122,8 @@ async fn test_create_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let rec_val = serde_json::Value::from(resp.results["repos"].records[0].as_value().into_owned());
+    let rec_val =
+        serde_json::to_value(resp.results["repos"].records[0].as_value().into_owned()).unwrap();
     let repos = &rec_val["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("hot_cache")));
 }
@@ -321,7 +324,8 @@ async fn test_list_indexes() {
         .await
         .unwrap();
 
-    let rec = serde_json::Value::from(resp.results["idxs"].records[0].as_value().into_owned());
+    let rec =
+        serde_json::to_value(resp.results["idxs"].records[0].as_value().into_owned()).unwrap();
     let indexes = rec["indexes"].as_array().unwrap();
     assert_eq!(indexes.len(), 2);
 
@@ -369,7 +373,8 @@ async fn test_create_table_then_use_it() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let rec = serde_json::Value::from(resp.results["tables"].records[0].as_value().into_owned());
+    let rec =
+        serde_json::to_value(resp.results["tables"].records[0].as_value().into_owned()).unwrap();
     let tables = rec["tables"].as_array().unwrap();
     assert!(tables.contains(&json!("products")));
 

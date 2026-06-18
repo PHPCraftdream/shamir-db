@@ -5,7 +5,7 @@
 //! PUTs a document via `set`, GETs it via `from`. This is the exact path
 //! documented in `docs/guide/00-quickstart.md` — keep them in sync.
 
-use serde_json::json;
+use shamir_types::mpack;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -48,7 +48,7 @@ async fn quickstart_kv_in_default_store() {
     put_b.upsert(
         "p",
         shamir_query_builder::write::upsert("kv")
-            .key(json!({"id": "user:42"}))
+            .key(mpack!({"id": "user:42"}))
             .value(shamir_query_builder::doc! {
                 "id" => "user:42",
                 "name" => "Alice",

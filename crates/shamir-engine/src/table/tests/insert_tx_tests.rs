@@ -3,12 +3,11 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use shamir_query_builder::{filter, write};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -207,9 +206,9 @@ async fn execute_insert_tx_stages_all_records() {
     // production shape); bare scalars are not valid top-level records.
     let op = write::insert("t")
         .rows([
-            json!({ "name": "v1" }),
-            json!({ "name": "v2" }),
-            json!({ "name": "v3" }),
+            mpack!({ "name": "v1" }),
+            mpack!({ "name": "v2" }),
+            mpack!({ "name": "v3" }),
         ])
         .build();
 
@@ -243,13 +242,15 @@ async fn execute_update_tx_stages_via_update_tx() {
     let tbl = make_table().await;
     let interner = tbl.interner().get().await.unwrap();
 
-    let existing = json!({ "name": "bob" });
-    let inner = shamir_types::codecs::interned::json_value_to_inner(&existing, interner).unwrap();
-    let _rid = tbl.insert(&inner).await.unwrap();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let mut m = new_map();
+    m.insert(name_key, InnerValue::Str("bob".into()));
+    tbl.interner().persist().await.unwrap();
+    let _rid = tbl.insert(&InnerValue::Map(m)).await.unwrap();
 
     let mut tx = TxContext::new(TxId::new(50), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::update("t").set(json!({ "name": "alice" })).build();
+    let op = write::update("t").set(mpack!({ "name": "alice" })).build();
 
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
@@ -271,7 +272,7 @@ async fn execute_update_tx_no_match_zero_affected() {
 
     let mut tx = TxContext::new(TxId::new(51), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::update("t").set(json!({ "name": "alice" })).build();
+    let op = write::update("t").set(mpack!({ "name": "alice" })).build();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -328,8 +329,8 @@ async fn execute_set_tx_insert_path() {
     let mut tx = TxContext::new(TxId::new(60), 0, u64::MAX, IsolationLevel::Snapshot);
 
     let op = write::upsert("t")
-        .key(json!({ "email": "a@b.c" }))
-        .value(json!({ "email": "a@b.c", "name": "alice" }))
+        .key(mpack!({ "email": "a@b.c" }))
+        .value(mpack!({ "email": "a@b.c", "name": "alice" }))
         .build();
 
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
@@ -348,19 +349,22 @@ async fn execute_set_tx_insert_path() {
 async fn execute_set_tx_update_path() {
     let tbl = make_table().await;
 
-    let existing = json!({ "email": "a@b.c", "name": "alice" });
-    let inner = shamir_types::codecs::interned::json_value_to_inner(
-        &existing,
-        tbl.interner().get().await.unwrap(),
-    )
-    .unwrap();
-    let _rid = tbl.insert(&inner).await.unwrap();
+    {
+        let interner = tbl.interner().get().await.unwrap();
+        let email_key = interner.touch_ind("email").unwrap().into_key();
+        let name_key = interner.touch_ind("name").unwrap().into_key();
+        let mut m = new_map();
+        m.insert(email_key, InnerValue::Str("a@b.c".into()));
+        m.insert(name_key, InnerValue::Str("alice".into()));
+        tbl.interner().persist().await.unwrap();
+        tbl.insert(&InnerValue::Map(m)).await.unwrap();
+    }
 
     let mut tx = TxContext::new(TxId::new(61), 0, u64::MAX, IsolationLevel::Snapshot);
 
     let op = write::upsert("t")
-        .key(json!({ "email": "a@b.c" }))
-        .value(json!({ "name": "bob" }))
+        .key(mpack!({ "email": "a@b.c" }))
+        .value(mpack!({ "name": "bob" }))
         .build();
 
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();

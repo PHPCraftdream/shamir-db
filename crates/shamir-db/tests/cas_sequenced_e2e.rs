@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -167,7 +167,7 @@ async fn bind_cas_validator(db: &ShamirDb) {
 }
 
 /// Insert one record into `docs` (string fields only).
-fn insert_request(id: &str, record: serde_json::Value) -> BatchRequest {
+fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("docs").row(record));
@@ -175,7 +175,7 @@ fn insert_request(id: &str, record: serde_json::Value) -> BatchRequest {
 }
 
 /// Update the single `docs` row matched by `key`, applying `set`.
-fn update_request(id: &str, key: &str, set: serde_json::Value) -> BatchRequest {
+fn update_request(id: &str, key: &str, set: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.update("upd", update("docs").where_(eq("key", key)).set(set));
@@ -215,7 +215,7 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
     // it is accepted unconditionally.
     db.execute(
         "testdb",
-        &insert_request("ins_v1", json!({ "key": "doc1", "body": "v1" })),
+        &insert_request("ins_v1", mpack!({ "key": "doc1", "body": "v1" })),
     )
     .await
     .expect("v1 insert must succeed");
@@ -226,7 +226,7 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
     let upd_v2 = update_request(
         "upd_v2",
         "doc1",
-        json!({ "body": "v2", "_prev_hash": hash_v1 }),
+        mpack!({ "body": "v2", "_prev_hash": @(QueryValue::Str(hash_v1.clone())) }),
     );
     db.execute("testdb", &upd_v2)
         .await
@@ -247,7 +247,7 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
     let stale = update_request(
         "upd_stale",
         "doc1",
-        json!({ "body": "v2_conflict", "_prev_hash": hash_v1 }),
+        mpack!({ "body": "v2_conflict", "_prev_hash": @(QueryValue::Str(hash_v1.clone())) }),
     );
     let err = db
         .execute("testdb", &stale)
@@ -286,7 +286,7 @@ async fn cas_correct_chain_passes_each_step() {
 
     db.execute(
         "testdb",
-        &insert_request("ins_v1", json!({ "key": "chain", "body": "v1" })),
+        &insert_request("ins_v1", mpack!({ "key": "chain", "body": "v1" })),
     )
     .await
     .expect("v1 insert must succeed");
@@ -297,7 +297,7 @@ async fn cas_correct_chain_passes_each_step() {
         &update_request(
             "upd_v2",
             "chain",
-            json!({ "body": "v2", "_prev_hash": hash_v1 }),
+            mpack!({ "body": "v2", "_prev_hash": @(QueryValue::Str(hash_v1.clone())) }),
         ),
     )
     .await
@@ -311,7 +311,7 @@ async fn cas_correct_chain_passes_each_step() {
         &update_request(
             "upd_v3",
             "chain",
-            json!({ "body": "v3", "_prev_hash": hash_v2 }),
+            mpack!({ "body": "v3", "_prev_hash": @(QueryValue::Str(hash_v2.clone())) }),
         ),
     )
     .await
@@ -339,7 +339,7 @@ async fn cas_rejects_blind_update_without_prev_hash() {
 
     db.execute(
         "testdb",
-        &insert_request("ins_v1", json!({ "key": "blind", "body": "v1" })),
+        &insert_request("ins_v1", mpack!({ "key": "blind", "body": "v1" })),
     )
     .await
     .expect("v1 insert must succeed");
@@ -348,7 +348,7 @@ async fn cas_rejects_blind_update_without_prev_hash() {
     let err = db
         .execute(
             "testdb",
-            &update_request("upd_blind", "blind", json!({ "body": "v2" })),
+            &update_request("upd_blind", "blind", mpack!({ "body": "v2" })),
         )
         .await
         .expect_err("an update without _prev_hash on an existing row must be rejected");

@@ -8,7 +8,7 @@ use shamir_collections::TFxSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde_json::json;
+use shamir_types::mpack;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -290,7 +290,7 @@ async fn execute_with_touch_warms_cache() {
     with_client(|client: Client| async move {
         let mut b1 = Batch::new();
         b1.id("w1");
-        b1.insert("i1", insert("items").row(json!({ "sku": "A1", "qty": 1 })));
+        b1.insert("i1", insert("items").row(mpack!({ "sku": "A1", "qty": 1 })));
         let resp1 = client
             .execute_with_touch("ic", b1.build())
             .await
@@ -316,7 +316,7 @@ async fn execute_with_touch_warms_cache() {
 
         let mut b2 = Batch::new();
         b2.id("w2");
-        b2.insert("i2", insert("items").row(json!({ "sku": "A2", "qty": 2 })));
+        b2.insert("i2", insert("items").row(mpack!({ "sku": "A2", "qty": 2 })));
         let resp2 = client
             .execute_with_touch("ic", b2.build())
             .await

@@ -43,6 +43,7 @@ use crate::table::tests::write_exec_tests::{insert_via_tx, setup_empty_table};
 use crate::table::TableConfig;
 use crate::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
 use shamir_types::access::Actor;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 // ============================================================================
@@ -161,7 +162,7 @@ async fn idmsgpack_byte_identity_convergence() {
 
     // ── Path A: name-keyed via `values` ──────────────────────────────────
     let op_a = write::insert("users")
-        .row(serde_json::json!({ "name": "Alice", "age": 30 }))
+        .row(mpack!({ "name": "Alice", "age": 30 }))
         .build();
     let res_a = insert_via_tx(&repo, &table, &op_a, true).await.unwrap();
     assert_eq!(res_a.affected, 1, "path-A must insert 1 record");
@@ -177,9 +178,7 @@ async fn idmsgpack_byte_identity_convergence() {
     // and the server interner — the canonical client-side pre-encoding path.
     // This produces byte-identical output to what the server's `values` path
     // would produce (same codec, same interned key ids, same field order).
-    let record_qv =
-        serde_json::from_value::<QueryValue>(serde_json::json!({ "name": "Alice", "age": 30 }))
-            .unwrap();
+    let record_qv = mpack!({ "name": "Alice", "age": 30 });
     let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
         interner
             .touch_ind(key)
@@ -430,16 +429,14 @@ async fn idmsgpack_return_result_records_match_affected() {
             })
     };
 
-    let rec_a = serde_json::from_value::<QueryValue>(serde_json::json!({
+    let rec_a = mpack!({
         "name": "Alice",
         "age": 30
-    }))
-    .unwrap();
-    let rec_b = serde_json::from_value::<QueryValue>(serde_json::json!({
+    });
+    let rec_b = mpack!({
         "name": "Bob",
         "age": 25
-    }))
-    .unwrap();
+    });
 
     let bytes_a = query_value_to_storage_bytes(&rec_a, &intern_fn).unwrap();
     let bytes_b = query_value_to_storage_bytes(&rec_b, &intern_fn).unwrap();
@@ -527,16 +524,15 @@ async fn mixed_values_and_idmsgpack_return_result() {
             })
     };
 
-    let rec_id = serde_json::from_value::<QueryValue>(serde_json::json!({
+    let rec_id = mpack!({
         "name": "Bob",
         "age": 25
-    }))
-    .unwrap();
+    });
     let bytes_id = query_value_to_storage_bytes(&rec_id, &intern_fn).unwrap();
 
     // Build an InsertOp with BOTH branches populated.
     let mut op: InsertOp = write::insert("users")
-        .row(serde_json::json!({
+        .row(mpack!({
             "name": "Alice",
             "age": 30
         }))

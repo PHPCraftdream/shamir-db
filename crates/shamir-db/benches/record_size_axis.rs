@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use serde_json::{json, Value as JsonValue};
+use shamir_types::mpack;
+use shamir_types::types::common::new_map;
+use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
@@ -82,25 +84,25 @@ async fn fresh_db() -> Arc<ShamirDb> {
 }
 
 /// One record carrying a single big `data` string of the given length.
-fn one_big_row(id: &str, size: usize) -> JsonValue {
-    json!({
-        "id":   id,
-        "data": "x".repeat(size),
+fn one_big_row(id: &str, size: usize) -> QueryValue {
+    mpack!({
+        "id":   @(QueryValue::from(id)),
+        "data": @(QueryValue::from("x".repeat(size))),
     })
 }
 
 /// ~`size` byte object split across ~50 string fields — exercises the
 /// interner path (many distinct keys) at a comparable total payload.
-fn one_wide_row(id: &str, total_size: usize) -> JsonValue {
+fn one_wide_row(id: &str, total_size: usize) -> QueryValue {
     const N_FIELDS: usize = 50;
     let per_field = total_size / N_FIELDS;
     let chunk = "x".repeat(per_field);
-    let mut obj = serde_json::Map::with_capacity(N_FIELDS + 1);
-    obj.insert("id".into(), json!(id));
+    let mut obj = new_map();
+    obj.insert("id".to_string(), QueryValue::from(id));
     for i in 0..N_FIELDS {
-        obj.insert(format!("f{i:02}"), json!(chunk));
+        obj.insert(format!("f{i:02}"), QueryValue::from(chunk.as_str()));
     }
-    JsonValue::Object(obj)
+    QueryValue::Map(obj)
 }
 
 // --------------------------------------------------------------------------
@@ -126,7 +128,7 @@ fn bench_insert_by_size(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for i in 0..iters {
                     let id = format!("k{i:010}");
-                    let row = json!({ "id": id, "data": payload });
+                    let row = mpack!({ "id": @(QueryValue::from(id.as_str())), "data": @(QueryValue::from(payload.as_str())) });
                     let mut bch = Batch::new();
                     bch.id("ins").insert("ins", write::insert(TABLE).row(row));
                     let req = bch.build();
@@ -199,7 +201,7 @@ fn bench_read_by_size(c: &mut Criterion) {
 
 /// Insert one record carrying the given JSON value, tap the changefeed
 /// before the insert, return the Put change's value bytes.
-async fn capture_change_bytes(row: JsonValue) -> (Arc<ShamirDb>, Bytes) {
+async fn capture_change_bytes(row: QueryValue) -> (Arc<ShamirDb>, Bytes) {
     let shamir = fresh_db().await;
     let mut rx = shamir
         .subscribe_changelog(DB, REPO)

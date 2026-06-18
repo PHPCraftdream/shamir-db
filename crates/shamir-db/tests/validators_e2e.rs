@@ -14,7 +14,6 @@
 //! 9. Fail-closed: a bound validator whose registry entry is missing aborts
 //!    with `ValidatorInvalid`.
 
-use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
@@ -24,6 +23,7 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
+use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -222,7 +222,7 @@ async fn setup_db() -> ShamirDb {
 }
 
 /// Helper: build an insert batch request for one record into "users".
-fn insert_request(id: &str, record: serde_json::Value) -> BatchRequest {
+fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("users").row(record));
@@ -260,7 +260,7 @@ async fn accept_validator_allows_insert() {
     .await
     .unwrap();
 
-    let request = insert_request("test_accept", json!({"name": "Alice"}));
+    let request = insert_request("test_accept", mpack!({"name": "Alice"}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_ok(),
@@ -297,7 +297,7 @@ async fn missing_validator_fails_closed() {
     // binding after a deploy error).
     db.validators().remove(&id);
 
-    let request = insert_request("test_missing", json!({"name": "Bob"}));
+    let request = insert_request("test_missing", mpack!({"name": "Bob"}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_err(),
@@ -318,7 +318,7 @@ async fn missing_validator_fails_closed() {
 async fn insert_succeeds_without_bindings() {
     let db = setup_db().await;
 
-    let request = insert_request("test_no_bindings", json!({"sku": "ABC123"}));
+    let request = insert_request("test_no_bindings", mpack!({"sku": "ABC123"}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_ok(),
@@ -355,7 +355,7 @@ async fn reject_validator_blocks_insert_with_field_error() {
     .unwrap();
 
     // Attempt an insert — should fail with validator rejection.
-    let request = insert_request("test_reject", json!({"name": "Eve", "age": 12}));
+    let request = insert_request("test_reject", mpack!({"name": "Eve", "age": 12}));
     let response = db.execute("testdb", &request).await;
     assert!(response.is_err(), "insert should be rejected by validator");
 
@@ -405,7 +405,7 @@ async fn single_validator_multi_error() {
     .await
     .unwrap();
 
-    let request = insert_request("test_multi", json!({"name": "X", "age": 5}));
+    let request = insert_request("test_multi", mpack!({"name": "X", "age": 5}));
     let response = db.execute("testdb", &request).await;
     assert!(response.is_err(), "multi-error insert should be rejected");
 
@@ -462,7 +462,7 @@ async fn stop_validator_halts_lower_priority() {
     .await
     .unwrap();
 
-    let request = insert_request("test_stop", json!({"name": "Halt"}));
+    let request = insert_request("test_stop", mpack!({"name": "Halt"}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_err(),
@@ -550,7 +550,7 @@ async fn ops_filtering_update_only_does_not_fire_on_insert() {
     .unwrap();
 
     // Insert should succeed because the validator is not bound on Insert.
-    let request = insert_request("test_ops_filter", json!({"name": "Allowed", "age": 5}));
+    let request = insert_request("test_ops_filter", mpack!({"name": "Allowed", "age": 5}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_ok(),
@@ -597,7 +597,7 @@ async fn fail_closed_bound_id_not_in_registry() {
     // Forcibly remove from the registry to simulate a stale binding.
     db.validators().remove(&id);
 
-    let request = insert_request("test_fail_closed", json!({"name": "Ghost"}));
+    let request = insert_request("test_fail_closed", mpack!({"name": "Ghost"}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_err(),
@@ -669,7 +669,7 @@ async fn collect_all_two_validators_both_codes_present() {
     .await
     .unwrap();
 
-    let request = insert_request("test_collect_all", json!({"name": "X", "age": 5}));
+    let request = insert_request("test_collect_all", mpack!({"name": "X", "age": 5}));
     let response = db.execute("testdb", &request).await;
     assert!(
         response.is_err(),
