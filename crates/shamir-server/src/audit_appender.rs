@@ -1,9 +1,9 @@
-//! Durable audit appender — HMAC-chained JSON-line log + redb checkpoint.
+//! Durable audit appender — HMAC-chained tab-separated log + redb checkpoint.
 //!
 //! Spec IMPL §3.3 NORMATIVE — two storage layers:
 //!
-//! 1. **JSON-line log** (`data_dir/audit.log`) — one line per [`AuditEntry`],
-//!    fields encoded as base64url for byte arrays. Append-only.
+//! 1. **Fixed-format log** (`data_dir/audit.log`) — one line per [`AuditEntry`],
+//!    fields TAB-separated in fixed order; byte fields as base64url. Append-only.
 //! 2. **Checkpoint redb** (`data_dir/audit_checkpoint.redb`) — single-row
 //!    `last_audit_hmac` table with `(next_seq: u64, prev_hmac: [u8; 32])`.
 //!    Always committed with [`Durability::Immediate`] (fsync on commit).
@@ -22,7 +22,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
 use redb::{Database, Durability, ReadableDatabase, TableDefinition};
-use serde::{Deserialize, Serialize};
 use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -32,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-/// Filename of the JSON-line audit log inside `data_dir`.
+/// Filename of the fixed-format audit log inside `data_dir`.
 const AUDIT_LOG_FILENAME: &str = "audit.log";
 /// Filename of the redb checkpoint database inside `data_dir`.
 const CHECKPOINT_DB_FILENAME: &str = "audit_checkpoint.redb";
@@ -50,9 +49,6 @@ pub enum AppenderError {
     /// redb error while opening / committing the checkpoint table.
     #[error("redb: {0}")]
     Redb(#[from] redb::Error),
-    /// JSON serialisation / deserialisation failure.
-    #[error("json: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 impl From<redb::DatabaseError> for AppenderError {
@@ -85,106 +81,149 @@ impl From<redb::CommitError> for AppenderError {
     }
 }
 
-/// Wire format for one audit entry on disk — bytes base64url-encoded.
+/// Encode a free-text field for embedding in the tab-separated log line.
 ///
-/// Private; callers re-decode via [`RedbAuditAppender::read_log_for_verify`].
-#[derive(Serialize, Deserialize)]
-struct JsonEntry {
-    seq: u64,
-    ts_ns: u64,
-    event: String,
-    transport: String,
-    user: String,
-    ip_subnet: String,
-    /// base64url-encoded 8-byte session_id_prefix.
-    session_id_prefix: String,
-    result: String,
-    /// base64url-encoded canonical msgpack details bytes.
-    details_canonical_msgpack: String,
-    /// base64url-encoded 32-byte previous-entry HMAC.
-    prev_hmac: String,
-    /// base64url-encoded 32-byte HMAC of this entry.
-    hmac: String,
+/// Escapes `\` → `\\`, `\t` → `\t`, `\n` → `\n` so the field is safe
+/// to embed between TAB delimiters without breaking the fixed column layout.
+fn escape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str(r"\\"),
+            '\t' => out.push_str(r"\t"),
+            '\n' => out.push_str(r"\n"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
-impl JsonEntry {
-    fn from_audit(entry: &AuditEntry) -> Self {
-        Self {
-            seq: entry.seq,
-            ts_ns: entry.ts_ns,
-            event: entry.event.clone(),
-            transport: entry.transport.clone(),
-            user: entry.user.clone(),
-            ip_subnet: entry.ip_subnet.clone(),
-            session_id_prefix: URL_SAFE_NO_PAD.encode(entry.session_id_prefix),
-            result: entry.result.clone(),
-            details_canonical_msgpack: URL_SAFE_NO_PAD.encode(&entry.details_canonical_msgpack),
-            prev_hmac: URL_SAFE_NO_PAD.encode(entry.prev_hmac),
-            hmac: URL_SAFE_NO_PAD.encode(entry.hmac),
+/// Decode a free-text field that was produced by [`escape_field`].
+fn unescape_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some(c) => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
         }
     }
+    out
+}
 
-    fn into_audit(self) -> Result<AuditEntry, AppenderError> {
-        let session_id_prefix_v = URL_SAFE_NO_PAD
-            .decode(self.session_id_prefix.as_bytes())
-            .map_err(|e| {
-                AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
-        let details = URL_SAFE_NO_PAD
-            .decode(self.details_canonical_msgpack.as_bytes())
-            .map_err(|e| {
-                AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
-        let prev_hmac_v = URL_SAFE_NO_PAD
-            .decode(self.prev_hmac.as_bytes())
-            .map_err(|e| {
-                AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            })?;
-        let hmac_v = URL_SAFE_NO_PAD.decode(self.hmac.as_bytes()).map_err(|e| {
-            AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })?;
+/// Serialise one [`AuditEntry`] to the fixed-format log line (without trailing `\n`).
+///
+/// Field order (TAB-separated, 11 columns):
+///   seq \t ts_ns \t event \t transport \t user \t ip_subnet \t
+///   session_id_prefix \t result \t details_canonical_msgpack \t prev_hmac \t hmac
+///
+/// `seq` and `ts_ns` are decimal u64.
+/// `session_id_prefix`, `details_canonical_msgpack`, `prev_hmac`, `hmac` are
+/// base64url (URL_SAFE_NO_PAD) — characters `[A-Za-z0-9_-]`, no escaping needed.
+/// `event`, `transport`, `user`, `ip_subnet`, `result` are escaped with
+/// [`escape_field`]: `\` → `\\`, TAB → `\t`, newline → `\n`.
+fn entry_to_line(entry: &AuditEntry) -> Vec<u8> {
+    let line = format!(
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        entry.seq,
+        entry.ts_ns,
+        escape_field(&entry.event),
+        escape_field(&entry.transport),
+        escape_field(&entry.user),
+        escape_field(&entry.ip_subnet),
+        URL_SAFE_NO_PAD.encode(entry.session_id_prefix),
+        escape_field(&entry.result),
+        URL_SAFE_NO_PAD.encode(&entry.details_canonical_msgpack),
+        URL_SAFE_NO_PAD.encode(entry.prev_hmac),
+        URL_SAFE_NO_PAD.encode(entry.hmac),
+    );
+    line.into_bytes()
+}
 
-        let mut session_id_prefix = [0u8; 8];
-        if session_id_prefix_v.len() != 8 {
-            return Err(AppenderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "session_id_prefix not 8 bytes",
-            )));
-        }
-        session_id_prefix.copy_from_slice(&session_id_prefix_v);
+/// Parse one fixed-format log line back into an [`AuditEntry`].
+fn line_to_entry(line: &str) -> Result<AuditEntry, AppenderError> {
+    let invalid = |msg: &'static str| {
+        AppenderError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
+    };
 
-        let mut prev_hmac = [0u8; 32];
-        if prev_hmac_v.len() != 32 {
-            return Err(AppenderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "prev_hmac not 32 bytes",
-            )));
-        }
-        prev_hmac.copy_from_slice(&prev_hmac_v);
+    let mut cols = line.splitn(11, '\t');
+    let seq: u64 = cols
+        .next()
+        .ok_or_else(|| invalid("missing seq"))?
+        .parse()
+        .map_err(|_| invalid("seq not u64"))?;
+    let ts_ns: u64 = cols
+        .next()
+        .ok_or_else(|| invalid("missing ts_ns"))?
+        .parse()
+        .map_err(|_| invalid("ts_ns not u64"))?;
+    let event = unescape_field(cols.next().ok_or_else(|| invalid("missing event"))?);
+    let transport = unescape_field(cols.next().ok_or_else(|| invalid("missing transport"))?);
+    let user = unescape_field(cols.next().ok_or_else(|| invalid("missing user"))?);
+    let ip_subnet = unescape_field(cols.next().ok_or_else(|| invalid("missing ip_subnet"))?);
 
-        let mut hmac = [0u8; 32];
-        if hmac_v.len() != 32 {
-            return Err(AppenderError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "hmac not 32 bytes",
-            )));
-        }
-        hmac.copy_from_slice(&hmac_v);
-
-        Ok(AuditEntry {
-            seq: self.seq,
-            ts_ns: self.ts_ns,
-            event: self.event,
-            transport: self.transport,
-            user: self.user,
-            ip_subnet: self.ip_subnet,
-            session_id_prefix,
-            result: self.result,
-            details_canonical_msgpack: details,
-            prev_hmac,
-            hmac,
-        })
+    let session_id_prefix_v = URL_SAFE_NO_PAD
+        .decode(
+            cols.next()
+                .ok_or_else(|| invalid("missing session_id_prefix"))?,
+        )
+        .map_err(|_| invalid("session_id_prefix: invalid base64url"))?;
+    if session_id_prefix_v.len() != 8 {
+        return Err(invalid("session_id_prefix not 8 bytes"));
     }
+    let mut session_id_prefix = [0u8; 8];
+    session_id_prefix.copy_from_slice(&session_id_prefix_v);
+
+    let result = unescape_field(cols.next().ok_or_else(|| invalid("missing result"))?);
+
+    let details = URL_SAFE_NO_PAD
+        .decode(
+            cols.next()
+                .ok_or_else(|| invalid("missing details_canonical_msgpack"))?,
+        )
+        .map_err(|_| invalid("details_canonical_msgpack: invalid base64url"))?;
+
+    let prev_hmac_v = URL_SAFE_NO_PAD
+        .decode(cols.next().ok_or_else(|| invalid("missing prev_hmac"))?)
+        .map_err(|_| invalid("prev_hmac: invalid base64url"))?;
+    if prev_hmac_v.len() != 32 {
+        return Err(invalid("prev_hmac not 32 bytes"));
+    }
+    let mut prev_hmac = [0u8; 32];
+    prev_hmac.copy_from_slice(&prev_hmac_v);
+
+    let hmac_v = URL_SAFE_NO_PAD
+        .decode(cols.next().ok_or_else(|| invalid("missing hmac"))?)
+        .map_err(|_| invalid("hmac: invalid base64url"))?;
+    if hmac_v.len() != 32 {
+        return Err(invalid("hmac not 32 bytes"));
+    }
+    let mut hmac = [0u8; 32];
+    hmac.copy_from_slice(&hmac_v);
+
+    Ok(AuditEntry {
+        seq,
+        ts_ns,
+        event,
+        transport,
+        user,
+        ip_subnet,
+        session_id_prefix,
+        result,
+        details_canonical_msgpack: details,
+        prev_hmac,
+        hmac,
+    })
 }
 
 /// Durability mode of the appender.
@@ -204,11 +243,11 @@ enum Durab {
     },
 }
 
-/// Optional log-rotation policy for the JSON-line audit file.
+/// Optional log-rotation policy for the fixed-format audit file.
 ///
 /// When set, every successful append checks the running file size; once it
 /// crosses `max_size_bytes` the current file is renamed to
-/// `audit_log.jsonl.<unix_nanos>` and a fresh `audit_log.jsonl` is opened
+/// `audit.log.<unix_nanos>` and a fresh `audit.log` is opened
 /// for subsequent writes. The HMAC chain is **not** affected — each
 /// rotated entry already carries its `prev_hmac`, so verification stitches
 /// the rotated files back together by reading them in lexicographic order.
@@ -218,11 +257,11 @@ pub struct RotationPolicy {
     pub current_size: std::sync::atomic::AtomicU64,
 }
 
-/// Durable [`AuditAppender`] backed by JSON-line log + redb checkpoint.
+/// Durable [`AuditAppender`] backed by fixed-format tab-separated log + redb checkpoint.
 pub struct RedbAuditAppender {
     /// Open append-handle to `audit.log`.
     log_file: Mutex<File>,
-    /// Path to the JSON-line log (used by static helpers).
+    /// Path to the fixed-format audit log (used by static helpers).
     log_path: PathBuf,
     /// Open redb database for the checkpoint table.
     checkpoint_db: Arc<Database>,
@@ -396,7 +435,7 @@ impl RedbAuditAppender {
         Ok(Some((u64::from_be_bytes(seq), hmac)))
     }
 
-    /// Re-read the on-disk JSON-line log into [`AuditEntry`]s for
+    /// Re-read the on-disk fixed-format log into [`AuditEntry`]s for
     /// startup verification ([`AuditChain::verify_chain`]).
     pub fn read_log_for_verify(
         data_dir: impl AsRef<Path>,
@@ -444,8 +483,7 @@ impl RedbAuditAppender {
                 if line.is_empty() {
                     continue;
                 }
-                let je: JsonEntry = serde_json::from_str(&line)?;
-                out.push(je.into_audit()?);
+                out.push(line_to_entry(&line)?);
             }
         }
         Ok(out)
@@ -495,8 +533,7 @@ impl RedbAuditAppender {
         let mut f = self.log_file.lock();
         let mut bytes_written: u64 = 0;
         for e in &entries {
-            let je = JsonEntry::from_audit(e);
-            let mut bytes = serde_json::to_vec(&je)?;
+            let mut bytes = entry_to_line(e);
             bytes.push(b'\n');
             f.write_all(&bytes)?;
             bytes_written += bytes.len() as u64;
@@ -521,8 +558,7 @@ impl RedbAuditAppender {
 
     /// Write one entry synchronously + fsync. Used in strict mode.
     fn append_strict(&self, entry: &AuditEntry) -> Result<(), AppenderError> {
-        let je = JsonEntry::from_audit(entry);
-        let mut bytes = serde_json::to_vec(&je)?;
+        let mut bytes = entry_to_line(entry);
         bytes.push(b'\n');
         let bytes_written = bytes.len() as u64;
         let mut f = self.log_file.lock();
