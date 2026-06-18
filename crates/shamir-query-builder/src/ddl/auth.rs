@@ -3,6 +3,7 @@ use shamir_query_types::auth::{
     SecretString,
 };
 use shamir_query_types::batch::BatchOp;
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::IntoBatchOp;
 
@@ -23,7 +24,7 @@ pub struct CreateUser {
     name: String,
     password: String,
     roles: Vec<String>,
-    profile: Option<serde_json::Value>,
+    profile: Option<QueryValue>,
     database: Option<String>,
 }
 
@@ -34,8 +35,8 @@ impl CreateUser {
         self
     }
 
-    /// Set the user profile JSON.
-    pub fn profile(mut self, profile: serde_json::Value) -> Self {
+    /// Set the user profile.
+    pub fn profile(mut self, profile: QueryValue) -> Self {
         self.profile = Some(profile);
         self
     }

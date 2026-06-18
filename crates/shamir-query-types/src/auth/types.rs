@@ -1,6 +1,7 @@
 //! Auth types — Resource, Action, Permission, Role, User, and auth operations.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::value::QueryValue;
 
 use crate::auth::SecretString;
 use crate::filter::Filter;
@@ -145,7 +146,7 @@ pub struct User {
     pub roles: Vec<String>,
     /// Arbitrary user profile fields (for $user references in row filters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<serde_json::Value>,
+    pub profile: Option<QueryValue>,
     /// Optional database scope. When set, the user is *owned* by that
     /// database — its owner (whoever holds `Manage` on the database) may
     /// create/drop this user without being a global admin. `None` means a
@@ -181,7 +182,7 @@ pub struct CreateUserOp {
     #[serde(default)]
     pub roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<serde_json::Value>,
+    pub profile: Option<QueryValue>,
     /// Optional database scope. When set, the created user is owned by this
     /// database, so the database owner (a holder of `Manage` on the
     /// database) may create it without global-admin rights. See [`User`].

@@ -151,7 +151,7 @@ async fn db_gateway_execute_returns_correct_batch_response() {
     let value = qr.value.as_ref().expect("call result must have a value");
     assert_eq!(
         value,
-        &serde_json::json!(2),
+        &QueryValue::Int(2),
         "RunBatchProc should find 2 rows where n >= 2 (rows n=2, n=3)"
     );
 }

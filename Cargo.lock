@@ -3926,6 +3926,7 @@ dependencies = [
  "shamir-collections",
  "shamir-query-builder-macros",
  "shamir-query-types",
+ "shamir-types",
 ]
 
 [[package]]
@@ -4021,6 +4022,7 @@ dependencies = [
  "shamir-transport-ws",
  "shamir-tunables",
  "shamir-tx",
+ "shamir-types",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

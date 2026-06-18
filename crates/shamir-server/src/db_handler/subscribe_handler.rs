@@ -4,6 +4,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_db::access::Actor;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse};
+use shamir_types::types::value::QueryValue;
 
 use crate::subscriptions::registry::ActiveSubscription;
 use crate::subscriptions::{bridge, SubscriptionRegistry};
@@ -54,8 +55,8 @@ pub(super) fn activate_subscriptions(
                     },
                 );
                 if let Some(qr) = response.results.get_mut(alias) {
-                    if let Some(serde_json::Value::Object(map)) = &mut qr.value {
-                        map.insert("sub".to_string(), serde_json::Value::from(sub_id));
+                    if let Some(QueryValue::Map(map)) = &mut qr.value {
+                        map.insert("sub".to_string(), QueryValue::Int(sub_id as i64));
                     }
                 }
                 tracing::info!(sub_id, "subscription activated");

@@ -1,4 +1,5 @@
 use shamir_collections::TMap;
+use shamir_types::types::value::QueryValue;
 
 use crate::admin::{GroupRef, ResourceRef};
 use crate::batch::{
@@ -492,7 +493,7 @@ fn access_tree_defaults_serde() {
 #[test]
 fn nested_batch_serde_roundtrip() {
     let inner = BatchRequest {
-        id: serde_json::json!(99),
+        id: QueryValue::Int(99),
         name: None,
         transactional: false,
         isolation: None,
@@ -526,7 +527,7 @@ fn nested_batch_serde_roundtrip() {
 #[test]
 fn nested_batch_empty_bind_omitted() {
     let inner = BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -560,7 +561,7 @@ fn nested_batch_dispatch_by_batch_key() {
 #[test]
 fn nested_batch_is_admin() {
     let inner = BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -623,7 +624,7 @@ fn chown_function_serde() {
 #[test]
 fn batch_request_interner_epochs_omitted_when_empty() {
     let req = BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -650,7 +651,7 @@ fn batch_request_interner_epochs_roundtrip() {
     epochs.insert("repo_a".to_string(), 5u64);
     epochs.insert("repo_b".to_string(), 42u64);
     let req = BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -684,7 +685,7 @@ fn batch_request_backward_compat_old_peer_no_field() {
 #[test]
 fn batch_response_interner_delta_omitted_when_empty() {
     let resp = BatchResponse {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         results: TMap::default(),
         execution_plan: vec![],
         execution_time_us: 0,
@@ -711,7 +712,7 @@ fn batch_response_interner_delta_roundtrip() {
         },
     );
     let resp = BatchResponse {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         results: TMap::default(),
         execution_plan: vec![],
         execution_time_us: 0,
@@ -760,7 +761,7 @@ fn batch_request_result_encoding_defaults_to_name() {
 #[test]
 fn batch_request_result_encoding_id_roundtrip_via_msgpack() {
     let req = BatchRequest {
-        id: serde_json::json!(42),
+        id: QueryValue::Int(42),
         name: None,
         transactional: false,
         isolation: None,

@@ -1,3 +1,5 @@
+use shamir_types::types::value::QueryValue;
+
 use crate::batch::{Batch, BuildError, Durability, Handle, Isolation};
 use crate::filter;
 use crate::query::Query;
@@ -156,7 +158,7 @@ fn query_return_result_true_by_default() {
 #[test]
 fn batch_config_full() {
     let mut b = Batch::named("my_batch");
-    b.id(serde_json::json!(42));
+    b.id(QueryValue::Int(42));
     b.transactional();
     b.isolation(Isolation::Serializable);
     b.durability(Durability::Synced);
@@ -165,7 +167,7 @@ fn batch_config_full() {
 
     let req = b.build();
     assert_eq!(req.name, Some("my_batch".to_string()));
-    assert_eq!(req.id, serde_json::json!(42));
+    assert_eq!(req.id, QueryValue::Int(42));
     assert!(req.transactional);
     assert_eq!(req.isolation, Some("serializable".to_string()));
     assert_eq!(req.durability, Some("synced".to_string()));
@@ -376,7 +378,7 @@ fn op_silent_escape_hatch() {
 fn batch_new_defaults() {
     let b = Batch::new();
     let req = b.build();
-    assert_eq!(req.id, serde_json::Value::Null);
+    assert_eq!(req.id, QueryValue::Null);
     assert!(req.name.is_none());
     assert!(!req.transactional);
     assert!(req.isolation.is_none());
@@ -403,7 +405,7 @@ fn batch_default_matches_new() {
 #[test]
 fn batch_request_round_trip() {
     let mut b = Batch::named("rt");
-    b.id(serde_json::json!("req-1"));
+    b.id(QueryValue::Str("req-1".into()));
     b.transactional();
     b.isolation(Isolation::Serializable);
     b.durability(Durability::Synced);

@@ -3,6 +3,7 @@
 
 use serde_json::json;
 use shamir_query_types::auth::{Action, Effect, Permission, Resource};
+use shamir_types::mpack;
 
 use crate::ddl;
 
@@ -249,7 +250,7 @@ fn create_user_minimal() {
 fn create_user_full() {
     let op = ddl::create_user("bob", "hunter2")
         .roles(["admin", "viewer"])
-        .profile(json!({"department": "eng"}))
+        .profile(mpack!({"department": "eng"}))
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "bob");

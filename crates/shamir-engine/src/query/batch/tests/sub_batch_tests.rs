@@ -12,6 +12,7 @@ use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
+use shamir_types::types::value::QueryValue;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::{execute_batch, TableResolver};
@@ -114,7 +115,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
     );
 
     let outer_req = BatchRequest {
-        id: serde_json::json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -202,7 +203,7 @@ async fn sub_batch_bind_injects_param() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(20),
+        id: QueryValue::Int(20),
         name: None,
         transactional: false,
         isolation: None,
@@ -248,7 +249,7 @@ async fn sub_batch_bind_injects_param() {
     outer_queries.insert("sub".to_string(), sub_entry);
 
     let outer_req = BatchRequest {
-        id: serde_json::json!(2),
+        id: QueryValue::Int(2),
         name: None,
         transactional: false,
         isolation: None,
@@ -277,8 +278,7 @@ async fn sub_batch_bind_injects_param() {
         match_records
     );
     assert_eq!(
-        match_records[0]["score"],
-        serde_json::json!(42),
+        match_records[0]["score"], 42i64,
         "the returned record should have score=42"
     );
 }
@@ -328,7 +328,7 @@ async fn sub_batch_atomic() {
     );
 
     let inner_req = BatchRequest {
-        id: serde_json::json!(30),
+        id: QueryValue::Int(30),
         name: None,
         transactional: true, // atomic unit
         isolation: None,
@@ -353,7 +353,7 @@ async fn sub_batch_atomic() {
     let mut outer_queries = new_map();
     outer_queries.insert("sub".to_string(), sub_entry);
     let outer_req = BatchRequest {
-        id: serde_json::json!(3),
+        id: QueryValue::Int(3),
         name: None,
         transactional: false,
         isolation: None,
@@ -433,7 +433,7 @@ async fn tx_in_tx_rejected() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(40),
+        id: QueryValue::Int(40),
         name: None,
         transactional: true, // inner tx — should be rejected
         isolation: None,
@@ -461,7 +461,7 @@ async fn tx_in_tx_rejected() {
     // already-open tx using execute_in_open_tx, so the runner gets
     // tx: Some(...) and hits the guard when it sees sub.batch.transactional.
     let outer_req = BatchRequest {
-        id: serde_json::json!(4),
+        id: QueryValue::Int(4),
         name: None,
         transactional: false,
         isolation: None,
@@ -553,7 +553,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(50),
+        id: QueryValue::Int(50),
         name: None,
         transactional: false,
         isolation: None,
@@ -579,7 +579,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
     let mut outer_queries = new_map();
     outer_queries.insert("sub".to_string(), sub_entry);
     let outer_req = BatchRequest {
-        id: serde_json::json!(5),
+        id: QueryValue::Int(5),
         name: None,
         transactional: false,
         isolation: None,
@@ -638,7 +638,7 @@ async fn unbound_param_in_bind_errors() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(51),
+        id: QueryValue::Int(51),
         name: None,
         transactional: false,
         isolation: None,
@@ -671,7 +671,7 @@ async fn unbound_param_in_bind_errors() {
     let mut outer_queries = new_map();
     outer_queries.insert("sub".to_string(), sub_entry);
     let outer_req = BatchRequest {
-        id: serde_json::json!(5),
+        id: QueryValue::Int(5),
         name: None,
         transactional: false,
         isolation: None,
@@ -745,7 +745,7 @@ async fn param_in_insert_values() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(60),
+        id: QueryValue::Int(60),
         name: None,
         transactional: false,
         isolation: None,
@@ -800,7 +800,7 @@ async fn param_in_insert_values() {
     outer_queries.insert("read_back".to_string(), read_back_entry);
 
     let outer_req = BatchRequest {
-        id: serde_json::json!(6),
+        id: QueryValue::Int(6),
         name: None,
         transactional: false,
         isolation: None,
@@ -868,7 +868,7 @@ async fn param_in_insert_nested() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(70),
+        id: QueryValue::Int(70),
         name: None,
         transactional: false,
         isolation: None,
@@ -902,7 +902,7 @@ async fn param_in_insert_nested() {
     outer_queries.insert("sub".to_string(), sub_entry);
 
     let outer_req = BatchRequest {
-        id: serde_json::json!(7),
+        id: QueryValue::Int(7),
         name: None,
         transactional: false,
         isolation: None,
@@ -940,7 +940,7 @@ async fn param_in_insert_nested() {
         },
     );
     let read_req = BatchRequest {
-        id: serde_json::json!(71),
+        id: QueryValue::Int(71),
         name: None,
         transactional: false,
         isolation: None,
@@ -994,7 +994,7 @@ async fn param_in_insert_missing_param_errors() {
         },
     );
     let inner_req = BatchRequest {
-        id: serde_json::json!(80),
+        id: QueryValue::Int(80),
         name: None,
         transactional: false,
         isolation: None,
@@ -1021,7 +1021,7 @@ async fn param_in_insert_missing_param_errors() {
     outer_queries.insert("sub".to_string(), sub_entry);
 
     let outer_req = BatchRequest {
-        id: serde_json::json!(8),
+        id: QueryValue::Int(8),
         name: None,
         transactional: false,
         isolation: None,

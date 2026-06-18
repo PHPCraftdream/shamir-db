@@ -240,7 +240,9 @@ pub(super) fn filter_value_to_query_value(
             // Same value-first / records-second rule as the filter evaluator:
             // a Call result lives in `value`; a Read result lives in `records`.
             if let Some(value) = &qr.value {
-                json_value_to_query_value(value, path.as_deref())
+                navigate_query_value(value, path.as_deref())
+                    .cloned()
+                    .unwrap_or(QueryValue::Null)
             } else if path.is_none() {
                 // No path + Read result: synthesize from the records array.
                 let arr: Vec<QueryValue> = qr
@@ -248,7 +250,7 @@ pub(super) fn filter_value_to_query_value(
                     .iter()
                     .map(|r| {
                         let jv = r.as_json();
-                        json_value_to_query_value(&jv, None)
+                        json_to_query_value(&jv)
                     })
                     .collect();
                 QueryValue::List(arr)
@@ -264,12 +266,12 @@ pub(super) fn filter_value_to_query_value(
                                 let record_json = record.as_json();
                                 let after = &rest[end + 1..];
                                 if let Some(field_path) = after.strip_prefix('.') {
-                                    if let Some(field_val) = record_json.get(field_path) {
-                                        return json_value_to_query_value(field_val, None);
-                                    }
-                                    return QueryValue::Null;
+                                    return record_json
+                                        .get(field_path)
+                                        .map(json_to_query_value)
+                                        .unwrap_or(QueryValue::Null);
                                 }
-                                return json_value_to_query_value(&record_json, None);
+                                return json_to_query_value(&record_json);
                             }
                         }
                     }
@@ -282,15 +284,42 @@ pub(super) fn filter_value_to_query_value(
     }
 }
 
-/// Convert a `serde_json::Value` (the wire representation used in
-/// `QueryResult.value` / `QueryResult.records`) into a `QueryValue`, with
-/// optional path navigation. Used to resolve `$query` refs inside Call
-/// params.
-pub(super) fn json_value_to_query_value(v: &serde_json::Value, path: Option<&str>) -> QueryValue {
-    let Some(target) = navigate_json_value(v, path) else {
-        return QueryValue::Null;
+/// Walk a path like `.field`, `[0]`, `[0].name` through a `QueryValue`.
+/// Returns `None` on any miss / unsupported syntax.
+/// `None` path returns the root value itself.
+fn navigate_query_value<'a>(mut cur: &'a QueryValue, path: Option<&str>) -> Option<&'a QueryValue> {
+    let Some(path) = path else {
+        return Some(cur);
     };
-    match target {
+    let mut rest = path;
+    while !rest.is_empty() {
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
+            let field = &after_dot[..end];
+            cur = match cur {
+                QueryValue::Map(m) => m.get(field)?,
+                _ => return None,
+            };
+            rest = &after_dot[end..];
+        } else if rest.starts_with('[') {
+            let bracket_end = rest.find(']')?;
+            let idx: usize = rest[1..bracket_end].parse().ok()?;
+            cur = match cur {
+                QueryValue::List(l) => l.get(idx)?,
+                _ => return None,
+            };
+            rest = &rest[bracket_end + 1..];
+        } else {
+            return None;
+        }
+    }
+    Some(cur)
+}
+
+/// Convert a `serde_json::Value` into a `QueryValue` (shallow/recursive).
+/// Used only for the records path (which still materialises via `as_json()`).
+fn json_to_query_value(v: &serde_json::Value) -> QueryValue {
+    match v {
         serde_json::Value::Null => QueryValue::Null,
         serde_json::Value::Bool(b) => QueryValue::Bool(*b),
         serde_json::Value::Number(n) => {
@@ -301,46 +330,15 @@ pub(super) fn json_value_to_query_value(v: &serde_json::Value, path: Option<&str
             }
         }
         serde_json::Value::String(s) => QueryValue::Str(s.clone()),
-        serde_json::Value::Array(arr) => QueryValue::List(
-            arr.iter()
-                .map(|v| json_value_to_query_value(v, None))
-                .collect(),
-        ),
+        serde_json::Value::Array(arr) => {
+            QueryValue::List(arr.iter().map(json_to_query_value).collect())
+        }
         serde_json::Value::Object(map) => {
             let mut out = crate::types::common::new_map();
             for (k, vv) in map {
-                out.insert(k.clone(), json_value_to_query_value(vv, None));
+                out.insert(k.clone(), json_to_query_value(vv));
             }
             QueryValue::Map(out)
         }
     }
-}
-
-/// Walk a path like `.field`, `[0]`, `[0].name` through a `serde_json::Value`.
-/// Mirrors `resolve_json_path` in the filter evaluator — duplicated here to
-/// keep `shamir-db` independent of `shamir-engine::query::filter::eval`
-/// (which is crate-private). Returns `None` on any miss / unsupported syntax.
-fn navigate_json_value<'a>(
-    mut cur: &'a serde_json::Value,
-    path: Option<&str>,
-) -> Option<&'a serde_json::Value> {
-    let Some(path) = path else {
-        return Some(cur);
-    };
-    let mut rest = path;
-    while !rest.is_empty() {
-        if let Some(after_dot) = rest.strip_prefix('.') {
-            let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
-            cur = cur.get(&after_dot[..end])?;
-            rest = &after_dot[end..];
-        } else if rest.starts_with('[') {
-            let bracket_end = rest.find(']')?;
-            let idx: usize = rest[1..bracket_end].parse().ok()?;
-            cur = cur.get(idx)?;
-            rest = &rest[bracket_end + 1..];
-        } else {
-            return None;
-        }
-    }
-    Some(cur)
 }

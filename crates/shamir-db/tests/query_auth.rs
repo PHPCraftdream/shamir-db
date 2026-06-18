@@ -1,6 +1,7 @@
 //! End-to-end tests for auth operations via ShamirDb::execute.
 
 use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -34,7 +35,7 @@ async fn test_create_user() {
         "cu",
         ddl::create_user("alice", "secret123")
             .roles(["readonly"])
-            .profile(json!({
+            .profile(mpack!({
                 "department": "engineering",
                 "level": 3
             })),

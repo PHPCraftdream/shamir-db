@@ -1,4 +1,3 @@
-use serde_json::Value;
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
@@ -7,6 +6,7 @@ use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::subscribe::{SubscribeOp, UnsubscribeOp};
+use shamir_types::types::value::QueryValue;
 
 use super::build_error::BuildError;
 use super::durability::Durability;
@@ -20,7 +20,7 @@ use super::isolation::Isolation;
 /// [`BatchRequest`].
 #[derive(Debug, Clone)]
 pub struct Batch {
-    id: Value,
+    id: QueryValue,
     name: Option<String>,
     transactional: bool,
     isolation: Option<String>,
@@ -41,7 +41,7 @@ impl Batch {
     /// Create an empty batch with default settings.
     pub fn new() -> Self {
         Self {
-            id: Value::Null,
+            id: QueryValue::Null,
             name: None,
             transactional: false,
             isolation: None,
@@ -69,7 +69,7 @@ impl Batch {
     }
 
     /// Set the client-provided request id.
-    pub fn id(&mut self, id: impl Into<Value>) -> &mut Self {
+    pub fn id(&mut self, id: impl Into<QueryValue>) -> &mut Self {
         self.id = id.into();
         self
     }

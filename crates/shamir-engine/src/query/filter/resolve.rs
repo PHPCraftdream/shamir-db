@@ -247,7 +247,7 @@ pub fn resolve_filter_value(
 pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> Option<QueryValue> {
     // Call-result path: source is `QueryResult.value`.
     if let Some(value) = &qr.value {
-        return resolve_json_path(value, path).map(json_to_query_value);
+        return resolve_query_value_path(value, path).cloned();
     }
 
     // Read-result path: source is `QueryResult.records`.
@@ -299,20 +299,20 @@ pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> 
 }
 
 /// Walk a path like `.field`, `[0]`, `[0].name`, or `None` (root) through a
-/// `serde_json::Value`. Used by [`resolve_query_ref_value`] when the source
-/// is a Call result (`QueryResult.value`).
+/// `QueryValue`. Used by [`resolve_query_ref_value`] when the source is a
+/// Call result (`QueryResult.value`).
 ///
 /// Supported segments:
-/// - `.field`     → object field access.
-/// - `[n]`        → array index.
+/// - `.field`     → Map field access.
+/// - `[n]`        → List index.
 /// - `[n].field`  → chained.
 ///
 /// The path is intentionally a subset of the full `QueryReference` grammar —
 /// it is what the `QueryRef.path` string carries in practice for Call refs.
-pub(super) fn resolve_json_path<'a>(
-    mut cur: &'a serde_json::Value,
+pub(super) fn resolve_query_value_path<'a>(
+    mut cur: &'a QueryValue,
     path: Option<&str>,
-) -> Option<&'a serde_json::Value> {
+) -> Option<&'a QueryValue> {
     // Preserve the original semantics: a `None` path returns the root
     // value itself (Some(cur)), not None.
     let mut rest = match path {
@@ -323,12 +323,18 @@ pub(super) fn resolve_json_path<'a>(
         if let Some(after_dot) = rest.strip_prefix('.') {
             let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
             let field = &after_dot[..end];
-            cur = cur.get(field)?;
+            cur = match cur {
+                QueryValue::Map(m) => m.get(field)?,
+                _ => return None,
+            };
             rest = &after_dot[end..];
         } else if rest.starts_with('[') {
             let bracket_end = rest.find(']')?;
             let idx: usize = rest[1..bracket_end].parse().ok()?;
-            cur = cur.get(idx)?;
+            cur = match cur {
+                QueryValue::List(l) => l.get(idx)?,
+                _ => return None,
+            };
             rest = &rest[bracket_end + 1..];
         } else {
             return None;

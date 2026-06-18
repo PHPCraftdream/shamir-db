@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use serde_json::json;
 use shamir_collections::TMap;
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
 use shamir_db::access::Actor;
+use shamir_db::types::common::new_map;
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, BatchResponse, QueryEntry, ResultEncoding,
@@ -62,7 +63,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
     );
 
     let batch = BatchRequest {
-        id: json!(1),
+        id: QueryValue::Int(1),
         name: None,
         transactional: false,
         isolation: None,
@@ -76,23 +77,23 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
     };
 
     let mut response = BatchResponse {
-        id: json!(1),
+        id: QueryValue::Int(1),
         results: Default::default(),
         execution_plan: vec![],
         execution_time_us: 0,
         transaction: None,
         interner_delta: Default::default(),
     };
+    let mut initial_value = new_map();
+    initial_value.insert("subscription_grant".to_string(), QueryValue::Bool(true));
+    initial_value.insert("sources_count".to_string(), QueryValue::Int(1));
     response.results.insert(
         "my_sub".to_string(),
         QueryResult {
             records: vec![],
             stats: None,
             pagination: None,
-            value: Some(json!({
-                "subscription_grant": true,
-                "sources_count": 1
-            })),
+            value: Some(QueryValue::Map(initial_value)),
         },
     );
 
@@ -110,7 +111,13 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         .get("my_sub")
         .expect("my_sub result missing");
     let value = qr.value.as_ref().expect("value missing");
-    let sub_id = value.get("sub").expect("sub field missing");
+    let sub_id = match value {
+        QueryValue::Map(m) => match m.get("sub") {
+            Some(QueryValue::Int(id)) => *id as u64,
+            other => panic!("expected sub field as Int, got {:?}", other),
+        },
+        other => panic!("expected Map value, got {:?}", other),
+    };
     assert_eq!(sub_id, 1, "first subscription should get sub_id = 1");
     assert_eq!(registry.count(), 1);
 }

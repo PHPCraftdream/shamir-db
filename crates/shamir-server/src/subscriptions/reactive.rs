@@ -1,5 +1,6 @@
 use shamir_collections::{new_map, TMap};
 use shamir_db::access::Actor;
+use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
@@ -61,7 +62,7 @@ pub(super) async fn execute_reactive_batch(
     );
 
     let wrapper = BatchRequest {
-        id: serde_json::Value::Null,
+        id: QueryValue::Null,
         name: None,
         transactional: false,
         isolation: None,
@@ -108,7 +109,7 @@ pub(super) async fn execute_reactive_call(
         },
     );
     let inner_batch = BatchRequest {
-        id: serde_json::Value::Null,
+        id: QueryValue::Null,
         name: None,
         transactional: false,
         isolation: None,
@@ -134,7 +135,7 @@ pub(super) async fn execute_reactive_call(
         },
     );
     let wrapper = BatchRequest {
-        id: serde_json::Value::Null,
+        id: QueryValue::Null,
         name: None,
         transactional: false,
         isolation: None,

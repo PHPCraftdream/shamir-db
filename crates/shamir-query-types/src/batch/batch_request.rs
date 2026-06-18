@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use shamir_collections::TMap;
+use shamir_types::types::value::QueryValue;
 
 use super::batch_limits::BatchLimits;
 use super::query_entry::QueryEntry;
@@ -40,7 +41,7 @@ use super::result_encoding::ResultEncoding;
 pub struct BatchRequest {
     /// Client-provided request ID, echoed back in the response.
     /// Used for correlating async requests with responses.
-    pub id: serde_json::Value,
+    pub id: QueryValue,
 
     /// Optional name for logging/debugging.
     #[serde(default, skip_serializing_if = "Option::is_none")]

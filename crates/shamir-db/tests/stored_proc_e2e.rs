@@ -5,7 +5,7 @@
 //! - A `{ "call": "fn_name", "params": [...] }` batch entry invokes a
 //!   registered function through the batch surface.
 //! - The function's `QueryValue` return maps to `QueryResult.value` as
-//!   `serde_json::Value` (object / array / scalar / null — all four forms).
+//!   `QueryValue` (object / array / scalar / null — all four forms).
 //! - setuid getter-only: a user without table Read invokes a setuid
 //!   procedure and receives data; without setuid the call is denied.
 //!
@@ -208,11 +208,11 @@ async fn call_returns_object() {
         "records should be empty for a call result"
     );
     let value = qr.value.as_ref().expect("value must be Some for a call");
+    let mut expected_map = new_map();
+    expected_map.insert("sum".to_string(), QueryValue::Int(42));
     assert_eq!(
         value,
-        &serde_json::json!({
-            "sum": 42
-        }),
+        &QueryValue::Map(expected_map),
         "object return: sum of 10 + 32"
     );
 }
@@ -242,7 +242,11 @@ async fn call_returns_array() {
     let value = qr.value.as_ref().expect("value must be Some");
     assert_eq!(
         value,
-        &serde_json::json!([1, "hello", true]),
+        &QueryValue::List(vec![
+            QueryValue::Int(1),
+            QueryValue::Str("hello".to_string()),
+            QueryValue::Bool(true),
+        ]),
         "array return: echo of params"
     );
 }
@@ -263,7 +267,7 @@ async fn call_returns_scalar() {
 
     let qr = &resp.results["result"];
     let value = qr.value.as_ref().expect("value must be Some");
-    assert_eq!(value, &serde_json::json!(42), "scalar return: 42");
+    assert_eq!(value, &QueryValue::Int(42), "scalar return: 42");
 }
 
 #[tokio::test]
@@ -284,7 +288,7 @@ async fn call_returns_null() {
         .value
         .as_ref()
         .expect("value must be Some (even for null)");
-    assert_eq!(value, &serde_json::Value::Null, "null return");
+    assert_eq!(value, &QueryValue::Null, "null return");
 }
 
 // ============================================================================
@@ -374,7 +378,7 @@ async fn setuid_call_lets_stranger_read_via_owner() {
     let value = qr.value.as_ref().expect("value must be Some");
     assert_eq!(
         value,
-        &serde_json::json!(2),
+        &QueryValue::Int(2),
         "setuid getter should see 2 rows via owner A's authority"
     );
 }
@@ -565,7 +569,7 @@ async fn phase2_params_from_read_ref() {
         .expect("call result must have value");
     assert_eq!(
         p_value,
-        &serde_json::json!(7),
+        &QueryValue::Int(7),
         "echo_first should receive the resolved id=7 from q1[0].id"
     );
 }
@@ -608,7 +612,7 @@ async fn phase2_params_from_call_ref() {
         .expect("p2 must have value");
     assert_eq!(
         p2_value,
-        &serde_json::json!(5),
+        &QueryValue::Int(5),
         "echo_first should receive id=5 from p1.id"
     );
 }

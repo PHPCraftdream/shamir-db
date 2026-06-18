@@ -1,6 +1,7 @@
 //! QueryResult and QueryStats — query execution results.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::value::QueryValue;
 
 use super::query_record::QueryRecord;
 use super::PaginationInfo;
@@ -35,5 +36,5 @@ pub struct QueryResult {
     /// here; `records` is empty. `None` for regular DML/DDL results.
     /// Skipped from serialization when absent (backward-compatible).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<serde_json::Value>,
+    pub value: Option<QueryValue>,
 }

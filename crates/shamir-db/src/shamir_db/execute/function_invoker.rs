@@ -53,12 +53,11 @@ impl FunctionInvoker for ShamirFunctionInvoker {
             })?;
 
         // Map QueryValue -> QueryResult with `value` field.
-        let json_value = serde_json::to_value(&qv).unwrap_or(serde_json::Value::Null);
         Ok(QueryResult {
             records: vec![],
             stats: None,
             pagination: None,
-            value: Some(json_value),
+            value: Some(qv),
         })
     }
 }

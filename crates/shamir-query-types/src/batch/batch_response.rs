@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use shamir_collections::TMap;
+use shamir_types::types::value::QueryValue;
 
 use crate::read::QueryResult;
 
@@ -26,7 +27,7 @@ use super::transaction_info::TransactionInfo;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchResponse {
     /// Echoed request ID from BatchRequest.
-    pub id: serde_json::Value,
+    pub id: QueryValue,
 
     /// Results by alias.
     #[serde(default)]

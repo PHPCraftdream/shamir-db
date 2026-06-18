@@ -26,6 +26,7 @@ shamir-db = { path = "../shamir-db" }
 shamir-query-types = { path = "../shamir-query-types" }
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-tx = { path = "../shamir-tx" }
+shamir-types = { path = "../shamir-types", default-features = false }
 # High-level TLS+SCRAM client — powers the `access-tree --connect` online
 # mode so the one binary can introspect a *running* server, not just a
 # stopped data_dir.

@@ -134,14 +134,19 @@ fn unwrap_batch(resp: DbResponse) -> shamir_query_types::batch::BatchResponse {
 
 /// Pull the `sub` id the server injected into `results[alias].value.sub`.
 fn sub_id_of(resp: &shamir_query_types::batch::BatchResponse, alias: &str) -> u64 {
+    use shamir_types::types::value::QueryValue;
     let qr = resp
         .results
         .get(alias)
         .unwrap_or_else(|| panic!("missing result for alias {alias}"));
     let v = qr.value.as_ref().expect("subscribe result has no `value`");
-    v.get("sub")
-        .and_then(|s| s.as_u64())
-        .expect("subscribe result missing `sub`")
+    match v {
+        QueryValue::Map(m) => match m.get("sub") {
+            Some(QueryValue::Int(id)) => *id as u64,
+            other => panic!("subscribe result `sub` is not Int: {:?}", other),
+        },
+        other => panic!("subscribe result value is not Map: {:?}", other),
+    }
 }
 
 /// Wait up to `dur` for a single push frame.

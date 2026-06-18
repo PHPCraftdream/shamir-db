@@ -31,7 +31,7 @@ use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -136,7 +136,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             },
                         );
                         let request = BatchRequest {
-                            id: serde_json::json!(1),
+                            id: QueryValue::Int(1),
                             name: None,
                             transactional,
                             isolation: None,
@@ -189,7 +189,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             },
                         );
                         let request = BatchRequest {
-                            id: serde_json::json!(1),
+                            id: QueryValue::Int(1),
                             name: None,
                             transactional,
                             isolation: None,
@@ -272,7 +272,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             },
                         );
                         let request = BatchRequest {
-                            id: serde_json::json!(1),
+                            id: QueryValue::Int(1),
                             name: None,
                             transactional,
                             isolation: None,
@@ -514,7 +514,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                         },
                     );
                     let request = BatchRequest {
-                        id: serde_json::json!(1),
+                        id: QueryValue::Int(1),
                         name: None,
                         transactional: true,
                         isolation: None,
@@ -743,7 +743,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 },
             );
             let request = BatchRequest {
-                id: serde_json::json!(1),
+                id: QueryValue::Int(1),
                 name: None,
                 transactional: false,
                 isolation: None,
@@ -781,7 +781,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 },
             );
             BatchRequest {
-                id: serde_json::json!(2),
+                id: QueryValue::Int(2),
                 name: None,
                 transactional: false,
                 isolation: None,
@@ -820,7 +820,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 },
             );
             BatchRequest {
-                id: serde_json::json!(3),
+                id: QueryValue::Int(3),
                 name: None,
                 transactional: false,
                 isolation: None,
@@ -859,7 +859,7 @@ fn bench_read_scan(c: &mut Criterion) {
                 },
             );
             BatchRequest {
-                id: serde_json::json!(4),
+                id: QueryValue::Int(4),
                 name: None,
                 transactional: false,
                 isolation: None,
