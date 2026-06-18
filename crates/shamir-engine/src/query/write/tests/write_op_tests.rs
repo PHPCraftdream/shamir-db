@@ -5,6 +5,7 @@
 //! deserialization still use `json!` — that IS the thing under test.
 
 use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_query_builder::filter;
 use shamir_query_builder::filter::FilterExt;
@@ -50,21 +51,23 @@ fn test_insert_multiple_records() {
 
 #[test]
 fn test_insert_nested_data() {
-    // Nested arrays/objects are not representable via Doc::set (FilterValue
-    // has no Map/Array variant), so we use set_json for the nested parts.
+    // Nested arrays/objects are supplied as QueryValue via set_value + mpack!.
     let op = write::insert("orders")
         .row(
             doc()
                 .set("id", 1_i64)
                 .set("user_id", 100_i64)
-                .set_json(
+                .set_value(
                     "items",
-                    json!([
+                    mpack!([
                         { "product_id": 1, "qty": 2 },
                         { "product_id": 3, "qty": 1 }
                     ]),
                 )
-                .set_json("metadata", json!({"source": "web", "coupon": "SAVE10"})),
+                .set_value(
+                    "metadata",
+                    mpack!({"source": "web", "coupon": "SAVE10"}),
+                ),
         )
         .build();
 
@@ -503,7 +506,7 @@ fn test_insert_with_null() {
         .row(
             doc()
                 .set("name", "Alice")
-                .set_json("email", serde_json::Value::Null),
+                .set_value("email", mpack!(null)),
         )
         .build();
 

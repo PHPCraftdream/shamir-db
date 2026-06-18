@@ -1,15 +1,16 @@
 //! Tests for the `write` module — Doc, Insert, Update, Upsert, Delete.
 //!
-//! Each builder is verified against exact wire JSON and round-tripped
-//! through serde where the DTO supports it.
+//! Each builder is verified against the expected `QueryValue` structure and
+//! round-tripped through msgpack (`rmp_serde::to_vec_named` /
+//! `rmp_serde::from_slice`).
 //!
-//! **Note:** `serde_json` `preserve_order` is NOT enabled in this
-//! workspace, so multi-field `Doc` assertions check individual keys
-//! rather than relying on object-level equality with a `json!()` literal
-//! whose key order may differ.
+//! Multi-field `Doc` assertions check individual keys rather than full
+//! structural equality because insertion order is preserved but we do not
+//! rely on a specific key ordering for the assertions.
 
-use serde_json::{json, Value};
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 
 use crate::filter;
 use crate::val::*;
@@ -17,14 +18,16 @@ use crate::write::*;
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-/// Serialize a DTO, assert equality, then round-trip back.
-fn assert_dto_wire<T>(dto: &T, expected: &Value)
+/// Serialize a DTO to msgpack, assert structural equality via `QueryValue`,
+/// then round-trip back and compare.
+fn assert_dto_wire<T>(dto: &T, expected: &QueryValue)
 where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
-    let got = serde_json::to_value(dto).unwrap();
-    assert_eq!(got, *expected, "wire JSON mismatch");
-    let back: T = serde_json::from_value(got).unwrap();
+    let bytes = rmp_serde::to_vec_named(dto).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got, *expected, "wire msgpack mismatch");
+    let back: T = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, *dto, "round-trip mismatch");
 }
 
@@ -35,23 +38,23 @@ where
 #[test]
 fn doc_empty() {
     let d = doc().build();
-    assert_eq!(d, json!({}));
+    assert_eq!(d, mpack!({}));
 }
 
 #[test]
 fn doc_literal_fields() {
     let d = doc().set("name", "Alice").set("age", 30).build();
-    assert_eq!(d["name"], json!("Alice"));
-    assert_eq!(d["age"], json!(30));
+    assert_eq!(d["name"], QueryValue::Str("Alice".to_string()));
+    assert_eq!(d["age"], QueryValue::Int(30));
 }
 
 #[test]
 fn doc_nested_literal() {
     let d = doc()
-        .set_json("address", json!({"city": "NY", "zip": "10001"}))
+        .set_value("address", mpack!({"city": "NY", "zip": "10001"}))
         .build();
-    assert_eq!(d["address"]["city"], json!("NY"));
-    assert_eq!(d["address"]["zip"], json!("10001"));
+    assert_eq!(d["address"]["city"], QueryValue::Str("NY".to_string()));
+    assert_eq!(d["address"]["zip"], QueryValue::Str("10001".to_string()));
 }
 
 #[test]
@@ -61,7 +64,7 @@ fn doc_set_expr_fn_call() {
         .build();
     assert_eq!(
         d["email_norm"],
-        json!({
+        mpack!({
             "$fn": {
                 "name": "strings/lower",
                 "args": [{"$ref": ["email"]}]
@@ -73,19 +76,19 @@ fn doc_set_expr_fn_call() {
 #[test]
 fn doc_set_expr_field_ref() {
     let d = doc().set("copy", col("source")).build();
-    assert_eq!(d["copy"], json!({"$ref": ["source"]}));
+    assert_eq!(d["copy"], mpack!({"$ref": ["source"]}));
 }
 
 #[test]
 fn doc_set_expr_query_ref() {
     let d = doc().set("user_id", qref("users", "[0].id")).build();
-    assert_eq!(d["user_id"], json!({"$query": "@users", "path": "[0].id"}));
+    assert_eq!(d["user_id"], mpack!({"$query": "@users", "path": "[0].id"}));
 }
 
 #[test]
 fn doc_into_value() {
-    let v: Value = doc().set("x", 1).into();
-    assert_eq!(v["x"], json!(1));
+    let v: QueryValue = doc().set("x", 1).into();
+    assert_eq!(v["x"], QueryValue::Int(1));
 }
 
 // ============================================================================
@@ -94,8 +97,8 @@ fn doc_into_value() {
 
 #[test]
 fn insert_single_row_literal() {
-    let op = insert("users").row(json!({"name": "Alice"})).build();
-    let expected = json!({
+    let op = insert("users").row(mpack!({"name": "Alice"})).build();
+    let expected = mpack!({
         "insert_into": "users",
         "values": [{"name": "Alice"}]
     });
@@ -107,14 +110,15 @@ fn insert_with_doc() {
     let op = insert("users")
         .row(doc().set("name", "Alice").set("age", 25))
         .build();
-    // Check structure per-field (no preserve_order).
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["insert_into"], json!("users"));
+    // Check structure per-field.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["insert_into"], QueryValue::Str("users".to_string()));
     let row = &got["values"][0];
-    assert_eq!(row["name"], json!("Alice"));
-    assert_eq!(row["age"], json!(25));
+    assert_eq!(row["name"], QueryValue::Str("Alice".to_string()));
+    assert_eq!(row["age"], QueryValue::Int(25));
     // Round-trip the DTO.
-    let back: InsertOp = serde_json::from_value(got).unwrap();
+    let back: InsertOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
@@ -128,13 +132,14 @@ fn insert_computed_fn_value() {
                 .set("email_norm", func("strings/lower", [col("email")])),
         )
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["insert_into"], json!("users"));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["insert_into"], QueryValue::Str("users".to_string()));
     let row = &got["values"][0];
-    assert_eq!(row["email"], json!("A@X.COM"));
+    assert_eq!(row["email"], QueryValue::Str("A@X.COM".to_string()));
     assert_eq!(
         row["email_norm"],
-        json!({
+        mpack!({
             "$fn": {
                 "name": "strings/lower",
                 "args": [{"$ref": ["email"]}]
@@ -142,17 +147,17 @@ fn insert_computed_fn_value() {
         })
     );
     // Round-trip.
-    let back: InsertOp = serde_json::from_value(got).unwrap();
+    let back: InsertOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
 #[test]
 fn insert_multiple_rows() {
     let op = insert("items")
-        .rows(vec![json!({"a": 1}), json!({"a": 2})])
+        .rows(vec![mpack!({"a": 1}), mpack!({"a": 2})])
         .build();
     assert_eq!(op.values.len(), 2);
-    let expected = json!({
+    let expected = mpack!({
         "insert_into": "items",
         "values": [{"a": 1}, {"a": 2}]
     });
@@ -162,10 +167,11 @@ fn insert_multiple_rows() {
 #[test]
 fn insert_with_repo() {
     let op = Insert::with_repo("hot", "sessions")
-        .row(json!({"token": "abc"}))
+        .row(mpack!({"token": "abc"}))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["insert_into"], json!(["hot", "sessions"]));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["insert_into"], mpack!(["hot", "sessions"]));
 }
 
 // ============================================================================
@@ -178,14 +184,17 @@ fn update_basic() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Bob"))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["update"], json!("users"));
-    assert!(got["where"].is_object());
-    assert_eq!(got["set"]["name"], json!("Bob"));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["update"], QueryValue::Str("users".to_string()));
+    assert!(matches!(got["where"], QueryValue::Map(_)));
+    assert_eq!(got["set"]["name"], QueryValue::Str("Bob".to_string()));
     // No select key when not set.
-    assert!(got.get("select").is_none());
+    if let QueryValue::Map(ref m) = got {
+        assert!(!m.contains_key("select"));
+    }
     // Round-trip.
-    let back: UpdateOp = serde_json::from_value(got).unwrap();
+    let back: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
@@ -196,10 +205,16 @@ fn update_with_returning_all() {
         .set(doc().set("active", false))
         .returning(UpdateReturnMode::All)
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["select"]["return_mode"], json!("all"));
-    assert!(got["select"].get("fields").is_none());
-    let back: UpdateOp = serde_json::from_value(got).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(
+        got["select"]["return_mode"],
+        QueryValue::Str("all".to_string())
+    );
+    if let QueryValue::Map(ref m) = got["select"] {
+        assert!(!m.contains_key("fields"));
+    }
+    let back: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
@@ -210,28 +225,36 @@ fn update_with_returning_fields() {
         .set(doc().set("name", "X"))
         .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["select"]["return_mode"], json!("changed"));
-    assert_eq!(got["select"]["fields"], json!(["id", "name"]));
-    let back: UpdateOp = serde_json::from_value(got).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(
+        got["select"]["return_mode"],
+        QueryValue::Str("changed".to_string())
+    );
+    assert_eq!(got["select"]["fields"], mpack!(["id", "name"]));
+    let back: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
 #[test]
 fn update_with_repo() {
     let op = Update::with_repo("hot", "sessions")
-        .set(json!({"renewed": true}))
+        .set(mpack!({"renewed": true}))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["update"], json!(["hot", "sessions"]));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["update"], mpack!(["hot", "sessions"]));
 }
 
 #[test]
 fn update_no_where() {
     // An update without where is valid (updates all records).
     let op = update("users").set(doc().set("active", false)).build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert!(got.get("where").is_none());
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    if let QueryValue::Map(ref m) = got {
+        assert!(!m.contains_key("where"));
+    }
 }
 
 // ============================================================================
@@ -241,40 +264,43 @@ fn update_no_where() {
 #[test]
 fn upsert_basic() {
     let op = upsert("cache")
-        .key(json!("session:abc"))
+        .key(mpack!("session:abc"))
         .value(doc().set("data", "payload"))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["set"], json!("cache"));
-    assert_eq!(got["key"], json!("session:abc"));
-    assert_eq!(got["value"]["data"], json!("payload"));
-    let back: SetOp = serde_json::from_value(got).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["set"], QueryValue::Str("cache".to_string()));
+    assert_eq!(got["key"], QueryValue::Str("session:abc".to_string()));
+    assert_eq!(got["value"]["data"], QueryValue::Str("payload".to_string()));
+    let back: SetOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
 #[test]
 fn upsert_with_repo() {
     let op = Upsert::with_repo("hot", "kv")
-        .key(json!("k1"))
-        .value(json!(42))
+        .key(mpack!("k1"))
+        .value(mpack!(42))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["set"], json!(["hot", "kv"]));
-    assert_eq!(got["key"], json!("k1"));
-    assert_eq!(got["value"], json!(42));
-    let back: SetOp = serde_json::from_value(got).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["set"], mpack!(["hot", "kv"]));
+    assert_eq!(got["key"], QueryValue::Str("k1".to_string()));
+    assert_eq!(got["value"], QueryValue::Int(42));
+    let back: SetOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
 #[test]
 fn upsert_with_doc_value() {
     let op = upsert("users")
-        .key(json!({"email": "a@x.com"}))
+        .key(mpack!({"email": "a@x.com"}))
         .value(doc().set("name", "Alice").set("age", 30))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["value"]["name"], json!("Alice"));
-    assert_eq!(got["value"]["age"], json!(30));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["value"]["name"], QueryValue::Str("Alice".to_string()));
+    assert_eq!(got["value"]["age"], QueryValue::Int(30));
 }
 
 // ============================================================================
@@ -286,7 +312,7 @@ fn delete_basic() {
     let op = delete("sessions")
         .where_(filter::eq("expired", true))
         .build();
-    let expected = json!({
+    let expected = mpack!({
         "delete_from": "sessions",
         "where": {
             "op": "eq",
@@ -302,8 +328,9 @@ fn delete_with_repo() {
     let op = Delete::with_repo("hot", "sessions")
         .where_(filter::eq("expired", true))
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["delete_from"], json!(["hot", "sessions"]));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["delete_from"], mpack!(["hot", "sessions"]));
 }
 
 #[test]
@@ -312,11 +339,12 @@ fn delete_complex_where() {
 
     let f = filter::eq("status", "inactive").and(filter::lt("last_seen", 1000_i64));
     let op = delete("users").where_(f).build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["delete_from"], json!("users"));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(got["delete_from"], QueryValue::Str("users".to_string()));
     // The where clause is an And with two children.
-    assert_eq!(got["where"]["op"], json!("and"));
-    let back: DeleteOp = serde_json::from_value(got).unwrap();
+    assert_eq!(got["where"]["op"], QueryValue::Str("and".to_string()));
+    let back: DeleteOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
@@ -339,32 +367,37 @@ fn insert_with_query_ref_value() {
                 .set("user_id", qref("users", "[0].id")),
         )
         .build();
-    let got = serde_json::to_value(&op).unwrap();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     let row = &got["values"][0];
-    assert_eq!(row["total"], json!(100));
+    assert_eq!(row["total"], QueryValue::Int(100));
     assert_eq!(
         row["user_id"],
-        json!({"$query": "@users", "path": "[0].id"})
+        mpack!({"$query": "@users", "path": "[0].id"})
     );
-    let back: InsertOp = serde_json::from_value(got).unwrap();
+    let back: InsertOp = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(back, op);
 }
 
 #[test]
 fn upsert_with_computed_value() {
     let op = upsert("profiles")
-        .key(json!("user:1"))
+        .key(mpack!("user:1"))
         .value(
             doc()
                 .set("raw_name", "ALICE")
                 .set("name", func("strings/lower", [col("raw_name")])),
         )
         .build();
-    let got = serde_json::to_value(&op).unwrap();
-    assert_eq!(got["value"]["raw_name"], json!("ALICE"));
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(
+        got["value"]["raw_name"],
+        QueryValue::Str("ALICE".to_string())
+    );
     assert_eq!(
         got["value"]["name"],
-        json!({
+        mpack!({
             "$fn": {
                 "name": "strings/lower",
                 "args": [{"$ref": ["raw_name"]}]

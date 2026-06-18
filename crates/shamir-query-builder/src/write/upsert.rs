@@ -1,14 +1,14 @@
 //! [`Upsert`] builder for [`SetOp`].
 
-use serde_json::Value;
 use shamir_query_types::write::SetOp;
 use shamir_query_types::TableRef;
+use shamir_types::types::value::QueryValue;
 
 /// Builder for [`SetOp`] (upsert: update-if-exists, insert-if-not).
 pub struct Upsert {
     table_ref: TableRef,
-    key: Value,
-    value: Value,
+    key: QueryValue,
+    value: QueryValue,
 }
 
 /// Create an [`Upsert`] builder targeting the given table (default repo).
@@ -21,8 +21,8 @@ impl Upsert {
     pub fn table(table: impl Into<String>) -> Self {
         Self {
             table_ref: TableRef::new(table),
-            key: Value::Null,
-            value: Value::Null,
+            key: QueryValue::Null,
+            value: QueryValue::Null,
         }
     }
 
@@ -30,22 +30,22 @@ impl Upsert {
     pub fn with_repo(repo: impl Into<String>, table: impl Into<String>) -> Self {
         Self {
             table_ref: TableRef::with_repo(repo, table),
-            key: Value::Null,
-            value: Value::Null,
+            key: QueryValue::Null,
+            value: QueryValue::Null,
         }
     }
 
     /// Set the key to match on (id or unique field value).
-    pub fn key(mut self, doc: impl Into<Value>) -> Self {
+    pub fn key(mut self, doc: impl Into<QueryValue>) -> Self {
         self.key = doc.into();
         self
     }
 
     /// Set the value to upsert.
     ///
-    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<Value>`) or a raw
-    /// `serde_json::Value`.
-    pub fn value(mut self, doc: impl Into<Value>) -> Self {
+    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<QueryValue>`) or any
+    /// `QueryValue` directly (e.g. from `mpack!({...})`).
+    pub fn value(mut self, doc: impl Into<QueryValue>) -> Self {
         self.value = doc.into();
         self
     }
@@ -54,8 +54,8 @@ impl Upsert {
     pub fn build(self) -> SetOp {
         SetOp {
             set: self.table_ref,
-            key: self.key.into(),
-            value: self.value.into(),
+            key: self.key,
+            value: self.value,
         }
     }
 }

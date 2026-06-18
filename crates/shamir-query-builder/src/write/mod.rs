@@ -7,10 +7,10 @@
 //!
 //! # `Doc` — record-value builder
 //!
-//! A write record is a JSON object whose field values are **either**
-//! literal JSON **or** expressions (computed `{"$fn":...}`,
-//! `{"$ref":...}`, `{"$query":...}`). Expressions are produced by
-//! serializing a [`FilterValue`] to JSON.
+//! A write record is a `QueryValue::Map` whose field values are **either**
+//! literal `QueryValue`s **or** expressions (computed `{"$fn":...}`,
+//! `{"$ref":...}`, `{"$query":...}`).  Expressions are produced by
+//! encoding a [`FilterValue`] through a msgpack round-trip into `QueryValue`.
 //!
 //! ```ignore
 //! use shamir_query_builder::{write::doc, val::*};
@@ -25,6 +25,7 @@
 //! ```ignore
 //! use shamir_query_builder::write::*;
 //! use shamir_query_builder::{val::*, filter::*};
+//! use shamir_types::mpack;
 //!
 //! // Insert
 //! let ins = insert("users")
@@ -40,7 +41,7 @@
 //!
 //! // Upsert (SetOp)
 //! let ups = upsert("cache")
-//!     .key(serde_json::json!("k1"))
+//!     .key(mpack!("k1"))
 //!     .value(doc().set("v", 42))
 //!     .build();
 //!

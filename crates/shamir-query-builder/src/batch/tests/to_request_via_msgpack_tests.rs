@@ -1,6 +1,7 @@
+use shamir_types::mpack;
+
 use crate::batch::Batch;
 use crate::query::Query;
-use serde_json::json;
 
 // ============================================================================
 // to_request_via_msgpack round-trip equivalence
@@ -13,7 +14,7 @@ fn round_trip_matches_build() {
     b.query("q1", Query::from("users"));
     b.insert(
         "ins",
-        crate::write::Insert::into("users").row(json!({ "name": "alice" })),
+        crate::write::Insert::into("users").row(mpack!({ "name": "alice" })),
     );
 
     let via_build = b.build();

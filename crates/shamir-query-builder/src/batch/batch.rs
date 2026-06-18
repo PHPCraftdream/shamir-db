@@ -572,24 +572,26 @@ impl Batch {
 
     // ── wire encoding (build + encode in one step) ─────────────────
 
-    /// Build and encode as a JSON `serde_json::Value`.
-    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
-        crate::wire::ToWire::to_json_value(&self.build())
+    /// Build and encode as msgpack (named fields) — primary wire format.
+    pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec_named(&self.build())
     }
 
-    /// Build and encode as a compact JSON string.
+    /// Build and encode as a compact JSON string (debug / human-readable).
     pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
         crate::wire::ToWire::to_json_string(&self.build())
     }
 
-    /// Build and encode as a pretty-printed JSON string.
+    /// Build and encode as a pretty-printed JSON string (debug / human-readable).
     pub fn to_json_string_pretty(&self) -> Result<String, serde_json::Error> {
         crate::wire::ToWire::to_json_string_pretty(&self.build())
     }
 
-    /// Build and encode as msgpack (named fields).
-    pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec_named(&self.build())
+    /// Build and encode as a JSON `serde_json::Value` (debug / structural tests).
+    ///
+    /// Prefer [`to_msgpack`](Self::to_msgpack) for the wire path.
+    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        crate::wire::ToWire::to_json_value(&self.build())
     }
 
     /// Build, encode to msgpack, and decode back into a `BatchRequest`.
@@ -624,9 +626,9 @@ impl Batch {
 
     /// Build with client-side validation.
     ///
-    /// Serializes each entry's op to JSON, walks for `"$query"` string
-    /// values, normalizes the base alias (strip `@`, cut at `[`/`.`), and
-    /// checks:
+    /// Serializes each entry's op to a [`QueryValue`] tree via msgpack, walks
+    /// for `"$query"` map keys, normalizes the base alias (strip `@`, cut at
+    /// `[`/`.`), and checks:
     /// - the base alias exists as a key in `queries`
     /// - the base alias is not the referencing entry's own alias
     ///
@@ -635,10 +637,15 @@ impl Batch {
     pub fn try_build(&self) -> Result<BatchRequest, BuildError> {
         for (alias, entry) in &self.queries {
             // Validate $query refs.
-            let json =
-                serde_json::to_value(&entry.op).expect("BatchOp serialization is infallible");
+            //
+            // Encode the op to msgpack and decode as QueryValue so we can
+            // walk the tree without a serde_json::Value intermediate.
+            let bytes = rmp_serde::to_vec_named(&entry.op)
+                .expect("BatchOp msgpack serialization is infallible");
+            let qv: shamir_types::types::value::QueryValue =
+                rmp_serde::from_slice(&bytes).expect("BatchOp→QueryValue round-trip is infallible");
             let mut refs = Vec::new();
-            collect_query_refs(&json, &mut refs);
+            collect_query_refs(&qv, &mut refs);
             for raw_ref in &refs {
                 let base = extract_base_alias(raw_ref);
                 if base == *alias {
@@ -702,20 +709,23 @@ impl Batch {
 // $query ref walking helpers (mirrors planner.rs logic)
 // ============================================================================
 
-/// Collect all `$query` string values from a JSON tree.
-fn collect_query_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+/// Collect all `$query` string values from a `QueryValue` tree.
+///
+/// The `FilterValue::QueryRef` variant serializes as `{"$query": "@alias", ...}`.
+/// Walking the `QueryValue::Map` for the `"$query"` key mirrors the planner's
+/// logic without requiring a `serde_json::Value` intermediate.
+fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut Vec<String>) {
+    use shamir_types::types::value::QueryValue;
     match value {
-        serde_json::Value::Object(map) => {
-            if let Some(qv) = map.get("$query") {
-                if let Some(s) = qv.as_str() {
-                    out.push(s.to_owned());
-                }
+        QueryValue::Map(map) => {
+            if let Some(QueryValue::Str(s)) = map.get("$query") {
+                out.push(s.clone());
             }
             for v in map.values() {
                 collect_query_refs(v, out);
             }
         }
-        serde_json::Value::Array(arr) => {
+        QueryValue::List(arr) => {
             for v in arr {
                 collect_query_refs(v, out);
             }

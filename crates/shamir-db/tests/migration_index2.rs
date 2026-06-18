@@ -14,7 +14,7 @@
 //! All batches (read/write AND DDL/migration ops) are constructed with
 //! `shamir_query_builder` and round-tripped through MessagePack.
 
-use serde_json::json;
+use shamir_types::mpack;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -236,27 +236,27 @@ async fn migration_preserves_vector_index() {
     b.insert(
         "w1",
         Insert::with_repo("src_repo", "docs")
-            .row(doc! { "label" => "x" }.set_json("embedding", json!([1.0, 0.0, 0.0]))),
+            .row(doc! { "label" => "x" }.set_value("embedding", mpack!([1.0, 0.0, 0.0]))),
     );
     b.insert(
         "w2",
         Insert::with_repo("src_repo", "docs")
-            .row(doc! { "label" => "y" }.set_json("embedding", json!([0.0, 1.0, 0.0]))),
+            .row(doc! { "label" => "y" }.set_value("embedding", mpack!([0.0, 1.0, 0.0]))),
     );
     b.insert(
         "w3",
         Insert::with_repo("src_repo", "docs")
-            .row(doc! { "label" => "x_near" }.set_json("embedding", json!([0.95, 0.1, 0.0]))),
+            .row(doc! { "label" => "x_near" }.set_value("embedding", mpack!([0.95, 0.1, 0.0]))),
     );
     b.insert(
         "w4",
         Insert::with_repo("src_repo", "docs")
-            .row(doc! { "label" => "z" }.set_json("embedding", json!([0.0, 0.0, 1.0]))),
+            .row(doc! { "label" => "z" }.set_value("embedding", mpack!([0.0, 0.0, 1.0]))),
     );
     b.insert(
         "w5",
         Insert::with_repo("src_repo", "docs")
-            .row(doc! { "label" => "x_near2" }.set_json("embedding", json!([0.9, 0.05, 0.05]))),
+            .row(doc! { "label" => "x_near2" }.set_value("embedding", mpack!([0.9, 0.05, 0.05]))),
     );
     exec_built(&shamir, b.to_request_via_msgpack()).await;
 

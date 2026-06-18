@@ -235,7 +235,7 @@ fn update_entry() {
 fn upsert_entry() {
     let mut b = Batch::new();
     let ups = write::upsert("cache")
-        .key(serde_json::json!("k1"))
+        .key(shamir_types::mpack!("k1"))
         .value(doc().set("v", 42));
     b.upsert("ups", ups);
     let req = b.build();
@@ -491,7 +491,7 @@ fn into_batch_op_update_op() {
 fn into_batch_op_set_op() {
     use crate::batch::IntoBatchOp;
     let op = write::upsert("t")
-        .key(serde_json::json!("k"))
+        .key(shamir_types::mpack!("k"))
         .value(doc().set("v", 1))
         .build();
     let batch_op = op.into_batch_op();

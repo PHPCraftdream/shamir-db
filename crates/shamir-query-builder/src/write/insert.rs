@@ -1,13 +1,13 @@
 //! [`Insert`] builder for [`InsertOp`].
 
-use serde_json::Value;
 use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
+use shamir_types::types::value::QueryValue;
 
 /// Builder for [`InsertOp`].
 pub struct Insert {
     table_ref: TableRef,
-    values: Vec<Value>,
+    values: Vec<QueryValue>,
 }
 
 /// Create an [`Insert`] builder targeting the given table (default repo).
@@ -34,15 +34,15 @@ impl Insert {
 
     /// Append a single record.
     ///
-    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<Value>`) or a raw
-    /// `serde_json::Value`.
-    pub fn row(mut self, value: impl Into<Value>) -> Self {
+    /// Accepts a [`Doc`](super::doc::Doc) (via `Into<QueryValue>`) or any
+    /// `QueryValue` directly (e.g. from `mpack!({...})`).
+    pub fn row(mut self, value: impl Into<QueryValue>) -> Self {
         self.values.push(value.into());
         self
     }
 
     /// Append multiple records.
-    pub fn rows(mut self, values: impl IntoIterator<Item = impl Into<Value>>) -> Self {
+    pub fn rows(mut self, values: impl IntoIterator<Item = impl Into<QueryValue>>) -> Self {
         self.values.extend(values.into_iter().map(Into::into));
         self
     }
@@ -51,7 +51,7 @@ impl Insert {
     pub fn build(self) -> InsertOp {
         InsertOp {
             insert_into: self.table_ref,
-            values: self.values.into_iter().map(Into::into).collect(),
+            values: self.values,
             records_idmsgpack: Vec::new(),
         }
     }
