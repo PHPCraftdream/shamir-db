@@ -1,5 +1,6 @@
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_query_types::batch::BatchOp;
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::IntoBatchOp;
 
@@ -37,7 +38,7 @@ pub struct CreateIndex {
     fts_tokenizer: Option<String>,
     fts_language: Option<String>,
     functional_op: Option<String>,
-    functional_args: Option<Vec<serde_json::Value>>,
+    functional_args: Option<Vec<QueryValue>>,
     vector_dim: Option<u32>,
     vector_metric: Option<String>,
     include: Vec<Vec<String>>,
@@ -103,7 +104,7 @@ impl CreateIndex {
     }
 
     /// Set the functional index arguments.
-    pub fn functional_args(mut self, args: Vec<serde_json::Value>) -> Self {
+    pub fn functional_args(mut self, args: Vec<QueryValue>) -> Self {
         self.functional_args = Some(args);
         self
     }
