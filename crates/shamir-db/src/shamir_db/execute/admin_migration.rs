@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::engine::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 use crate::engine::repo::repo_types::BoxRepoFactory;
@@ -11,6 +9,8 @@ use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
@@ -172,13 +172,13 @@ impl ShamirAdminExecutor {
             .active_migrations()
             .insert(migration_id.clone(), coord);
 
-        Ok(admin_result(json!({
-            "migration_id": migration_id,
+        Ok(admin_result(mpack!({
+            "migration_id": @(QueryValue::Str(migration_id)),
             "phase": "cutover_ready",
-            "table": table_name,
-            "src_repo": op.repo,
-            "dst_repo": op.dst_repo,
-            "dst_engine": op.dst_engine,
+            "table": @(QueryValue::Str(table_name.clone())),
+            "src_repo": @(QueryValue::Str(op.repo.clone())),
+            "dst_repo": @(QueryValue::Str(op.dst_repo.clone())),
+            "dst_engine": @(QueryValue::Str(op.dst_engine.clone())),
         })))
     }
 
@@ -278,13 +278,13 @@ impl ShamirAdminExecutor {
         // dst table directly).
         self.shamir.active_migrations().remove(&op.commit_migration);
 
-        Ok(admin_result(json!({
-            "migration_id": op.commit_migration,
+        Ok(admin_result(mpack!({
+            "migration_id": @(QueryValue::Str(op.commit_migration.clone())),
             "phase": "committed",
-            "tail_drained": tail,
-            "src_records": src_count,
-            "dst_records": dst_count,
-            "records_copied": state.records_copied,
+            "tail_drained": @(QueryValue::Int(tail as i64)),
+            "src_records": @(QueryValue::Int(src_count as i64)),
+            "dst_records": @(QueryValue::Int(dst_count as i64)),
+            "records_copied": @(QueryValue::Int(state.records_copied as i64)),
         })))
     }
 
@@ -333,8 +333,8 @@ impl ShamirAdminExecutor {
             .active_migrations()
             .remove(&op.rollback_migration);
 
-        Ok(admin_result(json!({
-            "migration_id": op.rollback_migration,
+        Ok(admin_result(mpack!({
+            "migration_id": @(QueryValue::Str(op.rollback_migration.clone())),
             "phase": "rolled_back",
         })))
     }
@@ -377,17 +377,17 @@ impl ShamirAdminExecutor {
         let state = coord.state().await;
         let shadow_lag = coord.shadow_lag().await;
 
-        Ok(admin_result(json!({
-            "migration_id": state.id,
-            "phase": state.phase.to_string(),
-            "table": state.table_name,
-            "src_repo": state.src_repo,
-            "dst_repo": state.dst_repo,
-            "dst_engine": state.dst_engine,
-            "snapshot_lsn": state.snapshot_lsn,
-            "last_lsn_applied": state.last_lsn_applied,
-            "records_copied": state.records_copied,
-            "shadow_lag": shadow_lag,
+        Ok(admin_result(mpack!({
+            "migration_id": @(QueryValue::Str(state.id.clone())),
+            "phase": @(QueryValue::Str(state.phase.to_string())),
+            "table": @(QueryValue::Str(state.table_name.clone())),
+            "src_repo": @(QueryValue::Str(state.src_repo.clone())),
+            "dst_repo": @(QueryValue::Str(state.dst_repo.clone())),
+            "dst_engine": @(QueryValue::Str(state.dst_engine.clone())),
+            "snapshot_lsn": @(QueryValue::Int(state.snapshot_lsn as i64)),
+            "last_lsn_applied": @(QueryValue::Int(state.last_lsn_applied as i64)),
+            "records_copied": @(QueryValue::Int(state.records_copied as i64)),
+            "shadow_lag": @(QueryValue::Int(shadow_lag as i64)),
         })))
     }
 }

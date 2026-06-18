@@ -381,8 +381,16 @@ async fn set_update_indexed_field_reflected_in_index() {
         .build();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0].as_json()["_created"], false);
-    assert_eq!(result.records[0].as_json()["city"], "LA");
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("city"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "LA".to_string()
+        ))
+    );
 
     // The index now resolves city=LA (the SET record). A fresh upsert keyed on
     // city=LA must find it (UPDATE branch → _created=false); city=NYC must NOT
@@ -392,7 +400,10 @@ async fn set_update_indexed_field_reflected_in_index() {
         .value(doc().set("city", "LA").set("flag", true))
         .build();
     let la = set_via_implicit_tx(&repo, &table, &find_la).await.unwrap();
-    assert_eq!(la.records[0].as_json()["_created"], false);
+    assert_eq!(
+        la.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
 
     let find_nyc = write::upsert("users")
         .key(doc().set("city", "NYC"))
@@ -400,8 +411,8 @@ async fn set_update_indexed_field_reflected_in_index() {
         .build();
     let nyc = set_via_implicit_tx(&repo, &table, &find_nyc).await.unwrap();
     assert_eq!(
-        nyc.records[0].as_json()["_created"],
-        true,
+        nyc.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(true)),
         "old NYC posting should be gone after the upsert re-keyed to LA"
     );
 }
@@ -447,11 +458,22 @@ async fn set_update_introduces_new_field() {
         .value(doc().set("score", 100_i64))
         .build();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
-    assert_eq!(result.records[0].as_json()["_created"], false);
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
     // Old field preserved (merge).
-    assert_eq!(result.records[0].as_json()["name"], "alice");
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "alice".to_string()
+        ))
+    );
     // New field present (the overlay-string-keyed result-JSON path).
-    assert_eq!(result.records[0].as_json()["score"], 100);
+    assert_eq!(
+        result.records[0].get_value_owned("score"),
+        Some(shamir_types::types::value::QueryValue::Int(100))
+    );
 }
 
 /// SET UPDATES a UNIQUE-indexed field — the catalog/system_store path relies
@@ -481,8 +503,16 @@ async fn set_update_unique_indexed_field() {
         .value(doc().set("email", "a@b.c").set("name", "ALICE"))
         .build();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
-    assert_eq!(result.records[0].as_json()["_created"], false);
-    assert_eq!(result.records[0].as_json()["name"], "ALICE");
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "ALICE".to_string()
+        ))
+    );
 
     // A second upsert keyed on a NEW email that does not exist → INSERT branch.
     let set_new = write::upsert("users")
@@ -490,8 +520,16 @@ async fn set_update_unique_indexed_field() {
         .value(doc().set("email", "c@d.e").set("name", "carol"))
         .build();
     let result = set_via_implicit_tx(&repo, &table, &set_new).await.unwrap();
-    assert_eq!(result.records[0].as_json()["_created"], true);
-    assert_eq!(result.records[0].as_json()["name"], "carol");
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(true))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "carol".to_string()
+        ))
+    );
 
     // The table now has exactly three records (no duplicates from the upserts).
     assert_eq!(table.count().await.unwrap(), 3);

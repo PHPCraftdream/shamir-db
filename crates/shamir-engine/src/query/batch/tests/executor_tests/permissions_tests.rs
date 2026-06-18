@@ -131,7 +131,10 @@ async fn rls_read_returns_only_matching_rows() {
         "RLS must restrict Read to active rows only; got {:?}",
         records
     );
-    let names: Vec<String> = records.iter().filter_map(|r| r.get_str("name")).collect();
+    let names: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get_value_str("name").map(str::to_owned))
+        .collect();
     let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     assert!(names.contains(&"Alice"), "Alice is active");
     assert!(names.contains(&"Carol"), "Carol is active");
@@ -200,7 +203,7 @@ async fn rls_delete_only_removes_matching_rows() {
         "only the inactive row should remain after RLS-scoped delete"
     );
     assert_eq!(
-        remaining[0].get_str("name").as_deref(),
+        remaining[0].get_value_str("name"),
         Some("Bob"),
         "the surviving row must be the inactive one"
     );
@@ -293,7 +296,7 @@ async fn rls_update_only_affects_matching_rows() {
     let bob = &verify_resp.results["check"].records;
     assert_eq!(bob.len(), 1, "Bob should still exist");
     assert!(
-        bob[0].get("tag").is_none(),
+        bob[0].get_value("tag").is_none(),
         "Bob should NOT have the 'tag' field — Update was RLS-restricted to active rows"
     );
 }

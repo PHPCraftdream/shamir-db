@@ -104,7 +104,10 @@ async fn test_execute_crud_pipeline() {
     let q2 = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
-    assert_eq!(resp.results["upd"].records[0]["status"], "active");
+    assert_eq!(
+        resp.results["upd"].records[0].get_value_str("status"),
+        Some("active")
+    );
 
     // 3. Delete Carol + read remaining
     let mut b = Batch::new();
@@ -213,8 +216,11 @@ async fn test_migration_lifecycle_in_memory() {
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let mig_result = &resp.results["mig"].records[0];
-    assert_eq!(mig_result["phase"], "cutover_ready");
-    let migration_id = mig_result["migration_id"].as_str().unwrap().to_string();
+    assert_eq!(mig_result.get_value_str("phase"), Some("cutover_ready"));
+    let migration_id = mig_result
+        .get_value_str("migration_id")
+        .unwrap()
+        .to_string();
 
     // Query status
     let mut b = Batch::new();
@@ -223,8 +229,8 @@ async fn test_migration_lifecycle_in_memory() {
     let status_req = b.to_request_via_msgpack();
     let status_resp = shamir.execute("testdb", &status_req).await.unwrap();
     let status = &status_resp.results["s"].records[0];
-    assert_eq!(status["phase"], "cutover_ready");
-    assert_eq!(status["records_copied"], 3);
+    assert_eq!(status.get_value_str("phase"), Some("cutover_ready"));
+    assert_eq!(status.get_value_i64("records_copied"), Some(3));
 
     // Commit
     let mut b = Batch::new();
@@ -233,9 +239,9 @@ async fn test_migration_lifecycle_in_memory() {
     let commit_req = b.to_request_via_msgpack();
     let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
     let commit = &commit_resp.results["c"].records[0];
-    assert_eq!(commit["phase"], "committed");
-    assert_eq!(commit["src_records"], 3);
-    assert_eq!(commit["dst_records"], 3);
+    assert_eq!(commit.get_value_str("phase"), Some("committed"));
+    assert_eq!(commit.get_value_i64("src_records"), Some(3));
+    assert_eq!(commit.get_value_i64("dst_records"), Some(3));
 
     // Read from the destination table
     let mut b = Batch::new();
@@ -268,8 +274,8 @@ async fn test_migration_rollback() {
     );
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let migration_id = resp.results["mig"].records[0]["migration_id"]
-        .as_str()
+    let migration_id = resp.results["mig"].records[0]
+        .get_value_str("migration_id")
         .unwrap()
         .to_string();
 
@@ -279,7 +285,10 @@ async fn test_migration_rollback() {
     b.rollback_migration("r", ddl::rollback_migration(&migration_id));
     let rb_req = b.to_request_via_msgpack();
     let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
-    assert_eq!(rb_resp.results["r"].records[0]["phase"], "rolled_back");
+    assert_eq!(
+        rb_resp.results["r"].records[0].get_value_str("phase"),
+        Some("rolled_back")
+    );
 
     // Status should fail (migration removed)
     let mut b = Batch::new();
@@ -347,8 +356,11 @@ async fn test_create_user_hashes_password_at_rest() {
     let result = table.read(&query, &ctx).await.unwrap();
     assert_eq!(result.records.len(), 1, "alice must be stored");
 
-    let stored_json = result.records[0].as_json();
-    let stored = stored_json["password_hash"].as_str().unwrap();
+    let stored_qv = result.records[0].as_value();
+    let stored = stored_qv
+        .get("password_hash")
+        .and_then(|v| v.as_str())
+        .unwrap();
 
     // The stored value must NOT be the plaintext.
     assert_ne!(
@@ -435,7 +447,10 @@ async fn create_repo_via_execute_persists_to_catalogue() {
         );
         let req = b.to_request_via_msgpack();
         let resp = shamir.execute("production", &req).await.unwrap();
-        assert_eq!(resp.results["cr"].records[0]["created_repo"], "events_repo");
+        assert_eq!(
+            resp.results["cr"].records[0].get_value_str("created_repo"),
+            Some("events_repo")
+        );
 
         // Persisted to the catalogue immediately (not just in-memory).
         let repos = shamir.system_store().load_repositories().await.unwrap();
@@ -496,7 +511,10 @@ async fn drop_repo_via_execute_clears_catalogue() {
         b.drop_repo("dr", ddl::drop_repo("scratch_repo"));
         let drop_req = b.to_request_via_msgpack();
         let resp = shamir.execute("production", &drop_req).await.unwrap();
-        assert_eq!(resp.results["dr"].records[0]["existed"], true);
+        assert_eq!(
+            resp.results["dr"].records[0].get_value_bool("existed"),
+            Some(true)
+        );
 
         let repos = shamir.system_store().load_repositories().await.unwrap();
         assert!(
@@ -582,7 +600,10 @@ async fn create_repo_accepts_valid_name() {
     b.create_repo("cr", ddl::create_repo("my-repo_01").engine("in_memory"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["cr"].records[0]["created_repo"], "my-repo_01");
+    assert_eq!(
+        resp.results["cr"].records[0].get_value_str("created_repo"),
+        Some("my-repo_01")
+    );
 }
 
 #[tokio::test]

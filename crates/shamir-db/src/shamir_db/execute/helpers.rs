@@ -7,9 +7,9 @@ use crate::types::common::TMap;
 use crate::types::value::QueryValue;
 
 /// Construct a `QueryResult` for a successful admin operation.
-pub(super) fn admin_result(data: serde_json::Value) -> QueryResult {
+pub(super) fn admin_result(data: QueryValue) -> QueryResult {
     QueryResult {
-        records: vec![QueryRecord::Json(data)],
+        records: vec![QueryRecord::Direct(data)],
         stats: Some(QueryStats {
             index_used: None,
             records_scanned: 0,
@@ -19,6 +19,19 @@ pub(super) fn admin_result(data: serde_json::Value) -> QueryResult {
         pagination: None,
         value: None,
     }
+}
+
+/// Serialize any `serde::Serialize` value to `QueryValue` via msgpack round-trip.
+///
+/// Used at call sites where a typed struct (e.g. `BufferConfigDto`,
+/// `ChangelogEvent`, `ResourceRef`) must be embedded in an admin response
+/// `QueryValue` but has no direct `→ QueryValue` conversion. The msgpack
+/// codec is byte-identical to the wire, so this is lossless.
+pub(super) fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
+    rmp_serde::to_vec_named(v)
+        .ok()
+        .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok())
+        .unwrap_or(QueryValue::Null)
 }
 
 /// Rejects path-traversal characters in database and repository names.
@@ -248,30 +261,27 @@ pub(super) fn filter_value_to_query_value(
                 let arr: Vec<QueryValue> = qr
                     .records
                     .iter()
-                    .map(|r| {
-                        let jv = r.as_json();
-                        json_to_query_value(&jv)
-                    })
+                    .map(|r| r.as_value().into_owned())
                     .collect();
                 QueryValue::List(arr)
             } else {
                 // Indexed/field path into records. Only the `[n]` form is
                 // meaningful without a record context; walk to the record
-                // then serialise it.
+                // then navigate.
                 let path = path.as_deref().unwrap_or("");
                 if let Some(rest) = path.strip_prefix('[') {
                     if let Some(end) = rest.find(']') {
                         if let Ok(idx) = rest[..end].parse::<usize>() {
                             if let Some(record) = qr.records.get(idx) {
-                                let record_json = record.as_json();
+                                let record_qv = record.as_value();
                                 let after = &rest[end + 1..];
                                 if let Some(field_path) = after.strip_prefix('.') {
-                                    return record_json
+                                    return record_qv
                                         .get(field_path)
-                                        .map(json_to_query_value)
+                                        .cloned()
                                         .unwrap_or(QueryValue::Null);
                                 }
-                                return json_to_query_value(&record_json);
+                                return record_qv.into_owned();
                             }
                         }
                     }
@@ -314,31 +324,4 @@ fn navigate_query_value<'a>(mut cur: &'a QueryValue, path: Option<&str>) -> Opti
         }
     }
     Some(cur)
-}
-
-/// Convert a `serde_json::Value` into a `QueryValue` (shallow/recursive).
-/// Used only for the records path (which still materialises via `as_json()`).
-fn json_to_query_value(v: &serde_json::Value) -> QueryValue {
-    match v {
-        serde_json::Value::Null => QueryValue::Null,
-        serde_json::Value::Bool(b) => QueryValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                QueryValue::Int(i)
-            } else {
-                QueryValue::F64(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        serde_json::Value::String(s) => QueryValue::Str(s.clone()),
-        serde_json::Value::Array(arr) => {
-            QueryValue::List(arr.iter().map(json_to_query_value).collect())
-        }
-        serde_json::Value::Object(map) => {
-            let mut out = crate::types::common::new_map();
-            for (k, vv) in map {
-                out.insert(k.clone(), json_to_query_value(vv));
-            }
-            QueryValue::Map(out)
-        }
-    }
 }

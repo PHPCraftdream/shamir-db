@@ -136,8 +136,7 @@ async fn concurrent_executes_return_correct_results() {
     // Each SKU appears exactly once.
     for sku in &skus {
         assert!(
-            rows.iter()
-                .any(|r| r.get("sku").and_then(|v| v.as_str()) == Some(sku)),
+            rows.iter().any(|r| r.get_value_str("sku") == Some(sku)),
             "sku {sku} not found in results"
         );
     }

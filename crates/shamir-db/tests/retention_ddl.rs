@@ -7,8 +7,6 @@
 //!   migration) and the new policy governs subsequent writes.
 //! - A principal without `Manage` permission is denied `SetRetention`.
 
-use serde_json::json;
-
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
@@ -75,12 +73,12 @@ async fn create_table_with_retention_applies_policy() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["ct"].records[0].as_json()["created_table"],
-        json!("events")
+        resp.results["ct"].records[0].get_value_str("created_table"),
+        Some("events")
     );
     assert_eq!(
-        resp.results["ct"].records[0].as_json()["created"],
-        json!(true)
+        resp.results["ct"].records[0].get_value_bool("created"),
+        Some(true)
     );
 
     // The table's MvccStore must report the retention we set.
@@ -142,10 +140,13 @@ async fn set_retention_changes_live_table_policy() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["sr"].records[0].as_json()["set_retention"],
-        json!("users")
+        resp.results["sr"].records[0].get_value_str("set_retention"),
+        Some("users")
     );
-    assert_eq!(resp.results["sr"].records[0].as_json()["ok"], json!(true));
+    assert_eq!(
+        resp.results["sr"].records[0].get_value_bool("ok"),
+        Some(true)
+    );
 
     // The live MvccStore now reports the new policy.
     let after = table_retention(&shamir, "testdb", "main", "users").await;

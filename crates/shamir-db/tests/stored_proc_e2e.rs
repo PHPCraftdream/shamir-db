@@ -700,13 +700,13 @@ async fn phase2_call_result_as_read_filter_ref() {
         q_result.records
     );
     assert_eq!(
-        q_result.records[0].as_json()["id"],
-        serde_json::json!(5),
+        q_result.records[0].get_value_i64("id"),
+        Some(5),
         "matched row must have id=5"
     );
     assert_eq!(
-        q_result.records[0].as_json()["name"],
-        serde_json::json!("delta"),
+        q_result.records[0].get_value_str("name"),
+        Some("delta"),
         "matched row must be 'delta'"
     );
 }

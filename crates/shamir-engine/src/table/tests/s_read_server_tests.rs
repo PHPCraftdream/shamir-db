@@ -13,7 +13,7 @@
 //!
 //! 3. **Aggregate/GROUP BY fallback**: a query with `ResultEncoding::Id` that
 //!    has an aggregate (`sum(age)`) falls back to the Name path and returns
-//!    `QueryRecord::Json` / `QueryRecord::Direct` rows with the correct result.
+//!    `QueryRecord::Direct` rows with the correct result.
 //!
 //! 4. **Default unchanged**: `ResultEncoding::Name` (or absent) → `Direct`
 //!    rows exactly as before.
@@ -135,7 +135,7 @@ async fn s_read_select_star_convergence() {
 
     // Name path must return Direct(QueryValue).
     let name_qv = match name_row {
-        QueryRecord::Direct(qv, _) => qv.clone(),
+        QueryRecord::Direct(qv) => qv.clone(),
         other => panic!("expected QueryRecord::Direct from Name path, got {other:?}"),
     };
 
@@ -234,7 +234,7 @@ async fn s_read_projection_convergence() {
         "expected 1 record (Name projection)"
     );
     let name_qv = match &result_name.records[0] {
-        QueryRecord::Direct(qv, _) => qv.clone(),
+        QueryRecord::Direct(qv) => qv.clone(),
         other => panic!("expected QueryRecord::Direct from Name projection, got {other:?}"),
     };
 
@@ -307,7 +307,7 @@ async fn s_read_aggregate_falls_back_to_name() {
     );
 
     // The aggregate result must be correct: sum(30, 25) == 55.
-    let json_val = serde_json::Value::from(row.clone());
+    let json_val = serde_json::Value::from(row.as_value().into_owned());
     assert_eq!(
         json_val["total_age"],
         serde_json::json!(55),
@@ -341,9 +341,8 @@ async fn s_read_default_name_encoding_unchanged() {
         "expected 1 record (plain read)"
     );
     match &result_plain.records[0] {
-        QueryRecord::Direct(_, _) => {} // correct
-        QueryRecord::Json(_) => {}      // also acceptable (some fast-paths return Json)
-        other => panic!("plain read() must return Direct or Json, got {other:?}"),
+        QueryRecord::Direct(_) => {} // correct
+        other => panic!("plain read() must return Direct, got {other:?}"),
     }
 
     // Explicitly specifying Name must also return non-IdBytes.
@@ -363,14 +362,7 @@ async fn s_read_default_name_encoding_unchanged() {
     );
 
     // The name-keyed result must contain Alice's fields.
-    let qv = match &result_name.records[0] {
-        QueryRecord::Direct(qv, _) => qv.clone(),
-        QueryRecord::Json(v) => {
-            serde_json::from_value::<shamir_types::types::value::QueryValue>(v.clone()).unwrap()
-        }
-        other => panic!("unexpected variant: {other:?}"),
-    };
-    let json_val = serde_json::Value::from(QueryRecord::Direct(qv, std::sync::OnceLock::new()));
-    assert_eq!(json_val["name"], serde_json::json!("Alice"));
-    assert_eq!(json_val["age"], serde_json::json!(30));
+    let rec = &result_name.records[0];
+    assert_eq!(rec.get_value_str("name"), Some("Alice"));
+    assert_eq!(rec.get_value_i64("age"), Some(30));
 }

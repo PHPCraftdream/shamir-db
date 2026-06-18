@@ -264,7 +264,6 @@ impl TableManager {
                             return Ok(QueryResult {
                                 records: vec![crate::query::read::QueryRecord::Direct(
                                     QueryValue::Map(obj),
-                                    std::sync::OnceLock::new(),
                                 )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
@@ -289,10 +288,9 @@ impl TableManager {
                 let mut obj = new_map_wc(1);
                 obj.insert(key, QueryValue::Int(count as i64));
                 return Ok(QueryResult {
-                    records: vec![crate::query::read::QueryRecord::Direct(
-                        QueryValue::Map(obj),
-                        std::sync::OnceLock::new(),
-                    )],
+                    records: vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
+                        obj,
+                    ))],
                     stats: Some(QueryStats {
                         index_used: Some("__record_counter__".to_string()),
                         records_scanned: 0,
@@ -355,10 +353,7 @@ impl TableManager {
                                 Err(_) => continue,
                             },
                         };
-                        records.push(crate::query::read::QueryRecord::Direct(
-                            qv,
-                            std::sync::OnceLock::new(),
-                        ));
+                        records.push(crate::query::read::QueryRecord::Direct(qv));
                     }
                     let returned = records.len() as u64;
                     let pagination = if query.pagination.is_none() {
@@ -418,7 +413,6 @@ impl TableManager {
                         return Ok(QueryResult {
                             records: vec![crate::query::read::QueryRecord::Direct(
                                 QueryValue::Map(obj),
-                                std::sync::OnceLock::new(),
                             )],
                             stats: Some(QueryStats {
                                 index_used: Some(format!("idx_{idx_name}")),
@@ -490,7 +484,6 @@ impl TableManager {
                             return Ok(QueryResult {
                                 records: vec![crate::query::read::QueryRecord::Direct(
                                     QueryValue::Map(obj),
-                                    std::sync::OnceLock::new(),
                                 )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
@@ -698,7 +691,6 @@ impl TableManager {
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
-                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -723,7 +715,6 @@ impl TableManager {
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),
-                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -741,8 +732,8 @@ impl TableManager {
             rec_acc
                 .into_iter()
                 .map(|r| match r {
-                    crate::query::read::QueryRecord::Direct(qv, _) => qv,
-                    other => serde_json::Value::from(other).into(),
+                    crate::query::read::QueryRecord::Direct(qv) => qv,
+                    other => other.as_value().into_owned(),
                 })
                 .collect()
         };
@@ -760,7 +751,7 @@ impl TableManager {
             exec::apply_pagination(qv_result, &query.pagination, query.count_total);
         let final_records: Vec<crate::query::read::QueryRecord> = paged
             .into_iter()
-            .map(|qv| crate::query::read::QueryRecord::Direct(qv, std::sync::OnceLock::new()))
+            .map(crate::query::read::QueryRecord::Direct)
             .collect();
 
         let elapsed = start.elapsed();
@@ -841,13 +832,11 @@ impl TableManager {
                                 if idx < skip + lim {
                                     result.push(crate::query::read::QueryRecord::Direct(
                                         proj.project_value($rec, interner),
-                                        std::sync::OnceLock::new(),
                                     ));
                                 }
                             } else {
                                 result.push(crate::query::read::QueryRecord::Direct(
                                     proj.project_value($rec, interner),
-                                    std::sync::OnceLock::new(),
                                 ));
                             }
                         }
@@ -1002,10 +991,9 @@ impl TableManager {
                                     Ok(bytes) => {
                                         QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref()))
                                     }
-                                    Err(_) => QueryRecord::Direct(
-                                        proj.project_value(&view, interner),
-                                        std::sync::OnceLock::new(),
-                                    ),
+                                    Err(_) => {
+                                        QueryRecord::Direct(proj.project_value(&view, interner))
+                                    }
                                 }
                             };
                             result.push(record);
@@ -1043,14 +1031,10 @@ impl TableManager {
                                             )),
                                             Err(_) => QueryRecord::Direct(
                                                 proj.project_value(iv, interner),
-                                                std::sync::OnceLock::new(),
                                             ),
                                         }
                                     }
-                                    Err(_) => QueryRecord::Direct(
-                                        proj.project_value(iv, interner),
-                                        std::sync::OnceLock::new(),
-                                    ),
+                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
                                 }
                             };
                             result.push(record);
@@ -1080,10 +1064,7 @@ impl TableManager {
                                 break;
                             }
                         }
-                        result.push(QueryRecord::Direct(
-                            proj.project_value($rec, interner),
-                            std::sync::OnceLock::new(),
-                        ));
+                        result.push(QueryRecord::Direct(proj.project_value($rec, interner)));
                     }};
                 }
 
@@ -1179,7 +1160,6 @@ pub(super) fn try_project_page_only(
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
             proj.project_value(record, interner),
-            std::sync::OnceLock::new(),
         ));
     }
 
@@ -1251,10 +1231,7 @@ pub(super) fn try_project_page_only_bytes(
                 Err(_) => continue,
             },
         };
-        paged.push(crate::query::read::QueryRecord::Direct(
-            qv,
-            std::sync::OnceLock::new(),
-        ));
+        paged.push(crate::query::read::QueryRecord::Direct(qv));
     }
 
     let pagination = if query.pagination.is_none() && query.count_total {

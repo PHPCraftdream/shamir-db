@@ -183,10 +183,8 @@ impl TableManager {
                                 &query.pagination,
                                 query.count_total,
                             );
-                            let paged: Vec<QueryRecord> = paged_qv
-                                .into_iter()
-                                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-                                .collect();
+                            let paged: Vec<QueryRecord> =
+                                paged_qv.into_iter().map(QueryRecord::Direct).collect();
                             let records_returned = paged.len() as u64;
                             return Ok(QueryResult {
                                 records: paged,
@@ -269,10 +267,7 @@ impl TableManager {
 
             let (paged_qv, pagination) =
                 exec::apply_pagination(result_qv, &query.pagination, query.count_total);
-            let paged: Vec<QueryRecord> = paged_qv
-                .into_iter()
-                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-                .collect();
+            let paged: Vec<QueryRecord> = paged_qv.into_iter().map(QueryRecord::Direct).collect();
             let records_returned = paged.len() as u64;
 
             Ok(QueryResult {
@@ -341,10 +336,7 @@ impl TableManager {
 
             let (paged_qv, pagination) =
                 exec::apply_pagination(result_qv, &query.pagination, query.count_total);
-            let paged: Vec<QueryRecord> = paged_qv
-                .into_iter()
-                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-                .collect();
+            let paged: Vec<QueryRecord> = paged_qv.into_iter().map(QueryRecord::Direct).collect();
             let records_returned = paged.len() as u64;
 
             Ok(QueryResult {
@@ -413,10 +405,7 @@ impl TableManager {
 
         let result_qv = apply_select_value_bytes(&matched, &query.select, interner);
         let records_returned = result_qv.len() as u64;
-        let result: Vec<QueryRecord> = result_qv
-            .into_iter()
-            .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-            .collect();
+        let result: Vec<QueryRecord> = result_qv.into_iter().map(QueryRecord::Direct).collect();
 
         Ok(QueryResult {
             records: result,
@@ -530,10 +519,8 @@ impl TableManager {
 
             let elapsed = start.elapsed();
             let records_returned = records_qv.len() as u64;
-            let records: Vec<QueryRecord> = records_qv
-                .into_iter()
-                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-                .collect();
+            let records: Vec<QueryRecord> =
+                records_qv.into_iter().map(QueryRecord::Direct).collect();
 
             Ok(QueryResult {
                 records,
@@ -608,10 +595,8 @@ impl TableManager {
 
             let elapsed = start.elapsed();
             let records_returned = records_qv.len() as u64;
-            let records: Vec<QueryRecord> = records_qv
-                .into_iter()
-                .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-                .collect();
+            let records: Vec<QueryRecord> =
+                records_qv.into_iter().map(QueryRecord::Direct).collect();
 
             Ok(QueryResult {
                 records,

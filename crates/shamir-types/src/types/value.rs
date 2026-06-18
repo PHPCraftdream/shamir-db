@@ -380,6 +380,58 @@ impl Value<String> {
             _ => None,
         }
     }
+
+    /// Returns the value as an `i64`, if it is an `Int`.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a `u64`, if it is an `Int` with a non-negative value.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Int(i) if *i >= 0 => Some(*i as u64),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a `bool`, if it is a `Bool`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as an `f64`, if it is an `F64`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::F64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Looks up a key in a `Map` and returns a reference to the value.
+    ///
+    /// Returns `None` if this value is not a `Map` or the key is absent.
+    pub fn get(&self, key: &str) -> Option<&Value<String>> {
+        match self {
+            Value::Map(m) => m.get(key),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this value is a `Map`.
+    pub fn is_map(&self) -> bool {
+        matches!(self, Value::Map(_))
+    }
+
+    /// Returns true if this value is a `List`.
+    pub fn is_list(&self) -> bool {
+        matches!(self, Value::List(_))
+    }
 }
 
 // ============================================================================

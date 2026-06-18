@@ -84,7 +84,7 @@ fn extract_names_from_result(result: &crate::query::read::QueryResult) -> Vec<St
     let mut names: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| r.get_str("name"))
+        .filter_map(|r| r.get_value_str("name").map(str::to_owned))
         .collect();
     names.sort();
     names
@@ -291,10 +291,7 @@ async fn test_read_index_with_order_by() {
     let names: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| {
-            r.get_owned("name")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
+        .filter_map(|r| r.get_value_str("name").map(str::to_owned))
         .collect();
     // Active sorted by age desc: Alice(30), Bob(25), Dave(22)
     assert_eq!(names, vec!["Alice", "Bob", "Dave"]);
@@ -489,11 +486,7 @@ async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
     let got_scores: Vec<i64> = result
         .records
         .iter()
-        .map(|r| {
-            r.get_owned("score")
-                .and_then(|v| v.as_i64())
-                .expect("score field")
-        })
+        .map(|r| r.get_value_i64("score").expect("score field"))
         .collect();
     assert_eq!(got_scores, expected[..5], "wrong records for DESC LIMIT 5");
 
@@ -532,7 +525,7 @@ async fn test_max_aggregate_uses_sorted_index() {
     let max_expected = *expected.last().unwrap();
     assert_eq!(result.records.len(), 1);
     let got = result.records[0]
-        .get("max_score")
+        .get_value("max_score")
         .and_then(|v| v.as_i64())
         .expect("max_score in result");
     assert_eq!(got, max_expected);
@@ -580,11 +573,7 @@ async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
     let got_scores: Vec<i64> = result
         .records
         .iter()
-        .map(|r| {
-            r.get_owned("score")
-                .and_then(|v| v.as_i64())
-                .expect("score field")
-        })
+        .map(|r| r.get_value_i64("score").expect("score field"))
         .collect();
     assert_eq!(
         got_scores,
@@ -704,10 +693,7 @@ async fn test_distinct_with_limit_falls_back_and_sees_all_rows() {
     let mut cities: Vec<String> = r
         .records
         .iter()
-        .filter_map(|v| {
-            v.get_owned("city")
-                .and_then(|c| c.as_str().map(String::from))
-        })
+        .filter_map(|v| v.get_value_str("city").map(String::from))
         .collect();
     cities.sort();
     assert_eq!(cities, vec!["LA".to_string(), "NYC".to_string()]);

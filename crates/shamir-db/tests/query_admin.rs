@@ -47,7 +47,8 @@ async fn test_list_databases() {
         .await
         .unwrap();
 
-    let dbs = &resp.results["dbs"].records[0].as_json()["databases"];
+    let rec_val = serde_json::Value::from(resp.results["dbs"].records[0].as_value().into_owned());
+    let dbs = &rec_val["databases"];
     assert!(dbs.as_array().unwrap().contains(&json!("testdb")));
 }
 
@@ -63,7 +64,8 @@ async fn test_list_repos() {
         .await
         .unwrap();
 
-    let repos = &resp.results["repos"].records[0].as_json()["repos"];
+    let rec_val = serde_json::Value::from(resp.results["repos"].records[0].as_value().into_owned());
+    let repos = &rec_val["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("main")));
 }
 
@@ -79,7 +81,9 @@ async fn test_list_tables() {
         .await
         .unwrap();
 
-    let tables = &resp.results["tables"].records[0].as_json()["tables"];
+    let rec_val =
+        serde_json::Value::from(resp.results["tables"].records[0].as_value().into_owned());
+    let tables = &rec_val["tables"];
     assert!(tables.as_array().unwrap().contains(&json!("users")));
 }
 
@@ -104,8 +108,8 @@ async fn test_create_repo() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["create"].records[0].as_json()["created_repo"],
-        "hot_cache"
+        resp.results["create"].records[0].get_value_str("created_repo"),
+        Some("hot_cache")
     );
 
     // Verify it exists
@@ -116,7 +120,8 @@ async fn test_create_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let repos = &resp.results["repos"].records[0].as_json()["repos"];
+    let rec_val = serde_json::Value::from(resp.results["repos"].records[0].as_value().into_owned());
+    let repos = &rec_val["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("hot_cache")));
 }
 
@@ -133,7 +138,10 @@ async fn test_drop_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["drop"].records[0].as_json()["existed"], true);
+    assert_eq!(
+        resp.results["drop"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
 }
 
 // ============================================================================
@@ -170,10 +178,13 @@ async fn test_create_index_via_query() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["idx"].records[0].as_json()["created_index"],
-        "email_idx"
+        resp.results["idx"].records[0].get_value_str("created_index"),
+        Some("email_idx")
     );
-    assert_eq!(resp.results["idx"].records[0].as_json()["unique"], true);
+    assert_eq!(
+        resp.results["idx"].records[0].get_value_bool("unique"),
+        Some(true)
+    );
 
     // Now query using the index
     let mut b = Batch::new();
@@ -184,7 +195,10 @@ async fn test_create_index_via_query() {
     );
     let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     assert_eq!(resp.results["find"].records.len(), 1);
-    assert_eq!(resp.results["find"].records[0].as_json()["name"], "Alice");
+    assert_eq!(
+        resp.results["find"].records[0].get_value_str("name"),
+        Some("Alice")
+    );
 }
 
 #[tokio::test]
@@ -203,7 +217,10 @@ async fn test_drop_index_via_query() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["drop"].records[0].as_json()["existed"], true);
+    assert_eq!(
+        resp.results["drop"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
 }
 
 // ============================================================================
@@ -259,7 +276,10 @@ async fn test_ddl_then_dml_pipeline() {
         .await
         .unwrap();
     assert_eq!(resp.results["cheap"].records.len(), 1);
-    assert_eq!(resp.results["cheap"].records[0].as_json()["name"], "Widget");
+    assert_eq!(
+        resp.results["cheap"].records[0].get_value_str("name"),
+        Some("Widget")
+    );
 }
 
 // ============================================================================
@@ -301,7 +321,7 @@ async fn test_list_indexes() {
         .await
         .unwrap();
 
-    let rec = resp.results["idxs"].records[0].as_json();
+    let rec = serde_json::Value::from(resp.results["idxs"].records[0].as_value().into_owned());
     let indexes = rec["indexes"].as_array().unwrap();
     assert_eq!(indexes.len(), 2);
 
@@ -337,8 +357,8 @@ async fn test_create_table_then_use_it() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["ct"].records[0].as_json()["created_table"],
-        "products"
+        resp.results["ct"].records[0].get_value_str("created_table"),
+        Some("products")
     );
 
     // Verify it appears in list
@@ -349,7 +369,7 @@ async fn test_create_table_then_use_it() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let rec = resp.results["tables"].records[0].as_json();
+    let rec = serde_json::Value::from(resp.results["tables"].records[0].as_value().into_owned());
     let tables = rec["tables"].as_array().unwrap();
     assert!(tables.contains(&json!("products")));
 
@@ -386,7 +406,10 @@ async fn test_drop_table() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["dt"].records[0].as_json()["existed"], true);
+    assert_eq!(
+        resp.results["dt"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
 
     // Verify it's gone -- insert should fail with table not found
     let mut b = Batch::new();
@@ -413,7 +436,10 @@ async fn test_drop_nonexistent_table() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["dt"].records[0].as_json()["existed"], false);
+    assert_eq!(
+        resp.results["dt"].records[0].get_value_bool("existed"),
+        Some(false)
+    );
 }
 
 // ============================================================================

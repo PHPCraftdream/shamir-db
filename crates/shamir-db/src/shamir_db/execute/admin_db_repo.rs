@@ -1,13 +1,13 @@
 //! Admin handlers: CreateDb, DropDb, CreateRepo, DropRepo.
 
-use serde_json::json;
-
 use crate::access::{Action, ResourcePath};
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, validate_name_component};
@@ -26,10 +26,10 @@ impl ShamirAdminExecutor {
         validate_name_component(&op.create_db, "db_name")?;
         if self.shamir.has_db(&op.create_db) {
             if op.if_not_exists {
-                return Ok(admin_result(json!({
+                return Ok(admin_result(mpack!({
                     "created": false,
                     "existed": true,
-                    "db": op.create_db
+                    "db": @(QueryValue::Str(op.create_db.clone()))
                 })));
             }
             return Err(err_code(
@@ -40,10 +40,10 @@ impl ShamirAdminExecutor {
         self.shamir
             .create_db_as(&op.create_db, self.actor.clone())
             .await;
-        Ok(admin_result(json!({
+        Ok(admin_result(mpack!({
             "created": true,
             "existed": false,
-            "db": op.create_db
+            "db": @(QueryValue::Str(op.create_db.clone()))
         })))
     }
 
@@ -100,9 +100,10 @@ impl ShamirAdminExecutor {
             }
         }
         let removed = self.shamir.remove_db(&op.drop_db).await;
-        Ok(admin_result(
-            json!({"dropped": op.drop_db, "existed": removed}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped": @(QueryValue::Str(op.drop_db.clone())),
+            "existed": @(QueryValue::Bool(removed)),
+        })))
     }
 
     pub(super) async fn handle_create_repo(
@@ -127,10 +128,10 @@ impl ShamirAdminExecutor {
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_repo(&op.create_repo) {
                 if op.if_not_exists {
-                    return Ok(admin_result(json!({
+                    return Ok(admin_result(mpack!({
                         "created": false,
                         "existed": true,
-                        "repo": op.create_repo
+                        "repo": @(QueryValue::Str(op.create_repo.clone()))
                     })));
                 }
                 return Err(err_code(
@@ -182,10 +183,10 @@ impl ShamirAdminExecutor {
             .add_repo_as(&self.db_name, config, self.actor.clone())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "created_repo": op.create_repo,
+        Ok(admin_result(mpack!({
+            "created_repo": @(QueryValue::Str(op.create_repo.clone())),
             "created": true,
-            "existed": false
+            "existed": false,
         })))
     }
 
@@ -240,8 +241,9 @@ impl ShamirAdminExecutor {
         // removed from the system store and the repo does not
         // resurrect on the next open (symmetry with CreateRepo).
         let removed = self.shamir.remove_repo(&self.db_name, &op.drop_repo).await;
-        Ok(admin_result(
-            json!({"dropped_repo": op.drop_repo, "existed": removed}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_repo": @(QueryValue::Str(op.drop_repo.clone())),
+            "existed": @(QueryValue::Bool(removed)),
+        })))
     }
 }

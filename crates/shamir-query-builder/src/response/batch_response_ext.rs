@@ -25,11 +25,14 @@ pub enum ResponseError {
         len: usize,
     },
     /// A record failed to deserialize into the requested type `T`.
+    ///
+    /// The source is an `rmp_serde` decode error produced when the msgpack
+    /// round-trip through `QueryValue` cannot be mapped onto `T`.
     Deserialize {
         /// Alias whose record failed.
         alias: String,
-        /// The underlying serde_json error.
-        source: serde_json::Error,
+        /// The underlying rmp_serde decode error.
+        source: rmp_serde::decode::Error,
     },
 }
 
@@ -72,6 +75,37 @@ impl std::error::Error for ResponseError {
 
 /// Returned by `rows` / `get_rows` when the alias is absent.
 const EMPTY_SLICE: &[QueryRecord] = &[];
+
+// ============================================================================
+// Internal deserialization helper
+// ============================================================================
+
+/// Deserialize a single `QueryRecord` into `T` via a msgpack round-trip
+/// through its `QueryValue` representation.
+///
+/// This avoids the `serde_json::Value` intermediate that `as_json()` produces
+/// and instead encodes the record as msgpack (via `rmp_serde::to_vec_named`)
+/// and decodes it into `T` (via `rmp_serde::from_slice`).  Because
+/// `QueryValue`'s `Serialize` impl is byte-identical to the msgpack wire
+/// encoding, this round-trip is lossless.
+fn deserialize_record<T: serde::de::DeserializeOwned>(
+    alias: &str,
+    record: &QueryRecord,
+) -> Result<T, ResponseError> {
+    // Serializing a QueryValue to msgpack is infallible: no I/O, no
+    // non-finite floats, no unknown-length sequences. Propagate as Syntax
+    // to avoid unwrap in library code.
+    let bytes = rmp_serde::to_vec_named(record.as_value().as_ref()).map_err(|e| {
+        ResponseError::Deserialize {
+            alias: alias.to_owned(),
+            source: rmp_serde::decode::Error::Syntax(e.to_string()),
+        }
+    })?;
+    rmp_serde::from_slice(&bytes).map_err(|e| ResponseError::Deserialize {
+        alias: alias.to_owned(),
+        source: e,
+    })
+}
 
 // ============================================================================
 // BatchResponseExt trait
@@ -152,14 +186,7 @@ impl BatchResponseExt for BatchResponse {
             .ok_or_else(|| ResponseError::MissingAlias(alias.to_owned()))?;
         qr.records
             .iter()
-            .map(|v| {
-                serde_json::from_value(v.as_json().into_owned()).map_err(|e| {
-                    ResponseError::Deserialize {
-                        alias: alias.to_owned(),
-                        source: e,
-                    }
-                })
-            })
+            .map(|v| deserialize_record(alias, v))
             .collect()
     }
 
@@ -180,10 +207,7 @@ impl BatchResponseExt for BatchResponse {
                 index,
                 len: qr.records.len(),
             })?;
-        serde_json::from_value(val.as_json().into_owned()).map_err(|e| ResponseError::Deserialize {
-            alias: alias.to_owned(),
-            source: e,
-        })
+        deserialize_record(alias, val)
     }
 
     fn get(&self, handle: &Handle) -> Option<&QueryResult> {

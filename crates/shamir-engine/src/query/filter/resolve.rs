@@ -260,13 +260,12 @@ pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> O
     let record = qr.records.get(index)?;
 
     let rest = &path[bracket_end + 1..];
-    let record_json = record.as_json();
+    let record_qv = record.as_value();
     if rest.is_empty() {
-        return Some(json_to_query_value(&record_json));
+        return Some(record_qv.into_owned());
     }
     let rest = rest.strip_prefix('.')?;
-    let field_val = record_json.get(rest)?;
-    Some(json_to_query_value(field_val))
+    Some(record_qv.get(rest)?.clone())
 }
 
 /// Extract a column of values from all records in a QueryResult.
@@ -291,9 +290,8 @@ pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> 
     qr.records
         .iter()
         .filter_map(|record| {
-            let record_json = record.as_json();
-            let val = record_json.get(field)?;
-            Some(json_to_query_value(val))
+            let record_qv = record.as_value();
+            Some(record_qv.get(field)?.clone())
         })
         .collect()
 }
@@ -345,25 +343,4 @@ pub(super) fn resolve_query_value_path<'a>(
 
 pub(super) fn is_column_query_ref(fv: &FilterValue) -> bool {
     matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
-}
-
-/// Convert a `serde_json::Value` scalar into a `QueryValue`.
-///
-/// C6 (#80): the name-keyed target. `serde_json::Value` is already
-/// string-keyed, so this is the natural representation — no interner
-/// walk is required.
-pub(super) fn json_to_query_value(v: &serde_json::Value) -> QueryValue {
-    match v {
-        serde_json::Value::Null => QueryValue::Null,
-        serde_json::Value::Bool(b) => QueryValue::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                QueryValue::Int(i)
-            } else {
-                n.as_f64().map(QueryValue::F64).unwrap_or(QueryValue::Null)
-            }
-        }
-        serde_json::Value::String(s) => QueryValue::Str(s.clone()),
-        _ => QueryValue::Null,
-    }
 }

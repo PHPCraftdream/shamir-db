@@ -6,9 +6,9 @@
 //! (`shamir_query_builder::ddl::interner_*`), issue them via the existing
 //! [`Client::execute`](crate::Client::execute) path, and merge the server's
 //! `(name, id)` answer into the per-`(db, repo)` cache. Parsing the admin
-//! payload out of `QueryResult.records` is a deserialize (the documented
-//! exception to "no hand-assembled serde_json"); no query is constructed from
-//! raw JSON.
+//! payload out of `QueryResult.records` uses the QueryValue-native accessors
+//! (`as_value()` / `QueryValue::get` / `as_u64` / `as_str` / `as_array`);
+//! no serde_json is involved on the read path.
 //!
 //! §9.4 discipline (single source of truth): ids enter the cache ONLY via
 //! [`FieldMap::insert_entry`](crate::interner_cache::FieldMap::insert_entry),
@@ -60,32 +60,31 @@ struct TouchPayload {
     mappings: Vec<(String, u64)>,
 }
 
-/// Extract the first record of a `QueryResult` as a borrowed `serde_json`
-/// value, or return a protocol error if the admin payload is absent.
+/// Extract the first record of a `QueryResult` as a `QueryValue`, or return
+/// a protocol error if the admin payload is absent.
 ///
-/// Returns `Cow::Borrowed` for the wire-deserialized `Json` variant (the
-/// common case for admin ops); `Cow::Owned` only for the `Inserted`/`Direct`
-/// materialised variants, which admin ops never produce.
-fn first_record_json<'a>(
+/// Returns `Cow::Borrowed` for the `Direct` variant (the common post-Stage-A
+/// path for admin ops); `Cow::Owned` for the `Json` / `Inserted` variants.
+fn first_record_value<'a>(
     resp: &'a BatchResponse,
     alias: &str,
-) -> Result<Cow<'a, serde_json::Value>, ClientError> {
+) -> Result<Cow<'a, QueryValue>, ClientError> {
     let result = resp.results.get(alias).ok_or_else(|| {
         ClientError::Protocol(format!(
             "interner admin op: missing result for alias '{alias}'"
         ))
     })?;
-    result.records.first().map(|r| r.as_json()).ok_or_else(|| {
+    result.records.first().map(|r| r.as_value()).ok_or_else(|| {
         ClientError::Protocol(format!(
             "interner admin op: empty records for alias '{alias}'"
         ))
     })
 }
 
-fn parse_dump_payload(v: &serde_json::Value, alias: &str) -> Result<DumpPayload, ClientError> {
+fn parse_dump_payload(v: &QueryValue, alias: &str) -> Result<DumpPayload, ClientError> {
     let epoch = v
         .get("epoch")
-        .and_then(|e| e.as_u64())
+        .and_then(QueryValue::as_u64)
         .ok_or_else(|| ClientError::Protocol(format!("interner_dump: missing epoch ({alias})")))?;
     let entries_v = v.get("entries").ok_or_else(|| {
         ClientError::Protocol(format!("interner_dump: missing entries ({alias})"))
@@ -94,10 +93,10 @@ fn parse_dump_payload(v: &serde_json::Value, alias: &str) -> Result<DumpPayload,
     Ok(DumpPayload { epoch, entries })
 }
 
-fn parse_touch_payload(v: &serde_json::Value, alias: &str) -> Result<TouchPayload, ClientError> {
+fn parse_touch_payload(v: &QueryValue, alias: &str) -> Result<TouchPayload, ClientError> {
     let epoch = v
         .get("epoch")
-        .and_then(|e| e.as_u64())
+        .and_then(QueryValue::as_u64)
         .ok_or_else(|| ClientError::Protocol(format!("interner_touch: missing epoch ({alias})")))?;
     let mappings_v = v.get("mappings").ok_or_else(|| {
         ClientError::Protocol(format!("interner_touch: missing mappings ({alias})"))
@@ -108,7 +107,7 @@ fn parse_touch_payload(v: &serde_json::Value, alias: &str) -> Result<TouchPayloa
 
 /// Parse `[[id, name], ...]` pairs (dump's `entries` — id-first).
 fn parse_id_first_pairs(
-    v: &serde_json::Value,
+    v: &QueryValue,
     ctx: &str,
     alias: &str,
 ) -> Result<Vec<(u64, String)>, ClientError> {
@@ -138,7 +137,7 @@ fn parse_id_first_pairs(
 
 /// Parse `[[name, id], ...]` pairs (touch's `mappings` — name-first).
 fn parse_name_first_pairs(
-    v: &serde_json::Value,
+    v: &QueryValue,
     ctx: &str,
     alias: &str,
 ) -> Result<Vec<(String, u64)>, ClientError> {
@@ -199,7 +198,7 @@ impl Client {
                 // Errors are logged + swallowed so the OnceCell still resolves
                 // with `()`; the maps stay empty until a successful retry.
                 match self.execute(&db, batch.build()).await {
-                    Ok(resp) => match first_record_json(&resp, alias)
+                    Ok(resp) => match first_record_value(&resp, alias)
                         .and_then(|v| parse_dump_payload(&v, alias))
                     {
                         Ok(payload) => {
@@ -231,8 +230,8 @@ impl Client {
         let mut batch = Batch::new();
         batch.op(alias, ddl::interner_dump().repo(repo).since(epoch));
         let resp = self.execute(db, batch.build()).await?;
-        let payload_json = first_record_json(&resp, alias)?;
-        let payload = parse_dump_payload(&payload_json, alias)?;
+        let payload_value = first_record_value(&resp, alias)?;
+        let payload = parse_dump_payload(&payload_value, alias)?;
         for (id, name) in &payload.entries {
             fm.insert_entry(name, *id);
         }
@@ -270,8 +269,8 @@ impl Client {
             ddl::interner_touch(unknown.iter().cloned()).repo(repo),
         );
         let resp = self.execute(db, batch.build()).await?;
-        let payload_json = first_record_json(&resp, alias)?;
-        let payload = parse_touch_payload(&payload_json, alias)?;
+        let payload_value = first_record_value(&resp, alias)?;
+        let payload = parse_touch_payload(&payload_value, alias)?;
         for (name, id) in &payload.mappings {
             fm.insert_entry(name, *id);
         }
@@ -555,7 +554,7 @@ async fn deintern_query_result(
             let bytes_snapshot = bytes.clone();
             let qv =
                 deintern_id_bytes(client, db, bytes_snapshot.as_ref(), repos, refreshed).await?;
-            *record = QueryRecord::Direct(qv, std::sync::OnceLock::new());
+            *record = QueryRecord::Direct(qv);
         }
     }
     Ok(())

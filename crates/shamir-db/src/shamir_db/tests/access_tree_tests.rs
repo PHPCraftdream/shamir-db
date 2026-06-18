@@ -148,7 +148,7 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
             .results
             .get("tree")
             .and_then(|q| q.records.first())
-            .and_then(|rec| rec.get("access_tree"))
+            .and_then(|rec| rec.get_value("access_tree"))
             .and_then(|t| t.get("resources"))
             .is_some())
     };

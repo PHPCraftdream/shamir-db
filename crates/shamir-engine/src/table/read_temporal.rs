@@ -162,10 +162,7 @@ impl TableManager {
             exec::apply_pagination(result_qv, &query.pagination, query.count_total);
 
         let records_returned = records_qv.len() as u64;
-        let records: Vec<QueryRecord> = records_qv
-            .into_iter()
-            .map(|qv| QueryRecord::Direct(qv, std::sync::OnceLock::new()))
-            .collect();
+        let records: Vec<QueryRecord> = records_qv.into_iter().map(QueryRecord::Direct).collect();
         Ok(QueryResult {
             records,
             stats: Some(QueryStats {
@@ -357,7 +354,7 @@ impl TableManager {
                     QueryValue::Map(map)
                 }
             };
-            out_records.push(QueryRecord::Direct(final_qv, std::sync::OnceLock::new()));
+            out_records.push(QueryRecord::Direct(final_qv));
         }
 
         let records_returned = out_records.len() as u64;

@@ -144,12 +144,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
     let proj = SelectProjection::new(&query.select, interner);
     let records: Vec<QueryRecord> = matched
         .iter()
-        .map(|(_, record)| {
-            QueryRecord::Direct(
-                proj.project_value(record, interner),
-                std::sync::OnceLock::new(),
-            )
-        })
+        .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner)))
         .collect();
 
     let records_returned = records.len() as u64;
@@ -181,12 +176,12 @@ fn assert_parity(label: &str, live: &QueryResult, tree: &QueryResult) {
     let mut live_json: Vec<serde_json::Value> = live
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.clone()))
+        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
         .collect();
     let mut tree_json: Vec<serde_json::Value> = tree
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.clone()))
+        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
         .collect();
     live_json.sort_by_key(|a| a.to_string());
     tree_json.sort_by_key(|a| a.to_string());
@@ -266,7 +261,7 @@ async fn s3_parity_distinct() {
         .records
         .iter()
         .filter_map(|r| {
-            serde_json::Value::from(r.clone())
+            serde_json::Value::from(r.as_value().into_owned())
                 .get("city")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -316,7 +311,7 @@ async fn s3_parity_order_by() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::Value::from(r.clone());
+            let json = serde_json::Value::from(r.as_value().into_owned());
             json.get("age").and_then(|v| v.as_i64())
         })
         .collect();
@@ -349,7 +344,7 @@ async fn s3_parity_filter_order_limit() {
         .records
         .iter()
         .map(|r| {
-            let json = serde_json::Value::from(r.clone());
+            let json = serde_json::Value::from(r.as_value().into_owned());
             json.get("age").and_then(|v| v.as_i64())
         })
         .collect();

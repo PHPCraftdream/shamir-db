@@ -6,7 +6,7 @@ use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
 use shamir_db::core::interner::Interner;
 use shamir_db::record_view::{RecordRef, RecordView};
-use shamir_db::types::value::InnerValue;
+use shamir_db::types::value::{InnerValue, QueryValue};
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -214,17 +214,19 @@ pub(crate) async fn bridge_task(
                     Ok(response) => {
                         for qr in response.results.values() {
                             for record in &qr.records {
-                                let record_json = record.as_json();
-                                let key_value = record_json
+                                let record_val = record.as_value();
+                                let key_value: serde_json::Value = record_val
                                     .get("_id")
                                     .cloned()
-                                    .unwrap_or(serde_json::Value::Null);
+                                    .unwrap_or(QueryValue::Null)
+                                    .into();
+                                let value_json: serde_json::Value = record_val.into_owned().into();
                                 let obj = serde_json::json!({
                                     "table": target_table,
                                     "op": "put",
                                     "key": key_value,
                                     "commit_version": 0,
-                                    "value": *record_json
+                                    "value": value_json
                                 });
                                 let data = serde_json::to_vec(&obj).unwrap_or_default();
                                 if !try_push_event(

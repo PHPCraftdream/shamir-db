@@ -173,9 +173,17 @@ async fn test_execute_insert_single() {
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0].as_json()["name"], "Alice");
-    assert_eq!(result.records[0].as_json()["age"], 30);
-    assert!(result.records[0].as_json().get("_id").is_some());
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Alice".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("age"),
+        Some(shamir_types::types::value::QueryValue::Int(30))
+    );
+    assert!(result.records[0].get_value_owned("_id").is_some());
 
     // Verify record count
     assert_eq!(table.count().await.unwrap(), 1);
@@ -252,7 +260,12 @@ async fn test_execute_update_returns_changed() {
     assert_eq!(result.records.len(), 2);
     // All returned records should have status = "premium"
     for record in &result.records {
-        assert_eq!(record.as_json()["status"], "premium");
+        assert_eq!(
+            record.get_value_owned("status"),
+            Some(shamir_types::types::value::QueryValue::Str(
+                "premium".to_string()
+            ))
+        );
     }
 }
 
@@ -285,7 +298,10 @@ async fn test_execute_update_all_records() {
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for record in &result.records {
-        assert_eq!(record.as_json()["verified"], true);
+        assert_eq!(
+            record.get_value_owned("verified"),
+            Some(shamir_types::types::value::QueryValue::Bool(true))
+        );
     }
 }
 
@@ -386,7 +402,10 @@ async fn test_insert_update_delete_pipeline() {
         .await
         .unwrap();
     assert_eq!(r.affected, 1);
-    assert_eq!(r.records[0].as_json()["score"], 75);
+    assert_eq!(
+        r.records[0].get_value_owned("score"),
+        Some(shamir_types::types::value::QueryValue::Int(75))
+    );
 
     // 3. Delete: remove low scorers
     let delete_op = write::delete("users")
@@ -416,8 +435,16 @@ async fn test_execute_set_insert_new() {
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0].as_json()["_created"], true);
-    assert_eq!(result.records[0].as_json()["name"], "Alice");
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(true))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Alice".to_string()
+        ))
+    );
     assert_eq!(table.count().await.unwrap(), 1);
 }
 
@@ -440,10 +467,21 @@ async fn test_execute_set_update_existing() {
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0].as_json()["_created"], false);
-    assert_eq!(result.records[0].as_json()["status"], "vip");
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("status"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "vip".to_string()
+        ))
+    );
     // Original field "age" should be preserved (merge)
-    assert_eq!(result.records[0].as_json()["age"], 30);
+    assert_eq!(
+        result.records[0].get_value_owned("age"),
+        Some(shamir_types::types::value::QueryValue::Int(30))
+    );
     assert_eq!(table.count().await.unwrap(), 3); // no new record
 }
 
@@ -458,7 +496,10 @@ async fn test_execute_set_no_match_inserts() {
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
-    assert_eq!(result.records[0].as_json()["_created"], true);
+    assert_eq!(
+        result.records[0].get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(true))
+    );
     assert_eq!(table.count().await.unwrap(), 4); // new record added
 }
 
@@ -567,10 +608,17 @@ async fn test_insert_computed_field_lowercase() {
     let result = insert_via_tx(&repo, &table, &op, true).await.unwrap();
     assert_eq!(result.affected, 1);
     // The literal field is untouched; the computed field holds the result.
-    assert_eq!(result.records[0].as_json()["email"], "Alice@Example.COM");
     assert_eq!(
-        result.records[0].as_json()["email_norm"],
-        "alice@example.com"
+        result.records[0].get_value_owned("email"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Alice@Example.COM".to_string()
+        ))
+    );
+    assert_eq!(
+        result.records[0].get_value_owned("email_norm"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "alice@example.com".to_string()
+        ))
     );
 }
 
@@ -588,7 +636,12 @@ async fn test_set_computed_field() {
         .build();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
-    assert_eq!(result.records[0].as_json()["email_norm"], "x@y.z");
+    assert_eq!(
+        result.records[0].get_value_owned("email_norm"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "x@y.z".to_string()
+        ))
+    );
 }
 
 #[tokio::test]
@@ -638,12 +691,28 @@ async fn test_set_nontx_insert_parity() {
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    let rec = result.records[0].as_json();
-    assert_eq!(rec["_created"], true);
-    assert_eq!(rec["email"], "parity@test.com");
-    assert_eq!(rec["name"], "Parity");
-    assert_eq!(rec["score"], 42);
-    assert!(rec["_id"].is_string(), "_id must be present");
+    let rec = &result.records[0];
+    assert_eq!(
+        rec.get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(true))
+    );
+    assert_eq!(
+        rec.get_value_owned("email"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "parity@test.com".to_string()
+        ))
+    );
+    assert_eq!(
+        rec.get_value_owned("name"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "Parity".to_string()
+        ))
+    );
+    assert_eq!(
+        rec.get_value_owned("score"),
+        Some(shamir_types::types::value::QueryValue::Int(42))
+    );
+    assert!(rec.get_value_owned("_id").is_some(), "_id must be present");
     assert_eq!(table.count().await.unwrap(), 1);
 
     // Read back and verify the stored bytes round-trip to the same values.
@@ -654,9 +723,9 @@ async fn test_set_nontx_insert_parity() {
     let read = table.read(&query, &ctx).await.unwrap();
     assert_eq!(read.records.len(), 1);
     let stored = &read.records[0];
-    assert_eq!(stored["email"], "parity@test.com");
-    assert_eq!(stored["name"], "Parity");
-    assert_eq!(stored["score"], 42);
+    assert_eq!(stored.get_value_str("email"), Some("parity@test.com"));
+    assert_eq!(stored.get_value_str("name"), Some("Parity"));
+    assert_eq!(stored.get_value_i64("score"), Some(42));
 }
 
 /// UPDATE path: non-tx SET (via `set_via_tx`) merges into an existing
@@ -679,12 +748,28 @@ async fn test_set_nontx_update_parity() {
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    let rec = result.records[0].as_json();
-    assert_eq!(rec["_created"], false);
-    assert_eq!(rec["status"], "vip");
-    assert_eq!(rec["badge"], "gold");
+    let rec = &result.records[0];
+    assert_eq!(
+        rec.get_value_owned("_created"),
+        Some(shamir_types::types::value::QueryValue::Bool(false))
+    );
+    assert_eq!(
+        rec.get_value_owned("status"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "vip".to_string()
+        ))
+    );
+    assert_eq!(
+        rec.get_value_owned("badge"),
+        Some(shamir_types::types::value::QueryValue::Str(
+            "gold".to_string()
+        ))
+    );
     // Original field "age" preserved by merge.
-    assert_eq!(rec["age"], 30);
+    assert_eq!(
+        rec.get_value_owned("age"),
+        Some(shamir_types::types::value::QueryValue::Int(30))
+    );
     // No new record created.
     assert_eq!(table.count().await.unwrap(), 3);
 
@@ -700,7 +785,7 @@ async fn test_set_nontx_update_parity() {
     let read = table.read(&query, &ctx).await.unwrap();
     assert_eq!(read.records.len(), 1);
     let stored = &read.records[0];
-    assert_eq!(stored["status"], "vip");
-    assert_eq!(stored["badge"], "gold");
-    assert_eq!(stored["age"], 30);
+    assert_eq!(stored.get_value_str("status"), Some("vip"));
+    assert_eq!(stored.get_value_str("badge"), Some("gold"));
+    assert_eq!(stored.get_value_i64("age"), Some(30));
 }

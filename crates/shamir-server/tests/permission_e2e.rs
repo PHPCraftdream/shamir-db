@@ -646,8 +646,7 @@ async fn permission_group_grant() {
             .results
             .get("mk")
             .and_then(|r| r.records.first())
-            .and_then(|r| r.get("group_id"))
-            .and_then(|v| v.as_u64())
+            .and_then(|r| r.get_value_u64("group_id"))
             .expect("group_id in response"),
         _ => panic!("unexpected"),
     };

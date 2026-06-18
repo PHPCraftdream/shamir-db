@@ -1,11 +1,12 @@
 //! Admin handlers: CreateValidator, DropValidator, RenameValidator, BindValidator, UnbindValidator, ListValidators.
 
 use base64::Engine;
-use serde_json::json;
 
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::types::value::QueryValue;
+use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
@@ -68,9 +69,9 @@ impl ShamirAdminExecutor {
                 "create_validator requires either 'source' or 'wasm'".to_string()
             ));
         };
-        Ok(admin_result(json!({
-            "created_validator": op.create_validator,
-            "id": id.to_string(),
+        Ok(admin_result(mpack!({
+            "created_validator": @(QueryValue::Str(op.create_validator.clone())),
+            "id": @(QueryValue::Str(id.to_string())),
         })))
     }
 
@@ -108,9 +109,10 @@ impl ShamirAdminExecutor {
             .drop_validator_as(&op.drop_validator, self.actor.clone())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"dropped_validator": op.drop_validator, "existed": existed}),
-        ))
+        Ok(admin_result(mpack!({
+            "dropped_validator": @(QueryValue::Str(op.drop_validator.clone())),
+            "existed": @(QueryValue::Bool(existed)),
+        })))
     }
 
     pub(super) async fn handle_rename_validator(
@@ -142,9 +144,10 @@ impl ShamirAdminExecutor {
             .rename_validator_as(&op.rename_validator, &op.to, self.actor.clone())
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(
-            json!({"renamed_validator": op.rename_validator, "to": op.to}),
-        ))
+        Ok(admin_result(mpack!({
+            "renamed_validator": @(QueryValue::Str(op.rename_validator.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+        })))
     }
 
     pub(super) async fn handle_bind_validator(
@@ -194,9 +197,9 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "bound_validator": op.bind_validator,
-            "table": op.table,
+        Ok(admin_result(mpack!({
+            "bound_validator": @(QueryValue::Str(op.bind_validator.clone())),
+            "table": @(QueryValue::Str(op.table.clone())),
         })))
     }
 
@@ -245,10 +248,10 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(|e| err(e.to_string()))?;
-        Ok(admin_result(json!({
-            "unbound_validator": op.unbind_validator,
-            "table": op.table,
-            "existed": removed,
+        Ok(admin_result(mpack!({
+            "unbound_validator": @(QueryValue::Str(op.unbind_validator.clone())),
+            "table": @(QueryValue::Str(op.table.clone())),
+            "existed": @(QueryValue::Bool(removed)),
         })))
     }
 
@@ -291,18 +294,18 @@ impl ShamirAdminExecutor {
             .list_validator_bindings(&op.db, &op.repo, &op.list_validators)
             .await
             .map_err(|e| err(e.to_string()))?;
-        let bindings_json: Vec<serde_json::Value> = bindings
+        let bindings_qv: Vec<QueryValue> = bindings
             .iter()
             .map(|b| {
-                json!({
-                    "validator_id": b.validator_id.to_string(),
-                    "priority": b.priority,
+                mpack!({
+                    "validator_id": @(QueryValue::Str(b.validator_id.to_string())),
+                    "priority": @(QueryValue::Int(b.priority as i64)),
                 })
             })
             .collect();
-        Ok(admin_result(json!({
-            "validators": bindings_json,
-            "table": op.list_validators,
+        Ok(admin_result(mpack!({
+            "validators": @(QueryValue::List(bindings_qv)),
+            "table": @(QueryValue::Str(op.list_validators.clone())),
         })))
     }
 }

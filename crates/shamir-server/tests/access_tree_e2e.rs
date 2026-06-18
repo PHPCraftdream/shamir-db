@@ -96,7 +96,8 @@ async fn access_tree_over_the_wire_as_admin() {
         .expect("execute");
     let qr = resp.results.get("tree").expect("tree result present");
     let rec = qr.records.first().expect("one record");
-    let tree = rec.get("access_tree").expect("access_tree payload");
+    let rec_json = serde_json::Value::from(rec.as_value().into_owned());
+    let tree = &rec_json["access_tree"];
 
     // Resource root assembled.
     assert_eq!(

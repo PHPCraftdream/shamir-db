@@ -196,7 +196,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -271,7 +271,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -362,7 +362,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -400,7 +400,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .and_then(|r| r.as_json().get("value").cloned()))
+            .and_then(|r| r.get_value_owned("value").map(serde_json::Value::from)))
     }
 
     // ========================================================================
@@ -472,7 +472,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -487,7 +487,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -508,7 +508,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     // ========================================================================
@@ -546,7 +546,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -567,7 +567,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Add a user to a group. Reads the group, appends the user, and
@@ -642,7 +642,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Load a single repository record by (db_name, repo_name).
@@ -674,7 +674,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Load a single table catalogue record by (db, repo, table).
@@ -711,7 +711,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Persist a replacement database record (for `set_resource_meta`).
@@ -823,7 +823,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -844,7 +844,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Persist a replacement function catalogue record (for `set_resource_meta`).
@@ -920,7 +920,7 @@ impl SystemStore {
         Ok(result
             .records
             .into_iter()
-            .map(serde_json::Value::from)
+            .map(|r| serde_json::Value::from(r.as_value().into_owned()))
             .collect())
     }
 
@@ -944,7 +944,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(serde_json::Value::from))
+            .map(|r| serde_json::Value::from(r.as_value().into_owned())))
     }
 
     /// Persist a replacement function folder record (for `set_resource_meta`).

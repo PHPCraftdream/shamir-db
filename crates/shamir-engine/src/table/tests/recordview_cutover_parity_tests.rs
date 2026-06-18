@@ -185,12 +185,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
     let proj = SelectProjection::new(&query.select, interner);
     let records: Vec<QueryRecord> = matched
         .iter()
-        .map(|(_, record)| {
-            QueryRecord::Direct(
-                proj.project_value(record, interner),
-                std::sync::OnceLock::new(),
-            )
-        })
+        .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner)))
         .collect();
 
     let records_returned = records.len() as u64;
@@ -226,12 +221,12 @@ fn assert_parity(label: &str, live: &QueryResult, tree: &QueryResult) {
     let mut live_json: Vec<serde_json::Value> = live
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.clone()))
+        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
         .collect();
     let mut tree_json: Vec<serde_json::Value> = tree
         .records
         .iter()
-        .map(|r| serde_json::Value::from(r.clone()))
+        .map(|r| serde_json::Value::from(r.as_value().into_owned()))
         .collect();
     live_json.sort_by_key(|a| a.to_string());
     tree_json.sort_by_key(|a| a.to_string());
@@ -345,7 +340,7 @@ async fn parity_select_with_alias() {
     assert_parity("SELECT name AS full_name, age", &live, &tree);
 
     // Verify the alias key appears in the output
-    let first_json = serde_json::Value::from(live.records[0].clone());
+    let first_json = serde_json::Value::from(live.records[0].as_value().into_owned());
     assert!(
         first_json.get("full_name").is_some(),
         "expected 'full_name' alias key in output"
@@ -509,7 +504,7 @@ async fn parity_group_by_agg() {
     // We don't compare against run_tree for GROUP BY because the tree
     // helper doesn't implement the full GROUP BY pipeline. Instead, we
     // verify the live result is non-empty and structurally valid.
-    let first_json = serde_json::Value::from(live.records[0].clone());
+    let first_json = serde_json::Value::from(live.records[0].as_value().into_owned());
     assert!(
         first_json.get("city").is_some(),
         "GROUP BY output must contain city"
@@ -595,7 +590,7 @@ async fn parity_u64_overflow() {
     assert_eq!(live.records.len(), 1, "expected exactly Eve's record");
 
     // Verify the big_id value is the stringified u64::MAX
-    let json = serde_json::Value::from(live.records[0].clone());
+    let json = serde_json::Value::from(live.records[0].as_value().into_owned());
     let big_id = json.get("big_id").expect("big_id field missing");
     assert_eq!(
         big_id.as_str().unwrap(),

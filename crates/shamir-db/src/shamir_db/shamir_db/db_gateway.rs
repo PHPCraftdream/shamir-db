@@ -153,11 +153,7 @@ impl DbGateway for FacadeDbGateway {
         };
 
         match result.records.first() {
-            Some(rec) => {
-                let qv = serde_json::from_value(rec.as_json().into_owned())
-                    .map_err(|e| format!("get: record decode error: {e}"))?;
-                Ok(Some(qv))
-            }
+            Some(rec) => Ok(Some(rec.as_value().into_owned())),
             None => Ok(None),
         }
     }
@@ -213,11 +209,7 @@ impl DbGateway for FacadeDbGateway {
         };
 
         match result.records.first() {
-            Some(rec) => {
-                let qv = serde_json::from_value(rec.as_json().into_owned())
-                    .map_err(|e| format!("insert: record decode error: {e}"))?;
-                Ok(qv)
-            }
+            Some(rec) => Ok(rec.as_value().into_owned()),
             None => Err("insert: empty result".to_string()),
         }
     }
@@ -295,14 +287,11 @@ impl DbGateway for FacadeDbGateway {
             None => return Ok(Vec::new()),
         };
 
-        result
+        Ok(result
             .records
             .iter()
-            .map(|rec| {
-                serde_json::from_value(rec.as_json().into_owned())
-                    .map_err(|e| format!("query: record decode error: {e}"))
-            })
-            .collect()
+            .map(|rec| rec.as_value().into_owned())
+            .collect())
     }
 
     async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, String> {

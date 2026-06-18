@@ -50,7 +50,10 @@ async fn wire_created_repo_is_durable_across_reopen() {
         b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
         let create = b.to_request_via_msgpack();
         let resp = shamir.execute("appdb", &create).await.unwrap();
-        assert_eq!(resp.results["cr"].records[0]["created_repo"], "data");
+        assert_eq!(
+            resp.results["cr"].records[0].get_value_str("created_repo"),
+            Some("data")
+        );
 
         let mut b = Batch::new();
         b.id(2);
@@ -85,7 +88,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
         1,
         "data must survive restart in a durable repo"
     );
-    let r0 = records[0].as_json();
+    let r0 = records[0].as_value();
     assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
     assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }

@@ -16,8 +16,6 @@
 //! `create_repo` setup batch remains as raw `json!` because `create_repo` is
 //! an admin op with no builder coverage.
 
-use serde_json::json;
-
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -102,8 +100,8 @@ async fn e2e_computed_value_persisted_on_insert() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0].as_json()["email"], json!("A@X.COM"));
-    assert_eq!(recs[0].as_json()["email_norm"], json!("a@x.com"));
+    assert_eq!(recs[0].get_value_str("email"), Some("A@X.COM"));
+    assert_eq!(recs[0].get_value_str("email_norm"), Some("a@x.com"));
 }
 
 /// 2. Filtering — `WHERE name == strings/lower("ALICE")` selects exactly the
@@ -124,7 +122,7 @@ async fn e2e_filter_with_fn_call() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
     assert_eq!(recs.len(), 1, "only alice matches lower(\"ALICE\")");
-    assert_eq!(recs[0].as_json()["name"], json!("alice"));
+    assert_eq!(recs[0].get_value_str("name"), Some("alice"));
 }
 
 /// 3. Aggregation — `SELECT city, median(age) GROUP BY city` runs the funclib
@@ -152,10 +150,10 @@ async fn e2e_group_by_library_aggregate() {
     assert_eq!(groups.len(), 2);
 
     // Groups are emitted in alphabetical key order: LA, then NYC.
-    assert_eq!(groups[0]["city"], json!("LA"));
-    assert_eq!(groups[0]["med_age"], json!(25)); // [25, 25]
-    assert_eq!(groups[1]["city"], json!("NYC"));
-    assert_eq!(groups[1]["med_age"], json!(30)); // lower-median of [30, 35]
+    assert_eq!(groups[0].get_value_str("city"), Some("LA"));
+    assert_eq!(groups[0].get_value_i64("med_age"), Some(25)); // [25, 25]
+    assert_eq!(groups[1].get_value_str("city"), Some("NYC"));
+    assert_eq!(groups[1].get_value_i64("med_age"), Some(30)); // lower-median of [30, 35]
 }
 
 /// 4. Scalar function in the SELECT projection — `SELECT name,
@@ -181,6 +179,6 @@ async fn e2e_select_scalar_function() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0].as_json()["name"], json!("alice"));
-    assert_eq!(recs[0].as_json()["up"], json!("ALICE"));
+    assert_eq!(recs[0].get_value_str("name"), Some("alice"));
+    assert_eq!(recs[0].get_value_str("up"), Some("ALICE"));
 }
