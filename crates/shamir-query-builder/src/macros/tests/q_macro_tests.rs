@@ -667,11 +667,17 @@ fn q_call_with_query_ref_expr() {
 #[test]
 fn q_call_composes_into_batch() {
     use crate::batch::Batch;
+    use crate::wire::ToWire;
 
     let mut b = Batch::new();
     b.op("p", q!(call my_proc(1, "x")));
-    let json = b.to_json_value().unwrap();
-    assert_eq!(json["queries"]["p"]["call"], "my_proc");
+    let qv = b.build().to_query_value().unwrap();
+    let call_name = qv
+        .get("queries")
+        .and_then(|q| q.get("p"))
+        .and_then(|e| e.get("call"))
+        .and_then(|v| v.as_str());
+    assert_eq!(call_name, Some("my_proc"));
 }
 
 // ── insert with trailing comma in doc ────────────────────────────

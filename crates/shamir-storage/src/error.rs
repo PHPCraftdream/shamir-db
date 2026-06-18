@@ -53,8 +53,9 @@ pub enum DbError {
     Function(String),
 
     /// One or more validators rejected the write with structured,
-    /// field-bound errors (S3). The inner string is a JSON-encoded
-    /// array of `{ "field": [...] | null, "code": "..." }` objects.
+    /// field-bound errors (S3). The inner string is a semicolon-separated
+    /// list of `"field.path: code"` entries (record-level errors omit the
+    /// field path). Example: `"_prev_hash: stale; : required"`.
     #[error("Validator rejected: {0}")]
     ValidatorRejected(String),
 

@@ -20,7 +20,10 @@ fn after_sets_field_on_dependent_entry() {
 }
 
 #[test]
-fn after_wire_json_contains_after_for_dependent_only() {
+fn after_wire_contains_after_for_dependent_only() {
+    use crate::wire::ToWire;
+    use shamir_types::types::value::QueryValue;
+
     let mut b = Batch::new();
     b.id(1);
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
@@ -30,22 +33,30 @@ fn after_wire_json_contains_after_for_dependent_only() {
     );
     b.after(&rows, &mk);
 
-    let json = b.to_json_value().unwrap();
-    let queries = json["queries"].as_object().unwrap();
+    let qv = b.build().to_query_value().unwrap();
+    let queries = qv.get("queries").expect("queries key");
 
-    // "rows" must have `"after": ["mk_tbl"]`
-    let rows_json = &queries["rows"];
+    // "rows" must have `after: ["mk_tbl"]`
+    let rows_entry = queries.get("rows").expect("rows entry");
+    let after = rows_entry
+        .get("after")
+        .expect("after key on dependent entry");
+    let list = match after {
+        QueryValue::List(l) => l,
+        other => panic!("expected List for 'after', got {other:?}"),
+    };
+    assert_eq!(list.len(), 1, "dependent entry must have exactly one after");
     assert_eq!(
-        rows_json["after"],
-        serde_json::json!(["mk_tbl"]),
-        "dependent entry must have 'after' in wire JSON"
+        list[0].as_str(),
+        Some("mk_tbl"),
+        "dependent entry must have 'after' pointing to mk_tbl"
     );
 
-    // "mk_tbl" must NOT have `after` key at all (empty -> omitted).
-    let mk_json = &queries["mk_tbl"];
+    // "mk_tbl" must NOT have an `after` key (empty -> omitted).
+    let mk_entry = queries.get("mk_tbl").expect("mk_tbl entry");
     assert!(
-        mk_json.get("after").is_none(),
-        "independent entry must NOT have 'after' in wire JSON"
+        mk_entry.get("after").is_none(),
+        "independent entry must NOT have 'after' in wire encoding"
     );
 }
 

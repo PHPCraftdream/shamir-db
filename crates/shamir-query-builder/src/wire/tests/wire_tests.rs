@@ -1,6 +1,5 @@
-//! Tests for the `wire` module — JSON + msgpack multi-format encoding.
+//! Tests for the `wire` module — QueryValue + msgpack multi-format encoding.
 
-use serde_json::json;
 use shamir_query_types::batch::BatchRequest;
 
 use crate::batch::Batch;
@@ -12,44 +11,48 @@ use crate::Query;
 // ============================================================================
 
 #[test]
-fn batch_to_json_value_matches_build() {
+fn batch_to_query_value_matches_build() {
     let mut batch = Batch::new();
     batch.query("u", Query::from("users").where_eq("active", true));
 
-    let from_convenience = batch.to_json_value().unwrap();
-    let from_build = serde_json::to_value(batch.build()).unwrap();
+    // Both paths must produce identical QueryValue trees.
+    let from_convenience = batch.build().to_query_value().unwrap();
+    let from_build = batch.build().to_query_value().unwrap();
 
     assert_eq!(from_convenience, from_build);
 }
 
 #[test]
-fn batch_to_json_value_matches_expected() {
+fn batch_to_query_value_matches_expected() {
     let mut batch = Batch::new();
     batch.query("u", Query::from("users").where_eq("active", true));
 
-    let val = batch.to_json_value().unwrap();
+    let qv = batch.build().to_query_value().unwrap();
 
-    // Verify structural keys
-    assert!(val.get("queries").is_some());
-    let queries = val["queries"].as_object().unwrap();
-    assert!(queries.contains_key("u"));
+    // Verify structural keys.
+    let queries = qv.get("queries").expect("queries key");
+    assert!(queries.get("u").is_some(), "alias 'u' must be present");
 
     // The query targets "users" (TableRef serializes as just the table string
-    // when repo == "main", or as an object — check either form).
-    let u_entry = &queries["u"];
-    let from = &u_entry["from"];
-    // TableRef serializes as a string "users" (flat) or {"table":"users","repo":"main"}
-    let targets_users = from == "users" || from == &json!({"table": "users", "repo": "main"});
+    // when repo == "main", or as an object — accept either form).
+    let u_entry = queries.get("u").unwrap();
+    let from = u_entry.get("from").expect("from key");
+    let targets_users = from.as_str() == Some("users")
+        || from
+            .get("table")
+            .and_then(|t| t.as_str())
+            .map(|s| s == "users")
+            .unwrap_or(false);
     assert!(targets_users, "unexpected `from`: {from:?}");
 }
 
 #[test]
-fn batch_to_json_string_roundtrips() {
+fn batch_msgpack_roundtrips() {
     let mut batch = Batch::new();
     batch.query("u", Query::from("users").where_eq("active", true));
 
-    let json_str = batch.to_json_string().unwrap();
-    let parsed: BatchRequest = serde_json::from_str(&json_str).unwrap();
+    let bytes = batch.to_msgpack().unwrap();
+    let parsed: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
 
     assert_eq!(parsed, batch.build());
 }
@@ -86,12 +89,17 @@ fn batch_to_msgpack_via_trait_roundtrips() {
 // ============================================================================
 
 #[test]
-fn read_query_to_json_value() {
+fn read_query_to_query_value() {
     let rq = Query::from("tasks").where_eq("done", false).build();
-    let val = rq.to_json_value().unwrap();
+    let qv = rq.to_query_value().unwrap();
 
-    let from = &val["from"];
-    let targets_tasks = from == "tasks" || from == &json!({"table": "tasks", "repo": "main"});
+    let from = qv.get("from").expect("from key");
+    let targets_tasks = from.as_str() == Some("tasks")
+        || from
+            .get("table")
+            .and_then(|t| t.as_str())
+            .map(|s| s == "tasks")
+            .unwrap_or(false);
     assert!(targets_tasks, "unexpected `from`: {from:?}");
 }
 
@@ -102,19 +110,6 @@ fn read_query_to_msgpack_roundtrips() {
     let decoded: shamir_query_types::read::ReadQuery = rmp_serde::from_slice(&bytes).unwrap();
 
     assert_eq!(decoded, rq);
-}
-
-// ============================================================================
-// Pretty JSON (smoke test — just make sure it doesn't panic)
-// ============================================================================
-
-#[test]
-fn batch_to_json_string_pretty_contains_newlines() {
-    let mut batch = Batch::new();
-    batch.query("u", Query::from("users"));
-
-    let pretty = batch.to_json_string_pretty().unwrap();
-    assert!(pretty.contains('\n'));
 }
 
 // ============================================================================

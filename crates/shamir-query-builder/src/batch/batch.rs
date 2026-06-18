@@ -577,23 +577,6 @@ impl Batch {
         rmp_serde::to_vec_named(&self.build())
     }
 
-    /// Build and encode as a compact JSON string (debug / human-readable).
-    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
-        crate::wire::ToWire::to_json_string(&self.build())
-    }
-
-    /// Build and encode as a pretty-printed JSON string (debug / human-readable).
-    pub fn to_json_string_pretty(&self) -> Result<String, serde_json::Error> {
-        crate::wire::ToWire::to_json_string_pretty(&self.build())
-    }
-
-    /// Build and encode as a JSON `serde_json::Value` (debug / structural tests).
-    ///
-    /// Prefer [`to_msgpack`](Self::to_msgpack) for the wire path.
-    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
-        crate::wire::ToWire::to_json_value(&self.build())
-    }
-
     /// Build, encode to msgpack, and decode back into a `BatchRequest`.
     ///
     /// Round-trips the request through the wire codec (named msgpack) — the
