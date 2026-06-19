@@ -427,6 +427,20 @@ impl TableManager {
         &self.sorted_indexes
     }
 
+    /// O(1) composite check: does this table have ANY index across all
+    /// three subsystems (index2 registry, legacy hash/unique, sorted)?
+    ///
+    /// Used as a fast-path guard on the insert hot path to skip the
+    /// `all_backends().await` scan + 3 legacy planner calls when the
+    /// table has zero indexes. Each sub-check is O(1): `is_empty()`
+    /// on `scc::HashMap`, two `AtomicBool` loads, `DashMap::is_empty`.
+    pub fn has_any_index(&self) -> bool {
+        !self.index2_registry.is_empty()
+            || self.index_manager.has_indexes()
+            || self.index_manager.has_unique_indexes()
+            || self.sorted_indexes.has_indexes()
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
