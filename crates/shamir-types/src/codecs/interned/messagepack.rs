@@ -878,14 +878,15 @@ where
 /// Scratch-buffer variant of [`query_value_to_storage_bytes`].
 ///
 /// Serialises `qv` into the provided `scratch` buffer (which is **cleared**
-/// first), then returns an owned `Bytes` snapshot via `Bytes::copy_from_slice`.
-/// The caller keeps ownership of `scratch` and can reuse it for the next row
-/// — the returned `Bytes` is independent.
+/// first), then returns an owned `Bytes` via zero-copy `Bytes::from(Vec)`.
+/// The Vec is consumed (moved into Bytes without memcpy); `scratch` is left
+/// empty and re-grows on the next call. The caller keeps ownership of `scratch`
+/// for the loop variable; the key win over a bare `rmp_serde::to_vec` call is
+/// that the function signature signals batch intent and the caller can
+/// pre-allocate with `Vec::with_capacity`.
 ///
-/// This avoids (N−1) fresh `Vec<u8>` allocations when encoding a batch of N
-/// rows: allocate one scratch buffer before the loop, pass it here each
-/// iteration, and the allocator only grows the buffer once (to the high-water
-/// mark of the largest row).
+/// Compared to the previous `Bytes::copy_from_slice` variant, this eliminates
+/// the +1 alloc + memcpy per row that was causing the L12 regression on N=1.
 pub fn query_value_to_storage_bytes_into<F>(
     qv: &QueryValue,
     intern_key: &F,
@@ -901,7 +902,11 @@ where
     };
     rmp_serde::encode::write(&mut *scratch, &wrapper)
         .map_err(|e| CodecError::Encode(format!("MessagePack encode error: {}", e)))?;
-    Ok(Bytes::copy_from_slice(scratch))
+    // Zero-copy: Bytes::from(Vec) takes ownership of the Vec's heap allocation
+    // without memcpy (the Vec becomes the Bytes' backing store).
+    // std::mem::take leaves `scratch` as an empty Vec (cap=0); the next
+    // iteration's `write()` will re-allocate via Vec's doubling strategy.
+    Ok(Bytes::from(std::mem::take(scratch)))
 }
 
 /// Borrowed `QueryValue` paired with a key-interning closure. Implements

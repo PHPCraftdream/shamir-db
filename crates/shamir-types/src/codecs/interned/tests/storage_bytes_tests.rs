@@ -511,3 +511,55 @@ fn scratch_buffer_clear_between_rows() {
     // Sanity: big and small should differ.
     assert_ne!(big_bytes.as_ref(), small_bytes.as_ref());
 }
+
+#[test]
+fn scratch_returns_zero_copy_handoff() {
+    // Verify that query_value_to_storage_bytes_into produces byte-identical
+    // output to the fresh-Vec variant AND that after the call `scratch` is
+    // consumed (mem::take moves the Vec into Bytes zero-copy). The key
+    // property: Bytes::from(Vec) is a zero-copy handoff — no memcpy.
+    let f = make_first_seen_interner();
+    let mut scratch = Vec::new();
+
+    // Encode a large row.
+    let mut big = new_map();
+    for i in 0..30 {
+        big.insert(format!("field_{i}"), Value::Str("x".repeat(200)));
+    }
+    let big_qv = Value::Map(big);
+    let big_bytes = query_value_to_storage_bytes_into(&big_qv, &f, &mut scratch).unwrap();
+
+    // After the call, scratch is empty (mem::take consumed it).
+    assert_eq!(scratch.len(), 0, "scratch must be empty after take");
+    assert_eq!(scratch.capacity(), 0, "scratch capacity is 0 after take");
+
+    // The returned Bytes must be byte-identical to the fresh-Vec variant.
+    let f2 = make_first_seen_interner();
+    let fresh = query_value_to_storage_bytes(&big_qv, &f2).unwrap();
+    assert_eq!(
+        big_bytes.as_ref(),
+        fresh.as_ref(),
+        "zero-copy handoff bytes differ from fresh-Vec bytes"
+    );
+
+    // Encode a batch of 20 rows — each call produces valid output even
+    // though scratch starts empty each time (Vec re-grows internally).
+    for i in 0..20 {
+        let mut m = new_map();
+        m.insert("id".to_string(), Value::Int(i));
+        m.insert("name".to_string(), Value::Str(format!("row_{i}")));
+        let qv = Value::Map(m);
+
+        let f_a = make_first_seen_interner();
+        let from_scratch = query_value_to_storage_bytes_into(&qv, &f_a, &mut scratch).unwrap();
+
+        let f_b = make_first_seen_interner();
+        let from_fresh = query_value_to_storage_bytes(&qv, &f_b).unwrap();
+
+        assert_eq!(
+            from_scratch.as_ref(),
+            from_fresh.as_ref(),
+            "batch row {i}: zero-copy handoff bytes differ from fresh-Vec bytes"
+        );
+    }
+}
