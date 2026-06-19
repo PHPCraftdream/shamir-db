@@ -36,9 +36,8 @@ impl RecordId {
 
     /// Creates a `RecordId` with a caller-supplied `timestamp_micros`
     /// (absolute, same scale as `Utc::now().timestamp_micros()`) and a
-    /// fresh 8-byte random tail.  Use in batch paths to hoist the
-    /// single clock-read out of the per-row loop while keeping every id
-    /// unique via the random tail.
+    /// fresh 8-byte random tail.  Use for single-row inserts where no
+    /// intra-batch ordering is needed.
     pub fn from_ts(timestamp_micros: i64) -> Self {
         let mut bytes = [0u8; 16];
 
@@ -50,14 +49,44 @@ impl RecordId {
         // ~1-2 ns/call vs ~5 ns for ChaCha (thread_rng). Xoshiro256++ has
         // excellent statistical quality (passes BigCrush) and is sufficient
         // for collision-resistant IDs; CSPRNG is unnecessary here.
+        Self::fill_random_tail(&mut bytes[8..16]);
+        Self(bytes)
+    }
+
+    /// Creates a `RecordId` with a caller-supplied `timestamp_micros` and
+    /// an ascending `seq` counter embedded in the tail's high 4 bytes.
+    /// Layout: `[0..8] BE relative_ts | [8..12] BE seq (u32) | [12..16] 4 random bytes`.
+    ///
+    /// Use in batch paths: one `now_micros()` call per batch, then
+    /// `from_ts_seq(batch_ts, 0)`, `from_ts_seq(batch_ts, 1)`, ...
+    /// This preserves intra-batch monotonicity (ascending byte order)
+    /// while keeping the single clock-read hoist from L13.
+    pub fn from_ts_seq(timestamp_micros: i64, seq: u32) -> Self {
+        let mut bytes = [0u8; 16];
+
+        let relative_micros = timestamp_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
+        bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
+
+        // Sequence counter in tail's high 4 bytes — gives lex-ascending
+        // order within a batch sharing the same timestamp prefix.
+        bytes[8..12].copy_from_slice(&seq.to_be_bytes());
+
+        // 4 random bytes for collision resistance across concurrent batches
+        // sharing the same ts + seq (practically impossible but defensive).
+        Self::fill_random_tail(&mut bytes[12..16]);
+        Self(bytes)
+    }
+
+    /// Fills the given slice with random bytes from a thread-local
+    /// Xoshiro256++ PRNG seeded once from OsRng.
+    fn fill_random_tail(dest: &mut [u8]) {
         thread_local! {
             static RNG: RefCell<Xoshiro256PlusPlus> = {
                 use rand::SeedableRng;
                 RefCell::new(Xoshiro256PlusPlus::from_entropy())
             };
         }
-        RNG.with(|rng| rng.borrow_mut().fill_bytes(&mut bytes[8..16]));
-        Self(bytes)
+        RNG.with(|rng| rng.borrow_mut().fill_bytes(dest));
     }
 
     /// Creates a deterministic, system-level `RecordId` from a string name.

@@ -158,4 +158,64 @@ mod tests {
             "timestamp {absolute} not in [{before}, {after}]"
         );
     }
+
+    /// P0.1: `from_ts_seq` with ascending seq produces byte-ascending ids.
+    #[test]
+    fn from_ts_seq_intra_batch_ascending() {
+        let ts = RecordId::now_micros();
+        let mut prev = RecordId::from_ts_seq(ts, 0);
+        for seq in 1..1000u32 {
+            let cur = RecordId::from_ts_seq(ts, seq);
+            assert!(
+                cur > prev,
+                "seq {seq}: expected strictly ascending, got cur <= prev"
+            );
+            prev = cur;
+        }
+    }
+
+    /// P0.1: 100k distinct (ts, seq=0) pairs all produce unique ids.
+    #[test]
+    fn from_ts_seq_uniqueness_across_batches() {
+        let base_ts = RecordId::now_micros();
+        let n = 100_000;
+        let mut ids: TFxSet<RecordId> = TFxSet::default();
+        for i in 0..n {
+            let id = RecordId::from_ts_seq(base_ts + i as i64, 0);
+            assert!(ids.insert(id), "duplicate at i={i}");
+        }
+    }
+
+    /// P0.1: `from_ts_seq` preserves byte layout:
+    /// [0..8] = BE relative_ts, [8..12] = BE seq.
+    #[test]
+    fn from_ts_seq_preserves_layout() {
+        let ts: i64 = 1_800_000_000_000_000;
+        let seq: u32 = 42;
+        let id = RecordId::from_ts_seq(ts, seq);
+        let expected_epoch: i64 = 1_769_817_600_000_000;
+        let relative = ts.saturating_sub(expected_epoch);
+        assert_eq!(
+            &id.as_bytes()[..8],
+            &relative.to_be_bytes(),
+            "upper 8 bytes must be BE-encoded relative timestamp"
+        );
+        assert_eq!(
+            &id.as_bytes()[8..12],
+            &seq.to_be_bytes(),
+            "bytes [8..12] must be BE-encoded seq"
+        );
+    }
+
+    /// P0.1: one batch_ts, seq=0..10000 — all unique.
+    #[test]
+    fn from_ts_seq_intra_batch_uniqueness() {
+        let ts = RecordId::now_micros();
+        let n = 10_000;
+        let mut ids: TFxSet<RecordId> = TFxSet::default();
+        for seq in 0..n {
+            let id = RecordId::from_ts_seq(ts, seq);
+            assert!(ids.insert(id), "duplicate at seq={seq}");
+        }
+    }
 }
