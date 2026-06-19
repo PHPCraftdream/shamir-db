@@ -5,6 +5,7 @@ pub mod cell_reservation_tests;
 pub mod crud_tests;
 pub mod error_tests;
 pub mod gc_tests;
+pub mod get_current_many_tests;
 pub mod history_tests;
 pub mod lock_tests;
 pub mod overlay_dualwrite_tests;
