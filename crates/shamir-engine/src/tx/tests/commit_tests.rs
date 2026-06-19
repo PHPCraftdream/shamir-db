@@ -760,3 +760,53 @@ async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
         got
     );
 }
+
+// ===========================================================================
+// L10(c) — interner_overlay skip when empty
+// ===========================================================================
+
+/// L10(c): `wal_ops_from_tx` with an empty `interner_overlay` must NOT
+/// produce an `InternerOverlayMerge` op and must skip the async scan
+/// entirely (the is_empty guard in commit.rs avoids the `.await` point).
+#[tokio::test]
+async fn wal_ops_empty_overlay_produces_no_interner_merge_op() {
+    use shamir_wal::WalOpV2;
+
+    let tx = TxContext::new(TxId::new(10_001), 0, 0, IsolationLevel::Snapshot);
+    assert!(
+        tx.interner_overlay.is_empty(),
+        "precondition: empty overlay"
+    );
+
+    let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
+    let has_merge = ops
+        .iter()
+        .any(|op| matches!(op, WalOpV2::InternerOverlayMerge { .. }));
+    assert!(
+        !has_merge,
+        "empty overlay must NOT produce InternerOverlayMerge"
+    );
+}
+
+/// L10(c): `wal_ops_from_tx` with a non-empty `interner_overlay` DOES
+/// produce an `InternerOverlayMerge` op carrying the overlay entries.
+#[tokio::test]
+async fn wal_ops_non_empty_overlay_produces_interner_merge_op() {
+    use shamir_wal::WalOpV2;
+
+    let tx = TxContext::new(TxId::new(10_002), 0, 0, IsolationLevel::Snapshot);
+    let _ = tx.interner_overlay.insert("field_a".to_string(), 42);
+    let _ = tx.interner_overlay.insert("field_b".to_string(), 43);
+
+    let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
+    let merge = ops
+        .iter()
+        .find(|op| matches!(op, WalOpV2::InternerOverlayMerge { .. }));
+    assert!(
+        merge.is_some(),
+        "non-empty overlay must produce InternerOverlayMerge"
+    );
+    if let Some(WalOpV2::InternerOverlayMerge { entries }) = merge {
+        assert_eq!(entries.len(), 2, "both overlay entries must be captured");
+    }
+}
