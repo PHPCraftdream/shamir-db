@@ -424,9 +424,12 @@ impl TableManager {
             return Ok(Vec::new());
         }
         if let Some(mvcc) = self.mvcc_store_ref() {
-            let mut out = Vec::with_capacity(ids.len());
-            for id in ids {
-                match mvcc.get_current_bytes(id.as_bytes()).await? {
+            // L3: batched MVCC read — one history.get_many for warm keys.
+            let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            let raw = mvcc.get_current_many(&batch_keys).await?;
+            let mut out = Vec::with_capacity(raw.len());
+            for slot in raw {
+                match slot {
                     Some(bytes) => {
                         let v = InnerValue::from_bytes(bytes).map_err(|e| {
                             DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))
@@ -468,11 +471,9 @@ impl TableManager {
             return Ok(Vec::new());
         }
         if let Some(mvcc) = self.mvcc_store_ref() {
-            let mut out = Vec::with_capacity(ids.len());
-            for id in ids {
-                out.push(mvcc.get_current_bytes(id.as_bytes()).await?);
-            }
-            Ok(out)
+            // L3: batched MVCC read — one history.get_many for warm keys.
+            let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            mvcc.get_current_many(&batch_keys).await
         } else {
             let keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
             self.table.data_store().get_many(keys).await

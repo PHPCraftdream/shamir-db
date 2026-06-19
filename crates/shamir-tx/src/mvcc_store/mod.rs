@@ -935,6 +935,103 @@ impl MvccStore {
         self.locks.len()
     }
 
+    /// L3: batched current-version read for multiple keys.
+    ///
+    /// Semantically equivalent to calling [`get_current_bytes`] per key, but
+    /// collapses the warm-path history lookups into a single
+    /// `Store::get_many` call (one transactional read / one `spawn_blocking`
+    /// on disk backends instead of N).
+    ///
+    /// Cold keys (cell absent — `current_version == 0`) fall back to the
+    /// per-key [`get_current_bytes`] path (range-scan + seed); cold is the
+    /// minority in steady state.
+    ///
+    /// Result order matches `keys` order.
+    pub async fn get_current_many(&self, keys: &[Bytes]) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let floor = self.gate.last_committed();
+        let len = keys.len();
+
+        // Phase 1: classify each input key. For each slot we store the
+        // resolution category so Phase 3 can assemble the output in order.
+        enum Slot {
+            /// Resolved from overlay — final answer already known.
+            Resolved(Option<Bytes>),
+            /// Warm miss — `miss_idx` is the position in the `miss_keys`
+            /// vector that will be fed to `history.get_many`.
+            HistoryMiss { miss_idx: usize },
+            /// Version > floor — fall back to snapshot read at floor.
+            FloorExceeded,
+            /// Cold cell — fall back to per-key `get_current_bytes`.
+            Cold,
+        }
+
+        let mut slots: Vec<Slot> = Vec::with_capacity(len);
+        let mut miss_keys: Vec<Bytes> = Vec::new();
+
+        for key in keys {
+            let cur_v = self.current_version(key);
+            if cur_v == 0 {
+                slots.push(Slot::Cold);
+                continue;
+            }
+            // R3 floor-cap: version above the committed floor is not yet
+            // visible — fall back to snapshot read at floor.
+            if floor > 0 && cur_v > floor {
+                slots.push(Slot::FloorExceeded);
+                continue;
+            }
+            // Overlay probe — same precedence as get_current_bytes.
+            if let Some(val) = self.overlay.get(key, cur_v) {
+                let resolved = if val.is_empty() { None } else { Some(val) };
+                slots.push(Slot::Resolved(resolved));
+                continue;
+            }
+            // Warm miss — needs history lookup.
+            let vk = encode_version_key(key, cur_v);
+            let miss_idx = miss_keys.len();
+            miss_keys.push(vk);
+            slots.push(Slot::HistoryMiss { miss_idx });
+        }
+
+        // Phase 2: single batched history read for all warm misses.
+        let miss_results = if miss_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.history.get_many(miss_keys).await?
+        };
+
+        // Phase 3: assemble the output vector in input order.
+        let mut out: Vec<Option<Bytes>> = Vec::with_capacity(len);
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Slot::Resolved(val) => {
+                    out.push(val.clone());
+                }
+                Slot::HistoryMiss { miss_idx } => {
+                    match &miss_results[*miss_idx] {
+                        Some(val) if val.is_empty() => out.push(None), // tombstone
+                        Some(val) => out.push(Some(val.clone())),
+                        None => out.push(None), // not found
+                    }
+                }
+                Slot::FloorExceeded => {
+                    let val = self.get_at(&keys[i], floor).await?;
+                    out.push(val);
+                }
+                Slot::Cold => {
+                    let val = self.get_current_bytes(&keys[i]).await?;
+                    out.push(val);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// T1c: look up the recorded commit timestamp (millis) for `version`.
     /// Returns `None` if no ts entry exists (treated as "unknown age" → the
     /// age axis conservatively keeps the version).
