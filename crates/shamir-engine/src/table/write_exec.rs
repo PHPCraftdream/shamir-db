@@ -22,7 +22,7 @@ use crate::query::write::{
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     merge_storage_bytes, query_value_to_inner_with, query_value_to_storage_bytes,
-    record_view_to_query_value, validate_keys_resolve_interner,
+    query_value_to_storage_bytes_into, record_view_to_query_value, validate_keys_resolve_interner,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -131,10 +131,11 @@ impl TableManager {
                 Ok(ik)
             };
             let mut out = Vec::with_capacity(op.values.len());
+            let mut scratch = Vec::new();
             for value in &op.values {
                 let resolved = resolve_computed_record(value, interner)
                     .map_err(shamir_storage::error::DbError::Codec)?;
-                let bytes = query_value_to_storage_bytes(&resolved, &intern_fn)
+                let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 out.push(bytes);
                 resolved_values.push(resolved);

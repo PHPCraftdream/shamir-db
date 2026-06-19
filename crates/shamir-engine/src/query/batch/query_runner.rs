@@ -14,7 +14,7 @@ use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
-use shamir_types::codecs::interned::query_value_to_storage_bytes;
+use shamir_types::codecs::interned::query_value_to_storage_bytes_into;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -718,6 +718,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
 ) -> QueryResult {
     let records: Vec<QueryRecord> =
         if matches!(encoding, ResultEncoding::Id) && !wr.records.is_empty() {
+            let mut scratch = Vec::new();
             wr.records
                 .into_iter()
                 .map(|rec| {
@@ -731,7 +732,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
                             ))
                         })
                     };
-                    match query_value_to_storage_bytes(&rec.fields, &intern_fn) {
+                    match query_value_to_storage_bytes_into(&rec.fields, &intern_fn, &mut scratch) {
                         Ok(bytes) => QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref())),
                         // Encoding failed (e.g. non-map value) — fall back gracefully.
                         Err(_) => QueryRecord::from(rec),

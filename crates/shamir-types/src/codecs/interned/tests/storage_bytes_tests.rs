@@ -13,7 +13,9 @@
 //! values and interned map-key ids, plus map key ORDER (insertion order, no
 //! re-sort).
 
-use crate::codecs::interned::messagepack::query_value_to_storage_bytes;
+use crate::codecs::interned::messagepack::{
+    query_value_to_storage_bytes, query_value_to_storage_bytes_into,
+};
 use crate::codecs::interned::query_value_to_inner_with;
 use crate::core::interner::InternerKey;
 use crate::types::common::{new_map, new_set};
@@ -384,4 +386,128 @@ fn storage_bytes_shared_interner_smoke() {
         .to_bytes()
         .unwrap();
     assert_eq!(direct.as_ref(), reference.as_ref());
+}
+
+// --------------------------------------------------------------------------
+// Scratch-buffer variant: byte-identity with fresh-Vec variant
+// --------------------------------------------------------------------------
+
+#[test]
+fn scratch_buffer_byte_identical_100_rows() {
+    // 100 rows of varying shapes — scratch-buffer encode must produce
+    // byte-identical output compared to the fresh-Vec `query_value_to_storage_bytes`.
+    let rows: Vec<QueryValue> = (0..100)
+        .map(|i| {
+            let mut m = new_map();
+            m.insert("id".to_string(), Value::Int(i));
+            m.insert("name".to_string(), Value::Str(format!("row_{i}")));
+            m.insert("flag".to_string(), Value::Bool(i % 2 == 0));
+            if i % 3 == 0 {
+                m.insert("extra".to_string(), Value::F64(i as f64 * 1.5));
+            }
+            if i % 5 == 0 {
+                m.insert(
+                    "list".to_string(),
+                    Value::List(vec![Value::Int(i), Value::Str("x".into())]),
+                );
+            }
+            Value::Map(m)
+        })
+        .collect();
+
+    let mut scratch = Vec::new();
+    for (idx, qv) in rows.iter().enumerate() {
+        let f = make_first_seen_interner();
+        let fresh = query_value_to_storage_bytes(qv, &f).unwrap();
+
+        let f2 = make_first_seen_interner();
+        let from_scratch = query_value_to_storage_bytes_into(qv, &f2, &mut scratch).unwrap();
+
+        assert_eq!(
+            fresh.as_ref(),
+            from_scratch.as_ref(),
+            "row {idx}: scratch bytes differ from fresh-Vec bytes\n  fresh   = {}\n  scratch = {}",
+            hex_dump(&fresh),
+            hex_dump(&from_scratch),
+        );
+    }
+}
+
+#[test]
+fn scratch_buffer_roundtrip_diverse_types() {
+    use crate::types::value::InnerValue;
+
+    let intern_fn = make_first_seen_interner();
+
+    // A batch of diverse-type values.
+    let mut map_val = new_map();
+    map_val.insert("alpha".to_string(), Value::Int(42));
+    map_val.insert("beta".to_string(), Value::Str("hello".into()));
+    map_val.insert("gamma".to_string(), Value::F64(2.71));
+
+    let batch: Vec<QueryValue> = vec![
+        Value::Str("simple string".into()),
+        Value::Int(i64::MAX),
+        Value::F64(-0.0),
+        Value::Bool(true),
+        Value::Null,
+        Value::List(vec![
+            Value::Int(1),
+            Value::Str("two".into()),
+            Value::Bool(false),
+        ]),
+        Value::Map(map_val),
+    ];
+
+    let mut scratch = Vec::new();
+    for (idx, qv) in batch.iter().enumerate() {
+        let bytes = query_value_to_storage_bytes_into(qv, &intern_fn, &mut scratch).unwrap();
+
+        // Decode back via InnerValue::from_bytes (rmp_serde round-trip).
+        // The encoder produces id-keyed msgpack; InnerValue deserializes
+        // InternerKey from the binary map keys.
+        let decoded = InnerValue::from_bytes(&bytes);
+        assert!(
+            decoded.is_ok(),
+            "row {idx}: decode failed: {:?}",
+            decoded.err()
+        );
+    }
+}
+
+#[test]
+fn scratch_buffer_clear_between_rows() {
+    // Verify that scratch buffer is properly cleared between rows — the
+    // second (smaller) row must NOT contain leftover bytes from the first
+    // (larger) row.
+    let f = make_first_seen_interner();
+
+    // Large row first.
+    let mut big = new_map();
+    for i in 0..20 {
+        big.insert(format!("field_{i}"), Value::Str("x".repeat(100)));
+    }
+    let big_qv = Value::Map(big);
+
+    // Small row second.
+    let small_qv = Value::Int(1);
+
+    let mut scratch = Vec::new();
+
+    let big_bytes = query_value_to_storage_bytes_into(&big_qv, &f, &mut scratch).unwrap();
+    let small_bytes = query_value_to_storage_bytes_into(&small_qv, &f, &mut scratch).unwrap();
+
+    // The small bytes must equal what a fresh encode produces.
+    let f2 = make_first_seen_interner();
+    let small_fresh = query_value_to_storage_bytes(&small_qv, &f2).unwrap();
+    assert_eq!(
+        small_bytes.as_ref(),
+        small_fresh.as_ref(),
+        "small row after big row: scratch has leftover bytes\n  scratch = {}\n  fresh   = {}",
+        hex_dump(&small_bytes),
+        hex_dump(&small_fresh),
+    );
+
+    // Sanity: big and small should differ.
+    assert_ne!(big_bytes.as_ref(), small_bytes.as_ref());
 }
