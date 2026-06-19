@@ -738,9 +738,20 @@ impl MvccStore {
     /// cell's latest version, so semantics are unchanged today; once P2b
     /// lands (out-of-order materialize) this prevents observing
     /// uncommitted versions.
+    ///
+    /// Accepts owned `Bytes` for backward-compatibility. Delegates to
+    /// [`get_current_bytes`](Self::get_current_bytes) — prefer that
+    /// method on hot paths to avoid a 16-byte key allocation.
     pub async fn get_current(&self, key: Bytes) -> DbResult<Option<Bytes>> {
+        self.get_current_bytes(&key).await
+    }
+
+    /// Zero-alloc point-read: identical semantics to [`get_current`] but
+    /// accepts a borrowed `&[u8]` key, avoiding the 16-byte heap copy
+    /// that `Bytes::copy_from_slice` would incur on every call.
+    pub async fn get_current_bytes(&self, key: &[u8]) -> DbResult<Option<Bytes>> {
         let floor = self.gate.last_committed();
-        let cur_v = self.current_version(&key);
+        let cur_v = self.current_version(key);
         let v = if cur_v > 0 {
             cur_v
         } else {
@@ -751,20 +762,21 @@ impl MvccStore {
             // (visibility gate); floor == 0 means bootstrap → use u64::MAX so
             // nothing is hidden, matching the R3 "no restriction" semantics.
             let ov_cap = if floor > 0 { floor } else { u64::MAX };
-            let hist_v = self.seek_latest_version(&key).await?;
-            let ov_v = self
-                .overlay
-                .newest_visible(&key, ov_cap)
-                .map(|(ver, _)| ver);
+            let hist_v = self.seek_latest_version(key).await?;
+            let ov_v = self.overlay.newest_visible(key, ov_cap).map(|(ver, _)| ver);
+            // Cold path: `seed_version` needs an owned `Bytes`. Allocate once
+            // and reuse for both the seed call and the downstream probes.
+            // This allocation only happens on cold-start (cell absent) which
+            // is rare on the hot read path.
             match (hist_v, ov_v) {
                 (Some(h), Some(o)) => {
                     // Seed the cell from history's max (the durable anchor);
                     // the overlay value, if newer, wins in resolve_read below.
-                    self.seed_version(key.clone(), h).await;
+                    self.seed_version(Bytes::copy_from_slice(key), h).await;
                     h.max(o)
                 }
                 (Some(h), None) => {
-                    self.seed_version(key.clone(), h).await;
+                    self.seed_version(Bytes::copy_from_slice(key), h).await;
                     h
                 }
                 // Overlay-only key: no durable history yet. Do NOT seed the
@@ -780,15 +792,15 @@ impl MvccStore {
         // resolve_read). Floor == 0 means bootstrap / recovery — no
         // visibility restriction applied.
         if floor > 0 && v > floor {
-            return self.get_at(&key, floor).await;
+            return self.get_at(key, floor).await;
         }
         // P1b: overlay-probe BEFORE the durable log for the exact `(key, v)`.
         // A hit (tombstone → None, value → Some) short-circuits; a miss falls
         // through to history (always so in P1b — overlay is empty).
-        if let Some(val) = self.overlay.get(&key, v) {
+        if let Some(val) = self.overlay.get(key, v) {
             return Ok(if val.is_empty() { None } else { Some(val) });
         }
-        match self.history.get(encode_version_key(&key, v)).await {
+        match self.history.get(encode_version_key(key, v)).await {
             Ok(val) if val.is_empty() => Ok(None),
             Ok(val) => Ok(Some(val)),
             Err(DbError::NotFound(_)) => Ok(None),
