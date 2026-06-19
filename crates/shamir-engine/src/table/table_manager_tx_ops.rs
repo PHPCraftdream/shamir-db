@@ -400,12 +400,12 @@ impl TableManager {
 
         // 2. Generate ids upfront. Serialization (to_bytes) is deferred to
         //    commit Phase 4/5 via StagedRow::Live — aborted txs skip it.
-        //    L13: single clock-read for the whole batch; per-row uniqueness
-        //    is guaranteed by 64 random-tail bits inside `from_ts`.
+        //    L13: single clock-read for the whole batch; intra-batch
+        //    monotonicity via ascending seq in `from_ts_seq`.
         let batch_ts = RecordId::now_micros();
         let mut ids: Vec<RecordId> = Vec::with_capacity(values.len());
-        for _ in values {
-            ids.push(RecordId::from_ts(batch_ts));
+        for (i, _) in values.iter().enumerate() {
+            ids.push(RecordId::from_ts_seq(batch_ts, i as u32));
         }
 
         // 2b. Precompute Bytes keys once — reused in the lock loop and
@@ -564,12 +564,12 @@ impl TableManager {
         }
 
         // 2. Generate ids upfront.
-        //    L13: single clock-read for the whole batch; per-row uniqueness
-        //    is guaranteed by 64 random-tail bits inside `from_ts`.
+        //    L13: single clock-read for the whole batch; intra-batch
+        //    monotonicity via ascending seq in `from_ts_seq`.
         let batch_ts = RecordId::now_micros();
         let mut ids: Vec<RecordId> = Vec::with_capacity(staged.len());
-        for _ in staged {
-            ids.push(RecordId::from_ts(batch_ts));
+        for (i, _) in staged.iter().enumerate() {
+            ids.push(RecordId::from_ts_seq(batch_ts, i as u32));
         }
 
         // 2b. Precompute Bytes keys once — reused in the lock loop and set_many.
