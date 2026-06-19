@@ -17,3 +17,4 @@ pub mod stream_tests;
 pub mod ts_atomicity_tests;
 pub mod version_tests;
 pub mod watermark_unify_tests;
+pub mod write_committed_batch_tests;

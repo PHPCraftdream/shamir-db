@@ -242,6 +242,87 @@ impl MvccStore {
             .await;
     }
 
+    /// cancel-safe: NO — applies a batch of `KvOp` for MULTIPLE commit versions
+    /// via a SINGLE durable `history.transact`. This is the batched drain path:
+    /// the drainer accumulates ops across multiple WAL entries for the same
+    /// table and lands them in one write-tx instead of one per entry.
+    ///
+    /// `pass` is a slice of `(commit_version, ops)` pairs, each carrying the
+    /// `KvOp`s for that version. The pairs MUST be in ascending commit_version
+    /// order (the drainer sorts entries by version before accumulation).
+    ///
+    /// Builds ONE `history_ops` vec containing:
+    ///  - For each `(v, ops)`: `KvOp::Set(encode_version_key(k, v), val|tombstone)`
+    ///  - For each unique `v`: `KvOp::Set(ts_key(v), ts_val)` (L2-style fold)
+    ///
+    /// Then: ONE `self.history.transact(history_ops)`.
+    /// Then: per-(key,v) `publish_cell` (idempotent -- needed for cold recovery).
+    /// Then: `gate.publish_committed_max(max_v)`.
+    pub async fn write_committed_batch_to_history(
+        &self,
+        pass: &[(u64, Vec<KvOp>)],
+    ) -> DbResult<()> {
+        if pass.is_empty() {
+            return Ok(());
+        }
+
+        // Pre-size: each (v, ops) contributes ops.len() data entries + 1 ts entry.
+        let total_ops: usize = pass.iter().map(|(_, ops)| ops.len()).sum();
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(total_ops + pass.len());
+
+        for (commit_version, ops) in pass {
+            let v = *commit_version;
+
+            // T1c: resolve the commit timestamp. Prefer the COMMIT-TIME millis
+            // stamped on the ack-path (`apply_committed_visible`); cold recovery
+            // falls back to `now_millis()`. Remove the stamp once consumed.
+            let ts_ms = self
+                .pending_ts
+                .remove(&v)
+                .map(|(_, ms)| ms)
+                .unwrap_or_else(|| self.now_millis());
+            let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
+
+            // Data ops: version-key entries.
+            for op in ops {
+                let h_op = match op {
+                    KvOp::Set(k, val) => KvOp::Set(encode_version_key(k, v), val.clone()),
+                    KvOp::Remove(k) => KvOp::Set(encode_version_key(k, v), Bytes::new()),
+                };
+                history_ops.push(h_op);
+            }
+
+            // L2-style fold: ts entry rides in the SAME batch as data.
+            history_ops.push(KvOp::Set(ts_key(v), ts_val));
+        }
+
+        // ONE batched write to history (all versions, all ops, atomic).
+        if !history_ops.is_empty() {
+            self.history.transact(history_ops).await?;
+        }
+
+        // Seed the cell from the durable write (idempotent; needed on cold
+        // recovery). On the warm drain path the cell is already at the correct
+        // version from the ack-path's `apply_committed_visible`.
+        for (commit_version, ops) in pass {
+            let v = *commit_version;
+            for op in ops {
+                let key = match op {
+                    KvOp::Set(k, _) => k.clone(),
+                    KvOp::Remove(k) => k.clone(),
+                };
+                self.publish_cell(key, v).await;
+            }
+        }
+
+        // R3: advance the reader-visible floor to the max version in the batch.
+        if let Some((max_v, _)) = pass.last() {
+            self.gate.publish_committed_max(*max_v);
+        }
+
+        Ok(())
+    }
+
     /// cancel-safe: NO — applies a batch of `KvOp` via multi-step sequences
     /// (history transact, version_cache updates). One durable write (history
     /// transact). Cancellation mid-batch leaves some phases applied, others
