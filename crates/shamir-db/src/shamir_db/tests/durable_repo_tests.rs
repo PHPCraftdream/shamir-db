@@ -152,8 +152,8 @@ async fn explicit_in_memory_repo_is_ephemeral() {
     );
 }
 
-/// A durable wire-created repo "data" in db "appdb" must produce a file at
-/// `<data_root>/appdb/data.redb` on disk, mirroring the db→repo tree.
+/// A durable wire-created repo "data" in db "appdb" must produce a directory at
+/// `<data_root>/appdb/data.fjall` on disk, mirroring the db→repo tree.
 #[tokio::test]
 async fn durable_repo_file_mirrors_db_repo_tree() {
     let dir = tempfile::tempdir().unwrap();
@@ -170,7 +170,7 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
     let create = b.to_request_via_msgpack();
     shamir.execute("appdb", &create).await.unwrap();
 
-    let expected = dir.path().join("appdb").join("data.redb");
+    let expected = dir.path().join("appdb").join("data.fjall");
     assert!(
         expected.exists(),
         "durable repo file must exist at {}",

@@ -164,7 +164,7 @@ async fn table_catalogue_survives_restart() {
     let sys_dir = tempfile::tempdir().unwrap();
     let repo_dir = tempfile::tempdir().unwrap();
     let sys_path = sys_dir.path().join("system.redb");
-    let repo_path = repo_dir.path().join("data.redb");
+    let repo_path = repo_dir.path().join("data.fjall");
 
     // === Session 1: create repo + table, write a record ===
     {
@@ -173,10 +173,10 @@ async fn table_catalogue_survives_restart() {
             .unwrap();
         shamir.create_db("production").await;
 
-        // `redb_raw` (unbuffered): writes are durable on return and the
-        // file lock releases synchronously on drop, so the repo store is
+        // `fjall_raw` (unbuffered): writes are durable on return and the
+        // store releases synchronously on drop, so the repo store is
         // immediately re-openable by session 2.
-        let config = RepoConfig::new("data", BoxRepoFactory::redb_raw(repo_path.clone()))
+        let config = RepoConfig::new("data", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("users"));
         shamir.add_repo("production", config).await.unwrap();
 
@@ -227,7 +227,7 @@ async fn table_added_after_repo_survives_restart() {
     let sys_dir = tempfile::tempdir().unwrap();
     let repo_dir = tempfile::tempdir().unwrap();
     let sys_path = sys_dir.path().join("system.redb");
-    let repo_path = repo_dir.path().join("data.redb");
+    let repo_path = repo_dir.path().join("data.fjall");
 
     {
         let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
@@ -235,9 +235,9 @@ async fn table_added_after_repo_survives_restart() {
             .unwrap();
         shamir.create_db("production").await;
 
-        // Repo created with NO inline tables (redb_raw for synchronous lock
+        // Repo created with NO inline tables (fjall_raw for synchronous
         // release on drop).
-        let config = RepoConfig::new("data", BoxRepoFactory::redb_raw(repo_path.clone()));
+        let config = RepoConfig::new("data", BoxRepoFactory::fjall_raw(repo_path.clone()));
         shamir.add_repo("production", config).await.unwrap();
 
         // Table added afterwards — persisted via add_table.
@@ -274,7 +274,7 @@ async fn dropped_table_does_not_resurrect_after_restart() {
     let sys_dir = tempfile::tempdir().unwrap();
     let repo_dir = tempfile::tempdir().unwrap();
     let sys_path = sys_dir.path().join("system.redb");
-    let repo_path = repo_dir.path().join("data.redb");
+    let repo_path = repo_dir.path().join("data.fjall");
 
     {
         let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
@@ -282,7 +282,7 @@ async fn dropped_table_does_not_resurrect_after_restart() {
             .unwrap();
         shamir.create_db("production").await;
 
-        let config = RepoConfig::new("data", BoxRepoFactory::redb_raw(repo_path.clone()))
+        let config = RepoConfig::new("data", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("keep"))
             .add_table(TableConfig::new("scratch"));
         shamir.add_repo("production", config).await.unwrap();

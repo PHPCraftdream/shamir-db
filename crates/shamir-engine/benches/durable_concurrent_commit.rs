@@ -55,7 +55,7 @@ async fn make_durable_repo(table_count: usize) -> (RepoInstance, tempfile::TempD
     let tables: Vec<TableConfig> = (0..table_count)
         .map(|i| TableConfig::new(format!("tbl_{}", i)))
         .collect();
-    let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
+    let factory = BoxRepoFactory::fjall_raw(tempdir.path().to_path_buf());
     let repo = RepoInstance::from_factory("bench".into(), factory, tables)
         .await
         .expect("RepoInstance::from_factory");

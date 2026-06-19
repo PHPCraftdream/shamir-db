@@ -58,7 +58,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
         for _attempt in 0..10 {
             match RepoInstance::from_factory(
                 "r".into(),
-                BoxRepoFactory::sled_raw(path.to_path_buf()),
+                BoxRepoFactory::fjall_raw(path.to_path_buf()),
                 vec![TableConfig::new("t")],
             )
             .await

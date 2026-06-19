@@ -338,7 +338,7 @@ async fn open_sled(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInst
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
             "stress".into(),
-            BoxRepoFactory::sled_raw(path.to_path_buf()),
+            BoxRepoFactory::fjall_raw(path.to_path_buf()),
             tables.clone(),
         )
         .await

@@ -160,8 +160,8 @@ impl ShamirAdminExecutor {
                                 e
                             ))
                         })?;
-                        let path = db_dir.join(format!("{}.redb", op.create_repo));
-                        BoxRepoFactory::redb_raw(path)
+                        let path = db_dir.join(format!("{}.fjall", op.create_repo));
+                        BoxRepoFactory::fjall_raw(path)
                     }
                     None => BoxRepoFactory::in_memory(),
                 }

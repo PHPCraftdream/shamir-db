@@ -143,14 +143,14 @@ fn text_record(body_key_id: u64, text: &str) -> InnerValue {
 /// WAL backend; the reopened repo then sees the real torn-mid-commit
 /// image the killed child left behind.
 async fn open_repo(path: &Path) -> RepoInstance {
-    let factory = BoxRepoFactory::redb_raw(path.to_path_buf());
+    let factory = BoxRepoFactory::fjall_raw(path.to_path_buf());
     RepoInstance::from_factory(
         REPO_NAME.into(),
         factory,
         vec![TableConfig::new(TABLE), TableConfig::new(TABLE_B)],
     )
     .await
-    .expect("open redb repo")
+    .expect("open fjall repo")
 }
 
 /// Count records present in a table by draining its `list_stream` (the
