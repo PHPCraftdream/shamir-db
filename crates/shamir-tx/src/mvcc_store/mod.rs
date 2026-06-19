@@ -667,6 +667,86 @@ impl MvccStore {
         Ok(max_v)
     }
 
+    /// Append-only variant of [`set_versioned_many`]: the caller GUARANTEES
+    /// every key is fresh (no prior version exists in this store).
+    ///
+    /// Skips the per-row `current_version()` lookup that `set_versioned_many`
+    /// performs to capture `old_v` for the L6 targeted-remove vacuum fast path.
+    /// For fresh keys the lookup is a guaranteed hash-miss (~50-100 ns per key
+    /// on `scc::HashMap`), which is pure waste on a batch insert of N new
+    /// records.
+    ///
+    /// Instead, passes `old_v = 0` to `vacuum_key`, which short-circuits via
+    /// the append-only no-op return (`old_v == 0` in the L6 fast path when
+    /// retention is `CurrentOnly` and no live snapshots exist). When retention
+    /// is NOT `CurrentOnly` or live snapshots are present, `vacuum_key(_, 0)`
+    /// falls through to the scan path, which operates by its own prefix-scan
+    /// invariants and does not depend on the `old_v` parameter.
+    ///
+    /// SAFETY (programmer-contract, not runtime-enforced):
+    ///   - Caller must have generated each key via `RecordId::from_ts` /
+    ///     `RecordId::new` (or equivalent fresh-key construction) RIGHT before
+    ///     this call.
+    ///   - Calling with a pre-existing key does NOT cause correctness issues
+    ///     (the scan path in `vacuum_key` still triggers via
+    ///     `vacuum_needs_scan` if accumulated versions exist from prior
+    ///     snapshot epochs), but defeats the targeted-remove optimization
+    ///     for that key: the old version accumulates until the next full scan.
+    pub async fn set_versioned_many_append_only(
+        &self,
+        items: Vec<(Bytes, Bytes)>,
+    ) -> DbResult<u64> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        // Phase 1 (bump-first): assign a fresh version per key and update the
+        // cell BEFORE the physical log write. No old_versions collection needed
+        // — caller guarantees every key is fresh (no prior version to capture).
+        let mut max_v = 0u64;
+        let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
+        let mut guards: Vec<VersionGuard> = Vec::with_capacity(items.len());
+        let ts_ms = self.now_millis();
+        let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
+        let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
+        for (key, value) in &items {
+            let guard = self.gate.assign_next_version_guarded();
+            let new_v = guard.version();
+            self.publish_cell(key.clone(), new_v).await;
+            new_versions.push(new_v);
+            guards.push(guard);
+            max_v = new_v;
+            history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
+            history_ops.push(KvOp::Set(ts_key(new_v), ts_val.clone()));
+        }
+
+        // Single batched write to the log (data + ts, atomic).
+        if !history_ops.is_empty() {
+            self.history.transact(history_ops).await?;
+        }
+
+        // P1c: dual-write — populate the overlay.
+        for ((key, value), &new_v) in items.iter().zip(new_versions.iter()) {
+            self.overlay.insert(key.clone(), new_v, value.clone());
+        }
+
+        // Mark every version Materialized and advance the reader-visible floor.
+        for guard in guards {
+            guard.commit();
+        }
+        // P1d-1: mark each version durable.
+        for &v in &new_versions {
+            self.gate.mark_durable(v);
+        }
+        // Vacuum with old_v=0: append-only no-op in L6 fast path (CurrentOnly
+        // + no snapshots), or scan path (independent of old_v) otherwise.
+        for key in &keys {
+            self.vacuum_key(key, 0).await;
+        }
+        Ok(max_v)
+    }
+
     /// cancel-safe: NO — multi-step state mutation; same reasoning as
     /// `set_versioned`. The log is the sole durable write. Cancellation after
     /// `publish_cell` but before the tombstone `history.set` leaves the cell
