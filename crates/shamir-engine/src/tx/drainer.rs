@@ -45,12 +45,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use shamir_storage::error::DbResult;
+use shamir_collections::TFxMap;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::KvOp;
+use shamir_wal::WalOpV2;
 use tokio::sync::Notify;
 
 use crate::repo::RepoInstance;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
-use crate::tx::recovery::replay_v2_entry;
 
 /// Repo-level single-owner drainer.
 ///
@@ -100,16 +102,20 @@ impl Drainer {
     /// watermark partially advanced; replay is idempotent so a re-run
     /// converges, but the step is not atomic. Mirrors `recover_inflight_v2`.
     ///
-    /// Drain one pass: replay every inflight WAL entry whose `commit_version`
-    /// is in the window `durable_watermark < commit_version <=
-    /// last_committed` into history, advance the durable watermark, and
-    /// truncate the marker (A5-gated). Returns the number of versions drained
-    /// this pass.
+    /// L1 coalesced drain: three-phase pass that collapses E entries x T tables
+    /// from E*T `history.transact` calls down to T calls (one per table).
     ///
-    /// This is the generalized body of
-    /// [`recover_inflight_v2`](crate::tx::recovery::recover_inflight_v2):
-    /// same replay → mark → truncate sequence, but windowed to the
-    /// not-yet-durable visible prefix instead of every inflight entry.
+    /// **Phase A** (per-entry, ascending v): apply interner delta (A4 keystone,
+    /// BEFORE data), replay non-MVCC ops, and accumulate data ops into a
+    /// per-table batch `TFxMap<table_id, Vec<(v, Vec<KvOp>)>>`.
+    ///
+    /// **Phase B** (per table): ONE `write_committed_batch_to_history` per table.
+    /// On the first table transact failure, stop and do not finalize any entry
+    /// whose data touched a failed table.
+    ///
+    /// **Phase C** (per-entry, ascending v): for entries whose tables ALL
+    /// succeeded: `mark_durable(v)` -> A5 gate -> `wal.commit` -> crash seams.
+    /// Stop at the first entry with a failed table (contiguity).
     pub async fn drain_step(&self, repo: &RepoInstance) -> DbResult<usize> {
         let gate = repo.tx_gate().await?;
         let vis = gate.last_committed();
@@ -127,56 +133,165 @@ impl Drainer {
         // prefix (contiguity).
         entries.sort_by_key(|e| e.commit_version);
 
-        let mut drained = 0usize;
-        for entry in &entries {
+        // Filter to the drainable window.
+        let window: Vec<_> = entries
+            .iter()
+            .filter(|e| e.commit_version > dur && e.commit_version <= vis)
+            .collect();
+
+        if window.is_empty() {
+            return Ok(0);
+        }
+
+        // ================================================================
+        // Phase A: per-entry interner delta + accumulate data ops per table.
+        // ================================================================
+
+        // Per-table batch: table_id -> Vec<(commit_version, Vec<KvOp>)>,
+        // preserving ascending-v order within each table for LWW.
+        let mut table_batches: TFxMap<u64, Vec<(u64, Vec<KvOp>)>> = TFxMap::default();
+        // Per-entry: which table_ids does this entry touch (for Phase C gating).
+        let mut entry_tables: Vec<(u64 /* commit_version */, Vec<u64> /* table_ids */)> =
+            Vec::with_capacity(window.len());
+        // Track Phase A failure — stop accumulating and drain nothing.
+        let mut phase_a_failed = false;
+
+        for entry in &window {
             let v = entry.commit_version;
-            // Below the durable prefix: already drained on a prior pass (or
-            // by inline materialize). Above visibility: not yet committed —
-            // not ours to drain.
-            if v <= dur || v > vis {
-                continue;
+
+            // A4-recovery keystone: apply interner delta BEFORE data.
+            if !entry.interner_delta.is_empty() {
+                match apply_interner_delta(entry, repo).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "drain_step: interner delta for tx {} commit_version {} \
+                             failed: {e}; stopping this pass",
+                            entry.txn_id,
+                            v
+                        );
+                        phase_a_failed = true;
+                        break;
+                    }
+                }
             }
 
-            // 1) Replay into history (idempotent, last-write-wins). On error
-            //    leave the entry inflight: do NOT mark_durable, do NOT
-            //    wal.commit, and STOP — a later version must not jump over a
-            //    hole in the durable prefix (the contiguous watermark would
-            //    not advance past the gap anyway, but we also must not
-            //    truncate a higher entry whose lower neighbour is undrained).
-            if let Err(e) = replay_v2_entry(entry, repo).await {
+            // Replay non-MVCC ops (IndexPut/IndexDel/InternerOverlayMerge/
+            // CounterDelta) — these go through `replay_v2_op` which handles
+            // non-data routing. Data ops (Put/Delete) for MVCC tables are
+            // accumulated below instead of going through replay_v2_op.
+            for op in &entry.ops {
+                match op {
+                    WalOpV2::Put { .. } | WalOpV2::Delete { .. } => {
+                        // Data ops: handled below via batch accumulation.
+                    }
+                    _ => {
+                        if let Err(e) = crate::tx::recovery::replay_v2_op(op, repo).await {
+                            log::warn!(
+                                "drain_step: non-data op replay for tx {} \
+                                 commit_version {} failed: {e}; stopping this pass",
+                                entry.txn_id,
+                                v
+                            );
+                            phase_a_failed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if phase_a_failed {
+                break;
+            }
+
+            // Accumulate data ops (Put/Delete) grouped by table_id.
+            let mut this_entry_tables: Vec<u64> = Vec::new();
+            let mut by_table: TFxMap<u64, Vec<KvOp>> = TFxMap::default();
+            for op in &entry.ops {
+                let (table_id, kvop) = match op {
+                    WalOpV2::Put {
+                        table_id_interned,
+                        rid,
+                        body,
+                    } => (*table_id_interned, KvOp::Set(rid.to_bytes(), body.clone())),
+                    WalOpV2::Delete {
+                        table_id_interned,
+                        rid,
+                    } => (*table_id_interned, KvOp::Remove(rid.to_bytes())),
+                    _ => continue,
+                };
+                by_table.entry(table_id).or_default().push(kvop);
+            }
+            for (table_id, ops) in by_table {
+                this_entry_tables.push(table_id);
+                table_batches.entry(table_id).or_default().push((v, ops));
+            }
+            entry_tables.push((v, this_entry_tables));
+        }
+
+        if phase_a_failed {
+            // Phase A failed on an entry — do not proceed to Phase B/C.
+            // All entries remain inflight for the next pass/recovery.
+            return Ok(0);
+        }
+
+        // ================================================================
+        // Phase B: per-table ONE write_committed_batch_to_history.
+        // ================================================================
+
+        // Track which table_ids failed their transact.
+        let mut failed_tables: shamir_collections::TFxSet<u64> =
+            shamir_collections::TFxSet::default();
+
+        for (table_id, pass) in &table_batches {
+            if let Some(mvcc) = repo
+                .per_table_mvcc()
+                .read_async(table_id, |_, m| std::sync::Arc::clone(m))
+                .await
+            {
+                if let Err(e) = mvcc.write_committed_batch_to_history(pass).await {
+                    log::warn!(
+                        "drain_step: batch history write for table {} failed: {e}; \
+                         entries touching this table will not be finalized",
+                        table_id
+                    );
+                    failed_tables.insert(*table_id);
+                }
+            }
+            // No MvccStore for this table_id — the table is unattached (system/
+            // test); data ops were already handled by replay_v2_op in Phase A
+            // (which skips Put/Delete for MVCC tables). Nothing to do here.
+        }
+
+        // ================================================================
+        // Phase C: per-entry finalization (ascending v, contiguous).
+        // ================================================================
+
+        let mut drained = 0usize;
+        for (entry, (v, touched_tables)) in window.iter().zip(entry_tables.iter()) {
+            // Contiguity: stop at the first entry that touches a failed table.
+            // Entries above this version must not be finalized (the watermark
+            // would jump over the gap).
+            let any_failed = touched_tables.iter().any(|t| failed_tables.contains(t));
+            if any_failed {
                 log::warn!(
-                    "drain_step: replay of tx {} commit_version {} failed: {e}; \
-                     leaving inflight for recovery, stopping this pass",
+                    "drain_step: entry tx {} commit_version {} touches a table \
+                     whose batch write failed; stopping finalization",
                     entry.txn_id,
                     v
                 );
                 break;
             }
 
-            // D4 crash seam: `replay_v2_entry` wrote this entry's ops into
-            // `history` (the value is durable) but `mark_durable(v)` below has
-            // NOT yet run — the durable watermark does not cover `v` and the WAL
-            // entry is still inflight. A HARD crash HERE proves the drain is not
-            // atomic but recovery is convergent: `recover_inflight_v2` re-replays
-            // the still-inflight entry idempotently (last-write-wins), the data is
-            // unchanged, and the durable watermark re-converges to visibility.
-            // Zero cost in release builds (see `maybe_crash`).
+            // D4 crash seam: data is durable in history but `mark_durable(v)`
+            // has NOT yet run. Recovery re-replays idempotently.
             crate::tx::commit::maybe_crash("drain_replay", repo).await;
 
-            // 2) The value is now durable in history → advance the durable
-            //    watermark (contiguous; safe to call redundantly).
-            gate.mark_durable(v);
+            // The value is now durable in history -> advance the durable
+            // watermark (contiguous; safe to call redundantly).
+            gate.mark_durable(*v);
             drained += 1;
 
-            // 3) A5 interner-hwm gate, then truncate the inflight marker.
-            //    `wal.commit` is currently a no-op (markers live in the
-            //    segment until F6), but the gate is preserved so the cutover
-            //    in P1d-2b inherits it: only truncate when every interner id
-            //    in this entry's delta is durably persisted. If not covered,
-            //    leave the marker inflight — the data is already durable
-            //    (mark_durable above), so this is NOT a durability deferral,
-            //    only a truncation deferral (a later checkpoint advances the
-            //    hwm and a future pass truncates).
+            // A5 interner-hwm gate, then truncate the inflight marker.
             let delta_max_id = entry_interner_max_id(entry);
             match interner_delta_safe_to_truncate(repo, delta_max_id).await {
                 Ok(true) => {
@@ -206,12 +321,7 @@ impl Drainer {
             }
 
             // D2 P1d-2c crash seam: `v` is now fully durable in history and
-            // truncation has been attempted — the post-cutover equivalent of
-            // the old inline "phase7" (the ack-path no longer reaches it after
-            // the cutover). A HARD crash here leaves the data durable in
-            // history with the WAL entry still replayable (no-op truncation
-            // until F6), so recovery re-applies idempotently. Zero cost in
-            // release builds (see `maybe_crash`).
+            // truncation has been attempted. Recovery re-applies idempotently.
             crate::tx::commit::maybe_crash("phase7", repo).await;
         }
 
@@ -365,4 +475,22 @@ fn entry_interner_max_id(entry: &shamir_wal::WalEntryV2) -> Option<u64> {
         .iter()
         .map(|(_scope, _name, id)| *id)
         .max()
+}
+
+/// A4-recovery keystone: apply an entry's interner delta BEFORE data ops.
+/// Extracted from `replay_v2_entry` (recovery.rs) for use in the drainer's
+/// Phase A. The interner is per-REPO (Stage I); the first u64 of each
+/// triple (scope constant) is ignored.
+async fn apply_interner_delta(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+    let repo_interner = repo.repo_interner().await?;
+    let interner = repo_interner.get().await?;
+    for (_scope, name, id) in &entry.interner_delta {
+        interner.touch_with_id(name, *id).map_err(|e| {
+            DbError::Internal(format!(
+                "drain interner delta for tx {} failed: {}",
+                entry.txn_id, e
+            ))
+        })?;
+    }
+    Ok(())
 }
