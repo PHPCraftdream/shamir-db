@@ -152,12 +152,19 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
         });
     }
 
-    let mut entries: Vec<(u64, String)> = Vec::new();
-    tx.interner_overlay
-        .scan_async(|k, v| entries.push((*v, k.clone())))
-        .await;
-    if !entries.is_empty() {
-        ops.push(WalOpV2::InternerOverlayMerge { entries });
+    // L10(c): skip the async scan when the overlay is empty — `is_empty()`
+    // is lock-free on `scc::HashMap` (atomic length check), avoiding a
+    // needless `.await` point on the hot commit path. Race with a concurrent
+    // `insert` is benign: the overlay is tx-scoped and only the owning tx
+    // mutates it, so the emptiness check is stable.
+    if !tx.interner_overlay.is_empty() {
+        let mut entries: Vec<(u64, String)> = Vec::with_capacity(tx.interner_overlay.len());
+        tx.interner_overlay
+            .scan_async(|k, v| entries.push((*v, k.clone())))
+            .await;
+        if !entries.is_empty() {
+            ops.push(WalOpV2::InternerOverlayMerge { entries });
+        }
     }
 
     for (table_token, op) in &tx.index_write_set {
