@@ -316,12 +316,17 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
-        let tx_id = Some(tx.tx_id);
-        let mut index_ops = self.plan_insert_ops(rid, value, tx_id).await;
-        index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
+        // L9 fast-path: skip index planning entirely when the table has
+        // no indexes. The `has_any_index()` check is O(1).
+        let mut index_ops = Vec::new();
+        if self.has_any_index() {
+            let tx_id = Some(tx.tx_id);
+            index_ops = self.plan_insert_ops(rid, value, tx_id).await;
+            index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
 
-        // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
-        self.stage_vectors(rid, value, tx).await;
+            // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
+            self.stage_vectors(rid, value, tx).await;
+        }
 
         self.stage_mutation(
             StagedMutation {
@@ -427,43 +432,48 @@ impl TableManager {
             }
         }
 
-        // 4. Take the index2 backend snapshot ONCE, then drive both
-        //    plan_insert_tx (stateless ops → index_write_set) and
-        //    staged_vector (HNSW → tx.staged_vectors) per row off the
-        //    cached list. This is the main per-row→batched lift:
-        //    `all_backends().await` walks the scc::HashMap; doing it
-        //    once amortises across N rows.
-        let backends = self.index2_registry.all_backends().await;
-        let tx_id = Some(tx.tx_id);
+        // 4–5. Index planning — skipped entirely when the table has no
+        //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
+        //    (atomic loads + `is_empty` on lock-free maps).
         let token = self.table_token();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
-        for (rid, v) in ids.iter().zip(values.iter()) {
-            for backend in &backends {
-                if let Ok(ops) = backend.plan_insert_tx(*rid, v, tx_id).await {
-                    index_ops.extend(ops);
-                }
-                if let Some(vec) = backend.staged_vector(*rid, v).await {
-                    tx.stage_vector(token, *rid, vec);
+        if self.has_any_index() {
+            // 4. Take the index2 backend snapshot ONCE, then drive both
+            //    plan_insert_tx (stateless ops → index_write_set) and
+            //    staged_vector (HNSW → tx.staged_vectors) per row off the
+            //    cached list. This is the main per-row→batched lift:
+            //    `all_backends().await` walks the scc::HashMap; doing it
+            //    once amortises across N rows.
+            let backends = self.index2_registry.all_backends().await;
+            let tx_id = Some(tx.tx_id);
+            for (rid, v) in ids.iter().zip(values.iter()) {
+                for backend in &backends {
+                    if let Ok(ops) = backend.plan_insert_tx(*rid, v, tx_id).await {
+                        index_ops.extend(ops);
+                    }
+                    if let Some(vec) = backend.staged_vector(*rid, v).await {
+                        tx.stage_vector(token, *rid, vec);
+                    }
                 }
             }
-        }
 
-        // 5. Legacy + sorted batch planners — one call each, planning
-        //    over the whole (id, value) iterator. Same physical key
-        //    layout the non-tx readers expect (see
-        //    `plan_legacy_insert_ops` for the contract).
-        let pairs = || ids.iter().zip(values.iter());
-        let mut legacy_ops = self
-            .index_manager
-            .plan_records_created_batch(pairs())
-            .await?;
-        legacy_ops.extend(
-            self.index_manager
-                .plan_records_created_unique_batch(pairs())
-                .await?,
-        );
-        legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
-        index_ops.extend(legacy_ops);
+            // 5. Legacy + sorted batch planners — one call each, planning
+            //    over the whole (id, value) iterator. Same physical key
+            //    layout the non-tx readers expect (see
+            //    `plan_legacy_insert_ops` for the contract).
+            let pairs = || ids.iter().zip(values.iter());
+            let mut legacy_ops = self
+                .index_manager
+                .plan_records_created_batch(pairs())
+                .await?;
+            legacy_ops.extend(
+                self.index_manager
+                    .plan_records_created_unique_batch(pairs())
+                    .await?,
+            );
+            legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
+            index_ops.extend(legacy_ops);
+        }
 
         // 6. Single ensure_table_staging, then set_many: one synchronous
         //    pass — no async overhead per key. InnerValues are serialized
@@ -578,40 +588,45 @@ impl TableManager {
             }
         }
 
-        // 4. Take the index2 backend snapshot ONCE, then drive both
-        //    plan_insert_tx (stateless ops → index_write_set) and
-        //    staged_vector (HNSW → tx.staged_vectors) per row off the
-        //    cached list, feeding `&views[i]` as `&dyn RecordRef`.
-        let backends = self.index2_registry.all_backends().await;
-        let tx_id = Some(tx.tx_id);
+        // 4–5. Index planning — skipped entirely when the table has no
+        //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
+        //    (atomic loads + `is_empty` on lock-free maps).
         let token = self.table_token();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
-        for (rid, view) in ids.iter().zip(views.iter()) {
-            for backend in &backends {
-                if let Ok(ops) = backend.plan_insert_tx(*rid, view, tx_id).await {
-                    index_ops.extend(ops);
-                }
-                if let Some(vec) = backend.staged_vector(*rid, view).await {
-                    tx.stage_vector(token, *rid, vec);
+        if self.has_any_index() {
+            // 4. Take the index2 backend snapshot ONCE, then drive both
+            //    plan_insert_tx (stateless ops → index_write_set) and
+            //    staged_vector (HNSW → tx.staged_vectors) per row off the
+            //    cached list, feeding `&views[i]` as `&dyn RecordRef`.
+            let backends = self.index2_registry.all_backends().await;
+            let tx_id = Some(tx.tx_id);
+            for (rid, view) in ids.iter().zip(views.iter()) {
+                for backend in &backends {
+                    if let Ok(ops) = backend.plan_insert_tx(*rid, view, tx_id).await {
+                        index_ops.extend(ops);
+                    }
+                    if let Some(vec) = backend.staged_vector(*rid, view).await {
+                        tx.stage_vector(token, *rid, vec);
+                    }
                 }
             }
-        }
 
-        // 5. Legacy + sorted batch planners — one call each, planning
-        //    over the whole (id, view) iterator. `RecordView: RecordRef`,
-        //    so the generic `R: RecordRef` bound is satisfied.
-        let pairs = || ids.iter().zip(views.iter());
-        let mut legacy_ops = self
-            .index_manager
-            .plan_records_created_batch(pairs())
-            .await?;
-        legacy_ops.extend(
-            self.index_manager
-                .plan_records_created_unique_batch(pairs())
-                .await?,
-        );
-        legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
-        index_ops.extend(legacy_ops);
+            // 5. Legacy + sorted batch planners — one call each, planning
+            //    over the whole (id, view) iterator. `RecordView: RecordRef`,
+            //    so the generic `R: RecordRef` bound is satisfied.
+            let pairs = || ids.iter().zip(views.iter());
+            let mut legacy_ops = self
+                .index_manager
+                .plan_records_created_batch(pairs())
+                .await?;
+            legacy_ops.extend(
+                self.index_manager
+                    .plan_records_created_unique_batch(pairs())
+                    .await?,
+            );
+            legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
+            index_ops.extend(legacy_ops);
+        }
 
         // 6. Single ensure_table_staging, then set_many with the staged
         //    bytes (NOT set_many_live — bytes are already encoded).

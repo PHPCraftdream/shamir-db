@@ -6,6 +6,7 @@ pub mod delete_view_parity_tests;
 pub mod doctor_tests;
 pub mod filter_stream_tests;
 pub mod fts_tokenizer_dsl_tests;
+pub mod has_any_index_tests;
 pub mod history_read_tests;
 pub mod index2_migration_tests;
 pub mod index2_persistence_redb_tests;
