@@ -224,6 +224,77 @@ pub(super) mod pausable_store {
     }
 }
 
+// ================================================================
+// CountingStore — test double that counts scan_prefix_stream calls.
+// ================================================================
+//
+// Wraps an InMemoryStore and increments an AtomicUsize on every
+// `scan_prefix_stream` call. Used by L6 tests to assert that the
+// targeted-remove fast path does NOT perform a prefix scan.
+pub(super) mod counting_store {
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::stream::Stream;
+    use shamir_storage::error::{DbError, DbResult};
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::{KvOp, RecordKey, Store};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub struct CountingStore {
+        inner: InMemoryStore,
+        pub scan_prefix_count: AtomicUsize,
+    }
+
+    impl CountingStore {
+        pub fn new() -> Self {
+            Self {
+                inner: InMemoryStore::new(),
+                scan_prefix_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Store for CountingStore {
+        async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+            self.inner.insert(value).await
+        }
+
+        async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+            self.inner.set(key, value).await
+        }
+
+        async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+            self.inner.get(key).await
+        }
+
+        async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+            self.inner.remove(key).await
+        }
+
+        async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+            self.inner.transact(ops).await
+        }
+
+        fn iter_stream(
+            &self,
+            batch_size: usize,
+        ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+            self.inner.iter_stream(batch_size)
+        }
+
+        fn scan_prefix_stream(
+            &self,
+            prefix: Bytes,
+            batch_size: usize,
+        ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+            self.scan_prefix_count.fetch_add(1, Ordering::Relaxed);
+            self.inner.scan_prefix_stream(prefix, batch_size)
+        }
+    }
+}
+
 /// Helper: build an MvccStore whose `history` is a FailingStore.
 /// History is the sole write target, so I/O error injection must be
 /// applied here.

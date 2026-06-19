@@ -25,7 +25,7 @@ pub use key_lock::{KeyLock, LockMode};
 pub use retention::Retention;
 pub use version_entry::VersionEntry;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -147,6 +147,11 @@ pub struct MvccStore {
     /// no entry and falls back to `now_millis()` — its conservative pre-cutover
     /// behaviour (recovery already could not reconstruct the original ts).
     pending_ts: SccHashMap<u64, u64, THasher>,
+    /// L6: set `true` when a snapshot is (or was recently) active during a
+    /// vacuum_key call. The targeted-remove fast path fires only when this is
+    /// `false` (no accumulated old versions from a snapshot epoch). Cleared
+    /// after a full scan-path vacuum runs with `active_snapshots_empty()`.
+    vacuum_needs_scan: AtomicBool,
 }
 
 impl MvccStore {
@@ -165,6 +170,7 @@ impl MvccStore {
             test_now_millis: AtomicU64::new(0),
             overlay: VersionedOverlay::new(),
             pending_ts: SccHashMap::with_hasher(THasher::default()),
+            vacuum_needs_scan: AtomicBool::new(false),
         }
     }
 
@@ -514,6 +520,9 @@ impl MvccStore {
         // return / `?`-propagated error / panic before commit). This is the
         // H5 unification: the watermark — not a direct `publish_committed_max`
         // — is the single source of truth for visibility.
+        // L6: capture old_v BEFORE publish_cell bumps the cell — this is the
+        // prior version that targeted vacuum will remove.
+        let old_v = self.current_version(&key);
         let guard = self.gate.assign_next_version_guarded();
         let new_v = guard.version();
         self.publish_cell(key.clone(), new_v).await;
@@ -553,9 +562,10 @@ impl MvccStore {
         // writes to a background drain and the non-tx path keeps marking
         // durable inline (its best-effort / no-WAL contract is unchanged).
         self.gate.mark_durable(new_v);
-        // T1b.2: per-key count-aware vacuum reclaims superseded history
-        // versions beyond the retention bound (floor: min_alive).
-        self.vacuum_key(&key_snapshot).await;
+        // T1b.2 + L6: per-key count-aware vacuum reclaims superseded history
+        // versions beyond the retention bound (floor: min_alive). old_v is the
+        // prior version captured before publish_cell — enables targeted remove.
+        self.vacuum_key(&key_snapshot, old_v).await;
         Ok(new_v)
     }
 
@@ -592,6 +602,8 @@ impl MvccStore {
         // cached version advances monotonically.
         let mut max_v = 0u64;
         let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
+        // L6: capture old_v per key BEFORE publish_cell bumps the cell.
+        let mut old_versions: Vec<u64> = Vec::with_capacity(items.len());
         // P0b: one VersionGuard per allocated version. If the batched
         // `history.transact` below fails (`?`), every guard drops un-committed
         // and marks its version Aborted, so the contiguous watermark advances
@@ -605,6 +617,7 @@ impl MvccStore {
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
+            old_versions.push(self.current_version(key));
             let guard = self.gate.assign_next_version_guarded();
             let new_v = guard.version();
             self.publish_cell(key.clone(), new_v).await;
@@ -646,9 +659,10 @@ impl MvccStore {
         for &v in &new_versions {
             self.gate.mark_durable(v);
         }
-        // T1b.2: per-key count-aware vacuum for every key in the batch.
-        for key in &keys {
-            self.vacuum_key(key).await;
+        // T1b.2 + L6: per-key count-aware vacuum for every key in the batch.
+        // old_versions[i] is the prior version captured before publish_cell.
+        for (key, &old_v) in keys.iter().zip(old_versions.iter()) {
+            self.vacuum_key(key, old_v).await;
         }
         Ok(max_v)
     }
@@ -668,6 +682,8 @@ impl MvccStore {
         // Bump-first: assign version, update cell, then write the tombstone.
         // CRIT-2: `publish_cell` uses entry_async (modify-or-insert) so the
         // cached version advances monotonically.
+        // L6: capture old_v BEFORE publish_cell bumps the cell.
+        let old_v = self.current_version(&key);
         // P0b: guarded allocation — unify the non-tx delete onto the
         // CompletionTracker (see `set_versioned`). Drop before `commit()`
         // marks the version Aborted, so a `?`-propagated history error never
@@ -702,9 +718,10 @@ impl MvccStore {
         // mark durable AFTER the visibility commit. Same rationale as
         // `set_versioned` — keeps `durable_watermark() <= last_committed()`.
         self.gate.mark_durable(new_v);
-        // T1b.2: per-key count-aware vacuum reclaims superseded history
-        // versions beyond the retention bound (floor: min_alive).
-        self.vacuum_key(&key).await;
+        // T1b.2 + L6: per-key count-aware vacuum reclaims superseded history
+        // versions beyond the retention bound (floor: min_alive). old_v is the
+        // prior version captured before publish_cell — enables targeted remove.
+        self.vacuum_key(&key, old_v).await;
         Ok(new_v)
     }
 
