@@ -875,6 +875,35 @@ where
         .map_err(|e| CodecError::Encode(format!("MessagePack encode error: {}", e)))
 }
 
+/// Scratch-buffer variant of [`query_value_to_storage_bytes`].
+///
+/// Serialises `qv` into the provided `scratch` buffer (which is **cleared**
+/// first), then returns an owned `Bytes` snapshot via `Bytes::copy_from_slice`.
+/// The caller keeps ownership of `scratch` and can reuse it for the next row
+/// — the returned `Bytes` is independent.
+///
+/// This avoids (N−1) fresh `Vec<u8>` allocations when encoding a batch of N
+/// rows: allocate one scratch buffer before the loop, pass it here each
+/// iteration, and the allocator only grows the buffer once (to the high-water
+/// mark of the largest row).
+pub fn query_value_to_storage_bytes_into<F>(
+    qv: &QueryValue,
+    intern_key: &F,
+    scratch: &mut Vec<u8>,
+) -> Result<Bytes, CodecError>
+where
+    F: Fn(&str) -> Result<InternerKey, CodecError>,
+{
+    scratch.clear();
+    let wrapper = QvInternedRef {
+        value: qv,
+        intern: intern_key,
+    };
+    rmp_serde::encode::write(&mut *scratch, &wrapper)
+        .map_err(|e| CodecError::Encode(format!("MessagePack encode error: {}", e)))?;
+    Ok(Bytes::copy_from_slice(scratch))
+}
+
 /// Borrowed `QueryValue` paired with a key-interning closure. Implements
 /// `Serialize` so `rmp_serde` can stream it straight to the output buffer.
 ///

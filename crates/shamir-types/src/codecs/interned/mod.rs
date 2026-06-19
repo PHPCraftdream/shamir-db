@@ -10,6 +10,7 @@ pub use codec::{
 };
 pub use messagepack::{
     inner_to_msgpack, merge_storage_bytes, msgpack_to_inner, query_value_to_storage_bytes,
+    query_value_to_storage_bytes_into,
 };
 pub use projection::record_view_to_id_msgpack;
 pub use validate_keys::{validate_keys_resolve, validate_keys_resolve_interner};
