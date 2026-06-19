@@ -828,7 +828,16 @@ impl RepoInstance {
         };
         let commit_version = event.commit_version;
         match self.changefeed().await {
-            Ok(h) => h.feed.emit(event),
+            Ok(h) => {
+                // L10(a) journal-safe: always journal, skip broadcast when
+                // no live subscribers. Late subscribers use `changes_since`
+                // (journal), so they are unaffected by the broadcast skip.
+                if h.feed.subscriber_count() > 0 {
+                    h.feed.emit(event);
+                } else {
+                    h.feed.emit_journal_only(event);
+                }
+            }
             Err(e) => {
                 // Changefeed init failed (e.g. store_get error). The commit
                 // is already durable; the feed is best-effort, so log + move

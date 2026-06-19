@@ -290,6 +290,20 @@ impl RepoChangefeed {
         let _ = self.live.send(Arc::clone(&event));
 
         // Track 2: durable journal (does not block the commit-path).
+        self.journal_send(event);
+    }
+
+    /// L10(a) journal-safe: emit ONLY to the durable journal, skipping the
+    /// live broadcast. Used when there are no live subscribers — saves the
+    /// broadcast overhead while preserving the journal invariant that
+    /// `changes_since` / late subscribers always see every committed event.
+    pub fn emit_journal_only(&self, event: ChangelogEvent) {
+        let event = Arc::new(event);
+        self.journal_send(event);
+    }
+
+    /// Shared journal-write logic for [`emit`] and [`emit_journal_only`].
+    fn journal_send(&self, event: Arc<ChangelogEvent>) {
         if let Err(e) = self.journal_tx.try_send(event) {
             match e {
                 mpsc::error::TrySendError::Full(ev) => {

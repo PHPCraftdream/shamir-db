@@ -611,6 +611,48 @@ async fn mixed_tx_nontx_versions_no_gap_from_double_bump() {
     );
 }
 
+/// L10(a) journal-safe invariant: a commit with ZERO live subscribers still
+/// writes to the durable journal. `changes_since(0)` must observe the event.
+/// This guards against a regression where skipping the broadcast path
+/// accidentally skips the journal path too.
+#[tokio::test]
+async fn commit_without_subscribers_still_journals() {
+    let shamir = setup().await;
+
+    // Deliberately NO subscribe_changelog — zero live subscribers.
+    insert_alice(&shamir).await;
+    insert_user(&shamir, "bob").await;
+
+    // Poll the journal until both events land (async journal writer).
+    let mut events = Vec::new();
+    for _ in 0..50 {
+        events = shamir
+            .read_changelog_from("testdb", "main", 0, 100)
+            .await
+            .unwrap();
+        if events.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        events.len(),
+        2,
+        "both commits journaled despite zero live subscribers"
+    );
+
+    // Versions ascend.
+    assert!(
+        events[0].commit_version < events[1].commit_version,
+        "journal events in ascending version order"
+    );
+
+    // Both are Put operations.
+    for ev in &events {
+        assert_eq!(ev.changes[0].op, ChangeOp::Put);
+    }
+}
+
 #[tokio::test]
 async fn subscribe_unknown_repo_returns_none() {
     let shamir = setup().await;
