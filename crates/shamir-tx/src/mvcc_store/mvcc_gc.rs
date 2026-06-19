@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use shamir_collections::TFxMap;
@@ -6,6 +8,7 @@ use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
 use super::ts_key;
 use super::MvccStore;
+use crate::version_codec::encode_version_key;
 
 impl MvccStore {
     /// T1b.2 + T1c: per-key retention-aware eager vacuum. After a
@@ -40,12 +43,53 @@ impl MvccStore {
     /// (no orphan timestamps). Best-effort: errors are swallowed (a vacuum
     /// failure must NOT fail the write that triggered it; the next write
     /// retries).
-    pub(super) async fn vacuum_key(&self, key: &Bytes) {
+    /// L6 targeted-remove fast path parameter: `old_v` is the key's version
+    /// BEFORE the current write (`current_version(key)` captured before
+    /// `publish_cell`). `0` means append-only (no prior version) → vacuum is
+    /// a no-op.
+    pub(super) async fn vacuum_key(&self, key: &Bytes, old_v: u64) {
         let policy = self.retention();
         // No upper bound on either axis → nothing to reclaim.
         if policy.max_count.is_none() && policy.max_age_secs.is_none() {
             return;
         }
+
+        // L6 fast path: CurrentOnly retention + no live snapshots + no
+        // accumulated old versions from a prior snapshot epoch + known prior
+        // version → targeted remove of the single old version, no scan_prefix.
+        // Invariants:
+        //  • old_v == 0 ⇒ append-only (first write), nothing to reclaim.
+        //  • active_snapshots_empty() ⇒ no snapshot floor to protect, no anchor.
+        //  • !vacuum_needs_scan ⇒ no accumulated versions from snapshot epochs.
+        //  • is_current_only() ⇒ max_count == Some(0), no age axis, no min_count
+        //    floor — every old version must go.
+        let snapshots_empty = self.gate.active_snapshots_empty();
+        if policy.is_current_only()
+            && snapshots_empty
+            && !self.vacuum_needs_scan.load(Ordering::Acquire)
+        {
+            if old_v == 0 {
+                return; // append-only, no prior version
+            }
+            // Targeted remove: the old version-key and its ts-key.
+            let _ = self.history.remove(encode_version_key(key, old_v)).await;
+            let _ = self.history.remove(ts_key(old_v)).await;
+            // P1c: drop the old version from the overlay in lockstep.
+            // D2 P1d-2b: gate on durable_watermark — never drop an undrained
+            // version (the overlay holds its only copy until the drainer lands
+            // it in history).
+            if old_v <= self.gate.durable_watermark() {
+                self.overlay.remove(key, old_v);
+            }
+            return;
+        }
+
+        // L6: if a snapshot is active, set the flag so the targeted fast path
+        // does not fire until a full scan vacuum cleans up accumulated versions.
+        if !snapshots_empty {
+            self.vacuum_needs_scan.store(true, Ordering::Release);
+        }
+
         let max_count = policy.max_count.map(|m| m as usize);
         let min_count = policy.min_count.unwrap_or(0) as usize;
         // Age cutoff in millis (None = no age cap). Saturating mul in case of
@@ -153,6 +197,12 @@ impl MvccStore {
             if *version <= self.gate.durable_watermark() {
                 self.overlay.remove(key, *version);
             }
+        }
+
+        // L6: after a full scan-path vacuum with no live snapshots, clear the
+        // flag so subsequent writes can use the targeted fast path.
+        if snapshots_empty {
+            self.vacuum_needs_scan.store(false, Ordering::Release);
         }
     }
 

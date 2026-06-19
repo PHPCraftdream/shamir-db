@@ -48,6 +48,13 @@ impl Retention {
         }
     }
 
+    /// Check if this retention is the CurrentOnly default: `max_count == Some(0)`
+    /// and `max_age_secs == None`. Used by the targeted-remove fast path in
+    /// `vacuum_key` (L6) to skip prefix scans on the hot write path.
+    pub fn is_current_only(&self) -> bool {
+        self.max_count == Some(0) && self.max_age_secs.is_none()
+    }
+
     /// Validate: `min_count` must be `<= max_count` when both are `Some`.
     /// Returns `Err(message)` on violation.
     pub fn validate(&self) -> Result<(), String> {
