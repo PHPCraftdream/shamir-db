@@ -22,11 +22,28 @@ pub struct RecordId(pub [u8; 16]);
 
 impl RecordId {
     pub fn new() -> Self {
+        Self::from_ts(Utc::now().timestamp_micros())
+    }
+
+    /// Returns the current wall-clock timestamp in microseconds —
+    /// the same scale used by `RecordId::new()` / `RecordId::from_ts`.
+    /// Call once before a batch loop, then feed the result to `from_ts`
+    /// per row.
+    #[inline]
+    pub fn now_micros() -> i64 {
+        Utc::now().timestamp_micros()
+    }
+
+    /// Creates a `RecordId` with a caller-supplied `timestamp_micros`
+    /// (absolute, same scale as `Utc::now().timestamp_micros()`) and a
+    /// fresh 8-byte random tail.  Use in batch paths to hoist the
+    /// single clock-read out of the per-row loop while keeping every id
+    /// unique via the random tail.
+    pub fn from_ts(timestamp_micros: i64) -> Self {
         let mut bytes = [0u8; 16];
 
         // Timestamp part, relative to the custom epoch.
-        let now_micros = Utc::now().timestamp_micros();
-        let relative_micros = now_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
+        let relative_micros = timestamp_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
         bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
 
         // Random part — thread-local Xoshiro256++ seeded once from OsRng.
