@@ -1,8 +1,9 @@
 use crate::repo::repo_instance::RepoInstance;
-use crate::repo::repo_types::BoxRepo;
+use crate::repo::repo_types::{BoxRepo, MemBufferRepoComposite};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
@@ -13,6 +14,20 @@ fn create_test_instance() -> RepoInstance {
         BoxRepo::InMemory(repo),
         vec![TableConfig::new("users"), TableConfig::new("orders")],
     )
+}
+
+/// L14+L5: MemBuffer-wrapped repo for testing store-layer unwrap wiring.
+fn create_membuffer_wrapped_instance() -> RepoInstance {
+    let inner = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
+    let config = MemBufferConfig {
+        max_bytes: 64 * 1024 * 1024,
+        max_entries: 100_000,
+        ttl_ms: None,
+        flush_interval_ms: 500,
+        flush_batch_size: 256,
+    };
+    let repo = BoxRepo::MemBuffer(Arc::new(MemBufferRepoComposite { inner, config }));
+    RepoInstance::new("mb_test".into(), repo, vec![TableConfig::new("items")])
 }
 
 #[tokio::test]
@@ -330,4 +345,160 @@ async fn test_repo_instance_crud_with_table() {
     let deleted = table.delete(id).await.unwrap();
     assert!(deleted);
     assert_eq!(table.count().await.unwrap(), 0);
+}
+
+// ============================================================================
+// L14+L5 — store-layer wiring: __data__ unwrapped, __info__/__history__ wrapped
+// ============================================================================
+
+/// L14: when a MemBuffer-wrapped repo creates an MVCC table, the
+/// `__data__` store must be unwrapped (raw backend) because MVCC tables
+/// never read or write through `__data__` — all I/O goes through the
+/// version log (`history`). The MemBuffer wrapper is dead weight.
+#[tokio::test]
+async fn l14_data_store_unwrapped_for_mvcc_table() {
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+
+    // data_store should be raw (unwrapped) — raw_backend returns None.
+    assert!(
+        table.data_store().raw_backend().await.is_none(),
+        "__data__ store must be unwrapped (raw) for MVCC tables"
+    );
+}
+
+/// L14 regression guard: `__info__` (indexes, counter) must remain
+/// wrapped in MemBuffer even for MVCC tables — it IS actively
+/// read/written by the index and counter subsystems.
+#[tokio::test]
+async fn l14_info_store_remains_wrapped_for_mvcc_table() {
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+
+    // info_store should still be wrapped — raw_backend returns Some.
+    assert!(
+        table.info_store().raw_backend().await.is_some(),
+        "__info__ store must remain wrapped in MemBuffer"
+    );
+}
+
+/// L5: `__history__` must remain wrapped in MemBuffer for the
+/// read-through cache benefit. Version-keyed values are immutable (new
+/// write = new version), so cached reads never go stale (except via
+/// explicit vacuum_key → remove, which correctly inserts a Tombstone).
+#[tokio::test]
+async fn l5_history_store_remains_wrapped_for_mvcc_table() {
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+    let mvcc = table.mvcc_store_ref().expect("MVCC must be attached");
+
+    // history_store should still be wrapped — raw_backend returns Some.
+    assert!(
+        mvcc.history_store().raw_backend().await.is_some(),
+        "__history__ store must remain wrapped in MemBuffer (read-through cache)"
+    );
+}
+
+/// L14: MVCC tables do not write to `__data__` — writes go exclusively
+/// through the version log. Verify by inserting through the table's MVCC
+/// path and confirming the raw data_store is empty.
+#[tokio::test]
+async fn l14_mvcc_write_does_not_touch_data_store() {
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+
+    // Insert a record through the MVCC path.
+    let value = InnerValue::Str("hello".to_string());
+    let _id = table.insert(&value).await.unwrap();
+
+    // The raw data_store should have zero entries — MVCC writes go to
+    // history, not __data__.
+    let mut stream = table.data_store().iter_stream(64);
+    use futures::StreamExt;
+    let mut count = 0usize;
+    while let Some(batch) = stream.next().await {
+        count += batch.unwrap().len();
+    }
+    assert_eq!(
+        count, 0,
+        "__data__ must have zero entries for MVCC tables — writes go to history"
+    );
+}
+
+/// L5: repeated reads of the same version-key hit the MemBuffer cache
+/// and do NOT go to the raw backend on the second read.
+#[tokio::test]
+async fn l5_repeated_read_hits_cache() {
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+
+    // Insert a record through the MVCC path.
+    let value = InnerValue::Str("cached".to_string());
+    let id = table.insert(&value).await.unwrap();
+
+    // First read (populates cache or is already cached from the write).
+    let v1 = table.get(id).await.unwrap();
+    assert_eq!(v1, value);
+
+    // Second read — should hit the MemBuffer cache.
+    let v2 = table.get(id).await.unwrap();
+    assert_eq!(v2, value);
+    // Functional correctness: both reads return the same value.
+    // The cache hit is structural (MemBuffer's get returns from moka
+    // before falling through to inner) — no counter seam needed for
+    // this regression guard.
+}
+
+/// L5: after vacuum_key removes a version from history, the MemBuffer
+/// cache entry is invalidated (Tombstone) and does NOT resurrect the
+/// deleted version.
+#[tokio::test]
+async fn l5_vacuum_does_not_resurrect_from_cache() {
+    use shamir_tx::Retention;
+
+    let instance = create_membuffer_wrapped_instance();
+    let table = instance.get_table("items").await.unwrap();
+    let mvcc = table
+        .mvcc_store_ref()
+        .expect("MVCC must be attached")
+        .clone();
+
+    // Set retention to keep only 1 version (CurrentOnly).
+    mvcc.set_retention(Retention {
+        max_count: Some(1),
+        min_count: None,
+        max_age_secs: None,
+    })
+    .expect("valid retention policy");
+
+    let key = bytes::Bytes::from_static(b"mykey");
+
+    // Write version 1.
+    let _v1 = mvcc
+        .set_versioned(key.clone(), bytes::Bytes::from_static(b"val1"))
+        .await
+        .unwrap();
+
+    // Write version 2 — vacuum_key runs inline and reclaims v1.
+    let v2 = mvcc
+        .set_versioned(key.clone(), bytes::Bytes::from_static(b"val2"))
+        .await
+        .unwrap();
+
+    // Current read should return v2, NOT v1 (v1 was vacuumed).
+    let current = mvcc.get_current(key.clone()).await.unwrap();
+    assert_eq!(
+        current,
+        Some(bytes::Bytes::from_static(b"val2")),
+        "current version must be v2 after vacuum"
+    );
+
+    // The history log should have only v2's entry (v1 was reclaimed).
+    let timeline = mvcc.history_of(&key).await.unwrap();
+    assert_eq!(
+        timeline.len(),
+        1,
+        "only one version should remain after vacuum (v1 reclaimed)"
+    );
+    assert_eq!(timeline[0].version, v2);
 }

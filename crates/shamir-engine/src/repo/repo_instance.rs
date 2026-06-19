@@ -5,7 +5,7 @@ use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::table::interner_manager::InternerManager;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{Repo, Store};
+use shamir_storage::types::{fully_unwrap_store, Repo, Store};
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use shamir_types::types::value::InnerValue;
@@ -308,6 +308,17 @@ impl RepoInstance {
 
         let token = table_token_for(table_name);
         let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));
+
+        // L14: when an MvccStore is attached, ALL data reads and writes are
+        // routed through the version log (`history`), never through `__data__`.
+        // The MemBuffer wrapper inherited from the repo-level BoxRepo::MemBuffer
+        // is dead weight on `__data__` — it caches entries that are never read
+        // and drains dirty slots that are never written. Unwrap to the raw
+        // backend so the TableManager holds an inert store reference (used only
+        // by the non-MVCC fallback branches, which are unreachable when MVCC is
+        // attached). `__info__` (indexes, counter) stays wrapped — it IS
+        // actively read/written.
+        let data_store = fully_unwrap_store(&data_store).await;
 
         let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
         // Stage I: every table in this repo SHARES the one repo-level
