@@ -21,7 +21,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
             name.into(),
-            BoxRepoFactory::sled_raw(path.clone()),
+            BoxRepoFactory::fjall_raw(path.clone()),
             tables.clone(),
         )
         .await
@@ -635,7 +635,7 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     // === Phase A: open disk repo, commit a tx via the real tx path. ===
     let rid;
     {
-        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let factory = BoxRepoFactory::fjall_raw(path.clone());
         let repo = RepoInstance::from_factory("f3".into(), factory, vec![TableConfig::new("t")])
             .await
             .expect("from_factory");
@@ -706,7 +706,7 @@ async fn f4b_nontx_insert_crash_recovery() {
     //     implicit-tx pipeline (mirrors `run_implicit_batch_tx`). ===
     let rid;
     {
-        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let factory = BoxRepoFactory::fjall_raw(path.clone());
         let repo = RepoInstance::from_factory("f4b".into(), factory, vec![TableConfig::new("t")])
             .await
             .expect("from_factory");
@@ -790,7 +790,7 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
     let rid;
     let pre_crash_id;
     {
-        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let factory = BoxRepoFactory::fjall_raw(path.clone());
         let repo = RepoInstance::from_factory("c5".into(), factory, vec![TableConfig::new("t")])
             .await
             .expect("from_factory");
@@ -903,7 +903,7 @@ async fn f3_file_wal_replay_is_idempotent() {
     // === Phase A: open disk repo, commit a tx. ===
     let rid;
     {
-        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let factory = BoxRepoFactory::fjall_raw(path.clone());
         let repo =
             RepoInstance::from_factory("f3_idem".into(), factory, vec![TableConfig::new("t")])
                 .await

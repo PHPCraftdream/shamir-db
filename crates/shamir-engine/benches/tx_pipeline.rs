@@ -471,9 +471,9 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
                     let tempdir = tempfile::TempDir::new().expect("tempdir");
-                    // Raw sled — no MemBuffer wrapper, so every commit
+                    // Raw fjall — no MemBuffer wrapper, so every commit
                     // sees real per-write cost.
-                    let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
+                    let factory = BoxRepoFactory::fjall_raw(tempdir.path().to_path_buf());
                     let repo = RepoInstance::from_factory(
                         "bench".into(),
                         factory,
@@ -637,7 +637,7 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let tempdir = tempfile::TempDir::new().expect("tempdir");
-                            let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
+                            let factory = BoxRepoFactory::fjall_raw(tempdir.path().to_path_buf());
                             let repo = RepoInstance::from_factory(
                                 "bench".into(),
                                 factory,

@@ -40,7 +40,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
     for _ in 0..10 {
         match RepoInstance::from_factory(
             name.into(),
-            BoxRepoFactory::sled_raw(path.clone()),
+            BoxRepoFactory::fjall_raw(path.clone()),
             tables.clone(),
         )
         .await
@@ -177,7 +177,7 @@ async fn reopen_recovery_without_drain_reconstructs_history() {
 
     let rid;
     {
-        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let factory = BoxRepoFactory::fjall_raw(path.clone());
         let repo = RepoInstance::from_factory(
             "cutover_reopen".into(),
             factory,

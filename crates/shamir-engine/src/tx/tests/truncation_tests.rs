@@ -52,7 +52,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
             name.into(),
-            BoxRepoFactory::sled_raw(path.clone()),
+            BoxRepoFactory::fjall_raw(path.clone()),
             tables.clone(),
         )
         .await
