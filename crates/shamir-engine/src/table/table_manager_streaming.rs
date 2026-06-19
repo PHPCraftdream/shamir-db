@@ -443,7 +443,7 @@ impl TableManager {
         }
         // No tx, or no mvcc: read raw bytes from the data store.
         if let Some(mvcc) = self.mvcc_store.as_ref() {
-            return mvcc.get_current(id.to_bytes()).await;
+            return mvcc.get_current_bytes(id.as_bytes()).await;
         }
         match self.table.data_store().get(id.to_bytes()).await {
             Ok(bytes) => Ok(Some(bytes)),

@@ -405,7 +405,7 @@ impl TableManager {
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         if let Some(mvcc) = self.mvcc_store_ref() {
-            match mvcc.get_current(id.to_bytes()).await? {
+            match mvcc.get_current_bytes(id.as_bytes()).await? {
                 Some(bytes) => InnerValue::from_bytes(bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))),
                 None => Err(DbError::NotFound(format!("record not found: {id:?}"))),
@@ -426,7 +426,7 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mut out = Vec::with_capacity(ids.len());
             for id in ids {
-                match mvcc.get_current(id.to_bytes()).await? {
+                match mvcc.get_current_bytes(id.as_bytes()).await? {
                     Some(bytes) => {
                         let v = InnerValue::from_bytes(bytes).map_err(|e| {
                             DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))
@@ -448,7 +448,7 @@ impl TableManager {
     /// the aggregate pipeline and other callers that need the full tree.
     pub async fn get_bytes(&self, id: RecordId) -> DbResult<Option<Bytes>> {
         if let Some(mvcc) = self.mvcc_store_ref() {
-            mvcc.get_current(id.to_bytes()).await
+            mvcc.get_current_bytes(id.as_bytes()).await
         } else {
             match self.table.data_store().get(id.to_bytes()).await {
                 Ok(b) => Ok(Some(b)),
@@ -470,7 +470,7 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store_ref() {
             let mut out = Vec::with_capacity(ids.len());
             for id in ids {
-                out.push(mvcc.get_current(id.to_bytes()).await?);
+                out.push(mvcc.get_current_bytes(id.as_bytes()).await?);
             }
             Ok(out)
         } else {
