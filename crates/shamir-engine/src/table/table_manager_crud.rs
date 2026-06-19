@@ -178,7 +178,7 @@ impl TableManager {
         }
 
         // 2. Data-store write. When an MvccStore is attached, route the
-        //    whole batch through `set_versioned_many` (III.4) so
+        //    whole batch through `set_versioned_many_append_only` (III.4) so
         //    `version_cache` and history archival stay consistent with
         //    non-tx writes WHILE collapsing the main writes into a single
         //    `Store::transact` — one fsync instead of N on backends that
@@ -201,7 +201,7 @@ impl TableManager {
                 items.push((rid.to_bytes(), bytes));
                 ids.push(rid);
             }
-            let ver = mvcc.set_versioned_many(items).await?;
+            let ver = mvcc.set_versioned_many_append_only(items).await?;
             (ids, ver)
         } else {
             let ids = self.table.insert_many(values).await?;
