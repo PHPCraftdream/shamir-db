@@ -170,6 +170,11 @@ name = "drain_throughput"
 harness = false
 required-features = ["redb", "fjall", "sled"]
 
+[[bench]]
+name = "backend_matrix"
+harness = false
+required-features = ["redb", "fjall", "sled", "nebari", "persy", "canopy"]
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
