@@ -67,6 +67,7 @@ tempfile = "3.10.1"
 serial_test = "3.3.1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
+shamir-bench-utils = { path = "../shamir-bench-utils" }
 
 [[bench]]
 name = "store_raw"

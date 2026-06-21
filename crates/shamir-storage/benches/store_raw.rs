@@ -7,11 +7,16 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use shamir_bench_utils::tune_tiered;
 use shamir_storage::types::Store;
 use std::sync::Arc;
 
 const RECORD_SIZE: usize = 256;
 const SEED_COUNT: usize = 1000;
+
+/// Prefix scan dataset: 50k records that share a common 8-byte prefix.
+/// Used by `bench_prefix_scan` to measure the cost of `scan_prefix_stream`.
+const PREFIX_SCAN_N: usize = 50_000;
 
 fn make_value(i: usize) -> Bytes {
     let mut v = vec![0u8; RECORD_SIZE];
@@ -79,6 +84,59 @@ fn bench_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
             async move {
                 use futures::StreamExt;
                 let mut stream = s.iter_stream(256);
+                let mut count = 0u64;
+                while let Some(batch) = stream.next().await {
+                    count += batch.unwrap().len() as u64;
+                }
+                count
+            }
+        });
+    });
+    group.finish();
+}
+
+/// Prefix-scan benchmark — measures `scan_prefix_stream` end-to-end throughput
+/// on a 50k-record store where ALL records share an 8-byte prefix.
+///
+/// This is the worst-case shape for the old full-iter+linear-seek implementation
+/// (O(N²) re-scan on every batch) and the best demonstration of the
+/// range-seek rewrite (O(log N + M) per batch).
+///
+/// `prefix_scan/<backend>/50000` is the canonical Op A before/after metric.
+fn bench_prefix_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+    use futures::StreamExt;
+
+    let rt = rt();
+
+    // Shared 8-byte prefix — every record uses it.
+    static PREFIX_BYTES: &[u8] = b"pfxscan_";
+    let prefix = Bytes::from_static(PREFIX_BYTES);
+
+    // Seed PREFIX_SCAN_N records whose keys start with the prefix.
+    // We set explicit keys via `store.set(key, value)` so we control the prefix.
+    rt.block_on(async {
+        // Build keys: prefix (8 bytes) + 8-byte big-endian index.
+        for i in 0..PREFIX_SCAN_N {
+            let mut key = Vec::with_capacity(16);
+            key.extend_from_slice(PREFIX_BYTES);
+            key.extend_from_slice(&(i as u64).to_be_bytes());
+            let rk = shamir_storage::types::RecordKey::from(key);
+            store.set(rk, make_value(i)).await.unwrap();
+        }
+    });
+
+    let mut group = c.benchmark_group(format!("{name}/prefix_scan"));
+    group.throughput(Throughput::Elements(PREFIX_SCAN_N as u64));
+    tune_tiered(&mut group, 20, 5, 3, 120);
+
+    group.bench_function(BenchmarkId::new("scan_prefix_stream", PREFIX_SCAN_N), |b| {
+        let s = Arc::clone(&store);
+        let pfx = prefix.clone();
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&s);
+            let pfx = pfx.clone();
+            async move {
+                let mut stream = s.scan_prefix_stream(pfx, 256);
                 let mut count = 0u64;
                 while let Some(batch) = stream.next().await {
                     count += batch.unwrap().len() as u64;
@@ -212,13 +270,20 @@ fn make_fjall_store(dir: &std::path::Path) -> Arc<dyn Store> {
 }
 
 disk_backend!("sled", storage_sled, bench_sled, "sled", make_sled_store);
-disk_backend!(
-    "fjall",
-    storage_fjall,
-    bench_fjall,
-    "fjall",
-    make_fjall_store
-);
+
+/// Fjall bench — includes the prefix_scan 50k cell (Op A before/after target).
+#[cfg(feature = "fjall")]
+fn bench_fjall(c: &mut Criterion) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let store: Arc<dyn Store> = make_fjall_store(dir.path());
+    let name = "fjall";
+    bench_insert(c, name, Arc::clone(&store));
+    bench_get(c, name, Arc::clone(&store));
+    bench_scan(c, name, Arc::clone(&store));
+    bench_set_many(c, name, Arc::clone(&store));
+    // Op A benchmark: prefix_scan on 50k shared-prefix records.
+    bench_prefix_scan(c, name, store);
+}
 
 fn cached_in_memory_store() -> Arc<dyn Store> {
     let inner = in_memory_store();
