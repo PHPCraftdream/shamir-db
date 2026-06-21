@@ -77,12 +77,10 @@ async fn run_burst(repo: Arc<RepoInstance>, writers: usize, batch_size: usize, i
         handles.push(tokio::spawn(async move {
             let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
             let tbl = repo.get_table("tbl_0").await.unwrap();
-            for row in 0..batch_size {
-                let val = format!("v_{}_{}_{}", iter_i, w, row);
-                tbl.insert_tx(&InnerValue::Str(val), Some(&mut tx))
-                    .await
-                    .unwrap();
-            }
+            let values: Vec<InnerValue> = (0..batch_size)
+                .map(|row| InnerValue::Str(format!("v_{}_{}_{}", iter_i, w, row)))
+                .collect();
+            tbl.insert_tx_many(&values, &mut tx).await.unwrap();
             (*repo).commit_tx(tx).await.unwrap();
         }));
     }

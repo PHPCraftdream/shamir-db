@@ -17,6 +17,9 @@ use std::time::Duration;
 use criterion::measurement::Measurement;
 use criterion::BenchmarkGroup;
 
+#[cfg(feature = "peak_mem")]
+pub mod peak_mem;
+
 /// `true` when the bench should run in QUICK mode.
 ///
 /// Quick is the **default**; full-rigor mode is opt-in via
