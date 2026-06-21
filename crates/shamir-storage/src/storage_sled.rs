@@ -209,6 +209,14 @@ impl Store for SledStore {
         })
     }
 
+    /// Prefix scan via `tree.range` — O(log N + batch_size) per batch.
+    ///
+    /// Replaces the previous O(M²/batch_size) cursor-skip pathology where
+    /// every subsequent batch re-scanned the prefix from start and linearly
+    /// skipped the previously-yielded prefix-prefix. Now seeks directly to
+    /// the cursor via `range((Excluded(last_key), Unbounded))` (sled trees
+    /// are lex-sorted) and stops at the first key outside the prefix range.
+    /// Same shape as fjall's fix in `storage_fjall.rs::scan_prefix_stream`.
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
@@ -218,32 +226,31 @@ impl Store for SledStore {
 
         Box::pin(stream! {
             let mut last_key: Option<Vec<u8>> = None;
-            let prefix_slice = prefix.to_vec();
+            let prefix_vec = prefix.to_vec();
 
             loop {
                 let tree_clone = tree.clone();
-                let start_key = last_key.clone();
-                let prefix_clone = prefix_slice.clone();
+                let cur_last = last_key.clone();
+                let pfx = prefix_vec.clone();
 
                 let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
-                    let prefix_ref = &prefix_clone;
+                    use std::ops::Bound;
 
-                    // Sled's scan_prefix doesn't support cursor, so we need to skip
+                    // Seek directly to the prefix boundary (or past the cursor).
+                    // Sled returns items in lex order — same property fjall relies on.
+                    let lower: Bound<Vec<u8>> = match cur_last {
+                        Some(ref c) => Bound::Excluded(c.clone()),
+                        None => Bound::Included(pfx.clone()),
+                    };
+                    let upper: Bound<Vec<u8>> = Bound::Unbounded;
+
                     let mut items = Vec::new();
-                    let mut skip_until = start_key;
+                    for item in tree_clone.range((lower, upper)).take(batch_size) {
+                        let (key, val) = item
+                            .map_err(|e| DbError::Storage(format!("SledDB range item: {}", e)))?;
 
-                    for item in tree_clone.scan_prefix(prefix_ref) {
-                        let (key, val) = item.map_err(|e| DbError::Storage(format!("SledDB scan_prefix item: {}", e)))?;
-
-                        // Skip until we pass the cursor
-                        if let Some(ref start) = skip_until {
-                            if key.as_ref() <= start.as_slice() {
-                                continue;
-                            }
-                            skip_until = None; // Done skipping
-                        }
-
-                        if items.len() >= batch_size {
+                        if !key.starts_with(&pfx) {
+                            // Past the prefix range — stop.
                             break;
                         }
 
