@@ -1,30 +1,35 @@
-//! Durable [`ConsumedCounterStore`] backed by `redb` (spec §6.2 NORMATIVE
+//! Durable [`ConsumedCounterStore`] backed by `fjall` (spec §6.2 NORMATIVE
 //! release blocker for SESSION_RESUMPTION).
 //!
-//! `redb` provides a single-file embedded key-value store with ACID
-//! guarantees. Each `try_advance()` performs a write transaction that
-//! commits before returning `true` — so the on-disk state always reflects
-//! the highest counter value the server has ever returned `true` for.
-//! Crash-restart cannot replay a previously-consumed ticket because the
-//! durable counter snapshot survived the crash.
+//! `fjall` is an embedded LSM key-value store. Each `try_advance()` performs
+//! a write that persists with `PersistMode::SyncAll` (fsync) before
+//! returning `true` — so the on-disk state always reflects the highest
+//! counter value the server has ever returned `true` for. Crash-restart
+//! cannot replay a previously-consumed ticket because the durable counter
+//! snapshot survived the crash.
 //!
 //! Per spec §6.2:
 //! > Implementation **MUST** persist durably (fsync) before returning `true`.
 //!
-//! `redb` calls `fsync` on commit (`Durability::Immediate` is the default).
-//! We make the durability level explicit + verify with a crash-restart
-//! test.
+//! ## Atomicity
+//!
+//! fjall has no nested ACID transaction primitive that scopes a
+//! `get → conditional-insert`. We serialise `try_advance` and `gc` through
+//! a single in-process `parking_lot::Mutex` — this is replay-protection
+//! infrastructure, not a hot path (one call per session resumption), so
+//! the serialisation cost is irrelevant. `peek` is lock-free (read-only).
 //!
 //! ## Feature flag
 //!
-//! Enable with `--features durable-redb`. Without the feature this module
+//! Enable with `--features durable-fjall`. Without the feature this module
 //! compiles to nothing and only `InMemoryConsumedCounters` (in
 //! `server/resume.rs`) is available.
 
 use crate::common::time::{ns, UnixNanos};
 use crate::common::types::limits;
 use crate::server::resume::ConsumedCounterStore;
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use parking_lot::Mutex;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,41 +37,44 @@ use std::sync::Arc;
 /// (= 24h) of no activity.
 const GC_IDLE_NS: u64 = 24 * ns::HOUR;
 
-/// Table layout: key = `user_id (16) || family_id (16)` (32 bytes total),
+/// Single keyspace name. Key = `user_id (16) || family_id (16)` (32 bytes),
 /// value = `counter (u64_be) || last_observed_at_ns (u64_be)` (16 bytes).
-const COUNTERS_TABLE: TableDefinition<&[u8; 32], &[u8; 16]> =
-    TableDefinition::new("consumed_counters_v1");
+const COUNTERS_KEYSPACE: &str = "consumed_counters_v1";
 
 /// Durable replay-protection counter store.
 ///
-/// All operations commit synchronously with `Durability::Immediate` (fsync)
-/// per spec §6.2 NORMATIVE.
-pub struct RedbConsumedCounters {
+/// All accepted advances are persisted with `PersistMode::SyncAll` (fsync)
+/// before returning, per spec §6.2 NORMATIVE.
+pub struct FjallConsumedCounters {
     db: Arc<Database>,
+    keyspace: Keyspace,
+    /// Serialises `try_advance` and `gc` so concurrent advancers don't
+    /// race on the get-then-conditional-insert sequence. Not held across
+    /// the fsync — fjall's `persist` is synchronous and short.
+    write_lock: Mutex<()>,
 }
 
-impl core::fmt::Debug for RedbConsumedCounters {
+impl core::fmt::Debug for FjallConsumedCounters {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RedbConsumedCounters")
-            .field("db", &"<redb::Database>")
+        f.debug_struct("FjallConsumedCounters")
+            .field("db", &"<fjall::Database>")
             .finish()
     }
 }
 
-impl RedbConsumedCounters {
-    /// Open or create the database file at `path`.
+impl FjallConsumedCounters {
+    /// Open or create the database at `path`.
     ///
-    /// On first use the table is created. Subsequent opens reuse the
-    /// existing data (counter state survives restart).
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, redb::Error> {
-        let db = Database::create(path)?;
-        // Ensure the table exists.
-        let txn = db.begin_write()?;
-        {
-            let _t = txn.open_table(COUNTERS_TABLE)?;
-        }
-        txn.commit()?;
-        Ok(Self { db: Arc::new(db) })
+    /// On first use the counters keyspace is created. Subsequent opens
+    /// reuse the existing data (counter state survives restart).
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, fjall::Error> {
+        let db = Database::builder(path.as_ref()).open()?;
+        let keyspace = db.keyspace(COUNTERS_KEYSPACE, KeyspaceCreateOptions::default)?;
+        Ok(Self {
+            db: Arc::new(db),
+            keyspace,
+            write_lock: Mutex::new(()),
+        })
     }
 
     fn key(user_id: &[u8; 16], family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES]) -> [u8; 32] {
@@ -83,11 +91,11 @@ impl RedbConsumedCounters {
         v
     }
 
-    fn unpack_value(v: &[u8; 16]) -> (u64, u64) {
+    fn unpack_value(v: &[u8]) -> (u64, u64) {
         let mut c = [0u8; 8];
         let mut t = [0u8; 8];
         c.copy_from_slice(&v[..8]);
-        t.copy_from_slice(&v[8..]);
+        t.copy_from_slice(&v[8..16]);
         (u64::from_be_bytes(c), u64::from_be_bytes(t))
     }
 
@@ -97,16 +105,13 @@ impl RedbConsumedCounters {
         user_id: &[u8; 16],
         family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
     ) -> Option<u64> {
-        let txn = self.db.begin_read().ok()?;
-        let table = txn.open_table(COUNTERS_TABLE).ok()?;
         let key = Self::key(user_id, family_id);
-        let entry = table.get(&key).ok().flatten()?;
-        let v = entry.value();
-        Some(Self::unpack_value(v).0)
+        let slice = self.keyspace.get(&key[..]).ok().flatten()?;
+        Some(Self::unpack_value(&slice).0)
     }
 }
 
-impl ConsumedCounterStore for RedbConsumedCounters {
+impl ConsumedCounterStore for FjallConsumedCounters {
     fn try_advance(
         &self,
         user_id: &[u8; 16],
@@ -116,79 +121,67 @@ impl ConsumedCounterStore for RedbConsumedCounters {
         let key = Self::key(user_id, family_id);
         let now_ns = UnixNanos::now().as_u64();
 
-        // Spec §6.2: Durability::Immediate ensures fsync before commit
-        // returns. This is the default in redb 3.x but we set it explicitly
-        // for documentation + future-proofing if the default ever changes.
-        let mut txn = match self.db.begin_write() {
-            Ok(t) => t,
+        let _guard = self.write_lock.lock();
+
+        let prior = match self.keyspace.get(&key[..]) {
+            Ok(opt) => opt,
             Err(_) => return false,
         };
-        txn.set_durability(Durability::Immediate).ok();
-
-        let accepted = {
-            let mut table = match txn.open_table(COUNTERS_TABLE) {
-                Ok(t) => t,
-                Err(_) => return false,
-            };
-            let prior = match table.get(&key) {
-                Ok(opt) => opt,
-                Err(_) => return false,
-            };
-            let prior_counter = prior.map(|v| Self::unpack_value(v.value()).0);
-            let accept = match prior_counter {
-                Some(c) => new_counter > c,
-                None => true,
-            };
-            if accept {
-                let v = Self::pack_value(new_counter, now_ns);
-                if table.insert(&key, &v).is_err() {
-                    return false;
-                }
-            }
-            accept
+        let prior_counter = prior.map(|s| Self::unpack_value(&s).0);
+        let accept = match prior_counter {
+            Some(c) => new_counter > c,
+            None => true,
         };
-
-        if txn.commit().is_err() {
+        if !accept {
             return false;
         }
-        accepted
+
+        let v = Self::pack_value(new_counter, now_ns);
+        if self.keyspace.insert(&key[..], &v[..]).is_err() {
+            return false;
+        }
+
+        // Spec §6.2 NORMATIVE: fsync before returning `true`. Without
+        // this the on-disk state may lag the in-memory journal and a
+        // crash could replay a "consumed" ticket.
+        if self.db.persist(PersistMode::SyncAll).is_err() {
+            return false;
+        }
+        true
     }
 
     fn gc(&self, now_ns: u64) {
         let cutoff = now_ns.saturating_sub(GC_IDLE_NS);
-        let txn = match self.db.begin_write() {
-            Ok(t) => t,
-            Err(_) => return,
-        };
+        let _guard = self.write_lock.lock();
+
         let to_remove: Vec<[u8; 32]> = {
-            let table = match txn.open_table(COUNTERS_TABLE) {
-                Ok(t) => t,
-                Err(_) => return,
-            };
             let mut victims = Vec::new();
-            if let Ok(iter) = table.iter() {
-                for entry in iter.flatten() {
-                    let v = entry.1.value();
-                    let (_, last) = Self::unpack_value(v);
-                    if last < cutoff {
-                        let k = entry.0.value();
-                        victims.push(*k);
-                    }
+            for guard in self.keyspace.iter() {
+                let Ok((k, v)) = guard.into_inner() else {
+                    continue;
+                };
+                if k.len() != 32 || v.len() != 16 {
+                    continue;
+                }
+                let (_, last) = Self::unpack_value(&v);
+                if last < cutoff {
+                    let mut kk = [0u8; 32];
+                    kk.copy_from_slice(&k);
+                    victims.push(kk);
                 }
             }
             victims
         };
-        if !to_remove.is_empty() {
-            if let Ok(mut table) = txn.open_table(COUNTERS_TABLE) {
-                for key in &to_remove {
-                    if let Err(e) = table.remove(key) {
-                        log::warn!("durable_counters::gc: remove failed: {}", e);
-                    }
-                }
+
+        for key in &to_remove {
+            if let Err(e) = self.keyspace.remove(&key[..]) {
+                log::warn!("durable_counters::gc: remove failed: {}", e);
             }
         }
-        if let Err(e) = txn.commit() {
-            log::warn!("durable_counters::gc: commit failed: {}", e);
+        if !to_remove.is_empty() {
+            if let Err(e) = self.db.persist(PersistMode::SyncAll) {
+                log::warn!("durable_counters::gc: persist failed: {}", e);
+            }
         }
     }
 }

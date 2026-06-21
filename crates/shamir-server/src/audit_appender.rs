@@ -1,27 +1,27 @@
-//! Durable audit appender — HMAC-chained tab-separated log + redb checkpoint.
+//! Durable audit appender — HMAC-chained tab-separated log + fjall checkpoint.
 //!
 //! Spec IMPL §3.3 NORMATIVE — two storage layers:
 //!
 //! 1. **Fixed-format log** (`data_dir/audit.log`) — one line per [`AuditEntry`],
 //!    fields TAB-separated in fixed order; byte fields as base64url. Append-only.
-//! 2. **Checkpoint redb** (`data_dir/audit_checkpoint.redb`) — single-row
-//!    `last_audit_hmac` table with `(next_seq: u64, prev_hmac: [u8; 32])`.
-//!    Always committed with [`Durability::Immediate`] (fsync on commit).
+//! 2. **Checkpoint fjall** (`data_dir/audit_checkpoint`) — single-row
+//!    `last_audit_hmac` keyspace with `(next_seq: u64, prev_hmac: [u8; 32])`.
+//!    Always committed with `db.persist(PersistMode::SyncAll)` (fsync).
 //!
 //! ## fsync semantics
 //!
-//! - **Strict mode** ([`RedbAuditAppender::open_strict`]): every
+//! - **Strict mode** ([`FjallAuditAppender::open_strict`]): every
 //!   [`AuditAppender::append_entry`] writes + `sync_all`s the log file
 //!   synchronously.
-//! - **Batched mode** ([`RedbAuditAppender::open_batched`]): entries are
+//! - **Batched mode** ([`FjallAuditAppender::open_batched`]): entries are
 //!   buffered in memory and flushed by a background tokio task at the
 //!   configured interval (≤5s per spec).
 //!
 //! Checkpoint writes are always durable regardless of mode.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use parking_lot::Mutex;
-use redb::{Database, Durability, ReadableDatabase, TableDefinition};
 use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -33,58 +33,25 @@ use tokio::task::JoinHandle;
 
 /// Filename of the fixed-format audit log inside `data_dir`.
 const AUDIT_LOG_FILENAME: &str = "audit.log";
-/// Filename of the redb checkpoint database inside `data_dir`.
-const CHECKPOINT_DB_FILENAME: &str = "audit_checkpoint.redb";
+/// Directory name of the fjall checkpoint database inside `data_dir`.
+const CHECKPOINT_DB_DIRNAME: &str = "audit_checkpoint";
+/// fjall keyspace holding the single `(next_seq, prev_hmac)` row.
+const CHECKPOINT_KEYSPACE: &str = "last_audit_hmac";
+/// Single key used inside the checkpoint keyspace.
+const CHECKPOINT_KEY: &[u8] = &[0u8];
 
-/// redb table holding `(next_seq, prev_hmac)`. Single row keyed by `0u8`.
-const CHECKPOINT_TABLE: TableDefinition<&[u8; 1], &[u8; 40]> =
-    TableDefinition::new("last_audit_hmac");
-
-/// Errors raised by [`RedbAuditAppender`] open + flush operations.
+/// Errors raised by [`FjallAuditAppender`] open + flush operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AppenderError {
     /// Underlying I/O failure (file open, write, fsync).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// redb error while opening / committing the checkpoint table.
-    #[error("redb: {0}")]
-    Redb(#[from] redb::Error),
-}
-
-impl From<redb::DatabaseError> for AppenderError {
-    fn from(e: redb::DatabaseError) -> Self {
-        AppenderError::Redb(e.into())
-    }
-}
-
-impl From<redb::TransactionError> for AppenderError {
-    fn from(e: redb::TransactionError) -> Self {
-        AppenderError::Redb(e.into())
-    }
-}
-
-impl From<redb::TableError> for AppenderError {
-    fn from(e: redb::TableError) -> Self {
-        AppenderError::Redb(e.into())
-    }
-}
-
-impl From<redb::StorageError> for AppenderError {
-    fn from(e: redb::StorageError) -> Self {
-        AppenderError::Redb(e.into())
-    }
-}
-
-impl From<redb::CommitError> for AppenderError {
-    fn from(e: redb::CommitError) -> Self {
-        AppenderError::Redb(e.into())
-    }
+    /// fjall error while opening / committing the checkpoint keyspace.
+    #[error("fjall: {0}")]
+    Fjall(#[from] fjall::Error),
 }
 
 /// Encode a free-text field for embedding in the tab-separated log line.
-///
-/// Escapes `\` → `\\`, `\t` → `\t`, `\n` → `\n` so the field is safe
-/// to embed between TAB delimiters without breaking the fixed column layout.
 fn escape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -122,16 +89,6 @@ fn unescape_field(s: &str) -> String {
 }
 
 /// Serialise one [`AuditEntry`] to the fixed-format log line (without trailing `\n`).
-///
-/// Field order (TAB-separated, 11 columns):
-///   seq \t ts_ns \t event \t transport \t user \t ip_subnet \t
-///   session_id_prefix \t result \t details_canonical_msgpack \t prev_hmac \t hmac
-///
-/// `seq` and `ts_ns` are decimal u64.
-/// `session_id_prefix`, `details_canonical_msgpack`, `prev_hmac`, `hmac` are
-/// base64url (URL_SAFE_NO_PAD) — characters `[A-Za-z0-9_-]`, no escaping needed.
-/// `event`, `transport`, `user`, `ip_subnet`, `result` are escaped with
-/// [`escape_field`]: `\` → `\\`, TAB → `\t`, newline → `\n`.
 fn entry_to_line(entry: &AuditEntry) -> Vec<u8> {
     let line = format!(
         "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -228,52 +185,37 @@ fn line_to_entry(line: &str) -> Result<AuditEntry, AppenderError> {
 
 /// Durability mode of the appender.
 enum Durab {
-    /// Each `append_entry` writes + fsyncs synchronously.
     Strict,
-    /// Entries are buffered; a background task flushes periodically.
     Batched {
-        /// Pending entries to write on next flush.
         buffer: Mutex<Vec<AuditEntry>>,
-        /// Wakes up the flusher (used by `flush_now` + `shutdown`).
         notify: Arc<Notify>,
-        /// Set to `true` to stop the flusher.
         shutdown: Arc<std::sync::atomic::AtomicBool>,
-        /// Handle to the background flusher task.
         task: Mutex<Option<JoinHandle<()>>>,
     },
 }
 
 /// Optional log-rotation policy for the fixed-format audit file.
-///
-/// When set, every successful append checks the running file size; once it
-/// crosses `max_size_bytes` the current file is renamed to
-/// `audit.log.<unix_nanos>` and a fresh `audit.log` is opened
-/// for subsequent writes. The HMAC chain is **not** affected — each
-/// rotated entry already carries its `prev_hmac`, so verification stitches
-/// the rotated files back together by reading them in lexicographic order.
 #[derive(Debug)]
 pub struct RotationPolicy {
     pub max_size_bytes: u64,
     pub current_size: std::sync::atomic::AtomicU64,
 }
 
-/// Durable [`AuditAppender`] backed by fixed-format tab-separated log + redb checkpoint.
-pub struct RedbAuditAppender {
-    /// Open append-handle to `audit.log`.
+/// Durable [`AuditAppender`] backed by fixed-format tab-separated log + fjall checkpoint.
+pub struct FjallAuditAppender {
     log_file: Mutex<File>,
-    /// Path to the fixed-format audit log (used by static helpers).
     log_path: PathBuf,
-    /// Open redb database for the checkpoint table.
+    /// Open fjall database holding the checkpoint keyspace.
     checkpoint_db: Arc<Database>,
-    /// Durability mode (strict or batched).
+    /// Checkpoint keyspace (single-row table).
+    checkpoint_ks: Keyspace,
     mode: Durab,
-    /// Optional rotation policy. `None` = unlimited file size (legacy).
     rotation: Option<RotationPolicy>,
 }
 
-impl core::fmt::Debug for RedbAuditAppender {
+impl core::fmt::Debug for FjallAuditAppender {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RedbAuditAppender")
+        f.debug_struct("FjallAuditAppender")
             .field("log_path", &self.log_path)
             .field(
                 "mode",
@@ -286,11 +228,11 @@ impl core::fmt::Debug for RedbAuditAppender {
     }
 }
 
-impl RedbAuditAppender {
+impl FjallAuditAppender {
     fn paths(data_dir: &Path) -> (PathBuf, PathBuf) {
         (
             data_dir.join(AUDIT_LOG_FILENAME),
-            data_dir.join(CHECKPOINT_DB_FILENAME),
+            data_dir.join(CHECKPOINT_DB_DIRNAME),
         )
     }
 
@@ -298,16 +240,10 @@ impl RedbAuditAppender {
         OpenOptions::new().create(true).append(true).open(path)
     }
 
-    fn open_db(path: &Path) -> Result<Arc<Database>, AppenderError> {
-        let db = Database::create(path)?;
-        // Ensure the table exists.
-        let mut txn = db.begin_write()?;
-        txn.set_durability(Durability::Immediate).ok();
-        {
-            let _t = txn.open_table(CHECKPOINT_TABLE)?;
-        }
-        txn.commit()?;
-        Ok(Arc::new(db))
+    fn open_db(path: &Path) -> Result<(Arc<Database>, Keyspace), AppenderError> {
+        let db = Database::builder(path).open()?;
+        let ks = db.keyspace(CHECKPOINT_KEYSPACE, KeyspaceCreateOptions::default)?;
+        Ok((Arc::new(db), ks))
     }
 
     /// Open in **strict** mode — every entry is fsync'd synchronously.
@@ -325,11 +261,12 @@ impl RedbAuditAppender {
         let (log_path, db_path) = Self::paths(dir);
         let log_file = Self::open_log(&log_path)?;
         let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
-        let checkpoint_db = Self::open_db(&db_path)?;
+        let (checkpoint_db, checkpoint_ks) = Self::open_db(&db_path)?;
         Ok(Arc::new(Self {
             log_file: Mutex::new(log_file),
             log_path,
             checkpoint_db,
+            checkpoint_ks,
             mode: Durab::Strict,
             rotation: max_size_bytes.map(|m| RotationPolicy {
                 max_size_bytes: m,
@@ -358,7 +295,7 @@ impl RedbAuditAppender {
         let (log_path, db_path) = Self::paths(dir);
         let log_file = Self::open_log(&log_path)?;
         let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
-        let checkpoint_db = Self::open_db(&db_path)?;
+        let (checkpoint_db, checkpoint_ks) = Self::open_db(&db_path)?;
 
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -366,6 +303,7 @@ impl RedbAuditAppender {
             log_file: Mutex::new(log_file),
             log_path,
             checkpoint_db,
+            checkpoint_ks,
             mode: Durab::Batched {
                 buffer: Mutex::new(Vec::new()),
                 notify: notify.clone(),
@@ -407,7 +345,7 @@ impl RedbAuditAppender {
 
     /// Read the persisted checkpoint, if any.
     ///
-    /// Returns `Ok(None)` for fresh deployments (table empty).
+    /// Returns `Ok(None)` for fresh deployments (keyspace empty).
     pub fn load_checkpoint(
         data_dir: impl AsRef<Path>,
     ) -> Result<Option<(u64, [u8; 32])>, AppenderError> {
@@ -415,19 +353,15 @@ impl RedbAuditAppender {
         if !db_path.exists() {
             return Ok(None);
         }
-        let db = Database::open(&db_path)?;
-        let txn = db.begin_read()?;
-        let table = match txn.open_table(CHECKPOINT_TABLE) {
-            Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let key: &[u8; 1] = &[0u8];
-        let entry = table.get(key)?;
-        let Some(v) = entry else {
+        let db = Database::builder(&db_path).open()?;
+        let ks = db.keyspace(CHECKPOINT_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let Some(value) = ks.get(CHECKPOINT_KEY)? else {
             return Ok(None);
         };
-        let bytes = v.value();
+        let bytes: &[u8] = value.as_ref();
+        if bytes.len() != 40 {
+            return Ok(None);
+        }
         let mut seq = [0u8; 8];
         let mut hmac = [0u8; 32];
         seq.copy_from_slice(&bytes[..8]);
@@ -442,11 +376,6 @@ impl RedbAuditAppender {
     ) -> Result<Vec<AuditEntry>, AppenderError> {
         let (log_path, _db_path) = Self::paths(data_dir.as_ref());
         let dir = data_dir.as_ref();
-        // Collect rotated files (`audit.log.<timestamp>`) AND the active
-        // `audit.log` in chronological order (oldest → newest). Since the
-        // rotated suffix is a zero-padded `unix_nanos` (20 digits), a
-        // lexicographic sort matches chronological order. The active
-        // file is read LAST because its entries are the most recent.
         let active_name = log_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -516,7 +445,6 @@ impl RedbAuditAppender {
             if let Some(h) = handle {
                 let _ = h.await;
             }
-            // Final defensive flush in case the task missed the buffer.
             let _ = self.flush_buffer();
         }
     }
@@ -540,8 +468,6 @@ impl RedbAuditAppender {
         }
         f.flush()?;
         f.sync_all()?;
-        // Rotation check — done while holding the file lock so two flushes
-        // can't race past the threshold simultaneously.
         if let Some(rot) = &self.rotation {
             let new_size = rot
                 .current_size
@@ -584,11 +510,8 @@ impl RedbAuditAppender {
     /// hold the `log_file` mutex (the `&mut File` parameter is the lock
     /// guard's deref).
     fn rotate_locked(&self, current: &mut File) -> Result<(), AppenderError> {
-        // Final sync before renaming so no buffered bytes are lost.
         current.flush()?;
         current.sync_all()?;
-        // Build rotated name with a wall-clock timestamp so files sort
-        // chronologically when listed.
         let ts_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -600,7 +523,6 @@ impl RedbAuditAppender {
             .unwrap_or_else(|| "audit_log.log".to_string());
         rotated.set_file_name(format!("{stem}.{ts_ns:020}"));
         std::fs::rename(&self.log_path, &rotated)?;
-        // Open a new empty file in place.
         *current = Self::open_log(&self.log_path)?;
         if let Some(rot) = &self.rotation {
             rot.current_size
@@ -610,29 +532,24 @@ impl RedbAuditAppender {
         Ok(())
     }
 
-    /// Persist `(next_seq, prev_hmac)` to the checkpoint table.
+    /// Persist `(next_seq, prev_hmac)` to the checkpoint keyspace.
     fn write_checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), AppenderError> {
         let mut packed = [0u8; 40];
         packed[..8].copy_from_slice(&next_seq.to_be_bytes());
         packed[8..].copy_from_slice(prev_hmac);
-        let mut txn = self.checkpoint_db.begin_write()?;
-        txn.set_durability(Durability::Immediate).ok();
-        {
-            let mut table = txn.open_table(CHECKPOINT_TABLE)?;
-            let key: &[u8; 1] = &[0u8];
-            table.insert(key, &packed)?;
-        }
-        txn.commit()?;
+        self.checkpoint_ks.insert(CHECKPOINT_KEY, &packed[..])?;
+        // Spec IMPL §3.3 / §6.2: fsync before the checkpoint is observable.
+        self.checkpoint_db.persist(PersistMode::SyncAll)?;
         Ok(())
     }
 }
 
 // `AuditAppender` is defined in `shamir-connect` and `Arc` is from `std`,
-// so the orphan rule forbids `impl AuditAppender for Arc<RedbAuditAppender>`.
-// Instead we implement on `RedbAuditAppender` directly — when callers wrap
+// so the orphan rule forbids `impl AuditAppender for Arc<FjallAuditAppender>`.
+// Instead we implement on `FjallAuditAppender` directly — when callers wrap
 // the inner type in `Arc<dyn AuditAppender>` (as `AuditChainWriter::new`
 // requires) the `Arc::new` -> `Arc<dyn Trait>` coercion uses this impl.
-impl AuditAppender for RedbAuditAppender {
+impl AuditAppender for FjallAuditAppender {
     fn append_entry(&self, entry: &AuditEntry) {
         match &self.mode {
             Durab::Strict => {
@@ -647,10 +564,6 @@ impl AuditAppender for RedbAuditAppender {
     }
 
     fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) {
-        // Per spec, ensure the log is durable BEFORE the checkpoint that
-        // claims to be at `next_seq` — otherwise a crash between log write
-        // and checkpoint commit could leave the checkpoint pointing past
-        // a non-fsynced suffix.
         if let Err(e) = self.flush_buffer() {
             tracing::error!(error = %e, "audit appender flush before checkpoint failed");
         }

@@ -16,7 +16,7 @@ pub mod handshake;
 pub mod lockout;
 pub mod rate_limit;
 
-#[cfg(feature = "durable-redb")]
+#[cfg(feature = "durable-fjall")]
 pub mod durable_counters;
 pub mod resume;
 pub mod rotation;

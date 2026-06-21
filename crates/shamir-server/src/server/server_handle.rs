@@ -8,7 +8,7 @@ use shamir_tunables::runtime::RuntimeTunables;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::audit_appender::RedbAuditAppender;
+use crate::audit_appender::FjallAuditAppender;
 use crate::scheduler::Scheduler;
 
 /// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
@@ -30,7 +30,7 @@ pub struct ServerHandle {
     /// Background task scheduler.
     pub(super) scheduler: Scheduler,
     /// Audit-log appender (drained on shutdown).
-    pub(super) audit_appender: Arc<RedbAuditAppender>,
+    pub(super) audit_appender: Arc<FjallAuditAppender>,
     /// Cancellation token signalling shutdown to every accept loop.
     ///
     /// Why CancellationToken, not `Notify::notify_waiters`: Notify is

@@ -13,12 +13,21 @@
 //!   see `server::launch`)
 //! - Install / boot timestamps
 //!
-//! Layout: ONE redb table `server_meta_v1` mapping `&str` (key name) →
+//! Layout: ONE fjall keyspace `server_meta_v1` mapping `&str` (key name) →
 //! `&[u8]` (msgpack-encoded value). Each setter performs an atomic write
-//! transaction with [`Durability::Immediate`] so the file is fsync'd before
-//! the call returns (spec IMPL §1.3 / §6.2 NORMATIVE).
+//! followed by `db.persist(PersistMode::SyncAll)` so the journal is fsync'd
+//! before the call returns (spec IMPL §1.3 / §6.2 NORMATIVE).
+//!
+//! ## Atomicity
+//!
+//! fjall has no nested ACID transactions. Read-modify-write setters
+//! (rotation, bootstrap consume, etc.) serialise through a single
+//! `parking_lot::Mutex` so two concurrent admin ops on the same key
+//! cannot lose an update. The mutex covers the entire RMW window plus
+//! the fsync — getters are lock-free.
 
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -34,10 +43,10 @@ use shamir_connect::server::rate_limit::RateLimitSnapshot;
 use shamir_connect::server::rotation::ServerIdentityState;
 
 // ---------------------------------------------------------------------------
-// Table layout + key constants
+// Keyspace + key constants
 // ---------------------------------------------------------------------------
 
-const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("server_meta_v1");
+const META_KEYSPACE: &str = "server_meta_v1";
 
 const KEY_SECRETS: &str = "secrets";
 const KEY_AUDIT_CHAIN: &str = "audit_chain";
@@ -48,15 +57,9 @@ const KEY_AUDIT_CHECKPOINT: &str = "audit_checkpoint";
 const KEY_TIMES: &str = "times";
 /// Periodic dump of `InMemoryLockoutStore` state (spec IMPL §1.3 — failed
 /// auth bookkeeping persisted across restarts so an attacker cannot reset
-/// brute-force lockout by inducing a restart). Snapshot interval and
-/// trade-offs are documented in `shamir_connect::server::lockout`.
+/// brute-force lockout by inducing a restart).
 const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
-/// Periodic dump of `InMemoryRateLimiter` token buckets (M2 follow-up).
-/// Persisted alongside the lockout snapshot by the same 60s background
-/// task so per-subnet rate-limit state survives restarts and an attacker
-/// cannot reset depleted buckets by inducing a restart. Rehydration is
-/// conservative (no free refill across downtime) — see
-/// `shamir_connect::server::rate_limit`.
+/// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 
 // ---------------------------------------------------------------------------
@@ -65,8 +68,6 @@ const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 
 /// Serde glue: (de)serialize secret byte buffers as `serde_bytes` blobs while
 /// holding them in `Zeroizing<Vec<u8>>` so the key material is wiped on drop.
-/// The on-disk encoding is byte-identical to the previous
-/// `#[serde(with = "serde_bytes")]`, so existing meta stores still load.
 mod serde_zeroizing_bytes {
     use serde::{Deserializer, Serializer};
     use zeroize::Zeroizing;
@@ -80,7 +81,6 @@ mod serde_zeroizing_bytes {
         Ok(Zeroizing::new(v))
     }
 
-    /// Same, for the `Option<…>` secret fields (previous-key slots).
     pub mod opt {
         use serde::{Deserializer, Serializer};
         use zeroize::Zeroizing;
@@ -89,7 +89,6 @@ mod serde_zeroizing_bytes {
             v: &Option<Zeroizing<Vec<u8>>>,
             s: S,
         ) -> Result<S::Ok, S::Error> {
-            // Mirror serde_bytes' Option framing: serialize_some(bytes) / none.
             match v {
                 Some(inner) => s.serialize_some(serde_bytes::Bytes::new(inner.as_slice())),
                 None => s.serialize_none(),
@@ -99,7 +98,6 @@ mod serde_zeroizing_bytes {
         pub fn deserialize<'de, D: Deserializer<'de>>(
             d: D,
         ) -> Result<Option<Zeroizing<Vec<u8>>>, D::Error> {
-            // serde_bytes handles the Option framing identically to before.
             let v: Option<Vec<u8>> = serde_bytes::deserialize(d)?;
             Ok(v.map(Zeroizing::new))
         }
@@ -109,35 +107,34 @@ mod serde_zeroizing_bytes {
 #[derive(Serialize, Deserialize)]
 struct PersistedSecrets {
     #[serde(with = "serde_zeroizing_bytes")]
-    server_secret: Zeroizing<Vec<u8>>, // 32
+    server_secret: Zeroizing<Vec<u8>>,
     #[serde(with = "serde_zeroizing_bytes::opt")]
-    server_secret_previous: Option<Zeroizing<Vec<u8>>>, // 32
+    server_secret_previous: Option<Zeroizing<Vec<u8>>>,
     server_secret_rotated_at_ns: u64,
     #[serde(with = "serde_zeroizing_bytes")]
-    lockout_secret: Zeroizing<Vec<u8>>, // 32 — NEVER rotated
+    lockout_secret: Zeroizing<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedAuditChain {
     #[serde(with = "serde_zeroizing_bytes")]
-    audit_chain_key: Zeroizing<Vec<u8>>, // 32
+    audit_chain_key: Zeroizing<Vec<u8>>,
     #[serde(with = "serde_zeroizing_bytes::opt")]
-    audit_chain_key_previous: Option<Zeroizing<Vec<u8>>>, // 32
+    audit_chain_key_previous: Option<Zeroizing<Vec<u8>>>,
     audit_chain_key_rotated_at_ns: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedTicket {
     #[serde(with = "serde_zeroizing_bytes")]
-    ticket_key: Zeroizing<Vec<u8>>, // 32
+    ticket_key: Zeroizing<Vec<u8>>,
     #[serde(with = "serde_zeroizing_bytes::opt")]
-    ticket_key_previous: Option<Zeroizing<Vec<u8>>>, // 32
+    ticket_key_previous: Option<Zeroizing<Vec<u8>>>,
     ticket_key_rotated_at_ns: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedIdentity {
-    /// 32-byte Ed25519 seed (NOT the priv-key — `from_seed` reconstructs it).
     #[serde(with = "serde_zeroizing_bytes")]
     current_seed: Zeroizing<Vec<u8>>,
     #[serde(with = "serde_zeroizing_bytes::opt")]
@@ -149,7 +146,7 @@ struct PersistedIdentity {
 #[derive(Serialize, Deserialize)]
 struct PersistedBootstrap {
     #[serde(with = "serde_zeroizing_bytes::opt")]
-    bootstrap_token_hash: Option<Zeroizing<Vec<u8>>>, // 32
+    bootstrap_token_hash: Option<Zeroizing<Vec<u8>>>,
     bootstrap_token_expires_at_ns: Option<u64>,
     superuser_ever_existed: bool,
 }
@@ -158,7 +155,7 @@ struct PersistedBootstrap {
 struct PersistedAuditCheckpoint {
     last_audit_seq: u64,
     #[serde(with = "serde_zeroizing_bytes")]
-    last_audit_hmac: Zeroizing<Vec<u8>>, // 32
+    last_audit_hmac: Zeroizing<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -174,28 +171,14 @@ struct PersistedTimes {
 /// Errors returned by [`ServerMetaStore`].
 #[derive(Debug, Error)]
 pub enum MetaError {
-    /// Generic redb error (covers `Database::create`, `Database::open`,
-    /// and rare internal paths through `From<DatabaseError>` /
-    /// `From<SetDurabilityError>`).
-    #[error("redb: {0}")]
-    Redb(#[from] redb::Error),
-    /// Failed to begin a transaction.
-    #[error("transaction: {0}")]
-    Transaction(#[from] redb::TransactionError),
-    /// Failed to open / mutate a table.
-    #[error("table: {0}")]
-    Table(#[from] redb::TableError),
-    /// Underlying storage error (read / insert / range / etc.).
-    #[error("storage: {0}")]
-    Storage(#[from] redb::StorageError),
-    /// Commit (fsync) failure.
-    #[error("commit: {0}")]
-    Commit(#[from] redb::CommitError),
+    /// fjall keyspace open / get / insert / persist failures.
+    #[error("fjall: {0}")]
+    Fjall(#[from] fjall::Error),
     /// MessagePack encode / decode failure or length mismatch on a fixed-size
     /// byte field.
     #[error("encoding: {0}")]
     Encoding(String),
-    /// Plain I/O failure (kept for symmetry with the other stores).
+    /// Plain I/O failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     /// A required key was absent — the store has not been initialised.
@@ -207,19 +190,22 @@ pub enum MetaError {
 // ServerMetaStore
 // ---------------------------------------------------------------------------
 
-/// Durable server-meta store backed by a single redb file.
+/// Durable server-meta store backed by a single fjall keyspace.
 ///
-/// All mutations use [`Durability::Immediate`] (fsync) per spec
-/// IMPLEMENTATION_GUIDE §1.3 / §6.2 NORMATIVE.
+/// All mutations fsync (`db.persist(PersistMode::SyncAll)`) before
+/// returning, per spec IMPLEMENTATION_GUIDE §1.3 / §6.2 NORMATIVE.
 pub struct ServerMetaStore {
     db: Arc<Database>,
+    meta: Keyspace,
+    /// Serialises read-modify-write setters (rotation, bootstrap consume, ...).
+    write_lock: Mutex<()>,
 }
 
 impl core::fmt::Debug for ServerMetaStore {
     /// Custom debug — redacts ALL key bytes (spec IMPL §4 NORMATIVE).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ServerMetaStore")
-            .field("db", &"<redb::Database>")
+            .field("db", &"<fjall::Database>")
             .field("server_secret", &"<REDACTED>")
             .field("lockout_secret", &"<REDACTED>")
             .field("audit_chain_key", &"<REDACTED>")
@@ -233,38 +219,17 @@ impl core::fmt::Debug for ServerMetaStore {
 
 impl ServerMetaStore {
     /// Open existing store at `path`, or create-and-init with FRESH random
-    /// material when the file does not yet exist (or has no data yet).
-    ///
-    /// Init flow generates `server_secret`, `lockout_secret`, `audit_chain_key`,
-    /// `ticket_key`, Ed25519 seed, sets `created_at_ns = now`,
-    /// `current_version = 0`. Everything is committed under a single write
-    /// transaction with [`Durability::Immediate`].
-    ///
-    /// `last_started_at_ns` is updated to "now" on every open.
+    /// material when the keyspace does not yet exist (or has no data yet).
     pub fn open_or_init(path: impl AsRef<Path>) -> Result<Self, MetaError> {
-        let db = Database::create(path).map_err(redb::Error::from)?;
-        let store = Self { db: Arc::new(db) };
-
-        // Decide whether init is needed. We probe for the secrets blob — if
-        // present we treat the file as already initialised. Otherwise we
-        // generate fresh material and persist it inside a single durable
-        // transaction.
-        let needs_init = {
-            // Make sure the table exists so the read txn doesn't fail with
-            // TableDoesNotExist on a brand-new file.
-            let mut wtxn = store.db.begin_write()?;
-            wtxn.set_durability(Durability::Immediate)
-                .map_err(redb::Error::from)?;
-            {
-                let _t = wtxn.open_table(META_TABLE)?;
-            }
-            wtxn.commit()?;
-
-            let rtxn = store.db.begin_read()?;
-            let table = rtxn.open_table(META_TABLE)?;
-            table.get(KEY_SECRETS)?.is_none()
+        let db = Database::builder(path.as_ref()).open()?;
+        let meta = db.keyspace(META_KEYSPACE, KeyspaceCreateOptions::default)?;
+        let store = Self {
+            db: Arc::new(db),
+            meta,
+            write_lock: Mutex::new(()),
         };
 
+        let needs_init = store.meta.get(KEY_SECRETS.as_bytes())?.is_none();
         if needs_init {
             store.write_initial_state()?;
         } else {
@@ -274,7 +239,7 @@ impl ServerMetaStore {
         Ok(store)
     }
 
-    /// One-shot durable init under a single transaction.
+    /// One-shot durable init.
     fn write_initial_state(&self) -> Result<(), MetaError> {
         let now = UnixNanos::now().as_u64();
 
@@ -321,70 +286,69 @@ impl ServerMetaStore {
             last_started_at_ns: now,
         };
 
-        self.with_write_txn(|table| {
-            put(table, KEY_SECRETS, &secrets)?;
-            put(table, KEY_AUDIT_CHAIN, &audit)?;
-            put(table, KEY_TICKET, &ticket)?;
-            put(table, KEY_IDENTITY, &identity)?;
-            put(table, KEY_BOOTSTRAP, &bootstrap)?;
-            put(table, KEY_TIMES, &times)?;
-            // Audit checkpoint stays absent until first store_audit_checkpoint.
-            Ok(())
-        })
+        let _guard = self.write_lock.lock();
+        self.put(KEY_SECRETS, &secrets)?;
+        self.put(KEY_AUDIT_CHAIN, &audit)?;
+        self.put(KEY_TICKET, &ticket)?;
+        self.put(KEY_IDENTITY, &identity)?;
+        self.put(KEY_BOOTSTRAP, &bootstrap)?;
+        self.put(KEY_TIMES, &times)?;
+        self.persist()
     }
 
     fn touch_last_started_at(&self) -> Result<(), MetaError> {
         let now = UnixNanos::now().as_u64();
-        self.with_write_txn(|table| {
-            let mut times: PersistedTimes = match get(table, KEY_TIMES)? {
-                Some(t) => t,
-                None => PersistedTimes {
-                    created_at_ns: now,
-                    last_started_at_ns: now,
-                },
-            };
-            times.last_started_at_ns = now;
-            put(table, KEY_TIMES, &times)?;
-            Ok(())
-        })
+        let _guard = self.write_lock.lock();
+        let mut times: PersistedTimes = match self.get(KEY_TIMES)? {
+            Some(t) => t,
+            None => PersistedTimes {
+                created_at_ns: now,
+                last_started_at_ns: now,
+            },
+        };
+        times.last_started_at_ns = now;
+        self.put(KEY_TIMES, &times)?;
+        self.persist()
     }
 
     // -----------------------------------------------------------------
-    // Internal write-txn helper
+    // Internal key/value helpers
     // -----------------------------------------------------------------
 
-    fn with_write_txn<F, T>(&self, f: F) -> Result<T, MetaError>
+    fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<(), MetaError> {
+        let bytes = rmp_serde::to_vec_named(value)
+            .map_err(|e| MetaError::Encoding(format!("rmp encode {key}: {e}")))?;
+        self.meta.insert(key.as_bytes(), bytes.as_slice())?;
+        Ok(())
+    }
+
+    fn get<T>(&self, key: &str) -> Result<Option<T>, MetaError>
     where
-        F: FnOnce(&mut redb::Table<'_, &str, &[u8]>) -> Result<T, MetaError>,
+        T: for<'de> Deserialize<'de>,
     {
-        let mut txn = self.db.begin_write()?;
-        txn.set_durability(Durability::Immediate)
-            .map_err(redb::Error::from)?;
-        let result = {
-            let mut table = txn.open_table(META_TABLE)?;
-            f(&mut table)?
+        let entry = match self.meta.get(key.as_bytes())? {
+            Some(e) => e,
+            None => return Ok(None),
         };
-        txn.commit()?;
-        Ok(result)
+        let v: T = rmp_serde::from_slice(&entry)
+            .map_err(|e| MetaError::Encoding(format!("rmp decode {key}: {e}")))?;
+        Ok(Some(v))
+    }
+
+    fn persist(&self) -> Result<(), MetaError> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
     }
 
     fn read_blob<T>(&self, key: &str) -> Result<Option<T>, MetaError>
     where
         T: for<'de> Deserialize<'de>,
     {
-        let txn = self.db.begin_read()?;
-        let table = txn.open_table(META_TABLE)?;
-        let entry = match table.get(key)? {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-        let v: T = rmp_serde::from_slice(entry.value())
-            .map_err(|e| MetaError::Encoding(format!("rmp decode {key}: {e}")))?;
-        Ok(Some(v))
+        self.get(key)
     }
 
     // -----------------------------------------------------------------
-    // Getters (lock-free reads — each opens a fresh redb read txn)
+    // Getters (lock-free reads)
     // -----------------------------------------------------------------
 
     /// Return the current `(server_secret, lockout_secret)` as a clonable
@@ -417,11 +381,7 @@ impl ServerMetaStore {
         Ok((current, previous))
     }
 
-    /// Current Ed25519 identity seed (32 bytes). Useful for callers that
-    /// need a raw [`Ed25519Keypair`] alongside the [`ServerIdentityState`]
-    /// — e.g. `connection.rs` holds a separate keypair handle so it can
-    /// pass `&Ed25519Keypair` into `verify_proof` (the rotation state
-    /// doesn't expose the keypair directly).
+    /// Current Ed25519 identity seed (32 bytes).
     pub fn current_identity_seed(&self) -> Result<[u8; 32], MetaError> {
         let p: PersistedIdentity = self
             .read_blob(KEY_IDENTITY)?
@@ -506,56 +466,53 @@ impl ServerMetaStore {
     }
 
     // -----------------------------------------------------------------
-    // Setters (each is one durable write transaction)
+    // Setters (each acquires `write_lock`, does RMW or pure write, fsyncs)
     // -----------------------------------------------------------------
 
     /// Move `current → previous`, install `new_key` as current, set
     /// `rotated_at_ns = now_ns`.
     pub fn rotate_ticket_key(&self, new_key: [u8; 32], now_ns: u64) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedTicket =
-                get(table, KEY_TICKET)?.ok_or_else(|| missing(KEY_TICKET))?;
-            let next = PersistedTicket {
-                ticket_key: Zeroizing::new(new_key.to_vec()),
-                ticket_key_previous: Some(prior.ticket_key),
-                ticket_key_rotated_at_ns: now_ns,
-            };
-            put(table, KEY_TICKET, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedTicket = self.get(KEY_TICKET)?.ok_or_else(|| missing(KEY_TICKET))?;
+        let next = PersistedTicket {
+            ticket_key: Zeroizing::new(new_key.to_vec()),
+            ticket_key_previous: Some(prior.ticket_key),
+            ticket_key_rotated_at_ns: now_ns,
+        };
+        self.put(KEY_TICKET, &next)?;
+        self.persist()
     }
 
     /// Rotate the audit-chain HMAC key (current → previous, install new).
     pub fn rotate_audit_chain_key(&self, new_key: [u8; 32], now_ns: u64) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedAuditChain =
-                get(table, KEY_AUDIT_CHAIN)?.ok_or_else(|| missing(KEY_AUDIT_CHAIN))?;
-            let next = PersistedAuditChain {
-                audit_chain_key: Zeroizing::new(new_key.to_vec()),
-                audit_chain_key_previous: Some(prior.audit_chain_key),
-                audit_chain_key_rotated_at_ns: now_ns,
-            };
-            put(table, KEY_AUDIT_CHAIN, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedAuditChain = self
+            .get(KEY_AUDIT_CHAIN)?
+            .ok_or_else(|| missing(KEY_AUDIT_CHAIN))?;
+        let next = PersistedAuditChain {
+            audit_chain_key: Zeroizing::new(new_key.to_vec()),
+            audit_chain_key_previous: Some(prior.audit_chain_key),
+            audit_chain_key_rotated_at_ns: now_ns,
+        };
+        self.put(KEY_AUDIT_CHAIN, &next)?;
+        self.persist()
     }
 
-    /// Rotate the anti-enumeration `server_secret` (current → previous,
-    /// install new). `lockout_secret` is NEVER rotated.
+    /// Rotate the anti-enumeration `server_secret`. `lockout_secret` is NEVER rotated.
     pub fn rotate_server_secret(&self, new_secret: [u8; 32], now_ns: u64) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedSecrets =
-                get(table, KEY_SECRETS)?.ok_or_else(|| missing(KEY_SECRETS))?;
-            let next = PersistedSecrets {
-                server_secret: Zeroizing::new(new_secret.to_vec()),
-                server_secret_previous: Some(prior.server_secret),
-                server_secret_rotated_at_ns: now_ns,
-                lockout_secret: prior.lockout_secret,
-            };
-            put(table, KEY_SECRETS, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedSecrets = self.get(KEY_SECRETS)?.ok_or_else(|| missing(KEY_SECRETS))?;
+        let next = PersistedSecrets {
+            server_secret: Zeroizing::new(new_secret.to_vec()),
+            server_secret_previous: Some(prior.server_secret),
+            server_secret_rotated_at_ns: now_ns,
+            lockout_secret: prior.lockout_secret,
+        };
+        self.put(KEY_SECRETS, &next)?;
+        self.persist()
     }
 
-    /// Persist identity post-`rotate()` — atomically stores the new current
-    /// seed plus the previous seed and the overlap deadline.
+    /// Persist identity post-`rotate()`.
     pub fn store_identity_after_rotate(
         &self,
         current_seed: [u8; 32],
@@ -563,157 +520,117 @@ impl ServerMetaStore {
         rotation_until_ns: u64,
         new_version: u64,
     ) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let next = PersistedIdentity {
-                current_seed: Zeroizing::new(current_seed.to_vec()),
-                previous_seed: Some(Zeroizing::new(previous_seed.to_vec())),
-                rotation_until_ns: Some(rotation_until_ns),
-                current_version: new_version,
-            };
-            put(table, KEY_IDENTITY, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let next = PersistedIdentity {
+            current_seed: Zeroizing::new(current_seed.to_vec()),
+            previous_seed: Some(Zeroizing::new(previous_seed.to_vec())),
+            rotation_until_ns: Some(rotation_until_ns),
+            current_version: new_version,
+        };
+        self.put(KEY_IDENTITY, &next)?;
+        self.persist()
     }
 
-    /// Background-task callback after the 7-day overlap completes. Clears
-    /// `previous_seed` and `rotation_until_ns`, leaves `current_seed` and
-    /// `current_version` untouched.
+    /// Background-task callback after the 7-day overlap completes.
     pub fn finalize_identity_rotation(&self) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedIdentity =
-                get(table, KEY_IDENTITY)?.ok_or_else(|| missing(KEY_IDENTITY))?;
-            let next = PersistedIdentity {
-                current_seed: prior.current_seed,
-                previous_seed: None,
-                rotation_until_ns: None,
-                current_version: prior.current_version,
-            };
-            put(table, KEY_IDENTITY, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedIdentity = self
+            .get(KEY_IDENTITY)?
+            .ok_or_else(|| missing(KEY_IDENTITY))?;
+        let next = PersistedIdentity {
+            current_seed: prior.current_seed,
+            previous_seed: None,
+            rotation_until_ns: None,
+            current_version: prior.current_version,
+        };
+        self.put(KEY_IDENTITY, &next)?;
+        self.persist()
     }
 
-    /// Install a fresh bootstrap-token hash + expiry. Caller validates that
-    /// `superuser_ever_existed` is `false` BEFORE invoking (this layer
-    /// performs only the write).
+    /// Install a fresh bootstrap-token hash + expiry.
     pub fn set_bootstrap_token(&self, hash: [u8; 32], expires_at_ns: u64) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedBootstrap =
-                get(table, KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
-                    bootstrap_token_hash: None,
-                    bootstrap_token_expires_at_ns: None,
-                    superuser_ever_existed: false,
-                });
-            let next = PersistedBootstrap {
-                bootstrap_token_hash: Some(Zeroizing::new(hash.to_vec())),
-                bootstrap_token_expires_at_ns: Some(expires_at_ns),
-                superuser_ever_existed: prior.superuser_ever_existed,
-            };
-            put(table, KEY_BOOTSTRAP, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedBootstrap = self.get(KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
+            bootstrap_token_hash: None,
+            bootstrap_token_expires_at_ns: None,
+            superuser_ever_existed: false,
+        });
+        let next = PersistedBootstrap {
+            bootstrap_token_hash: Some(Zeroizing::new(hash.to_vec())),
+            bootstrap_token_expires_at_ns: Some(expires_at_ns),
+            superuser_ever_existed: prior.superuser_ever_existed,
+        };
+        self.put(KEY_BOOTSTRAP, &next)?;
+        self.persist()
     }
 
     /// Atomically clear `bootstrap_token_hash` and set
-    /// `superuser_ever_existed = true`. Idempotent — calling on an already
-    /// consumed state is a no-op (no error).
+    /// `superuser_ever_existed = true`. Idempotent.
     pub fn consume_bootstrap_token(&self) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let prior: PersistedBootstrap =
-                get(table, KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
-                    bootstrap_token_hash: None,
-                    bootstrap_token_expires_at_ns: None,
-                    superuser_ever_existed: false,
-                });
-            let next = PersistedBootstrap {
-                bootstrap_token_hash: None,
-                bootstrap_token_expires_at_ns: None,
-                superuser_ever_existed: true,
-            };
-            // Avoid a useless write if state already terminal.
-            if prior.bootstrap_token_hash.is_none()
-                && prior.bootstrap_token_expires_at_ns.is_none()
-                && prior.superuser_ever_existed
-            {
-                return Ok(());
-            }
-            put(table, KEY_BOOTSTRAP, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let prior: PersistedBootstrap = self.get(KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
+            bootstrap_token_hash: None,
+            bootstrap_token_expires_at_ns: None,
+            superuser_ever_existed: false,
+        });
+        if prior.bootstrap_token_hash.is_none()
+            && prior.bootstrap_token_expires_at_ns.is_none()
+            && prior.superuser_ever_existed
+        {
+            return Ok(());
+        }
+        let next = PersistedBootstrap {
+            bootstrap_token_hash: None,
+            bootstrap_token_expires_at_ns: None,
+            superuser_ever_existed: true,
+        };
+        self.put(KEY_BOOTSTRAP, &next)?;
+        self.persist()
     }
 
-    /// Persist a fresh audit-checkpoint snapshot. `next_seq` is the seq of
-    /// the LAST entry covered by `prev_hmac` (mirror of audit_appender state).
+    /// Persist a fresh audit-checkpoint snapshot.
     pub fn store_audit_checkpoint(
         &self,
         next_seq: u64,
         prev_hmac: [u8; 32],
     ) -> Result<(), MetaError> {
-        self.with_write_txn(|table| {
-            let next = PersistedAuditCheckpoint {
-                last_audit_seq: next_seq,
-                last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
-            };
-            put(table, KEY_AUDIT_CHECKPOINT, &next)
-        })
+        let _guard = self.write_lock.lock();
+        let next = PersistedAuditCheckpoint {
+            last_audit_seq: next_seq,
+            last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
+        };
+        self.put(KEY_AUDIT_CHECKPOINT, &next)?;
+        self.persist()
     }
 
-    /// Load the last persisted lockout snapshot, if any. Returns
-    /// `Ok(None)` on fresh installs — the caller (the in-memory store)
-    /// then starts empty.
+    /// Load the last persisted lockout snapshot, if any.
     pub fn lockout_snapshot(&self) -> Result<Option<LockoutSnapshot>, MetaError> {
         self.read_blob::<LockoutSnapshot>(KEY_LOCKOUT_SNAPSHOT)
     }
 
-    /// Persist a lockout snapshot. Called every ~60 s by the background
-    /// task spawned in `server::launch` so failed-auth bookkeeping
-    /// survives restarts (worst-case loss window equals the snapshot
-    /// interval; spec IMPL §1.3 allows ≤5 s — we trade that for one
-    /// write-per-minute instead of one-write-per-failed-auth).
+    /// Persist a lockout snapshot.
     pub fn store_lockout_snapshot(&self, snapshot: &LockoutSnapshot) -> Result<(), MetaError> {
-        self.with_write_txn(|table| put(table, KEY_LOCKOUT_SNAPSHOT, snapshot))
+        let _guard = self.write_lock.lock();
+        self.put(KEY_LOCKOUT_SNAPSHOT, snapshot)?;
+        self.persist()
     }
 
-    /// Load the last persisted rate-limit snapshot, if any. Returns
-    /// `Ok(None)` on fresh installs — the caller (the in-memory limiter)
-    /// then starts empty.
+    /// Load the last persisted rate-limit snapshot, if any.
     pub fn ratelimit_snapshot(&self) -> Result<Option<RateLimitSnapshot>, MetaError> {
         self.read_blob::<RateLimitSnapshot>(KEY_RATELIMIT_SNAPSHOT)
     }
 
-    /// Persist a rate-limit snapshot. Called every ~60 s by the same
-    /// background task that snapshots lockout (see `server::launch`) so
-    /// per-subnet bucket state survives restarts (worst-case loss window
-    /// equals the snapshot interval; the spec §8.6 warmup window covers any
-    /// drift during the recovery interval).
+    /// Persist a rate-limit snapshot.
     pub fn store_ratelimit_snapshot(&self, snapshot: &RateLimitSnapshot) -> Result<(), MetaError> {
-        self.with_write_txn(|table| put(table, KEY_RATELIMIT_SNAPSHOT, snapshot))
+        let _guard = self.write_lock.lock();
+        self.put(KEY_RATELIMIT_SNAPSHOT, snapshot)?;
+        self.persist()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn put<T: Serialize>(
-    table: &mut redb::Table<'_, &str, &[u8]>,
-    key: &str,
-    value: &T,
-) -> Result<(), MetaError> {
-    let bytes = rmp_serde::to_vec_named(value)
-        .map_err(|e| MetaError::Encoding(format!("rmp encode {key}: {e}")))?;
-    table.insert(key, bytes.as_slice())?;
-    Ok(())
-}
-
-fn get<T>(table: &redb::Table<'_, &str, &[u8]>, key: &str) -> Result<Option<T>, MetaError>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let entry = match table.get(key)? {
-        Some(e) => e,
-        None => return Ok(None),
-    };
-    let v: T = rmp_serde::from_slice(entry.value())
-        .map_err(|e| MetaError::Encoding(format!("rmp decode {key}: {e}")))?;
-    Ok(Some(v))
-}
 
 fn missing(key: &str) -> MetaError {
     MetaError::Encoding(format!("server_meta key missing: {key}"))

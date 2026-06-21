@@ -17,7 +17,7 @@ use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
 use shamir_connect::server::config::ServerSecrets;
 use shamir_connect::server::dispatch::RequestHandler;
-use shamir_connect::server::durable_counters::RedbConsumedCounters;
+use shamir_connect::server::durable_counters::FjallConsumedCounters;
 use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutSnapshotSink};
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::{InMemoryConsumedCounters, ResumeConfig};
@@ -41,7 +41,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use crate::audit_appender::RedbAuditAppender;
+use crate::audit_appender::FjallAuditAppender;
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
@@ -58,7 +58,7 @@ use crate::server::server_handle::ServerHandle;
 use crate::server_meta::ServerMetaStore;
 use crate::tables_registry::TablesRegistry;
 use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
@@ -129,16 +129,16 @@ impl ServerLauncher {
         };
 
         let meta = Arc::new(
-            ServerMetaStore::open_or_init(config.data_dir.join("server_meta.redb"))
+            ServerMetaStore::open_or_init(config.data_dir.join("server_meta"))
                 .map_err(|e| BootError::ServerMeta(e.to_string()))?,
         );
 
         let user_dir = Arc::new(
-            RedbUserDirectory::open(config.data_dir.join("users.redb"))
+            FjallUserDirectory::open(config.data_dir.join("users"))
                 .map_err(|e| BootError::UserDirectory(e.to_string()))?,
         );
         let counters = Arc::new(
-            RedbConsumedCounters::open(config.data_dir.join("counters.redb"))
+            FjallConsumedCounters::open(config.data_dir.join("counters"))
                 .map_err(|e| BootError::Counters(e.to_string()))?,
         );
 
@@ -147,7 +147,7 @@ impl ServerLauncher {
         } else {
             Some(config.audit.max_file_size_mb.saturating_mul(1024 * 1024))
         };
-        let audit_appender = RedbAuditAppender::open_batched_with_rotation(
+        let audit_appender = FjallAuditAppender::open_batched_with_rotation(
             &config.data_dir,
             std::time::Duration::from_secs(5),
             audit_max_bytes,
@@ -264,7 +264,7 @@ impl ServerLauncher {
         let meta_path = config.data_dir.join("shamir_db_meta.redb");
         let default_main_path = config.data_dir.join("shamir_db_default_main.redb");
         let shamir = Arc::new(
-            ShamirDb::init(SystemStoreConfig::Redb(meta_path))
+            ShamirDb::init(SystemStoreConfig::Fjall(meta_path))
                 .await
                 .map_err(|e| BootError::ShamirDbInit(e.to_string()))?,
         );
@@ -279,7 +279,7 @@ impl ServerLauncher {
             .get_db("default")
             .expect("default db must exist after create_db");
         if !default_db.has_repo("main") {
-            let factory = BoxRepoFactory::redb(&default_main_path);
+            let factory = BoxRepoFactory::fjall(&default_main_path);
             shamir
                 .add_repo("default", RepoConfig::new("main", factory))
                 .await
@@ -681,7 +681,7 @@ fn build_ctx(
     secrets: &Arc<ServerSecrets>,
     kdf: KdfParams,
     session_store: &Arc<SessionStore>,
-    user_dir: &Arc<RedbUserDirectory>,
+    user_dir: &Arc<FjallUserDirectory>,
     lockout: Arc<dyn shamir_connect::server::lockout::LockoutStore>,
     rate_limit: Arc<dyn shamir_connect::server::rate_limit::RateLimiter>,
     argon2_sem: &Arc<Argon2Semaphore>,

@@ -144,12 +144,12 @@ async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usi
 /// the store exactly once per run.
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
             Ok(shamir) => return shamir,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
-    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
 }
@@ -168,7 +168,7 @@ async fn table_catalogue_survives_restart() {
 
     // === Session 1: create repo + table, write a record ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("production").await;
@@ -230,7 +230,7 @@ async fn table_added_after_repo_survives_restart() {
     let repo_path = repo_dir.path().join("data.fjall");
 
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("production").await;
@@ -277,7 +277,7 @@ async fn dropped_table_does_not_resurrect_after_restart() {
     let repo_path = repo_dir.path().join("data.fjall");
 
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("production").await;

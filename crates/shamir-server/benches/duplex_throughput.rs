@@ -111,7 +111,7 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
 
     let temp = tempfile::TempDir::new().unwrap();
     let temp_path = temp.path().join("u.redb");
-    let user_dir = shamir_server::user_directory::RedbUserDirectory::open(&temp_path)
+    let user_dir = shamir_server::user_directory::FjallUserDirectory::open(&temp_path)
         .expect("open user dir for bench");
     // Leak the temp dir so the redb file outlives this function.
     Box::leak(Box::new(temp));

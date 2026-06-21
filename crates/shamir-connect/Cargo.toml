@@ -16,7 +16,7 @@ doctest = false
 default = ["client", "server"]
 client = []
 server = ["dashmap", "parking_lot", "fxhash", "arc-swap"]
-durable-redb = ["server", "redb"]
+durable-fjall = ["server", "fjall"]
 
 [dependencies]
 # Crypto primitives (per spec §18)
@@ -55,8 +55,8 @@ parking_lot = { version = "0.12", optional = true }
 # SipHash is overkill for hash-tables where DoS resistance is already
 # enforced upstream (rate limiter, auth).
 fxhash = { version = "0.2", optional = true }
-# Durable counter store (optional: durable-redb feature)
-redb = { version = "3.1", optional = true }
+# Durable counter store (optional: durable-fjall feature)
+fjall = { version = "3.0.1", optional = true }
 
 [dev-dependencies]
 hex = "0.4"

@@ -113,7 +113,7 @@ fn make_ctx_with_session(
     // User directory in a temp file (TempDir kept alive via Box::leak for test).
     let temp = tempfile::TempDir::new().unwrap();
     let temp_path = temp.path().join("u.redb");
-    let user_dir = shamir_server::user_directory::RedbUserDirectory::open(&temp_path)
+    let user_dir = shamir_server::user_directory::FjallUserDirectory::open(&temp_path)
         .expect("open user dir for test");
     // Leak the temp dir so the redb file lives until process exit (test only).
     Box::leak(Box::new(temp));

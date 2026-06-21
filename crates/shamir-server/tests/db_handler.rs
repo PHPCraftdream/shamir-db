@@ -36,7 +36,7 @@ use shamir_query_builder::Query;
 use shamir_server::db_handler::{
     AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler, TxLimitsCap,
 };
-use shamir_server::user_directory::RedbUserDirectory;
+use shamir_server::user_directory::FjallUserDirectory;
 use tempfile::TempDir;
 
 // --------------------------------------------------------------------------
@@ -668,7 +668,7 @@ async fn create_scram_user_denied_without_admin_glue() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_scram_user_denied_for_non_superuser() {
     let tmp = TempDir::new().unwrap();
-    let user_dir = Arc::new(RedbUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
@@ -704,7 +704,7 @@ async fn create_scram_user_denied_for_non_superuser() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_scram_user_success_then_duplicate() {
     let tmp = TempDir::new().unwrap();
-    let user_dir = Arc::new(RedbUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),

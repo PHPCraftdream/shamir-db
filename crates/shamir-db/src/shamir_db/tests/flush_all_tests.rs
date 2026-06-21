@@ -16,12 +16,12 @@ use crate::ShamirDb;
 /// the lock a few ms after the owning `ShamirDb` is dropped).
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
             Ok(shamir) => return shamir,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
-    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
 }
@@ -39,12 +39,12 @@ async fn buffered_commit_survives_graceful_flush_all() {
 
     // === Session 1: create durable repo + table, insert, flush_all, drop ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("appdb").await;
 
-        let config = RepoConfig::new("data", BoxRepoFactory::redb(&repo_path))
+        let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
             .add_table(TableConfig::new("items"));
         shamir.add_repo("appdb", config).await.unwrap();
 

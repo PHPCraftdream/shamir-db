@@ -10,7 +10,6 @@ pub mod fts_tokenizer_dsl_tests;
 pub mod has_any_index_tests;
 pub mod history_read_tests;
 pub mod index2_migration_tests;
-pub mod index2_persistence_redb_tests;
 pub mod index2_persistence_tests;
 pub mod index_scan_tests;
 pub mod insert_tx_tests;

@@ -1,4 +1,4 @@
-//! Integration tests for [`shamir_server::user_directory::RedbUserDirectory`].
+//! Integration tests for [`shamir_server::user_directory::FjallUserDirectory`].
 //!
 //! Covers the durability requirement (state survives restart), the
 //! atomicity / monotonicity rules from spec §12.6, and concurrent insert
@@ -15,7 +15,7 @@ use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
-use shamir_server::user_directory::RedbUserDirectory;
+use shamir_server::user_directory::FjallUserDirectory;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -39,10 +39,10 @@ fn fixture_record() -> UserRecord {
     }
 }
 
-fn fresh_dir() -> (TempDir, RedbUserDirectory) {
+fn fresh_dir() -> (TempDir, FjallUserDirectory) {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("users.redb");
-    let store = RedbUserDirectory::open(&path).expect("open redb user dir");
+    let store = FjallUserDirectory::open(&path).expect("open redb user dir");
     (dir, store)
 }
 
@@ -186,7 +186,7 @@ fn state_survives_restart() {
     let initial_roles = vec!["read_write".to_string()];
 
     {
-        let store = RedbUserDirectory::open(&path).unwrap();
+        let store = FjallUserDirectory::open(&path).unwrap();
         initial_uid = store.insert("alice".to_string(), original.clone()).unwrap();
         // Stamp roles + ts so the persisted blob covers all fields.
         store
@@ -197,7 +197,7 @@ fn state_survives_restart() {
 
     // Reopen & verify byte-identical record.
     {
-        let store = RedbUserDirectory::open(&path).unwrap();
+        let store = FjallUserDirectory::open(&path).unwrap();
         let loaded = store
             .lookup_by_name("alice")
             .expect("alice must persist across restart");
@@ -258,13 +258,13 @@ fn user_id_index_survives_restart() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("users.redb");
     let uid = {
-        let store = RedbUserDirectory::open(&path).unwrap();
+        let store = FjallUserDirectory::open(&path).unwrap();
         let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
         store.bump_tickets_invalid("alice", 7_777).unwrap();
         uid
     };
     {
-        let store = RedbUserDirectory::open(&path).unwrap();
+        let store = FjallUserDirectory::open(&path).unwrap();
         assert_eq!(
             store.tickets_invalid_before_ns_by_user_id(&uid),
             7_777,

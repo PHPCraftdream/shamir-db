@@ -19,12 +19,12 @@ use crate::ShamirDb;
 /// helper in `execute_tests`.
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
             Ok(shamir) => return shamir,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
-    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
 }
@@ -40,7 +40,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
 
     // === Session 1: create db + repo (no engine specified) + insert ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("appdb").await;
@@ -103,7 +103,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
 
     // === Session 1: create in_memory repo explicitly, insert ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("appdb").await;
@@ -153,13 +153,14 @@ async fn explicit_in_memory_repo_is_ephemeral() {
 }
 
 /// A durable wire-created repo "data" in db "appdb" must produce a directory at
-/// `<data_root>/appdb/data.fjall` on disk, mirroring the db→repo tree.
+/// `<data_root>/appdb/data` on disk (fjall is directory-based),
+/// mirroring the db→repo tree.
 #[tokio::test]
 async fn durable_repo_file_mirrors_db_repo_tree() {
     let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
+    let sys_path = dir.path().join("meta");
 
-    let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+    let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
         .await
         .unwrap();
     shamir.create_db("appdb").await;
@@ -170,10 +171,10 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
     let create = b.to_request_via_msgpack();
     shamir.execute("appdb", &create).await.unwrap();
 
-    let expected = dir.path().join("appdb").join("data.fjall");
+    let expected = dir.path().join("appdb").join("data");
     assert!(
         expected.exists(),
-        "durable repo file must exist at {}",
+        "durable repo directory must exist at {}",
         expected.display()
     );
 }

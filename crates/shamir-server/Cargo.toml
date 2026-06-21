@@ -17,7 +17,7 @@ name = "shamir-server"
 path = "src/main.rs"
 
 [dependencies]
-shamir-connect = { path = "../shamir-connect", features = ["server", "client", "durable-redb"] }
+shamir-connect = { path = "../shamir-connect", features = ["server", "client", "durable-fjall"] }
 shamir-tunables = { path = "../shamir-tunables" }
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 shamir-transport-ws = { path = "../shamir-transport-ws" }
@@ -50,7 +50,7 @@ tokio-util = "0.7"
 tokio-tungstenite = "0.24"
 
 # Durable storage
-redb = "3.1"
+fjall = "3.0.1"
 
 # Config (Ktav per user request)
 ktav = "0.3"

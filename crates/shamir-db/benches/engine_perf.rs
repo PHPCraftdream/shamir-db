@@ -255,26 +255,8 @@ async fn fresh_db_sled(path: &std::path::Path) -> Arc<ShamirDb> {
     fresh_db_with(BoxRepoFactory::sled(path.to_path_buf())).await
 }
 
-async fn fresh_db_redb(path: &std::path::Path) -> Arc<ShamirDb> {
-    // redb expects a single-file path; tempdir gives us a directory.
-    fresh_db_with(BoxRepoFactory::redb(path.join("db.redb"))).await
-}
-
-async fn fresh_db_persy(path: &std::path::Path) -> Arc<ShamirDb> {
-    // Same for persy.
-    fresh_db_with(BoxRepoFactory::persy(path.join("db.persy"))).await
-}
-
-async fn fresh_db_canopy(path: &std::path::Path) -> Arc<ShamirDb> {
-    fresh_db_with(BoxRepoFactory::canopy(path.to_path_buf())).await
-}
-
 async fn fresh_db_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
     fresh_db_with(BoxRepoFactory::fjall(path.to_path_buf())).await
-}
-
-async fn fresh_db_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
-    fresh_db_with(BoxRepoFactory::nebari(path.to_path_buf())).await
 }
 
 async fn fresh_db_with(factory: BoxRepoFactory) -> Arc<ShamirDb> {
@@ -306,46 +288,10 @@ async fn fresh_db_membuffer_sled(path: &std::path::Path) -> Arc<ShamirDb> {
     .await
 }
 
-async fn fresh_db_membuffer_redb(path: &std::path::Path) -> Arc<ShamirDb> {
-    use shamir_storage::storage_membuffer::MemBufferConfig;
-    fresh_db_with(BoxRepoFactory::membuffer(
-        BoxRepoFactory::redb(path.join("db.redb")),
-        MemBufferConfig::default(),
-    ))
-    .await
-}
-
-async fn fresh_db_membuffer_persy(path: &std::path::Path) -> Arc<ShamirDb> {
-    use shamir_storage::storage_membuffer::MemBufferConfig;
-    fresh_db_with(BoxRepoFactory::membuffer(
-        BoxRepoFactory::persy(path.join("db.persy")),
-        MemBufferConfig::default(),
-    ))
-    .await
-}
-
-async fn fresh_db_membuffer_canopy(path: &std::path::Path) -> Arc<ShamirDb> {
-    use shamir_storage::storage_membuffer::MemBufferConfig;
-    fresh_db_with(BoxRepoFactory::membuffer(
-        BoxRepoFactory::canopy(path.to_path_buf()),
-        MemBufferConfig::default(),
-    ))
-    .await
-}
-
 async fn fresh_db_membuffer_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
     use shamir_storage::storage_membuffer::MemBufferConfig;
     fresh_db_with(BoxRepoFactory::membuffer(
         BoxRepoFactory::fjall(path.to_path_buf()),
-        MemBufferConfig::default(),
-    ))
-    .await
-}
-
-async fn fresh_db_membuffer_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
-    use shamir_storage::storage_membuffer::MemBufferConfig;
-    fresh_db_with(BoxRepoFactory::membuffer(
-        BoxRepoFactory::nebari(path.to_path_buf()),
         MemBufferConfig::default(),
     ))
     .await
@@ -1294,53 +1240,19 @@ macro_rules! bench_bulk_insert_for_backend {
     };
 }
 
-bench_bulk_insert_for_backend!(bench_bulk_insert_redb, "bulk_insert_redb", fresh_db_redb);
-bench_bulk_insert_for_backend!(bench_bulk_insert_persy, "bulk_insert_persy", fresh_db_persy);
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_canopy,
-    "bulk_insert_canopy",
-    fresh_db_canopy
-);
 bench_bulk_insert_for_backend!(bench_bulk_insert_fjall, "bulk_insert_fjall", fresh_db_fjall);
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_nebari,
-    "bulk_insert_nebari",
-    fresh_db_nebari
-);
 
 // MemBuffer-wrapped variants. Same backends, same numbers as raw
-// for the passthrough proxy phase. Once the LRU + flusher ship,
-// expect: persy/nebari/canopy biggest win; sled/redb/fjall
-// near-noise.
+// for the passthrough proxy phase.
 bench_bulk_insert_for_backend!(
     bench_bulk_insert_membuffer_sled,
     "bulk_insert_membuffer_sled",
     fresh_db_membuffer_sled
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_redb,
-    "bulk_insert_membuffer_redb",
-    fresh_db_membuffer_redb
-);
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_persy,
-    "bulk_insert_membuffer_persy",
-    fresh_db_membuffer_persy
-);
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_canopy,
-    "bulk_insert_membuffer_canopy",
-    fresh_db_membuffer_canopy
-);
-bench_bulk_insert_for_backend!(
     bench_bulk_insert_membuffer_fjall,
     "bulk_insert_membuffer_fjall",
     fresh_db_membuffer_fjall
-);
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_nebari,
-    "bulk_insert_membuffer_nebari",
-    fresh_db_membuffer_nebari
 );
 
 // Membuffer-only bench using the macro shape: in-memory backend
@@ -2196,18 +2108,10 @@ criterion_group! {
     bench_range_query_no_index,
     bench_range_query_with_index,
     bench_bulk_insert_sled,
-    bench_bulk_insert_redb,
-    bench_bulk_insert_persy,
-    bench_bulk_insert_canopy,
     bench_bulk_insert_fjall,
-    bench_bulk_insert_nebari,
     bench_bulk_insert_membuffer_in_memory,
     bench_bulk_insert_membuffer_sled,
-    bench_bulk_insert_membuffer_redb,
-    bench_bulk_insert_membuffer_persy,
-    bench_bulk_insert_membuffer_canopy,
     bench_bulk_insert_membuffer_fjall,
-    bench_bulk_insert_membuffer_nebari,
     bench_bulk_insert_with_index_sled,
     bench_range_query_no_index_sled,
     bench_range_query_with_index_sled,

@@ -10,7 +10,7 @@ use shamir_db::query::batch::{BatchOp, BatchRequest};
 use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 
 use super::handler::DbResponse;
 
@@ -21,7 +21,7 @@ use super::handler::DbResponse;
 #[derive(Clone)]
 pub struct AdminGlue {
     /// Directory that stores SCRAM-authenticatable users.
-    pub user_dir: Arc<RedbUserDirectory>,
+    pub user_dir: Arc<FjallUserDirectory>,
     /// KDF defaults applied to newly created users so they can log in
     /// against the same listener policy.
     pub kdf: KdfParams,

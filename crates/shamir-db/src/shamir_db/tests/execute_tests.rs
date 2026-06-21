@@ -401,12 +401,12 @@ async fn test_create_user_hashes_password_at_rest() {
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     use crate::shamir_db::SystemStoreConfig;
     for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
             Ok(shamir) => return shamir,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
-    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
 }
@@ -432,7 +432,7 @@ async fn create_repo_via_execute_persists_to_catalogue() {
 
     // === Session 1: create a repo via the wire/execute CreateRepo op ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("production").await;
@@ -495,7 +495,7 @@ async fn drop_repo_via_execute_clears_catalogue() {
     let sys_path = sys_dir.path().join("system.redb");
 
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("production").await;

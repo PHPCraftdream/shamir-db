@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 use shamir_connect::server::admin::UserDirectory;
 
 fn fast_kdf() -> KdfParams {
@@ -23,7 +23,7 @@ fn fast_kdf() -> KdfParams {
 fn creates_then_idempotent() {
     let dir = TempDir::new().unwrap();
     let dir_path = dir.path();
-    let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
     let r1 = ensure_superuser(
         &user_dir,
@@ -59,7 +59,7 @@ fn creates_then_idempotent() {
 fn random_token_writes_file() {
     let dir = TempDir::new().unwrap();
     let dir_path = dir.path();
-    let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
     let r = ensure_superuser(
         &user_dir,
@@ -89,7 +89,7 @@ fn derived_keys_match_real_login_flow() {
     // we just check key derivation symmetry.
     let dir = TempDir::new().unwrap();
     let dir_path = dir.path();
-    let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
     let pw = b"correct horse battery staple";
     ensure_superuser(
