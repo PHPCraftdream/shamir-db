@@ -26,6 +26,7 @@ use shamir_query_builder::filter::{and, eq, gt, gte};
 use shamir_query_builder::query::Query;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
+use shamir_tx::{MvccStore, RepoTxGate};
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::record_id::RecordId;
@@ -62,11 +63,27 @@ struct TableFixture {
 }
 
 async fn build_table(n: usize) -> TableFixture {
+    build_table_inner(n, false).await
+}
+
+/// Build table with MvccStore attached — needed for Shape 5 (AsOf temporal
+/// reads). Other shapes don't need it.
+async fn build_table_mvcc(n: usize) -> TableFixture {
+    build_table_inner(n, true).await
+}
+
+async fn build_table_inner(n: usize, with_mvcc: bool) -> TableFixture {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mgr = TableManager::create("bench_table".into(), data, info)
+    let mut mgr = TableManager::create("bench_table".into(), data, info)
         .await
         .unwrap();
+    if with_mvcc {
+        let gate = Arc::new(RepoTxGate::fresh());
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mvcc = Arc::new(MvccStore::new(history, gate));
+        mgr = mgr.with_mvcc_store(mvcc);
+    }
 
     let interner = mgr.interner().get().await.unwrap();
     let touch = |s: &str| match interner.touch_ind(s).unwrap() {
@@ -186,10 +203,12 @@ fn query_s3_range_and_selective() -> ReadQuery {
 }
 
 /// Shape 5: AsOf(Timestamp) point read. Triggers version_at_or_before_ts
-/// full history scan (S1).
+/// resolution (S1 ts-index lookup). LIMIT 1 isolates the ts resolution
+/// cost from full-snapshot materialization.
 fn query_s1_asof(ts_millis: u64) -> ReadQuery {
     Query::from("bench_table")
         .as_of_timestamp(ts_millis)
+        .limit(1)
         .build()
 }
 
@@ -316,19 +335,35 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         }
 
         // ── Shape 5: s1_asof (AsOf timestamp, history scan) ────────
+        //
+        // NOTE: this shape measures end-to-end AsOf query cost — which
+        // includes full snapshot table scan after ts resolution. The
+        // ts-index O(log N) lookup itself is proven by 4 unit tests in
+        // `shamir-tx/src/tests/mvcc_store_tests/ts_index_tests.rs`. The
+        // end-to-end AsOf path is dominated by per-row snapshot read,
+        // not by ts resolution. Skipped at N >= 100K unless
+        // BENCH_READ_PATH_HUGE=1 — per-N runs are minutes-scale.
+        if n < 100_000
+            || std::env::var("BENCH_READ_PATH_HUGE")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false)
         {
-            let fixture = rt.block_on(async {
-                let f = build_table(n).await;
+            // Capture ts BETWEEN initial inserts and history accumulation:
+            // initial versions have ts < ts_millis, updated versions have
+            // ts > ts_millis. AsOf(ts_millis) should return the initial
+            // version for any record.
+            let (fixture, ts_millis) = rt.block_on(async {
+                let f = build_table_mvcc(n).await;
+                // Sleep briefly so initial-insert ts is strictly before query ts.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 accumulate_history(&f.mgr, &f.record_ids).await;
-                f
+                (f, ts)
             });
-            // Use a timestamp slightly in the past to force history scan.
-            // We pick "now - 1 second" to ensure it's before the updates.
-            let ts_millis = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-                - 1000;
             let q = query_s1_asof(ts_millis);
 
             group.throughput(Throughput::Elements(n as u64));

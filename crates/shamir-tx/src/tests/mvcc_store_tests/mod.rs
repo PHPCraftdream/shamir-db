@@ -16,6 +16,7 @@ pub mod point_read_alloc_tests;
 pub mod retention_tests;
 pub mod stream_tests;
 pub mod ts_atomicity_tests;
+pub mod ts_index_tests;
 pub mod vacuum_targeted_tests;
 pub mod version_tests;
 pub mod watermark_unify_tests;

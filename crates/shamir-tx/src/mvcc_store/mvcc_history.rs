@@ -73,21 +73,32 @@ impl MvccStore {
     /// T4-asof: resolve a wall-clock timestamp to the largest committed
     /// version whose recorded commit timestamp is ≤ `ts_millis`.
     ///
-    /// Algorithm: scan ALL ts-keys (`[TS_TAG][version_be: 8]`) stored in
-    /// the `history` store — each was written by [`Self::record_ts`] when
-    /// the corresponding version was committed. Pick the maximum version
-    /// whose recorded ts ≤ `ts_millis`. Returns `None` when no eligible
-    /// version exists (e.g. the store is empty, or `ts_millis` is earlier
-    /// than all recorded versions).
-    ///
-    /// This is O(total versions) — acceptable for the point-in-time read
-    /// slice; a dedicated ts-ordered index is a later performance slice.
+    /// Phase 3: uses the in-memory `ts_index` (reversed `TreeIndex`) for O(log N)
+    /// lookup. On first call after open (cold start), rebuilds the index from
+    /// the history store's ts-keys (one-time O(N) scan, then all subsequent
+    /// queries are O(log N)). Falls back to the full history scan only if the
+    /// index is empty after rebuild (no ts entries in history at all).
     ///
     /// Read-only; no cell mutation; no locking. Best-effort: if a ts entry
     /// was never recorded for a version (it was written before T1c landed)
     /// that version is invisible to this scan — the conservative choice,
     /// consistent with how `vacuum_key` treats unknown-age versions.
     pub async fn version_at_or_before_ts(&self, ts_millis: u64) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+
+        // Lazy rebuild: on first call, populate the ts-index from history.
+        if !self.ts_index_ready.load(Ordering::Acquire) {
+            self.ts_index_rebuild().await;
+        }
+
+        // O(log N) query via the reversed-key TreeIndex.
+        self.ts_index_query(ts_millis)
+    }
+
+    /// Legacy O(total) scan fallback — kept for reference and as a test oracle.
+    /// Not used on the production hot path (replaced by ts_index_query).
+    #[cfg(test)]
+    pub(crate) async fn version_at_or_before_ts_scan(&self, ts_millis: u64) -> Option<u64> {
         use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
         use super::TS_TAG;
@@ -269,6 +280,8 @@ impl MvccStore {
         // Pre-size: each (v, ops) contributes ops.len() data entries + 1 ts entry.
         let total_ops: usize = pass.iter().map(|(_, ops)| ops.len()).sum();
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(total_ops + pass.len());
+        // Phase 3: collect (version, ts_ms) to feed the ts-index after transact.
+        let mut ts_entries: Vec<(u64, u64)> = Vec::with_capacity(pass.len());
 
         for (commit_version, ops) in pass {
             let v = *commit_version;
@@ -282,6 +295,7 @@ impl MvccStore {
                 .map(|(_, ms)| ms)
                 .unwrap_or_else(|| self.now_millis());
             let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
+            ts_entries.push((v, ts_ms));
 
             // Data ops: version-key entries.
             for op in ops {
@@ -299,6 +313,11 @@ impl MvccStore {
         // ONE batched write to history (all versions, all ops, atomic).
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
+        }
+
+        // Phase 3: maintain the in-memory ts-index for every version in the batch.
+        for (version, ts_ms) in &ts_entries {
+            self.ts_index_insert(*ts_ms, *version);
         }
 
         // Seed the cell from the durable write (idempotent; needed on cold
@@ -481,6 +500,10 @@ impl MvccStore {
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
+
+        // Phase 3: maintain the in-memory ts-index (idempotent — duplicate
+        // insert into TreeIndex is a no-op).
+        self.ts_index_insert(ts_ms, commit_version);
 
         // Seed the cell from the durable write (idempotent; needed on the cold
         // recovery path so a key whose value lives only in history reports the

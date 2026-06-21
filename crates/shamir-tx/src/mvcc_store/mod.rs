@@ -25,6 +25,7 @@ pub use key_lock::{KeyLock, LockMode};
 pub use retention::Retention;
 pub use version_entry::VersionEntry;
 
+use std::cmp::Reverse;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use bytes::{BufMut, Bytes, BytesMut};
 use scc::HashMap as SccHashMap;
+use scc::TreeIndex;
 use shamir_collections::THasher;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
@@ -152,6 +154,14 @@ pub struct MvccStore {
     /// `false` (no accumulated old versions from a snapshot epoch). Cleared
     /// after a full scan-path vacuum runs with `active_snapshots_empty()`.
     vacuum_needs_scan: AtomicBool,
+    /// Phase 3: in-memory ts-ordered index for O(log N) `version_at_or_before_ts`.
+    /// Key: `(Reverse(ts_millis), Reverse(version))` — reversed so that a forward
+    /// `range((Reverse(target_ts), Reverse(u64::MAX)).., &guard).next()` yields the
+    /// entry with the LARGEST ts ≤ target_ts in O(log N). Value is unit (the version
+    /// is embedded in the key). Rebuilt from `history` ts-keys on first query if empty.
+    ts_index: TreeIndex<(Reverse<u64>, Reverse<u64>), ()>,
+    /// Whether the ts_index has been populated from history (lazy rebuild on first query).
+    ts_index_ready: AtomicBool,
 }
 
 impl MvccStore {
@@ -171,6 +181,8 @@ impl MvccStore {
             overlay: VersionedOverlay::new(),
             pending_ts: SccHashMap::with_hasher(THasher::default()),
             vacuum_needs_scan: AtomicBool::new(false),
+            ts_index: TreeIndex::new(),
+            ts_index_ready: AtomicBool::new(false),
         }
     }
 
@@ -243,6 +255,64 @@ impl MvccStore {
     /// versions it stamps fall at or below the durable watermark. Lock-free.
     pub fn pending_ts_len(&self) -> usize {
         self.pending_ts.len()
+    }
+
+    /// Phase 3: insert a (ts_millis, version) entry into the in-memory ts-index.
+    /// Lock-free (TreeIndex::insert is a CAS-based B+ tree operation).
+    pub(super) fn ts_index_insert(&self, ts_millis: u64, version: u64) {
+        let _ = self
+            .ts_index
+            .insert((Reverse(ts_millis), Reverse(version)), ());
+    }
+
+    /// Phase 3: query the ts-index for the largest version whose commit ts ≤ target.
+    /// Returns `None` if the index is empty or no entry satisfies the bound.
+    /// O(log N) via reversed-key forward range + `.next()`.
+    pub(super) fn ts_index_query(&self, target_ts: u64) -> Option<u64> {
+        let guard = scc::ebr::Guard::new();
+        // Reversed keys: (Reverse(ts), Reverse(version)) sorted ascending means
+        // largest ts first. range((Reverse(target_ts), Reverse(u64::MAX))..) yields
+        // entries where Reverse(ts) >= Reverse(target_ts) i.e. ts <= target_ts,
+        // starting from the largest such ts. `.next()` is O(log N).
+        self.ts_index
+            .range((Reverse(target_ts), Reverse(u64::MAX)).., &guard)
+            .next()
+            .map(|(k, _)| k.1 .0) // k.1 is Reverse(version), .0 extracts the u64
+    }
+
+    /// Phase 3: rebuild the ts-index from the history store's ts-keys.
+    /// Called lazily on first `version_at_or_before_ts` if `ts_index_ready` is false.
+    async fn ts_index_rebuild(&self) {
+        use futures::StreamExt;
+        use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
+        futures::pin_mut!(stream);
+
+        while let Some(batch) = stream.next().await {
+            let batch = match batch {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            for (phys_key, val) in batch {
+                // ts-keys are exactly 9 bytes: [TS_TAG][version_be: 8].
+                if phys_key.len() != 9 || phys_key[0] != TS_TAG {
+                    continue;
+                }
+                if val.len() != 8 {
+                    continue;
+                }
+                let ts_bytes: [u8; 8] = match val.as_ref().try_into() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let recorded_ts = u64::from_le_bytes(ts_bytes);
+                let v_bytes: [u8; 8] = phys_key[1..9].try_into().expect("checked len==9");
+                let version = u64::from_be_bytes(v_bytes);
+                self.ts_index_insert(recorded_ts, version);
+            }
+        }
+        self.ts_index_ready.store(true, Ordering::Release);
     }
 
     /// T1c: current wall-clock millis. If `test_now_millis` is non-zero
@@ -537,6 +607,8 @@ impl MvccStore {
                 KvOp::Set(ts_key(new_v), ts_val),
             ])
             .await?;
+        // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
+        self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — populate the overlay with the SAME (key, version)
         // → value pair, AFTER the durable history write succeeds but BEFORE
         // `guard.commit()` advances the reader-visible floor. Ordering rationale:
@@ -633,6 +705,11 @@ impl MvccStore {
             self.history.transact(history_ops).await?;
         }
 
+        // Phase 3: maintain the in-memory ts-index for every version in the batch.
+        for &new_v in &new_versions {
+            self.ts_index_insert(ts_ms, new_v);
+        }
+
         // P1c: dual-write — populate the overlay with the SAME (key, version) →
         // value pairs, AFTER the batched `history.transact` succeeds and BEFORE
         // the `guard.commit()` loop advances the floor. Post-transact so a failed
@@ -726,6 +803,11 @@ impl MvccStore {
             self.history.transact(history_ops).await?;
         }
 
+        // Phase 3: maintain the in-memory ts-index for every version in the batch.
+        for &new_v in &new_versions {
+            self.ts_index_insert(ts_ms, new_v);
+        }
+
         // P1c: dual-write — populate the overlay.
         for ((key, value), &new_v) in items.iter().zip(new_versions.iter()) {
             self.overlay.insert(key.clone(), new_v, value.clone());
@@ -783,6 +865,8 @@ impl MvccStore {
                 KvOp::Set(ts_key(new_v), ts_val),
             ])
             .await?;
+        // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
+        self.ts_index_insert(ts_ms, new_v);
         // P1c: dual-write — overlay tombstone (empty `Bytes`, same convention
         // as history), AFTER the durable tombstone write succeeds and BEFORE
         // `guard.commit()` advances the floor. Same ordering rationale as
