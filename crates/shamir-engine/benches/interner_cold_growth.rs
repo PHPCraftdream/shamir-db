@@ -35,7 +35,7 @@ use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::codecs::basic::bincode;
-use shamir_types::core::interner::{Interner, InternerKey, UserKey};
+use shamir_types::core::interner::{Interner, InternerKey};
 
 /// Byte-counting Store wrapper — totals the bytes written through
 /// `set()` so we can prove the O(N²) → O(N) structural difference.
@@ -215,11 +215,48 @@ fn bench_bytes_written_structural(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("noop", n), |b| {
             b.iter(|| criterion::black_box(InternerKey::new(n as u64)));
         });
-        let _ = UserKey::from_str("x");
+        let _ = criterion::black_box("x");
     }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_cold_growth, bench_bytes_written_structural);
+/// Direct in-memory `touch_ind` cold-growth bench.
+///
+/// This bench measures the CAS-clone cost of growing the reverse spine
+/// from 0 to N distinct keys. Op B (Arc<str> slots) changes this from
+/// O(N²) byte copies to O(N) refcount bumps — each CAS-loop clone
+/// previously deep-copied every `String` slot.
+///
+/// Run alongside `interner_concurrent` to confirm read-path is unchanged.
+fn bench_touch_ind_cold_growth(c: &mut Criterion) {
+    let mut group = c.benchmark_group("interner_touch_ind_cold_growth");
+    bu::tune(&mut group, 20, 3, 1);
+
+    for &n in &[1_000usize, 5_000, 20_000] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("touch_ind", n), &n, |b, &n| {
+            b.iter_custom(|iters| {
+                let mut total = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let interner = Interner::new();
+                    let start = std::time::Instant::now();
+                    for i in 0..n {
+                        let _ = criterion::black_box(interner.touch_ind(format!("field_{i}")));
+                    }
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_cold_growth,
+    bench_bytes_written_structural,
+    bench_touch_ind_cold_growth
+);
 criterion_main!(benches);

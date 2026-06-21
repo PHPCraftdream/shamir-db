@@ -6,7 +6,7 @@
 use scc::HashMap as SccHashMap;
 use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::{Interner, InternerKey, UserKey};
+use shamir_types::core::interner::{Interner, InternerKey};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Starting value for overlay ids. Any id >= this value is treated as an
@@ -132,11 +132,11 @@ impl<'a> LayeredInterner<'a> {
         match self {
             Self::Direct(base) => base
                 .get_str(&InternerKey::new(id))
-                .map(|uk: UserKey| uk.as_str().to_string()),
+                .map(|arc| arc.to_string()),
             Self::Layered { base, overlay, .. } => {
                 if id < OVERLAY_ID_BASE {
                     base.get_str(&InternerKey::new(id))
-                        .map(|uk: UserKey| uk.as_str().to_string())
+                        .map(|arc| arc.to_string())
                 } else {
                     let mut found: Option<String> = None;
                     overlay.scan(|k: &String, v: &u64| {
