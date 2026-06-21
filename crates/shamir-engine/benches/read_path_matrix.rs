@@ -22,10 +22,8 @@ use shamir_bench_utils as bu;
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::ReadQuery;
 use shamir_engine::table::table_manager::TableManager;
-use shamir_query_builder::ddl;
 use shamir_query_builder::filter::{and, eq, gt, gte};
 use shamir_query_builder::query::Query;
-use shamir_query_types::batch::BatchOp;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::TouchInd;
@@ -103,16 +101,14 @@ async fn build_table(n: usize) -> TableFixture {
 }
 
 /// Create a sorted index on `field_name` for the given table.
-async fn create_sorted_index(mgr: &TableManager, name: &str, field: &str) {
-    let op = ddl::create_index(name, "bench_table")
-        .field(field)
-        .sorted()
-        .build();
-    let create_op = match op {
-        BatchOp::CreateIndex(o) => o,
-        other => panic!("expected BatchOp::CreateIndex, got {other:?}"),
-    };
-    mgr.create_index_v2(&create_op).await.unwrap();
+///
+/// Uses `TableManager::create_sorted_index` directly — `create_index_v2`
+/// routes `sorted: true` through the hash-index path (ignores the flag),
+/// so the sorted index was never actually created in Phase 0 benchmarks.
+async fn create_sorted_index(mgr: &TableManager, _name: &str, field: &str) {
+    mgr.create_sorted_index(&format!("{field}_sorted"), &[field])
+        .await
+        .unwrap();
 }
 
 /// Update ~10% of records to accumulate ts-history for AsOf queries.

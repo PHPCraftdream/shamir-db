@@ -168,6 +168,62 @@ impl Store for InMemoryStore {
         })
     }
 
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        // O(log N + K) via TreeIndex::range — seek to start, yield one
+        // batch at a time. Each batch grabs a fresh guard, collects up to
+        // `batch_size` entries starting from a resumption key, then drops
+        // the guard before yielding. This keeps memory proportional to
+        // batch_size and allows callers that stop early (lookup_first_k)
+        // to avoid scanning the entire range.
+        let data = Arc::clone(&self.data);
+        Box::pin(stream! {
+            let mut resume_key: Option<Bytes> = start_inclusive.clone();
+            let mut first_batch = true;
+            loop {
+                let batch: Vec<(RecordKey, Bytes)> = {
+                    let g = scc::ebr::Guard::new();
+                    let iter: Box<dyn Iterator<Item = (&RecordKey, &Bytes)> + '_> =
+                        match &resume_key {
+                            Some(lo) => Box::new(data.range(lo.clone().., &g)),
+                            None => Box::new(data.iter(&g)),
+                        };
+                    let mut collected = Vec::with_capacity(batch_size);
+                    let mut skip_first = !first_batch;
+                    for (k, v) in iter {
+                        // After the first batch, resume_key points to the last
+                        // key we already yielded — skip it to avoid duplicates.
+                        if skip_first {
+                            skip_first = false;
+                            continue;
+                        }
+                        if let Some(ref hi) = end_inclusive {
+                            if k.as_ref() > hi.as_ref() {
+                                break;
+                            }
+                        }
+                        collected.push((k.clone(), v.clone()));
+                        if collected.len() == batch_size {
+                            break;
+                        }
+                    }
+                    collected
+                };
+                if batch.is_empty() {
+                    break;
+                }
+                // Set resume key to last entry in this batch for next iteration.
+                resume_key = Some(batch.last().unwrap().0.clone());
+                first_batch = false;
+                yield Ok(batch);
+            }
+        })
+    }
+
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
