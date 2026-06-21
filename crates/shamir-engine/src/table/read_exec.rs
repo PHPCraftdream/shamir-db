@@ -550,6 +550,28 @@ impl TableManager {
             }
         }
 
+        // Range-from-AND extraction: try to pull a range predicate out
+        // of an AND filter and use the sorted index for the range scan,
+        // with remaining conjuncts as residual filter.
+        if let Some(ref filter) = query.r#where {
+            if let Some((idx_name, lo, hi, residual)) =
+                self.try_plan_and_range_index_scan(filter, interner)
+            {
+                return self
+                    .read_sorted_index_scan(
+                        query,
+                        ctx,
+                        interner,
+                        idx_name,
+                        lo.as_deref(),
+                        hi.as_deref(),
+                        residual.as_ref(),
+                        start,
+                    )
+                    .await;
+            }
+        }
+
         // Fall back to full scan
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
