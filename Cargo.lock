@@ -3810,6 +3810,7 @@ dependencies = [
  "scc",
  "serde",
  "serial_test",
+ "shamir-bench-utils",
  "shamir-collections",
  "shamir-tunables",
  "shamir-types",
