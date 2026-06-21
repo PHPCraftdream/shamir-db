@@ -463,7 +463,7 @@ impl TableManager {
         // Resolve index name for stats — needed by both paths below.
         let index_name_str = interner
             .get_str(&InternerKey::new(index_name))
-            .map(|k| k.as_str().to_string())
+            .map(|arc| arc.to_string())
             .unwrap_or_else(|| index_name.to_string());
 
         // S4: aggregate paths now use bytes + RecordView lens (same as the

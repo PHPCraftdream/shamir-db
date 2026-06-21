@@ -4,6 +4,11 @@ use shamir_collections::TFxSet;
 use std::sync::Arc;
 use std::thread;
 
+/// Helper: make an `Arc<str>` for comparison with `get_str` results.
+fn arc_str(s: &str) -> Arc<str> {
+    Arc::from(s)
+}
+
 #[test]
 fn test_basic_interning() {
     let interner = Interner::new();
@@ -22,11 +27,11 @@ fn test_basic_interning() {
 
     assert_eq!(
         interner.get_str(&InternerKey::new(1)),
-        Some(UserKey::from_str("hello"))
+        Some(arc_str("hello"))
     );
     assert_eq!(
         interner.get_str(&InternerKey::new(2)),
-        Some(UserKey::from_str("world"))
+        Some(arc_str("world"))
     );
     assert_eq!(interner.get_ind("world"), Some(InternerKey::new(2)));
 }
@@ -44,7 +49,7 @@ fn test_with_state_initialization() {
     assert_eq!(interner.get_ind("name"), Some(InternerKey::new(1)));
     assert_eq!(
         interner.get_str(&InternerKey::new(50)),
-        Some(UserKey::from_str("age"))
+        Some(arc_str("age"))
     );
     assert_eq!(interner.get_ind("city"), Some(InternerKey::new(100)));
 
@@ -293,7 +298,7 @@ fn test_concurrent_reverse_lookup() {
             for (id, expected_key) in id_lookup_clone {
                 let key = interner_clone.get_str(&id);
                 assert!(key.is_some(), "Failed to look up ID: {}", id.id());
-                assert_eq!(key, Some(UserKey::from_str(expected_key)));
+                assert_eq!(key.as_deref(), Some(expected_key.as_str()));
             }
         }));
     }
@@ -325,7 +330,7 @@ fn test_concurrent_touch_and_get() {
 
                 // Also verify reverse lookup
                 let reverse = interner_clone.get_str(touch_result.key());
-                assert_eq!(reverse, Some(UserKey::from_str(key.as_str())));
+                assert_eq!(reverse.as_deref(), Some(key.as_str()));
             }
         }));
     }
@@ -346,10 +351,7 @@ fn test_edge_cases_empty_and_unicode() {
     let id1 = interner.touch_ind("").unwrap();
     assert_eq!(id1.key().id(), 1);
     assert_eq!(interner.get_ind(""), Some(InternerKey::new(1)));
-    assert_eq!(
-        interner.get_str(&InternerKey::new(1)),
-        Some(UserKey::from_str(""))
-    );
+    assert_eq!(interner.get_str(&InternerKey::new(1)), Some(arc_str("")));
 
     // Unicode strings
     let unicode_keys = vec!["привет", "🚀🎉🔥", "مرحبا", "مرحبا2", "😀😃😄😁"];
@@ -364,7 +366,7 @@ fn test_edge_cases_empty_and_unicode() {
     assert_eq!(interner.get_ind("مرحبا"), Some(InternerKey::new(4)));
     assert_eq!(
         interner.get_str(&InternerKey::new(5)),
-        Some(UserKey::from_str("مرحبا2"))
+        Some(arc_str("مرحبا2"))
     );
     assert_eq!(interner.get_ind("😀😃😄😁"), Some(InternerKey::new(6)));
 }
@@ -380,7 +382,7 @@ fn test_edge_cases_very_long_keys() {
     assert_eq!(interner.get_ind(&long_key), Some(InternerKey::new(1)));
     assert_eq!(
         interner.get_str(&InternerKey::new(1)),
-        Some(UserKey::from_str(long_key.clone()))
+        Some(arc_str(&long_key))
     );
 }
 
@@ -421,7 +423,7 @@ fn test_concurrent_with_state() {
     assert_eq!(interner.get_ind("initial_99"), Some(InternerKey::new(100)));
     assert_eq!(
         interner.get_str(&InternerKey::new(1)),
-        Some(UserKey::from_str("initial_0"))
+        Some(arc_str("initial_0"))
     );
 }
 
@@ -853,7 +855,7 @@ fn touch_with_id_fresh_insert() {
     assert_eq!(interner.get_ind("email"), Some(InternerKey::new(5)));
     assert_eq!(
         interner.get_str(&InternerKey::new(5)),
-        Some(UserKey::from_str("email"))
+        Some(arc_str("email"))
     );
 }
 

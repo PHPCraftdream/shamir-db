@@ -121,7 +121,7 @@ async fn test_interner_incremental_persist_then_reload() {
     for (id, name) in &expected {
         let key = interner2.make_key(*id);
         let got = interner2.get_str(&key).expect("id must resolve to name");
-        assert_eq!(got.as_str(), name.as_str(), "id {} mismapped", id);
+        assert_eq!(&*got, name.as_str(), "id {} mismapped", id);
         // Reverse: name → id round-trips.
         let id2 = interner2.get_ind(name).expect("name must intern");
         assert_eq!(id2.id(), *id, "name {} mismapped", name);
@@ -153,18 +153,9 @@ async fn test_interner_legacy_blob_loads_under_new_code() {
     let manager = InternerManager::new(Arc::clone(&store));
     let interner = manager.get().await.unwrap();
     assert_eq!(interner.len(), 3);
-    assert_eq!(
-        interner.get_str(&InternerKey::new(1)).unwrap().as_str(),
-        "alpha"
-    );
-    assert_eq!(
-        interner.get_str(&InternerKey::new(2)).unwrap().as_str(),
-        "beta"
-    );
-    assert_eq!(
-        interner.get_str(&InternerKey::new(3)).unwrap().as_str(),
-        "gamma"
-    );
+    assert_eq!(&*interner.get_str(&InternerKey::new(1)).unwrap(), "alpha");
+    assert_eq!(&*interner.get_str(&InternerKey::new(2)).unwrap(), "beta");
+    assert_eq!(&*interner.get_str(&InternerKey::new(3)).unwrap(), "gamma");
 
     // Append a fresh entry — should land as a delta chunk, not as a
     // rewrite of the legacy blob.
@@ -178,10 +169,7 @@ async fn test_interner_legacy_blob_loads_under_new_code() {
     let interner2 = manager2.get().await.unwrap();
     assert_eq!(interner2.len(), 4);
     for (id, name) in [(1u64, "alpha"), (2, "beta"), (3, "gamma"), (4, "delta")] {
-        assert_eq!(
-            interner2.get_str(&InternerKey::new(id)).unwrap().as_str(),
-            name
-        );
+        assert_eq!(&*interner2.get_str(&InternerKey::new(id)).unwrap(), name);
     }
 }
 
@@ -225,6 +213,6 @@ async fn test_interner_concurrent_touch_and_persist() {
         let got = interner2
             .get_str(&key)
             .unwrap_or_else(|| panic!("id {} (name {}) not found after reload", id, name));
-        assert_eq!(got.as_str(), name.as_str());
+        assert_eq!(&*got, name.as_str());
     }
 }

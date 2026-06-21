@@ -7,8 +7,8 @@ use super::{InternerKey, TouchInd, UserKey};
 
 /// A thread-safe, two-way map for interning strings into compact binary IDs.
 ///
-/// **Reverse-lookup layout (Opt G):** the `id → UserKey` direction is
-/// an `ArcSwap<Vec<Option<UserKey>>>`. Readers do a single atomic
+/// **Reverse-lookup layout (Opt G + Op B):** the `id → str` direction is
+/// an `ArcSwap<Vec<Option<Arc<str>>>>`. Readers do a single atomic
 /// load (no shared-lock acquire/release atomic-counter bouncing
 /// across cores). The growing-vec semantics are preserved: on
 /// insert we clone the current vec, append, and `store` the new
@@ -16,15 +16,24 @@ use super::{InternerKey, TouchInd, UserKey};
 /// touch of a fresh string vs. many reads from filter/projection
 /// hot paths), so the clone-and-swap cost is amortised heavily.
 ///
+/// **Op B (Arc<str> spine):** each slot now holds `Option<Arc<str>>`
+/// instead of `Option<UserKey(String)>`. Cloning a slot bumps the
+/// Arc refcount — O(1) — rather than copying the owned bytes.
+/// For N cold first-touches the total clone work drops from
+/// O(N²) byte copies to O(N) refcount bumps.
+///
 /// The forward direction (`UserKey → id`) stays a `TDashMap` —
 /// it's sharded and already scales nearly linearly with thread
 /// count.
 #[derive(Debug)]
 pub struct Interner {
     map_user_to_interned: TDashMap<UserKey, InternerKey>,
-    /// Reverse direction — `vec[id as usize] = Some(UserKey)`. Indexed
+    /// Reverse direction — `vec[id as usize] = Some(Arc<str>)`. Indexed
     /// by raw `id`; entry `0` is always `None` (sentinel, ids start at 1).
-    reverse: ArcSwap<Vec<Option<UserKey>>>,
+    ///
+    /// Op B: `Arc<str>` slots so CAS-loop clone is O(1) per slot instead
+    /// of O(len(key)) per slot.
+    reverse: ArcSwap<Vec<Option<Arc<str>>>>,
     current_id: AtomicU64,
 }
 
@@ -61,12 +70,13 @@ impl Interner {
         }
         // +1 because vec is sized to hold index `max_id` (which is
         // the highest id assigned), plus the sentinel at 0.
-        let mut reverse: Vec<Option<UserKey>> = vec![None; (max_id as usize) + 1];
+        let mut reverse: Vec<Option<Arc<str>>> = vec![None; (max_id as usize) + 1];
 
         for (interned_key, user_key) in initial_data {
             let id = interned_key.id();
-            map_user_to_interned.insert(user_key.clone(), interned_key);
-            reverse[id as usize] = Some(user_key);
+            let arc: Arc<str> = Arc::from(user_key.as_str());
+            map_user_to_interned.insert(user_key, interned_key);
+            reverse[id as usize] = Some(arc);
         }
 
         Interner {
@@ -89,6 +99,9 @@ impl Interner {
         }
 
         let key = UserKey::from_str(s);
+        // Op B: build Arc<str> once for the reverse slot — no extra alloc
+        // vs the String we'd make for UserKey anyway.
+        let arc: Arc<str> = Arc::from(s);
 
         // Reserve a fresh ID lock-free. If the forward-map CAS below
         // loses the race (Occupied branch), this slot is silently leaked
@@ -98,7 +111,7 @@ impl Interner {
 
         // CAS into forward map — another thread may have raced us.
         use dashmap::mapref::entry::Entry;
-        match self.map_user_to_interned.entry(key.clone()) {
+        match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
                 // Race: another thread inserted between our get() and entry().
                 // `new_id` is wasted (small leaked slot, harmless).
@@ -109,13 +122,17 @@ impl Interner {
                 // CAS-loop: grow and populate the reverse vec without a mutex.
                 // Multiple concurrent insertions each retry until their slot
                 // lands, so no writer's update is lost.
+                //
+                // Op B: cloning `arc` bumps the Arc refcount — O(1) —
+                // rather than deep-copying owned String bytes. Total
+                // clone work across N first-touches: O(N) vs O(N²).
                 loop {
                     let cur = self.reverse.load_full();
                     let mut new_rev = (*cur).clone();
                     if (new_id as usize) >= new_rev.len() {
                         new_rev.resize((new_id as usize) + 1, None);
                     }
-                    new_rev[new_id as usize] = Some(key.clone());
+                    new_rev[new_id as usize] = Some(arc.clone());
                     let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
                     if Arc::ptr_eq(&prev, &cur) {
                         break;
@@ -132,8 +149,12 @@ impl Interner {
     /// **Hot path (Opt G):** one `ArcSwap::load` (single atomic
     /// load, no read-lock acquire/release) + bounds-check + clone.
     /// Scales linearly across cores under read-heavy load.
+    ///
+    /// Returns `Option<Arc<str>>` — callers that previously used
+    /// `.as_str()` can dereference the Arc directly (`&*arc` or
+    /// via `Deref`).
     #[inline]
-    pub fn get_str(&self, id: &InternerKey) -> Option<UserKey> {
+    pub fn get_str(&self, id: &InternerKey) -> Option<Arc<str>> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
         rev.get(idx).and_then(|slot| slot.clone())
@@ -144,7 +165,11 @@ impl Interner {
     /// against the same slice without re-loading. Used by codecs
     /// that walk a value tree and resolve many keys against the
     /// interner in tight succession.
-    pub fn reverse_snapshot(&self) -> Arc<Vec<Option<UserKey>>> {
+    ///
+    /// Op B: slot type changed to `Arc<str>` — no semantic change
+    /// for presence checks; callers that read the string dereference
+    /// the Arc directly.
+    pub fn reverse_snapshot(&self) -> Arc<Vec<Option<Arc<str>>>> {
         self.reverse.load_full()
     }
 
@@ -154,7 +179,7 @@ impl Interner {
         let idx = id.id() as usize;
         rev.get(idx)
             .and_then(|slot| slot.as_ref())
-            .map(|key| f(key.as_str()))
+            .map(|arc| f(arc))
     }
 
     /// Gets the interned key corresponding to a user key.
@@ -184,13 +209,17 @@ impl Interner {
     }
 
     /// Returns all interned entries as (InternerKey, UserKey) pairs.
+    ///
+    /// UserKey is reconstructed from the `Arc<str>` slot — this is a
+    /// cold path (persistence / diagnostics), so the String allocation
+    /// is acceptable.
     pub fn all_entries(&self) -> Vec<(InternerKey, UserKey)> {
         let rev = self.reverse.load();
         rev.iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
                 slot.as_ref()
-                    .map(|key| (InternerKey::new(idx as u64), key.clone()))
+                    .map(|arc| (InternerKey::new(idx as u64), UserKey::from_str(&**arc)))
             })
             .collect()
     }
@@ -229,13 +258,11 @@ impl Interner {
         // Check reverse map for id collision before inserting.
         {
             let rev = self.reverse.load();
-            if let Some(Some(existing_name)) = rev.get(id as usize) {
-                if existing_name.as_str() != name {
+            if let Some(Some(existing_arc)) = rev.get(id as usize) {
+                if &**existing_arc != name {
                     return Err(format!(
                         "touch_with_id: id {} already used by '{}', cannot assign to '{}'",
-                        id,
-                        existing_name.as_str(),
-                        name
+                        id, &**existing_arc, name
                     ));
                 }
                 // Same name at same id — idempotent (shouldn't normally reach
@@ -245,8 +272,10 @@ impl Interner {
             }
         }
 
+        let arc: Arc<str> = Arc::from(name);
+
         // CAS into forward map — another thread may have raced us.
-        match self.map_user_to_interned.entry(key.clone()) {
+        match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
                 let existing_id = existing.get().id();
                 if existing_id == id {
@@ -270,20 +299,18 @@ impl Interner {
                         new_rev.resize((id as usize) + 1, None);
                     }
                     // Check for collision in the snapshot we're about to swap.
-                    if let Some(Some(existing_name)) = new_rev.get(id as usize) {
-                        if existing_name.as_str() != name {
+                    if let Some(Some(existing_arc)) = new_rev.get(id as usize) {
+                        if &**existing_arc != name {
                             // Another thread raced and placed a different name at this id.
                             // The forward map already has our entry — remove it.
                             self.map_user_to_interned.remove(name);
                             return Err(format!(
                                 "touch_with_id: id {} raced to '{}', cannot assign '{}'",
-                                id,
-                                existing_name.as_str(),
-                                name
+                                id, &**existing_arc, name
                             ));
                         }
                     }
-                    new_rev[id as usize] = Some(key.clone());
+                    new_rev[id as usize] = Some(arc.clone());
                     let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
                     if Arc::ptr_eq(&prev, &cur) {
                         break;
@@ -318,6 +345,8 @@ impl Interner {
     /// Both bounds are interpreted as raw ids (1-based — slot 0 is the
     /// sentinel). `end_inclusive` is clamped to the current reverse-vec
     /// length so a stale `end` from a concurrent reader is safe.
+    ///
+    /// UserKey is reconstructed from `Arc<str>` — cold path.
     pub fn entries_in_id_range(
         &self,
         start_exclusive: usize,
@@ -331,8 +360,8 @@ impl Interner {
         }
         let mut out = Vec::with_capacity(hi + 1 - lo);
         for idx in lo..=hi {
-            if let Some(Some(key)) = rev.get(idx) {
-                out.push((InternerKey::new(idx as u64), key.clone()));
+            if let Some(Some(arc)) = rev.get(idx) {
+                out.push((InternerKey::new(idx as u64), UserKey::from_str(&**arc)));
             }
         }
         out
@@ -354,6 +383,8 @@ impl Interner {
     /// on restart. However, the high-water mark is frozen at the id
     /// just before the first gap, so the next `entries_after` call
     /// re-captures the gap slot once (if) it fills.
+    ///
+    /// UserKey is reconstructed from `Arc<str>` — cold path.
     pub fn entries_after(&self, start_exclusive: usize) -> (Vec<(InternerKey, UserKey)>, usize) {
         let rev = self.reverse.load();
         // `rev.len() - 1` is the highest id that has a slot. Some
@@ -371,8 +402,8 @@ impl Interner {
         let mut gapped = false;
         for idx in lo..=hi_full {
             match rev.get(idx) {
-                Some(Some(key)) => {
-                    out.push((InternerKey::new(idx as u64), key.clone()));
+                Some(Some(arc)) => {
+                    out.push((InternerKey::new(idx as u64), UserKey::from_str(&**arc)));
                     // Only advance the high-water mark while the range is still
                     // gap-free; once a gap is seen we still capture present
                     // entries but must not claim to have persisted past the hole.

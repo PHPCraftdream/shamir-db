@@ -7,8 +7,9 @@
 //! corrupt the on-disk record. The lens walk is O(fields) and allocates nothing.
 
 use crate::codecs::CodecError;
-use crate::core::interner::{Interner, InternerKey, UserKey};
+use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RawSeq, RecordValue, RecordView};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -35,7 +36,7 @@ use crate::record_view::{RawSeq, RecordValue, RecordView};
 /// FIRST unresolved key. Returns `Ok(())` when all keys resolve.
 pub fn validate_keys_resolve(
     view: &RecordView<'_>,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<(), CodecError> {
     for (key, rv) in view.fields() {
         check_key_resolves(&key, rev)?;
@@ -63,7 +64,7 @@ pub fn validate_keys_resolve_interner(
 
 /// Assert that `key.id()` has a live entry in `rev`.
 #[inline]
-fn check_key_resolves(key: &InternerKey, rev: &[Option<UserKey>]) -> Result<(), CodecError> {
+fn check_key_resolves(key: &InternerKey, rev: &[Option<Arc<str>>]) -> Result<(), CodecError> {
     let id = key.id();
     let resolves = rev
         .get(id as usize)
@@ -81,7 +82,7 @@ fn check_key_resolves(key: &InternerKey, rev: &[Option<UserKey>]) -> Result<(), 
 /// Scalars, Str, and Bin have no interned keys — nothing to check.
 fn check_record_value_keys(
     rv: &RecordValue<'_>,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<(), CodecError> {
     match rv {
         RecordValue::Map(nested) => validate_keys_resolve(nested, rev),
@@ -97,7 +98,7 @@ fn check_record_value_keys(
 }
 
 /// Walk a [`RawSeq`] and recurse into any `Map` elements it contains.
-fn check_seq_keys(seq: &RawSeq<'_>, rev: &[Option<UserKey>]) -> Result<(), CodecError> {
+fn check_seq_keys(seq: &RawSeq<'_>, rev: &[Option<Arc<str>>]) -> Result<(), CodecError> {
     for elem in seq.iter() {
         match elem {
             RecordValue::Map(nested) => validate_keys_resolve(&nested, rev)?,

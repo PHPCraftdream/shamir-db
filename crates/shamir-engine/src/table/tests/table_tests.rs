@@ -322,7 +322,7 @@ async fn test_table_with_special_characters() {
                 let interner = interner.get().await.unwrap();
                 for key in m.keys() {
                     let original = interner.get_str(key).unwrap();
-                    assert!(special_keys.contains(&original.as_str()));
+                    assert!(special_keys.contains(&original.as_ref()));
                 }
             }
             _ => panic!("Expected Map"),

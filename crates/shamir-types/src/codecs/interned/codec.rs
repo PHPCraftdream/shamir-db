@@ -10,10 +10,11 @@
 
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
-use crate::core::interner::{Interner, InternerKey, UserKey};
+use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RawSeq, RecordValue, RecordView};
 use crate::types::common::{new_map_wc, TSet};
 use crate::types::value::{InnerValue, QueryValue, Value};
+use std::sync::Arc;
 
 /// Converts a [`QueryValue`] (string-keyed) to [`InnerValue`] (interned keys).
 ///
@@ -86,7 +87,7 @@ pub fn inner_value_to_query_value(
 
 fn inner_value_to_query_value_with_rev(
     value: &InnerValue,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
     match value {
         Value::Null => Ok(QueryValue::Null),
@@ -118,7 +119,7 @@ fn inner_value_to_query_value_with_rev(
                 let key_str = rev
                     .get(idx)
                     .and_then(|slot| slot.as_ref())
-                    .map(|k| k.as_str().to_string())
+                    .map(|k| k.to_string())
                     .ok_or_else(|| {
                         CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
                     })?;
@@ -148,7 +149,7 @@ pub fn record_view_to_query_value(
 
 fn record_view_to_query_value_with_rev(
     view: &RecordView<'_>,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
     let mut obj = new_map_wc(view.len());
     for (interned_key, rv) in view.fields() {
@@ -156,7 +157,7 @@ fn record_view_to_query_value_with_rev(
         let key_str = rev
             .get(idx)
             .and_then(|slot| slot.as_ref())
-            .map(|k| k.as_str().to_string())
+            .map(|k| k.to_string())
             .ok_or_else(|| {
                 CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
             })?;
@@ -169,7 +170,7 @@ fn record_view_to_query_value_with_rev(
 /// maps (via `record_view_to_query_value_with_rev`) and arrays.
 fn record_value_to_query_value_with_rev(
     rv: &RecordValue<'_>,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
     match rv {
         RecordValue::Null => Ok(QueryValue::Null),
@@ -186,7 +187,7 @@ fn record_value_to_query_value_with_rev(
 /// Walk a [`RawSeq`] and convert each element to [`QueryValue`].
 fn convert_raw_seq_to_query_value(
     seq: &RawSeq<'_>,
-    rev: &[Option<UserKey>],
+    rev: &[Option<Arc<str>>],
 ) -> Result<QueryValue, CodecError> {
     let mut items = Vec::with_capacity(seq.len());
     for elem in seq.iter() {

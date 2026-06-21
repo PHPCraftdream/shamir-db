@@ -167,14 +167,14 @@ impl ShamirAdminExecutor {
                 for def in tm.index_manager_ref().iter_indexes() {
                     let name = interner
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
-                        .map(|k| k.as_str().to_string())
+                        .map(|arc| arc.to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());
                     indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": false}));
                 }
                 for def in tm.index_manager_ref().iter_unique_indexes() {
                     let name = interner
                         .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
-                        .map(|k| k.as_str().to_string())
+                        .map(|arc| arc.to_string())
                         .unwrap_or_else(|| def.name_interned.to_string());
                     indexes.push(mpack!({"name": @(QueryValue::Str(name)), "unique": true}));
                 }
