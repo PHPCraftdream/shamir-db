@@ -165,10 +165,23 @@ fn query_s2_s3_combo() -> ReadQuery {
 }
 
 /// Shape 4: WHERE x >= 10 AND name = "foo", sorted index on x.
-/// Planner currently ignores range-in-AND -> full scan (S3 trigger).
+/// `x = i % 1000` -> `x >= 10` keeps 99% of records (non-selective range).
+/// On non-selective ranges, sorted-index scan + per-rid record fetch
+/// (2 reads/row) is SLOWER than full table scan (1 read/row). This shape
+/// is a tipping-point regression guard, NOT an optimization target.
 fn query_s3_range_and() -> ReadQuery {
     Query::from("bench_table")
         .where_(and([gte("x", 10i64), eq("name", "foo")]))
+        .build()
+}
+
+/// Shape 4b: WHERE x >= 990 AND name = "foo", sorted index on x.
+/// `x = i % 1000` -> `x >= 990` keeps 1% of records (selective range).
+/// This is the realistic case Phase 2 (S3 range-AND extraction) targets:
+/// sorted-index scan reads ~1% of records vs full table scan reading 100%.
+fn query_s3_range_and_selective() -> ReadQuery {
+    Query::from("bench_table")
+        .where_(and([gte("x", 990i64), eq("name", "foo")]))
         .build()
 }
 
@@ -265,6 +278,30 @@ fn bench_read_path_matrix(c: &mut Criterion) {
 
             group.throughput(Throughput::Elements(n as u64));
             group.bench_with_input(BenchmarkId::new("s3_range_and", n), &n, |b, _| {
+                b.to_async(&rt).iter(|| {
+                    let mgr = fixture.mgr.clone();
+                    let q = q.clone();
+                    async move {
+                        let interner = mgr.interner().get().await.unwrap();
+                        let refs = new_map();
+                        let ctx = FilterContext::new(interner, &refs);
+                        black_box(mgr.read(&q, &ctx).await.unwrap());
+                    }
+                });
+            });
+        }
+
+        // ── Shape 4b: s3_range_and_selective (1% selectivity) ──────
+        {
+            let fixture = rt.block_on(async {
+                let f = build_table(n).await;
+                create_sorted_index(&f.mgr, "x_sorted", "x").await;
+                f
+            });
+            let q = query_s3_range_and_selective();
+
+            group.throughput(Throughput::Elements(n as u64));
+            group.bench_with_input(BenchmarkId::new("s3_range_and_selective", n), &n, |b, _| {
                 b.to_async(&rt).iter(|| {
                     let mgr = fixture.mgr.clone();
                     let q = q.clone();
