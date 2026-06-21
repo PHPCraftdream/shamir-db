@@ -239,7 +239,6 @@ fn bench_in_memory(c: &mut Criterion) {
 // Disk backends (feature-gated)
 // ────────────────────────────────────────────────────────────────────
 
-
 #[cfg(feature = "sled")]
 fn make_sled_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;

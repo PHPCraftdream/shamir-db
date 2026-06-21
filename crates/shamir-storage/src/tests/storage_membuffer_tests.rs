@@ -388,3 +388,61 @@ async fn fully_unwrap_drills_through_chain() {
         .unwrap();
     assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
 }
+
+/// Op C regression: insert_many / set_many / remove_many must publish
+/// dirty_nonempty (Release) before populating the dirty overlay.
+///
+/// Without the sentinel set, a concurrent `get()` after eviction-from-cache
+/// would see `dirty_nonempty=false` (Acquire), skip the dirty probe entirely,
+/// fall through to the inner store, and stale-miss a key that's actually
+/// present in `dirty`.
+///
+/// This test sets up a tiny cache to force eviction during a 100-row
+/// `insert_many` and asserts every inserted key remains visible.
+/// On HEAD (pre-fix), at least one key in the inserted batch will return
+/// `NotFound` because its cache slot was evicted before the flusher drained
+/// it AND the dirty probe was bypassed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn insert_many_visible_under_cache_eviction_op_c() {
+    let cfg = MemBufferConfig {
+        // 64 bytes — fits ~2 of our 50-byte slots, forces aggressive moka eviction
+        // as we insert 100 keys.
+        max_bytes: 64,
+        max_entries: 1_000_000,
+        ttl_ms: None,
+        // Long enough that the periodic flusher does not drain dirty during the
+        // window we care about. Eviction-listener-driven drain still fires, but
+        // the race we're testing is reads landing BEFORE the listener has
+        // pushed an evicted key to inner.
+        flush_interval_ms: 600_000,
+        flush_batch_size: 1,
+    };
+    let inner_repo = InMemoryRepo::new();
+    let inner_store = inner_repo.store_get("t").await.unwrap();
+    let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
+
+    // 100 distinct 50-byte values → cache eviction guaranteed.
+    let values: Vec<Bytes> = (0..100)
+        .map(|i| Bytes::from(format!("op-c-payload-{i:04}-padding-padding-pad")))
+        .collect();
+    let expected = values.clone();
+    let keys = buffered.insert_many(values).await.unwrap();
+
+    // Immediate read — no flush call — every key must be visible via the dirty
+    // overlay even if its cache slot has been evicted.
+    let mut missed = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        match buffered.get(key.clone()).await {
+            Ok(v) => assert_eq!(v.as_ref(), expected[i].as_ref(), "stale value at i={i}"),
+            Err(e) => missed.push((i, e)),
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "Op C regression: {} key(s) stale-missed after insert_many. \
+         First: idx={}, err={:?}",
+        missed.len(),
+        missed[0].0,
+        missed[0].1
+    );
+}
