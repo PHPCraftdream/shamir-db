@@ -327,6 +327,63 @@ impl TableManager {
         }
     }
 
+    /// Try to extract a range predicate from an `And` filter for sorted-index scan.
+    ///
+    /// Scans the conjuncts of `And([c1, c2, ...])` for a range predicate
+    /// (Gt/Gte/Lt/Lte/Between) whose field has a sorted index. If found,
+    /// returns `(idx_name, lower_encoded, upper_encoded, residual_filter)`
+    /// where the residual is the remaining conjuncts (those not consumed
+    /// by the range).
+    ///
+    /// This bridges the gap where `try_plan_sorted_index_scan` only handles
+    /// top-level range predicates, not ranges buried inside AND.
+    #[allow(clippy::type_complexity)]
+    pub fn try_plan_and_range_index_scan(
+        &self,
+        filter: &Filter,
+        interner: &Interner,
+    ) -> Option<(u64, Option<Vec<u8>>, Option<Vec<u8>>, Option<Filter>)> {
+        let filters = match filter {
+            Filter::And { filters } => filters,
+            _ => return None,
+        };
+
+        let mgr = self.sorted_indexes();
+        if !mgr.has_indexes() {
+            return None;
+        }
+
+        // Scan conjuncts for the first range predicate matchable to a sorted index.
+        for (i, conjunct) in filters.iter().enumerate() {
+            if let Some((idx_name, lo, hi, range_residual)) =
+                self.try_plan_sorted_index_scan(conjunct, interner)
+            {
+                // Build the residual from remaining conjuncts + any range residual
+                // (e.g. Ne boundary from Gt/Lt).
+                let mut remaining: Vec<Filter> = filters
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, f)| f.clone())
+                    .collect();
+
+                if let Some(rr) = range_residual {
+                    remaining.push(rr);
+                }
+
+                let residual = match remaining.len() {
+                    0 => None,
+                    1 => Some(remaining.into_iter().next().unwrap()),
+                    _ => Some(Filter::And { filters: remaining }),
+                };
+
+                return Some((idx_name, lo, hi, residual));
+            }
+        }
+
+        None
+    }
+
     /// Eligibility check for the ORDER BY + LIMIT K fast path
     /// (both ASC and DESC).
     ///
