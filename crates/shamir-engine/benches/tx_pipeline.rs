@@ -54,7 +54,7 @@ fn bench_insert_tx_vs_non_tx(c: &mut Criterion) {
     let repo = make_repo();
     let tbl = rt.block_on(repo.get_table("bench_table")).unwrap();
 
-    bu::tune(&mut group, 100, 5, 3);
+    bu::tune_tiered(&mut group, 100, 5, 3, 90);
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("non_tx", |b| {
@@ -106,7 +106,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
     let rt = rt();
     let repo = make_repo();
     let resolver = Resolver { repo: repo.clone() };
-    bu::tune(&mut group, 100, 5, 3);
+    bu::tune_tiered(&mut group, 100, 5, 3, 90);
 
     for &n in &[1usize, 10, 100] {
         group.throughput(Throughput::Elements(n as u64));
@@ -303,7 +303,7 @@ fn bench_commit_tx_phase_breakdown(c: &mut Criterion) {
     let rt = rt();
     let repo = make_repo();
     rt.block_on(repo.get_table("bench_table")).unwrap();
-    bu::tune(&mut group, 100, 5, 3);
+    bu::tune_tiered(&mut group, 100, 5, 3, 90);
 
     // Baseline: empty Tx (Phase 3 + 4 + 6 + 7 fixed overhead).
     group.bench_function("baseline_empty", |b| {
@@ -392,7 +392,7 @@ fn bench_provider_overhead(c: &mut Criterion) {
     rt.block_on(real_repo.get_table("bench_table")).unwrap();
     let stub_repo = make_repo();
     rt.block_on(stub_repo.get_table("bench_table")).unwrap();
-    bu::tune(&mut group, 100, 5, 3);
+    bu::tune_tiered(&mut group, 100, 5, 3, 90);
 
     /// Always Some(0) — minimum-cost mock.
     struct StubAlwaysZero;
@@ -462,7 +462,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
         .build()
         .unwrap();
     let mut group = c.benchmark_group("commit_tx/phase5c_indexed_sled");
-    bu::tune(&mut group, 10, 15, 3);
+    bu::tune_tiered(&mut group, 10, 15, 3, 60);
 
     for &n in &[100usize, 1000usize] {
         group.throughput(Throughput::Elements(n as u64));
@@ -559,7 +559,7 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
         .unwrap();
 
     let mut group = c.benchmark_group("commit_tx/async_visibility_index_heavy");
-    bu::tune(&mut group, 20, 8, 3);
+    bu::tune_tiered(&mut group, 20, 8, 3, 60);
 
     for &n in &[100usize, 1000usize] {
         group.throughput(Throughput::Elements(n as u64));
@@ -758,7 +758,7 @@ fn bench_read_scan(c: &mut Criterion) {
     let resolver = Resolver { repo: repo.clone() };
 
     let mut g = c.benchmark_group("read_scan");
-    bu::tune(&mut g, 30, 5, 3);
+    bu::tune_tiered(&mut g, 30, 5, 3, 90);
 
     // Variant 1: scan all rows — baseline; pure scan + projection cost.
     // Exercises Stage 21 (no per-row Map alloc on 3 scan paths).

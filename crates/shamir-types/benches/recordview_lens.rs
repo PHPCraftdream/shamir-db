@@ -121,7 +121,7 @@ fn bench_lens_vs_tree(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("recordview_lens_single_field");
     group.throughput(Throughput::Elements(1));
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     // (a) BASELINE — full tree decode (from_bytes) + map lookup + Int read.
     group.bench_function("tree_read_age", |b| {
@@ -176,7 +176,7 @@ fn bench_tree_roundtrip(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("recordview_tier_b_tree_roundtrip");
     group.throughput(Throughput::Elements(records.len() as u64));
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     // Tier B — encode: InnerValue tree -> msgpack bytes (storage form).
     group.bench_function("encode_1000", |b| {
@@ -206,7 +206,7 @@ fn bench_tree_clone_cost(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("recordview_tier_a_clone_cost");
     group.throughput(Throughput::Elements(records.len() as u64));
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     // Deep-clone of one InnerValue tree (Map + nested Map + List of Strings).
     group.bench_function("clone_inner_1000", |b| {

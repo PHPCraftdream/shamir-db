@@ -213,7 +213,7 @@ fn bench_wire_pipelining(c: &mut Criterion) {
                 .collect();
 
             g.throughput(Throughput::Elements(n as u64));
-            bu::tune(&mut g, 30, 5, 3);
+            bu::tune_tiered(&mut g, 30, 5, 3, 90);
 
             g.bench_function(format!("n_{n}"), |b| {
                 b.iter_custom(|iters| {

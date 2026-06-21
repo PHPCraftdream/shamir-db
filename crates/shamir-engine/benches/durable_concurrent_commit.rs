@@ -74,7 +74,7 @@ fn bench_same_table(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("durable_concurrent_commit/same_table");
     // QUICK: sample_size=10, measurement=1 s, warm_up=1 s.
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     for &n in &[1usize, 8, 32] {
         group.throughput(Throughput::Elements(n as u64));
@@ -123,7 +123,7 @@ fn bench_same_table(c: &mut Criterion) {
 fn bench_disjoint_tables(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("durable_concurrent_commit/disjoint_tables");
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     for &n in &[1usize, 8, 32] {
         group.throughput(Throughput::Elements(n as u64));

@@ -127,7 +127,7 @@ fn bench_backend_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("backend_matrix");
     // QUICK: sample=15, measurement=2s, warm_up=1s — enough for warm caches.
     // FULL: sample=50, measurement=5s, warm_up=3s.
-    bu::tune(&mut group, 50, 5, 3);
+    bu::tune_tiered(&mut group, 50, 5, 3, 120);
 
     // 7 backends × 3 concurrency × 3 batch sizes = 63 cells. Heavy.
     // In QUICK mode this is ~30 min; FULL ~2h.

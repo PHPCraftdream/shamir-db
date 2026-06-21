@@ -92,7 +92,7 @@ async fn fan_out(gc: Arc<WalGroupCommit>, n: usize, tier: WalDurability, version
 fn bench_mem(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("wal_append/mem");
-    bu::tune(&mut group, 50, 2, 1);
+    bu::tune_tiered(&mut group, 50, 2, 1, 60);
 
     for &n in CONCURRENCY {
         group.throughput(Throughput::Elements(n as u64));
@@ -122,7 +122,7 @@ fn bench_mem(c: &mut Criterion) {
 fn bench_file_buffered(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("wal_append/file_buffered");
-    bu::tune(&mut group, 30, 2, 1);
+    bu::tune_tiered(&mut group, 30, 2, 1, 60);
 
     for &n in CONCURRENCY {
         group.throughput(Throughput::Elements(n as u64));
@@ -155,7 +155,7 @@ fn bench_file_synced(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("wal_append/file_synced");
     // fsync is the slowest variant — keep the sample floor modest.
-    bu::tune(&mut group, 20, 2, 1);
+    bu::tune_tiered(&mut group, 20, 2, 1, 60);
 
     for &n in CONCURRENCY {
         group.throughput(Throughput::Elements(n as u64));
