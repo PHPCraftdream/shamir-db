@@ -34,18 +34,18 @@ use criterion::BenchmarkGroup;
 #[cfg(feature = "peak_mem")]
 pub mod peak_mem;
 
-/// Минимальный sample_size, который criterion принимает.
-const MIN_SAMPLES: usize = 3;
+/// Минимальный sample_size, который criterion принимает (hardcoded в 0.5.x).
+const MIN_SAMPLES: usize = 10;
 
-/// SMOKE tier fixed sample (compile-check + sanity).
-const SMOKE_SAMPLES: usize = 3;
+/// SMOKE tier fixed sample (criterion floor = 10).
+const SMOKE_SAMPLES: usize = 10;
 /// SMOKE tier fixed measurement duration.
-const SMOKE_MEASUREMENT: Duration = Duration::from_millis(500);
+const SMOKE_MEASUREMENT: Duration = Duration::from_millis(200);
 /// SMOKE tier fixed warm-up duration.
-const SMOKE_WARM_UP: Duration = Duration::from_millis(200);
+const SMOKE_WARM_UP: Duration = Duration::from_millis(100);
 
-/// QUICK tier fixed sample.
-const QUICK_SAMPLES: usize = 5;
+/// QUICK tier fixed sample (criterion floor = 10).
+const QUICK_SAMPLES: usize = 10;
 /// QUICK tier fixed measurement.
 const QUICK_MEASUREMENT: Duration = Duration::from_millis(500);
 /// QUICK tier fixed warm-up.
