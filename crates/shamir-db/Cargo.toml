@@ -15,13 +15,9 @@ license = "MIT OR Apache-2.0"
 # shamir-engine — needed because the facade's own re-exports go through
 # engine's BoxRepoFactory which is gated by engine's own features.
 default = ["all-backends"]
-all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
-redb   = ["shamir-storage/redb",   "shamir-engine/redb"]
+all-backends = ["sled", "fjall"]
 sled   = ["shamir-storage/sled",   "shamir-engine/sled"]
 fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
-nebari = ["shamir-storage/nebari", "shamir-engine/nebari"]
-persy  = ["shamir-storage/persy",  "shamir-engine/persy"]
-canopy = ["shamir-storage/canopy", "shamir-engine/canopy"]
 
 [dependencies]
 # Foundation crates re-exported under `shamir_db::*` so callers stay

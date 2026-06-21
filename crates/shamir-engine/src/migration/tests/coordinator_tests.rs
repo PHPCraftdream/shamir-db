@@ -34,7 +34,7 @@ async fn full_migration_lifecycle() {
         "users".into(),
         "main".into(),
         "cold".into(),
-        "redb".into(),
+        "fjall".into(),
         None,
     );
     let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone(), None);
@@ -90,7 +90,7 @@ async fn rollback_before_commit() {
         "t".into(),
         "main".into(),
         "cold".into(),
-        "redb".into(),
+        "fjall".into(),
         None,
     );
     let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst, None);
@@ -111,7 +111,7 @@ async fn cannot_rollback_after_commit() {
         "t".into(),
         "main".into(),
         "cold".into(),
-        "redb".into(),
+        "fjall".into(),
         None,
     );
     let coord = MigrationCoordinator::new(state, shadow, src, dst, None);
@@ -134,7 +134,7 @@ async fn phase_transitions_enforced() {
         "t".into(),
         "main".into(),
         "cold".into(),
-        "redb".into(),
+        "fjall".into(),
         None,
     );
     let coord = MigrationCoordinator::new(state, shadow, src, dst, None);
@@ -158,7 +158,7 @@ async fn deletes_propagated_to_dst() {
         "t".into(),
         "main".into(),
         "cold".into(),
-        "redb".into(),
+        "fjall".into(),
         None,
     );
     let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone(), None);

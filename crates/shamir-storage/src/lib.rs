@@ -19,16 +19,8 @@ pub mod storage_in_memory;
 pub mod storage_membuffer;
 pub mod types;
 
-#[cfg(feature = "canopy")]
-pub mod storage_canopy;
 #[cfg(feature = "fjall")]
 pub mod storage_fjall;
-#[cfg(feature = "nebari")]
-pub mod storage_nebari;
-#[cfg(feature = "persy")]
-pub mod storage_persy;
-#[cfg(feature = "redb")]
-pub mod storage_redb;
 #[cfg(feature = "sled")]
 pub mod storage_sled;
 

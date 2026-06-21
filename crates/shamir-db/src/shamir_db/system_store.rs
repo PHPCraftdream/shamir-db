@@ -1,7 +1,7 @@
 //! Persistent system store for ShamirDB metadata.
 //!
 //! Stores databases, repositories, settings, users, roles.
-//! Uses a TableManager backed by any storage engine (redb for production,
+//! Uses a TableManager backed by any storage engine (fjall for production,
 //! in_memory for tests).
 
 use shamir_types::access::{Actor, ResourceMeta};
@@ -48,8 +48,8 @@ const TABLE_FUNCTION_FOLDERS: &str = "function_folders";
 pub enum SystemStoreConfig {
     /// In-memory (for tests). Data lost on restart.
     InMemory,
-    /// Persistent redb at the given path.
-    Redb(std::path::PathBuf),
+    /// Persistent fjall at the given path.
+    Fjall(std::path::PathBuf),
 }
 
 /// Persistent system store.
@@ -81,7 +81,7 @@ impl SystemStore {
 
         let factory = match config {
             SystemStoreConfig::InMemory => BoxRepoFactory::in_memory(),
-            SystemStoreConfig::Redb(path) => BoxRepoFactory::redb(path),
+            SystemStoreConfig::Fjall(path) => BoxRepoFactory::fjall(path),
         };
 
         let repo_config = RepoConfig::new(SYSTEM_REPO, factory)

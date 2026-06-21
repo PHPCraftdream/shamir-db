@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use shamir_connect::server::audit_chain::{AuditChain, AuditEntry, AuditError};
-use shamir_server::audit_appender::RedbAuditAppender;
+use shamir_server::audit_appender::FjallAuditAppender;
 use tempfile::TempDir;
 
 fn key() -> [u8; 32] {
@@ -49,7 +49,7 @@ fn entries_equal(a: &AuditEntry, b: &AuditEntry) {
 #[test]
 fn strict_mode_writes_each_entry_with_fsync() {
     let dir = TempDir::new().unwrap();
-    let appender = RedbAuditAppender::open_strict(dir.path()).unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
     let chain = AuditChain::new(key());
 
     let mut written = Vec::new();
@@ -65,7 +65,7 @@ fn strict_mode_writes_each_entry_with_fsync() {
     drop(appender);
 
     // Re-read and confirm.
-    let read = RedbAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 5);
     for (a, b) in written.iter().zip(read.iter()) {
         entries_equal(a, b);
@@ -75,7 +75,7 @@ fn strict_mode_writes_each_entry_with_fsync() {
 #[test]
 fn checkpoint_persists_and_loads() {
     let dir = TempDir::new().unwrap();
-    let appender = RedbAuditAppender::open_strict(dir.path()).unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
 
     {
         use shamir_connect::server::audit_chain::AuditAppender;
@@ -84,7 +84,7 @@ fn checkpoint_persists_and_loads() {
 
     drop(appender);
 
-    let loaded = RedbAuditAppender::load_checkpoint(dir.path()).unwrap();
+    let loaded = FjallAuditAppender::load_checkpoint(dir.path()).unwrap();
     assert_eq!(loaded, Some((42u64, [0xab; 32])));
 }
 
@@ -92,7 +92,7 @@ fn checkpoint_persists_and_loads() {
 fn chain_verifies_after_restart() {
     let dir = TempDir::new().unwrap();
     let chain = AuditChain::new(key());
-    let appender = RedbAuditAppender::open_strict(dir.path()).unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
 
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..10 {
@@ -106,11 +106,11 @@ fn chain_verifies_after_restart() {
     drop(chain);
 
     // Restart: re-read the log + checkpoint and verify.
-    let read = RedbAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 10);
     AuditChain::verify_chain(&key(), &read).expect("chain valid");
 
-    let (cp_seq, cp_hmac) = RedbAuditAppender::load_checkpoint(dir.path())
+    let (cp_seq, cp_hmac) = FjallAuditAppender::load_checkpoint(dir.path())
         .unwrap()
         .expect("checkpoint exists");
     AuditChain::verify_against_checkpoint(&read, cp_seq, &cp_hmac).expect("checkpoint matches");
@@ -120,7 +120,7 @@ fn chain_verifies_after_restart() {
 fn truncation_detected_after_restart() {
     let dir = TempDir::new().unwrap();
     let chain = AuditChain::new(key());
-    let appender = RedbAuditAppender::open_strict(dir.path()).unwrap();
+    let appender = FjallAuditAppender::open_strict(dir.path()).unwrap();
 
     use shamir_connect::server::audit_chain::AuditAppender;
     for i in 0..10 {
@@ -143,9 +143,9 @@ fn truncation_detected_after_restart() {
     std::fs::write(&log_path, truncated).unwrap();
 
     // Re-read and verify against the older checkpoint.
-    let read = RedbAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 7);
-    let (cp_seq, cp_hmac) = RedbAuditAppender::load_checkpoint(dir.path())
+    let (cp_seq, cp_hmac) = FjallAuditAppender::load_checkpoint(dir.path())
         .unwrap()
         .expect("checkpoint exists");
     let res = AuditChain::verify_against_checkpoint(&read, cp_seq, &cp_hmac);
@@ -162,7 +162,8 @@ fn truncation_detected_after_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_mode_flushes_on_interval() {
     let dir = TempDir::new().unwrap();
-    let appender = RedbAuditAppender::open_batched(dir.path(), Duration::from_millis(100)).unwrap();
+    let appender =
+        FjallAuditAppender::open_batched(dir.path(), Duration::from_millis(100)).unwrap();
     let chain = AuditChain::new(key());
 
     use shamir_connect::server::audit_chain::AuditAppender;
@@ -174,7 +175,7 @@ async fn batched_mode_flushes_on_interval() {
     // Allow the background task to fire its 100ms timer.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let read = RedbAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 3, "background flusher must drain buffer");
 
     appender.shutdown().await;
@@ -185,7 +186,7 @@ async fn batched_mode_flushes_on_interval() {
 async fn shutdown_flushes_pending() {
     let dir = TempDir::new().unwrap();
     // 1-hour interval — only `shutdown()` should drain the buffer.
-    let appender = RedbAuditAppender::open_batched(dir.path(), Duration::from_secs(3600)).unwrap();
+    let appender = FjallAuditAppender::open_batched(dir.path(), Duration::from_secs(3600)).unwrap();
     let chain = AuditChain::new(key());
 
     use shamir_connect::server::audit_chain::AuditAppender;
@@ -196,6 +197,6 @@ async fn shutdown_flushes_pending() {
 
     appender.shutdown().await;
 
-    let read = RedbAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
     assert_eq!(read.len(), 5, "shutdown must flush all pending entries");
 }

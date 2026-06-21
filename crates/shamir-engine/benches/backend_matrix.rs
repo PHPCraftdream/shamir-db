@@ -8,7 +8,7 @@
 //! setup per criterion iter on top of the actual commit work).
 //!
 //! Axes:
-//!   - **Backend:** redb / fjall / sled / nebari / persy / canopy / in_memory
+//!   - **Backend:** fjall / sled / in_memory
 //!     (durability OFF or default on each — our WAL is the single owner).
 //!   - **Concurrency:** {8, 32, 128} writers.
 //!   - **Batch size:** {1, 10, 100} rows per commit — single-row is worst case,
@@ -47,12 +47,8 @@ async fn make_repo(backend: &str) -> (RepoInstance, Option<tempfile::TempDir>) {
     };
     let factory = match backend {
         "in_memory" => BoxRepoFactory::in_memory(),
-        "redb" => BoxRepoFactory::redb_raw(tempdir.as_ref().unwrap().path().join("data.redb")),
         "fjall" => BoxRepoFactory::fjall_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
         "sled" => BoxRepoFactory::sled_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
-        "nebari" => BoxRepoFactory::nebari_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
-        "persy" => BoxRepoFactory::persy_raw(tempdir.as_ref().unwrap().path().join("data.persy")),
-        "canopy" => BoxRepoFactory::canopy_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
         other => panic!("unknown backend: {}", other),
     };
     let repo = RepoInstance::from_factory(
@@ -129,17 +125,8 @@ fn bench_backend_matrix(c: &mut Criterion) {
     // FULL: sample=50, measurement=5s, warm_up=3s.
     bu::tune_tiered(&mut group, 50, 5, 3, 120);
 
-    // 7 backends × 3 concurrency × 3 batch sizes = 63 cells. Heavy.
-    // In QUICK mode this is ~30 min; FULL ~2h.
-    let backends: &[&'static str] = &[
-        "in_memory",
-        "fjall",
-        "sled",
-        "redb",
-        "nebari",
-        "persy",
-        "canopy",
-    ];
+    // 3 backends × 3 concurrency × 3 batch sizes = 27 cells.
+    let backends: &[&'static str] = &["in_memory", "fjall", "sled"];
     let writers_levels: &[usize] = &[8, 32, 128];
     let batch_sizes: &[usize] = &[1, 10, 100];
 

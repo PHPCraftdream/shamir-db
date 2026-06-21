@@ -146,9 +146,9 @@ impl ShamirAdminExecutor {
 
         let factory = match op.engine.as_deref() {
             Some("in_memory") => BoxRepoFactory::in_memory(),
-            Some("redb") | None => {
+            Some("fjall") | None => {
                 // Durable default: if the home has a data_root,
-                // use a redb file under data_root/<db>/<repo>.redb.
+                // use a fjall directory under data_root/<db>/<repo>.
                 // In-memory home (tests) falls back to in_memory.
                 match self.shamir.data_root() {
                     Some(root) => {
@@ -160,7 +160,7 @@ impl ShamirAdminExecutor {
                                 e
                             ))
                         })?;
-                        let path = db_dir.join(format!("{}.fjall", op.create_repo));
+                        let path = db_dir.join(&op.create_repo);
                         BoxRepoFactory::fjall_raw(path)
                     }
                     None => BoxRepoFactory::in_memory(),
@@ -168,7 +168,7 @@ impl ShamirAdminExecutor {
             }
             Some(other) => {
                 return Err(err(format!(
-                    "Unsupported engine '{}'. Supported: in_memory, redb.",
+                    "Unsupported engine '{}'. Supported: in_memory, fjall.",
                     other
                 )));
             }

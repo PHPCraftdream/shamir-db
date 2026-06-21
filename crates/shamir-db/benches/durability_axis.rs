@@ -49,7 +49,7 @@ use shamir_query_builder::write;
 async fn fresh_db_redb(path: &std::path::Path) -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
     shamir.create_db("bench").await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::redb(path.join("db.redb")))
+    let cfg = RepoConfig::new("main", BoxRepoFactory::fjall(path.join("db.redb")))
         .add_table(TableConfig::new("users"));
     shamir.add_repo("bench", cfg).await.expect("add_repo");
     shamir

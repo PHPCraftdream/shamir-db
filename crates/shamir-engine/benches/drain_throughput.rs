@@ -1,11 +1,10 @@
 //! Phase 2 — Backend-matrix drain-throughput bench.
 //!
 //! Measures sustained ack-throughput of a RepoInstance under N concurrent
-//! committers, parametrised by backend (redb, fjall, sled). Durability is
+//! committers, parametrised by backend (fjall, sled). Durability is
 //! NOT owned by the backend in our architecture (the WAL is the single
 //! durable owner), so each backend runs with its cheapest persist mode:
 //!
-//!   - **redb:**  `Durability::None` (set in storage_redb by default).
 //!   - **fjall:** `PersistMode::Buffered` (set in storage_fjall by default).
 //!   - **sled:**  default open (flush_every_ms not forced to None here;
 //!     kept as sanity baseline).
@@ -35,21 +34,6 @@ fn rt() -> tokio::runtime::Runtime {
 }
 
 // ── Backend repo factories ────────────────────────────────────────────────
-
-async fn make_redb_repo() -> (RepoInstance, tempfile::TempDir) {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    // redb expects a file path, not a directory.
-    let factory = BoxRepoFactory::redb_raw(tempdir.path().join("data.redb"));
-    let repo = RepoInstance::from_factory(
-        "bench".into(),
-        factory,
-        vec![TableConfig::new("tbl_0".to_string())],
-    )
-    .await
-    .expect("RepoInstance::from_factory (redb)");
-    repo.get_table("tbl_0").await.expect("get_table tbl_0");
-    (repo, tempdir)
-}
 
 async fn make_fjall_repo() -> (RepoInstance, tempfile::TempDir) {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -141,7 +125,6 @@ fn bench_drain_throughput(c: &mut Criterion) {
     let concurrency_levels: &[usize] = &[8, 32, 128];
 
     for &writers in concurrency_levels {
-        bench_backend(&mut group, "redb", writers, make_redb_repo);
         bench_backend(&mut group, "fjall", writers, make_fjall_repo);
         bench_backend(&mut group, "sled", writers, make_sled_repo);
     }

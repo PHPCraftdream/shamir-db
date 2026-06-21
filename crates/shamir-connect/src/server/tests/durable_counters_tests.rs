@@ -1,14 +1,14 @@
-#[cfg(feature = "durable-redb")]
+#[cfg(feature = "durable-fjall")]
 mod inner {
     use crate::common::time::{ns, UnixNanos};
-    use crate::server::durable_counters::RedbConsumedCounters;
+    use crate::server::durable_counters::FjallConsumedCounters;
     use crate::server::resume::ConsumedCounterStore;
     use tempfile::TempDir;
 
-    fn fresh_store() -> (TempDir, RedbConsumedCounters) {
+    fn fresh_store() -> (TempDir, FjallConsumedCounters) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("counters.redb");
-        let store = RedbConsumedCounters::open(&path).unwrap();
+        let store = FjallConsumedCounters::open(&path).unwrap();
         (dir, store)
     }
 
@@ -54,14 +54,14 @@ mod inner {
 
         // First boot: advance counter to 7.
         {
-            let s1 = RedbConsumedCounters::open(&path).unwrap();
+            let s1 = FjallConsumedCounters::open(&path).unwrap();
             assert!(s1.try_advance(&uid, &fam, 7));
             // s1 dropped → file closed.
         }
 
         // Second boot: peek must see 7. Replay of counter 7 must reject.
         {
-            let s2 = RedbConsumedCounters::open(&path).unwrap();
+            let s2 = FjallConsumedCounters::open(&path).unwrap();
             assert_eq!(s2.peek(&uid, &fam), Some(7));
             assert!(
                 !s2.try_advance(&uid, &fam, 7),

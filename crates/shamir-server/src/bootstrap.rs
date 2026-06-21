@@ -34,7 +34,7 @@ use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
 
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 
 /// Default name of the auto-created superuser.
 pub const DEFAULT_BOOTSTRAP_NAME: &str = "admin";
@@ -89,7 +89,7 @@ pub enum BootstrapError {
 /// defaults the production handshake will use so a token-mode account
 /// can log in straight away.
 pub fn ensure_superuser(
-    dir: &RedbUserDirectory,
+    dir: &FjallUserDirectory,
     data_dir: &Path,
     name: &str,
     policy: BootstrapPolicy<'_>,
@@ -159,9 +159,9 @@ pub fn ensure_superuser(
 
 /// Insert a fresh user with the requested role. Roles can't be set in a
 /// single transaction via the [`UserDirectory`] trait (see comment in
-/// [`RedbUserDirectory::insert`]), so this helper does insert + update_roles.
+/// [`FjallUserDirectory::insert`]), so this helper does insert + update_roles.
 fn insert_with_role(
-    dir: &RedbUserDirectory,
+    dir: &FjallUserDirectory,
     name: &str,
     record: UserRecord,
     role: &str,

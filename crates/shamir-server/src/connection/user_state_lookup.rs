@@ -1,15 +1,15 @@
-//! [`UserStateLookup`] adapter backed by [`RedbUserDirectory`].
+//! [`UserStateLookup`] adapter backed by [`FjallUserDirectory`].
 
 use shamir_connect::server::resume::UserStateLookup;
 
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 
-/// Adapter: implement [`UserStateLookup`] against [`RedbUserDirectory`].
+/// Adapter: implement [`UserStateLookup`] against [`FjallUserDirectory`].
 ///
 /// Returns the user's `tickets_invalid_before_ns` if they exist, `None`
 /// if the user_id is not found. An unrecognised user_id causes
 /// `process_resume` to return `AuthFailed` per spec §5.4 step 8.
-pub(super) struct RedbUserStateLookup<'a>(pub(super) &'a RedbUserDirectory);
+pub(super) struct RedbUserStateLookup<'a>(pub(super) &'a FjallUserDirectory);
 
 impl UserStateLookup for RedbUserStateLookup<'_> {
     fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
@@ -28,7 +28,7 @@ impl UserStateLookup for RedbUserStateLookup<'_> {
         // tickets_invalid_before_ns_by_user_id returns 0 for unknown users
         // AND for users with tib=0. Distinguish by looking up user existence.
         // Use a lightweight existence check: look up by user_id directly.
-        // The RedbUserDirectory exposes `user_id_exists` for this purpose,
+        // The FjallUserDirectory exposes `user_id_exists` for this purpose,
         // but if that method is absent we fall back to treating 0 as valid
         // (conservative: all tickets valid) — the anti-replay counter still
         // protects against replays.

@@ -12,12 +12,12 @@ use crate::ShamirDb;
 
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
-        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
             Ok(shamir) => return shamir,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
         }
     }
-    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
 }
@@ -35,12 +35,12 @@ async fn synced_batch_survives_immediate_drop() {
 
     // === Session 1: insert with durability=synced, then DROP immediately ===
     {
-        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
             .await
             .unwrap();
         shamir.create_db("appdb").await;
 
-        let config = RepoConfig::new("data", BoxRepoFactory::redb(&repo_path))
+        let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
             .add_table(TableConfig::new("items"));
         shamir.add_repo("appdb", config).await.unwrap();
 
@@ -90,12 +90,12 @@ async fn buffered_batch_executes_successfully() {
     let sys_path = dir.path().join("meta.redb");
     let repo_path = dir.path().join("data.redb");
 
-    let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+    let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
     shamir.create_db("appdb").await;
 
-    let config = RepoConfig::new("data", BoxRepoFactory::redb(&repo_path))
+    let config = RepoConfig::new("data", BoxRepoFactory::fjall(&repo_path))
         .add_table(TableConfig::new("items"));
     shamir.add_repo("appdb", config).await.unwrap();
 

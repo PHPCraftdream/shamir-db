@@ -102,7 +102,7 @@ impl ShamirDb {
         // Derive data_root BEFORE `config` is moved into SystemStore::init.
         let data_root: Option<std::path::PathBuf> = match &config {
             SystemStoreConfig::InMemory => None,
-            SystemStoreConfig::Redb(p) => p.parent().map(|d| d.to_path_buf()),
+            SystemStoreConfig::Fjall(p) => p.parent().map(|d| d.to_path_buf()),
         };
 
         let system_store = SystemStore::init(config).await?;
@@ -410,18 +410,10 @@ impl ShamirDb {
         // re-attach the repo.
         match engine {
             "in_memory" => Some(BoxRepoFactory::in_memory()),
-            #[cfg(feature = "redb")]
-            "redb" => path.map(BoxRepoFactory::redb),
             #[cfg(feature = "sled")]
             "sled" => path.map(BoxRepoFactory::sled),
             #[cfg(feature = "fjall")]
             "fjall" => path.map(BoxRepoFactory::fjall),
-            #[cfg(feature = "nebari")]
-            "nebari" => path.map(BoxRepoFactory::nebari),
-            #[cfg(feature = "persy")]
-            "persy" => path.map(BoxRepoFactory::persy),
-            #[cfg(feature = "canopy")]
-            "canopy" => path.map(BoxRepoFactory::canopy),
             _ => None,
         }
     }
@@ -431,16 +423,8 @@ impl ShamirDb {
             BoxRepoFactory::InMemory(_) => "in_memory",
             #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(_) => "sled",
-            #[cfg(feature = "redb")]
-            BoxRepoFactory::Redb(_) => "redb",
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(_) => "fjall",
-            #[cfg(feature = "nebari")]
-            BoxRepoFactory::Nebari(_) => "nebari",
-            #[cfg(feature = "persy")]
-            BoxRepoFactory::Persy(_) => "persy",
-            #[cfg(feature = "canopy")]
-            BoxRepoFactory::Canopy(_) => "canopy",
             // The buffer layer doesn't have an identity of its own
             // — recurse to the underlying backend so reflection
             // sees the real engine.
@@ -455,16 +439,8 @@ impl ShamirDb {
             BoxRepoFactory::InMemory(_) => None,
             #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(f) => Some(f.path.to_string_lossy().to_string()),
-            #[cfg(feature = "redb")]
-            BoxRepoFactory::Redb(f) => Some(f.path.to_string_lossy().to_string()),
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => Some(f.path.to_string_lossy().to_string()),
-            #[cfg(feature = "nebari")]
-            BoxRepoFactory::Nebari(f) => Some(f.path.to_string_lossy().to_string()),
-            #[cfg(feature = "persy")]
-            BoxRepoFactory::Persy(f) => Some(f.path.to_string_lossy().to_string()),
-            #[cfg(feature = "canopy")]
-            BoxRepoFactory::Canopy(f) => Some(f.path.to_string_lossy().to_string()),
             BoxRepoFactory::MemBuffer(f) => Self::extract_path(&f.inner),
             BoxRepoFactory::Cached(f) => Self::extract_path(&f.inner),
         }

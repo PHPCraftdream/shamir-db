@@ -253,7 +253,7 @@ async fn create_validator_persists_to_catalogue() {
 /// just-dropped previous instance's redb file lock is still being released.
 async fn init_redb_retry(path: &std::path::Path) -> ShamirDb {
     for _ in 0..50 {
-        match ShamirDb::init(SystemStoreConfig::Redb(path.to_path_buf())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(path.to_path_buf())).await {
             Ok(db) => return db,
             Err(e)
                 if {
@@ -277,7 +277,7 @@ async fn validators_persist_across_reopen() {
     let id;
     // Open, create validator, close.
     {
-        let db = ShamirDb::init(SystemStoreConfig::Redb(path.clone()))
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(path.clone()))
             .await
             .unwrap();
         id = db

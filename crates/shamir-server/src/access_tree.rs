@@ -157,7 +157,7 @@ async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result
         let mut last_err = None;
         let mut opened = None;
         for _ in 0..20 {
-            match ShamirDb::init(SystemStoreConfig::Redb(meta_path.clone())).await {
+            match ShamirDb::init(SystemStoreConfig::Fjall(meta_path.clone())).await {
                 Ok(db) => {
                     opened = Some(db);
                     break;

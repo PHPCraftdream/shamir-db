@@ -114,7 +114,7 @@ async fn lifecycle_create_use_rename_use_drop() {
 /// (synchronous on Windows, can lag on Linux). Bounded retry (~5s).
 async fn init_redb_retry(path: &std::path::Path) -> ShamirDb {
     for _ in 0..50 {
-        match ShamirDb::init(SystemStoreConfig::Redb(path.to_path_buf())).await {
+        match ShamirDb::init(SystemStoreConfig::Fjall(path.to_path_buf())).await {
             Ok(db) => return db,
             Err(e)
                 if {
@@ -137,7 +137,7 @@ async fn functions_persist_across_reopen() {
 
     // Open, create function, close.
     {
-        let db = ShamirDb::init(SystemStoreConfig::Redb(path.clone()))
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(path.clone()))
             .await
             .unwrap();
         db.create_function_from_wasm("echo", &echo_wasm(), false)
@@ -992,7 +992,7 @@ async fn function_meta_roundtrip() {
 
     // Open, create function with explicit metadata, close.
     {
-        let db = ShamirDb::init(SystemStoreConfig::Redb(path.clone()))
+        let db = ShamirDb::init(SystemStoreConfig::Fjall(path.clone()))
             .await
             .unwrap();
         let opts = CreateFunctionOptions {

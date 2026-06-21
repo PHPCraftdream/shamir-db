@@ -23,7 +23,7 @@ use shamir_connect::server::resume::{ConsumedCounterStore, ResumeConfig};
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
 
-use crate::user_directory::RedbUserDirectory;
+use crate::user_directory::FjallUserDirectory;
 
 /// Live shared state passed into [`handle_connection`].
 pub struct ConnectionContext {
@@ -34,7 +34,7 @@ pub struct ConnectionContext {
     pub secrets: Arc<ServerSecrets>,
     pub kdf_defaults: KdfParams,
     pub session_store: Arc<SessionStore>,
-    pub user_dir: Arc<RedbUserDirectory>,
+    pub user_dir: Arc<FjallUserDirectory>,
     pub lockout: Arc<dyn LockoutStore>,
     pub rate_limit: Arc<dyn RateLimiter>,
     pub argon2_sem: Arc<Argon2Semaphore>,
@@ -87,7 +87,7 @@ impl ConnectionContext {
         secrets: Arc<ServerSecrets>,
         kdf_defaults: KdfParams,
         session_store: Arc<SessionStore>,
-        user_dir: Arc<RedbUserDirectory>,
+        user_dir: Arc<FjallUserDirectory>,
         lockout: Arc<dyn LockoutStore>,
         rate_limit: Arc<dyn RateLimiter>,
         argon2_sem: Arc<Argon2Semaphore>,

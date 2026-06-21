@@ -62,19 +62,15 @@ arc-swap = "1.7"          # RCU-style atomic Arc swap (table_manager)
 # enabling storage backends without enabling the matching engine
 # feature would compile away the variant constructors.
 default = ["all-backends"]
-all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+all-backends = ["sled", "fjall"]
 # Opt-in: enables the N=100_000 long variant in the `fts_indexed` bench.
 # Setup takes several seconds per fixture (seeding 100k records + FTS
 # postings) and pushes past Criterion's default measurement window, so
 # it's gated to keep the default `cargo bench --bench fts_indexed` run
 # bounded.
 fts_indexed_long = []
-redb   = ["shamir-storage/redb"]
 sled   = ["shamir-storage/sled"]
 fjall  = ["shamir-storage/fjall"]
-nebari = ["shamir-storage/nebari"]
-persy  = ["shamir-storage/persy"]
-canopy = ["shamir-storage/canopy"]
 
 [target.'cfg(unix)'.dev-dependencies]
 dhat = "0.3"
@@ -168,12 +164,12 @@ harness = false
 [[bench]]
 name = "drain_throughput"
 harness = false
-required-features = ["redb", "fjall", "sled"]
+required-features = ["fjall", "sled"]
 
 [[bench]]
 name = "backend_matrix"
 harness = false
-required-features = ["redb", "fjall", "sled", "nebari", "persy", "canopy"]
+required-features = ["fjall", "sled"]
 
 [[bench]]
 name = "read_path_matrix"

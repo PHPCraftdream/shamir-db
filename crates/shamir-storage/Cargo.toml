@@ -12,19 +12,15 @@ license = "MIT OR Apache-2.0"
 default = ["all-backends"]
 
 # Convenience meta-feature: enables every concrete backend.
-all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+all-backends = ["sled", "fjall"]
 
 # Per-backend features. Each one toggles its `dep:<crate>` so the
 # corresponding storage engine + the `storage_*` module + the matching
 # `BoxRepo` / `BoxRepoFactory` variant only compile when asked for.
 # The in-memory backend is always available — it has no extra deps and
 # is required by tests across the workspace.
-redb   = ["dep:redb"]
 sled   = ["dep:sled"]
 fjall  = ["dep:fjall"]
-nebari = ["dep:nebari"]
-persy  = ["dep:persy"]
-canopy = ["dep:canopydb"]
 
 [dependencies]
 # Foundation
@@ -34,12 +30,8 @@ shamir-tunables    = { path = "../shamir-tunables" }
 
 # Backends — `optional = true` makes each one pulled in only when the
 # matching feature is enabled.
-redb     = { version = "3.1.0",  optional = true }
 fjall    = { version = "3.0.1",  optional = true }
-canopydb = { version = "0.2.5",  optional = true }
 sled     = { version = "0.34.7", optional = true }
-nebari   = { version = "0.5.5",  optional = true }
-persy    = { version = "1.7.1",  optional = true }
 
 # Async / runtime helpers used by the trait surface and a few backends
 tokio = { version = "1.49.0", features = ["full"] }
