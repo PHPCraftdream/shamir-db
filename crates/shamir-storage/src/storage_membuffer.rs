@@ -655,6 +655,12 @@ impl Store for MemBufferStore {
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
         let mut keys = Vec::with_capacity(values.len());
         let cache = self.state.cache.load();
+        // Publish dirty-nonempty BEFORE populating, matching sibling
+        // `insert` / `set` / `remove`. Without this, a concurrent `get()`
+        // reading dirty_nonempty (Acquire) sees `false`, skips the dirty
+        // probe (lines ~480), and stale-misses an insert_many'd key whose
+        // cache slot has already been evicted by moka but not yet flushed.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         for v in values {
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
@@ -677,6 +683,8 @@ impl Store for MemBufferStore {
         // SINGLE notify_one at the end. Last-write-wins within the
         // batch on duplicate keys (the dirty/cache inserts happen in
         // input order; the final state matches the per-element loop).
+        // Publish dirty-nonempty BEFORE populating, matching sibling `set`.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(items.len());
         for (k, v) in items {
@@ -705,6 +713,8 @@ impl Store for MemBufferStore {
         // Batched mirror of `remove` — see `set_many` for the
         // batching shape. Tombstones replace Live slots; dirty/cache
         // dual-write preserved, ONE notify_one.
+        // Publish dirty-nonempty BEFORE populating, matching sibling `remove`.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(keys.len());
         for k in keys {
