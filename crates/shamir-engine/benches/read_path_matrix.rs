@@ -290,7 +290,22 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         }
 
         // ── Shape 4: s3_range_and (sorted index on x, range-in-AND) ─
-        {
+        //
+        // This is the NON-SELECTIVE case (x >= 10, 99% pass) — kept here
+        // intentionally to document the "tipping point" where sorted-index
+        // scan visits virtually all rows and a full-table scan would win.
+        // At N=1M one iter is ~100s — Criterion would extend measurement
+        // to ~1000s/sample × 10 samples = ~3h, violating the workspace
+        // "max 10 min per bench" contract (CLAUDE.md).
+        //
+        // Cap this shape's N at 500K so even worst-case stays bounded
+        // (~50s/iter × 10 samples = ~8 min wall-clock). The shape's
+        // qualitative behaviour is identical at 500K vs 1M (both flatten
+        // the index-scan vs full-scan curve), so we lose no documentation
+        // value. The companion `s3_range_and_selective` cell (1% selectivity)
+        // continues to run at the full N range — that's where Phase 2 win
+        // is demonstrated.
+        if n <= 500_000 {
             let fixture = rt.block_on(async {
                 let f = build_table(n).await;
                 create_sorted_index(&f.mgr, "x_sorted", "x").await;
