@@ -1,5 +1,7 @@
 //! ORDER BY execution: QueryValue-native path.
 
+use std::collections::BinaryHeap;
+
 use smallvec::SmallVec;
 
 use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
@@ -39,6 +41,113 @@ pub fn apply_order_by_qv(records: &mut Vec<QueryValue>, order_by: &OrderBy) {
         .map(|i| tmp[i].take().expect("permutation index used twice"))
         .collect();
     *records = sorted;
+}
+
+/// Bounded top-K ORDER BY: returns the first `skip + take` records in order,
+/// using O(skip + take) memory via a `BinaryHeap` capped at `skip + take`.
+///
+/// The heap uses *reversed* comparison so the root is the WORST element in the
+/// current top-K set. When a new row compares better than the root, we pop the
+/// root and push the new row. After all rows are consumed, the heap is drained
+/// and sorted to produce the final ordered slice.
+///
+/// Insertion order (`idx`) is used as a tiebreaker for equal sort keys to
+/// match the stable-sort semantics of `apply_order_by_qv`.
+///
+/// The result is byte-identical to `apply_order_by_qv` + truncation.
+pub fn apply_order_by_topk(
+    records: Vec<QueryValue>,
+    order_by: &OrderBy,
+    skip: usize,
+    take: usize,
+) -> Vec<QueryValue> {
+    if order_by.items.is_empty() || records.is_empty() || take == 0 {
+        return Vec::new();
+    }
+
+    let k = skip.saturating_add(take);
+
+    // HeapItem carries pre-resolved sort keys, insertion index (for stable
+    // tie-breaking), and the value. Comparison is in ORDER BY direction;
+    // equal keys break by ascending insertion index (preserving insertion
+    // order, matching `sort_by` stability).
+    struct HeapItem {
+        keys: QvPreResolvedKeys,
+        idx: usize,
+        value: QueryValue,
+        items_ptr: *const [OrderByItem],
+    }
+
+    // SAFETY: QueryValue is Send, QvSortKey is Send, and items_ptr is only
+    // dereferenced within this function's scope where order_by is alive.
+    unsafe impl Send for HeapItem {}
+
+    impl HeapItem {
+        #[inline]
+        fn cmp_order(&self, other: &Self) -> std::cmp::Ordering {
+            let items = unsafe { &*self.items_ptr };
+            let ord = compare_qv_preresolved(&self.keys, &other.keys, items);
+            ord.then_with(|| self.idx.cmp(&other.idx))
+        }
+    }
+
+    impl PartialEq for HeapItem {
+        fn eq(&self, other: &Self) -> bool {
+            self.cmp(other) == std::cmp::Ordering::Equal
+        }
+    }
+    impl Eq for HeapItem {}
+    impl PartialOrd for HeapItem {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for HeapItem {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // BinaryHeap is a max-heap; root = worst candidate (sorts last).
+            self.cmp_order(other)
+        }
+    }
+
+    let items_ptr: *const [OrderByItem] = &order_by.items[..];
+    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(k + 1);
+
+    for (idx, value) in records.into_iter().enumerate() {
+        let keys = resolve_qv_order_keys(&value, &order_by.items);
+
+        if heap.len() < k {
+            heap.push(HeapItem {
+                keys,
+                idx,
+                value,
+                items_ptr,
+            });
+        } else if let Some(worst) = heap.peek() {
+            // If new element sorts BEFORE the worst in the heap, swap.
+            let new_item = HeapItem {
+                keys,
+                idx,
+                value,
+                items_ptr,
+            };
+            if new_item.cmp_order(worst) == std::cmp::Ordering::Less {
+                heap.pop();
+                heap.push(new_item);
+            }
+        }
+    }
+
+    // Drain and sort the top-K by ORDER BY direction + insertion order.
+    let mut top_k: Vec<HeapItem> = heap.into_vec();
+    top_k.sort_by(|a, b| a.cmp_order(b));
+
+    // Apply skip, then take.
+    top_k
+        .into_iter()
+        .skip(skip)
+        .take(take)
+        .map(|e| e.value)
+        .collect()
 }
 
 /// Owned sort key for QueryValue fields. Unlike the legacy `SortKey<'a>` this

@@ -744,11 +744,32 @@ impl TableManager {
         if query.select.distinct {
             qv_result = exec::apply_distinct_qv(qv_result);
         }
-        if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by_qv(&mut qv_result, order_by);
-        }
-        let (paged, pagination) =
-            exec::apply_pagination(qv_result, &query.pagination, query.count_total);
+        // Top-K path: when ORDER BY + finite LIMIT and no distinct/group_by,
+        // use a bounded heap (O(K) memory) instead of full sort (O(N) memory).
+        let (skip_resolved, take_resolved) = query.pagination.resolve();
+        let use_topk = query.order_by.is_some()
+            && take_resolved.is_some()
+            && !query.select.distinct
+            && !has_group_by
+            && !has_agg;
+
+        let (paged, pagination) = if use_topk {
+            let order_by = query.order_by.as_ref().unwrap();
+            let skip = skip_resolved as usize;
+            let take = take_resolved.unwrap() as usize;
+            let topk_result = exec::apply_order_by_topk(qv_result, order_by, skip, take);
+            // count_total with top-K: we don't know the total from the
+            // heap alone — but we tracked records_scanned. For true
+            // count_total, the full-sort path is needed; top-K is memory-opt
+            // only. Guard: count_total is already excluded above via the
+            // `read_counting` path dispatch.
+            (topk_result, None)
+        } else {
+            if let Some(ref order_by) = query.order_by {
+                exec::apply_order_by_qv(&mut qv_result, order_by);
+            }
+            exec::apply_pagination(qv_result, &query.pagination, query.count_total)
+        };
         let final_records: Vec<crate::query::read::QueryRecord> = paged
             .into_iter()
             .map(crate::query::read::QueryRecord::Direct)

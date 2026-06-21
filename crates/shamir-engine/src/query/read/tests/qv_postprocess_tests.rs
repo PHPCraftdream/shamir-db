@@ -15,7 +15,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::{apply_distinct_qv, apply_pagination, apply_select_value};
-use crate::query::read::order::apply_order_by_qv;
+use crate::query::read::order::{apply_order_by_qv, apply_order_by_topk};
 use crate::query::read::{
     apply_aggregate_all, apply_group_by, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
     Pagination, Select,
@@ -830,4 +830,73 @@ fn aggregate_all_no_group() {
     assert_eq!(result[0]["avg_age"], QueryValue::F64(28.75));
     assert_eq!(result[0]["min_age"], QueryValue::Int(25));
     assert_eq!(result[0]["max_age"], QueryValue::Int(35));
+}
+
+// ── Top-K correctness fuzz ─────────────────────────────────────────────────
+
+/// Verify that `apply_order_by_topk` produces byte-identical results to
+/// `apply_order_by_qv` + skip/take for random data, both ASC and DESC.
+#[test]
+fn apply_order_by_topk_byte_identical() {
+    let k = 10usize;
+    let n = 1000usize;
+
+    // Build 1000 random-ish records: {v: i64, name: String}
+    let mut records: Vec<QueryValue> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut m = new_map_wc(2);
+        // Deterministic pseudo-random value
+        let v = ((i as i64).wrapping_mul(0x5DEECE66D) ^ (i as i64 * 37)) % 500;
+        let name = format!("rec_{:04x}", i);
+        m.insert("v".to_string(), QueryValue::Int(v));
+        m.insert("name".to_string(), QueryValue::Str(name));
+        records.push(QueryValue::Map(m));
+    }
+
+    // Test both ASC and DESC
+    for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+        let order = OrderBy {
+            items: vec![OrderByItem {
+                field: vec!["v".to_string()],
+                direction,
+                nulls: None,
+            }],
+        };
+
+        // Reference: full sort + skip/take
+        let mut full_sorted = records.clone();
+        apply_order_by_qv(&mut full_sorted, &order);
+        let expected: Vec<QueryValue> = full_sorted.into_iter().take(k).collect();
+
+        // Top-K path
+        let topk_result = apply_order_by_topk(records.clone(), &order, 0, k);
+
+        // Byte-identical comparison via msgpack serialisation
+        let expected_bytes = rmp_serde::to_vec_named(&expected).unwrap();
+        let topk_bytes = rmp_serde::to_vec_named(&topk_result).unwrap();
+
+        assert_eq!(
+            expected_bytes, topk_bytes,
+            "topk result must be byte-identical to full-sort+truncate ({direction:?})"
+        );
+    }
+
+    // Test with skip > 0
+    let order = OrderBy::asc("v");
+    let skip = 5usize;
+    let take = 10usize;
+
+    let mut full_sorted = records.clone();
+    apply_order_by_qv(&mut full_sorted, &order);
+    let expected: Vec<QueryValue> = full_sorted.into_iter().skip(skip).take(take).collect();
+
+    let topk_result = apply_order_by_topk(records.clone(), &order, skip, take);
+
+    let expected_bytes = rmp_serde::to_vec_named(&expected).unwrap();
+    let topk_bytes = rmp_serde::to_vec_named(&topk_result).unwrap();
+
+    assert_eq!(
+        expected_bytes, topk_bytes,
+        "topk with skip must be byte-identical to full-sort+skip+take"
+    );
 }
