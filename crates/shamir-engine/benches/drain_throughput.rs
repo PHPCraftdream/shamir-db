@@ -136,7 +136,7 @@ fn bench_backend<F, Fut>(
 fn bench_drain_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("drain_throughput");
     // QUICK mode: sample=10, measurement=1s, warm_up=1s.
-    bu::tune(&mut group, 10, 1, 1);
+    bu::tune_tiered(&mut group, 10, 1, 1, 30);
 
     let concurrency_levels: &[usize] = &[8, 32, 128];
 
