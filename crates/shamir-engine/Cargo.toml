@@ -175,6 +175,10 @@ name = "backend_matrix"
 harness = false
 required-features = ["redb", "fjall", "sled", "nebari", "persy", "canopy"]
 
+[[bench]]
+name = "read_path_matrix"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
