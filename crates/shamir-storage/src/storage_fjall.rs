@@ -370,6 +370,14 @@ impl Store for FjallStore {
         })
     }
 
+    /// Prefix scan via `keyspace.range` — O(log N + M) per batch.
+    ///
+    /// Replaces the old O(N) full-iter + linear cursor re-seek that scanned
+    /// every key on every batch call. Fjall's `range` seeks directly to the
+    /// first matching key using the LSM-tree index, then `take_while` stops
+    /// at the first key that no longer starts with the prefix. Subsequent
+    /// batches use `Bound::Excluded(last_key)` to resume at exactly the right
+    /// position — same pattern as `iter_stream` above (lines ~323).
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
@@ -379,43 +387,51 @@ impl Store for FjallStore {
 
         Box::pin(stream! {
             let mut last_key: Option<Vec<u8>> = None;
-            let prefix_slice = prefix.to_vec();
+            let prefix_vec = prefix.to_vec();
 
             loop {
                 let keyspace_clone = keyspace.clone();
-                let start_key = last_key;
-                let prefix_clone = prefix_slice.clone();
+                let cur_last = last_key;
+                let pfx = prefix_vec.clone();
 
                 let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
-                    // First pass: collect all matching records (fjall iter order is not guaranteed)
-                    let mut all_matches: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                    for guard in keyspace_clone.iter() {
-                        let (key, value) = guard
+                    use std::ops::Bound;
+
+                    // Seek directly to the prefix boundary (or just past the cursor).
+                    let lower: Bound<Vec<u8>> = match cur_last {
+                        Some(ref c) => Bound::Excluded(c.clone()),
+                        None => Bound::Included(pfx.clone()),
+                    };
+                    let upper: Bound<Vec<u8>> = Bound::Unbounded;
+
+                    let mut items = Vec::new();
+                    let mut last_batch_key: Option<Vec<u8>> = None;
+
+                    // Range-seek + prefix boundary: take up to batch_size entries
+                    // that still start with `pfx`. The `take(batch_size)` bounds
+                    // the per-batch cost; the explicit prefix check terminates the
+                    // scan once we've passed the prefix range (fjall yields lex order).
+                    'batch: for guard in keyspace_clone.range((lower, upper)).take(batch_size) {
+                        let (key, value_slice) = guard
                             .into_inner()
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                        if key.starts_with(&prefix_clone) {
-                            all_matches.push((key.to_vec(), value.to_vec()));
+                        if !key.starts_with(&pfx) {
+                            // We've exited the prefix range — stop this batch.
+                            // The outer loop will also break because next batch
+                            // would start at last_batch_key (already past prefix).
+                            // We use a sentinel: push nothing, end loop.
+                            break 'batch;
                         }
+
+                        last_batch_key = Some(key.to_vec());
+                        items.push((
+                            Bytes::copy_from_slice(&key),
+                            Bytes::copy_from_slice(&value_slice),
+                        ));
                     }
 
-                    // Filter by cursor and take batch_size
-                    let start_idx = if let Some(start) = &start_key {
-                        all_matches.iter().position(|(k, _)| k.as_slice() > start.as_slice()).unwrap_or(all_matches.len())
-                    } else {
-                        0
-                    };
-
-                    let batch_range = start_idx..(start_idx + batch_size).min(all_matches.len());
-                    let batch_end = batch_range.end;
-                    let items: Vec<_> = all_matches[batch_range]
-                        .iter()
-                        .map(|(k, v)| (Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)))
-                        .collect();
-
-                    let last_key = batch_end.checked_sub(1).and_then(|i| all_matches.get(i).map(|(k, _)| k.clone()));
-
-                    Ok((items, last_key))
+                    Ok((items, last_batch_key))
                 })
                 .await
                 .map_err(|e| DbError::Internal(e.to_string()))?;
