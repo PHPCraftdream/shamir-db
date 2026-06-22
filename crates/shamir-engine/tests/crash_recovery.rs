@@ -718,10 +718,23 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
 #[tokio::test]
 async fn crash_mid_drain_recovers_all() {
     let (recovered, committed) = trunc_crash_then_recover("drain_replay").await;
+    // Progress oracle uses `recovered`, NOT `committed`. The `drain_replay`
+    // seam fires from the BACKGROUND drainer (woken by every `commit_tx`)
+    // on the FIRST drained version, often BEFORE the child's main loop
+    // has had a chance to `sync_wal()` + `write_sidecar(n)` — so the
+    // sidecar `committed` count legitimately lags by one in-flight record
+    // for this specific seam. Recovery still reconstructs that in-flight
+    // version idempotently via `recover_inflight_v2`, so `recovered >= 1`
+    // is the load-bearing progress guarantee (sidebar-independent). On
+    // slower backends (pre-b2b1280 redb) the race never exposed itself;
+    // on fjall it is deterministic.
     assert!(
-        committed >= 1,
-        "the child must have durably committed at least one record before the \
-         drain_replay crash fired"
+        recovered >= 1,
+        "the drainer must have replayed at least one inflight version \
+         before the drain_replay crash fired (the sidecar may have lagged \
+         because the background drainer fired before sync_wal completed, \
+         but recovery reconstructs every inflight WAL entry idempotently — \
+         recovered {recovered}, committed {committed})"
     );
     // Zero loss (see `pre_truncate` for the +1 survivor window): the entry being
     // replayed when the process died is still inflight (mark_durable did not run),
