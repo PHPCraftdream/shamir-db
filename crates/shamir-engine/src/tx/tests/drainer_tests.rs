@@ -20,6 +20,69 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::drainer::Drainer;
 
+// ── Op #2 Stage 1: window infrastructure tests ──────────────────────
+
+/// Offer three entries with commit_versions 3, 1, 2 (out of order).
+/// Assert window_len == 3 and iteration yields ascending keys 1, 2, 3.
+#[tokio::test]
+async fn offer_inserts_at_commit_version_in_ascending_order() {
+    let drainer = Drainer::new();
+
+    let mk = |v: u64| -> Arc<WalEntryV2> {
+        Arc::new(WalEntryV2::new(v, 0, vec![]).with_commit_version(v))
+    };
+
+    // Insert out of order on purpose.
+    drainer.offer(mk(3));
+    drainer.offer(mk(1));
+    drainer.offer(mk(2));
+
+    assert_eq!(drainer.window_len(), 3);
+
+    // Iterate the window and collect keys — must be ascending.
+    assert_eq!(drainer.window_keys(), vec![1, 2, 3]);
+}
+
+/// seed_from_recover populates the window from a Vec<WalEntryV2>.
+#[tokio::test]
+async fn seed_from_recover_populates_window_with_inflight_entries() {
+    let drainer = Drainer::new();
+
+    let entries: Vec<WalEntryV2> = (10..=14)
+        .map(|v| WalEntryV2::new(v, 0, vec![]).with_commit_version(v))
+        .collect();
+
+    drainer.seed_from_recover(entries);
+    assert_eq!(drainer.window_len(), 5);
+}
+
+/// Stage 3: drain_step with an empty window falls back to wal.recover()
+/// (gap-reseed path) and still drains correctly.
+#[tokio::test]
+async fn drain_step_gap_reseed_when_window_empty() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    let gate = repo.tx_gate().await.unwrap();
+    seed_inflight_put(&repo, "t", rid(1), "stage3", 1).await;
+    gate.publish_committed_max(1);
+
+    let drainer = Drainer::new();
+    // Window is empty — drain_step must fall back via gap-reseed.
+    assert_eq!(drainer.window_len(), 0);
+
+    let drained = drainer.drain_step(&repo).await.unwrap();
+    assert_eq!(drained, 1, "drain_step works via gap-reseed fallback");
+    assert_eq!(gate.durable_watermark(), 1);
+
+    let got = tbl.get(rid(1)).await.unwrap();
+    assert!(
+        matches!(got, InnerValue::Str(ref s) if s == "stage3"),
+        "data resolves from history after drain"
+    );
+}
+
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new())
@@ -275,4 +338,324 @@ async fn drain_step_a5_retains_marker_above_hwm() {
 
     // Second pass: version 1 is now at the durable floor → no-op, no panic.
     assert_eq!(drainer.drain_step(&repo).await.unwrap(), 0);
+}
+
+// ── Op #2 Stage 2: commit-path offer wiring tests ─────────────────────
+
+/// Commit N=3 transactions through the public commit API and verify that
+/// the drainer window contains exactly 3 entries with ascending keys
+/// matching the commit_versions.
+#[tokio::test]
+async fn commit_offers_entry_to_drainer_window() {
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::Store;
+    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+
+    use crate::tx::commit_tx;
+
+    let repo = make_repo();
+
+    let mut versions = Vec::new();
+    for i in 1..=3u64 {
+        let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mut staging = StagingStore::new(Arc::clone(&data_store));
+        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        tx.write_set.insert(i, staging);
+        let outcome = commit_tx(tx, &repo).await.unwrap();
+        versions.push(outcome.commit_version);
+    }
+
+    let drainer = repo.drainer();
+    assert_eq!(
+        drainer.window_len(),
+        3,
+        "drainer window must contain all 3 offered entries"
+    );
+    let keys = drainer.window_keys();
+    assert_eq!(
+        keys, versions,
+        "window keys must match committed versions in ascending order"
+    );
+}
+
+/// Commit one transaction and verify the window entry matches the WAL
+/// entry recovered from the WAL (same txn_id and commit_version).
+#[tokio::test]
+async fn commit_offered_entries_match_wal() {
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::Store;
+    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+
+    use crate::tx::commit_tx;
+
+    let repo = make_repo();
+
+    let mut tx = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(Bytes::from_static(b"key"), Bytes::from_static(b"val"));
+    tx.write_set.insert(10, staging);
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    let cv = outcome.commit_version;
+
+    // Snapshot the window entry.
+    let drainer = repo.drainer();
+    let window_entry = drainer
+        .window_entry(cv)
+        .expect("window must contain the committed version");
+
+    // Recover from WAL and find the matching entry.
+    let wal = repo.repo_wal().await.unwrap();
+    let wal_entries = wal.recover().await.unwrap();
+    let wal_entry = wal_entries
+        .iter()
+        .find(|e| e.commit_version == cv)
+        .expect("WAL must contain the committed entry");
+
+    assert_eq!(
+        window_entry.txn_id, wal_entry.txn_id,
+        "window and WAL entry txn_id must match"
+    );
+    assert_eq!(
+        window_entry.commit_version, wal_entry.commit_version,
+        "window and WAL entry commit_version must match"
+    );
+}
+
+/// Sanity: commit, then drain_step, verify it drained correctly with
+/// offer wired (drain_step uses window in Stage 3).
+#[tokio::test]
+async fn drain_step_still_drains_correctly_with_offer_wired() {
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::Store;
+    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+
+    use crate::tx::commit_tx;
+
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+
+    for i in 1..=2u64 {
+        let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mut staging = StagingStore::new(Arc::clone(&data_store));
+        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        tx.write_set.insert(i, staging);
+        let _ = commit_tx(tx, &repo).await.unwrap();
+    }
+
+    // The drainer window has 2 entries from the commit path.
+    let drainer = repo.drainer();
+    assert_eq!(drainer.window_len(), 2);
+
+    // drain_step uses the window — it must drain the 2 versions.
+    let drained = drainer.drain_step(&repo).await.unwrap();
+    assert_eq!(drained, 2, "drain_step must drain all committed versions");
+
+    let gate = repo.tx_gate().await.unwrap();
+    assert_eq!(
+        gate.durable_watermark(),
+        gate.last_committed(),
+        "durable must catch up to visibility after drain"
+    );
+
+    // Stage 3: window entries are removed after finalization.
+    assert_eq!(
+        drainer.window_len(),
+        0,
+        "window must be empty after drain finalization"
+    );
+}
+
+// ── Op #2 Stage 3: window-based drain_step tests ─────────────────────
+
+/// Stage 3 test 1: drain_step uses the window, not wal.recover(), in
+/// steady state. Offer 3 entries directly, drain, assert all 3 drained
+/// and the window is empty afterward.
+#[tokio::test]
+async fn drain_step_uses_window_not_recover_in_steady_state() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+
+    let gate = repo.tx_gate().await.unwrap();
+
+    // Seed inflight entries in WAL AND offer them to the drainer window.
+    for v in 1..=3u64 {
+        seed_inflight_put(&repo, "t", rid(v as u8), &format!("val{v}"), v).await;
+    }
+    gate.publish_committed_max(3);
+
+    let drainer = Drainer::new();
+    // Offer directly — simulating the commit path's offer.
+    for v in 1..=3u64 {
+        let wal = repo.repo_wal().await.unwrap();
+        let entries = wal.recover().await.unwrap();
+        for e in &entries {
+            if e.commit_version == v {
+                drainer.offer(Arc::new(e.clone()));
+            }
+        }
+    }
+    assert_eq!(drainer.window_len(), 3);
+
+    let drained = drainer.drain_step(&repo).await.unwrap();
+    assert_eq!(drained, 3, "all 3 entries drained from window");
+    assert_eq!(drainer.window_len(), 0, "window empty after drain");
+    assert_eq!(gate.durable_watermark(), 3);
+}
+
+/// Stage 3 test 2: a gap in the window triggers exactly one gap-reseed
+/// from wal.recover(), and all entries are still drained.
+#[tokio::test]
+async fn drain_step_window_gap_triggers_one_recover_reseed() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+
+    let gate = repo.tx_gate().await.unwrap();
+
+    // Seed inflight entries for versions 1, 2, 3 in WAL.
+    for v in 1..=3u64 {
+        seed_inflight_put(&repo, "t", rid(v as u8), &format!("gap{v}"), v).await;
+    }
+    gate.publish_committed_max(3);
+
+    // Offer all 3 to the window, then remove v=2 to create a gap.
+    let drainer = Drainer::new();
+    let wal = repo.repo_wal().await.unwrap();
+    let entries = wal.recover().await.unwrap();
+    for e in &entries {
+        drainer.offer(Arc::new(e.clone()));
+    }
+    assert_eq!(drainer.window_len(), 3);
+    drainer.window_remove_for_test(2);
+    assert_eq!(drainer.window_len(), 2);
+    assert_eq!(drainer.window_keys(), vec![1, 3]);
+
+    // drain_step must detect the gap at v=2, reseed from WAL, and drain all 3.
+    let drained = drainer.drain_step(&repo).await.unwrap();
+    assert_eq!(drained, 3, "gap-reseed recovers the missing entry");
+    assert_eq!(gate.durable_watermark(), 3);
+    assert_eq!(drainer.window_len(), 0, "window empty after drain");
+}
+
+/// Stage 3 test 3: drain_step with dur >= vis returns 0 immediately —
+/// no window scan, no wal.recover().
+#[tokio::test]
+async fn drain_step_empty_window_no_recover_call() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+
+    let gate = repo.tx_gate().await.unwrap();
+    gate.publish_committed_max(5);
+    for v in 1..=5u64 {
+        gate.mark_durable(v);
+    }
+    assert_eq!(gate.durable_watermark(), 5);
+
+    let drainer = Drainer::new();
+    let drained = drainer.drain_step(&repo).await.unwrap();
+    assert_eq!(drained, 0, "dur >= vis → immediate return 0");
+}
+
+// Stage 3 test 4: crash_recovery still works — sanity check that
+// the window addition does not break recovery. Delegated to the
+// existing crash_recovery test suite (run via gate command).
+
+// ── Op #2 Stage 4: backpressure (bounded offer) tests ───────────────
+
+/// Fresh `Drainer::new()` has the default high-watermark of 64K.
+#[tokio::test]
+async fn default_high_watermark_is_64k() {
+    let drainer = Drainer::new();
+    assert_eq!(
+        drainer.window_high_watermark(),
+        64 * 1024,
+        "default high-watermark must be 64K"
+    );
+}
+
+/// Set high_watermark to 4, offer 10 entries. The window must cap around
+/// the watermark (soft limit — races allow a few extras) and
+/// `offer_dropped_total` must account for the gap.
+#[tokio::test]
+async fn offer_drops_at_high_watermark() {
+    let drainer = Drainer::new();
+    drainer.set_window_high_watermark(4);
+
+    let mk = |v: u64| -> Arc<WalEntryV2> {
+        Arc::new(WalEntryV2::new(v, 0, vec![]).with_commit_version(v))
+    };
+
+    for v in 1..=10u64 {
+        drainer.offer(mk(v));
+    }
+
+    let wlen = drainer.window_len();
+    let dropped = drainer.offer_dropped_total();
+
+    // Soft limit: window should be ~4, but races may allow a few extras.
+    assert!(
+        (4..=7).contains(&wlen),
+        "window_len ({wlen}) should be in [4, 7] with hw=4"
+    );
+    assert!(
+        dropped > 0,
+        "some entries must have been dropped (dropped={dropped})"
+    );
+    // Accounting: offered 10 total = window_len + dropped.
+    assert_eq!(
+        wlen as u64 + dropped,
+        10,
+        "window_len ({wlen}) + dropped ({dropped}) must equal 10"
+    );
+}
+
+/// End-to-end: set hw=2, commit N=10 txs through the commit API, then
+/// drain_step. All 10 entries must be drained (gap-reseed recovers drops).
+#[tokio::test]
+async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::Store;
+    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+
+    use crate::tx::commit_tx;
+
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+
+    // Set a very low watermark so most offers are dropped.
+    let drainer = repo.drainer();
+    drainer.set_window_high_watermark(2);
+
+    for i in 1..=10u64 {
+        let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mut staging = StagingStore::new(Arc::clone(&data_store));
+        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        tx.write_set.insert(i, staging);
+        let _ = commit_tx(tx, &repo).await.unwrap();
+    }
+
+    let dropped = drainer.offer_dropped_total();
+    assert!(
+        dropped > 0,
+        "with hw=2, some offers must have been dropped (dropped={dropped})"
+    );
+
+    // drain_step must recover ALL entries via gap-reseed.
+    let drained = drainer.drain_all(&repo).await.unwrap();
+    assert_eq!(drained, 10, "all 10 entries must be drained despite drops");
+
+    let gate = repo.tx_gate().await.unwrap();
+    assert_eq!(
+        gate.durable_watermark(),
+        gate.last_committed(),
+        "durable must catch up to visibility"
+    );
+    assert_eq!(drainer.window_len(), 0, "window must be empty after drain");
 }

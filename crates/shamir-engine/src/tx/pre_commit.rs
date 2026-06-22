@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use shamir_storage::error::DbError;
 use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
@@ -116,6 +118,10 @@ pub(super) struct PreCommit {
     /// AFTER the publisher finalizes every claim; any panic before that drops
     /// them → release. Empty off Serializable.
     pub(super) cell_guards: Vec<CellReservationGuard>,
+    /// Op #2 Stage 2: the WAL entry that was just persisted via
+    /// `begin_grouped`, wrapped in `Arc` so the caller can `offer` it to
+    /// the drainer window without cloning the payload again.
+    pub(super) wal_entry_arc: Arc<WalEntryV2>,
 }
 
 /// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
@@ -281,6 +287,9 @@ pub(super) struct ValidatedPreCommit {
     /// fails, or holds them through `materialize` and `disarm`s them once the
     /// publisher has finalized every claim. Empty off Serializable.
     pub(super) cell_guards: Vec<CellReservationGuard>,
+    /// Op #2 Stage 2: the WAL entry wrapped in `Arc` for drainer window offer.
+    /// Built during validation, cloned into `wal_entry` for WAL persistence.
+    pub(super) wal_entry_arc: Arc<WalEntryV2>,
 }
 
 /// Locked validation phase: Phases 2 + 2-bis + C6 + 3 (assign) + WAL entry build.
@@ -370,13 +379,17 @@ pub(super) async fn pre_commit_locked_validate(
     let mut wal_entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops)
         .with_commit_version(commit_version);
     wal_entry.interner_delta = interner_delta;
+    // Op #2 Stage 2: wrap in Arc for drainer window offer. The `wal_entry`
+    // field is a clone for WAL persistence (`begin_grouped` takes owned).
+    let wal_entry_arc = Arc::new(wal_entry);
 
     Ok(Some(ValidatedPreCommit {
         commit_version,
         uwl_guards,
-        wal_entry,
+        wal_entry: (*wal_entry_arc).clone(),
         version_guard,
         cell_guards,
+        wal_entry_arc,
     }))
 }
 
@@ -490,8 +503,13 @@ pub(super) async fn pre_commit_locked(
     let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     entry.interner_delta = interner_delta;
+    // Op #2 Stage 2: wrap the entry in Arc BEFORE persisting so the same
+    // logical entry is shared between the WAL and the drainer window.
+    // `begin_grouped` takes owned `WalEntryV2`, so we clone out of the Arc
+    // (cheap: one clone per commit).
+    let entry_arc = Arc::new(entry);
     if let Err(e) = wal
-        .begin_grouped(entry, shamir_wal::WalDurability::Buffered)
+        .begin_grouped((*entry_arc).clone(), shamir_wal::WalDurability::Buffered)
         .await
     {
         // version_guard drops here → mark(Aborted): WAL begin failed,
@@ -518,5 +536,6 @@ pub(super) async fn pre_commit_locked(
         uwl_guards,
         version_guard,
         cell_guards,
+        wal_entry_arc: entry_arc,
     }))
 }

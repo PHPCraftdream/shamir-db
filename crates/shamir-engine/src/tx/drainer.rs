@@ -41,14 +41,20 @@
 //! is OK). The cutover that makes the drainer the SOLE history writer is
 //! P1d-2b.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+/// Default high-watermark for the drain window. When `window.len() >=` this
+/// value, `offer` drops the entry (backpressure). The gap-reseed path in
+/// `drain_step` recovers dropped entries from the WAL on the next pass.
+const DEFAULT_WINDOW_HIGH_WATERMARK: usize = 64 * 1024;
+
+use scc::TreeIndex;
 use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
-use shamir_wal::WalOpV2;
+use shamir_wal::{WalEntryV2, WalOpV2};
 use tokio::sync::Notify;
 
 use crate::repo::RepoInstance;
@@ -69,6 +75,18 @@ pub struct Drainer {
     /// Total versions drained across all `drain_step` calls — telemetry and
     /// a hook for tests to assert progress without reading the gate.
     drained_total: AtomicU64,
+    /// Per-repo ordered window of inflight WAL entries already offered by
+    /// the commit path. Replaces wal.recover() on the drain hot path —
+    /// see Op #2 design.
+    window: TreeIndex<u64, Arc<WalEntryV2>>,
+    /// Op #2 Stage 4: hard cap on the window depth. When `window.len() >=
+    /// high_watermark`, `offer` becomes a no-op (the entry is dropped).
+    /// Default 64K. Configurable via `set_window_high_watermark`.
+    window_high_watermark: AtomicUsize,
+    /// Op #2 Stage 4: total entries dropped by `offer` due to backpressure.
+    /// Telemetry only — never affects correctness (drops are recovered by
+    /// `drain_step`'s gap-reseed path).
+    offer_dropped_total: AtomicU64,
 }
 
 impl Default for Drainer {
@@ -83,6 +101,9 @@ impl Drainer {
         Self {
             notify: Notify::new(),
             drained_total: AtomicU64::new(0),
+            window: TreeIndex::new(),
+            window_high_watermark: AtomicUsize::new(DEFAULT_WINDOW_HIGH_WATERMARK),
+            offer_dropped_total: AtomicU64::new(0),
         }
     }
 
@@ -95,6 +116,69 @@ impl Drainer {
     /// Total versions drained across the drainer's lifetime.
     pub fn drained_total(&self) -> u64 {
         self.drained_total.load(Ordering::Relaxed)
+    }
+
+    /// Offer a WAL entry to the drain window (called by the commit path
+    /// AFTER wal.begin_grouped returns durable, Op #2 Stage 2).
+    /// Insert is idempotent at the commit_version key. Lock-free.
+    pub fn offer(&self, entry: Arc<WalEntryV2>) {
+        let hw = self.window_high_watermark.load(Ordering::Relaxed);
+        if self.window.len() >= hw {
+            // Backpressure: drop, recovery is via drain_step's gap-reseed.
+            self.offer_dropped_total.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let _ = self.window.insert(entry.commit_version, entry);
+    }
+
+    /// Seed the window from a cold-start `wal.recover()` result.
+    /// Called ONCE during Drainer::spawn (or RepoInstance::drainer init).
+    pub fn seed_from_recover(&self, entries: Vec<WalEntryV2>) {
+        for e in entries {
+            let v = e.commit_version;
+            let _ = self.window.insert(v, Arc::new(e));
+        }
+    }
+
+    /// Test-only window length probe (replaces public `len` to keep API tight).
+    #[cfg(test)]
+    pub fn window_len(&self) -> usize {
+        self.window.len()
+    }
+
+    /// Test-only: collect window keys in ascending order.
+    #[cfg(test)]
+    pub fn window_keys(&self) -> Vec<u64> {
+        let guard = scc::ebr::Guard::new();
+        self.window.iter(&guard).map(|(k, _)| *k).collect()
+    }
+
+    /// Test-only: retrieve a window entry by commit_version.
+    #[cfg(test)]
+    pub fn window_entry(&self, version: u64) -> Option<Arc<WalEntryV2>> {
+        self.window.peek_with(&version, |_, v| Arc::clone(v))
+    }
+
+    /// Total entries dropped by `offer` due to backpressure (telemetry).
+    pub fn offer_dropped_total(&self) -> u64 {
+        self.offer_dropped_total.load(Ordering::Relaxed)
+    }
+
+    /// Set the window high-watermark (soft cap for `offer` backpressure).
+    pub fn set_window_high_watermark(&self, hw: usize) {
+        self.window_high_watermark.store(hw, Ordering::Relaxed);
+    }
+
+    /// Test-only: read the current window high-watermark.
+    #[cfg(test)]
+    pub fn window_high_watermark(&self) -> usize {
+        self.window_high_watermark.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: remove a window entry by commit_version (for gap simulation).
+    #[cfg(test)]
+    pub(crate) fn window_remove_for_test(&self, version: u64) {
+        self.window.remove(&version);
     }
 
     /// cancel-safe: NO — multi-step state mutation per entry (replay →
@@ -125,23 +209,45 @@ impl Drainer {
             return Ok(0);
         }
 
-        let wal = repo.repo_wal().await?;
-        let mut entries = wal.recover().await?;
-        // Ascending commit_version: matches recovery (HIGH-5) so last-write-
-        // wins ops resolve to the correct final value, AND lets us stop at
-        // the first replay failure without skipping a hole in the durable
-        // prefix (contiguity).
-        entries.sort_by_key(|e| e.commit_version);
+        // Op #2 Stage 3: scan the in-memory window for the contiguous
+        // ascending prefix [dur+1 .. vis]. No I/O in steady state.
+        let mut window_entries: Vec<Arc<WalEntryV2>> = Vec::new();
+        {
+            let guard = scc::ebr::Guard::new();
+            let mut expected = dur + 1;
+            for (k, v) in self.window.range(expected..=vis, &guard) {
+                if *k != expected {
+                    break; // gap — reseed below
+                }
+                window_entries.push(Arc::clone(v));
+                expected += 1;
+            }
+        }
 
-        // Filter to the drainable window.
-        let window: Vec<_> = entries
-            .iter()
-            .filter(|e| e.commit_version > dur && e.commit_version <= vis)
-            .collect();
+        // Gap-reseed fallback: if the contiguous prefix is incomplete,
+        // do ONE wal.recover() to fill the window and retry.
+        if (window_entries.len() as u64) < (vis - dur) {
+            let wal = repo.repo_wal().await?;
+            let recovered = wal.recover().await?;
+            self.seed_from_recover(recovered);
+            // Retry the window scan once.
+            window_entries.clear();
+            let guard2 = scc::ebr::Guard::new();
+            let mut expected2 = dur + 1;
+            for (k, v) in self.window.range(expected2..=vis, &guard2) {
+                if *k != expected2 {
+                    break;
+                }
+                window_entries.push(Arc::clone(v));
+                expected2 += 1;
+            }
+        }
 
-        if window.is_empty() {
+        if window_entries.is_empty() {
             return Ok(0);
         }
+
+        let wal = repo.repo_wal().await?;
 
         // ================================================================
         // Phase A: per-entry interner delta + accumulate data ops per table.
@@ -152,11 +258,11 @@ impl Drainer {
         let mut table_batches: TFxMap<u64, Vec<(u64, Vec<KvOp>)>> = TFxMap::default();
         // Per-entry: which table_ids does this entry touch (for Phase C gating).
         let mut entry_tables: Vec<(u64 /* commit_version */, Vec<u64> /* table_ids */)> =
-            Vec::with_capacity(window.len());
+            Vec::with_capacity(window_entries.len());
         // Track Phase A failure — stop accumulating and drain nothing.
         let mut phase_a_failed = false;
 
-        for entry in &window {
+        for entry in &window_entries {
             let v = entry.commit_version;
 
             // A4-recovery keystone: apply interner delta BEFORE data.
@@ -267,7 +373,7 @@ impl Drainer {
         // ================================================================
 
         let mut drained = 0usize;
-        for (entry, (v, touched_tables)) in window.iter().zip(entry_tables.iter()) {
+        for (entry, (v, touched_tables)) in window_entries.iter().zip(entry_tables.iter()) {
             // Contiguity: stop at the first entry that touches a failed table.
             // Entries above this version must not be finalized (the watermark
             // would jump over the gap).
@@ -323,6 +429,10 @@ impl Drainer {
             // D2 P1d-2c crash seam: `v` is now fully durable in history and
             // truncation has been attempted. Recovery re-applies idempotently.
             crate::tx::commit::maybe_crash("phase7", repo).await;
+
+            // Op #2 Stage 3: remove the finalized entry from the window so
+            // memory does not grow without bound.
+            self.window.remove(v);
         }
 
         if drained > 0 {
@@ -427,6 +537,30 @@ impl Drainer {
     pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
         let drainer = Arc::downgrade(self);
         tokio::spawn(async move {
+            // Op #2 Stage 1: seed the drainer window from WAL recovery on
+            // cold start so the window contains all inflight entries before
+            // the first drain_step. Best-effort — if the WAL is unreachable
+            // (shouldn't happen on a healthy repo) the loop still runs and
+            // drain_step falls back to wal.recover() as before.
+            if let Some(this) = drainer.upgrade() {
+                match repo.repo_wal().await {
+                    Ok(wal) => match wal.recover().await {
+                        Ok(entries) => this.seed_from_recover(entries),
+                        Err(e) => {
+                            log::warn!(
+                                "drainer spawn: wal.recover() for seed failed: {e}; \
+                                 window starts empty"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        log::warn!(
+                            "drainer spawn: repo_wal() for seed failed: {e}; \
+                             window starts empty"
+                        );
+                    }
+                }
+            }
             loop {
                 // Exit promptly once every foreground repo clone has dropped.
                 if live.upgrade().is_none() {

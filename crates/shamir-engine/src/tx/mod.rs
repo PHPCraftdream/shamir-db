@@ -4,7 +4,7 @@ pub mod commit_phases;
 // and unit-tested, but NOT wired into the commit path — the cutover that
 // makes it the sole history writer is P1d-2b. `dead_code` until then.
 #[allow(dead_code)]
-pub(crate) mod drainer;
+pub mod drainer;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod group_commit;
 pub(super) mod materialize;
