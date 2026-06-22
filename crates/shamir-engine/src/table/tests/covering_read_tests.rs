@@ -14,6 +14,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_query_types::filter::{FieldPath, Filter, FilterValue};
 use shamir_query_types::read::select::Select;
+use shamir_query_types::read::OrderBy;
 use shamir_query_types::read::ReadQuery;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -234,5 +235,73 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
         index_used.contains("covering"),
         "index_used must still be 'covering'; got {:?}",
         index_used
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #128 regression — top-K ORDER BY + LIMIT must still emit pagination metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A plain MVCC table with NO sorted index — so an `ORDER BY` query is
+/// forced through the in-memory top-K heap path (`use_topk` in
+/// `read_exec.rs`), not an index-ordered scan.
+async fn make_plain_mvcc_table() -> TableManager {
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let base = TableManager::create("t".into(), Arc::clone(&data), Arc::clone(&info))
+        .await
+        .unwrap();
+    let gate = Arc::new(RepoTxGate::fresh());
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
+    base.with_mvcc_store(mvcc)
+}
+
+/// The top-K read path (`use_topk` in `read_exec.rs`: ORDER BY + finite
+/// LIMIT, no distinct/group_by/agg) once hardcoded `pagination: None`,
+/// silently dropping pagination metadata for every ordered+limited query —
+/// while the sibling `apply_pagination` branch returned `Some(..)`. This is
+/// the engine-level lock for that wire-contract regression (#128): an
+/// ordered+limited read served by the heap must return `Some(PaginationInfo)`,
+/// matching the non-top-K branch, AND the heap must still return the correct
+/// top rows. A plain (no-index) table guarantees the top-K path is taken
+/// rather than an index-ordered scan.
+#[tokio::test]
+async fn topk_order_by_limit_emits_pagination() {
+    let tbl = make_plain_mvcc_table().await;
+
+    insert_record(&tbl, 10, "a@example.com").await;
+    insert_record(&tbl, 20, "b@example.com").await;
+    insert_record(&tbl, 30, "c@example.com").await;
+    insert_record(&tbl, 40, "d@example.com").await;
+    insert_record(&tbl, 50, "e@example.com").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // ORDER BY score DESC LIMIT 2 → triggers the top-K heap path.
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::desc("score"))
+        .limit(2);
+    let result = tbl.read(&query, &ctx).await.unwrap();
+
+    assert!(
+        result.pagination.is_some(),
+        "#128 regression: top-K ORDER BY + LIMIT must emit pagination \
+         metadata (got None — the heap path dropped it)"
+    );
+    assert_eq!(result.records.len(), 2, "LIMIT 2 yields exactly two rows");
+
+    // Heap correctness: top two scores are 50 then 40.
+    let scores: Vec<i64> = result
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_i64("score"))
+        .collect();
+    assert_eq!(
+        scores,
+        vec![50, 40],
+        "top-K returns the highest scores in order"
     );
 }
