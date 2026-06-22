@@ -23,9 +23,10 @@ use tokio_stream::{StreamExt, StreamMap};
 
 use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedBytes};
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
-use super::filter_eval::bytes_to_arc;
+use super::filter_eval::{bytes_to_arc, CompiledFilterSlot};
 use super::push::{make_deliver_data, try_push_event};
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
+use arc_swap::ArcSwapOption;
 
 /// Convert cached raw bytes + interner to a `QueryValue` for delivery.
 ///
@@ -108,6 +109,17 @@ pub(crate) async fn bridge_task(
         // O(1) target index: (repo_idx, table) -> target indices.
         // Built once at subscribe time; replaces the two O(T) linear scans.
         let target_index = build_target_index(&targets, &repo_idx);
+
+        // Per-target compiled-filter cache slots (parallel to `targets`).
+        // `Some(slot)` for targets with a filter (lazily populated on first
+        // event, recompiled when the interner grows); `None` for targets
+        // without a filter. This avoids re-running `compile_filter` (which
+        // includes `Regex::new`, `TSet` construction, `String` clones) on
+        // every event × every subscriber.
+        let filter_slots: Vec<Option<CompiledFilterSlot>> = targets
+            .iter()
+            .map(|(_, _, _, filter)| filter.as_ref().map(|_| ArcSwapOption::empty()))
+            .collect();
         let mut watermarks: Vec<u64> = vec![0; repos.len()];
 
         // Journal backfill for from_version resume.
@@ -153,6 +165,7 @@ pub(crate) async fn bridge_task(
                             };
                             if !matches_any_indexed(
                                 &targets,
+                                &filter_slots,
                                 &target_index,
                                 ri,
                                 &change.table,
@@ -161,12 +174,22 @@ pub(crate) async fn bridge_task(
                             ) {
                                 continue;
                             }
-                            // Convert bytes -> QueryValue lazily: only for events
-                            // that passed the filter and must be delivered.
-                            let value_qv: Option<QueryValue> = match bytes_decoded.as_ref() {
-                                Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
-                                None => None,
-                            };
+                            // Convert bytes -> QueryValue lazily: only for
+                            // events that passed the filter and must be
+                            // delivered. Mirrors the cached fan-out path: only
+                            // `DeliverMode::Records` consumes value_qv (via
+                            // `make_event_data`); Keys/Batch/Call ignore it, so
+                            // gate the de-intern on Records to skip the decode
+                            // entirely in those modes.
+                            let value_qv: Option<QueryValue> =
+                                if matches!(deliver, DeliverMode::Records) {
+                                    match bytes_decoded.as_ref() {
+                                        Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
+                                        None => None,
+                                    }
+                                } else {
+                                    None
+                                };
                             let data = make_deliver_data(
                                 &deliver,
                                 &db,
@@ -330,6 +353,7 @@ pub(crate) async fn bridge_task(
                         let bytes_ref = (*decoded_arc).as_ref();
                         if !matches_any_indexed(
                             &targets,
+                            &filter_slots,
                             &target_index,
                             ri,
                             &change.table,
@@ -338,18 +362,12 @@ pub(crate) async fn bridge_task(
                         ) {
                             continue;
                         }
-                        // Convert bytes -> QueryValue lazily (only for events
-                        // that passed the filter and must be delivered).
-                        // The deliver cache stores the final serialized bytes
-                        // so this conversion happens at most once per event.
-                        let value_qv: Option<QueryValue> = match bytes_ref {
-                            Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
-                            None => None,
-                        };
-                        let value_qv_ref = value_qv.as_ref();
-                        // For Records/Keys modes the payload is identical
-                        // across all subscribers -- use the deliver cache to
-                        // build it once and share via Arc.
+                        // Lazy decode of the interner-encoded value into a
+                        // QueryValue. Only `DeliverMode::Records` reads it
+                        // (via `make_event_data`); Keys/Batch/Call never do.
+                        // We therefore defer the de-intern until we know we're
+                        // on a Records deliver-cache MISS -- on cache hits and
+                        // in every other mode the decode is skipped entirely.
                         let deliver_mode_disc = match &deliver {
                             DeliverMode::Records => Some(0u8),
                             DeliverMode::Keys => Some(1u8),
@@ -371,13 +389,26 @@ pub(crate) async fn bridge_task(
                                 cached_arc = arc;
                                 &cached_arc
                             } else {
+                                // Cache MISS in the Records/Keys shared branch.
+                                // Only Records actually consumes value_qv
+                                // (`make_event_data`); Keys/Batch/Call ignore
+                                // it, so gate the de-intern on Records (mode 0)
+                                // to skip it entirely in Keys mode.
+                                let value_qv: Option<QueryValue> = if mode == 0 {
+                                    match bytes_ref {
+                                        Some((bytes, cell)) => bytes_to_query_value(bytes, cell),
+                                        None => None,
+                                    }
+                                } else {
+                                    None
+                                };
                                 let built = make_deliver_data(
                                     &deliver,
                                     &db,
                                     &db_name,
                                     &actor,
                                     change,
-                                    value_qv_ref,
+                                    value_qv.as_ref(),
                                     event.commit_version,
                                 )
                                 .await;
@@ -392,13 +423,15 @@ pub(crate) async fn bridge_task(
                                 &cached_arc
                             }
                         } else {
+                            // Batch/Call: `make_deliver_data` ignores the
+                            // value_qv arg, so pass None and skip the decode.
                             owned_buf = make_deliver_data(
                                 &deliver,
                                 &db,
                                 &db_name,
                                 &actor,
                                 change,
-                                value_qv_ref,
+                                None,
                                 event.commit_version,
                             )
                             .await;

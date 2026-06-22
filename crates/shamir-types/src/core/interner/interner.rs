@@ -192,6 +192,20 @@ impl Interner {
             .map(|id| id.clone())
     }
 
+    /// Monotonic interning generation: incremented on every successful
+    /// `touch_ind` / `touch_with_id` and only ever grows (the map is
+    /// append-only — there is NO `remove`/`clear`).
+    ///
+    /// This is the O(1) lock-free growth signal for caches that compile a
+    /// derived structure against the interner and need to detect staleness
+    /// (e.g. subscription filter compilation). An unchanged generation
+    /// means no new field was interned, so a filter compiled at that
+    /// generation is still complete.
+    #[inline]
+    pub fn generation(&self) -> u64 {
+        self.current_id.load(Ordering::Relaxed)
+    }
+
     /// Returns the current number of interned keys.
     pub fn len(&self) -> usize {
         self.map_user_to_interned.len()

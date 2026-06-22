@@ -160,8 +160,33 @@ struct Subscriber {
 }
 
 /// Register N subscriptions on the same table, each with its own push sink
-/// and bridge. `JoinSet` is returned so bridges can be aborted.
-async fn setup_subscribers(handler: &ShamirDbHandler, n: usize) -> (Vec<Subscriber>, JoinSet<()>) {
+/// and bridge. `JoinSet` is returned so bridges can be aborted. When
+/// `keys` is true the subscriptions use `DeliverMode::Keys` (the path that
+/// exercises the value_qv deferral unconditionally — every event, cache hit
+/// or miss); otherwise the default `DeliverMode::Records` is used.
+async fn setup_subscribers(
+    handler: &ShamirDbHandler,
+    n: usize,
+    keys: bool,
+) -> (Vec<Subscriber>, JoinSet<()>) {
+    setup_subscribers_with_filter(handler, n, keys, default_filter()).await
+}
+
+/// The simple `thread_id == 42` Eq filter used by the standard fan-out benches.
+fn default_filter() -> Filter {
+    Filter::Eq {
+        field: vec!["thread_id".into()],
+        value: FilterValue::Int(42),
+    }
+}
+
+/// Register N subscriptions on the same table with a caller-provided filter.
+async fn setup_subscribers_with_filter(
+    handler: &ShamirDbHandler,
+    n: usize,
+    keys: bool,
+    filter: Filter,
+) -> (Vec<Subscriber>, JoinSet<()>) {
     let mut subs = Vec::with_capacity(n);
     // JoinSet is reserved for future explicit bridge-task ownership; today
     // bridges are owned by the registry and aborted via Drop when the
@@ -185,12 +210,13 @@ async fn setup_subscribers(handler: &ShamirDbHandler, n: usize) -> (Vec<Subscrib
         };
 
         let src = SourceBuilder::table(TableRef::with_repo("main", "messages"))
-            .filter(Filter::Eq {
-                field: vec!["thread_id".into()],
-                value: FilterValue::Int(42),
-            })
+            .filter(filter.clone())
             .build();
-        let sub_op = Subscribe::source(src).build();
+        let mut sub_builder = Subscribe::source(src);
+        if keys {
+            sub_builder = sub_builder.deliver_keys();
+        }
+        let sub_op = sub_builder.build();
         let mut sb = Batch::new();
         sb.id((i as u64) + 1);
         sb.subscribe("m", sub_op);
@@ -256,7 +282,7 @@ fn bench_fanout(c: &mut Criterion) {
                     // Setup once per outer Criterion invocation of `iters`.
                     let shamir = make_db_one_repo("app", "main", "messages").await;
                     let handler = ShamirDbHandler::new(shamir);
-                    let (mut subs, mut joinset) = setup_subscribers(&handler, n).await;
+                    let (mut subs, mut joinset) = setup_subscribers(&handler, n, false).await;
 
                     // Writer needs ITS own session/conn (any will do; reuse first).
                     let writer_session = fixture_session();
@@ -334,5 +360,217 @@ fn bench_fanout(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_fanout);
+/// Keys-mode fan-out. Identical scaffolding to `bench_fanout`, but every
+/// subscription uses `DeliverMode::Keys`. This is the path where the
+/// `value_qv` de-intern deferral wins **unconditionally** — Keys never
+/// reads `value_qv`, so the decode is pure waste on every event, hit or
+/// miss, multiplied by N subscribers.
+fn bench_fanout_keys(c: &mut Criterion) {
+    let mut g = c.benchmark_group("subscription_fanout_keys");
+    g.sample_size(bu::sample_size(20));
+    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    const K: usize = 20; // inserts per measured iteration
+
+    for &n in &[1usize, 10, 50, 100] {
+        g.throughput(Throughput::Elements((n * K) as u64));
+        let name = format!("n_{n}");
+        g.bench_function(&name, |b| {
+            b.iter_custom(|iters| {
+                rt.block_on(async move {
+                    let mut total = std::time::Duration::ZERO;
+
+                    let shamir = make_db_one_repo("app", "main", "messages").await;
+                    let handler = ShamirDbHandler::new(shamir);
+                    let (mut subs, mut joinset) = setup_subscribers(&handler, n, true).await;
+
+                    let writer_session = fixture_session();
+                    let writer_push: Arc<dyn PushSink> = {
+                        let (p, _rx) = capture();
+                        p
+                    };
+                    let writer_registry = Arc::new(SubscriptionRegistry::new());
+                    let writer_conn = conn_with(writer_push, writer_registry);
+
+                    let settle_ms = (n as u64 * 4).clamp(80, 600);
+                    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+
+                    for iter_idx in 0..iters {
+                        let start = std::time::Instant::now();
+                        for i in 0..K {
+                            let mut wb = Batch::new();
+                            wb.id((iter_idx * 1000) + (i as u64) + 10_000);
+                            wb.insert(
+                                "ins",
+                                insert("messages").row(
+                                    doc! { "_id" => format!("k{}-{}", iter_idx, i) }
+                                        .set("thread_id", 42_i64)
+                                        .set("body", format!("msg-{i}")),
+                                ),
+                            );
+                            let _ = handler
+                                .handle(
+                                    &writer_session,
+                                    &encode(&execute_built("app", wb.build())),
+                                    &writer_conn,
+                                )
+                                .await
+                                .unwrap();
+                        }
+
+                        let mut got_total = 0usize;
+                        for sub in subs.iter_mut() {
+                            let got = drain_events_for(
+                                &mut sub.rx,
+                                sub.sub_id,
+                                K,
+                                Duration::from_secs(15),
+                            )
+                            .await;
+                            got_total += got;
+                            black_box(got);
+                        }
+                        let elapsed = start.elapsed();
+                        assert_eq!(
+                            got_total,
+                            n * K,
+                            "fanout loss: got {got_total}/{} for n={n} K={K}",
+                            n * K
+                        );
+                        total += elapsed;
+                    }
+
+                    joinset.abort_all();
+                    while joinset.join_next().await.is_some() {}
+                    drop(subs);
+                    drop(handler);
+
+                    total
+                })
+            });
+        });
+    }
+
+    g.finish();
+}
+
+/// Fan-out with an `$in` filter containing 10 string literals. This is the
+/// supported-filter path where compile caching has the most impact among
+/// allowed subscription operators: `compile_filter` builds a `TSet<QueryValue>`
+/// (hashing all 10 values) and clones each String — work that is currently
+/// repeated per event × per subscriber.
+///
+/// (Note: `Like`/`Regex` are the biggest theoretical win, but they are
+/// currently blocked by `find_unsupported_subscription_filter`. The `$in`
+/// path exercises the `TSet` build + `FilterValue::clone` costs that are
+/// eliminated by compile-once caching.)
+fn bench_fanout_in(c: &mut Criterion) {
+    let mut g = c.benchmark_group("subscription_fanout_in");
+    g.sample_size(bu::sample_size(20));
+    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    const K: usize = 20;
+
+    for &n in &[1usize, 10, 50, 100] {
+        g.throughput(Throughput::Elements((n * K) as u64));
+        let name = format!("n_{n}");
+        g.bench_function(&name, |b| {
+            b.iter_custom(|iters| {
+                rt.block_on(async move {
+                    let mut total = std::time::Duration::ZERO;
+
+                    let shamir = make_db_one_repo("app", "main", "messages").await;
+                    let handler = ShamirDbHandler::new(shamir);
+                    let filter = Filter::In {
+                        field: vec!["body".into()],
+                        values: (0..10)
+                            .map(|i| FilterValue::String(format!("msg-{i}")))
+                            .collect(),
+                    };
+                    let (mut subs, mut joinset) =
+                        setup_subscribers_with_filter(&handler, n, false, filter).await;
+
+                    let writer_session = fixture_session();
+                    let writer_push: Arc<dyn PushSink> = {
+                        let (p, _rx) = capture();
+                        p
+                    };
+                    let writer_registry = Arc::new(SubscriptionRegistry::new());
+                    let writer_conn = conn_with(writer_push, writer_registry);
+
+                    let settle_ms = (n as u64 * 4).clamp(80, 600);
+                    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
+
+                    for iter_idx in 0..iters {
+                        let start = std::time::Instant::now();
+                        for i in 0..K {
+                            let mut wb = Batch::new();
+                            wb.id((iter_idx * 1000) + (i as u64) + 10_000);
+                            wb.insert(
+                                "ins",
+                                insert("messages").row(
+                                    doc! { "_id" => format!("k{}-{}", iter_idx, i) }
+                                        .set("thread_id", 42_i64)
+                                        .set("body", format!("msg-{}", i % 10)),
+                                ),
+                            );
+                            let _ = handler
+                                .handle(
+                                    &writer_session,
+                                    &encode(&execute_built("app", wb.build())),
+                                    &writer_conn,
+                                )
+                                .await
+                                .unwrap();
+                        }
+
+                        let mut got_total = 0usize;
+                        for sub in subs.iter_mut() {
+                            let got = drain_events_for(
+                                &mut sub.rx,
+                                sub.sub_id,
+                                K,
+                                Duration::from_secs(15),
+                            )
+                            .await;
+                            got_total += got;
+                            black_box(got);
+                        }
+                        let elapsed = start.elapsed();
+                        assert_eq!(
+                            got_total,
+                            n * K,
+                            "fanout loss: got {got_total}/{} for n={n} K={K}",
+                            n * K
+                        );
+                        total += elapsed;
+                    }
+
+                    joinset.abort_all();
+                    while joinset.join_next().await.is_some() {}
+                    drop(subs);
+                    drop(handler);
+
+                    total
+                })
+            });
+        });
+    }
+
+    g.finish();
+}
+
+criterion_group!(benches, bench_fanout, bench_fanout_keys, bench_fanout_in);
 criterion_main!(benches);
