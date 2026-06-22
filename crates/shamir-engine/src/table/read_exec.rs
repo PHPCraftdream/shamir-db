@@ -785,7 +785,16 @@ impl TableManager {
             // count_total, the full-sort path is needed; top-K is memory-opt
             // only. Guard: count_total is already excluded above via the
             // `read_counting` path dispatch.
-            (topk_result, None)
+            //
+            // #128 regression fix: the top-K path must still emit the SAME
+            // pagination metadata as the sibling `apply_pagination` branch
+            // (with `count_total == false`, `total` is `None`). Returning
+            // `None` here silently dropped pagination for EVERY
+            // `ORDER BY` + `LIMIT` query — a wire-contract regression.
+            (
+                topk_result,
+                Some(PaginationInfo::compute(&query.pagination, None)),
+            )
         } else {
             if let Some(ref order_by) = query.order_by {
                 exec::apply_order_by_qv(&mut qv_result, order_by);
