@@ -175,6 +175,11 @@ required-features = ["fjall", "sled"]
 name = "read_path_matrix"
 harness = false
 
+[[bench]]
+name = "drain_cost_vs_depth"
+harness = false
+required-features = ["fjall"]
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.

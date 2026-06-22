@@ -500,6 +500,7 @@ async fn commit_tx_inner_legacy_async(
         uwl_guards,
         version_guard,
         cell_guards,
+        wal_entry_arc,
     } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
@@ -519,6 +520,8 @@ async fn commit_tx_inner_legacy_async(
             return Err(e);
         }
     };
+    // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
+    repo.drainer().offer(wal_entry_arc);
     // SSI fix S2 — still-armed cell-reservation guards from pre_commit_locked
     // (WAL begin already succeeded inside it). Disarmed after the inline Phase 5a
     // (`apply_data_phase`) finalizes the cells below.
@@ -642,6 +645,9 @@ async fn commit_tx_lockfree(
         release_pessimistic_locks(&tx, repo).await;
         return Err(TxError::Storage(e));
     }
+
+    // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
+    repo.drainer().offer(validated.wal_entry_arc);
 
     maybe_crash("phase4", repo).await;
 

@@ -10,6 +10,8 @@
 //! A transaction that loses `try_commit_lock` becomes a FOLLOWER: it
 //! enqueues itself and awaits the leader's notification.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbError;
@@ -136,6 +138,8 @@ pub(super) async fn run_leader(
         is_leader: bool,
         /// Index into panic_guard.senders (meaningful only for followers).
         pg_idx: usize,
+        /// Op #2 Stage 2: Arc-wrapped WAL entry for drainer window offer.
+        wal_entry_arc: Arc<shamir_wal::WalEntryV2>,
     }
 
     let mut validated: Vec<Validated> = Vec::with_capacity(entries.len());
@@ -234,6 +238,7 @@ pub(super) async fn run_leader(
                     cell_guards: vpc.cell_guards,
                     is_leader: entry.is_leader,
                     pg_idx,
+                    wal_entry_arc: vpc.wal_entry_arc,
                 });
             }
             Ok(None) => {
@@ -310,6 +315,11 @@ pub(super) async fn run_leader(
         drop(panic_guard);
         drop(commit_guard);
         return Err(TxError::Storage(e));
+    }
+
+    // Op #2 Stage 2: offer every persisted entry to the drainer window.
+    for v in &validated {
+        repo.drainer().offer(Arc::clone(&v.wal_entry_arc));
     }
 
     maybe_crash("phase4", repo).await;
@@ -457,6 +467,8 @@ async fn run_single_tx(
     };
 
     let commit_version = pre.commit_version;
+    // Op #2 Stage 2: offer the persisted WAL entry to the drainer window.
+    repo.drainer().offer(pre.wal_entry_arc);
     // SSI fix S2 — still-armed cell-reservation guards (WAL begin succeeded in
     // pre_commit_locked). Disarmed after `materialize` finalizes the cells.
     let mut cell_guards = pre.cell_guards;
