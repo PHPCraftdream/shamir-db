@@ -4,7 +4,7 @@ use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
 
 use super::decode_cache::CachedRecordBytes;
-use super::filter_eval::filter_matches_bytes;
+use super::filter_eval::{filter_matches_bytes, filter_matches_bytes_cached, CompiledFilterSlot};
 
 /// Per-bridge index built once at subscribe time:
 /// maps `(repo_idx, table_name)` -> sorted list of target indices
@@ -65,8 +65,13 @@ pub fn any_target_interested_indexed(
 /// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to construct a
 /// zero-copy `RecordView` lens for filter evaluation.
 /// Value decoding is not performed here -- that is deferred to the deliver path.
-pub fn matches_any_indexed(
+///
+/// `filter_slots` is a parallel slice to `targets` — one `CompiledFilterSlot`
+/// per target (`None` for targets without a filter). On the hot path (interner
+/// stable), the cached `FilterNode` is reused with zero compile cost.
+pub(crate) fn matches_any_indexed(
     targets: &[(String, String, EventMask, Option<Filter>)],
+    filter_slots: &[Option<CompiledFilterSlot>],
     index: &TargetIndex,
     repo_idx: usize,
     table: &str,
@@ -82,7 +87,16 @@ pub fn matches_any_indexed(
             }
             match (filter, op) {
                 (Some(f), ChangeOp::Put) => match bytes_decoded {
-                    Some((bytes, interner_cell)) => filter_matches_bytes(f, bytes, interner_cell),
+                    Some((bytes, interner_cell)) => {
+                        // Use the cached compiled filter if a slot exists;
+                        // this skips compile_filter on the hot path.
+                        match &filter_slots[i] {
+                            Some(slot) => {
+                                filter_matches_bytes_cached(slot, f, bytes, interner_cell)
+                            }
+                            None => filter_matches_bytes(f, bytes, interner_cell),
+                        }
+                    }
                     None => {
                         tracing::warn!(
                             "subscription filter: no bytes for Put value, \
