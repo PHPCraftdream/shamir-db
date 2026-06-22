@@ -415,7 +415,10 @@ impl TableManager {
                 records_returned,
                 execution_time_us: start.elapsed().as_micros() as u64,
             }),
-            pagination: None,
+            // #128 sibling regression: this sorted-index LIMIT fast path
+            // dropped pagination the same way the top-K heap did. Route it
+            // through the shared helper so the wire contract holds.
+            pagination: exec::fast_path_pagination(&query.pagination),
             value: None,
         })
     }

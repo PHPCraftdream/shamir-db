@@ -786,15 +786,12 @@ impl TableManager {
             // only. Guard: count_total is already excluded above via the
             // `read_counting` path dispatch.
             //
-            // #128 regression fix: the top-K path must still emit the SAME
-            // pagination metadata as the sibling `apply_pagination` branch
-            // (with `count_total == false`, `total` is `None`). Returning
-            // `None` here silently dropped pagination for EVERY
-            // `ORDER BY` + `LIMIT` query — a wire-contract regression.
-            (
-                topk_result,
-                Some(PaginationInfo::compute(&query.pagination, None)),
-            )
+            // #128 regression fix: the top-K LIMIT fast path emits the same
+            // pagination metadata as every other LIMIT path, via the shared
+            // `fast_path_pagination` helper (count_total == false → total
+            // None). Returning a bare `None` here once silently dropped
+            // pagination for every `ORDER BY` + `LIMIT` query.
+            (topk_result, exec::fast_path_pagination(&query.pagination))
         } else {
             if let Some(ref order_by) = query.order_by {
                 exec::apply_order_by_qv(&mut qv_result, order_by);
