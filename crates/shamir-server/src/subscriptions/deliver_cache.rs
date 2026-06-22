@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use scc::TreeIndex;
 use shamir_collections::THasher;
 
 /// Global deliver-data cache shared across ALL bridge tasks.
@@ -13,7 +13,10 @@ use shamir_collections::THasher;
 /// once and shared as `Arc<Vec<u8>>` across N bridges, eliminating redundant
 /// msgpack encode + interned-key decode per subscriber.
 ///
-/// Key: (db_id, repo_hash, commit_version, change_index, mode_discriminant).
+/// Key shape: `(commit_version, db_id, repo_hash, change_index, mode_discriminant)`.
+/// **CV-first** so eviction is a `remove_range` over the leading u64, not a
+/// full-map scan. Migrated from `DashMap` to `scc::TreeIndex` — see Stage 2
+/// of the hidden-O(N) sweep (`docs/perf/hidden-on-sweep-stage0.md`).
 /// `db_id` is the `Arc<ShamirDb>` pointer address cast to `u64`, uniquely
 /// identifying the database instance (prevents cross-instance cache pollution
 /// in tests where multiple in-memory DBs share repo names and version ranges).
@@ -23,14 +26,14 @@ static GLOBAL: Lazy<DeliverCache> = Lazy::new(DeliverCache::new);
 type CacheKey = (u64, u64, u64, usize, u8);
 
 pub(crate) struct DeliverCache {
-    inner: DashMap<CacheKey, Arc<Vec<u8>>, THasher>,
+    inner: TreeIndex<CacheKey, Arc<Vec<u8>>>,
     evicted_up_to: AtomicU64,
 }
 
 impl DeliverCache {
     fn new() -> Self {
         Self {
-            inner: DashMap::with_hasher(THasher::default()),
+            inner: TreeIndex::new(),
             evicted_up_to: AtomicU64::new(0),
         }
     }
@@ -50,16 +53,19 @@ pub(crate) fn deliver_cache_get(
     mode: u8,
 ) -> Option<Arc<Vec<u8>>> {
     let key = (
+        commit_version,
         db_id,
         DeliverCache::repo_hash(repo),
-        commit_version,
         change_idx,
         mode,
     );
-    GLOBAL.inner.get(&key).map(|r| Arc::clone(r.value()))
+    GLOBAL.inner.peek_with(&key, |_, v| Arc::clone(v))
 }
 
 /// Insert a deliver payload and return a shared reference.
+/// Benign race on duplicate key: TreeIndex's insert-once semantics keep
+/// the first writer's bytes; cached payloads are deterministic so either
+/// is correct from the user's view.
 pub(crate) fn deliver_cache_insert(
     db_id: u64,
     repo: &str,
@@ -69,18 +75,18 @@ pub(crate) fn deliver_cache_insert(
     data: Vec<u8>,
 ) -> Arc<Vec<u8>> {
     let key = (
+        commit_version,
         db_id,
         DeliverCache::repo_hash(repo),
-        commit_version,
         change_idx,
         mode,
     );
     let arc = Arc::new(data);
-    GLOBAL.inner.insert(key, Arc::clone(&arc));
+    let _ = GLOBAL.inner.insert(key, Arc::clone(&arc));
     arc
 }
 
-/// Evict entries with `commit_version <= up_to`.
+/// Evict entries with `commit_version <= up_to`. O(evicted + log N).
 pub(crate) fn deliver_cache_evict_up_to(up_to: u64) {
     let prev = GLOBAL.evicted_up_to.load(Ordering::Relaxed);
     if up_to <= prev {
@@ -91,6 +97,7 @@ pub(crate) fn deliver_cache_evict_up_to(up_to: u64) {
         .compare_exchange(prev, up_to, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        GLOBAL.inner.retain(|&(_, _, cv, _, _), _| cv > up_to);
+        let hi = (up_to, u64::MAX, u64::MAX, usize::MAX, u8::MAX);
+        GLOBAL.inner.remove_range(..=hi);
     }
 }
