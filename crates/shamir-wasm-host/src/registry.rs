@@ -87,6 +87,7 @@ impl FunctionRegistry {
     }
 
     /// Snapshot of registered names.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub fn list(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.functions.len());
         self.functions.scan(|k, _| out.push(k.clone()));
@@ -94,6 +95,7 @@ impl FunctionRegistry {
     }
 
     /// Number of registered functions.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         self.functions.len()
     }

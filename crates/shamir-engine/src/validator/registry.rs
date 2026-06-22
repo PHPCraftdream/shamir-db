@@ -222,6 +222,7 @@ impl ValidatorRegistry {
     }
 
     /// Number of registered validators.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

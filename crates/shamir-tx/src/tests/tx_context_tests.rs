@@ -1,3 +1,6 @@
+// O(N) ack: test assertions on scc map cardinality — not a hot path.
+#![allow(clippy::disallowed_methods)]
+
 use crate::predicate_set::PredicateDep;
 use crate::staging_store::StagingStore;
 use crate::tx_context::TxContext;

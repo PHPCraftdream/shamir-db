@@ -141,6 +141,7 @@ impl FieldMap {
     }
 
     /// Number of cached entries (both maps are kept in lockstep).
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cache cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         // `id_to_name.len()` avoids a transient inconsistency if a concurrent
         // insert hit only one map; in practice both are inserted back-to-back.

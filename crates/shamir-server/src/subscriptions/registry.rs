@@ -54,6 +54,7 @@ impl SubscriptionRegistry {
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn count(&self) -> usize {
         self.subs.len()
     }

@@ -71,6 +71,7 @@ impl BatchContext {
     }
 
     /// Number of entries.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -121,6 +122,7 @@ impl BatchContext {
 }
 
 impl std::fmt::Debug for BatchContext {
+    #[allow(clippy::disallowed_methods)] // O(N) ack: Debug formatting, off hot path
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BatchContext")
             .field("len", &self.data.len())
@@ -185,6 +187,7 @@ impl GlobalVars {
     }
 
     /// Number of entries.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -247,6 +250,7 @@ impl GlobalVars {
 }
 
 impl std::fmt::Debug for GlobalVars {
+    #[allow(clippy::disallowed_methods)] // O(N) ack: Debug formatting, off hot path
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GlobalVars")
             .field("len", &self.data.len())

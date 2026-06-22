@@ -18,6 +18,20 @@ disallowed-methods = [
     { path = "std::collections::HashSet::with_capacity", reason = "Fx-only: HashSet::with_capacity_and_hasher(n, THasher::default())" },
     { path = "dashmap::DashMap::new", reason = "Fx-only: DashMap::with_hasher(THasher::default())" },
     { path = "scc::HashMap::new", reason = "Fx-only: scc::HashMap::with_hasher(THasher::default())" },
+    # --- scc O(N) len() ban (ideology pillar 3: O(x → 0)) ---------------------
+    # scc's `len()` is `iter().count()` — a full O(N) traversal, NOT O(1)
+    # (verified: scc-2.4.0 tree_index.rs:727, hash_map.rs:1400, hash_index.rs:990,
+    # hash_cache.rs:1047). Calling it on a hot path re-introduces a hidden
+    # linear cost — this bit the drainer twice (offer backpressure, drain
+    # reseed). Where you need O(1) cardinality, keep an `AtomicUsize` mirror
+    # updated at every mutation site (see `Drainer::window_depth`,
+    # `VersionedOverlay::count`). Legitimate off-hot-path / telemetry uses
+    # annotate the call with `#[allow(clippy::disallowed_methods)] // O(N) ack: <why>`.
+    { path = "scc::TreeIndex::len", reason = "O(N) iter().count() — use an AtomicUsize mirror (see Drainer::window_depth)" },
+    { path = "scc::HashMap::len", reason = "O(N) iter().count() — use an AtomicUsize mirror" },
+    { path = "scc::HashIndex::len", reason = "O(N) iter().count() — use an AtomicUsize mirror" },
+    { path = "scc::HashCache::len", reason = "O(N) iter().count() — use an AtomicUsize mirror" },
+    { path = "scc::HashSet::len", reason = "O(N) iter().count() — use an AtomicUsize mirror" },
 ]
 
 # --- disallowed-types (Fx-only hasher type ban, ideology pillar 4) -------------

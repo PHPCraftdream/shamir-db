@@ -253,6 +253,7 @@ impl MvccStore {
     /// Telemetry / cross-crate test accessor mirroring [`Self::overlay_len`]:
     /// the overlay-GC tests assert `pending_ts` is also reclaimed once the
     /// versions it stamps fall at or below the durable watermark. Lock-free.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: telemetry/test accessor, off hot path
     pub fn pending_ts_len(&self) -> usize {
         self.pending_ts.len()
     }
@@ -1112,6 +1113,7 @@ impl MvccStore {
     /// Number of keys currently holding a Level-3 lock entry. Used by tests
     /// to assert the zero-overhead invariant (snapshot/serializable txs never
     /// populate `locks`).
+    #[allow(clippy::disallowed_methods)] // O(N) ack: telemetry/test accessor, off hot path
     pub fn locks_len(&self) -> usize {
         self.locks.len()
     }

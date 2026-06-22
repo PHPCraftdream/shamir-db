@@ -277,6 +277,13 @@ shape of the access pattern, in this order of preference:
 3. **O(x → 0)** — drive per-op asymptotic cost toward constant.
    Prefer batched + amortized over per-row. Avoid hidden O(N)/O(N²)
    in helpers (full scans, repeated lookups, allocation in loops).
+   **`scc::*::len()` is O(N), not O(1)** — every scc map/index/cache
+   `len()` is `iter().count()` (a full traversal). It is banned on
+   every code path by `clippy.toml` `disallowed-methods`; where you need
+   O(1) cardinality, keep an `AtomicUsize` mirror updated at each
+   mutation site (see `Drainer::window_depth`, `VersionedOverlay::count`).
+   Legitimate off-hot-path / telemetry / test uses annotate the call
+   with `#[allow(clippy::disallowed_methods)] // O(N) ack: <why>`.
 4. **Fx hash** — `shamir_collections::THasher = BuildHasherDefault<FxHasher>`
    is the workspace default for every hash-keyed structure.
    `DashMap::with_hasher(THasher::default())`,

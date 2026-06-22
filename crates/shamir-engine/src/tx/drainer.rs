@@ -173,6 +173,7 @@ impl Drainer {
 
     /// Test-only window length probe (replaces public `len` to keep API tight).
     #[cfg(test)]
+    #[allow(clippy::disallowed_methods)] // O(N) ack: test-only accessor; depth mirror is window_depth()
     pub fn window_len(&self) -> usize {
         self.window.len()
     }
