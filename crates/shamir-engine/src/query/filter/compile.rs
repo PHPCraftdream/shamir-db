@@ -213,6 +213,7 @@ fn compile_in_node(
             field_path: path,
             values: values.to_vec(),
             pre_resolved: resolved,
+            ref_column_sets: std::sync::OnceLock::new(),
             negate,
         }
     }
