@@ -116,7 +116,7 @@ async fn seed_inflight_put(
         }],
     )
     .with_commit_version(commit_version);
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
     body
@@ -308,7 +308,7 @@ async fn drain_step_a5_retains_marker_above_hwm() {
     // Interner delta id 42 — far above the persisted hwm (0) → A5 gate must
     // judge truncation UNSAFE and retain the marker.
     entry.interner_delta = vec![(token, "fresh_field".to_string(), 42)];
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 

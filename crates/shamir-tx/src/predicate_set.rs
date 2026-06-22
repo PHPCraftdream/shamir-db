@@ -92,6 +92,18 @@ impl PredicateSet {
             f(dep);
         }
     }
+
+    /// Snapshot all recorded deps into a `Vec` under the lock.
+    ///
+    /// Used by the inverted batch predicate-validation path
+    /// (`RepoTxGate::predicate_conflicts_batch`): the deps are cloned
+    /// out once under the `Mutex`, then the lock is released before the
+    /// commit-window scan — so no lock is held across the EBR-guarded
+    /// tree range walk. The clone is O(P) in dep count and only fires
+    /// on the Serializable + non-empty-predicate path.
+    pub fn snapshot_deps(&self) -> Vec<PredicateDep> {
+        self.inner.lock().unwrap().clone()
+    }
 }
 
 impl Default for PredicateSet {

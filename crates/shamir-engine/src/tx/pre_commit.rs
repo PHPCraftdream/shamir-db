@@ -275,7 +275,6 @@ pub(super) async fn pre_commit_prelock(
 pub(super) struct ValidatedPreCommit {
     pub(super) commit_version: u64,
     pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
-    pub(super) wal_entry: shamir_wal::WalEntryV2,
     /// RAII owner of the version's terminal-mark obligation. The caller
     /// (`commit_tx_lockfree`) either calls `materialize` (which consumes it
     /// via `guard.commit()` → Materialized) on the success path, or drops it
@@ -288,7 +287,8 @@ pub(super) struct ValidatedPreCommit {
     /// publisher has finalized every claim. Empty off Serializable.
     pub(super) cell_guards: Vec<CellReservationGuard>,
     /// Op #2 Stage 2: the WAL entry wrapped in `Arc` for drainer window offer.
-    /// Built during validation, cloned into `wal_entry` for WAL persistence.
+    /// The caller serializes it into the WAL via `begin_grouped(&arc, ..)`
+    /// and offers it to the drainer — both read from this Arc, no clone.
     pub(super) wal_entry_arc: Arc<WalEntryV2>,
 }
 
@@ -327,14 +327,17 @@ pub(super) async fn pre_commit_locked_validate(
     }
 
     // Phase 2-bis (SSI only, Phase C): predicate read-set validation.
+    //
+    // Inverted single-pass scan: walk the commit window ONCE and test ALL
+    // predicate deps against each record, short-circuiting on the FIRST
+    // conflict (O(W) window walks, not O(P×W); one shared EBR guard, not
+    // P). The conflict set is identical to the per-dep loop — a conflict
+    // exists iff some dep conflicts with some record, which is
+    // order-independent.
     if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
-        let mut conflict_dep: Option<String> = None;
-        tx.predicate_set.with_iter(|dep| {
-            if conflict_dep.is_none() && gate.predicate_conflicts(dep, tx.snapshot_version) {
-                conflict_dep = Some(format!("{:?}", dep));
-            }
-        });
-        if let Some(dep) = conflict_dep {
+        let deps = tx.predicate_set.snapshot_deps();
+        if let Some(idx) = gate.predicate_conflicts_batch(&deps, tx.snapshot_version) {
+            let dep = format!("{:?}", deps[idx]);
             repo.tx_metrics().on_tx_aborted_phantom();
             return Err(TxError::PhantomConflict { dep });
         }
@@ -379,14 +382,14 @@ pub(super) async fn pre_commit_locked_validate(
     let mut wal_entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops)
         .with_commit_version(commit_version);
     wal_entry.interner_delta = interner_delta;
-    // Op #2 Stage 2: wrap in Arc for drainer window offer. The `wal_entry`
-    // field is a clone for WAL persistence (`begin_grouped` takes owned).
+    // Op #2 Stage 2: wrap in Arc for drainer window offer. `begin_grouped`
+    // borrows, so no clone is needed for WAL persistence — both the WAL
+    // serialize and the drainer offer read from this Arc.
     let wal_entry_arc = Arc::new(wal_entry);
 
     Ok(Some(ValidatedPreCommit {
         commit_version,
         uwl_guards,
-        wal_entry: (*wal_entry_arc).clone(),
         version_guard,
         cell_guards,
         wal_entry_arc,
@@ -435,14 +438,14 @@ pub(super) async fn pre_commit_locked(
     }
 
     // Phase 2-bis (SSI only, Phase C): predicate read-set validation.
+    //
+    // Inverted single-pass scan — see the matching block in
+    // `pre_commit_locked_validate` for the full rationale. Both call
+    // sites share `RepoTxGate::predicate_conflicts_batch`.
     if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
-        let mut conflict_dep: Option<String> = None;
-        tx.predicate_set.with_iter(|dep| {
-            if conflict_dep.is_none() && gate.predicate_conflicts(dep, tx.snapshot_version) {
-                conflict_dep = Some(format!("{:?}", dep));
-            }
-        });
-        if let Some(dep) = conflict_dep {
+        let deps = tx.predicate_set.snapshot_deps();
+        if let Some(idx) = gate.predicate_conflicts_batch(&deps, tx.snapshot_version) {
+            let dep = format!("{:?}", deps[idx]);
             repo.tx_metrics().on_tx_aborted_phantom();
             return Err(TxError::PhantomConflict { dep });
         }
@@ -505,11 +508,11 @@ pub(super) async fn pre_commit_locked(
     entry.interner_delta = interner_delta;
     // Op #2 Stage 2: wrap the entry in Arc BEFORE persisting so the same
     // logical entry is shared between the WAL and the drainer window.
-    // `begin_grouped` takes owned `WalEntryV2`, so we clone out of the Arc
-    // (cheap: one clone per commit).
+    // `begin_grouped` borrows the entry, so we serialize from the Arc borrow
+    // — no clone on the commit hot path.
     let entry_arc = Arc::new(entry);
     if let Err(e) = wal
-        .begin_grouped((*entry_arc).clone(), shamir_wal::WalDurability::Buffered)
+        .begin_grouped(&entry_arc, shamir_wal::WalDurability::Buffered)
         .await
     {
         // version_guard drops here → mark(Aborted): WAL begin failed,

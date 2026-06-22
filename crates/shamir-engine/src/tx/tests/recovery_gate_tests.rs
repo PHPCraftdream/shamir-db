@@ -77,7 +77,7 @@ async fn seed_inflight_put(
     )
     .with_commit_version(commit_version);
     // Synced so the entry hits the segment file before the drop below.
-    wal.begin_grouped(entry, WalDurability::Synced)
+    wal.begin_grouped(&entry, WalDurability::Synced)
         .await
         .unwrap();
     drop(seed);

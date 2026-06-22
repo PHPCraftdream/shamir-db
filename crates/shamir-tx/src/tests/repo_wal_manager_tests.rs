@@ -34,7 +34,7 @@ async fn begin_then_recover() {
     let mgr = make_manager();
     let entry = simple_entry(100);
 
-    mgr.begin_grouped(entry, WalDurability::Buffered)
+    mgr.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
     let inflight = mgr.recover().await.unwrap();
@@ -49,7 +49,7 @@ async fn begin_then_recover() {
 #[tokio::test]
 async fn commit_is_idempotent_noop() {
     let mgr = make_manager();
-    mgr.begin_grouped(simple_entry(300), WalDurability::Buffered)
+    mgr.begin_grouped(&simple_entry(300), WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -97,13 +97,13 @@ async fn seed_floor_raises_counter_and_is_monotonic() {
 async fn begin_multiple_then_recover() {
     let mgr = make_manager();
 
-    mgr.begin_grouped(simple_entry(600), WalDurability::Buffered)
+    mgr.begin_grouped(&simple_entry(600), WalDurability::Buffered)
         .await
         .unwrap();
-    mgr.begin_grouped(simple_entry(601), WalDurability::Buffered)
+    mgr.begin_grouped(&simple_entry(601), WalDurability::Buffered)
         .await
         .unwrap();
-    mgr.begin_grouped(simple_entry(602), WalDurability::Buffered)
+    mgr.begin_grouped(&simple_entry(602), WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -159,7 +159,7 @@ async fn recovery_round_trip_all_op_variants() {
         interner_delta: vec![],
     };
 
-    mgr.begin_grouped(entry.clone(), WalDurability::Buffered)
+    mgr.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 

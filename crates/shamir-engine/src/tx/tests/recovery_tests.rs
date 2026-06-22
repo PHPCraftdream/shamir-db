@@ -67,7 +67,7 @@ async fn recover_v2_inflight_replays_and_removes_entries() {
             body: bytes::Bytes::from_static(b"payload"),
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn recover_v2_inflight_handles_multiple_entries() {
                 delta: 1,
             }],
         );
-        wal.begin_grouped(entry, WalDurability::Buffered)
+        wal.begin_grouped(&entry, WalDurability::Buffered)
             .await
             .unwrap();
     }
@@ -125,7 +125,7 @@ async fn recover_v2_inflight_replays_put_applies_to_data_store() {
             body,
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -175,7 +175,7 @@ async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
         }],
     )
     .with_commit_version(insert_v + 1);
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -210,7 +210,7 @@ async fn recover_v2_inflight_skips_counter_delta_replay() {
             delta: 5,
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -239,7 +239,7 @@ async fn recover_v2_inflight_unknown_table_skips_gracefully() {
             body: bytes::Bytes::from_static(b"orphan"),
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -270,7 +270,7 @@ async fn recover_v2_inflight_replays_index_put_with_table_id() {
             value: value.clone(),
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -302,7 +302,7 @@ async fn recover_v2_inflight_replays_index_put_broadcast() {
             value: value.clone(),
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -337,7 +337,7 @@ async fn recover_v2_inflight_replays_index_del() {
             key: key.clone(),
         }],
     );
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -411,7 +411,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
             ],
         );
         // Synced so the entry hits the segment file before the drop below.
-        wal.begin_grouped(entry, WalDurability::Synced)
+        wal.begin_grouped(&entry, WalDurability::Synced)
             .await
             .unwrap();
 
@@ -510,7 +510,7 @@ async fn wal_recovery_applies_interner_delta_before_replay() {
     .with_commit_version(1);
     entry.interner_delta = vec![(token, "fresh_field".to_string(), 42)];
 
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -591,10 +591,10 @@ async fn recover_v2_inflight_replays_in_commit_version_order() {
     )
     .with_commit_version(2);
 
-    wal.begin_grouped(entry_older, WalDurability::Buffered)
+    wal.begin_grouped(&entry_older, WalDurability::Buffered)
         .await
         .unwrap();
-    wal.begin_grouped(entry_newer, WalDurability::Buffered)
+    wal.begin_grouped(&entry_newer, WalDurability::Buffered)
         .await
         .unwrap();
 
@@ -1069,7 +1069,7 @@ async fn stage_i_repo_scope_interner_delta_recovers() {
     .with_commit_version(1);
     entry.interner_delta = vec![(REPO_INTERNER_SCOPE, "stage_i_field".to_string(), 42)];
 
-    wal.begin_grouped(entry, WalDurability::Buffered)
+    wal.begin_grouped(&entry, WalDurability::Buffered)
         .await
         .unwrap();
 

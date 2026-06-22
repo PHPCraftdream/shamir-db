@@ -94,7 +94,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
                 body: bytes::Bytes::from_static(b"x"),
             }],
         );
-        wal.begin_grouped(entry, WalDurability::Synced)
+        wal.begin_grouped(&entry, WalDurability::Synced)
             .await
             .unwrap();
         drop(seed);
