@@ -87,6 +87,20 @@ pub struct Drainer {
     /// Telemetry only — never affects correctness (drops are recovered by
     /// `drain_step`'s gap-reseed path).
     offer_dropped_total: AtomicU64,
+    /// PT 2: total `wal.recover()` calls fired from `drain_step`'s
+    /// gap-reseed path. Telemetry; load-bearing in regression tests that
+    /// assert the new empty-prefix trigger does NOT fire spuriously on
+    /// interior aborts.
+    recover_calls: AtomicU64,
+    /// PT 1: approximate depth of `window`. Atomic mirror so `offer`'s
+    /// backpressure check is O(1) instead of `scc::TreeIndex::len()`'s
+    /// O(N) full-tree walk (verified in scc-2.4.0 source). Updated at
+    /// every site that mutates `window`. Approximate under contention
+    /// (multiple offers racing the check + insert) — fine because
+    /// `window_high_watermark` is a SOFT cap (Stage 4 contract: drops
+    /// recovered via gap-reseed). Bounded slack ≤ concurrent committer
+    /// count.
+    window_depth: AtomicUsize,
 }
 
 impl Default for Drainer {
@@ -104,7 +118,14 @@ impl Drainer {
             window: TreeIndex::new(),
             window_high_watermark: AtomicUsize::new(DEFAULT_WINDOW_HIGH_WATERMARK),
             offer_dropped_total: AtomicU64::new(0),
+            recover_calls: AtomicU64::new(0),
+            window_depth: AtomicUsize::new(0),
         }
+    }
+
+    /// Total `wal.recover()` reseed calls fired from `drain_step`.
+    pub fn recover_calls(&self) -> u64 {
+        self.recover_calls.load(Ordering::Relaxed)
     }
 
     /// Wake the drain loop. Called by the producer (commit path) in P1d-2b
@@ -121,14 +142,22 @@ impl Drainer {
     /// Offer a WAL entry to the drain window (called by the commit path
     /// AFTER wal.begin_grouped returns durable, Op #2 Stage 2).
     /// Insert is idempotent at the commit_version key. Lock-free.
+    ///
+    /// PT 1: backpressure check uses `window_depth.load(Relaxed)` —
+    /// O(1) atomic — instead of `scc::TreeIndex::len()` which iterates
+    /// the whole tree per call (re-introducing the O(N) cliff Op #2
+    /// killed). The depth is approximate (racy +∆ ≤ concurrent committer
+    /// count) and the cap is soft, so this is safe.
     pub fn offer(&self, entry: Arc<WalEntryV2>) {
         let hw = self.window_high_watermark.load(Ordering::Relaxed);
-        if self.window.len() >= hw {
+        if self.window_depth.load(Ordering::Relaxed) >= hw {
             // Backpressure: drop, recovery is via drain_step's gap-reseed.
             self.offer_dropped_total.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let _ = self.window.insert(entry.commit_version, entry);
+        if self.window.insert(entry.commit_version, entry).is_ok() {
+            self.window_depth.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Seed the window from a cold-start `wal.recover()` result.
@@ -136,7 +165,9 @@ impl Drainer {
     pub fn seed_from_recover(&self, entries: Vec<WalEntryV2>) {
         for e in entries {
             let v = e.commit_version;
-            let _ = self.window.insert(v, Arc::new(e));
+            if self.window.insert(v, Arc::new(e)).is_ok() {
+                self.window_depth.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -178,7 +209,15 @@ impl Drainer {
     /// Test-only: remove a window entry by commit_version (for gap simulation).
     #[cfg(test)]
     pub(crate) fn window_remove_for_test(&self, version: u64) {
-        self.window.remove(&version);
+        if self.window.remove(&version) {
+            self.window_depth.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Test-only: read the approximate window depth (atomic mirror).
+    #[cfg(test)]
+    pub fn window_depth(&self) -> usize {
+        self.window_depth.load(Ordering::Relaxed)
     }
 
     /// cancel-safe: NO — multi-step state mutation per entry (replay →
@@ -224,11 +263,28 @@ impl Drainer {
             }
         }
 
-        // Gap-reseed fallback: if the contiguous prefix is incomplete,
-        // do ONE wal.recover() to fill the window and retry.
-        if (window_entries.len() as u64) < (vis - dur) {
+        // PT 2: gap-reseed fallback fires ONLY when the contiguous prefix
+        // is empty. `dur = durable_watermark()` already crosses every
+        // leading aborted version (VersionGuard::drop marks aborts on
+        // the durable tracker), so `dur+1` is NEVER aborted — it is
+        // either in the window or a true dropped-offer gap. A non-empty
+        // prefix therefore proves real progress; the next aborted hole
+        // above is crossed via the moving watermark on the next pass.
+        // The old `len < vis-dur` trigger fired on EVERY interior abort
+        // and paid a spurious O(W) wal.recover() that the recover could
+        // not fill — aborted versions have no WAL entry.
+        if window_entries.is_empty() {
             let wal = repo.repo_wal().await?;
             let recovered = wal.recover().await?;
+            self.recover_calls.fetch_add(1, Ordering::Relaxed);
+            // Filter to entries strictly above the current watermark —
+            // already-drained entries from the WAL (still inflight per
+            // F6 truncation) must not be re-inserted into the window or
+            // they leak across drain passes.
+            let recovered: Vec<_> = recovered
+                .into_iter()
+                .filter(|e| e.commit_version > dur)
+                .collect();
             self.seed_from_recover(recovered);
             // Retry the window scan once.
             window_entries.clear();
@@ -431,8 +487,11 @@ impl Drainer {
             crate::tx::commit::maybe_crash("phase7", repo).await;
 
             // Op #2 Stage 3: remove the finalized entry from the window so
-            // memory does not grow without bound.
-            self.window.remove(v);
+            // memory does not grow without bound. PT 1: keep the atomic
+            // depth mirror in lock-step with the actual tree.
+            if self.window.remove(v) {
+                self.window_depth.fetch_sub(1, Ordering::Relaxed);
+            }
         }
 
         if drained > 0 {

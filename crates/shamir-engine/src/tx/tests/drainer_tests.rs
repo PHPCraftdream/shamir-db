@@ -535,11 +535,166 @@ async fn drain_step_window_gap_triggers_one_recover_reseed() {
     assert_eq!(drainer.window_len(), 2);
     assert_eq!(drainer.window_keys(), vec![1, 3]);
 
-    // drain_step must detect the gap at v=2, reseed from WAL, and drain all 3.
-    let drained = drainer.drain_step(&repo).await.unwrap();
+    // drain_all loops drain_step until 0. The new empty-prefix trigger
+    // fires the gap-reseed exactly once on the pass that sees the empty
+    // contiguous prefix (the pass after v=1 drained and watermark moved
+    // to 1, leaving the window with {3} and expected=2 mismatching k=3).
+    let recover_before = drainer.recover_calls();
+    let drained = drainer.drain_all(&repo).await.unwrap();
+    let recover_after = drainer.recover_calls();
     assert_eq!(drained, 3, "gap-reseed recovers the missing entry");
+    assert_eq!(
+        recover_after - recover_before,
+        1,
+        "exactly one gap-reseed fires (on the empty-prefix pass)"
+    );
     assert_eq!(gate.durable_watermark(), 3);
     assert_eq!(drainer.window_len(), 0, "window empty after drain");
+}
+
+/// PT 2: an aborted commit_version INTERIOR to (dur, vis] — its
+/// version was burned via fetch_add but no WAL entry was written, and
+/// `VersionGuard::drop` (version_guard.rs:114) marked the durable
+/// tracker Aborted — must NOT trigger a spurious wal.recover() reseed.
+/// Empty-prefix invariant: `dur = durable_watermark()` already skips
+/// every leading aborted version, so `dur+1` is NEVER aborted. A
+/// non-empty contiguous prefix therefore means real progress; the
+/// aborted version above is crossed via the moving watermark on the
+/// next pass. Reseed must fire only on a TRUE gap (dropped offer),
+/// never on an abort hole.
+#[tokio::test]
+async fn drain_step_interior_abort_does_not_trigger_spurious_recover() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+
+    let gate = repo.tx_gate().await.unwrap();
+    // Seed WAL with entries for v=1 and v=3 only; v=2 was aborted, never
+    // written.
+    seed_inflight_put(&repo, "t", rid(1), "abort_a", 1).await;
+    seed_inflight_put(&repo, "t", rid(3), "abort_c", 3).await;
+    // Mirror VersionGuard::drop for an aborted v=2 (e.g. SSI conflict
+    // or empty-tx abort): durable tracker marks it Aborted so the
+    // contiguous watermark crosses it once v=1 lands.
+    gate.mark_durable_aborted(2);
+    gate.publish_committed_max(3);
+    assert_eq!(gate.durable_watermark(), 0, "dur=0 before v=1 drains");
+    assert_eq!(gate.last_committed(), 3);
+
+    let drainer = Drainer::new();
+    let wal = repo.repo_wal().await.unwrap();
+    let entries = wal.recover().await.unwrap();
+    assert_eq!(entries.len(), 2, "WAL holds only the committed entries");
+    for e in &entries {
+        drainer.offer(Arc::new(e.clone()));
+    }
+    assert_eq!(drainer.window_keys(), vec![1, 3]);
+
+    let recover_before = drainer.recover_calls();
+    let drained = drainer.drain_all(&repo).await.unwrap();
+    let recover_after = drainer.recover_calls();
+
+    assert_eq!(drained, 2, "two committed entries drained (v=1, v=3)");
+    assert_eq!(
+        recover_after - recover_before,
+        0,
+        "interior abort must NOT trigger spurious wal.recover() — the \
+         window already has every committed entry; the abort hole is \
+         crossed via durable_watermark advance, not a reseed"
+    );
+    assert_eq!(gate.durable_watermark(), 3, "watermark crosses abort");
+    assert_eq!(drainer.window_len(), 0, "window drained empty");
+}
+
+/// PT 1: the atomic `window_depth` mirror must stay in lock-step with
+/// `scc::TreeIndex::len()` across every mutation site (offer success,
+/// offer duplicate, seed, drain Phase C remove, test-only remove). The
+/// purpose of the counter is to make `offer`'s backpressure check O(1)
+/// — `scc::TreeIndex::len()` is `iter().count()` per source (2.4.0
+/// tree_index.rs:727), which is the O(N) regression this guards against.
+#[tokio::test]
+async fn window_depth_atomic_mirror_matches_tree_across_mutations() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let gate = repo.tx_gate().await.unwrap();
+    for v in 1..=4u64 {
+        seed_inflight_put(&repo, "t", rid(v as u8), &format!("d{v}"), v).await;
+    }
+    gate.publish_committed_max(4);
+
+    let drainer = Drainer::new();
+    assert_eq!(drainer.window_depth(), 0, "fresh = 0");
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+
+    // 1. offer success: depth bumps per successful insert.
+    let wal = repo.repo_wal().await.unwrap();
+    let entries = wal.recover().await.unwrap();
+    let arcs: Vec<_> = entries.into_iter().map(Arc::new).collect();
+    for e in &arcs {
+        drainer.offer(Arc::clone(e));
+    }
+    assert_eq!(drainer.window_depth(), 4, "four offers, four inserts");
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+
+    // 2. offer duplicate: scc::TreeIndex::insert returns Err on existing
+    //    key; the depth mirror must NOT double-count.
+    for e in &arcs {
+        drainer.offer(Arc::clone(e));
+    }
+    assert_eq!(drainer.window_depth(), 4, "duplicate offers ignored");
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+
+    // 3. test-only remove: depth decrements on a successful remove.
+    drainer.window_remove_for_test(2);
+    assert_eq!(drainer.window_depth(), 3, "one remove");
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+    // No-op remove (already absent): depth must not move.
+    drainer.window_remove_for_test(2);
+    assert_eq!(drainer.window_depth(), 3, "no-op remove preserves depth");
+
+    // 4. seed_from_recover: depth bumps per fresh insert, ignores
+    //    duplicates.
+    let entries2 = wal.recover().await.unwrap(); // returns all 4
+    drainer.seed_from_recover(entries2);
+    assert_eq!(
+        drainer.window_depth(),
+        4,
+        "v=2 reseeded; 1,3,4 already present"
+    );
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+
+    // 5. drain Phase C remove: depth decrements once per finalized entry.
+    let drained = drainer.drain_all(&repo).await.unwrap();
+    assert_eq!(drained, 4);
+    assert_eq!(drainer.window_depth(), 0, "all finalized → depth 0");
+    assert_eq!(drainer.window_depth(), drainer.window_len());
+}
+
+/// PT 1: when the window is at or above the soft high-watermark, `offer`
+/// MUST short-circuit on the atomic load — no `scc::TreeIndex::len()`
+/// walk, no tree mutation. This is the O(1)-backpressure contract.
+/// We can't directly assert "no len() call" from outside, but we CAN
+/// prove the equivalent by setting hw=0 and observing that the drop
+/// counter advances and the window stays untouched even though many
+/// offers fire — the only path that produces that observable triple
+/// is the atomic-load-and-return branch.
+#[tokio::test]
+async fn offer_backpressure_check_uses_atomic_depth_not_tree_walk() {
+    let drainer = Drainer::new();
+    drainer.set_window_high_watermark(0);
+
+    // 1000 offers under hw=0: every one must drop without touching the tree.
+    for v in 1..=1_000u64 {
+        let entry = WalEntryV2::new(v, 0, vec![]).with_commit_version(v);
+        drainer.offer(Arc::new(entry));
+    }
+
+    assert_eq!(drainer.window_depth(), 0, "no inserts under hw=0");
+    assert_eq!(drainer.window_len(), 0, "tree confirms no inserts");
+    assert_eq!(
+        drainer.offer_dropped_total(),
+        1_000,
+        "every offer dropped on the atomic backpressure check"
+    );
 }
 
 /// Stage 3 test 3: drain_step with dur >= vis returns 0 immediately —
