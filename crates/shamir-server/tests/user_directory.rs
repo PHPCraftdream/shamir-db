@@ -273,6 +273,72 @@ fn user_id_index_survives_restart() {
     }
 }
 
+/// **SECURITY-CRITICAL**: A revocation must survive a restart — i.e. the
+/// in-memory cache is hydrated from the durable store at `open` time, not
+/// left empty (an empty cache would return 0 = "no invalidation" = revoked
+/// ticket accepted).  This is the single test that catches a cache that
+/// fails to warm.
+#[test]
+fn revocation_survives_restart_via_cache_hydration() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+    let uid = {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+        // Revoke all tickets issued before 100_000.
+        store.bump_tickets_invalid("alice", 100_000).unwrap();
+        // Verify the cache reflects the revocation immediately.
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            100_000,
+            "cache must reflect revocation before restart"
+        );
+        uid
+    };
+    // Reopen — the cache must be hydrated from the durable store so the
+    // revocation is still visible without any additional write.
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            100_000,
+            "cache must be hydrated from durable store on restart — \
+             a stale/empty cache would return 0 and accept a revoked ticket"
+        );
+    }
+}
+
+/// Multiple users with different revocation timestamps must each be hydrated
+/// correctly — a partial or last-write-wins warm would fail here.
+#[test]
+fn restart_hydrates_multiple_users_independently() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    let (uid_a, uid_b, uid_c) = {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        let uid_a = store.insert("alice".to_string(), fixture_record()).unwrap();
+        let uid_b = store.insert("bob".to_string(), fixture_record()).unwrap();
+        let uid_c = store.insert("carol".to_string(), fixture_record()).unwrap();
+
+        store.bump_tickets_invalid("alice", 111).unwrap();
+        store.bump_tickets_invalid("bob", 222_222).unwrap();
+        // carol is never bumped — should read 0.
+        (uid_a, uid_b, uid_c)
+    };
+
+    {
+        let store = FjallUserDirectory::open(&path).unwrap();
+        assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid_a), 111);
+        assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid_b), 222_222);
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid_c),
+            0,
+            "user with no revocation must read 0 after restart"
+        );
+    }
+}
+
 #[test]
 fn concurrent_inserts_assign_distinct_user_ids() {
     let (_tmp, store) = fresh_dir();

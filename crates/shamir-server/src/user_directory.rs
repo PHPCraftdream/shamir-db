@@ -21,8 +21,11 @@
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use parking_lot::Mutex;
+use scc::HashMap as SccHashMap;
 use serde::{Deserialize, Serialize};
+use shamir_collections::THasher;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -152,6 +155,22 @@ pub struct FjallUserDirectory {
     /// Serialises read-modify-write paths so two concurrent admin ops
     /// targeting the same user cannot lose an update.
     write_lock: Mutex<()>,
+    /// In-memory authoritative cache of `tickets_invalid_before_ns` keyed by
+    /// `user_id` (16 bytes). Warmed once at `open` from the durable store and
+    /// updated on every write that changes the field. This eliminates the
+    /// per-request double-fjall-get + msgpack decode that the hot-path
+    /// §7.5 validity check used to incur.
+    ///
+    /// SECURITY: this cache is the **authoritative** source for
+    /// `tickets_invalid_before_ns_by_user_id`. A stale entry would cause a
+    /// revoked ticket to be accepted. Correctness rests on:
+    ///   1. Warm-all at `open` (every durable user is loaded).
+    ///   2. Update-on-insert (value 0 for new users).
+    ///   3. Update inside `read_modify_write` after successful persist.
+    ///
+    /// A cold miss means "unknown user" → return 0 (the existing fail-open
+    /// default).
+    tickets_cache: SccHashMap<[u8; 16], AtomicU64, THasher>,
 }
 
 impl core::fmt::Debug for FjallUserDirectory {
@@ -171,11 +190,33 @@ impl FjallUserDirectory {
         let db = Database::builder(path.as_ref()).open()?;
         let users = db.keyspace(USERS_KEYSPACE, KeyspaceCreateOptions::default)?;
         let user_id_index = db.keyspace(USER_ID_INDEX_KEYSPACE, KeyspaceCreateOptions::default)?;
+
+        let tickets_cache: SccHashMap<[u8; 16], AtomicU64, THasher> =
+            SccHashMap::with_hasher(THasher::default());
+
+        // Warm the cache: iterate every durable user record ONCE and populate
+        // user_id → tickets_invalid_before_ns. This is O(N) at startup and
+        // makes the cache authoritative — a cold miss in the hot path means
+        // "unknown user", not "unloaded user".
+        for entry in users.iter() {
+            let (_key, blob) = match entry.into_inner() {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+            if let Ok(user) = rmp_serde::from_slice::<PersistedUser>(blob.as_ref()) {
+                if let Some(id) = user.user_id_array() {
+                    let _ =
+                        tickets_cache.insert(id, AtomicU64::new(user.tickets_invalid_before_ns));
+                }
+            }
+        }
+
         Ok(Self {
             db: Arc::new(db),
             users,
             user_id_index,
             write_lock: Mutex::new(()),
+            tickets_cache,
         })
     }
 
@@ -187,23 +228,15 @@ impl FjallUserDirectory {
     /// never been bumped — both are treated as "no invalidation" by the
     /// caller, so a fail-open default is safe.
     pub fn tickets_invalid_before_ns_by_user_id(&self, user_id: &[u8; 16]) -> u64 {
-        let name_bytes: Vec<u8> = match self.user_id_index.get(&user_id[..]) {
-            Ok(Some(v)) => v.to_vec(),
-            _ => return 0,
-        };
-        let name = match std::str::from_utf8(&name_bytes) {
-            Ok(s) => s,
-            Err(_) => return 0,
-        };
-        let blob: Vec<u8> = match self.users.get(name.as_bytes()) {
-            Ok(Some(v)) => v.to_vec(),
-            _ => return 0,
-        };
-        let user: PersistedUser = match rmp_serde::from_slice(&blob) {
-            Ok(u) => u,
-            Err(_) => return 0,
-        };
-        user.tickets_invalid_before_ns
+        // O(1) cache read — no fjall gets, no msgpack decode.
+        //
+        // The cache is warmed with ALL users at startup and updated on every
+        // insert + every read_modify_write, so a miss means "unknown user".
+        // Returning 0 matches the prior fail-open behaviour for unknown users
+        // (0 = no invalidation).
+        self.tickets_cache
+            .read(user_id, |_, v| v.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// Roles live alongside the SCRAM record but are NOT part of
@@ -229,6 +262,30 @@ impl FjallUserDirectory {
 
     fn fresh_user_id() -> [u8; 16] {
         shamir_connect::common::crypto::random_array::<16>()
+    }
+
+    /// Update the in-memory cache after a successful durable write.
+    ///
+    /// - If the entry exists (warm path), the `AtomicU64` is updated in
+    ///   place — no allocation, no lock contention.
+    /// - If absent (should only happen for a brand-new insert), a new
+    ///   `AtomicU64` is inserted.
+    ///
+    /// This is called under `write_lock`, so only one writer per process
+    /// mutates the cache at a time; concurrent readers use `Relaxed` loads
+    /// which is safe because the `AtomicU64` is the only mutable state.
+    fn update_cache(&self, user_id: &[u8; 16], tickets_invalid_before_ns: u64) {
+        if let Some(v) = self.tickets_cache.get(user_id) {
+            v.store(tickets_invalid_before_ns, Ordering::Relaxed);
+        } else {
+            // Insert returns false if the key was already present (race with
+            // another writer), but under write_lock only one writer mutates
+            // the cache at a time, so this branch always succeeds for a
+            // genuinely new user_id.
+            let _ = self
+                .tickets_cache
+                .insert(*user_id, AtomicU64::new(tickets_invalid_before_ns));
+        }
     }
 
     /// Read-modify-write helper. Serialises through `write_lock` so two
@@ -266,6 +323,14 @@ impl FjallUserDirectory {
         self.db
             .persist(PersistMode::SyncAll)
             .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+        // Update the in-memory cache so the new tickets_invalid_before_ns is
+        // visible on the very next hot-path lookup. This covers ALL
+        // read_modify_write callers (update_roles + bump_tickets_invalid +
+        // any future write) in one place.
+        if let Some(id) = user.user_id_array() {
+            self.update_cache(&id, user.tickets_invalid_before_ns);
+        }
         Ok(true)
     }
 }
@@ -315,6 +380,10 @@ impl UserDirectory for FjallUserDirectory {
         self.db
             .persist(PersistMode::SyncAll)
             .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+        // Populate the cache so the hot-path lookup sees this user immediately.
+        // New users start at tickets_invalid_before_ns = 0 (no invalidation).
+        self.update_cache(&user_id, persisted.tickets_invalid_before_ns);
 
         Ok(user_id)
     }
