@@ -179,27 +179,23 @@ pub fn apply_pagination<T>(
 pub fn apply_distinct_qv(records: Vec<QueryValue>) -> Vec<QueryValue> {
     // Two-pass borrow pattern: HashableQueryValue<'a> borrows &'a QueryValue,
     // so we can't hold both the map key (reference into records) and own records
-    // at the same time. Instead we collect unique indices first, then build the
-    // result by draining/moving from the original vec.
+    // at the same time. Pass 1 walks references and records a keep-mask; pass 2
+    // moves the kept records out by index order. The keep-mask is a single
+    // densely-packed Vec<bool> — cheaper than a separate usize-keyed set.
+    let n = records.len();
     let mut seen: IndexSet<HashableQueryValue<'_>, shamir_collections::THasher> =
-        IndexSet::with_capacity_and_hasher(records.len(), shamir_collections::THasher::default());
-    // Pass 1: walk references into records, record which indices are unique.
-    let mut unique_indices: Vec<usize> = Vec::with_capacity(records.len());
+        IndexSet::with_capacity_and_hasher(n, shamir_collections::THasher::default());
+    let mut keep = vec![false; n];
+    // Pass 1: walk references into records, mark first-occurrence indices.
     for (i, record) in records.iter().enumerate() {
         if seen.insert(HashableQueryValue(record)) {
-            unique_indices.push(i);
+            keep[i] = true;
         }
     }
-    // Pass 2: move unique records out by index (iterate records, keep only
-    // those whose index appears in unique_indices in order).
-    let mut unique_set = shamir_collections::new_fx_set_wc::<usize>(unique_indices.len());
-    for &i in &unique_indices {
-        unique_set.insert(i);
-    }
+    // Pass 2: move kept records out in index order, preserving insertion order.
     records
         .into_iter()
-        .enumerate()
-        .filter(|(i, _)| unique_set.contains(i))
-        .map(|(_, v)| v)
+        .zip(keep)
+        .filter_map(|(v, k)| if k { Some(v) } else { None })
         .collect()
 }
