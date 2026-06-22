@@ -1,3 +1,6 @@
+// O(N) ack: test assertions on scc map cardinality — not a hot path.
+#![allow(clippy::disallowed_methods)]
+
 use super::helpers::{make_gate, make_mvcc, make_mvcc_with_gate};
 use bytes::Bytes;
 use futures::StreamExt;

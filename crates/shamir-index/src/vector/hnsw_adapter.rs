@@ -297,6 +297,7 @@ impl VectorAdapter for HnswAdapter {
         self.dim
     }
 
+    #[allow(clippy::disallowed_methods)] // O(N) ack: deleted-tombstone count for live cardinality, off hot path
     fn len(&self) -> usize {
         self.next_id.load(Ordering::Relaxed) - self.deleted.len()
     }

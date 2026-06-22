@@ -22,6 +22,9 @@
 //!   two paths now contend on the same lock and that exactly one owner ever
 //!   survives a contended unique value.
 
+// O(N) ack: test assertions on scc map cardinality — not a hot path.
+#![allow(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
 use shamir_storage::storage_in_memory::InMemoryRepo;

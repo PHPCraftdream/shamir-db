@@ -66,6 +66,7 @@ impl IndexRegistry {
         removed
     }
 
+    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
@@ -83,6 +84,7 @@ impl IndexRegistry {
     }
 
     /// Collect all registered backends (snapshot).
+    #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub async fn all_backends(&self) -> Vec<Arc<dyn IndexBackend>> {
         let mut out = Vec::with_capacity(self.by_id.len());
         self.by_id.scan_async(|_, v| out.push(v.clone())).await;
@@ -90,6 +92,7 @@ impl IndexRegistry {
     }
 
     /// Collect all descriptors (for persistence).
+    #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub async fn all_descriptors(&self) -> Vec<crate::descriptor::IndexDescriptor> {
         let mut out = Vec::with_capacity(self.by_id.len());
         self.by_id

@@ -158,6 +158,8 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     // `insert` is benign: the overlay is tx-scoped and only the owning tx
     // mutates it, so the emptiness check is stable.
     if !tx.interner_overlay.is_empty() {
+        // O(N) ack: per-tx interner delta sizing, bounded by this tx's touches.
+        #[allow(clippy::disallowed_methods)]
         let mut entries: Vec<(u64, String)> = Vec::with_capacity(tx.interner_overlay.len());
         tx.interner_overlay
             .scan_async(|k, v| entries.push((*v, k.clone())))
@@ -711,6 +713,8 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     // Group keys by table_token so each MvccStore is hit once. `locked_keys`
     // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
     // synchronous visitor cannot await inside).
+    // O(N) ack: per-tx locked-keys sizing, bounded by this tx's footprint.
+    #[allow(clippy::disallowed_methods)]
     let mut by_table: TFxMap<u64, Vec<bytes::Bytes>> =
         TFxMap::with_capacity_and_hasher(tx.locked_keys.len(), THasher::default());
     tx.locked_keys.scan(|(token, key), _| {
