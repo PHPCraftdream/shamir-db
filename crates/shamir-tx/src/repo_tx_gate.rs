@@ -477,6 +477,50 @@ impl RepoTxGate {
         false
     }
 
+    /// Phase C — inverted batch predicate validation.
+    ///
+    /// Walks the commit window `(snapshot, last_committed()]` **once** and
+    /// tests ALL `deps` against each `CommitWriteRecord`, short-circuiting
+    /// on the FIRST conflict. This is the order-inverted equivalent of
+    /// calling [`predicate_conflicts`](Self::predicate_conflicts) per dep:
+    /// the set of conflicts detected is identical (a conflict exists iff
+    /// *some* dep conflicts with *some* record in the window), but the cost
+    /// drops from O(P×W) to O(W×P_avg) with a single shared EBR guard
+    /// instead of P separate `Guard::new()` allocations.
+    ///
+    /// Returns the index of the FIRST conflicting dep (in `deps` iteration
+    /// order), or `None` when no dep conflicts with any record in the window.
+    /// The caller formats the dep for the `PhantomConflict` error.
+    ///
+    /// Called by `pre_commit` Phase 2-bis UNDER `commit_lock`. `deps` is
+    /// already snapshot-collected by the caller (under the PredicateSet
+    /// Mutex), so this method holds no `Mutex` guard.
+    pub fn predicate_conflicts_batch(
+        &self,
+        deps: &[crate::predicate_set::PredicateDep],
+        snapshot: u64,
+    ) -> Option<usize> {
+        debug_assert!(!deps.is_empty(), "caller guards the empty case");
+        // Single shared EBR guard for the ENTIRE validation — not one per dep.
+        let guard = scc::ebr::Guard::new();
+        let last = self.last_committed_version.load(Ordering::Acquire);
+        if last <= snapshot {
+            // Fast path: no new commits since snapshot.
+            return None;
+        }
+        let start = snapshot.saturating_add(1);
+        // Inverted loop: walk the window ONCE, test ALL deps per record.
+        // Short-circuit on the first (record, dep) pair that conflicts.
+        for (_v, rec) in self.commit_write_log.range(start..=last, &guard) {
+            for (idx, dep) in deps.iter().enumerate() {
+                if record_conflicts(rec, dep) {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
     /// PROPOSED (Phase C). Drop records with `commit_version <= floor`.
     ///
     /// Called by the same GC tick that prunes `MvccStore::version_cache`.

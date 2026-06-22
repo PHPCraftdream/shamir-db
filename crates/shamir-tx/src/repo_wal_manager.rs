@@ -63,10 +63,12 @@ impl RepoWalManager {
     /// (`WalGroupCommit::append`); cancellation drops the future.
     ///
     /// Encode `entry` and append it to the group at the requested
-    /// durability tier.
+    /// durability tier. Borrows the entry (mirroring `begin_grouped_many`)
+    /// so callers holding an `Arc<WalEntryV2>` can serialize from the borrow
+    /// instead of cloning the entry for every commit.
     pub async fn begin_grouped(
         &self,
-        entry: WalEntryV2,
+        entry: &WalEntryV2,
         durability: WalDurability,
     ) -> DbResult<()> {
         let commit_version = entry.commit_version;
@@ -76,10 +78,12 @@ impl RepoWalManager {
 
     /// Batch WAL begin — appends each entry through the group at the
     /// requested tier (one append per entry; this path is the non-hot
-    /// AsyncIndex leader, correctness over batching).
+    /// AsyncIndex leader, correctness over batching). Accepts any
+    /// iterator of `&WalEntryV2` so callers holding `Arc<WalEntryV2>` can
+    /// serialize from borrows instead of cloning into a `Vec`.
     pub async fn begin_grouped_many(
         &self,
-        entries: &[WalEntryV2],
+        entries: impl IntoIterator<Item = &WalEntryV2>,
         durability: WalDurability,
     ) -> DbResult<()> {
         for entry in entries {

@@ -77,7 +77,7 @@ async fn seed_inflight_entries(repo: &RepoInstance, w: u64) {
         )
         .with_commit_version(v);
 
-        wal.begin_grouped(entry, WalDurability::Buffered)
+        wal.begin_grouped(&entry, WalDurability::Buffered)
             .await
             .unwrap();
     }

@@ -125,7 +125,6 @@ pub(super) async fn run_leader(
         tx: TxContext,
         uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         commit_version: u64,
-        wal_entry: shamir_wal::WalEntryV2,
         /// RAII owner of this survivor's terminal-mark obligation (P0a).
         /// Dropped → Aborted on any abort path / panic; consumed via
         /// `materialize` → `commit()` → Materialized on the success path.
@@ -233,7 +232,6 @@ pub(super) async fn run_leader(
                     tx: entry.tx,
                     uwl_guards: vpc.uwl_guards,
                     commit_version: vpc.commit_version,
-                    wal_entry: vpc.wal_entry,
                     version_guard: vpc.version_guard,
                     cell_guards: vpc.cell_guards,
                     is_leader: entry.is_leader,
@@ -296,10 +294,13 @@ pub(super) async fn run_leader(
             .ok_or_else(|| TxError::Storage(DbError::Internal("group commit: no entries".into())));
     }
 
-    // Step 3: Batched WAL begin (ONE fsync for all survivors).
-    let wal_entries: Vec<_> = validated.iter().map(|v| v.wal_entry.clone()).collect();
+    // Step 3: Batched WAL begin (ONE fsync for all survivors). Serialize
+    // from the Arc-wrapped entries — no clone (begin_grouped_many borrows).
     if let Err(e) = wal
-        .begin_grouped_many(&wal_entries, shamir_wal::WalDurability::Buffered)
+        .begin_grouped_many(
+            validated.iter().map(|v| &*v.wal_entry_arc),
+            shamir_wal::WalDurability::Buffered,
+        )
         .await
     {
         // WAL begin failed — nothing durable. Draining `validated` drops

@@ -251,7 +251,7 @@ async fn backpressure_engages_then_releases_on_drain() {
             }],
         )
         .with_commit_version(v);
-        wal.begin_grouped(entry, WalDurability::Buffered)
+        wal.begin_grouped(&entry, WalDurability::Buffered)
             .await
             .unwrap();
     }

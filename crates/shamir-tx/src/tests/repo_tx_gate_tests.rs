@@ -158,6 +158,62 @@ fn commit_log_window_scan_excludes_at_or_below_snapshot() {
     assert!(!gate.predicate_conflicts(&PredicateDep::TableScan { table_token: 99 }, 0));
 }
 
+// ── Phase C inversion: predicate_conflicts_batch must detect the SAME
+//    conflict set as the per-dep predicate_conflicts loop, just in a
+//    single window walk with one shared EBR guard. ────────────────────
+
+#[test]
+fn batch_conflicts_matches_per_dep_loop() {
+    let gate = RepoTxGate::new(0, 1);
+    let mk = |v: u64, token: u64| CommitWriteRecord {
+        commit_version: v,
+        per_table: TFxMap::from_iter([(
+            token,
+            TableWriteFootprint {
+                touched: true,
+                inserted_index_keys: vec![],
+            },
+        )]),
+    };
+    gate.record_commit_writes(mk(5, 42));
+    gate.record_commit_writes(mk(10, 7));
+    gate.record_commit_writes(mk(15, 42));
+    gate.publish_committed(15);
+
+    // Multiple deps: one conflicts on table 42, one on table 99 (no
+    // record writes there), one on table 7.
+    let deps = vec![
+        PredicateDep::TableScan { table_token: 99 },
+        PredicateDep::TableScan { table_token: 42 },
+        PredicateDep::TableScan { table_token: 7 },
+    ];
+
+    // Batch (inverted): walks the window once, finds the first dep that
+    // conflicts against ANY record. Dep index 1 (table 42) conflicts.
+    let batch_idx = gate.predicate_conflicts_batch(&deps, 0);
+    assert_eq!(batch_idx, Some(1), "batch should detect dep[1] (table 42)");
+
+    // Cross-check: the per-dep loop agrees on which deps conflict.
+    for (i, dep) in deps.iter().enumerate() {
+        let per_dep = gate.predicate_conflicts(dep, 0);
+        // batch short-circuits at the FIRST conflicting dep, so a dep
+        // AFTER the first conflict may be conflating but still true.
+        if per_dep {
+            assert!(
+                batch_idx.is_some() && batch_idx.unwrap() <= i,
+                "per-dep says dep[{i}] conflicts but batch found none / a later one"
+            );
+        }
+    }
+
+    // Non-conflicting deps → batch returns None (commits successfully).
+    let clean = vec![PredicateDep::TableScan { table_token: 100 }];
+    assert!(gate.predicate_conflicts_batch(&clean, 0).is_none());
+
+    // Empty window (snapshot == last) → None.
+    assert!(gate.predicate_conflicts_batch(&deps, 15).is_none());
+}
+
 // ── P3a: inter-batch phantom — record_conflicts against a batch-local
 //        footprint (the building blocks the group-commit leader composes
 //        inline in run_leader). The committed-log path is already covered by

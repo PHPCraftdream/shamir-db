@@ -636,7 +636,10 @@ async fn commit_tx_lockfree(
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).
     if let Err(e) = wal
-        .begin_grouped(validated.wal_entry, shamir_wal::WalDurability::Buffered)
+        .begin_grouped(
+            &validated.wal_entry_arc,
+            shamir_wal::WalDurability::Buffered,
+        )
         .await
     {
         // version_guard drops here → mark(Aborted): WAL begin failed, the
