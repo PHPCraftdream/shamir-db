@@ -305,3 +305,62 @@ async fn topk_order_by_limit_emits_pagination() {
         "top-K returns the highest scores in order"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pagination contract — completeness critic across the LIMIT fast paths
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Run a query through `tbl.read` and return whether the wire result
+/// carried pagination metadata.
+async fn read_has_pagination(tbl: &TableManager, query: &ReadQuery) -> bool {
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    tbl.read(query, &ctx).await.unwrap().pagination.is_some()
+}
+
+/// The pagination wire-contract must hold across EVERY read path that a
+/// `LIMIT` query can take, not just the one that happened to regress.
+/// #128 introduced two independent `LIMIT` fast paths that each forgot to
+/// emit pagination: the in-memory top-K heap (`read_collecting`) and the
+/// sorted-index walk (`read_order_limit_fast`). This test enumerates the
+/// fast-path surface so a future optimization cannot silently drop the
+/// metadata again:
+///   - ORDER BY indexed-field ASC + LIMIT  → `read_order_limit_fast` (first_k)
+///   - ORDER BY indexed-field DESC + LIMIT → `read_order_limit_fast` (last_k)
+///   - plain SELECT + LIMIT (no order)     → `read_streaming`
+/// The no-index top-K heap path is covered by
+/// `topk_order_by_limit_emits_pagination`.
+#[tokio::test]
+async fn limit_queries_all_emit_pagination_contract() {
+    // Indexed table — ORDER BY score uses the sorted-index fast path.
+    let (tbl, _mvcc) = make_mvcc_table().await;
+    insert_record(&tbl, 10, "a@example.com").await;
+    insert_record(&tbl, 20, "b@example.com").await;
+    insert_record(&tbl, 30, "c@example.com").await;
+    insert_record(&tbl, 40, "d@example.com").await;
+    insert_record(&tbl, 50, "e@example.com").await;
+
+    // (1) sorted-index ORDER BY ASC LIMIT → read_order_limit_fast (first_k).
+    let asc = ReadQuery::new("t").order_by(OrderBy::asc("score")).limit(2);
+    assert!(
+        read_has_pagination(&tbl, &asc).await,
+        "sorted-index ORDER BY ASC + LIMIT must emit pagination"
+    );
+
+    // (2) sorted-index ORDER BY DESC LIMIT → read_order_limit_fast (last_k).
+    let desc = ReadQuery::new("t")
+        .order_by(OrderBy::desc("score"))
+        .limit(2);
+    assert!(
+        read_has_pagination(&tbl, &desc).await,
+        "sorted-index ORDER BY DESC + LIMIT must emit pagination"
+    );
+
+    // (3) plain SELECT + LIMIT (no order) → read_streaming path.
+    let plain = ReadQuery::new("t").limit(3);
+    assert!(
+        read_has_pagination(&tbl, &plain).await,
+        "plain SELECT + LIMIT must emit pagination"
+    );
+}

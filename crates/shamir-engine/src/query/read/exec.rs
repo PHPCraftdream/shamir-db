@@ -95,6 +95,25 @@ pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) {
 // Pagination
 // ============================================================================
 
+/// Pagination metadata for a LIMIT "fast path" — the in-memory top-K heap
+/// (`read_collecting`) and the sorted-index walk (`read_order_limit_fast`).
+/// These paths apply a finite LIMIT without computing a total count, so the
+/// metadata mirrors [`apply_pagination`] with `count_total == false` (total
+/// is `None`).
+///
+/// **Every** LIMIT fast path MUST route its pagination through this single
+/// helper. Returning a bare `None` is exactly the #128 regression that
+/// silently dropped pagination on two independent fast paths — funnelling
+/// them through one function makes that drift impossible to reintroduce
+/// without tripping the `limit_queries_all_emit_pagination_contract` test.
+pub fn fast_path_pagination(pagination: &Pagination) -> Option<PaginationInfo> {
+    if pagination.is_none() {
+        None
+    } else {
+        Some(PaginationInfo::compute(pagination, None))
+    }
+}
+
 /// Apply pagination to results, returning (page_records, pagination_info).
 pub fn apply_pagination<T>(
     records: Vec<T>,
