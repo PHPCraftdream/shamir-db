@@ -6,7 +6,6 @@ use shamir_collections::TFxMap;
 use shamir_tx::predicate_set::PredicateDep;
 use shamir_tx::repo_tx_gate::{CommitWriteRecord, TableWriteFootprint};
 use shamir_tx::IsolationLevel;
-use shamir_types::access::Actor;
 use shamir_types::types::value::InnerValue;
 
 use crate::table::table_manager::table_token_for;
@@ -65,13 +64,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
     };
     let query = crate::query::read::ReadQuery::new("users").filter(filter);
     let refs = shamir_types::types::common::new_map();
-    let ctx = crate::query::filter::eval_context::FilterContext {
-        interner,
-        resolved_refs: &refs,
-        actor: Actor::System,
-        scalars: crate::function::builtin_scalars(),
-        params: &shamir_types::types::common::new_map(),
-    };
+    let ctx = crate::query::filter::eval_context::FilterContext::new(interner, &refs);
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
     // Verify predicate was captured.
@@ -147,13 +140,7 @@ async fn ssi_phantom_between_range_aborts() {
     };
     let query = crate::query::read::ReadQuery::new("users").filter(filter);
     let refs = shamir_types::types::common::new_map();
-    let ctx = crate::query::filter::eval_context::FilterContext {
-        interner,
-        resolved_refs: &refs,
-        actor: Actor::System,
-        scalars: crate::function::builtin_scalars(),
-        params: &shamir_types::types::common::new_map(),
-    };
+    let ctx = crate::query::filter::eval_context::FilterContext::new(interner, &refs);
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
     tbl.insert_tx(&InnerValue::Str("dummy".into()), Some(&mut tx2))
@@ -214,13 +201,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
     };
     let query = crate::query::read::ReadQuery::new("users").filter(filter);
     let refs = shamir_types::types::common::new_map();
-    let ctx = crate::query::filter::eval_context::FilterContext {
-        interner,
-        resolved_refs: &refs,
-        actor: Actor::System,
-        scalars: crate::function::builtin_scalars(),
-        params: &shamir_types::types::common::new_map(),
-    };
+    let ctx = crate::query::filter::eval_context::FilterContext::new(interner, &refs);
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
     tbl.insert_tx(&InnerValue::Str("dummy".into()), Some(&mut tx2))
@@ -272,13 +253,7 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
     };
     let query = crate::query::read::ReadQuery::new("users").filter(filter);
     let refs = shamir_types::types::common::new_map();
-    let ctx = crate::query::filter::eval_context::FilterContext {
-        interner,
-        resolved_refs: &refs,
-        actor: Actor::System,
-        scalars: crate::function::builtin_scalars(),
-        params: &shamir_types::types::common::new_map(),
-    };
+    let ctx = crate::query::filter::eval_context::FilterContext::new(interner, &refs);
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
     // Should have fallen back to TableScan.

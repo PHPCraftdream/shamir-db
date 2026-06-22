@@ -14,21 +14,66 @@
 //! converted **once** to `QueryValue` and never round-tripped back.
 
 use std::cmp::Ordering;
+use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 use shamir_collections::TSet;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef};
+use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef, ScalarRef};
 use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
 use super::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
-use super::resolve::{
-    compare_values, is_column_query_ref, resolve_filter_query, resolve_query_ref_column,
-};
+use super::resolve::{compare_values, is_column_query_ref, resolve_filter_query};
 use crate::query::filter::FilterValue;
+
+/// Probe a `TSet<QueryValue>` for membership using the SAME coercion rules
+/// as `scalar_ref_cmp_qv` (which the old per-row linear scan used).
+///
+/// `scalar_ref_cmp_qv` treats `Int(a)` as equal to `F64(b)` when
+/// `(a as f64) == b`, and vice versa. `TSet<QueryValue>` uses exact
+/// `PartialEq` (no cross-type match). To bridge this, we perform at most
+/// TWO O(1) set lookups:
+///
+/// - `Int(n)`  → probe `Int(n)` AND `F64(n as f64)`.
+/// - `F64(f)`  → probe `F64(f)` AND if `f.fract()==0 && f.is_finite()` and
+///   `f` fits in `i64`, also `Int(f as i64)`.
+/// - Other types → single probe (no coercion in `scalar_ref_cmp_qv`).
+///
+/// This preserves the EXACT equality semantics of the pre-optimisation
+/// `scalar_ref_cmp_qv(field_val, cv) == Some(Ordering::Equal)` linear scan.
+#[inline]
+fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
+    match sr {
+        ScalarRef::Int(n) => {
+            // Same-type probe + cross-type F64 probe.
+            set.contains(&QueryValue::Int(n)) || set.contains(&QueryValue::F64(n as f64))
+        }
+        ScalarRef::F64(f) => {
+            // Same-type probe.
+            if set.contains(&QueryValue::F64(f)) {
+                return true;
+            }
+            // Cross-type Int probe — only when f is a whole number in i64 range.
+            // Matches scalar_ref_cmp_qv's `F64(a) vs Int(b)` arm which does
+            // `a.partial_cmp(&(*b as f64))`. Equality holds iff a == b as f64,
+            // which for integer-valued f means f == (f as i64) as f64.
+            if f.is_finite() && f.fract() == 0.0 {
+                // Clamp to i64 range to avoid UB / overflow.
+                if f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                    return set.contains(&QueryValue::Int(f as i64));
+                }
+            }
+            false
+        }
+        ScalarRef::Null => set.contains(&QueryValue::Null),
+        ScalarRef::Bool(b) => set.contains(&QueryValue::Bool(b)),
+        ScalarRef::Str(s) => set.contains(&QueryValue::Str(s.to_string())),
+        ScalarRef::Bin(b) => set.contains(&QueryValue::Bin(b.to_vec())),
+    }
+}
 
 /// Compact field-path representation for `FilterNode` variants.
 /// Inline up to 4 segments (typical: `"name"` → 1, `"address.city"` → 2);
@@ -94,6 +139,17 @@ pub enum FilterNode {
         /// Hoisting literal materialisation off the per-row path eliminates
         /// O(records × |list|) `String::clone` / `Vec::clone` allocations.
         pre_resolved: Vec<Option<QueryValue>>,
+        /// Lazily pre-resolved column-query-ref membership sets, parallel to
+        /// `values`. `Some(Arc<TSet>)` for column-query-ref entries (built
+        /// once on the first `matches()` call, then cached), `None` for all
+        /// other entry types. `OnceLock` provides lock-free `Sync` interior
+        /// mutability — the init runs once per scan (uncontended), all
+        /// subsequent rows read the cached `Vec` with zero lock / zero alloc.
+        /// Mirrors how `InSet` carries its set inline.
+        ///
+        /// **Contention model**: filter evaluation is single-threaded per
+        /// scan. `OnceLock::get_or_init` is infallible after the first call.
+        ref_column_sets: OnceLock<Vec<Option<Arc<TSet<QueryValue>>>>>,
         negate: bool,
     },
     /// Fast-path for `$in`/`$nin` when ALL values are literals.
@@ -256,6 +312,7 @@ impl FilterNode {
                 field_path,
                 values,
                 pre_resolved,
+                ref_column_sets,
                 negate,
             } => {
                 let ipath: SmallVec<[InternerKey; 4]> =
@@ -264,6 +321,35 @@ impl FilterNode {
                     Some(v) => v,
                     None => return *negate,
                 };
+
+                // O(N²)→O(N): pre-resolve column-query-ref sets ONCE per
+                // scan (first row), cache in `ref_column_sets`. Subsequent
+                // rows read the cached `Vec` lock-free + alloc-free —
+                // mirroring how `InSet` carries its set inline. The
+                // `OnceLock::get_or_init` runs exactly once (single-threaded
+                // per scan; uncontended).
+                let col_sets = ref_column_sets.get_or_init(|| {
+                    values
+                        .iter()
+                        .map(|fv| {
+                            if is_column_query_ref(fv) {
+                                if let FilterValue::QueryRef { alias, path } = fv {
+                                    let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+                                    let path_str = path.as_deref().unwrap_or("");
+                                    if let Some(qr) = ctx.resolved_refs.get(key) {
+                                        let column = super::resolve::resolve_query_ref_column(
+                                            qr,
+                                            Some(path_str),
+                                        );
+                                        return Some(Arc::new(column.into_iter().collect()));
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .collect()
+                });
+
                 // Walk literals and non-literals in the same order as `values`
                 // to preserve any short-circuit semantics; `pre_resolved[i]` is
                 // `Some` exactly when `values[i]` is a literal (no per-record
@@ -279,16 +365,17 @@ impl FilterNode {
                         continue;
                     }
                     if is_column_query_ref(fv) {
-                        if let FilterValue::QueryRef { alias, path } = fv {
-                            let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
-                            if let Some(qr) = ctx.resolved_refs.get(key) {
-                                let column = resolve_query_ref_column(qr, path.as_deref());
-                                if column.iter().any(|cv| {
-                                    scalar_ref_cmp_qv(field_val, cv) == Some(Ordering::Equal)
-                                }) {
-                                    found = true;
-                                    break;
-                                }
+                        // O(1) coercing set probe — preserves the EXACT
+                        // equality semantics of the old `scalar_ref_cmp_qv`
+                        // linear scan (Int↔F64 cross-type coercion).
+                        //
+                        // NOTE: `InSet` (all-literals fast-path) uses
+                        // non-coercing `TSet::contains` — that is a known
+                        // pre-existing difference, NOT touched by this task.
+                        if let Some(set) = &col_sets[i] {
+                            if set_contains_coercing(set, field_val) {
+                                found = true;
+                                break;
                             }
                         }
                         continue;

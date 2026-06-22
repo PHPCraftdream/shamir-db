@@ -369,7 +369,6 @@ async fn ssi_phantom_no_where_records_table_scan_for_list_stream() {
 #[tokio::test]
 async fn ssi_phantom_filter_stream_tx_records_coarse_when_filter_has_no_sorted_index() {
     use futures::StreamExt;
-    use shamir_types::access::Actor;
 
     let repo = make_repo();
     repo.add_table(crate::table::TableConfig::new("users"));
@@ -384,13 +383,7 @@ async fn ssi_phantom_filter_stream_tx_records_coarse_when_filter_has_no_sorted_i
         pattern: "^A".into(),
     };
     let refs = shamir_types::types::common::new_map();
-    let ctx = crate::query::filter::eval_context::FilterContext {
-        interner,
-        resolved_refs: &refs,
-        actor: Actor::System,
-        scalars: crate::function::builtin_scalars(),
-        params: &shamir_types::types::common::new_map(),
-    };
+    let ctx = crate::query::filter::eval_context::FilterContext::new(interner, &refs);
 
     let stream = tbl
         .filter_stream_tx(Some(&tx), 100, &filter, &ctx)
