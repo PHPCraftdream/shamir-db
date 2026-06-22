@@ -234,3 +234,28 @@ outranks every per-record micro-op and should be promoted ahead of #3.
 - **B7 — fjall API affordances.** Does fjall 3.0 `Keyspace::insert` return the prior value (would make
   the `contains_key` pre-check removal strictly free)? Does `keyspace.range` guarantee lexicographic
   order (gates Op A correctness)? Confirm before the storage micro-ops past phase 1.
+
+---
+
+## 7. Outcomes — campaigns landed since this roadmap
+
+- **Op A/A.2 — `scan_prefix_stream` range-seek** (fjall 164×, sled 50×). ✅ 98f256d / 7140f82
+- **Op B — interner reverse-spine `Arc<str>`** (O(N²)→O(N) cold growth). ✅ 35ebd40
+- **Op C — MemBuffer `*_many` dirty-sentinel** (correctness). ✅ d2d3504
+- **Op #2 — incremental drainer cursor** (window + offer + gap-reseed +
+  backpressure; removes the per-drain `wal.recover()` O(N²)). ✅ be0bc1f,
+  92311d4 (offer O(1) depth + abort-aware reseed).
+- **§4 D4 "version-major overlay GC index"** — INVESTIGATED, NOT pursued.
+  Stage 0 measurement (`docs/perf/hidden-on-sweep-stage0.md`) proved
+  `gc_upto`'s O(N) cliff is theoretical: Op #2 keeps the overlay window ≤3
+  entries even on fjall under sustained burst. Restoring drainer health, not
+  GC micro-opt, is the right lever if the overlay ever grows. ✅ measured 0a9571f
+- **§6 D6 "per-event full-`retain()` cache eviction O(cache_size)"** —
+  RESOLVED. decode/deliver caches migrated to `scc::TreeIndex` with a
+  CV-first key; eviction is now `remove_range` (O(evicted+log N)). ✅ 3eb7601
+- **Hidden-O(N) guard** — `scc::*::len()` (O(N) `iter().count()`) banned via
+  `clippy.toml`; CLAUDE.md pillar #3 documents the atomic-mirror pattern. ✅ 0f5de6b
+- **#128 pagination regression** — top-K + sorted-index `ORDER BY+LIMIT`
+  fast paths dropped pagination metadata on the wire; fixed structurally via
+  a shared `exec::fast_path_pagination` helper + a completeness-critic
+  contract test. ✅ 604cc47, a37c950
