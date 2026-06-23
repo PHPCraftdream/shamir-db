@@ -6,7 +6,7 @@
 //! human-friendly lookups. A per-validator `bound_in` set tracks which
 //! tables reference the validator so `drop` can refuse when bindings exist.
 
-use crate::function::ShamirFunction;
+use super::record_validator::RecordValidator;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::collections::BTreeSet;
@@ -33,7 +33,7 @@ pub enum ValidatorRegistryError {
 /// and `bound_in` (referential integrity — `drop` refuses while bound).
 pub struct ValidatorRegistry {
     /// Compiled validator artifact, keyed by catalogue `_id`.
-    by_id: scc::HashMap<RecordId, Arc<dyn ShamirFunction>, THasher>,
+    by_id: scc::HashMap<RecordId, Arc<dyn RecordValidator>, THasher>,
     /// Unique-name → id reverse index.
     name_to_id: scc::HashMap<String, RecordId, THasher>,
     /// Tables each validator is bound to (canonical `"db/repo/table"` keys).
@@ -57,7 +57,7 @@ impl ValidatorRegistry {
         &self,
         id: RecordId,
         name: impl Into<String>,
-        compiled: Arc<dyn ShamirFunction>,
+        compiled: Arc<dyn RecordValidator>,
     ) -> Result<(), ValidatorRegistryError> {
         let name = name.into();
         // Check name uniqueness first.
@@ -78,7 +78,7 @@ impl ValidatorRegistry {
     }
 
     /// Look up a compiled validator by id.
-    pub fn get_by_id(&self, id: &RecordId) -> Option<Arc<dyn ShamirFunction>> {
+    pub fn get_by_id(&self, id: &RecordId) -> Option<Arc<dyn RecordValidator>> {
         self.by_id.read(id, |_, v| v.clone())
     }
 
@@ -90,7 +90,7 @@ impl ValidatorRegistry {
     /// [`FunctionRegistry::replace`](crate::function::FunctionRegistry::replace)
     /// — used to substitute a live artifact (e.g. a native validator) for the
     /// one materialised from the catalogue, without disturbing bindings.
-    pub fn replace_artifact(&self, id: &RecordId, compiled: Arc<dyn ShamirFunction>) -> bool {
+    pub fn replace_artifact(&self, id: &RecordId, compiled: Arc<dyn RecordValidator>) -> bool {
         self.by_id
             .update(id, |_, v| *v = compiled.clone())
             .is_some()

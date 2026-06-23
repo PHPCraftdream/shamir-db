@@ -33,7 +33,6 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::function::{FnBatch, FnCtx, FnResult, Params, ShamirFunction};
 use crate::query::read::ReadQuery;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -41,10 +40,13 @@ use crate::table::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
 use crate::table::tests::write_exec_tests::{insert_via_tx, setup_empty_table};
 use crate::table::TableConfig;
-use crate::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
+use crate::validator::{
+    RecordFields, RecordValidator, Validation, ValidatorBinding, ValidatorCtx, ValidatorRegistry,
+    WriteOp,
+};
 use shamir_types::access::Actor;
 use shamir_types::mpack;
-use shamir_types::types::value::QueryValue;
+use shamir_types::record_view::ScalarRef;
 
 // ============================================================================
 // Stub validators
@@ -52,21 +54,29 @@ use shamir_types::types::value::QueryValue;
 
 /// A validator that rejects records whose "score" field is negative.
 ///
-/// The record arrives via `params.get("record")`. Returns a list containing
-/// the error code when the score is negative; `Null` otherwise.
+/// Reads `score` via `new.scalar(&["score"])` using the by-name interface.
 struct RejectNegativeScore;
 
 #[async_trait]
-impl ShamirFunction for RejectNegativeScore {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
-        if let Ok(QueryValue::Map(m)) = params.get("record") {
-            if matches!(m.get("score"), Some(QueryValue::Int(n)) if *n < 0) {
-                return Ok(QueryValue::List(vec![QueryValue::Str(
-                    "score_negative".into(),
-                )]));
+impl RecordValidator for RejectNegativeScore {
+    async fn validate(
+        &self,
+        new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        let score = new.and_then(|f| f.scalar(&["score"])).and_then(|s| {
+            if let ScalarRef::Int(i) = s {
+                Some(i)
+            } else {
+                None
             }
+        });
+        if matches!(score, Some(n) if n < 0) {
+            Validation::reject("score_negative")
+        } else {
+            Validation::accept()
         }
-        Ok(QueryValue::Null)
     }
 }
 
@@ -358,7 +368,7 @@ async fn idmsgpack_validator_rejects_violating_record() {
     reg.register(
         val_id,
         "reject_negative_score",
-        Arc::new(RejectNegativeScore) as Arc<dyn ShamirFunction>,
+        Arc::new(RejectNegativeScore) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
