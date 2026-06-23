@@ -3,14 +3,12 @@ use std::sync::Arc;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::{DbError, DbResult};
-use shamir_engine::function::{
-    compile_rust_source, FnCtx, FunctionError, ShamirFunction, WasmFunction, WasmLimits,
-};
+use shamir_engine::function::{compile_rust_source, FunctionError, WasmFunction, WasmLimits};
 use shamir_engine::validator::{
-    NativeValidatorAdapter, Validation, ValidatorBinding, ValidatorRegistry, WriteOp,
+    NativeRecordValidator, RecordFields, RecordValidator, Validation, ValidatorBinding,
+    ValidatorCtx, ValidatorRegistry, WasmRecordValidator, WriteOp,
 };
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::QueryValue;
 
 use super::{ArtifactKind, FunctionSource, ShamirDb};
 
@@ -27,11 +25,13 @@ impl ShamirDb {
     /// Register a **native** (in-process) validator by closure — no WASM
     /// required, no `replace_artifact` dance.
     ///
-    /// The closure receives `(record, old_record, ctx)` and returns a
-    /// [`Validation`]. Internally it is wrapped in [`NativeValidatorAdapter`]
-    /// (which implements [`ShamirFunction`]) so the existing invocation path
-    /// in `table_manager_validators.rs` feeds its output to
-    /// `decode_validation_result` untransformed.
+    /// The closure receives `(new, old, ctx)` where `new` / `old` are
+    /// `Option<&dyn RecordFields>` (by-name, zero-copy access) and `ctx`
+    /// carries the actor and interner.  Returns a [`Validation`].
+    ///
+    /// Internally the closure is wrapped in [`NativeRecordValidator`] which
+    /// implements [`RecordValidator`] — no `ShamirFunction` overhead, no
+    /// de-interning on the native hot path.
     ///
     /// A catalogue row with `kind = Native` and **no** `wasm_b64` is
     /// persisted so the binding survives restarts. On reopen the boot loop
@@ -47,7 +47,14 @@ impl ShamirDb {
         validator: F,
     ) -> DbResult<RecordId>
     where
-        F: Fn(&QueryValue, Option<&QueryValue>, &FnCtx) -> Validation + Send + Sync + 'static,
+        F: Fn(
+                Option<&dyn RecordFields>,
+                Option<&dyn RecordFields>,
+                &ValidatorCtx<'_>,
+            ) -> Validation
+            + Send
+            + Sync
+            + 'static,
     {
         self.register_native_validator_as(name, replace, validator, Actor::System)
             .await
@@ -62,7 +69,14 @@ impl ShamirDb {
         actor: Actor,
     ) -> DbResult<RecordId>
     where
-        F: Fn(&QueryValue, Option<&QueryValue>, &FnCtx) -> Validation + Send + Sync + 'static,
+        F: Fn(
+                Option<&dyn RecordFields>,
+                Option<&dyn RecordFields>,
+                &ValidatorCtx<'_>,
+            ) -> Validation
+            + Send
+            + Sync
+            + 'static,
     {
         if !replace && self.validators.id_for_name(name).is_some() {
             return Err(DbError::Validation(format!(
@@ -93,17 +107,32 @@ impl ShamirDb {
 
         // Build the catalogue row — kind=Native, no wasm_b64.
         let mut m = shamir_types::types::common::new_map();
-        m.insert("name".to_string(), QueryValue::Str(name.to_string()));
-        m.insert("_id".to_string(), QueryValue::Str(id.to_string()));
+        m.insert(
+            "name".to_string(),
+            shamir_types::types::value::QueryValue::Str(name.to_string()),
+        );
+        m.insert(
+            "_id".to_string(),
+            shamir_types::types::value::QueryValue::Str(id.to_string()),
+        );
         // Native rows have no wasm bytes; omit wasm_b64 / wasm_hash entirely.
-        m.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
-        m.insert("source".to_string(), QueryValue::Null);
-        m.insert("bound_in".to_string(), QueryValue::List(vec![]));
+        m.insert(
+            "lang".to_string(),
+            shamir_types::types::value::QueryValue::Str("rust".to_string()),
+        );
+        m.insert(
+            "source".to_string(),
+            shamir_types::types::value::QueryValue::Null,
+        );
+        m.insert(
+            "bound_in".to_string(),
+            shamir_types::types::value::QueryValue::List(vec![]),
+        );
         m.insert(
             super::KIND_FIELD.to_string(),
             ArtifactKind::Native.as_query_value(),
         );
-        let record = QueryValue::Map(m);
+        let record = shamir_types::types::value::QueryValue::Map(m);
 
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
@@ -117,7 +146,7 @@ impl ShamirDb {
             }
         }
 
-        let adapter = Arc::new(NativeValidatorAdapter::new(validator)) as Arc<dyn ShamirFunction>;
+        let adapter = Arc::new(NativeRecordValidator::new(validator)) as Arc<dyn RecordValidator>;
         self.validators
             .register(id, name, adapter)
             .map_err(|e| DbError::Validation(e.to_string()))?;
@@ -273,8 +302,11 @@ impl ShamirDb {
                 self.validators.remove(&old_id);
             }
         }
+        // Wrap the compiled WASM function in WasmRecordValidator so the
+        // registry stores Arc<dyn RecordValidator> uniformly.
+        let wasm_rv = Arc::new(WasmRecordValidator::new(Arc::new(wf))) as Arc<dyn RecordValidator>;
         self.validators
-            .register(id, name, Arc::new(wf))
+            .register(id, name, wasm_rv)
             .map_err(|e| DbError::Validation(e.to_string()))?;
 
         Ok(id)

@@ -9,7 +9,7 @@ use shamir_engine::function::{
     EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, WasmEngine,
     WasmFunction, WasmLimits,
 };
-use shamir_engine::validator::ValidatorRegistry;
+use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -354,7 +354,11 @@ impl ShamirDb {
                 WasmLimits::default(),
             ) {
                 Ok(wf) => {
-                    if shamir.validators.register(id, &name, Arc::new(wf)).is_err() {
+                    // Wrap in WasmRecordValidator — the registry stores
+                    // Arc<dyn RecordValidator> since Phase 0.
+                    let rv = Arc::new(WasmRecordValidator::new(Arc::new(wf)))
+                        as Arc<dyn RecordValidator>;
+                    if shamir.validators.register(id, &name, rv).is_err() {
                         log::warn!(
                             "shamir_db::init: validator '{}' already registered, skipping",
                             name

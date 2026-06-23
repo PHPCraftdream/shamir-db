@@ -11,13 +11,12 @@
 //!
 //! No WASM toolchain is required. We first materialise a real validator
 //! catalogue entry via `create_validator_from_wasm` (minimal `(module)`), then
-//! swap the live registry artifact for a native [`ShamirFunction`]
+//! swap the live registry artifact for a native [`RecordValidator`]
 //! (`CasValidator`) through the additive
 //! `ValidatorRegistry::replace_artifact`. Bindings created by `bind_validator`
-//! are preserved across the swap. The native validator receives `record` /
-//! `old_record` as `QueryValue` (string-keyed) in its `Params` — exactly the
-//! shape the engine's `run_validators` builds — computes
-//! `canonical_hash(old_record)` and compares it to `record["_prev_hash"]`.
+//! are preserved across the swap. The native validator accesses `record` /
+//! `old_record` via `&dyn RecordFields` by name — no Params or ShamirFunction
+//! overhead.
 //!
 //! The validator and the test compute the expected hash through the **same**
 //! `shamir_funclib::canonical::canonical_hash` over a string-keyed
@@ -36,13 +35,12 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::validator::WriteOp;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
-use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunction};
+use shamir_engine::validator::{RecordFields, RecordValidator, Validation, ValidatorCtx};
 use shamir_funclib::canonical::{canonical_hash, PREV_HASH_FIELD};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter::eq;
 use shamir_query_builder::write::{insert, update};
 use shamir_query_builder::Query;
-use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -53,75 +51,56 @@ use shamir_types::types::value::QueryValue;
 /// `_prev_hash` it carries matches the canonical hash of the current
 /// (`old_record`) version.
 ///
-/// ABI: returns msgpack-able `QueryValue`:
-/// - `Null` → valid.
-/// - `{"errors":[{"field":["_prev_hash"],"code":"stale"}]}` → rejected.
+/// Implements [`RecordValidator`] directly — no `ShamirFunction` overhead.
 struct CasValidator;
 
 impl CasValidator {
-    /// Build the `{"errors":[{"field":["_prev_hash"],"code":"stale"}]}` reject.
-    fn stale() -> QueryValue {
-        let mut err = new_map();
-        err.insert(
-            "field".to_owned(),
-            QueryValue::List(vec![QueryValue::Str(PREV_HASH_FIELD.to_owned())]),
-        );
-        err.insert("code".to_owned(), QueryValue::Str("stale".to_owned()));
-        let mut root = new_map();
-        root.insert(
-            "errors".to_owned(),
-            QueryValue::List(vec![QueryValue::Map(err)]),
-        );
-        QueryValue::Map(root)
+    /// Build a stale-rejection `Validation`.
+    fn stale() -> Validation {
+        let mut v = Validation::accept();
+        v.field_error(vec![PREV_HASH_FIELD.to_owned()], "stale");
+        v
     }
 }
 
 #[async_trait]
-impl ShamirFunction for CasValidator {
-    async fn call(
+impl RecordValidator for CasValidator {
+    async fn validate(
         &self,
-        _ctx: &FnCtx,
-        _batch: &FnBatch,
-        params: &Params,
-    ) -> Result<QueryValue, FunctionError> {
-        let record = params.get("record")?;
-        let old_record = params.get("old_record")?;
+        new: Option<&dyn RecordFields>,
+        old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        // The presented prev-hash from the new record (None = absent/null).
+        let presented = new
+            .and_then(|f| f.str(&[PREV_HASH_FIELD]))
+            .map(str::to_owned);
 
-        // The presented prev-hash (None / Null when absent).
-        let presented = match record {
-            QueryValue::Map(m) => match m.get(PREV_HASH_FIELD) {
-                Some(QueryValue::Str(s)) => Some(s.clone()),
-                Some(QueryValue::Null) | None => None,
-                Some(_) => {
-                    return Err(FunctionError::User(
-                        "_prev_hash must be a string".to_owned(),
-                    ))
-                }
-            },
-            _ => None,
-        };
+        // The materialized old record as QueryValue for canonical_hash.
+        let old_qv = old.map(|f| f.to_query_value());
 
-        match (old_record, presented) {
+        match (old_qv, presented) {
             // No prior version and no prev-hash asserted → first write, accept.
-            (QueryValue::Null, None) => Ok(QueryValue::Null),
+            (None, None) => Validation::accept(),
             // Prior version exists: the presented hash must match its content.
-            (old, Some(p)) => {
+            (Some(old_val), Some(p)) => {
                 // canonical_hash excludes the top-level _prev_hash, so it hashes
                 // the *content* of the current version — exactly what the writer
                 // must have based its update on.
-                let current = canonical_hash(old);
+                let current = canonical_hash(&old_val);
                 // Non-secret content hashes; a plain compare is fine (no
                 // timing-attack surface — anyone holding the record can
                 // recompute the hash).
                 if current == p {
-                    Ok(QueryValue::Null)
+                    Validation::accept()
                 } else {
-                    Ok(Self::stale())
+                    Self::stale()
                 }
             }
-            // A prior version exists but no prev-hash was asserted → stale
-            // (the writer is overwriting blind).
-            (_old, None) => Ok(Self::stale()),
+            // A prior version exists but no prev-hash was asserted → stale.
+            (Some(_), None) => Self::stale(),
+            // No prior version but prev-hash was asserted → stale.
+            (None, Some(_)) => Self::stale(),
         }
     }
 }

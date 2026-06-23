@@ -8,22 +8,27 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use smallvec::smallvec;
 
-use crate::function::{FnBatch, FnCtx, FnResult, FunctionError, Params, ShamirFunction};
-use crate::validator::{ValidatorBinding, ValidatorFailure, ValidatorRegistry, WriteOp};
+use crate::validator::{
+    RecordFields, RecordValidator, Validation, ValidatorBinding, ValidatorCtx, ValidatorFailure,
+    ValidatorRegistry, WriteOp,
+};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::QueryValue;
 
 // ── Stub validators ─────────────────────────────────────────────────────
 
-/// A validator that returns an empty list (accept).
+/// A validator that always accepts.
 struct AcceptValidator;
 
 #[async_trait]
-impl ShamirFunction for AcceptValidator {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, _params: &Params) -> FnResult<QueryValue> {
-        // null = valid
-        Ok(QueryValue::Null)
+impl RecordValidator for AcceptValidator {
+    async fn validate(
+        &self,
+        _new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        Validation::accept()
     }
 }
 
@@ -33,9 +38,14 @@ struct RejectValidator {
 }
 
 #[async_trait]
-impl ShamirFunction for RejectValidator {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, _params: &Params) -> FnResult<QueryValue> {
-        Ok(QueryValue::List(vec![QueryValue::Str(self.code.clone())]))
+impl RecordValidator for RejectValidator {
+    async fn validate(
+        &self,
+        _new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        Validation::reject(&self.code)
     }
 }
 
@@ -45,25 +55,39 @@ struct StopValidator {
 }
 
 #[async_trait]
-impl ShamirFunction for StopValidator {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, _params: &Params) -> FnResult<QueryValue> {
-        let mut map = shamir_types::types::common::new_map();
-        map.insert(
-            "errors".to_string(),
-            QueryValue::List(vec![QueryValue::Str(self.code.clone())]),
-        );
-        map.insert("stop".to_string(), QueryValue::Bool(true));
-        Ok(QueryValue::Map(map))
+impl RecordValidator for StopValidator {
+    async fn validate(
+        &self,
+        _new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        let mut v = Validation::reject(&self.code);
+        v.stop();
+        v
     }
 }
 
-/// A validator that traps (returns Err).
+/// A validator that simulates an invocation error via the sentinel code.
 struct TrapValidator;
 
 #[async_trait]
-impl ShamirFunction for TrapValidator {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, _params: &Params) -> FnResult<QueryValue> {
-        Err(FunctionError::Compute("wasm trap".into()))
+impl RecordValidator for TrapValidator {
+    async fn validate(
+        &self,
+        _new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        _ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        // Simulate the sentinel code that WasmRecordValidator produces on trap.
+        let mut v = Validation::default();
+        v.errors
+            .push(shamir_query_types::validator::ValidationError {
+                field: None,
+                code: "__wasm_err:wasm trap".to_owned(),
+            });
+        v.stop = true;
+        v
     }
 }
 
@@ -115,7 +139,7 @@ async fn no_matching_op_returns_ok() {
     reg.register(
         id,
         "val_a",
-        Arc::new(RejectValidator { code: "bad".into() }) as Arc<dyn ShamirFunction>,
+        Arc::new(RejectValidator { code: "bad".into() }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
@@ -140,7 +164,7 @@ async fn accept_validator_returns_ok() {
     reg.register(
         id,
         "val_accept",
-        Arc::new(AcceptValidator) as Arc<dyn ShamirFunction>,
+        Arc::new(AcceptValidator) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
@@ -167,7 +191,7 @@ async fn reject_validator_returns_failed() {
         "val_reject",
         Arc::new(RejectValidator {
             code: "invalid_email".into(),
-        }) as Arc<dyn ShamirFunction>,
+        }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
@@ -204,7 +228,7 @@ async fn priority_order_and_collect_all() {
         "val_a",
         Arc::new(RejectValidator {
             code: "first".into(),
-        }) as Arc<dyn ShamirFunction>,
+        }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
     reg.register(
@@ -212,7 +236,7 @@ async fn priority_order_and_collect_all() {
         "val_b",
         Arc::new(RejectValidator {
             code: "second".into(),
-        }) as Arc<dyn ShamirFunction>,
+        }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
@@ -259,7 +283,7 @@ async fn stop_halts_remaining_validators() {
         "val_stop",
         Arc::new(StopValidator {
             code: "stopped".into(),
-        }) as Arc<dyn ShamirFunction>,
+        }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
     reg.register(
@@ -267,7 +291,7 @@ async fn stop_halts_remaining_validators() {
         "val_after",
         Arc::new(RejectValidator {
             code: "should_not_appear".into(),
-        }) as Arc<dyn ShamirFunction>,
+        }) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 
@@ -330,7 +354,7 @@ async fn trap_validator_fails_closed() {
     reg.register(
         id,
         "val_trap",
-        Arc::new(TrapValidator) as Arc<dyn ShamirFunction>,
+        Arc::new(TrapValidator) as Arc<dyn RecordValidator>,
     )
     .unwrap();
 

@@ -24,11 +24,12 @@ use shamir_db::shamir_db::shamir_db::ArtifactKind;
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{FnBatch, FnCtx, Params};
-use shamir_engine::validator::Validation;
+use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 use shamir_types::mpack;
+use shamir_types::record_view::ScalarRef;
 use shamir_types::types::value::QueryValue;
 
 // ========================================================================
@@ -142,11 +143,16 @@ async fn native_validator_accepts_valid_write() {
     db.register_native_validator(
         "check_age",
         false,
-        |_new: &QueryValue, _prev: Option<&QueryValue>, _ctx: &FnCtx| {
-            let age = match _new {
-                QueryValue::Map(m) => m.get("age").and_then(|v| v.as_i64()),
-                _ => None,
-            };
+        |new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let age = new.and_then(|f| f.scalar(&["age"])).and_then(|s| {
+                if let ScalarRef::Int(i) = s {
+                    Some(i)
+                } else {
+                    None
+                }
+            });
             match age {
                 Some(a) if a < 18 => {
                     let mut v = Validation::accept();
@@ -189,11 +195,16 @@ async fn native_validator_rejects_violating_write() {
     db.register_native_validator(
         "check_age",
         false,
-        |new: &QueryValue, _prev: Option<&QueryValue>, _ctx: &FnCtx| {
-            let age = match new {
-                QueryValue::Map(m) => m.get("age").and_then(|v| v.as_i64()),
-                _ => None,
-            };
+        |new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let age = new.and_then(|f| f.scalar(&["age"])).and_then(|s| {
+                if let ScalarRef::Int(i) = s {
+                    Some(i)
+                } else {
+                    None
+                }
+            });
             match age {
                 Some(a) if a < 18 => {
                     let mut v = Validation::accept();
@@ -243,11 +254,17 @@ async fn native_validator_with_stop_flag() {
     let db = setup_db().await;
 
     // A validator that always rejects with stop=true.
-    db.register_native_validator("stop_all", false, |_new, _prev, _ctx| {
-        let mut v = Validation::reject("blocked");
-        v.stop();
-        v
-    })
+    db.register_native_validator(
+        "stop_all",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let mut v = Validation::reject("blocked");
+            v.stop();
+            v
+        },
+    )
     .await
     .unwrap();
 
@@ -313,7 +330,13 @@ async fn boot_tolerates_native_validator_row() {
 
         // Register a native validator — persists a kind=Native row with no wasm_b64.
         id = db
-            .register_native_validator("v_native", false, |_new, _prev, _ctx| Validation::accept())
+            .register_native_validator(
+                "v_native",
+                false,
+                |_new: Option<&dyn RecordFields>,
+                 _prev: Option<&dyn RecordFields>,
+                 _ctx: &ValidatorCtx<'_>| Validation::accept(),
+            )
             .await
             .unwrap();
 
@@ -382,9 +405,15 @@ async fn boot_native_validator_re_register_works() {
             .add_table(TableConfig::new("users"));
         db.add_repo("testdb", repo_config).await.unwrap();
 
-        db.register_native_validator("v_native2", false, |_new, _prev, _ctx| Validation::accept())
-            .await
-            .unwrap();
+        db.register_native_validator(
+            "v_native2",
+            false,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| Validation::accept(),
+        )
+        .await
+        .unwrap();
 
         db.bind_validator(
             "testdb",
@@ -403,9 +432,15 @@ async fn boot_native_validator_re_register_works() {
         let db = init_fjall_retry(&sys_path).await;
 
         // Re-register: this must work because the catalogue row is replaceable.
-        db.register_native_validator("v_native2", true, |_new, _prev, _ctx| Validation::accept())
-            .await
-            .unwrap();
+        db.register_native_validator(
+            "v_native2",
+            true,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| Validation::accept(),
+        )
+        .await
+        .unwrap();
 
         // Now the artifact is registered — write should succeed.
         let req = insert_request("ok_after_reregister", mpack!({"name": "Works"}));
@@ -529,9 +564,13 @@ async fn list_validators_with_kind_reports_native_and_wasm() {
     let db = setup_db().await;
 
     // A native validator — persisted to catalogue with kind = Native.
-    db.register_native_validator("native_val", false, |_new, _prev, _ctx| {
-        Validation::accept()
-    })
+    db.register_native_validator(
+        "native_val",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+    )
     .await
     .unwrap();
 
@@ -570,9 +609,13 @@ async fn drop_refuses_bound_native_validator() {
     let db = setup_db().await;
 
     // Register a native validator.
-    db.register_native_validator("bound_native", false, |_new, _prev, _ctx| {
-        Validation::accept()
-    })
+    db.register_native_validator(
+        "bound_native",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+    )
     .await
     .unwrap();
 
@@ -636,9 +679,13 @@ async fn unresolved_native_artifacts_lists_unregistered_after_reopen() {
         db.add_repo("testdb", repo_config).await.unwrap();
 
         // Persist a native validator row (kind = Native, no wasm_b64).
-        db.register_native_validator("orphan_native_val", false, |_new, _prev, _ctx| {
-            Validation::accept()
-        })
+        db.register_native_validator(
+            "orphan_native_val",
+            false,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+        )
         .await
         .unwrap();
 
@@ -663,9 +710,13 @@ async fn unresolved_native_artifacts_lists_unregistered_after_reopen() {
 
         // The boot warn was emitted (visible in test log output). Re-registering
         // clears the diagnostic.
-        db.register_native_validator("orphan_native_val", true, |_new, _prev, _ctx| {
-            Validation::accept()
-        })
+        db.register_native_validator(
+            "orphan_native_val",
+            true,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+        )
         .await
         .unwrap();
         let unresolved_after = db.unresolved_native_artifacts().await.unwrap();

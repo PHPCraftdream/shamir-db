@@ -28,7 +28,7 @@ use shamir_db::query::batch::BatchRequest;
 use shamir_db::shamir_db::shamir_db::ArtifactKind;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{FnBatch, FnCtx, Params};
-use shamir_engine::validator::Validation;
+use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
@@ -155,11 +155,17 @@ async fn mixed_native_and_wasm_validators_both_fire_and_accumulate() {
     .unwrap();
 
     // ── Native validator: priority 2000, always emits "native_err" ──
-    db.register_native_validator("v_native", false, |_new, _prev, _ctx| {
-        let mut v = Validation::accept();
-        v.error("native_err");
-        v
-    })
+    db.register_native_validator(
+        "v_native",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let mut v = Validation::accept();
+            v.error("native_err");
+            v
+        },
+    )
     .await
     .unwrap();
     db.bind_validator(
@@ -206,11 +212,17 @@ async fn mixed_validators_native_stop_halts_wasm() {
     let db = setup_db().await;
 
     // Native validator: priority 1000, rejects with stop.
-    db.register_native_validator("v_stop_native", false, |_new, _prev, _ctx| {
-        let mut v = Validation::reject("native_stop_err");
-        v.stop();
-        v
-    })
+    db.register_native_validator(
+        "v_stop_native",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let mut v = Validation::reject("native_stop_err");
+            v.stop();
+            v
+        },
+    )
     .await
     .unwrap();
     db.bind_validator(
@@ -278,11 +290,17 @@ async fn mixed_validators_wasm_stop_halts_native() {
     .unwrap();
 
     // Native validator: priority 2000, would emit "native_should_not_appear".
-    db.register_native_validator("v_after_wasm_stop", false, |_new, _prev, _ctx| {
-        let mut v = Validation::accept();
-        v.error("native_should_not_appear");
-        v
-    })
+    db.register_native_validator(
+        "v_after_wasm_stop",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let mut v = Validation::accept();
+            v.error("native_should_not_appear");
+            v
+        },
+    )
     .await
     .unwrap();
     db.bind_validator(
@@ -369,9 +387,13 @@ async fn parity_native_and_wasm_validator_same_rule() {
         let db = setup_db().await;
 
         // Native accept.
-        db.register_native_validator("native_accept", false, |_new, _prev, _ctx| {
-            Validation::accept()
-        })
+        db.register_native_validator(
+            "native_accept",
+            false,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+        )
         .await
         .unwrap();
 
@@ -417,9 +439,13 @@ async fn parity_native_and_wasm_validator_same_rule() {
         let db = setup_db().await;
 
         // Native reject with "same_rule".
-        db.register_native_validator("native_reject", false, |_new, _prev, _ctx| {
-            Validation::reject("same_rule")
-        })
+        db.register_native_validator(
+            "native_reject",
+            false,
+            |_new: Option<&dyn RecordFields>,
+             _prev: Option<&dyn RecordFields>,
+             _ctx: &ValidatorCtx<'_>| { Validation::reject("same_rule") },
+        )
         .await
         .unwrap();
 
@@ -504,17 +530,20 @@ async fn three_planes_native_function_validator_scalar_independent() {
     .unwrap();
 
     // ── Plane 2: Native validator ──
-    db.register_native_validator("require_name", false, |new: &QueryValue, _prev, _ctx| {
-        let has_name = match new {
-            QueryValue::Map(m) => m.contains_key("name"),
-            _ => false,
-        };
-        if has_name {
-            Validation::accept()
-        } else {
-            Validation::reject("missing_name")
-        }
-    })
+    db.register_native_validator(
+        "require_name",
+        false,
+        |new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| {
+            let has_name = new.map(|f| f.present(&["name"]).is_some()).unwrap_or(false);
+            if has_name {
+                Validation::accept()
+            } else {
+                Validation::reject("missing_name")
+            }
+        },
+    )
     .await
     .unwrap();
     db.bind_validator(
@@ -674,9 +703,13 @@ async fn mixed_kind_list_reports_correct_kind_and_count() {
         .unwrap();
 
     // Native validator.
-    db.register_native_validator("native_val_a", false, |_new, _prev, _ctx| {
-        Validation::accept()
-    })
+    db.register_native_validator(
+        "native_val_a",
+        false,
+        |_new: Option<&dyn RecordFields>,
+         _prev: Option<&dyn RecordFields>,
+         _ctx: &ValidatorCtx<'_>| { Validation::accept() },
+    )
     .await
     .unwrap();
 
