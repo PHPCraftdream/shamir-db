@@ -1,10 +1,9 @@
 //! Process-global built-in scalar function registry.
 //!
-//! `shamir-funclib` owns the function bodies; the engine exposes a single
-//! lazily-initialised [`ScalarRegistry`] so the filter / set / group-by
-//! paths can dispatch `FnCall`s by folder-qualified name (`"strings/upper"`,
-//! `"math/abs"`). Building the registry runs one `register_builtins()` pass,
-//! so it is built once on first use and shared for the process lifetime.
+//! `shamir-funclib` owns the function bodies AND the canonical
+//! `static_builtin()` entry point; the engine re-exports it here for
+//! backwards compatibility. The `ScalarResolver` (2-layer user + builtin)
+//! lives in `shamir_funclib::scalar_resolver`.
 
 use std::sync::OnceLock;
 
@@ -16,9 +15,10 @@ use shamir_funclib::registry::ScalarRegistry;
 /// The registry is immutable after construction and `Send + Sync`
 /// (`FnEntry::f` is an `Arc<dyn Fn(..) + Send + Sync>`), so a `&'static`
 /// reference can be handed to every concurrent query without locking.
+///
+/// Delegates to `shamir_funclib::static_builtin()` — the canonical home.
 pub fn builtin_scalars() -> &'static ScalarRegistry {
-    static REG: OnceLock<ScalarRegistry> = OnceLock::new();
-    REG.get_or_init(shamir_funclib::register_builtins)
+    shamir_funclib::static_builtin()
 }
 
 /// Return the shared built-in aggregate registry, initialising it on first

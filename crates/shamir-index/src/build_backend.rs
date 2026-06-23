@@ -14,6 +14,16 @@ pub fn build_index2_backend(
     desc: IndexDescriptor,
     info_store: &Arc<dyn Store>,
 ) -> Arc<dyn IndexBackend> {
+    build_index2_backend_with_resolver(desc, info_store, None)
+}
+
+/// Build an index backend, optionally with a scalar resolver for
+/// `IndexExpr::Scalar` variants (user-registered trusted_pure scalars).
+pub fn build_index2_backend_with_resolver(
+    desc: IndexDescriptor,
+    info_store: &Arc<dyn Store>,
+    resolver: Option<shamir_funclib::scalar_resolver::ScalarResolver>,
+) -> Arc<dyn IndexBackend> {
     let first_path = desc.paths.first().cloned().unwrap_or_default();
     match desc.kind.clone() {
         crate::kind::IndexKind::Fts { .. } => {
@@ -24,11 +34,20 @@ pub fn build_index2_backend(
             ))
         }
         crate::kind::IndexKind::Functional(cfg) => {
-            Arc::new(crate::functional_backend::FunctionalBackend::new(
-                desc,
-                cfg.expr.clone(),
-                Arc::clone(info_store),
-            ))
+            if let Some(r) = resolver {
+                Arc::new(crate::functional_backend::FunctionalBackend::with_resolver(
+                    desc,
+                    cfg.expr.clone(),
+                    Arc::clone(info_store),
+                    r,
+                ))
+            } else {
+                Arc::new(crate::functional_backend::FunctionalBackend::new(
+                    desc,
+                    cfg.expr.clone(),
+                    Arc::clone(info_store),
+                ))
+            }
         }
         IndexKind::Vector(cfg) => {
             let adapter = Arc::new(HnswAdapter::new(

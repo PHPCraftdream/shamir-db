@@ -3,11 +3,16 @@ use std::sync::Arc;
 
 use crate::access::{Actor, ResourceMeta};
 use crate::{DbError, DbResult};
-use shamir_engine::function::{compile_rust_source, FunctionError, WasmFunction, WasmLimits};
-use shamir_engine::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
+use shamir_engine::function::{
+    compile_rust_source, FnCtx, FunctionError, ShamirFunction, WasmFunction, WasmLimits,
+};
+use shamir_engine::validator::{
+    NativeValidatorAdapter, Validation, ValidatorBinding, ValidatorRegistry, WriteOp,
+};
 use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::QueryValue;
 
-use super::{FunctionSource, ShamirDb};
+use super::{ArtifactKind, FunctionSource, ShamirDb};
 
 impl ShamirDb {
     // ========================================================================
@@ -17,6 +22,107 @@ impl ShamirDb {
     /// Access the live validator registry.
     pub fn validators(&self) -> &Arc<ValidatorRegistry> {
         &self.validators
+    }
+
+    /// Register a **native** (in-process) validator by closure — no WASM
+    /// required, no `replace_artifact` dance.
+    ///
+    /// The closure receives `(record, old_record, ctx)` and returns a
+    /// [`Validation`]. Internally it is wrapped in [`NativeValidatorAdapter`]
+    /// (which implements [`ShamirFunction`]) so the existing invocation path
+    /// in `table_manager_validators.rs` feeds its output to
+    /// `decode_validation_result` untransformed.
+    ///
+    /// A catalogue row with `kind = Native` and **no** `wasm_b64` is
+    /// persisted so the binding survives restarts. On reopen the boot loop
+    /// skips wasm materialisation for `Native` rows; the embedder must
+    /// re-register the native artifact at startup. Until then the binding is
+    /// remembered and any use fails closed ("validator not found").
+    ///
+    /// Returns the `RecordId` assigned to the new validator.
+    pub async fn register_native_validator<F>(
+        &self,
+        name: &str,
+        replace: bool,
+        validator: F,
+    ) -> DbResult<RecordId>
+    where
+        F: Fn(&QueryValue, Option<&QueryValue>, &FnCtx) -> Validation + Send + Sync + 'static,
+    {
+        self.register_native_validator_as(name, replace, validator, Actor::System)
+            .await
+    }
+
+    /// Like [`register_native_validator`] but with an explicit [`Actor`].
+    pub async fn register_native_validator_as<F>(
+        &self,
+        name: &str,
+        replace: bool,
+        validator: F,
+        actor: Actor,
+    ) -> DbResult<RecordId>
+    where
+        F: Fn(&QueryValue, Option<&QueryValue>, &FnCtx) -> Validation + Send + Sync + 'static,
+    {
+        if !replace && self.validators.id_for_name(name).is_some() {
+            return Err(DbError::Validation(format!(
+                "validator '{}' already exists",
+                name
+            )));
+        }
+
+        // Determine the RecordId: on replace, try the live registry first,
+        // then fall back to the persisted catalogue (the boot loop skips
+        // Native rows, so the registry won't have them after a restart).
+        // The catalogue is keyed by `name`, so the fallback uses the O(1)
+        // `load_validator(name)` lookup rather than a full-catalogue scan.
+        let id = if replace {
+            if let Some(existing) = self.validators.id_for_name(name) {
+                existing
+            } else if let Some(rec) = self.system_store.load_validator(name).await? {
+                rec.get("_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<RecordId>().ok())
+                    .unwrap_or_default()
+            } else {
+                RecordId::default()
+            }
+        } else {
+            RecordId::new()
+        };
+
+        // Build the catalogue row — kind=Native, no wasm_b64.
+        let mut m = shamir_types::types::common::new_map();
+        m.insert("name".to_string(), QueryValue::Str(name.to_string()));
+        m.insert("_id".to_string(), QueryValue::Str(id.to_string()));
+        // Native rows have no wasm bytes; omit wasm_b64 / wasm_hash entirely.
+        m.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
+        m.insert("source".to_string(), QueryValue::Null);
+        m.insert("bound_in".to_string(), QueryValue::List(vec![]));
+        m.insert(
+            super::KIND_FIELD.to_string(),
+            ArtifactKind::Native.as_query_value(),
+        );
+        let record = QueryValue::Map(m);
+
+        // Persist before registering so a crash can't leave a live entry
+        // without a catalogue record.
+        self.system_store
+            .save_validator(name, &record, &ResourceMeta::owned_by(actor))
+            .await?;
+
+        if replace {
+            if let Some(old_id) = self.validators.id_for_name(name) {
+                self.validators.remove(&old_id);
+            }
+        }
+
+        let adapter = Arc::new(NativeValidatorAdapter::new(validator)) as Arc<dyn ShamirFunction>;
+        self.validators
+            .register(id, name, adapter)
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
+        Ok(id)
     }
 
     /// Register a WASM validator from pre-compiled binary bytes.
@@ -145,6 +251,15 @@ impl ShamirDb {
             "bound_in".to_string(),
             shamir_types::types::value::QueryValue::List(vec![]),
         );
+        // Phase 0 parity plumbing: tag the artifact origin. Today every row
+        // persisted here is WASM; later phases introduce `Native` rows. The
+        // field defaults to `Wasm` on read for any pre-existing row without
+        // it (see `ArtifactKind::from_record`), so this is a no-op for
+        // behaviour — purely additive catalogue metadata.
+        m.insert(
+            super::KIND_FIELD.to_string(),
+            ArtifactKind::Wasm.as_query_value(),
+        );
         let record = shamir_types::types::value::QueryValue::Map(m);
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
@@ -245,6 +360,33 @@ impl ShamirDb {
     /// List all registered validators as `(id, name)` pairs.
     pub fn list_validators(&self) -> Vec<(RecordId, String)> {
         self.validators.list()
+    }
+
+    /// List all registered validators as `(id, name, kind)` triples.
+    ///
+    /// The `kind` is resolved per-validator against the persisted catalogue
+    /// record (keyed by `name`): a validator whose row carries `kind = Native`
+    /// reports [`ArtifactKind::Native`]; everything else reports
+    /// [`ArtifactKind::Wasm`] (the historical default for any pre-Phase-0 row
+    /// without an explicit `kind` field — see [`ArtifactKind::from_record`]).
+    ///
+    /// This is the introspection accessor behind the `list validators` wire
+    /// surface; the catalogue is the source of truth for `kind`. If a
+    /// catalogue lookup fails transiently the validator still appears, with
+    /// `kind` defaulting to `Wasm` — the listing never silently drops entries.
+    pub async fn list_validators_with_kind(
+        &self,
+    ) -> DbResult<Vec<(RecordId, String, ArtifactKind)>> {
+        let entries = self.validators.list();
+        let mut out = Vec::with_capacity(entries.len());
+        for (id, name) in entries {
+            let kind = match self.system_store.load_validator(&name).await? {
+                Some(rec) => ArtifactKind::from_record(&rec),
+                None => ArtifactKind::Wasm,
+            };
+            out.push((id, name, kind));
+        }
+        Ok(out)
     }
 
     // ========================================================================

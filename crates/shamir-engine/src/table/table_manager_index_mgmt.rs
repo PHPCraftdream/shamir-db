@@ -104,10 +104,26 @@ impl TableManager {
                     "upper" => crate::index2::expr::IndexExpr::Upper(Box::new(base)),
                     "trim" => crate::index2::expr::IndexExpr::Trim(Box::new(base)),
                     "length" => crate::index2::expr::IndexExpr::Length(Box::new(base)),
-                    _ => {
-                        return Err(shamir_storage::error::DbError::Internal(format!(
-                            "unknown functional_op: {expr_op}"
-                        )))
+                    user_scalar_name => {
+                        // User-registered scalar: check the ScalarResolver for
+                        // a trusted_pure vouch. Non-vouched scalars are rejected
+                        // from the functional-index path (index-safety gate).
+                        let resolver = self.scalar_resolver.load_full();
+                        let entry = resolver.get(user_scalar_name).ok_or_else(|| {
+                            shamir_storage::error::DbError::Internal(format!(
+                                "functional_op '{user_scalar_name}' is not a known built-in or registered scalar"
+                            ))
+                        })?;
+                        if !entry.is_indexable() {
+                            return Err(shamir_storage::error::DbError::Internal(format!(
+                                "scalar '{user_scalar_name}' is not trusted_pure — cannot back a functional index. \
+                                 Call .trusted_pure() on the FnEntry when registering to vouch it is pure + deterministic."
+                            )));
+                        }
+                        crate::index2::expr::IndexExpr::Scalar {
+                            name: user_scalar_name.to_string(),
+                            inner: Box::new(base),
+                        }
                     }
                 };
                 let kind = IndexKind::Functional(Box::new(FunctionalConfig { expr: expr.clone() }));
@@ -119,11 +135,22 @@ impl TableManager {
                     kind.clone(),
                 );
                 let backend: Arc<dyn IndexBackend> =
-                    Arc::new(crate::index2::functional_backend::FunctionalBackend::new(
-                        desc,
-                        expr,
-                        Arc::clone(self.info_store()),
-                    ));
+                    if matches!(expr, crate::index2::expr::IndexExpr::Scalar { .. }) {
+                        Arc::new(
+                            crate::index2::functional_backend::FunctionalBackend::with_resolver(
+                                desc,
+                                expr,
+                                Arc::clone(self.info_store()),
+                                self.scalar_resolver.load_full().as_ref().clone(),
+                            ),
+                        )
+                    } else {
+                        Arc::new(crate::index2::functional_backend::FunctionalBackend::new(
+                            desc,
+                            expr,
+                            Arc::clone(self.info_store()),
+                        ))
+                    };
                 (kind, backend)
             }
             "vector" => {

@@ -190,9 +190,9 @@ impl ShamirAdminExecutor {
                     .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::List)
                     .await
                     .map_err(err_access)?;
-                let mut names = self
+                let mut entries = self
                     .shamir
-                    .list_functions()
+                    .list_functions_with_kind()
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 if let Some(prefix) = folder {
@@ -201,10 +201,19 @@ impl ShamirAdminExecutor {
                     } else {
                         format!("{}/", prefix)
                     };
-                    names.retain(|n| n.starts_with(&prefix_slash));
+                    entries.retain(|(n, _)| n.starts_with(&prefix_slash));
                 }
+                let items: Vec<QueryValue> = entries
+                    .into_iter()
+                    .map(|(name, kind)| {
+                        mpack!({
+                            "name": @(QueryValue::Str(name)),
+                            "kind": @(QueryValue::Str(kind.as_str().to_string())),
+                        })
+                    })
+                    .collect();
                 Ok(admin_result(mpack!({
-                    "functions": @(QueryValue::List(names.into_iter().map(QueryValue::Str).collect())),
+                    "functions": @(QueryValue::List(items)),
                 })))
             }
             ListOp::Validators => {
@@ -212,14 +221,19 @@ impl ShamirAdminExecutor {
                     .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::List)
                     .await
                     .map_err(err_access)?;
-                let validators = self.shamir.list_validators();
-                let items: Vec<QueryValue> = validators
+                let entries = self
+                    .shamir
+                    .list_validators_with_kind()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let items: Vec<QueryValue> = entries
                     .iter()
-                    .map(|(id, name)| {
+                    .map(|(id, name, kind)| {
                         let bound = self.shamir.validators().bound_tables(id);
                         mpack!({
                             "id": @(QueryValue::Str(id.to_string())),
                             "name": @(QueryValue::Str(name.clone())),
+                            "kind": @(QueryValue::Str(kind.as_str().to_string())),
                             "bound_in": @(QueryValue::List(bound.into_iter().map(QueryValue::Str).collect())),
                         })
                     })

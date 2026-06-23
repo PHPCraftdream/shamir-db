@@ -10,12 +10,16 @@ pub mod persistence;
 mod registry;
 
 mod decode;
+mod encode;
+mod native_adapter;
 mod persisted_validators;
 mod query_value_conv;
 mod validation_outcome;
 mod validator_binding;
 
 pub use decode::{decode_validation_result, ValidatorDecodeError};
+pub use encode::{validation_to_query_value, Validation};
+pub use native_adapter::{NativeValidatorAdapter, NativeValidatorFn};
 pub use persisted_validators::PersistedValidators;
 pub use query_value_conv::{inner_to_query_value, inner_to_query_value_with};
 pub use validation_outcome::{ValidationOutcome, ValidatorFailure};

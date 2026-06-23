@@ -21,6 +21,7 @@
 //! at the engine/wasm-host boundary convert to/from `InnerValue` as needed.
 
 pub mod registry;
+pub mod scalar_resolver;
 
 pub mod agg;
 pub mod compare;
@@ -58,6 +59,15 @@ pub fn register_builtins() -> registry::ScalarRegistry {
     reg.in_folder("crypto", crypto::register);
     reg.in_folder("crypto", canonical::register);
     reg
+}
+
+/// Return the shared `&'static` built-in scalar registry, initialising it
+/// on first use. This is the canonical home of the built-in registry;
+/// `shamir_wasm_host::builtin_scalars()` delegates here.
+pub fn static_builtin() -> &'static registry::ScalarRegistry {
+    use std::sync::OnceLock;
+    static REG: OnceLock<registry::ScalarRegistry> = OnceLock::new();
+    REG.get_or_init(register_builtins)
 }
 
 /// Build an [`agg::AggRegistry`] populated with every built-in aggregate.

@@ -9,13 +9,21 @@ use super::table_manager::TableManager;
 impl TableManager {
     // ---- index2 event hooks (used by crud + replication) ----
 
-    pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) {
+    /// Map an `IndexError` to a `DbError::Internal` for propagation.
+    /// This ensures scalar-eval failures (e.g. user scalar not re-registered
+    /// after reopen) surface as LOUD errors instead of being swallowed.
+    fn io_err(e: shamir_index::IndexError) -> DbError {
+        DbError::Internal(e.to_string())
+    }
+
+    pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_insert(*rid, rec).await {
-                let _ =
-                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
-            }
+            let ops = backend.plan_insert(*rid, rec).await.map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
         }
+        Ok(())
     }
 
     pub(super) async fn index2_on_update(
@@ -23,22 +31,27 @@ impl TableManager {
         rid: &RecordId,
         old: &InnerValue,
         new: &InnerValue,
-    ) {
+    ) -> DbResult<()> {
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_update(*rid, old, new).await {
-                let _ =
-                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
-            }
+            let ops = backend
+                .plan_update(*rid, old, new)
+                .await
+                .map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
         }
+        Ok(())
     }
 
-    pub(super) async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) {
+    pub(super) async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_delete(*rid, rec).await {
-                let _ =
-                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
-            }
+            let ops = backend.plan_delete(*rid, rec).await.map_err(Self::io_err)?;
+            crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                .await
+                .map_err(Self::io_err)?;
         }
+        Ok(())
     }
 
     // ---- public CRUD surface ----
@@ -105,7 +118,7 @@ impl TableManager {
         self.sorted_indexes
             .on_record_created(&id, value, version)
             .await?;
-        self.index2_on_insert(&id, value).await;
+        self.index2_on_insert(&id, value).await?;
 
         // SSI footprint: record this non-tx insert so Serializable txs see it.
         let ssi_ops = self
@@ -229,7 +242,7 @@ impl TableManager {
             .on_records_created_batch(pairs_iter(), batch_version)
             .await?;
         for (id, value) in pairs_iter() {
-            self.index2_on_insert(id, value).await;
+            self.index2_on_insert(id, value).await?;
         }
 
         // 5. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
@@ -291,7 +304,7 @@ impl TableManager {
                     .on_record_deleted_unique(&id, old)
                     .await?;
                 self.sorted_indexes.on_record_deleted(&id, old).await?;
-                self.index2_on_delete(&id, old).await;
+                self.index2_on_delete(&id, old).await?;
             }
             // SSI footprint: delete touches the table (coarse TableScan
             // detection). No new index postings for a delete.
@@ -369,7 +382,7 @@ impl TableManager {
             self.sorted_indexes
                 .on_record_created(&id, value, version)
                 .await?;
-            self.index2_on_insert(&id, value).await;
+            self.index2_on_insert(&id, value).await?;
             self.sorted_indexes
                 .plan_record_created(&id, value, version)
                 .unwrap_or_default()
@@ -383,7 +396,7 @@ impl TableManager {
             self.sorted_indexes
                 .on_record_updated(&id, old, value, version)
                 .await?;
-            self.index2_on_update(&id, old, value).await;
+            self.index2_on_update(&id, old, value).await?;
             self.sorted_indexes
                 .plan_record_updated(&id, old, value, version)
                 .unwrap_or_default()

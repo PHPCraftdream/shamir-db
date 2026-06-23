@@ -258,7 +258,9 @@ async fn init_redb_retry(path: &std::path::Path) -> ShamirDb {
             Err(e)
                 if {
                     let m = e.to_string();
-                    m.contains("Cannot acquire lock") || m.contains("already open")
+                    m.contains("Cannot acquire lock")
+                        || m.contains("already open")
+                        || m.contains("Locked")
                 } =>
             {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;

@@ -148,6 +148,13 @@ impl ShamirAdminExecutor {
             .get_table(&op.repo, &op.table)
             .await
             .map_err(|e| err(e.to_string()))?;
+        // Inject the per-DB scalar resolver so create_index_v2 can validate
+        // user-registered trusted_pure scalars for functional indexes.
+        table
+            .set_scalar_resolver(shamir_funclib::scalar_resolver::ScalarResolver::new(
+                std::sync::Arc::clone(db.scalars()),
+            ))
+            .await;
 
         // Check if the index already exists (for if_not_exists / dup guard).
         let already_exists = if op.unique {

@@ -4,12 +4,13 @@ use std::sync::Arc;
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source, BatchContext, CreateFunctionOptions, FnBatch, FnCtx, FunctionError,
-    FunctionMeta, FunctionRegistry, GlobalVars, Params, WasmFunction, WasmLimits,
+    compile_rust_source, BatchContext, CreateFunctionOptions, FnAdapter, FnBatch, FnCtx,
+    FunctionError, FunctionMeta, FunctionRegistry, GlobalVars, Params, ShamirFunction,
+    WasmFunction, WasmLimits,
 };
 use shamir_types::types::value::QueryValue;
 
-use super::{FunctionSource, ShamirDb};
+use super::{ArtifactKind, FunctionSource, ShamirDb};
 
 impl ShamirDb {
     // ========================================================================
@@ -26,6 +27,32 @@ impl ShamirDb {
     /// implementation detail, not user-managed functions.
     pub fn functions(&self) -> &Arc<FunctionRegistry> {
         &self.functions
+    }
+
+    /// Register a native (in-process) procedural function by closure.
+    ///
+    /// This is the MVP in-memory path: the closure is wrapped in
+    /// [`FnAdapter`] and inserted into the live [`FunctionRegistry`]. No
+    /// catalogue row is written — the registration is lost on restart. For a
+    /// persisted native function, write a `kind = Native` row manually (see
+    /// Deliverable 3 for the validator analogue).
+    ///
+    /// `replace` controls overwrite semantics: `false` errors on name
+    /// collision, `true` silently overwrites.
+    pub fn register_fn<F, Fut>(&self, name: &str, replace: bool, f: F) -> DbResult<()>
+    where
+        F: Fn(&FnCtx, &FnBatch, &Params) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<QueryValue, FunctionError>> + Send + 'static,
+    {
+        let adapter = Arc::new(FnAdapter(f)) as Arc<dyn ShamirFunction>;
+        if replace {
+            self.functions.replace(name, adapter);
+            Ok(())
+        } else {
+            self.functions
+                .register(name, adapter)
+                .map_err(|e| DbError::Function(e.to_string()))
+        }
     }
 
     /// Register a WASM function from pre-compiled binary bytes.
@@ -172,6 +199,15 @@ impl ShamirDb {
             "version".to_string(),
             shamir_types::types::value::QueryValue::Int(version as i64),
         );
+        // Phase 0 parity plumbing: tag the artifact origin. Today every row
+        // persisted here is WASM; later phases introduce `Native` rows. The
+        // field defaults to `Wasm` on read for any pre-existing row without
+        // it (see `ArtifactKind::from_record`), so this is a no-op for
+        // behaviour — purely additive catalogue metadata.
+        m.insert(
+            super::KIND_FIELD.to_string(),
+            ArtifactKind::Wasm.as_query_value(),
+        );
         let mut record = shamir_types::types::value::QueryValue::Map(m);
         meta.inject_into(&mut record);
         self.system_store
@@ -289,6 +325,35 @@ impl ShamirDb {
         let mut names = self.functions.list();
         names.sort();
         Ok(names)
+    }
+
+    /// List all registered functions as `(name, kind)` pairs (sorted by name).
+    ///
+    /// The `kind` is resolved per-name against the persisted catalogue record:
+    /// a function whose catalogue row carries `kind = Native` reports
+    /// [`ArtifactKind::Native`]; everything else (including builtins, which
+    /// have no catalogue row) reports [`ArtifactKind::Wasm`]. Builtins default
+    /// to `Wasm` because they are in-process Rust types that bypass the
+    /// catalogue — the historical default for any row without an explicit
+    /// `kind` field (see [`ArtifactKind::from_record`]).
+    ///
+    /// This is the introspection accessor behind the `list functions` wire
+    /// surface; the catalogue is the source of truth for `kind`.
+    pub async fn list_functions_with_kind(&self) -> DbResult<Vec<(String, ArtifactKind)>> {
+        let mut names = self.functions.list();
+        names.sort();
+        // One targeted lookup per name — O(N) in the function count, but each
+        // lookup is O(1) against the name-keyed catalogue table. A full scan
+        // would also be correct but does unnecessary work for large catalogues.
+        let mut out = Vec::with_capacity(names.len());
+        for name in &names {
+            let kind = match self.system_store.load_function(name).await? {
+                Some(rec) => ArtifactKind::from_record(&rec),
+                None => ArtifactKind::Wasm, // builtin / no catalogue row
+            };
+            out.push((name.clone(), kind));
+        }
+        Ok(out)
     }
 
     /// Look up a function's in-memory metadata.

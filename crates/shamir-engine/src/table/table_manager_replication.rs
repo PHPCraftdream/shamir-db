@@ -126,7 +126,11 @@ impl TableManager {
                 src_desc.kind.clone(),
             );
 
-            let backend = crate::index2::build_index2_backend(new_desc, &self.info_store);
+            let backend = crate::index2::build_index2_backend_with_resolver(
+                new_desc,
+                &self.info_store,
+                Some(self.scalar_resolver.load_full().as_ref().clone()),
+            );
             self.index2_registry
                 .insert(backend)
                 .await

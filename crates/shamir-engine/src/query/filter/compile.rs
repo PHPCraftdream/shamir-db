@@ -177,7 +177,15 @@ pub(super) fn build_index_expr(
         "trim" => IndexExpr::Trim(Box::new(base)),
         "length" => IndexExpr::Length(Box::new(base)),
         "field" => base,
-        _ => return None,
+        // Unknown ops are treated as user-registered scalar names. The
+        // brute-force eval path resolves the name via the ScalarResolver
+        // at match time; the index path validates `.trusted_pure()` at
+        // creation time. If the name doesn't resolve, the eval returns
+        // an error → the comparison yields false (no match).
+        user_scalar => IndexExpr::Scalar {
+            name: user_scalar.to_string(),
+            inner: Box::new(base),
+        },
     })
 }
 

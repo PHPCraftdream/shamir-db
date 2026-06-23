@@ -1,4 +1,5 @@
 mod access_control;
+mod artifact_kind;
 mod changelog;
 mod core;
 mod db_gateway;
@@ -9,4 +10,5 @@ mod validator_management;
 
 pub(super) const SYSTEM_DB_NAME: &str = "__system__";
 
+pub use artifact_kind::{ArtifactKind, KIND_FIELD};
 pub use core::{FunctionSource, ShamirDb};

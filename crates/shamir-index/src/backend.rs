@@ -221,4 +221,13 @@ pub trait IndexBackend: Send + Sync {
     async fn apply_staged_vectors(&self, _vecs: &[(RecordId, Vec<f32>)]) -> Result<(), IndexError> {
         Ok(())
     }
+
+    /// Push an updated scalar resolver into backends that evaluate scalar
+    /// expressions (e.g. `FunctionalBackend` with `IndexExpr::Scalar`).
+    ///
+    /// Called by `TableManager::set_scalar_resolver` after the per-DB
+    /// resolver is injected, so that backends constructed during reopen
+    /// (which captured a builtins-only resolver) can be retroactively
+    /// updated to see user-registered scalars. Default: no-op.
+    fn update_scalar_resolver(&self, _resolver: &shamir_funclib::scalar_resolver::ScalarResolver) {}
 }

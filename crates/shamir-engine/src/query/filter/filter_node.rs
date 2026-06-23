@@ -666,10 +666,13 @@ impl FilterNode {
                 pre_resolved,
                 op,
             } => {
-                // IndexExpr::eval (index crate — out of C6 scope) returns
-                // InnerValue. Convert once to QueryValue; the comparison
-                // itself is then QueryValue-to-QueryValue.
-                let computed_iv = match expr.eval(record) {
+                // IndexExpr::eval_with_scalars returns InnerValue. Convert
+                // once to QueryValue; the comparison itself is then
+                // QueryValue-to-QueryValue. The ScalarResolver from ctx is
+                // threaded so IndexExpr::Scalar variants (user-registered
+                // trusted_pure scalars) resolve on the brute-force path too.
+                let resolver = &ctx.scalars;
+                let computed_iv = match expr.eval_with_scalars(record, Some(resolver)) {
                     Ok(v) => v,
                     Err(_) => return false,
                 };

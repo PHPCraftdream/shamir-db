@@ -193,11 +193,18 @@ async fn list_functions_over_wire() {
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = resp.results["op"].records[0].as_value().into_owned();
     let fns = result["functions"].as_array().unwrap();
-    assert!(
-        fns.iter().any(|f| f == "fn_alpha"),
-        "should contain fn_alpha"
-    );
-    assert!(fns.iter().any(|f| f == "fn_beta"), "should contain fn_beta");
+    // Phase 4: each entry is now a {name, kind} object. WASM functions
+    // created via create_function report kind = "wasm".
+    let names: Vec<&str> = fns.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"fn_alpha"), "should contain fn_alpha");
+    assert!(names.contains(&"fn_beta"), "should contain fn_beta");
+    for f in fns {
+        assert_eq!(
+            f["kind"].as_str(),
+            Some("wasm"),
+            "wasm fn should report kind=wasm"
+        );
+    }
 }
 
 #[tokio::test]
@@ -220,9 +227,16 @@ async fn list_functions_filtered_by_folder() {
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
     let fns = rec["functions"].as_array().unwrap();
-    assert_eq!(fns.len(), 2, "should have 2 math functions, got: {:?}", fns);
-    assert!(fns.iter().any(|f| f == "math/add"));
-    assert!(fns.iter().any(|f| f == "math/sub"));
+    // Phase 4: entries are {name, kind} objects.
+    let names: Vec<&str> = fns.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(
+        fns.len(),
+        2,
+        "should have 2 math functions, got: {:?}",
+        names
+    );
+    assert!(names.contains(&"math/add"));
+    assert!(names.contains(&"math/sub"));
 }
 
 #[tokio::test]
@@ -265,6 +279,12 @@ async fn list_validators_all_over_wire() {
         .find(|v| v["name"] == "v_list_all")
         .expect("should find v_list_all");
     assert!(v.get("id").is_some(), "should have id");
+    // Phase 4: kind is surfaced on the validator list response.
+    assert_eq!(
+        v["kind"].as_str(),
+        Some("wasm"),
+        "wasm validator should report kind=wasm"
+    );
     let bound = v["bound_in"].as_array().unwrap();
     assert!(!bound.is_empty(), "should have at least one bound_in entry");
 }

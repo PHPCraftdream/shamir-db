@@ -8,6 +8,7 @@ use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::query::TableRef;
 use crate::table::TableManager;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::CallOp;
 use shamir_storage::error::DbResult;
 use shamir_types::access::Actor;
@@ -24,6 +25,15 @@ pub trait TableResolver: Send + Sync {
     /// (gate, WAL, commit lifecycle). Cross-repo guard upstream
     /// guarantees `repo_name` is well-defined for transactional batches.
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::repo::RepoInstance>;
+
+    /// Return the per-DB scalar resolver (user + builtin layers).
+    ///
+    /// Default: built-ins only (no user-registered scalars). Overridden
+    /// by `DbTableResolver` when user scalars are registered on the
+    /// database instance.
+    fn scalar_resolver(&self) -> ScalarResolver {
+        ScalarResolver::builtins_only()
+    }
 }
 
 /// Trait for executing admin (DDL) operations.

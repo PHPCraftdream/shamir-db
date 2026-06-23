@@ -38,7 +38,7 @@ pub mod write_ops;
 
 pub use actor::IndexActor;
 pub use backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
-pub use build_backend::build_index2_backend;
+pub use build_backend::{build_index2_backend, build_index2_backend_with_resolver};
 pub use descriptor::IndexDescriptor;
 pub use expr::{ExprError, IndexExpr};
 pub use kind::{

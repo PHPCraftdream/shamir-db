@@ -5,6 +5,7 @@ use crate::engine::table::TableManager;
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 use crate::DbResult;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 
 /// TableResolver that resolves TableRef within a DbInstance.
 ///
@@ -20,6 +21,11 @@ impl TableResolver for DbTableResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         let mut table = self.db.get_table(&table_ref.repo, &table_ref.table).await?;
         table.set_validator_registry(self.validators.clone());
+        table
+            .set_scalar_resolver(ScalarResolver::new(std::sync::Arc::clone(
+                self.db.scalars(),
+            )))
+            .await;
         Ok(table)
     }
 
@@ -27,5 +33,9 @@ impl TableResolver for DbTableResolver {
         self.db.get_repo(repo_name).ok_or_else(|| {
             crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))
         })
+    }
+
+    fn scalar_resolver(&self) -> ScalarResolver {
+        ScalarResolver::new(std::sync::Arc::clone(self.db.scalars()))
     }
 }

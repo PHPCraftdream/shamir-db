@@ -46,8 +46,11 @@ pub type ScalarFn = Arc<dyn Fn(&[QueryValue]) -> ScalarResult + Send + Sync>;
 ///
 /// `min_args` / `max_args` bound the argument count (`max_args = None` ⇒
 /// variadic / unbounded, used by n-ary `min`/`max`). `pure` and `deterministic`
-/// drive indexability: only a `pure + deterministic` function may back a
-/// functional index.
+/// describe the function's semantics. `trusted_pure` is an **explicit embedder
+/// opt-in** (via [`.trusted_pure()`](FnEntry::trusted_pure)) that vouches the
+/// function is safe to back a functional index — it must be `pure + deterministic`
+/// AND the embedder must have audited the native code. A non-vouched function
+/// is rejected from the functional-index path.
 #[derive(Clone)]
 pub struct FnEntry {
     pub f: ScalarFn,
@@ -55,6 +58,10 @@ pub struct FnEntry {
     pub max_args: Option<usize>,
     pub pure: bool,
     pub deterministic: bool,
+    /// Explicit embedder opt-in for functional-index use. Set via
+    /// [`.trusted_pure()`](FnEntry::trusted_pure). If `false`, the function
+    /// cannot back a functional index even if `pure && deterministic`.
+    pub trusted_pure: bool,
 }
 
 impl FnEntry {
@@ -71,7 +78,29 @@ impl FnEntry {
             max_args,
             pure: true,
             deterministic: true,
+            trusted_pure: false,
         }
+    }
+
+    /// Builder: explicitly vouch that this native function is `pure +
+    /// deterministic` and safe to back a functional index.
+    ///
+    /// This is the **index-safety gate**: a lying native scalar (one that
+    /// returns different values for the same input, or has side effects)
+    /// would silently corrupt a functional index. By requiring an explicit
+    /// opt-in, the embedder acknowledges they have audited the function.
+    ///
+    /// Sets `pure = true`, `deterministic = true`, `trusted_pure = true`.
+    pub fn trusted_pure(mut self) -> Self {
+        self.pure = true;
+        self.deterministic = true;
+        self.trusted_pure = true;
+        self
+    }
+
+    /// Whether this entry is eligible to back a functional index.
+    pub fn is_indexable(&self) -> bool {
+        self.trusted_pure && self.pure && self.deterministic
     }
 }
 

@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 shamir-types       = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
+shamir-funclib     = { path = "../shamir-funclib" }
 shamir-storage     = { path = "../shamir-storage", default-features = false }
 shamir-tx          = { path = "../shamir-tx" }
 shamir-tunables    = { path = "../shamir-tunables" }

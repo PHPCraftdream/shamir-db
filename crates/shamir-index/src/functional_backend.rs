@@ -25,14 +25,42 @@ pub struct FunctionalBackend {
     descriptor: IndexDescriptor,
     expr: IndexExpr,
     store: Arc<dyn Store>,
+    /// Optional scalar resolver for `IndexExpr::Scalar` variants.
+    /// `None` for indexes that only use built-in `IndexExpr` variants
+    /// (Lower, Upper, Trim, Length). Set when the index expression
+    /// contains a user-registered scalar function.
+    ///
+    /// Uses `ArcSwapOption` so the resolver can be updated after
+    /// construction (e.g. when a re-registered user scalar becomes
+    /// available after DB reopen) without locking on the hot eval path.
+    resolver: arc_swap::ArcSwapOption<shamir_funclib::scalar_resolver::ScalarResolver>,
 }
 
 impl FunctionalBackend {
+    /// Build a FunctionalBackend with no scalar resolver (for indexes
+    /// that only use built-in IndexExpr variants).
     pub fn new(descriptor: IndexDescriptor, expr: IndexExpr, store: Arc<dyn Store>) -> Self {
         Self {
             descriptor,
             expr,
             store,
+            resolver: arc_swap::ArcSwapOption::empty(),
+        }
+    }
+
+    /// Build a FunctionalBackend with a scalar resolver (for indexes
+    /// backed by user-registered `.trusted_pure()` scalars).
+    pub fn with_resolver(
+        descriptor: IndexDescriptor,
+        expr: IndexExpr,
+        store: Arc<dyn Store>,
+        resolver: shamir_funclib::scalar_resolver::ScalarResolver,
+    ) -> Self {
+        Self {
+            descriptor,
+            expr,
+            store,
+            resolver: arc_swap::ArcSwapOption::new(Some(std::sync::Arc::new(resolver))),
         }
     }
 
@@ -56,15 +84,22 @@ impl FunctionalBackend {
         build_posting_key(self.descriptor.id, type_tag::FUNCTIONAL, &h, rid)
     }
 
-    /// Evaluate the index expression, collapsing every `ExprError` to
-    /// `InnerValue::Null` so a missing/typed-wrong field yields a stable
-    /// posting key. The result is the owned computed value (§5b floor).
-    fn eval_or_null(&self, rec: &dyn RecordRef) -> InnerValue {
-        match self.expr.eval(rec) {
-            Ok(v) => v,
-            Err(ExprError::FieldNotFound) => InnerValue::Null,
-            Err(ExprError::TypeMismatch { .. }) => InnerValue::Null,
-            Err(ExprError::DivisionByZero) => InnerValue::Null,
+    /// Evaluate the index expression. `FieldNotFound`, `TypeMismatch`,
+    /// and `DivisionByZero` collapse to `InnerValue::Null` (a missing or
+    /// wrong-type field yields a stable Null posting key — that is correct
+    /// behaviour). `ScalarError` PROPAGATES — an unresolved user scalar
+    /// (e.g. not re-registered after reopen) must NOT be silently turned
+    /// into a Null index key, because every record would hash to the same
+    /// key, silently corrupting the index.
+    fn eval_or_null(&self, rec: &dyn RecordRef) -> Result<InnerValue, ExprError> {
+        let resolver_guard = self.resolver.load();
+        let resolver: Option<&_> = resolver_guard.as_deref();
+        match self.expr.eval_with_scalars(rec, resolver) {
+            Ok(v) => Ok(v),
+            Err(ExprError::FieldNotFound) => Ok(InnerValue::Null),
+            Err(ExprError::TypeMismatch { .. }) => Ok(InnerValue::Null),
+            Err(ExprError::DivisionByZero) => Ok(InnerValue::Null),
+            Err(scalar_err) => Err(scalar_err),
         }
     }
 
@@ -149,7 +184,12 @@ impl IndexBackend for FunctionalBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let val = self.eval_or_null(rec);
+        let val = self.eval_or_null(rec).map_err(|e| {
+            IndexError::Backend(format!(
+                "functional index '{}': scalar eval failed: {}",
+                self.descriptor.name, e
+            ))
+        })?;
         let key = self.posting_key(&val, &rid);
         Ok(vec![IndexWriteOp::SetPosting {
             key: Bytes::from(key),
@@ -163,8 +203,14 @@ impl IndexBackend for FunctionalBackend {
         old: &(dyn RecordRef + Sync + '_),
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let old_val = self.eval_or_null(old);
-        let new_val = self.eval_or_null(new);
+        let eval_err = |e: ExprError| {
+            IndexError::Backend(format!(
+                "functional index '{}': scalar eval failed: {}",
+                self.descriptor.name, e
+            ))
+        };
+        let old_val = self.eval_or_null(old).map_err(&eval_err)?;
+        let new_val = self.eval_or_null(new).map_err(&eval_err)?;
         let old_hash = Self::hash_value(&old_val);
         let new_hash = Self::hash_value(&new_val);
         if old_hash != new_hash {
@@ -189,7 +235,12 @@ impl IndexBackend for FunctionalBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let val = self.eval_or_null(rec);
+        let val = self.eval_or_null(rec).map_err(|e| {
+            IndexError::Backend(format!(
+                "functional index '{}': scalar eval failed: {}",
+                self.descriptor.name, e
+            ))
+        })?;
         let key = self.posting_key(&val, &rid);
         Ok(vec![IndexWriteOp::RemovePosting {
             key: Bytes::from(key),
@@ -235,5 +286,13 @@ impl IndexBackend for FunctionalBackend {
             let _ = self.store.remove(key_bytes).await;
         }
         Ok(())
+    }
+
+    fn update_scalar_resolver(&self, resolver: &shamir_funclib::scalar_resolver::ScalarResolver) {
+        // Clone the ScalarResolver into an Arc and store it — the old
+        // resolver (if any) is replaced atomically. Subsequent eval_or_null
+        // calls will pick up the new resolver via the ArcSwapOption load.
+        self.resolver
+            .store(Some(std::sync::Arc::new(resolver.clone())));
     }
 }

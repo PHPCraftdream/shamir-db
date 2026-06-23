@@ -49,6 +49,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             max_args: Some(0),
             pure: false,
             deterministic: false,
+            trusted_pure: false,
         },
     );
     reg.register(
@@ -62,6 +63,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             max_args: Some(1),
             pure: false,
             deterministic: false,
+            trusted_pure: false,
         },
     );
 
