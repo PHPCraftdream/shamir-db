@@ -5,9 +5,11 @@
 //! and a lean [`ValidatorCtx`]; it returns a [`Validation`].  Interning is
 //! hidden from the validator author.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use shamir_types::access::Actor;
-use shamir_types::core::interner::Interner;
+use shamir_types::core::interner::{Interner, InternerKey};
 
 use super::{record_fields::RecordFields, Validation};
 
@@ -16,16 +18,34 @@ use super::{record_fields::RecordFields, Validation};
 /// Narrow context passed to every [`RecordValidator::validate`] call.
 ///
 /// - `actor` — the identity that initiated the write.
-/// - `interner` — the repo interner, available so a validator can de-intern
-///   a field name back to a string when constructing error messages.
-///   **Not** intended for general key iteration; use it only to format errors.
-/// - `db` — reserved for Phase C (relational checks / FK lookups); `None`
-///   in Phase 0.
+/// - [`field_name`](Self::field_name) — the ONLY interner capability exposed:
+///   de-intern a field id back to its name for an error message. The interner
+///   itself is held privately so declarative / user validators cannot iterate
+///   keys, intern new names, or otherwise reach the full [`Interner`] surface.
+///
+/// A `db` handle (tx-scoped read-only snapshot) for relational checks is
+/// reserved for Phase C and is not part of this struct yet.
 pub struct ValidatorCtx<'a> {
     /// Who initiated the write.
     pub actor: &'a Actor,
-    /// Repo interner — for de-interning field names in error messages.
-    pub interner: &'a Interner,
+    /// Repo interner — **private**. Reached only through
+    /// [`field_name`](Self::field_name); never exposed wholesale to validators.
+    interner: &'a Interner,
+}
+
+impl<'a> ValidatorCtx<'a> {
+    /// Construct a validator context from the actor and the repo interner.
+    pub fn new(actor: &'a Actor, interner: &'a Interner) -> Self {
+        Self { actor, interner }
+    }
+
+    /// De-intern a field id back to its name, for error-message construction.
+    ///
+    /// This is the only interner capability a validator gets: it cannot iterate
+    /// keys, intern new names, or otherwise touch the full [`Interner`].
+    pub fn field_name(&self, id: &InternerKey) -> Option<Arc<str>> {
+        self.interner.get_str(id)
+    }
 }
 
 // ── RecordValidator trait ─────────────────────────────────────────────────────
