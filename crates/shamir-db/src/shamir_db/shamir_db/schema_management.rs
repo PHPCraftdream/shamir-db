@@ -149,6 +149,7 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         .and_then(|v| v.as_str())
         .and_then(shamir_engine::validator::schema::FormatKind::parse);
     let compare = item.get("compare").and_then(parse_cross_field_compare);
+    let foreign_key = item.get("foreign_key").and_then(parse_foreign_key_ref);
 
     let constraints = Constraints {
         required,
@@ -164,6 +165,7 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         scalar,
         format,
         compare,
+        foreign_key,
     };
 
     Ok(FieldRule {
@@ -207,6 +209,23 @@ fn parse_num_constraint(
     } else {
         v.as_f64().map(Num::F64)
     }
+}
+
+/// Parse a foreign-key reference from a catalogue Map.
+///
+/// Catalogue shape:
+/// ```text
+/// { "foreign_key": { "ref_table": "parent", "ref_field": "id" } }
+/// ```
+fn parse_foreign_key_ref(
+    v: &QueryValue,
+) -> Option<shamir_engine::validator::schema::ForeignKeyRef> {
+    let map = v.as_object()?;
+    let ref_table = map.get("ref_table")?.as_str()?.to_string();
+    let ref_field = map.get("ref_field")?.as_str()?.to_string();
+    Some(shamir_engine::validator::schema::ForeignKeyRef::new(
+        ref_table, ref_field,
+    ))
 }
 
 /// Parse a cross-field compare constraint from a rule map.

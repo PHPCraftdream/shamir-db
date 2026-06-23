@@ -80,6 +80,22 @@ pub struct ConstraintsDto {
     /// record (e.g. `{ "other": ["end"], "op": ">=" }`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compare: Option<CompareDto>,
+
+    /// Phase C2 — forward-only foreign-key reference.
+    /// `{ "ref_table": "parent_table", "ref_field": "id" }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreign_key: Option<ForeignKeyDto>,
+}
+
+/// Foreign-key reference descriptor (wire form).
+///
+/// `ref_table` and `ref_field` are flat (de-interned) names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForeignKeyDto {
+    /// The parent table name (flat, same repo).
+    pub ref_table: String,
+    /// The field in the parent table that must contain the referenced value.
+    pub ref_field: String,
 }
 
 /// Cross-field comparison descriptor (wire form).

@@ -29,8 +29,8 @@
 
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::{
-    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto,
-    RemoveSchemaRuleOp, SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
+    NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -92,6 +92,60 @@ async fn lock_schema_rmw(
     arc.lock_owned().await
 }
 
+/// Validate that all FK references in the rule set have a backing index on
+/// the parent table. Returns an error (`fk_requires_index`) if any FK
+/// reference lacks a single-field index on `(ref_table, ref_field)`.
+///
+/// Called at DDL time (set_table_schema, add_schema_rule) — fail-closed so
+/// an FK without an index is never persisted.
+async fn validate_fk_indexes(
+    shamir: &ShamirDb,
+    db: &str,
+    repo: &str,
+    rules: &[FieldRuleDto],
+) -> Result<(), BatchError> {
+    for rule in rules {
+        if let Some(fk) = &rule.constraints.foreign_key {
+            // Resolve the referenced table.
+            let ref_table = match shamir.get_table(db, repo, &fk.ref_table).await {
+                Ok(t) => t,
+                Err(_) => {
+                    return Err(err_code(
+                        "fk_requires_index",
+                        format!(
+                            "foreign_key on {:?}: referenced table '{}' not found",
+                            rule.path, fk.ref_table
+                        ),
+                    ));
+                }
+            };
+
+            // Resolve the ref_field to an interner id and check for a
+            // single-field index.
+            let interner = ref_table
+                .interner()
+                .get()
+                .await
+                .map_err(|e| err_code("internal_error", e.to_string()))?;
+            let has_index = interner.get_ind(&fk.ref_field).is_some_and(|field_id| {
+                let field_path = [field_id.id()];
+                ref_table.find_single_field_index(&field_path).is_some()
+            });
+            if !has_index {
+                return Err(err_code(
+                    "fk_requires_index",
+                    format!(
+                        "foreign_key on {:?}: no index on '{}.{}' — \
+                         create an index before adding a foreign_key constraint",
+                        rule.path, fk.ref_table, fk.ref_field
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ShamirAdminExecutor {
     pub(super) async fn handle_set_table_schema(
         &self,
@@ -147,6 +201,9 @@ impl ShamirAdminExecutor {
             .get()
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?;
+
+        // Phase C2 — validate FK index requirements before persisting.
+        validate_fk_indexes(&self.shamir, db, repo, &op.schema).await?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
         let schema_qv = serialise_rules(&op.schema, interner);
@@ -256,6 +313,9 @@ impl ShamirAdminExecutor {
         } else {
             rules.push(new_rule.clone());
         }
+
+        // Phase C2 — validate FK index requirements for the new/updated rule.
+        validate_fk_indexes(&self.shamir, db, repo, std::slice::from_ref(new_rule)).await?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);
@@ -610,6 +670,19 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
         cmp_m.insert("op".to_string(), QueryValue::Str(cmp.op.clone()));
         m.insert("compare".to_string(), QueryValue::Map(cmp_m));
     }
+    // Phase C2 — foreign_key.
+    if let Some(fk) = &c.foreign_key {
+        let mut fk_m = new_map();
+        fk_m.insert(
+            "ref_table".to_string(),
+            QueryValue::Str(fk.ref_table.clone()),
+        );
+        fk_m.insert(
+            "ref_field".to_string(),
+            QueryValue::Str(fk.ref_field.clone()),
+        );
+        m.insert("foreign_key".to_string(), QueryValue::Map(fk_m));
+    }
 }
 
 // ── deserialisation helper (catalogue → DTO, de-interned) ──────────────────
@@ -664,6 +737,7 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
         scalar: m.get("scalar").and_then(|v| v.as_str()).map(String::from),
         format: m.get("format").and_then(|v| v.as_str()).map(String::from),
         compare: m.get("compare").and_then(compare_dto_from_qv),
+        foreign_key: m.get("foreign_key").and_then(foreign_key_dto_from_qv),
     };
 
     Some(FieldRuleDto {
@@ -680,6 +754,17 @@ fn num_dto_from_qv(v: &QueryValue) -> Option<NumDto> {
         QueryValue::F64(f) => Some(NumDto::F64(*f)),
         _ => None,
     }
+}
+
+/// Extract a `ForeignKeyDto` from a catalogue Map.
+fn foreign_key_dto_from_qv(v: &QueryValue) -> Option<ForeignKeyDto> {
+    let m = v.as_object()?;
+    let ref_table = m.get("ref_table")?.as_str()?.to_string();
+    let ref_field = m.get("ref_field")?.as_str()?.to_string();
+    Some(ForeignKeyDto {
+        ref_table,
+        ref_field,
+    })
 }
 
 /// Extract a `CompareDto` from a catalogue Map.

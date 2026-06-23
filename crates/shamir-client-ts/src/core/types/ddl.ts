@@ -42,6 +42,17 @@ export interface CompareDto {
  * All fields are optional; absent = unconstrained.
  * Mirrors `ConstraintsDto` in `schema_ops.rs` — all `skip_serializing_if`.
  */
+/**
+ * Foreign-key reference descriptor (wire form).
+ * Mirrors `ForeignKeyDto` in `schema_ops.rs`.
+ */
+export interface ForeignKeyDto {
+  /** The parent table name (flat, same repo). */
+  ref_table: string;
+  /** The field in the parent table that must contain the referenced value. */
+  ref_field: string;
+}
+
 export interface ConstraintsDto {
   required?: boolean;
   nullable?: boolean;
@@ -59,6 +70,8 @@ export interface ConstraintsDto {
   format?: string;
   /** Phase B — cross-field comparison against another path. */
   compare?: CompareDto;
+  /** Phase C2 — forward-only foreign-key reference. */
+  foreign_key?: ForeignKeyDto;
 }
 
 /**

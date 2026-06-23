@@ -9,6 +9,7 @@
 use shamir_types::types::value::QueryValue;
 
 use super::cross_field::CrossFieldCompare;
+use super::foreign_key::ForeignKeyRef;
 use super::format::FormatKind;
 use super::type_tag::TypeTag;
 
@@ -67,4 +68,9 @@ pub struct Constraints {
     /// Phase B — cross-field comparison against another path in the same
     /// record (e.g. `start <= end`).
     pub compare: Option<CrossFieldCompare>,
+    /// Phase C2 — forward-only foreign-key reference.  The field value must
+    /// exist in `ref_table.ref_field`.  Checked only when `ctx.db() == Some`
+    /// (tx-mode write path); silently skipped under autocommit (no resolver).
+    /// NULL values bypass the FK check (standard SQL semantics).
+    pub foreign_key: Option<ForeignKeyRef>,
 }
