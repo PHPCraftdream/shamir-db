@@ -17,6 +17,12 @@ import type {
   BufferConfigPatch,
   PurgeScope,
   WriteOpKind,
+  FieldRuleDto,
+  ConstraintsDto,
+  SetTableSchemaOp,
+  AddSchemaRuleOp,
+  RemoveSchemaRuleOp,
+  GetTableSchemaOp,
   CreateDbOp,
   CreateRepoOp,
   CreateTableOp,
@@ -120,6 +126,7 @@ export function createTable(
     repo?: string;
     if_not_exists?: boolean;
     retention?: Retention;
+    schema?: FieldRuleDto[];
   },
 ): CreateTableOp {
   const op: CreateTableOp = {
@@ -128,6 +135,8 @@ export function createTable(
   };
   if (opts?.if_not_exists) op.if_not_exists = true;
   if (opts?.retention !== undefined) op.retention = opts.retention;
+  if (opts?.schema !== undefined && opts.schema.length > 0)
+    op.schema = opts.schema;
   return op;
 }
 
@@ -555,15 +564,140 @@ export function rollbackMigration(
   };
 }
 
+// ── field() fluent API ──────────────────────────────────────────────
+
+/**
+ * Fluent builder for a single `FieldRuleDto`. Mirrors the Rust
+ * `shamir_query_builder::ddl::field()` API.
+ *
+ * ```ts
+ * field(["email"]).string().max(255).required()
+ * field(["age"]).int().min(0).max(150)
+ * ```
+ */
+export class FieldBuilder {
+  private _path: string[];
+  private _type = '';
+  private _constraints: ConstraintsDto = {};
+
+  constructor(path: string[]) {
+    this._path = path;
+  }
+
+  // ── type setters ────────────────────────────────────────────────
+  string(): this { this._type = 'string'; return this; }
+  int(): this { this._type = 'int'; return this; }
+  f64(): this { this._type = 'f64'; return this; }
+  dec(): this { this._type = 'dec'; return this; }
+  bool(): this { this._type = 'bool'; return this; }
+  bin(): this { this._type = 'bin'; return this; }
+  list(): this { this._type = 'list'; return this; }
+  map(): this { this._type = 'map'; return this; }
+  any(): this { this._type = 'any'; return this; }
+  typeTag(tag: string): this { this._type = tag; return this; }
+
+  // ── constraint setters ──────────────────────────────────────────
+  required(): this { this._constraints.required = true; return this; }
+  nullable(): this { this._constraints.nullable = true; return this; }
+  unsigned(): this { this._constraints.unsigned = true; return this; }
+  min(v: number): this { this._constraints.min = v; return this; }
+  max(v: number): this { this._constraints.max = v; return this; }
+  len(v: number): this { this._constraints.len = v; return this; }
+  maxLen(v: number): this { this._constraints.max_len = v; return this; }
+  minLen(v: number): this { this._constraints.min_len = v; return this; }
+  arrayOf(tag: string): this { this._constraints.array_of = tag; return this; }
+
+  /** Finalize into a wire-ready `FieldRuleDto`. */
+  build(): FieldRuleDto {
+    const dto: FieldRuleDto = {
+      path: this._path,
+      type: this._type,
+    };
+    // Spread only defined constraint keys (mirrors serde skip_serializing_if).
+    for (const [k, v] of Object.entries(this._constraints)) {
+      if (v !== undefined) {
+        (dto as Record<string, unknown>)[k] = v;
+      }
+    }
+    return dto;
+  }
+}
+
+/** Start building a `FieldRuleDto` for the given path segments. */
+export function field(path: string[]): FieldBuilder {
+  return new FieldBuilder(path);
+}
+
+// ── Schema DDL ops ─────────────────────────────────────────────────
+
+/** Whole-replace a table's declarative schema. */
+export function setTableSchema(
+  table: string,
+  schema: FieldRuleDto[],
+  opts?: { repo?: string; expectedVersion?: number },
+): SetTableSchemaOp {
+  const op: SetTableSchemaOp = {
+    set_table_schema: table,
+    repo: repoOrDefault(opts?.repo),
+    schema,
+  };
+  if (opts?.expectedVersion !== undefined)
+    op.expected_version = opts.expectedVersion;
+  return op;
+}
+
+/** Add (or replace by path) a single rule in a table's schema. */
+export function addSchemaRule(
+  table: string,
+  rule: FieldRuleDto,
+  opts?: { repo?: string },
+): AddSchemaRuleOp {
+  return {
+    add_schema_rule: table,
+    repo: repoOrDefault(opts?.repo),
+    rule,
+  };
+}
+
+/** Remove a rule from a table's schema by path. */
+export function removeSchemaRule(
+  table: string,
+  path: string[],
+  opts?: { repo?: string },
+): RemoveSchemaRuleOp {
+  return {
+    remove_schema_rule: table,
+    repo: repoOrDefault(opts?.repo),
+    path,
+  };
+}
+
+/** Read a table's declarative schema (introspection). */
+export function getTableSchema(
+  table: string,
+  opts?: { repo?: string },
+): GetTableSchemaOp {
+  return {
+    get_table_schema: table,
+    repo: repoOrDefault(opts?.repo),
+  };
+}
+
 /** Aggregate namespace — every DDL constructor in one object. */
 export const ddl = {
   currentOnly,
   olderThan,
   olderThanAge,
+  field,
+  FieldBuilder,
   createDb,
   createRepo,
   createTable,
   createIndex,
+  setTableSchema,
+  addSchemaRule,
+  removeSchemaRule,
+  getTableSchema,
   setBufferConfig,
   getBufferConfig,
   alterBufferConfig,

@@ -5,13 +5,15 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, BindValidatorOp, ChangesSinceOp, ChgrpOp,
-    ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
-    CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
-    DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
-    GetBufferConfigOp, InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp,
-    MigrationStatusOp, PurgeHistoryOp, RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp,
-    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
+    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, BindValidatorOp,
+    ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
+    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreateRepoOp,
+    CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
+    DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
+    InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameValidatorOp,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
+    UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -100,6 +102,12 @@ pub enum BatchOp {
     UnbindValidator(UnbindValidatorOp),
     ListValidators(ListValidatorsOp),
 
+    // Declarative schema DDL (Phase A)
+    SetTableSchema(SetTableSchemaOp),
+    AddSchemaRule(AddSchemaRuleOp),
+    RemoveSchemaRule(RemoveSchemaRuleOp),
+    GetTableSchema(GetTableSchemaOp),
+
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
 
@@ -176,6 +184,10 @@ impl Serialize for BatchOp {
             BatchOp::BindValidator(op) => op.serialize(serializer),
             BatchOp::UnbindValidator(op) => op.serialize(serializer),
             BatchOp::ListValidators(op) => op.serialize(serializer),
+            BatchOp::SetTableSchema(op) => op.serialize(serializer),
+            BatchOp::AddSchemaRule(op) => op.serialize(serializer),
+            BatchOp::RemoveSchemaRule(op) => op.serialize(serializer),
+            BatchOp::GetTableSchema(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
             BatchOp::InternerDump(op) => op.serialize(serializer),
             BatchOp::InternerTouch(op) => op.serialize(serializer),
@@ -307,6 +319,14 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<UnbindValidatorOp, _>(&bytes).map(BatchOp::UnbindValidator)
         } else if has("list_validators") {
             qv_to::<ListValidatorsOp, _>(&bytes).map(BatchOp::ListValidators)
+        } else if has("set_table_schema") {
+            qv_to::<SetTableSchemaOp, _>(&bytes).map(BatchOp::SetTableSchema)
+        } else if has("add_schema_rule") {
+            qv_to::<AddSchemaRuleOp, _>(&bytes).map(BatchOp::AddSchemaRule)
+        } else if has("remove_schema_rule") {
+            qv_to::<RemoveSchemaRuleOp, _>(&bytes).map(BatchOp::RemoveSchemaRule)
+        } else if has("get_table_schema") {
+            qv_to::<GetTableSchemaOp, _>(&bytes).map(BatchOp::GetTableSchema)
         } else if has("create_function_folder") {
             qv_to::<CreateFunctionFolderOp, _>(&bytes).map(BatchOp::CreateFunctionFolder)
         } else if has("interner_dump") {
@@ -393,6 +413,10 @@ impl BatchOp {
                 | BatchOp::BindValidator(_)
                 | BatchOp::UnbindValidator(_)
                 | BatchOp::ListValidators(_)
+                | BatchOp::SetTableSchema(_)
+                | BatchOp::AddSchemaRule(_)
+                | BatchOp::RemoveSchemaRule(_)
+                | BatchOp::GetTableSchema(_)
                 | BatchOp::CreateFunctionFolder(_)
                 | BatchOp::InternerDump(_)
                 | BatchOp::InternerTouch(_)

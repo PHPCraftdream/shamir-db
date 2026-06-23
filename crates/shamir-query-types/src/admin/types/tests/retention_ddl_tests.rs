@@ -30,6 +30,7 @@ fn create_table_op_without_retention_omits_key() {
         repo: "main".to_string(),
         if_not_exists: false,
         retention: None,
+        schema: None,
     };
     let j = to_qv(&op);
     assert!(
@@ -67,6 +68,7 @@ fn create_table_op_with_retention_round_trip() {
             max_count: Some(5),
             ..Default::default()
         }),
+        schema: None,
     };
     let j = to_qv(&op);
     assert_eq!(
@@ -91,6 +93,7 @@ fn create_table_op_full_retention_round_trip() {
             max_count: Some(1000),
             min_count: Some(10),
         }),
+        schema: None,
     };
     let j = to_qv(&op);
     let back: CreateTableOp = from_qv(j);

@@ -99,6 +99,11 @@ pub enum Action {
     /// future ALTER-style DDL). Distinct from `Update` (row-level
     /// mutation) and from `Create` / `Drop` (schema lifecycle).
     Alter,
+    /// Write table-level metadata (declarative schema DDL).
+    /// Maps to `access::Action::Write` in the live DAC layer.
+    /// Distinct from `Alter` (structural DDL like indexes/buffer)
+    /// and from `Update` (row-level mutation).
+    Write,
     ManageUsers,
     ManageRoles,
     All,

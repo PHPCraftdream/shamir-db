@@ -454,6 +454,162 @@ describe('list ops', () => {
   });
 });
 
+// ── field() fluent builder ──────────────────────────────────────────
+
+describe('field()', () => {
+  it('builds a string field with max + required', () => {
+    const rule = ddl.field(['email']).string().max(255).required().build();
+    expect(rule).toEqual({
+      path: ['email'],
+      type: 'string',
+      max: 255,
+      required: true,
+    });
+  });
+
+  it('builds an int field with min + max', () => {
+    const rule = ddl.field(['age']).int().min(0).max(150).build();
+    expect(rule).toEqual({
+      path: ['age'],
+      type: 'int',
+      min: 0,
+      max: 150,
+    });
+  });
+
+  it('builds a nested-path string field with len', () => {
+    const rule = ddl.field(['address', 'zip']).string().len(5).build();
+    expect(rule).toEqual({
+      path: ['address', 'zip'],
+      type: 'string',
+      len: 5,
+    });
+  });
+
+  it('omits undefined constraint keys', () => {
+    const rule = ddl.field(['x']).bool().build();
+    expect(rule).toEqual({
+      path: ['x'],
+      type: 'bool',
+    });
+    expect(rule).not.toHaveProperty('required');
+    expect(rule).not.toHaveProperty('min');
+    expect(rule).not.toHaveProperty('max');
+    expect(rule).not.toHaveProperty('len');
+  });
+
+  it('supports all type tags', () => {
+    expect(ddl.field(['a']).f64().build().type).toBe('f64');
+    expect(ddl.field(['a']).dec().build().type).toBe('dec');
+    expect(ddl.field(['a']).bin().build().type).toBe('bin');
+    expect(ddl.field(['a']).list().build().type).toBe('list');
+    expect(ddl.field(['a']).map().build().type).toBe('map');
+    expect(ddl.field(['a']).any().build().type).toBe('any');
+    expect(ddl.field(['a']).typeTag('custom').build().type).toBe('custom');
+  });
+
+  it('supports nullable, unsigned, minLen, maxLen, arrayOf', () => {
+    const rule = ddl.field(['tags']).list().nullable().arrayOf('string').minLen(1).maxLen(10).build();
+    expect(rule).toEqual({
+      path: ['tags'],
+      type: 'list',
+      nullable: true,
+      array_of: 'string',
+      min_len: 1,
+      max_len: 10,
+    });
+  });
+});
+
+// ── schema DDL ops ─────────────────────────────────────────────────
+
+describe('setTableSchema', () => {
+  it('emits {set_table_schema, repo, schema}; expected_version omitted when absent', () => {
+    const schema = [
+      ddl.field(['email']).string().max(255).required().build(),
+    ];
+    const op = ddl.setTableSchema('users', schema);
+    expect(op).toEqual({
+      set_table_schema: 'users',
+      repo: 'main',
+      schema: [{ path: ['email'], type: 'string', max: 255, required: true }],
+    });
+    expect(op).not.toHaveProperty('expected_version');
+  });
+
+  it('includes expected_version when set', () => {
+    const op = ddl.setTableSchema('users', [], { expectedVersion: 3 });
+    expect(op.expected_version).toBe(3);
+  });
+
+  it('respects explicit repo', () => {
+    const op = ddl.setTableSchema('users', [], { repo: 'hot' });
+    expect(op.repo).toBe('hot');
+  });
+});
+
+describe('addSchemaRule', () => {
+  it('emits {add_schema_rule, repo, rule}', () => {
+    const rule = ddl.field(['nickname']).string().max(64).build();
+    const op = ddl.addSchemaRule('users', rule);
+    expect(op).toEqual({
+      add_schema_rule: 'users',
+      repo: 'main',
+      rule: { path: ['nickname'], type: 'string', max: 64 },
+    });
+  });
+});
+
+describe('removeSchemaRule', () => {
+  it('emits {remove_schema_rule, repo, path}', () => {
+    const op = ddl.removeSchemaRule('users', ['nickname']);
+    expect(op).toEqual({
+      remove_schema_rule: 'users',
+      repo: 'main',
+      path: ['nickname'],
+    });
+  });
+
+  it('respects explicit repo', () => {
+    const op = ddl.removeSchemaRule('users', ['email'], { repo: 'cold' });
+    expect(op.repo).toBe('cold');
+  });
+});
+
+describe('getTableSchema', () => {
+  it('emits {get_table_schema, repo}', () => {
+    const op = ddl.getTableSchema('users');
+    expect(op).toEqual({
+      get_table_schema: 'users',
+      repo: 'main',
+    });
+  });
+});
+
+describe('createTable with schema', () => {
+  it('emits schema when provided', () => {
+    const schema = [
+      ddl.field(['email']).string().required().build(),
+      ddl.field(['age']).int().min(0).max(150).build(),
+    ];
+    const op = ddl.createTable('users', { schema });
+    expect(op.schema).toEqual([
+      { path: ['email'], type: 'string', required: true },
+      { path: ['age'], type: 'int', min: 0, max: 150 },
+    ]);
+  });
+
+  it('omits schema when empty array', () => {
+    const op = ddl.createTable('users', { schema: [] });
+    expect(op).not.toHaveProperty('schema');
+  });
+
+  it('omits schema when not provided', () => {
+    const op = ddl.createTable('users');
+    expect(op).not.toHaveProperty('schema');
+  });
+});
+
 // ── HMAC-gated ops ──────────────────────────────────────────────────
 
 describe('HMAC-gated ops', () => {

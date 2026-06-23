@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::db_ops::is_false;
 use super::retention::Retention;
+use super::schema_ops::FieldRuleDto;
 
 fn default_repo() -> String {
     "main".to_string()
@@ -24,6 +25,10 @@ pub struct CreateTableOp {
     /// behaviour (no history retained). See [`Retention`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
+    /// Optional declarative schema applied at creation time.
+    /// When present, the table is created with this schema already active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<Vec<FieldRuleDto>>,
 }
 
 /// Drop a table.

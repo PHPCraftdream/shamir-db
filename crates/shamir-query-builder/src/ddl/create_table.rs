@@ -1,4 +1,4 @@
-use shamir_query_types::admin::{CreateTableOp, Retention};
+use shamir_query_types::admin::{CreateTableOp, FieldRuleDto, Retention};
 use shamir_query_types::batch::BatchOp;
 
 use crate::batch::IntoBatchOp;
@@ -10,6 +10,7 @@ pub fn create_table(name: impl Into<String>) -> CreateTable {
         repo: "main".to_owned(),
         if_not_exists: false,
         retention: None,
+        schema: None,
     }
 }
 
@@ -19,6 +20,7 @@ pub struct CreateTable {
     repo: String,
     if_not_exists: bool,
     retention: Option<Retention>,
+    schema: Option<Vec<FieldRuleDto>>,
 }
 
 impl CreateTable {
@@ -41,6 +43,12 @@ impl CreateTable {
         self
     }
 
+    /// Attach a declarative schema at creation time.
+    pub fn schema(mut self, rules: impl IntoIterator<Item = FieldRuleDto>) -> Self {
+        self.schema = Some(rules.into_iter().collect());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateTable(CreateTableOp {
@@ -48,6 +56,7 @@ impl CreateTable {
             repo: self.repo,
             if_not_exists: self.if_not_exists,
             retention: self.retention,
+            schema: self.schema,
         })
     }
 }
