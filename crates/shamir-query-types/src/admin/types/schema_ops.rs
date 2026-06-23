@@ -85,6 +85,12 @@ pub struct ConstraintsDto {
     /// `{ "ref_table": "parent_table", "ref_field": "id" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreign_key: Option<ForeignKeyDto>,
+
+    /// Phase C3 — unique constraint.  The field value must not duplicate any
+    /// existing row in the same table.  Requires an index on the column at
+    /// DDL time (fail-closed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique: Option<bool>,
 }
 
 /// Foreign-key reference descriptor (wire form).

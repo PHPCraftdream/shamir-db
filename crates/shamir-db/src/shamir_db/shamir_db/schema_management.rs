@@ -150,6 +150,10 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         .and_then(shamir_engine::validator::schema::FormatKind::parse);
     let compare = item.get("compare").and_then(parse_cross_field_compare);
     let foreign_key = item.get("foreign_key").and_then(parse_foreign_key_ref);
+    let unique = item
+        .get("unique")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let constraints = Constraints {
         required,
@@ -166,6 +170,7 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         format,
         compare,
         foreign_key,
+        unique,
     };
 
     Ok(FieldRule {
