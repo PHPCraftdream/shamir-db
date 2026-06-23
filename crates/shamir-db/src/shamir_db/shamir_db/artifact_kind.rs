@@ -31,6 +31,12 @@ pub enum ArtifactKind {
     /// Backed by an in-process Rust type implementing `ShamirFunction`.
     /// Phase ≥1 rows; no `wasm_b64` payload is required for these.
     Native,
+    /// Backed by a declarative schema (Phase A). The validator is compiled
+    /// from field rules stored in the table catalogue — no user code, no
+    /// WASM. The `kind` field in the validator catalogue carries
+    /// `"declarative"` so the boot-pass can distinguish it from code
+    /// validators and skip WASM materialisation.
+    Declarative,
 }
 
 impl ArtifactKind {
@@ -40,6 +46,7 @@ impl ArtifactKind {
         match self {
             ArtifactKind::Wasm => "wasm",
             ArtifactKind::Native => "native",
+            ArtifactKind::Declarative => "declarative",
         }
     }
 
@@ -50,6 +57,7 @@ impl ArtifactKind {
     pub fn parse_kind(s: &str) -> Self {
         match s {
             "native" => ArtifactKind::Native,
+            "declarative" => ArtifactKind::Declarative,
             // "wasm" and any unrecognised value — fail-safe to the historical
             // default. The boot path already logs-and-skips rows it cannot
             // materialise; an unknown kind is not by itself a skip condition.

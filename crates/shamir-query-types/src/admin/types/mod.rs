@@ -9,6 +9,7 @@ pub mod list_ops;
 pub mod migration_ops;
 pub mod repo_ops;
 pub mod retention;
+pub mod schema_ops;
 pub mod table_ops;
 pub mod validator_ops;
 
@@ -27,6 +28,10 @@ pub use migration_ops::{
 };
 pub use repo_ops::{CreateRepoOp, DropRepoOp};
 pub use retention::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention, SetRetentionOp};
+pub use schema_ops::{
+    AddSchemaRuleOp, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto, RemoveSchemaRuleOp,
+    SetTableSchemaOp,
+};
 pub use table_ops::{CreateTableOp, DropTableOp};
 pub use validator_ops::{
     BindValidatorOp, CreateValidatorOp, DropValidatorOp, ListValidatorsOp, RenameValidatorOp,

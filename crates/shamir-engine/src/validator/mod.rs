@@ -17,6 +17,7 @@ pub mod persistence;
 pub mod record_fields;
 pub mod record_validator;
 mod registry;
+pub mod schema;
 
 mod decode;
 mod encode;

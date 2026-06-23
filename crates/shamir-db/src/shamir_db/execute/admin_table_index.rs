@@ -25,6 +25,15 @@ impl ShamirAdminExecutor {
             code: Some(code.to_string()),
         };
 
+        // TODO(authz gap): `create_table` has NO authorization gate today.
+        // `add_table_as` writes `ResourceMeta::owned_by(actor)` but never
+        // calls `authorize_access`.  Adding `Action::Create` here is the
+        // recommended hardening (doc 05-permissions.md §2) but is deferred
+        // to a dedicated commit to avoid mixing concerns.  The declarative
+        // schema attached via `CreateTableOp.schema` inherits this gap —
+        // mutating schema POST-creation is gated via `Action::Write`
+        // (SetTableSchema / AddSchemaRule / RemoveSchemaRule).
+
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_table(&op.repo, &op.create_table) {

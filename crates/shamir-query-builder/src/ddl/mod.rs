@@ -43,6 +43,7 @@ mod interner_resolve;
 mod list;
 mod migration;
 mod retention;
+mod schema;
 mod validator;
 
 pub use access_control::*;
@@ -62,6 +63,7 @@ pub use interner_resolve::*;
 pub use list::*;
 pub use migration::*;
 pub use retention::*;
+pub use schema::*;
 pub use validator::*;
 
 #[cfg(test)]

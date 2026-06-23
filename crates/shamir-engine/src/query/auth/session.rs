@@ -47,7 +47,7 @@ pub struct SessionPermissions {
 // ============================================================================
 
 /// All individual actions (excluding All, which is expanded).
-const EXPANDED_ACTIONS: [Action; 9] = [
+const EXPANDED_ACTIONS: [Action; 10] = [
     Action::Read,
     Action::Insert,
     Action::Update,
@@ -55,6 +55,7 @@ const EXPANDED_ACTIONS: [Action; 9] = [
     Action::Create,
     Action::Drop,
     Action::Alter,
+    Action::Write,
     Action::ManageUsers,
     Action::ManageRoles,
 ];
@@ -451,6 +452,42 @@ impl SessionPermissions {
             // Sub-batch — no direct resource access at this level; the
             // inner batch's ops are checked recursively at execution time.
             BatchOp::Batch(_) => (Action::Read, Resource::Global),
+
+            // Declarative schema DDL — Write on table (doc 05).
+            // Maps to access::Action::Write in the live DAC layer
+            // (admin_schema.rs). Both layers now agree on Write.
+            BatchOp::SetTableSchema(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_table_schema.clone(),
+                },
+            ),
+            BatchOp::AddSchemaRule(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.add_schema_rule.clone(),
+                },
+            ),
+            BatchOp::RemoveSchemaRule(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.remove_schema_rule.clone(),
+                },
+            ),
+            BatchOp::GetTableSchema(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.get_table_schema.clone(),
+                },
+            ),
 
             // Subscriptions — read-level access; actual table checks happen
             // when the subscription is activated.

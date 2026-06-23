@@ -98,6 +98,18 @@ fn native_kind_round_trips() {
 }
 
 #[test]
+fn declarative_kind_round_trips() {
+    let mut rec = legacy_function_row_without_kind();
+    if let QueryValue::Map(m) = &mut rec {
+        m.insert(
+            KIND_FIELD.to_string(),
+            QueryValue::Str("declarative".to_string()),
+        );
+    }
+    assert_eq!(ArtifactKind::from_record(&rec), ArtifactKind::Declarative,);
+}
+
+#[test]
 fn null_kind_field_defaults_to_wasm() {
     let mut rec = legacy_function_row_without_kind();
     if let QueryValue::Map(m) = &mut rec {
@@ -135,6 +147,7 @@ fn kind_field_spelling_is_stable() {
     // format — renaming them is a migration. Lock them down.
     assert_eq!(ArtifactKind::Wasm.as_str(), "wasm");
     assert_eq!(ArtifactKind::Native.as_str(), "native");
+    assert_eq!(ArtifactKind::Declarative.as_str(), "declarative");
     assert_eq!(KIND_FIELD, "kind");
     assert_eq!(
         ArtifactKind::Wasm.as_query_value(),
@@ -144,6 +157,10 @@ fn kind_field_spelling_is_stable() {
         ArtifactKind::Native.as_query_value(),
         QueryValue::Str("native".to_string())
     );
+    assert_eq!(
+        ArtifactKind::Declarative.as_query_value(),
+        QueryValue::Str("declarative".to_string())
+    );
 }
 
 #[test]
@@ -151,6 +168,10 @@ fn parse_kind_fail_safe() {
     // Round-trip the known spellings...
     assert_eq!(ArtifactKind::parse_kind("wasm"), ArtifactKind::Wasm);
     assert_eq!(ArtifactKind::parse_kind("native"), ArtifactKind::Native);
+    assert_eq!(
+        ArtifactKind::parse_kind("declarative"),
+        ArtifactKind::Declarative,
+    );
     // ...and confirm unknowns degrade to the historical default rather
     // than panicking or erroring. This is what makes the catalogue format
     // forward-compatible: an older binary reading a row written by a newer

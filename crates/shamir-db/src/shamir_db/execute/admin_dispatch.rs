@@ -81,6 +81,12 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::UnbindValidator(_) => self.handle_unbind_validator(op).await,
             op @ BatchOp::ListValidators(_) => self.handle_list_validators(op).await,
 
+            // ── Declarative schema DDL (Phase A) ──────────────────────
+            BatchOp::SetTableSchema(op) => self.handle_set_table_schema(op).await,
+            BatchOp::AddSchemaRule(op) => self.handle_add_schema_rule(op).await,
+            BatchOp::RemoveSchemaRule(op) => self.handle_remove_schema_rule(op).await,
+            BatchOp::GetTableSchema(op) => self.handle_get_table_schema(op).await,
+
             // ── Retention / History ────────────────────────────────────
             op @ BatchOp::SetRetention(_) => self.handle_set_retention(op).await,
             op @ BatchOp::PurgeHistory(_) => self.handle_purge_history(op).await,

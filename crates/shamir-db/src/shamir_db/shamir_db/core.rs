@@ -299,9 +299,21 @@ impl ShamirDb {
             // each table's info-twin) are restored independently and still
             // reference this validator_id; any write will fail closed via
             // ValidatorFailure::Missing until the artifact is re-registered.
-            if super::ArtifactKind::from_record(rec) == super::ArtifactKind::Native {
+            let kind = super::ArtifactKind::from_record(rec);
+            if kind == super::ArtifactKind::Native {
                 log::info!(
                     "shamir_db::init: skipping native validator '{}' — re-register at startup",
+                    name
+                );
+                continue;
+            }
+            if kind == super::ArtifactKind::Declarative {
+                // Declarative validators live in the table catalogue and are
+                // compiled by boot_compile_schemas — not from the validator
+                // catalogue.
+                log::info!(
+                    "shamir_db::init: skipping declarative validator '{}' — \
+                     compiled from table catalogue",
                     name
                 );
                 continue;
@@ -383,6 +395,12 @@ impl ShamirDb {
                 }
             }
         }
+
+        // Phase A2: compile declarative schemas from the table catalogue.
+        // Runs after load_validators (WASM/native) so both code and
+        // declarative validators coexist in the registry. The table_records
+        // were already loaded above for the repo bootstrap.
+        shamir.boot_compile_schemas(&table_records).await?;
 
         // Phase 4 boot diagnostic: surface native catalogue rows whose
         // in-process artifact was NOT re-registered by the embedder. The boot

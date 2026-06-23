@@ -126,7 +126,11 @@ impl ShamirDb {
             self.persist_validator_bound_in(name, id).await;
         }
 
-        // 2. Drop the table itself.
+        // 2. Remove the declarative schema validator (if any) so there is
+        //    no id/name leak in the registry after the table is gone.
+        self.drop_schema_validator(db_name, repo_name, table_name);
+
+        // 3. Drop the table itself.
         self.drop_table(db_name, repo_name, table_name).await
     }
 

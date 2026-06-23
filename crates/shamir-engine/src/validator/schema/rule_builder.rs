@@ -1,0 +1,201 @@
+//! Fluent rule builder for declarative schema field rules.
+//!
+//! Usage:
+//! ```ignore
+//! use shamir_engine::validator::schema::rule;
+//!
+//! let rules = vec![
+//!     rule(["email"]).string().max_len(255).required(),
+//!     rule(["age"]).int().min(0).max(150),
+//!     rule(["address", "zip"]).string().len(5),
+//!     rule(["tags"]).list().array_of_string(),
+//! ];
+//! ```
+
+use shamir_types::types::value::QueryValue;
+
+use super::constraints::{Constraints, Num};
+use super::field_rule::FieldRule;
+use super::type_tag::TypeTag;
+
+/// Start building a field rule for the given path.
+///
+/// `path` accepts anything that can be converted into a `Vec<String>` of
+/// path segments — typically a fixed-size array of `&str`.
+pub fn rule<I, S>(path: I) -> RuleBuilder
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    RuleBuilder {
+        path: path.into_iter().map(Into::into).collect(),
+        ty: TypeTag::Any,
+        constraints: Constraints::default(),
+    }
+}
+
+/// Fluent builder for a single [`FieldRule`].
+///
+/// Type-setting methods (`string()`, `int()`, etc.) set the [`TypeTag`];
+/// constraint methods (`required()`, `min()`, etc.) accumulate into
+/// [`Constraints`].  The builder converts to [`FieldRule`] via `Into` /
+/// `build()`.
+pub struct RuleBuilder {
+    path: Vec<String>,
+    ty: TypeTag,
+    constraints: Constraints,
+}
+
+impl RuleBuilder {
+    // ── Type setters (each returns self for chaining) ───────────────────
+
+    /// Set the type tag to `String`.
+    pub fn string(mut self) -> Self {
+        self.ty = TypeTag::String;
+        self
+    }
+
+    /// Set the type tag to `Int`.
+    pub fn int(mut self) -> Self {
+        self.ty = TypeTag::Int;
+        self
+    }
+
+    /// Set the type tag to `F64`.
+    pub fn f64(mut self) -> Self {
+        self.ty = TypeTag::F64;
+        self
+    }
+
+    /// Set the type tag to `Dec`.
+    pub fn dec(mut self) -> Self {
+        self.ty = TypeTag::Dec;
+        self
+    }
+
+    /// Set the type tag to `Bool`.
+    pub fn bool(mut self) -> Self {
+        self.ty = TypeTag::Bool;
+        self
+    }
+
+    /// Set the type tag to `Bin`.
+    pub fn bin(mut self) -> Self {
+        self.ty = TypeTag::Bin;
+        self
+    }
+
+    /// Set the type tag to `List`.
+    pub fn list(mut self) -> Self {
+        self.ty = TypeTag::List;
+        self
+    }
+
+    /// Set the type tag to `Map`.
+    pub fn map(mut self) -> Self {
+        self.ty = TypeTag::Map;
+        self
+    }
+
+    /// Set the type tag to `Set`.
+    pub fn set(mut self) -> Self {
+        self.ty = TypeTag::Set;
+        self
+    }
+
+    // ── Constraint setters ──────────────────────────────────────────────
+
+    /// Mark the field as required (must be present in the record).
+    pub fn required(mut self) -> Self {
+        self.constraints.required = true;
+        self
+    }
+
+    /// Mark the field as nullable (Null is accepted when present).
+    pub fn nullable(mut self) -> Self {
+        self.constraints.nullable = true;
+        self
+    }
+
+    /// Set the minimum numeric value (inclusive).
+    pub fn min(mut self, n: i64) -> Self {
+        self.constraints.min = Some(Num::Int(n));
+        self
+    }
+
+    /// Set the minimum numeric value as f64 (inclusive).
+    pub fn min_f64(mut self, n: f64) -> Self {
+        self.constraints.min = Some(Num::F64(n));
+        self
+    }
+
+    /// Set the maximum numeric value (inclusive).
+    pub fn max(mut self, n: i64) -> Self {
+        self.constraints.max = Some(Num::Int(n));
+        self
+    }
+
+    /// Set the maximum numeric value as f64 (inclusive).
+    pub fn max_f64(mut self, n: f64) -> Self {
+        self.constraints.max = Some(Num::F64(n));
+        self
+    }
+
+    /// Set exact length (strings: char count; collections: item count).
+    pub fn len(mut self, n: u64) -> Self {
+        self.constraints.len = Some(n);
+        self
+    }
+
+    /// Set maximum length (strings: char count; collections: item count).
+    pub fn max_len(mut self, n: u64) -> Self {
+        self.constraints.max_len = Some(n);
+        self
+    }
+
+    /// Set minimum length (strings: char count; collections: item count).
+    pub fn min_len(mut self, n: u64) -> Self {
+        self.constraints.min_len = Some(n);
+        self
+    }
+
+    /// Mark the integer field as unsigned (value must be >= 0).
+    pub fn unsigned(mut self) -> Self {
+        self.constraints.unsigned = true;
+        self
+    }
+
+    /// Set allowed values (enum / const).
+    pub fn one_of(mut self, values: Vec<QueryValue>) -> Self {
+        self.constraints.one_of = Some(values);
+        self
+    }
+
+    /// Set the element type for `List` fields (`array_of` check).
+    pub fn array_of_string(mut self) -> Self {
+        self.constraints.array_of = Some(TypeTag::String);
+        self
+    }
+
+    /// Set the element type for `List` fields (generic).
+    pub fn array_of(mut self, tag: TypeTag) -> Self {
+        self.constraints.array_of = Some(tag);
+        self
+    }
+
+    /// Consume the builder and produce a [`FieldRule`].
+    pub fn build(self) -> FieldRule {
+        FieldRule {
+            path: self.path,
+            ty: self.ty,
+            constraints: self.constraints,
+        }
+    }
+}
+
+/// `RuleBuilder` converts to `FieldRule` via `Into`.
+impl From<RuleBuilder> for FieldRule {
+    fn from(b: RuleBuilder) -> Self {
+        b.build()
+    }
+}

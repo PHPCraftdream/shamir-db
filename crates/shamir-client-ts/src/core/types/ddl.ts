@@ -18,6 +18,73 @@
 
 import type { WireValue } from './write.js';
 
+// ── Schema DTO types ────────────────────────────────────────────────
+
+/**
+ * Numeric bound for `min` / `max` constraints on the wire.
+ * Mirrors `NumDto` in `schema_ops.rs` — `#[serde(untagged)]`.
+ */
+export type NumDto = number;
+
+/**
+ * Constraint fields carried alongside a `FieldRuleDto`.
+ * All fields are optional; absent = unconstrained.
+ * Mirrors `ConstraintsDto` in `schema_ops.rs` — all `skip_serializing_if`.
+ */
+export interface ConstraintsDto {
+  required?: boolean;
+  nullable?: boolean;
+  unsigned?: boolean;
+  min?: NumDto;
+  max?: NumDto;
+  len?: number;
+  max_len?: number;
+  min_len?: number;
+  one_of?: WireValue[];
+  array_of?: string;
+}
+
+/**
+ * A single field-rule as it travels over the wire (DDL payload).
+ * Mirrors `FieldRuleDto` in `schema_ops.rs`.
+ * `constraints` is `#[serde(flatten)]` — so on the wire the constraint
+ * keys sit at the same level as `path` and `type`.
+ */
+export type FieldRuleDto = {
+  path: string[];
+  type: string;
+} & ConstraintsDto;
+
+// ── Schema DDL ops ──────────────────────────────────────────────────
+
+/** Whole-replace a table's declarative schema. */
+export interface SetTableSchemaOp {
+  set_table_schema: string;
+  repo: string;
+  schema: FieldRuleDto[];
+  expected_version?: number;
+}
+
+/** Add (or replace by path) a single rule in a table's schema. */
+export interface AddSchemaRuleOp {
+  add_schema_rule: string;
+  repo: string;
+  rule: FieldRuleDto;
+}
+
+/** Remove a rule from a table's schema by path. */
+export interface RemoveSchemaRuleOp {
+  remove_schema_rule: string;
+  repo: string;
+  path: string[];
+}
+
+/** Read a table's declarative schema (introspection). */
+export interface GetTableSchemaOp {
+  get_table_schema: string;
+  repo: string;
+}
+
 // ── HMAC signer ─────────────────────────────────────────────────────
 
 /**
@@ -103,6 +170,7 @@ export interface CreateTableOp {
   repo: string;
   if_not_exists?: true;
   retention?: Retention;
+  schema?: FieldRuleDto[];
 }
 
 export interface CreateIndexOp {
@@ -290,6 +358,10 @@ export type DdlOp =
   | DropRepoOp
   | CreateTableOp
   | DropTableOp
+  | SetTableSchemaOp
+  | AddSchemaRuleOp
+  | RemoveSchemaRuleOp
+  | GetTableSchemaOp
   | CreateIndexOp
   | DropIndexOp
   | SetBufferConfigOp
