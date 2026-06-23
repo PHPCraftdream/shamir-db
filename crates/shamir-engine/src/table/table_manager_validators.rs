@@ -5,10 +5,11 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
+use crate::query::TableResolver;
 use crate::validator::{
     record_fields::{OwnedFields, ViewFields},
     record_validator::ValidatorCtx,
-    ValidatorFailure,
+    ValidatorDb, ValidatorFailure,
 };
 
 use super::table_manager::TableManager;
@@ -100,12 +101,20 @@ impl TableManager {
     /// 1. If no registry is set, return `Ok(())` (validators disabled).
     /// 2. Load bindings snapshot; filter to those whose `ops` contains `op`.
     /// 3. Delegate to `run_validators_loop` with `OwnedFields` backings.
+    ///
+    /// Phase C1: `tx` and `resolver` are threaded so a [`ValidatorDb`] can be
+    /// built and attached to [`ValidatorCtx`], enabling relational validators
+    /// (`foreign_key` C2, `unique` C3) to read database state on the tx's
+    /// snapshot.  Both are optional (`None` on paths without a tx context —
+    /// legacy callers, some tests).
     pub async fn run_validators_qv(
         &self,
         op: crate::validator::WriteOp,
         new_record: Option<&shamir_types::types::value::QueryValue>,
         old_record: Option<&shamir_types::types::value::QueryValue>,
         actor: &shamir_types::access::Actor,
+        tx: Option<&shamir_tx::TxContext>,
+        resolver: Option<&dyn TableResolver>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
         // 1. No registry → validators disabled (system tables / tests).
         let reg = match &self.validator_registry {
@@ -150,11 +159,23 @@ impl TableManager {
         // Phase B — attach the scalar resolver so scalar-bridge rules can
         // resolve registered scalars.  The resolver is loaded once per call
         // (cheap ArcSwap load_full → Arc clone).
-        let resolver = self.scalar_resolver.load_full();
-        let ctx = ValidatorCtx::with_scalars(actor, interner, resolver.as_ref());
-
-        self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
-            .await
+        //
+        // Phase C1 — attach a [`ValidatorDb`] when `tx` is available so
+        // relational validators (`foreign_key`, `unique`) can read database
+        // state on the tx's snapshot.  When `tx` is `None` (no transaction
+        // context), `db` stays `None` and relational rules silently skip
+        // (fail-open, matching the scalar-bridge precedent).
+        let scalar_res = self.scalar_resolver.load_full();
+        if let Some(tx) = tx {
+            let vdb = ValidatorDb::new(tx, self, resolver);
+            let ctx = ValidatorCtx::with_db(actor, interner, scalar_res.as_ref(), &vdb);
+            self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
+                .await
+        } else {
+            let ctx = ValidatorCtx::with_scalars(actor, interner, scalar_res.as_ref());
+            self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
+                .await
+        }
     }
 
     /// `RecordView`-input entry point for the DELETE write path (W6-delete).
@@ -172,13 +193,17 @@ impl TableManager {
     /// Base-only resolution via `ViewFields` is therefore correct and complete.
     ///
     /// `new_record` is `None` for Delete.
+    ///
+    /// Phase C1: `tx` (previously `_tx`) is now used to build a [`ValidatorDb`]
+    /// for relational validators.
     pub(super) async fn run_validators_view(
         &self,
         op: crate::validator::WriteOp,
         new_record: Option<&QueryValue>,
         old_view: Option<&RecordView<'_>>,
         actor: &shamir_types::access::Actor,
-        _tx: &shamir_tx::TxContext,
+        tx: &shamir_tx::TxContext,
+        resolver: Option<&dyn TableResolver>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
         // 1. No registry → validators disabled.
         let reg = match &self.validator_registry {
@@ -220,8 +245,11 @@ impl TableManager {
             .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
 
         // Phase B — attach the scalar resolver (same as the QV path).
-        let resolver = self.scalar_resolver.load_full();
-        let ctx = ValidatorCtx::with_scalars(actor, interner, resolver.as_ref());
+        // Phase C1 — attach a [`ValidatorDb`] from `tx` for relational
+        // validators (DELETE may have FK-referenced records, etc.).
+        let scalar_res = self.scalar_resolver.load_full();
+        let vdb = ValidatorDb::new(tx, self, resolver);
+        let ctx = ValidatorCtx::with_db(actor, interner, scalar_res.as_ref(), &vdb);
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
             .await

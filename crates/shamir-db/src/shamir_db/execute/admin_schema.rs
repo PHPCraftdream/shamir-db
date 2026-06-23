@@ -132,9 +132,7 @@ impl ShamirAdminExecutor {
             if expected != current_version {
                 return Err(err_code(
                     "version_conflict",
-                    format!(
-                        "expected schema_version {expected}, found {current_version}"
-                    ),
+                    format!("expected schema_version {expected}, found {current_version}"),
                 ));
             }
         }
@@ -156,7 +154,9 @@ impl ShamirAdminExecutor {
         // schema_validator_id: reuse if present (ALTER), else mint a new one.
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
-            Some(id_str) => id_str.parse::<RecordId>().unwrap_or_else(|_| RecordId::new()),
+            Some(id_str) => id_str
+                .parse::<RecordId>()
+                .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
 
@@ -261,7 +261,9 @@ impl ShamirAdminExecutor {
         let schema_qv = serialise_rules(&rules, interner);
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
-            Some(id_str) => id_str.parse::<RecordId>().unwrap_or_else(|_| RecordId::new()),
+            Some(id_str) => id_str
+                .parse::<RecordId>()
+                .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
         let current_version = rec
@@ -362,7 +364,9 @@ impl ShamirAdminExecutor {
         let schema_qv = serialise_rules(&rules, interner);
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
-            Some(id_str) => id_str.parse::<RecordId>().unwrap_or_else(|_| RecordId::new()),
+            Some(id_str) => id_str
+                .parse::<RecordId>()
+                .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
         let current_version = rec
@@ -452,9 +456,7 @@ impl ShamirAdminExecutor {
 
         // De-intern the catalogue schema into the wire DTO form (flat names).
         let schema_dto = match rec.get(SCHEMA_FIELD) {
-            Some(qv) if !matches!(qv, QueryValue::Null) => {
-                dto_list_from_catalogue(qv, interner)
-            }
+            Some(qv) if !matches!(qv, QueryValue::Null) => dto_list_from_catalogue(qv, interner),
             _ => Vec::new(),
         };
         let schema_version = rec

@@ -212,7 +212,10 @@ async fn execute_insert_tx_stages_all_records() {
         ])
         .build();
 
-    let result = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
+    let result = tbl
+        .execute_insert_tx(&op, &mut tx, true, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for r in &result.records {
@@ -230,7 +233,10 @@ async fn execute_insert_tx_empty_values() {
     let mut tx = TxContext::new(TxId::new(41), 0, u64::MAX, IsolationLevel::Snapshot);
 
     let op = write::insert("t").build();
-    let result = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
+    let result = tbl
+        .execute_insert_tx(&op, &mut tx, true, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 0);
     assert!(result.records.is_empty());
 }
@@ -255,7 +261,10 @@ async fn execute_update_tx_stages_via_update_tx() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let result = tbl.execute_update_tx(&op, &ctx, &mut tx).await.unwrap();
+    let result = tbl
+        .execute_update_tx(&op, &ctx, &mut tx, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 1);
 
     let token = tbl.table_token();
@@ -278,7 +287,10 @@ async fn execute_update_tx_no_match_zero_affected() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let result = tbl.execute_update_tx(&op, &ctx, &mut tx).await.unwrap();
+    let result = tbl
+        .execute_update_tx(&op, &ctx, &mut tx, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 0);
 }
 
@@ -295,7 +307,10 @@ async fn execute_delete_tx_stages_via_delete_tx() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let result = tbl.execute_delete_tx(&op, &ctx, &mut tx).await.unwrap();
+    let result = tbl
+        .execute_delete_tx(&op, &ctx, &mut tx, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 1);
     assert!(result.records.is_empty());
 
@@ -319,7 +334,10 @@ async fn execute_delete_tx_no_match_zero_affected() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let result = tbl.execute_delete_tx(&op, &ctx, &mut tx).await.unwrap();
+    let result = tbl
+        .execute_delete_tx(&op, &ctx, &mut tx, None)
+        .await
+        .unwrap();
     assert_eq!(result.affected, 0);
 }
 
@@ -333,7 +351,7 @@ async fn execute_set_tx_insert_path() {
         .value(mpack!({ "email": "a@b.c", "name": "alice" }))
         .build();
 
-    let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
+    let result = tbl.execute_set_tx(&op, &mut tx, None).await.unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
     assert_eq!(
@@ -367,7 +385,7 @@ async fn execute_set_tx_update_path() {
         .value(mpack!({ "name": "bob" }))
         .build();
 
-    let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
+    let result = tbl.execute_set_tx(&op, &mut tx, None).await.unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(
         result.records[0].get_value_owned("_created"),

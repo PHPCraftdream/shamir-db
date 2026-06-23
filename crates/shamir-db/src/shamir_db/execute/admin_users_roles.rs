@@ -166,7 +166,9 @@ impl ShamirAdminExecutor {
                     let interner = owned_table.interner().get().await?;
                     let refs = crate::types::common::new_map();
                     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
-                    owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                    owned_table
+                        .execute_delete_tx(&owned_op, &ctx, tx, None)
+                        .await
                 })
             })
             .await?;
@@ -279,7 +281,9 @@ impl ShamirAdminExecutor {
                     let interner = owned_table.interner().get().await?;
                     let refs = crate::types::common::new_map();
                     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
-                    owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                    owned_table
+                        .execute_delete_tx(&owned_op, &ctx, tx, None)
+                        .await
                 })
             })
             .await?;
