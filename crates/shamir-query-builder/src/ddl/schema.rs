@@ -1,8 +1,8 @@
 //! Builders for declarative schema DDL operations and the `field()` fluent API.
 
 use shamir_query_types::admin::{
-    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto,
-    RemoveSchemaRuleOp, SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
+    NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -194,6 +194,22 @@ impl FieldBuilder {
         self.constraints.compare = Some(CompareDto {
             other: other.into_iter().map(Into::into).collect(),
             op: op.into(),
+        });
+        self
+    }
+
+    /// Phase C2 — forward-only foreign-key reference.
+    ///
+    /// The field value must exist in `ref_table.ref_field`.  An index on
+    /// `(ref_table, ref_field)` is required at DDL time (fail-closed).
+    pub fn foreign_key(
+        mut self,
+        ref_table: impl Into<String>,
+        ref_field: impl Into<String>,
+    ) -> Self {
+        self.constraints.foreign_key = Some(ForeignKeyDto {
+            ref_table: ref_table.into(),
+            ref_field: ref_field.into(),
         });
         self
     }

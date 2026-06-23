@@ -270,8 +270,12 @@ impl FieldRule {
         }
     }
 
-    /// Materialise the field value as a [`QueryValue`] for `one_of` comparison.
-    fn materialize_as_qv(&self, fields: &dyn RecordFields, path: &[&str]) -> Option<QueryValue> {
+    /// Materialise the field value as a [`QueryValue`] for `one_of` / FK comparison.
+    pub fn materialize_as_qv(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+    ) -> Option<QueryValue> {
         // Try scalar first (cheap, borrow-based).
         if let Some(sr) = fields.scalar(path) {
             return Some(scalar_ref_to_qv(sr));

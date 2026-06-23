@@ -7,6 +7,7 @@
 pub mod constraints;
 pub mod cross_field;
 pub mod field_rule;
+pub mod foreign_key;
 pub mod format;
 pub mod rule_builder;
 pub mod schema_validator;
@@ -15,6 +16,7 @@ pub mod type_tag;
 pub use constraints::{Constraints, Num};
 pub use cross_field::{CompareOp, CrossFieldCompare, CrossFieldResult};
 pub use field_rule::FieldRule;
+pub use foreign_key::ForeignKeyRef;
 pub use format::FormatKind;
 pub use rule_builder::{rule, RuleBuilder};
 pub use schema_validator::SchemaValidator;

@@ -630,6 +630,15 @@ export class FieldBuilder {
     return this;
   }
 
+  /**
+   * Phase C2 — forward-only foreign-key reference.
+   * The field value must exist in `refTable.refField`.
+   */
+  foreignKey(refTable: string, refField: string): this {
+    this._constraints.foreign_key = { ref_table: refTable, ref_field: refField };
+    return this;
+  }
+
   /** Finalize into a wire-ready `FieldRuleDto`. */
   build(): FieldRuleDto {
     const dto: FieldRuleDto = {

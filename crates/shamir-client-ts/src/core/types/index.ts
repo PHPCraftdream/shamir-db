@@ -57,6 +57,7 @@ export type {
   WriteOpKind,
   NumDto,
   ConstraintsDto,
+  ForeignKeyDto,
   FieldRuleDto,
   SetTableSchemaOp,
   AddSchemaRuleOp,

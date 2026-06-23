@@ -15,9 +15,9 @@ pub use types::{
     ChangesSinceOp, CommitMigrationOp, CompareDto, ConstraintsDto, CreateDbOp,
     CreateFunctionFolderOp, CreateFunctionOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
     CreateValidatorOp, DropDbOp, DropFunctionOp, DropIndexOp, DropRepoOp, DropTableOp,
-    DropValidatorOp, FieldRuleDto, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
-    InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, NumDto, PurgeHistoryOp,
-    PurgeScope, RemoveSchemaRuleOp, RenameFunctionOp, RenameValidatorOp, Retention,
+    DropValidatorOp, FieldRuleDto, ForeignKeyDto, GetBufferConfigOp, GetTableSchemaOp,
+    InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, NumDto,
+    PurgeHistoryOp, PurgeScope, RemoveSchemaRuleOp, RenameFunctionOp, RenameValidatorOp, Retention,
     RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
     UnbindValidatorOp,
 };

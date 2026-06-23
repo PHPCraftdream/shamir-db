@@ -1,11 +1,12 @@
 //! [`SchemaValidator`] — declarative `impl RecordValidator`.
 //!
 //! Compiles a set of [`FieldRule`]s into a validator that checks every rule
-//! against the incoming record via `&dyn RecordFields`.  Pure, in-process,
-//! no DB access.
+//! against the incoming record via `&dyn RecordFields`.  Pure checks (Phase A/B)
+//! plus async DB-read FK checks (Phase C2).
 
 use async_trait::async_trait;
 
+use crate::query::TableRef;
 use crate::validator::encode::Validation;
 use crate::validator::record_fields::RecordFields;
 use crate::validator::record_validator::{RecordValidator, ValidatorCtx};
@@ -62,7 +63,8 @@ impl RecordValidator for SchemaValidator {
                 }
                 // Field present as Null.
                 Some(shamir_types::record_view::Kind::Null) if rule.constraints.nullable => {
-                    // Null is allowed — skip.
+                    // Null is allowed — FK on NULL is skipped (standard SQL
+                    // semantics: a NULL foreign key is always valid).
                 }
                 Some(shamir_types::record_view::Kind::Null) => {
                     v.field_error(rule.path.clone(), "null_not_allowed");
@@ -70,6 +72,44 @@ impl RecordValidator for SchemaValidator {
                 // Field present with a value — run type + constraint checks.
                 Some(_) => {
                     rule.check_extended(fields, &path_refs, Some(ctx), &mut v);
+
+                    // Phase C2 — foreign_key existence check (async DB read).
+                    // Runs only when ctx.db() is Some (tx-mode write path with
+                    // a resolver); silently skipped under autocommit / unit
+                    // tests where no resolver is wired (fail-open, matching
+                    // the scalar-bridge precedent).
+                    if let Some(fk) = &rule.constraints.foreign_key {
+                        if let Some(db) = ctx.db() {
+                            // Materialise the field value as QueryValue for the
+                            // FK lookup.
+                            if let Some(field_qv) = rule.materialize_as_qv(fields, &path_refs) {
+                                let table_ref = TableRef::new(&fk.ref_table);
+                                match db.exists_in(&table_ref, &fk.ref_field, &field_qv).await {
+                                    Ok(true) => {
+                                        // Referenced value exists — FK satisfied.
+                                    }
+                                    Ok(false) => {
+                                        v.field_error(rule.path.clone(), "fk_violation");
+                                    }
+                                    Err(e) => {
+                                        // DB read error — fail closed.
+                                        log::warn!(
+                                            "SchemaValidator FK check error on field {:?}: {}",
+                                            rule.path,
+                                            e
+                                        );
+                                        v.field_error(rule.path.clone(), "fk_violation");
+                                    }
+                                }
+                            }
+                        }
+                        // else: ctx.db() == None → FK check silently skipped.
+                        // Batch-consistency is only guaranteed in tx-mode
+                        // (multi-statement transactions where the resolver is
+                        // wired). Autocommit single-op inserts skip FK because
+                        // the implicit-tx path does not wire a cross-table
+                        // resolver.
+                    }
                 }
             }
         }
