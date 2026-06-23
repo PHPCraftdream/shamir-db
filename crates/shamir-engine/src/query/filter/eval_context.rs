@@ -1,12 +1,11 @@
 //! FilterContext — evaluation context for filter callbacks.
 
-use shamir_funclib::registry::ScalarRegistry;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::access::Actor;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
-use crate::function::builtin_scalars;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -14,7 +13,7 @@ use crate::query::read::QueryResult;
 /// Contains the interner for resolving field paths,
 /// a map of resolved query results for QueryRef support,
 /// the [`Actor`] that initiated the operation, and the scalar function
-/// registry used to evaluate `FilterValue::FnCall` nodes.
+/// resolver used to evaluate `FilterValue::FnCall` nodes.
 ///
 /// `params` is the injected sub-batch parameter scope — populated when
 /// this context belongs to a nested `BatchOp::Batch` execution. At the
@@ -24,9 +23,10 @@ pub struct FilterContext<'a> {
     pub interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     pub actor: Actor,
-    /// Scalar function registry for `FnCall` dispatch. Defaults to the
-    /// process-global built-ins ([`builtin_scalars`]).
-    pub scalars: &'a ScalarRegistry,
+    /// Scalar function resolver for `FnCall` dispatch. Defaults to
+    /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB
+    /// resolver with user scalars is injected via [`with_scalars`](Self::with_scalars).
+    pub scalars: ScalarResolver,
     /// Injected sub-batch parameters (`$param` bindings). Empty at the
     /// top level; populated by the recursive sub-batch executor (P3).
     pub params: &'a TMap<String, QueryValue>,
@@ -40,13 +40,19 @@ fn empty_params() -> &'static TMap<String, QueryValue> {
     EMPTY.get_or_init(shamir_types::types::common::new_map)
 }
 
+/// A permanently empty ScalarResolver (builtins only), shared across all
+/// top-level contexts so `FilterContext::new` never allocates an Arc.
+fn builtins_only_resolver() -> ScalarResolver {
+    ScalarResolver::builtins_only()
+}
+
 impl<'a> FilterContext<'a> {
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {
         Self {
             interner,
             resolved_refs,
             actor: Actor::System,
-            scalars: builtin_scalars(),
+            scalars: builtins_only_resolver(),
             params: empty_params(),
         }
     }
@@ -54,6 +60,12 @@ impl<'a> FilterContext<'a> {
     /// Builder: set the actor that initiated this operation.
     pub fn with_actor(mut self, actor: Actor) -> Self {
         self.actor = actor;
+        self
+    }
+
+    /// Builder: inject a per-DB scalar resolver with user-registered scalars.
+    pub fn with_scalars(mut self, resolver: ScalarResolver) -> Self {
+        self.scalars = resolver;
         self
     }
 

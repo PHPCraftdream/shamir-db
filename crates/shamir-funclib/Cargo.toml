@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 
+# Lock-free concurrent hashmap for the user-scalar layer (ScalarResolver).
+scc = "2.2"
+
 # Canonical-key serialisation for the order-independent record hash (/crypto
 # canonical_hash). serde gives the `Serialize` bound on map keys; rmp-serde
 # turns a key into its deterministic byte form for sorting.

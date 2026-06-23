@@ -249,10 +249,14 @@ async fn update_index_ops_view_eq_tree_no_backends() {
     let tx_id = Some(shamir_tx::TxId::new(1));
 
     // Index2 backends (empty, but proves generic dispatch works).
-    let mut ops_tree = tbl.plan_update_ops(rid, &old_tree, &new_tree, tx_id).await;
+    let mut ops_tree = tbl
+        .plan_update_ops(rid, &old_tree, &new_tree, tx_id)
+        .await
+        .unwrap();
     let mut ops_view = tbl
         .plan_update_ops_ref(rid, &old_view, &new_view, tx_id)
-        .await;
+        .await
+        .unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);

@@ -11,6 +11,7 @@ use shamir_engine::function::{
 };
 use shamir_engine::validator::ValidatorRegistry;
 use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -226,6 +227,17 @@ impl ShamirDb {
                 Some(n) => n.to_string(),
                 None => continue,
             };
+            // Dispatch on artifact kind: Native rows have no WASM bytes —
+            // skip materialisation. The embedder re-registers the native
+            // artifact at startup; until then the function is absent and any
+            // invocation fails closed ("function not found").
+            if super::ArtifactKind::from_record(rec) == super::ArtifactKind::Native {
+                log::info!(
+                    "shamir_db::init: skipping native function '{}' — re-register at startup",
+                    name
+                );
+                continue;
+            }
             let wasm_b64 = match rec["wasm_b64"].as_str() {
                 Some(b) => b,
                 None => {
@@ -281,6 +293,19 @@ impl ShamirDb {
                 Some(n) => n.to_string(),
                 None => continue,
             };
+            // Dispatch on artifact kind: Native rows have no WASM bytes —
+            // skip materialisation entirely. The embedder re-registers the
+            // native artifact at startup. Table-level bindings (stored on
+            // each table's info-twin) are restored independently and still
+            // reference this validator_id; any write will fail closed via
+            // ValidatorFailure::Missing until the artifact is re-registered.
+            if super::ArtifactKind::from_record(rec) == super::ArtifactKind::Native {
+                log::info!(
+                    "shamir_db::init: skipping native validator '{}' — re-register at startup",
+                    name
+                );
+                continue;
+            }
             let wasm_b64 = match rec["wasm_b64"].as_str() {
                 Some(b) => b,
                 None => {
@@ -355,6 +380,26 @@ impl ShamirDb {
             }
         }
 
+        // Phase 4 boot diagnostic: surface native catalogue rows whose
+        // in-process artifact was NOT re-registered by the embedder. The boot
+        // loops above skip `kind = Native` rows (no wasm bytes); the embedder
+        // is expected to call `register_fn` / `register_native_validator` at
+        // startup to rehydrate them. Any row still missing a live artifact at
+        // this point will fail closed on first use ("not found"). Emit a
+        // visible `warn!` so a silent fail-closed becomes an actionable
+        // startup signal rather than a mystery runtime error.
+        let unresolved = shamir.unresolved_native_artifacts_inner(&fn_records, &val_records);
+        if !unresolved.is_empty() {
+            log::warn!(
+                "shamir_db::init: {} native artifact(s) persisted in the catalogue but \
+                 NOT re-registered at startup: {:?}. Writes to tables bound to an \
+                 unresolved native validator will fail closed until the embedder \
+                 re-registers them.",
+                unresolved.len(),
+                unresolved
+            );
+        }
+
         Ok(shamir)
     }
 
@@ -384,6 +429,61 @@ impl ShamirDb {
         self.data_root.as_deref()
     }
 
+    /// Names of `kind = Native` catalogue entries (functions + validators)
+    /// whose in-process artifact is NOT live in the registry.
+    ///
+    /// The boot loop skips `kind = Native` rows (they have no WASM bytes);
+    /// the embedding application is expected to re-register each native
+    /// artifact at startup via [`ShamirDb::register_fn`] /
+    /// [`ShamirDb::register_native_validator`]. Any artifact still missing
+    /// after startup will fail closed on first use ("not found"). This
+    /// accessor turns that silent fail-closed into an actionable signal —
+    /// a monitoring layer can poll it, and the boot path emits a `warn!`
+    /// listing the unresolved names.
+    ///
+    /// Returns a sorted, deduplicated `Vec<String>` of names.
+    pub async fn unresolved_native_artifacts(&self) -> DbResult<Vec<String>> {
+        let fn_records = self.system_store.load_functions().await?;
+        let val_records = self.system_store.load_validators().await?;
+        Ok(self.unresolved_native_artifacts_inner(&fn_records, &val_records))
+    }
+
+    /// Inner join: given the already-loaded function and validator catalogue
+    /// records, return the names of `kind = Native` rows whose artifact is
+    /// absent from the live registry. Used both by the boot diagnostic
+    /// (which already has the records in hand) and by the public
+    /// [`Self::unresolved_native_artifacts`] accessor.
+    fn unresolved_native_artifacts_inner(
+        &self,
+        fn_records: &[QueryValue],
+        val_records: &[QueryValue],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for rec in fn_records {
+            if super::ArtifactKind::from_record(rec) != super::ArtifactKind::Native {
+                continue;
+            }
+            if let Some(name) = rec.get("name").and_then(|v| v.as_str()) {
+                if !self.functions.contains(name) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        for rec in val_records {
+            if super::ArtifactKind::from_record(rec) != super::ArtifactKind::Native {
+                continue;
+            }
+            if let Some(name) = rec.get("name").and_then(|v| v.as_str()) {
+                if self.validators.id_for_name(name).is_none() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     pub fn db_count(&self) -> usize {
         self.dbs.len()
     }
@@ -398,6 +498,20 @@ impl ShamirDb {
 
     pub fn get_db(&self, name: &str) -> Option<DbInstance> {
         self.dbs.get(name).map(|r| r.clone())
+    }
+
+    /// Access the per-DB user scalar layer for `db_name`.
+    ///
+    /// Returns `None` if the database does not exist. The returned
+    /// `Arc<UserScalarLayer>` can be used to register custom native
+    /// scalar functions that become available in WHERE filters and
+    /// (when marked `.trusted_pure()`) in functional indexes.
+    pub fn scalars(
+        &self,
+        db_name: &str,
+    ) -> Option<std::sync::Arc<shamir_funclib::scalar_resolver::UserScalarLayer>> {
+        self.get_db(db_name)
+            .map(|db| std::sync::Arc::clone(db.scalars()))
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 mod access_meta_tests;
 mod access_tree_tests;
+mod artifact_kind_tests;
 mod curl_gateway_tests;
 mod durability_levels_tests;
 mod durable_repo_tests;
@@ -11,3 +12,4 @@ mod group_tests;
 mod interner_ops_tests;
 mod shamir_db_tests;
 mod system_metadata_tests;
+mod user_scalar_tests;

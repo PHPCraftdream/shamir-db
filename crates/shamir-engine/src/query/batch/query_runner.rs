@@ -309,6 +309,7 @@ impl<'a> QueryRunner<'a> {
 
         let ctx = FilterContext::new(interner, resolved_refs)
             .with_actor(self.actor.clone())
+            .with_scalars(self.resolver.scalar_resolver())
             .with_params(self.params);
 
         match &entry.op {

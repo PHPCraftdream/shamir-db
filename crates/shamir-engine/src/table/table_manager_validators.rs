@@ -65,6 +65,26 @@ impl TableManager {
         self.validator_registry = Some(registry);
     }
 
+    /// Inject the per-DB scalar resolver (user + builtin layers). Called
+    /// by `DbTableResolver::resolve` so that `create_index_v2` can access
+    /// user-registered scalars for the `.trusted_pure()` index-safety gate,
+    /// AND so that already-constructed `FunctionalBackend` instances (e.g.
+    /// those rebuilt during reopen) can resolve user scalars at eval time.
+    pub async fn set_scalar_resolver(
+        &self,
+        resolver: shamir_funclib::scalar_resolver::ScalarResolver,
+    ) {
+        self.scalar_resolver
+            .store(std::sync::Arc::new(resolver.clone()));
+        // Push the resolver down to every index2 backend that may need it
+        // (FunctionalBackend with IndexExpr::Scalar). Other backends
+        // (FTS, Vector, Btree) have a no-op default impl.
+        let backends = self.index2_registry.all_backends().await;
+        for b in &backends {
+            b.update_scalar_resolver(&resolver);
+        }
+    }
+
     /// QueryValue-input entry point for the INSERT/UPDATE/UPSERT write paths.
     ///
     /// All write paths feed `QueryValue` directly: INSERT passes `resolved_values`

@@ -111,8 +111,8 @@ async fn plan_delete_ops_view_eq_tree_no_backends() {
     let old_view = RecordView::new(&raw_bytes).unwrap();
     let tx_id = Some(shamir_tx::TxId::new(1));
 
-    let mut ops_tree = tbl.plan_delete_ops(rid, &old_tree, tx_id).await;
-    let mut ops_view = tbl.plan_delete_ops(rid, &old_view, tx_id).await;
+    let mut ops_tree = tbl.plan_delete_ops(rid, &old_tree, tx_id).await.unwrap();
+    let mut ops_view = tbl.plan_delete_ops(rid, &old_view, tx_id).await.unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);

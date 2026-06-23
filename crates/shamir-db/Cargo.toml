@@ -27,6 +27,7 @@ shamir-types       = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 shamir-storage     = { path = "../shamir-storage", default-features = false }
 shamir-engine      = { path = "../shamir-engine",  default-features = false }
+shamir-funclib     = { path = "../shamir-funclib" }
 # T4-purge: the execute arm resolves the per-table MvccStore directly
 # (per_table_mvcc) to call purge_below_ts / read its clock. Already a
 # transitive build dep via shamir-engine; declared explicitly so the

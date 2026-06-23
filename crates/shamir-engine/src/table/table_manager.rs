@@ -66,6 +66,12 @@ pub struct TableManager {
     /// Attached by `RepoInstance::create_table_context` via
     /// [`with_changefeed`](Self::with_changefeed).
     pub(super) changefeed: Option<NonTxChangefeed>,
+    /// Per-DB scalar resolver (user + builtin layers). Lock-free reads
+    /// via `ArcSwap`; defaults to builtins-only until
+    /// [`set_scalar_resolver`](Self::set_scalar_resolver) is called.
+    /// Used by `create_index_v2` for the `.trusted_pure()` index-safety gate.
+    pub(super) scalar_resolver:
+        Arc<arc_swap::ArcSwap<shamir_funclib::scalar_resolver::ScalarResolver>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -106,6 +112,7 @@ impl Clone for TableManager {
             validator_bindings: Arc::clone(&self.validator_bindings),
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
+            scalar_resolver: Arc::clone(&self.scalar_resolver),
         }
     }
 }
@@ -160,6 +167,9 @@ impl TableManager {
             validator_bindings,
             validator_registry: None,
             changefeed: None,
+            scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+                shamir_funclib::scalar_resolver::ScalarResolver::builtins_only(),
+            ))),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -193,7 +203,11 @@ impl TableManager {
                 if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
                     continue;
                 }
-                let backend = crate::index2::build_index2_backend(desc, &info_store);
+                let backend = crate::index2::build_index2_backend_with_resolver(
+                    desc,
+                    &info_store,
+                    Some(mgr.scalar_resolver.load_full().as_ref().clone()),
+                );
                 let _ = mgr.index2_registry.insert(backend).await;
             }
         }
@@ -292,6 +306,9 @@ impl TableManager {
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             validator_registry: None,
             changefeed: None,
+            scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
+                shamir_funclib::scalar_resolver::ScalarResolver::builtins_only(),
+            ))),
         }
     }
 

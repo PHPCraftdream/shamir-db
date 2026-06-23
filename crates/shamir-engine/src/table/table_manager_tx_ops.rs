@@ -53,14 +53,16 @@ impl TableManager {
         rid: RecordId,
         rec: &InnerValue,
         tx_id: Option<shamir_tx::TxId>,
-    ) -> Vec<shamir_tx::IndexWriteOp> {
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_insert_tx(rid, rec, tx_id).await {
-                all_ops.extend(ops);
-            }
+            let ops = backend
+                .plan_insert_tx(rid, rec, tx_id)
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            all_ops.extend(ops);
         }
-        all_ops
+        Ok(all_ops)
     }
 
     /// HIGH-6: route any HNSW vectors carried by `rec` into the tx's own
@@ -96,14 +98,16 @@ impl TableManager {
         old: &InnerValue,
         new: &InnerValue,
         tx_id: Option<shamir_tx::TxId>,
-    ) -> Vec<shamir_tx::IndexWriteOp> {
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_update_tx(rid, old, new, tx_id).await {
-                all_ops.extend(ops);
-            }
+            let ops = backend
+                .plan_update_tx(rid, old, new, tx_id)
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            all_ops.extend(ops);
         }
-        all_ops
+        Ok(all_ops)
     }
 
     /// RecordRef-generic variant of [`plan_update_ops`].
@@ -116,17 +120,19 @@ impl TableManager {
         old: &R,
         new: &R,
         tx_id: Option<shamir_tx::TxId>,
-    ) -> Vec<shamir_tx::IndexWriteOp>
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>>
     where
         R: RecordRef + Sync,
     {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_update_tx(rid, old, new, tx_id).await {
-                all_ops.extend(ops);
-            }
+            let ops = backend
+                .plan_update_tx(rid, old, new, tx_id)
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            all_ops.extend(ops);
         }
-        all_ops
+        Ok(all_ops)
     }
 
     /// Collect index ops from all index2 backends for a delete.
@@ -141,17 +147,19 @@ impl TableManager {
         rid: RecordId,
         rec: &R,
         tx_id: Option<shamir_tx::TxId>,
-    ) -> Vec<shamir_tx::IndexWriteOp>
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>>
     where
         R: RecordRef + Sync,
     {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_delete_tx(rid, rec, tx_id).await {
-                all_ops.extend(ops);
-            }
+            let ops = backend
+                .plan_delete_tx(rid, rec, tx_id)
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            all_ops.extend(ops);
         }
-        all_ops
+        Ok(all_ops)
     }
 
     /// HIGH-6: collect legacy `IndexManager` (regular + unique) and
@@ -321,7 +329,7 @@ impl TableManager {
         let mut index_ops = Vec::new();
         if self.has_any_index() {
             let tx_id = Some(tx.tx_id);
-            index_ops = self.plan_insert_ops(rid, value, tx_id).await;
+            index_ops = self.plan_insert_ops(rid, value, tx_id).await?;
             index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
 
             // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
@@ -451,9 +459,11 @@ impl TableManager {
             let tx_id = Some(tx.tx_id);
             for (rid, v) in ids.iter().zip(values.iter()) {
                 for backend in &backends {
-                    if let Ok(ops) = backend.plan_insert_tx(*rid, v, tx_id).await {
-                        index_ops.extend(ops);
-                    }
+                    let ops = backend
+                        .plan_insert_tx(*rid, v, tx_id)
+                        .await
+                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                    index_ops.extend(ops);
                     if let Some(vec) = backend.staged_vector(*rid, v).await {
                         tx.stage_vector(token, *rid, vec);
                     }
@@ -608,9 +618,11 @@ impl TableManager {
             let tx_id = Some(tx.tx_id);
             for (rid, view) in ids.iter().zip(views.iter()) {
                 for backend in &backends {
-                    if let Ok(ops) = backend.plan_insert_tx(*rid, view, tx_id).await {
-                        index_ops.extend(ops);
-                    }
+                    let ops = backend
+                        .plan_insert_tx(*rid, view, tx_id)
+                        .await
+                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                    index_ops.extend(ops);
                     if let Some(vec) = backend.staged_vector(*rid, view).await {
                         tx.stage_vector(token, *rid, vec);
                     }
@@ -709,8 +721,11 @@ impl TableManager {
 
         let tx_id = Some(tx.tx_id);
         let (mut index_ops, counter_delta) = match &old {
-            Some(old_val) => (self.plan_update_ops(id, old_val, value, tx_id).await, 0_i64),
-            None => (self.plan_insert_ops(id, value, tx_id).await, 1_i64),
+            Some(old_val) => (
+                self.plan_update_ops(id, old_val, value, tx_id).await?,
+                0_i64,
+            ),
+            None => (self.plan_insert_ops(id, value, tx_id).await?, 1_i64),
         };
         match &old {
             Some(old_val) => {
@@ -781,7 +796,7 @@ impl TableManager {
                     // Index2 backends (RecordRef-generic).
                     let mut ops = self
                         .plan_update_ops_ref(id, &old_view, &new_view, tx_id)
-                        .await;
+                        .await?;
                     // Legacy + sorted posting ops.
                     ops.extend(
                         self.plan_legacy_update_ops_ref(id, &old_view, &new_view)
@@ -822,7 +837,9 @@ impl TableManager {
                         });
                     }
 
-                    let mut ops = self.plan_update_ops(id, &old_tree, &new_tree, tx_id).await;
+                    let mut ops = self
+                        .plan_update_ops(id, &old_tree, &new_tree, tx_id)
+                        .await?;
                     ops.extend(
                         self.plan_legacy_update_ops(id, &old_tree, &new_tree)
                             .await?,
@@ -885,7 +902,7 @@ impl TableManager {
         let tx_id = Some(tx.tx_id);
         let index_ops = match RecordView::new(&old_bytes) {
             Ok(old_view) => {
-                let mut ops = self.plan_delete_ops(id, &old_view, tx_id).await;
+                let mut ops = self.plan_delete_ops(id, &old_view, tx_id).await?;
                 ops.extend(self.plan_legacy_delete_ops(id, &old_view).await?);
                 ops
             }
@@ -897,7 +914,7 @@ impl TableManager {
                         id, e
                     ))
                 })?;
-                let mut ops = self.plan_delete_ops(id, &old_inner, tx_id).await;
+                let mut ops = self.plan_delete_ops(id, &old_inner, tx_id).await?;
                 ops.extend(self.plan_legacy_delete_ops(id, &old_inner).await?);
                 ops
             }

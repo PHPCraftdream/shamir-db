@@ -1,6 +1,7 @@
 use super::super::table::{TableConfig, TableManager};
 use crate::repo::{RepoConfig, RepoInstance};
 use dashmap::DashMap;
+use shamir_funclib::scalar_resolver::UserScalarLayer;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::common::THasher;
 use shamir_types::types::value::InnerValue;
@@ -11,6 +12,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct DbInstance {
     repos: Arc<DashMap<String, RepoInstance, THasher>>,
+    /// Per-DB user-registered scalar functions. Shared via Arc so all
+    /// clones of this DbInstance see registrations.
+    scalars: Arc<UserScalarLayer>,
 }
 
 impl Default for DbInstance {
@@ -23,6 +27,7 @@ impl DbInstance {
     pub fn new() -> Self {
         Self {
             repos: Arc::new(DashMap::with_hasher(THasher::default())),
+            scalars: Arc::new(UserScalarLayer::new()),
         }
     }
 
@@ -39,6 +44,7 @@ impl DbInstance {
 
         Ok(Self {
             repos: Arc::new(instances),
+            scalars: Arc::new(UserScalarLayer::new()),
         })
     }
 
@@ -107,6 +113,11 @@ impl DbInstance {
     /// Remove a repository from the instance
     pub async fn remove_repo(&self, repo_name: &str) -> bool {
         self.repos.remove(repo_name).is_some()
+    }
+
+    /// Access the per-DB user scalar layer for registration.
+    pub fn scalars(&self) -> &Arc<UserScalarLayer> {
+        &self.scalars
     }
 
     // ============================================================================
