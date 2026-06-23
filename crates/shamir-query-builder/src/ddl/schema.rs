@@ -198,6 +198,15 @@ impl FieldBuilder {
         self
     }
 
+    /// Phase C3 — unique constraint.
+    ///
+    /// The field value must not duplicate any existing row in the same
+    /// table.  An index on the column is required at DDL time (fail-closed).
+    pub fn unique(mut self) -> Self {
+        self.constraints.unique = Some(true);
+        self
+    }
+
     /// Phase C2 — forward-only foreign-key reference.
     ///
     /// The field value must exist in `ref_table.ref_field`.  An index on

@@ -73,4 +73,11 @@ pub struct Constraints {
     /// (tx-mode write path); silently skipped under autocommit (no resolver).
     /// NULL values bypass the FK check (standard SQL semantics).
     pub foreign_key: Option<ForeignKeyRef>,
+    /// Phase C3 — unique constraint.  The field value must not duplicate any
+    /// existing committed row (or staged write within the same tx).
+    /// Checked only when `ctx.db() == Some` (tx-mode write path); silently
+    /// skipped under autocommit (no resolver wired — same precedent as FK).
+    /// NULL values bypass the unique check (standard SQL semantics: NULL is
+    /// never equal to anything, including another NULL).
+    pub unique: bool,
 }

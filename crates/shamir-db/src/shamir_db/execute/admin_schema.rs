@@ -92,6 +92,71 @@ async fn lock_schema_rmw(
     arc.lock_owned().await
 }
 
+/// Validate that all unique-constrained fields in the rule set have a
+/// backing index on the SAME table.  Returns an error
+/// (`unique_requires_index`) if any unique field lacks a single-field
+/// index.
+///
+/// Called at DDL time (set_table_schema, add_schema_rule) — fail-closed so
+/// a unique constraint without an index is never persisted (would be O(n)
+/// scan per insert).
+async fn validate_unique_indexes(
+    shamir: &ShamirDb,
+    db: &str,
+    repo: &str,
+    table: &str,
+    rules: &[FieldRuleDto],
+) -> Result<(), BatchError> {
+    for rule in rules {
+        if rule.constraints.unique == Some(true) {
+            // The unique field lives on the SAME table being constrained.
+            let self_table = match shamir.get_table(db, repo, table).await {
+                Ok(t) => t,
+                Err(_) => {
+                    return Err(err_code(
+                        "unique_requires_index",
+                        format!("unique on {:?}: table '{}' not found", rule.path, table),
+                    ));
+                }
+            };
+
+            // The field path must be a single segment for a single-field index.
+            if rule.path.len() != 1 {
+                return Err(err_code(
+                    "unique_requires_index",
+                    format!(
+                        "unique on {:?}: only single-segment field paths are \
+                         supported for unique constraints",
+                        rule.path
+                    ),
+                ));
+            }
+
+            let field_name = &rule.path[0];
+            let interner = self_table
+                .interner()
+                .get()
+                .await
+                .map_err(|e| err_code("internal_error", e.to_string()))?;
+            let has_index = interner.get_ind(field_name).is_some_and(|field_id| {
+                let field_path = [field_id.id()];
+                self_table.find_single_field_index(&field_path).is_some()
+            });
+            if !has_index {
+                return Err(err_code(
+                    "unique_requires_index",
+                    format!(
+                        "unique on {:?}: no index on '{}.{}' — \
+                         create an index before adding a unique constraint",
+                        rule.path, table, field_name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate that all FK references in the rule set have a backing index on
 /// the parent table. Returns an error (`fk_requires_index`) if any FK
 /// reference lacks a single-field index on `(ref_table, ref_field)`.
@@ -205,6 +270,9 @@ impl ShamirAdminExecutor {
         // Phase C2 — validate FK index requirements before persisting.
         validate_fk_indexes(&self.shamir, db, repo, &op.schema).await?;
 
+        // Phase C3 — validate unique index requirements before persisting.
+        validate_unique_indexes(&self.shamir, db, repo, table, &op.schema).await?;
+
         // Serialise the DTO rules into the catalogue form (interning paths).
         let schema_qv = serialise_rules(&op.schema, interner);
 
@@ -316,6 +384,16 @@ impl ShamirAdminExecutor {
 
         // Phase C2 — validate FK index requirements for the new/updated rule.
         validate_fk_indexes(&self.shamir, db, repo, std::slice::from_ref(new_rule)).await?;
+
+        // Phase C3 — validate unique index requirements for the new/updated rule.
+        validate_unique_indexes(
+            &self.shamir,
+            db,
+            repo,
+            table,
+            std::slice::from_ref(new_rule),
+        )
+        .await?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);
@@ -670,6 +748,10 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
         cmp_m.insert("op".to_string(), QueryValue::Str(cmp.op.clone()));
         m.insert("compare".to_string(), QueryValue::Map(cmp_m));
     }
+    // Phase C3 — unique.
+    if let Some(v) = c.unique {
+        m.insert("unique".to_string(), QueryValue::Bool(v));
+    }
     // Phase C2 — foreign_key.
     if let Some(fk) = &c.foreign_key {
         let mut fk_m = new_map();
@@ -738,6 +820,7 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
         format: m.get("format").and_then(|v| v.as_str()).map(String::from),
         compare: m.get("compare").and_then(compare_dto_from_qv),
         foreign_key: m.get("foreign_key").and_then(foreign_key_dto_from_qv),
+        unique: m.get("unique").and_then(|v| v.as_bool()),
     };
 
     Some(FieldRuleDto {

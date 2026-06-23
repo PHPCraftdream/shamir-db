@@ -76,22 +76,34 @@ fn record_field_matches(
     value: &QueryValue,
     interner: &shamir_types::core::interner::Interner,
 ) -> bool {
+    if let Some(field_id) = interner.get_ind(field) {
+        return record_field_matches_by_id(record_bytes, &field_id, value);
+    }
+    false
+}
+
+/// Check whether a decoded record's field (by pre-resolved [`InternerKey`])
+/// matches `value`.
+///
+/// Factored out of [`record_field_matches`] so the staged-probe path can
+/// resolve the field id through the tx-layered interner and reuse the same
+/// matching logic.
+fn record_field_matches_by_id(
+    record_bytes: &[u8],
+    field_id: &shamir_types::core::interner::InternerKey,
+    value: &QueryValue,
+) -> bool {
+    let path = std::slice::from_ref(field_id);
     // Try zero-copy RecordView lens first.
     if let Ok(view) = RecordView::new(record_bytes) {
-        if let Some(field_id) = interner.get_ind(field) {
-            let path = std::slice::from_ref(&field_id);
-            if let Some(actual) = view.scalar_at(path) {
-                return scalar_ref_matches_query_value(&actual, value);
-            }
+        if let Some(actual) = view.scalar_at(path) {
+            return scalar_ref_matches_query_value(&actual, value);
         }
     }
     // Fallback: decode InnerValue tree (non-map records).
     if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-        if let Some(field_id) = interner.get_ind(field) {
-            let path = std::slice::from_ref(&field_id);
-            if let Some(actual) = tree.scalar_at(path) {
-                return scalar_ref_matches_query_value(&actual, value);
-            }
+        if let Some(actual) = tree.scalar_at(path) {
+            return scalar_ref_matches_query_value(&actual, value);
         }
     }
     false
@@ -329,15 +341,42 @@ impl<'a> ValidatorDb<'a> {
             }
         }
 
-        // --- 3. Staged writes in this tx (read-your-own-writes) — TODO(Phase C3) ---
-        // Deferred to the unique check (C3), where it is actually exercised and
-        // testable against real batch-unique scenarios. The subtlety: staged
-        // record bytes encode field names with the TX-OVERLAY interner (a
-        // brand-new field name staged in the current tx is layered, not yet in
-        // base), so a correct probe must resolve `field` through the tx-layered
-        // interner — not the base `table.interner()` loaded above. Wiring that
-        // belongs with the unique check that consumes it. Until then,
-        // `exists_in_self` reports committed state only.
+        // --- 3. Staged writes in this tx (read-your-own-writes) ---
+        //
+        // Staged record bytes encode field names with the TX-OVERLAY interner
+        // (a brand-new field name staged in the current tx is layered, not yet
+        // in base). We resolve `field` through the tx-layered interner so
+        // overlay-minted ids are found.
+        let table_token = table.table_token();
+        if let Some(staging) = self.tx.write_set.get(&table_token) {
+            // Resolve field through the layered interner: base first, then
+            // tx overlay. This finds both committed field names AND
+            // overlay-minted names from earlier statements in this tx.
+            let layered = shamir_tx::LayeredInterner::Layered {
+                base: interner,
+                overlay: &self.tx.interner_overlay,
+                next_overlay_id: &self.tx.next_overlay_id,
+            };
+            // get_id is async but only the Layered::overlay branch issues
+            // a single scc read — cheap and non-blocking.
+            if let Some(field_id_raw) = layered.get_id(field).await {
+                let field_key = shamir_types::core::interner::InternerKey::new(field_id_raw);
+                for op in staging.snapshot_ops() {
+                    if let shamir_storage::types::KvOp::Set(ref key, ref bytes) = op {
+                        // Exclude the record being updated (by key, which
+                        // encodes the RecordId).
+                        if let Some(rid) = exclude_rid {
+                            if key.as_ref() == rid.as_bytes() {
+                                continue;
+                            }
+                        }
+                        if record_field_matches_by_id(bytes.as_ref(), &field_key, value) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
         Ok(false)
     }
 }

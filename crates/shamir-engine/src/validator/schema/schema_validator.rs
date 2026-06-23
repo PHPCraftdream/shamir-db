@@ -110,6 +110,59 @@ impl RecordValidator for SchemaValidator {
                         // the implicit-tx path does not wire a cross-table
                         // resolver.
                     }
+
+                    // Phase C3 — unique constraint (async DB read).
+                    // Runs only when ctx.db() is Some (tx-mode write path);
+                    // silently skipped under autocommit (ctx.db() == None) —
+                    // same fail-open precedent as FK.
+                    if rule.constraints.unique {
+                        if let Some(db) = ctx.db() {
+                            if let Some(field_qv) = rule.materialize_as_qv(fields, &path_refs) {
+                                // On UPDATE: if the unique field's value has not
+                                // changed, skip the check — the record already
+                                // owns that value in committed state.
+                                let old_value = _old.and_then(|old_fields| {
+                                    rule.materialize_as_qv(old_fields, &path_refs)
+                                });
+                                let skip = old_value
+                                    .as_ref()
+                                    .map(|ov| ov == &field_qv)
+                                    .unwrap_or(false);
+
+                                if !skip {
+                                    let field_name = &rule.path[0];
+                                    // exclude_rid: None for INSERT (no old record);
+                                    // for UPDATE the old_value != new_value case means
+                                    // the committed record still holds the old value,
+                                    // so exists_in_self for the NEW value won't
+                                    // self-match.
+                                    match db.exists_in_self(field_name, &field_qv, None).await {
+                                        Ok(true) => {
+                                            v.field_error(rule.path.clone(), "unique_violation");
+                                        }
+                                        Ok(false) => {
+                                            // No duplicate — unique satisfied.
+                                        }
+                                        Err(e) => {
+                                            // DB read error — fail closed.
+                                            log::warn!(
+                                                "SchemaValidator unique check error \
+                                                 on field {:?}: {}",
+                                                rule.path,
+                                                e
+                                            );
+                                            v.field_error(rule.path.clone(), "unique_violation");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // else: ctx.db() == None → unique check silently
+                        // skipped. Autocommit (implicit tx) does not wire
+                        // the resolver / ValidatorDb, so relational checks
+                        // (FK, unique) are not enforced — matching the FK
+                        // precedent.
+                    }
                 }
             }
         }
