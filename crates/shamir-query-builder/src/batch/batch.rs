@@ -361,6 +361,28 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    // ── DDL: declarative schema ───────────────────────────────────
+
+    /// Whole-replace a table's declarative schema.
+    pub fn set_table_schema(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Add (or replace by path) a single rule in a table's schema.
+    pub fn add_schema_rule(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Remove a rule from a table's schema by path.
+    pub fn remove_schema_rule(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Read a table's declarative schema (introspection).
+    pub fn get_table_schema(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: retention ─────────────────────────────────────────────
 
     /// Change a live table's history-retention policy.

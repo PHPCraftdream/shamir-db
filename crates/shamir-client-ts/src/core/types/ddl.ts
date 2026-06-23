@@ -27,6 +27,17 @@ import type { WireValue } from './write.js';
 export type NumDto = number;
 
 /**
+ * Cross-field comparison descriptor (wire form).
+ * Mirrors `CompareDto` in `schema_ops.rs`.
+ */
+export interface CompareDto {
+  /** The other field path (flat string segments, NOT interned). */
+  other: string[];
+  /** Comparison operator: `"<"` / `"<="` / `"=="` / `"!="` / `">="` / `">"`. */
+  op: string;
+}
+
+/**
  * Constraint fields carried alongside a `FieldRuleDto`.
  * All fields are optional; absent = unconstrained.
  * Mirrors `ConstraintsDto` in `schema_ops.rs` — all `skip_serializing_if`.
@@ -42,6 +53,12 @@ export interface ConstraintsDto {
   min_len?: number;
   one_of?: WireValue[];
   array_of?: string;
+  /** Phase B — scalar-bridge: registered scalar name used as a predicate. */
+  scalar?: string;
+  /** Phase B — named format check: `"email"` / `"url"` / `"uuid"` / `"date"`. */
+  format?: string;
+  /** Phase B — cross-field comparison against another path. */
+  compare?: CompareDto;
 }
 
 /**

@@ -147,7 +147,11 @@ impl TableManager {
             .as_ref()
             .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
 
-        let ctx = ValidatorCtx::new(actor, interner);
+        // Phase B — attach the scalar resolver so scalar-bridge rules can
+        // resolve registered scalars.  The resolver is loaded once per call
+        // (cheap ArcSwap load_full → Arc clone).
+        let resolver = self.scalar_resolver.load_full();
+        let ctx = ValidatorCtx::with_scalars(actor, interner, resolver.as_ref());
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
             .await
@@ -215,7 +219,9 @@ impl TableManager {
             .as_ref()
             .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
 
-        let ctx = ValidatorCtx::new(actor, interner);
+        // Phase B — attach the scalar resolver (same as the QV path).
+        let resolver = self.scalar_resolver.load_full();
+        let ctx = ValidatorCtx::with_scalars(actor, interner, resolver.as_ref());
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
             .await

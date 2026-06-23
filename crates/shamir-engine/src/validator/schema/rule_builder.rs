@@ -15,7 +15,9 @@
 use shamir_types::types::value::QueryValue;
 
 use super::constraints::{Constraints, Num};
+use super::cross_field::{CompareOp, CrossFieldCompare};
 use super::field_rule::FieldRule;
+use super::format::FormatKind;
 use super::type_tag::TypeTag;
 
 /// Start building a field rule for the given path.
@@ -180,6 +182,37 @@ impl RuleBuilder {
     /// Set the element type for `List` fields (generic).
     pub fn array_of(mut self, tag: TypeTag) -> Self {
         self.constraints.array_of = Some(tag);
+        self
+    }
+
+    // ── Phase B setters ────────────────────────────────────────────────
+
+    /// Phase B — scalar-bridge: validate this field by calling the named
+    /// registered scalar as a predicate.  The scalar receives the
+    /// materialised field value as its single argument and must return
+    /// `Bool`.
+    pub fn scalar(mut self, name: impl Into<String>) -> Self {
+        self.constraints.scalar = Some(name.into());
+        self
+    }
+
+    /// Phase B — named format check (`email` / `url` / `uuid` / `date`).
+    pub fn format(mut self, kind: FormatKind) -> Self {
+        self.constraints.format = Some(kind);
+        self
+    }
+
+    /// Phase B — `format("email")` convenience (parses the name).
+    pub fn format_str(mut self, name: &str) -> Self {
+        if let Some(k) = FormatKind::parse(name) {
+            self.constraints.format = Some(k);
+        }
+        self
+    }
+
+    /// Phase B — cross-field comparison: `self.path  op  other_path`.
+    pub fn compare(mut self, other_path: Vec<String>, op: CompareOp) -> Self {
+        self.constraints.compare = Some(CrossFieldCompare::new(other_path, op));
         self
     }
 

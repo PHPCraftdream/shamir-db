@@ -139,6 +139,17 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         .and_then(|v| v.as_str())
         .and_then(|s| parse_type_tag(s).ok());
 
+    // Phase B — scalar-bridge, format, cross-field compare.
+    let scalar = item
+        .get("scalar")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let format = item
+        .get("format")
+        .and_then(|v| v.as_str())
+        .and_then(shamir_engine::validator::schema::FormatKind::parse);
+    let compare = item.get("compare").and_then(parse_cross_field_compare);
+
     let constraints = Constraints {
         required,
         nullable,
@@ -150,6 +161,9 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         unsigned,
         one_of,
         array_of,
+        scalar,
+        format,
+        compare,
     };
 
     Ok(FieldRule {
@@ -195,6 +209,41 @@ fn parse_num_constraint(
     }
 }
 
+/// Parse a cross-field compare constraint from a rule map.
+///
+/// Catalogue shape:
+/// ```text
+/// { "compare": { "other": List[Str, ...], "op": "<" | "<=" | "==" | "!=" | ">=" | ">" } }
+/// ```
+/// The `other` path is a list of plain field-name strings (NOT interned ids —
+/// cross-field paths are declarative and not stored on the interned hot path).
+fn parse_cross_field_compare(
+    v: &QueryValue,
+) -> Option<shamir_engine::validator::schema::CrossFieldCompare> {
+    use shamir_engine::validator::schema::{CompareOp, CrossFieldCompare};
+
+    let map = v.as_object()?;
+    let other_arr = map.get("other")?.as_array()?;
+    let other: Vec<String> = other_arr
+        .iter()
+        .filter_map(|s| s.as_str().map(String::from))
+        .collect();
+    if other.is_empty() {
+        return None;
+    }
+    let op_str = map.get("op")?.as_str()?;
+    let op = match op_str {
+        "<" => CompareOp::Lt,
+        "<=" => CompareOp::Le,
+        "==" => CompareOp::Eq,
+        "!=" => CompareOp::Ne,
+        ">=" => CompareOp::Ge,
+        ">" => CompareOp::Gt,
+        _ => return None,
+    };
+    Some(CrossFieldCompare::new(other, op))
+}
+
 // ── Schema validator name ───────────────────────────────────────────────
 
 /// Canonical name for a table's auto-generated schema validator.
@@ -217,7 +266,7 @@ impl ShamirDb {
     /// The validator is registered under `schema_validator_id` with
     /// `ArtifactKind::Declarative` and auto-bound to all write ops at
     /// priority 500.
-    pub(super) async fn compile_table_schema(
+    pub(crate) async fn compile_table_schema(
         &self,
         db_name: &str,
         repo_name: &str,
@@ -390,7 +439,7 @@ impl ShamirDb {
     ///
     /// Used by `boot_compile_schemas` and DDL paths that need to
     /// de-intern schema path ids.
-    async fn resolve_repo_interner(
+    pub(crate) async fn resolve_repo_interner(
         &self,
         db_name: &str,
         repo_name: &str,

@@ -3,15 +3,19 @@
 //! [`FieldRule`] combines a field path, a [`TypeTag`], and [`Constraints`].
 //! The [`FieldRule::check`] method runs the type assertion and constraint
 //! checks against a live `&dyn RecordFields`, accumulating errors into a
-//! [`Validation`].
+//! [`Validation`].  Phase B adds [`FieldRule::check_extended`] which layers
+//! scalar-bridge / format / cross-field checks on top.
 
 use shamir_types::record_view::{Kind, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::validator::encode::Validation;
 use crate::validator::record_fields::RecordFields;
+use crate::validator::record_validator::ValidatorCtx;
 
 use super::constraints::{Constraints, Num};
+use super::cross_field::CrossFieldResult;
+use super::format::FormatKind;
 use super::type_tag::TypeTag;
 
 /// A single declarative field rule.
@@ -36,6 +40,10 @@ impl FieldRule {
     /// Called from `SchemaValidator::validate` after `required` / `nullable`
     /// have already been handled.  The field is guaranteed to be present and
     /// non-null at this point.
+    ///
+    /// This method runs the Phase A pure checks only.  Phase B checks
+    /// (scalar-bridge / format / cross-field) are layered by
+    /// [`check_extended`](Self::check_extended).
     pub fn check(&self, fields: &dyn RecordFields, path: &[&str], v: &mut Validation) {
         // ── Type assertion ──────────────────────────────────────────────
         if !self.type_matches(fields, path) {
@@ -289,6 +297,132 @@ impl FieldRule {
             fields.materialize(path)
         {
             self.check_collection(fields, path, v);
+        }
+    }
+
+    // ── Phase B: scalar-bridge / format / cross-field ──────────────────
+
+    /// Run Phase A pure checks ([`check`](Self::check)) **plus** the Phase B
+    /// checks: scalar-bridge, format, and cross-field comparison.
+    ///
+    /// `ctx` carries the optional [`ScalarResolver`] — when `None`,
+    /// scalar-bridge rules are silently skipped (they do not panic).  Format
+    /// and cross-field checks are pure and always run when configured.
+    pub fn check_extended(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        ctx: Option<&ValidatorCtx<'_>>,
+        v: &mut Validation,
+    ) {
+        // Phase A pure checks.
+        self.check(fields, path, v);
+
+        // Phase B — format (pure, no ctx needed).
+        if let Some(fmt) = self.constraints.format {
+            self.check_format(fields, path, fmt, v);
+        }
+
+        // Phase B — scalar-bridge (needs the resolver; skipped silently if
+        // the ctx carries no resolver).
+        if let Some(name) = &self.constraints.scalar {
+            let resolver = ctx.and_then(|c| c.scalars());
+            match resolver {
+                Some(r) => self.check_scalar_bridge(fields, path, name, r, v),
+                None => {
+                    // No resolver wired — scalar-bridge rule is silently
+                    // skipped.  This is the documented behaviour for paths
+                    // where `ValidatorCtx::scalars() == None`.
+                }
+            }
+        }
+
+        // Phase B — cross-field (pure, no ctx needed).
+        if let Some(cmp) = &self.constraints.compare {
+            self.check_cross_field(fields, path, cmp, v);
+        }
+    }
+
+    /// Format check — apply [`FormatKind::matches`] to the string value.
+    fn check_format(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        fmt: FormatKind,
+        v: &mut Validation,
+    ) {
+        let s = match fields.str(path) {
+            Some(s) => s,
+            None => {
+                // Non-string value where a format is required.
+                v.field_error(self.path.clone(), "format_type_mismatch");
+                return;
+            }
+        };
+        if !fmt.matches(s) {
+            v.field_error(self.path.clone(), "bad_format");
+        }
+    }
+
+    /// Scalar-bridge — call the named scalar as a predicate over the field.
+    ///
+    /// The scalar receives the materialised field value as its single
+    /// argument and must return `Bool`.  Anything else (unknown function,
+    /// arity error, non-bool return) is recorded as a `scalar_check_failed`
+    /// error — failing closed is safer than silently accepting.
+    fn check_scalar_bridge(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        name: &str,
+        resolver: &shamir_funclib::scalar_resolver::ScalarResolver,
+        v: &mut Validation,
+    ) {
+        let arg = match self.materialize_as_qv(fields, path) {
+            Some(qv) => qv,
+            None => {
+                v.field_error(self.path.clone(), "scalar_check_failed");
+                return;
+            }
+        };
+        match resolver.call(name, &[arg]) {
+            Ok(QueryValue::Bool(true)) => {
+                // Predicate passed.
+            }
+            Ok(QueryValue::Bool(false)) => {
+                v.field_error(self.path.clone(), "scalar_rejected");
+            }
+            Ok(_) => {
+                // Non-bool return — the scalar is not a valid predicate.
+                v.field_error(self.path.clone(), "scalar_not_predicate");
+            }
+            Err(_) => {
+                // Unknown function / arity / type error — fail closed.
+                v.field_error(self.path.clone(), "scalar_check_failed");
+            }
+        }
+    }
+
+    /// Cross-field comparison.
+    fn check_cross_field(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        cmp: &super::cross_field::CrossFieldCompare,
+        v: &mut Validation,
+    ) {
+        match cmp.check(fields, path) {
+            CrossFieldResult::Ok => {}
+            CrossFieldResult::Violated => {
+                v.field_error(self.path.clone(), "compare_violation");
+            }
+            CrossFieldResult::TypeMismatch => {
+                v.field_error(self.path.clone(), "compare_type_mismatch");
+            }
+            CrossFieldResult::Skipped => {
+                // Either path absent — silently skip (a `required` rule on
+                // that field is the right way to catch absence).
+            }
         }
     }
 }
