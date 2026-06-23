@@ -115,10 +115,7 @@ async fn ddl_set_table_schema_persists_and_validates() {
     // Create a durable repo + table via wire DDL.
     let mut b = Batch::new();
     b.id(1);
-    b.create_repo(
-        "cr",
-        ddl::create_repo("main").tables(["users"]),
-    );
+    b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
     db.execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
@@ -347,10 +344,12 @@ async fn ddl_add_remove_get_schema() {
     b.id(2);
     b.add_schema_rule(
         "ar",
-        ddl::add_schema_rule("users")
-            .rule(ddl::field(["age"]).int().min(0).max(150)),
+        ddl::add_schema_rule("users").rule(ddl::field(["age"]).int().min(0).max(150)),
     );
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await.unwrap();
+    let resp = db
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     let result = resp.results["ar"].records[0].as_value().as_ref().clone();
     assert_eq!(r_bool(&result, "ok"), Some(true));
     assert_eq!(r_int(&result, "schema_version"), Some(2));
@@ -358,8 +357,14 @@ async fn ddl_add_remove_get_schema() {
     // Now age is required-ish: insert with age=-5 should fail.
     let neg_record = {
         let mut m = shamir_types::types::common::new_map();
-        m.insert("email".to_string(), shamir_types::types::value::QueryValue::Str("x@x.com".into()));
-        m.insert("age".to_string(), shamir_types::types::value::QueryValue::Int(-5));
+        m.insert(
+            "email".to_string(),
+            shamir_types::types::value::QueryValue::Str("x@x.com".into()),
+        );
+        m.insert(
+            "age".to_string(),
+            shamir_types::types::value::QueryValue::Int(-5),
+        );
         shamir_types::types::value::QueryValue::Map(m)
     };
     let bad = try_insert(&db, "testdb", "users", neg_record).await;
@@ -370,7 +375,10 @@ async fn ddl_add_remove_get_schema() {
     let mut b = Batch::new();
     b.id(3);
     b.remove_schema_rule("rr", ddl::remove_schema_rule("users", ["age"]));
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await.unwrap();
+    let resp = db
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     let result = resp.results["rr"].records[0].as_value().as_ref().clone();
     assert_eq!(r_bool(&result, "ok"), Some(true));
     assert_eq!(r_bool(&result, "removed"), Some(true));
@@ -378,8 +386,14 @@ async fn ddl_add_remove_get_schema() {
     // Now age=-5 should pass (rule removed).
     let neg_record = {
         let mut m = shamir_types::types::common::new_map();
-        m.insert("email".to_string(), shamir_types::types::value::QueryValue::Str("y@y.com".into()));
-        m.insert("age".to_string(), shamir_types::types::value::QueryValue::Int(-5));
+        m.insert(
+            "email".to_string(),
+            shamir_types::types::value::QueryValue::Str("y@y.com".into()),
+        );
+        m.insert(
+            "age".to_string(),
+            shamir_types::types::value::QueryValue::Int(-5),
+        );
         shamir_types::types::value::QueryValue::Map(m)
     };
     let ok = try_insert(&db, "testdb", "users", neg_record).await;
@@ -389,7 +403,10 @@ async fn ddl_add_remove_get_schema() {
     let mut b = Batch::new();
     b.id(4);
     b.get_table_schema("gs", ddl::get_table_schema("users"));
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await.unwrap();
+    let resp = db
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     let result = resp.results["gs"].records[0].as_value().as_ref().clone();
     let schema = result.get("schema").and_then(|v| v.as_array()).unwrap();
     // Should have exactly 1 rule (email), age was removed.
@@ -435,10 +452,7 @@ async fn ddl_phase_b_through_reopen() {
             "ss",
             "users",
             vec![
-                ddl::field(["email"])
-                    .string()
-                    .format("email")
-                    .required(),
+                ddl::field(["email"]).string().format("email").required(),
                 ddl::field(["end"])
                     .int()
                     .compare(["start".to_string()], ">="),
@@ -480,10 +494,7 @@ async fn ddl_phase_b_through_reopen() {
         mpack!({"email": "still-garbage", "start": 10, "end": 20}),
     )
     .await;
-    assert!(
-        bad.is_err(),
-        "format check should survive reopen"
-    );
+    assert!(bad.is_err(), "format check should survive reopen");
     assert!(bad.unwrap_err().contains("bad_format"));
 
     // Valid write still works.

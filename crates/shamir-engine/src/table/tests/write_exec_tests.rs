@@ -42,7 +42,7 @@ pub(crate) async fn insert_via_tx(
     repo.run_implicit_batch_tx(Actor::System, "test_insert", move |tx| {
         Box::pin(async move {
             owned_table
-                .execute_insert_tx(&owned_op, tx, return_result)
+                .execute_insert_tx(&owned_op, tx, return_result, None)
                 .await
         })
     })
@@ -65,7 +65,9 @@ pub(crate) async fn update_via_tx(
         Box::pin(async move {
             let interner = owned_table.interner().get().await?;
             let ctx = FilterContext::new(interner, &owned_refs);
-            owned_table.execute_update_tx(&owned_op, &ctx, tx).await
+            owned_table
+                .execute_update_tx(&owned_op, &ctx, tx, None)
+                .await
         })
     })
     .await
@@ -85,7 +87,9 @@ pub(crate) async fn delete_via_tx(
         Box::pin(async move {
             let interner = owned_table.interner().get().await?;
             let ctx = FilterContext::new(interner, &owned_refs);
-            owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+            owned_table
+                .execute_delete_tx(&owned_op, &ctx, tx, None)
+                .await
         })
     })
     .await
@@ -100,7 +104,7 @@ pub(crate) async fn set_via_tx(
     let owned_op = op.clone();
     let owned_table = table.clone();
     repo.run_implicit_batch_tx(Actor::System, "test_set", move |tx| {
-        Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx).await })
+        Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx, None).await })
     })
     .await
 }

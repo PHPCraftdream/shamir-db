@@ -884,7 +884,9 @@ async fn run_child_scenario_w2d(path: PathBuf) {
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tx.set_implicit(implicit);
-    tbl.execute_insert_tx(&op, &mut tx, false).await.unwrap();
+    tbl.execute_insert_tx(&op, &mut tx, false, None)
+        .await
+        .unwrap();
 
     // commit_tx reads SHAMIR_TEST_CRASH_AFTER and aborts at the seam.
     let _ = repo.commit_tx(tx).await;

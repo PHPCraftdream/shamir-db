@@ -52,6 +52,7 @@ impl TableManager {
         op: &InsertOp,
         tx: &mut shamir_tx::TxContext,
         return_result: bool,
+        resolver: Option<&dyn crate::query::TableResolver>,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let interner = self.interner().get().await?;
@@ -167,9 +168,16 @@ impl TableManager {
         // `run_validators_tx` path is proven by
         // `validator::tests::query_value_conv_tests`.
         for qv in &resolved_values {
-            self.run_validators_qv(WriteOp::Insert, Some(qv), None, &Actor::System)
-                .await
-                .map_err(validator_failure_to_db_error)?;
+            self.run_validators_qv(
+                WriteOp::Insert,
+                Some(qv),
+                None,
+                &Actor::System,
+                Some(tx),
+                resolver,
+            )
+            .await
+            .map_err(validator_failure_to_db_error)?;
         }
 
         // W2d-cutover: lens-driven batched tx insert — the staged bytes
@@ -223,9 +231,16 @@ impl TableManager {
                 // 3. Validators — only decode when validators are actually bound.
                 if has_validators {
                     let qv = record_view_to_query_value(&view, interner)?;
-                    self.run_validators_qv(WriteOp::Insert, Some(&qv), None, &Actor::System)
-                        .await
-                        .map_err(validator_failure_to_db_error)?;
+                    self.run_validators_qv(
+                        WriteOp::Insert,
+                        Some(&qv),
+                        None,
+                        &Actor::System,
+                        Some(tx),
+                        resolver,
+                    )
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
                 }
                 idmsgpack_staged.push(Bytes::copy_from_slice(buf.as_ref()));
             }
@@ -288,6 +303,7 @@ impl TableManager {
         op: &UpdateOp,
         ctx: &FilterContext<'_>,
         tx: &mut shamir_tx::TxContext,
+        resolver: Option<&dyn crate::query::TableResolver>,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -448,6 +464,8 @@ impl TableManager {
                     Some(&new_qv),
                     Some(&old_qv),
                     &Actor::System,
+                    Some(tx),
+                    resolver,
                 )
                 .await
                 .map_err(validator_failure_to_db_error)?;
@@ -510,6 +528,7 @@ impl TableManager {
         op: &DeleteOp,
         ctx: &FilterContext<'_>,
         tx: &mut shamir_tx::TxContext,
+        resolver: Option<&dyn crate::query::TableResolver>,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -614,6 +633,7 @@ impl TableManager {
                         Some(&view),
                         &Actor::System,
                         tx,
+                        resolver,
                     )
                     .await
                     .map_err(validator_failure_to_db_error)?;
@@ -662,6 +682,7 @@ impl TableManager {
         &self,
         op: &SetOp,
         tx: &mut shamir_tx::TxContext,
+        resolver: Option<&dyn crate::query::TableResolver>,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -784,6 +805,8 @@ impl TableManager {
                     Some(&new_qv),
                     Some(&old_qv),
                     &Actor::System,
+                    Some(tx),
+                    resolver,
                 )
                 .await
                 .map_err(validator_failure_to_db_error)?;
@@ -828,6 +851,8 @@ impl TableManager {
                 Some(resolved_value.as_ref()),
                 None,
                 &Actor::System,
+                Some(tx),
+                resolver,
             )
             .await
             .map_err(validator_failure_to_db_error)?;

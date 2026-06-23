@@ -27,6 +27,7 @@ mod persisted_validators;
 mod query_value_conv;
 mod validation_outcome;
 mod validator_binding;
+mod validator_db;
 mod wasm_record_validator;
 
 pub use decode::{decode_validation_result, ValidatorDecodeError};
@@ -39,6 +40,7 @@ pub use record_fields::{OwnedFields, RecordFields, ViewFields};
 pub use record_validator::{RecordValidator, ValidatorCtx};
 pub use validation_outcome::{ValidationOutcome, ValidatorFailure};
 pub use validator_binding::ValidatorBinding;
+pub use validator_db::ValidatorDb;
 pub use wasm_record_validator::WasmRecordValidator;
 
 pub use registry::{ValidatorRegistry, ValidatorRegistryError};

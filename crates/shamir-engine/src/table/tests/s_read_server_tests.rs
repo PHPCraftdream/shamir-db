@@ -50,7 +50,11 @@ async fn insert_alice_and_get_bytes(
         shamir_types::access::Actor::System,
         "test_insert_alice",
         move |tx| {
-            Box::pin(async move { owned_table.execute_insert_tx(&owned_op, tx, false).await })
+            Box::pin(async move {
+                owned_table
+                    .execute_insert_tx(&owned_op, tx, false, None)
+                    .await
+            })
         },
     )
     .await
@@ -268,7 +272,11 @@ async fn s_read_aggregate_falls_back_to_name() {
         shamir_types::access::Actor::System,
         "test_insert_two",
         move |tx| {
-            Box::pin(async move { owned_table.execute_insert_tx(&owned_op, tx, false).await })
+            Box::pin(async move {
+                owned_table
+                    .execute_insert_tx(&owned_op, tx, false, None)
+                    .await
+            })
         },
     )
     .await

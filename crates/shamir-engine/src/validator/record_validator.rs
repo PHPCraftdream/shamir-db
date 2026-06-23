@@ -12,7 +12,7 @@ use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::access::Actor;
 use shamir_types::core::interner::{Interner, InternerKey};
 
-use super::{record_fields::RecordFields, Validation};
+use super::{record_fields::RecordFields, validator_db::ValidatorDb, Validation};
 
 // ── ValidatorCtx ──────────────────────────────────────────────────────────────
 
@@ -26,9 +26,10 @@ use super::{record_fields::RecordFields, Validation};
 /// - [`scalars`](Self::scalars) — optional [`ScalarResolver`] for Phase B
 ///   scalar-bridge rules.  When `None`, scalar-bridge rules are silently
 ///   skipped (the validator does not panic).
-///
-/// A `db` handle (tx-scoped read-only snapshot) for relational checks is
-/// reserved for Phase C and is not part of this struct yet.
+/// - [`db`](Self::db) — optional tx-scoped read-only [`ValidatorDb`] for Phase C
+///   relational checks (`foreign_key` C2, `unique` C3).  When `None`, relational
+///   rules are silently skipped (same fail-open precedent as `scalars`).
+///   Attached on the write path via [`with_db`](Self::with_db).
 pub struct ValidatorCtx<'a> {
     /// Who initiated the write.
     pub actor: &'a Actor,
@@ -39,6 +40,10 @@ pub struct ValidatorCtx<'a> {
     /// where no resolver is wired (e.g. tests, or tables without a user
     /// scalar layer) — scalar-bridge rules silently skip in that case.
     scalars: Option<&'a ScalarResolver>,
+    /// Optional tx-scoped read-only DB handle (Phase C1).  `None` on paths
+    /// where no transaction context is wired (unit tests, non-relational
+    /// validators) — relational rules silently skip (fail-open).
+    db: Option<&'a ValidatorDb<'a>>,
 }
 
 impl<'a> ValidatorCtx<'a> {
@@ -49,6 +54,7 @@ impl<'a> ValidatorCtx<'a> {
             actor,
             interner,
             scalars: None,
+            db: None,
         }
     }
 
@@ -66,6 +72,29 @@ impl<'a> ValidatorCtx<'a> {
             actor,
             interner,
             scalars: Some(scalars),
+            db: None,
+        }
+    }
+
+    /// Construct a validator context with a scalar resolver AND a tx-scoped
+    /// read-only [`ValidatorDb`] attached.
+    ///
+    /// This is the Phase C1 write-path entry point: the write executor builds
+    /// a `ValidatorDb` from the active `TxContext` + `TableManager` (+
+    /// optional `TableResolver`) and attaches it here so relational validators
+    /// (`foreign_key` C2, `unique` C3) can read database state on the tx's
+    /// snapshot without re-entering the write/commit pipeline.
+    pub fn with_db(
+        actor: &'a Actor,
+        interner: &'a Interner,
+        scalars: &'a ScalarResolver,
+        db: &'a ValidatorDb<'a>,
+    ) -> Self {
+        Self {
+            actor,
+            interner,
+            scalars: Some(scalars),
+            db: Some(db),
         }
     }
 
@@ -83,6 +112,17 @@ impl<'a> ValidatorCtx<'a> {
     /// rules must treat `None` as "skip silently" (never panic).
     pub fn scalars(&self) -> Option<&ScalarResolver> {
         self.scalars
+    }
+
+    /// The tx-scoped read-only DB handle, if one was attached via
+    /// [`with_db`](Self::with_db).
+    ///
+    /// Returns `None` on paths where no transaction context is wired
+    /// (unit tests, non-relational validators); relational rules
+    /// (`foreign_key`, `unique`) must treat `None` as "skip silently"
+    /// (never panic) — matching the Phase B scalar-bridge fail-open precedent.
+    pub fn db(&self) -> Option<&ValidatorDb<'_>> {
+        self.db
     }
 }
 

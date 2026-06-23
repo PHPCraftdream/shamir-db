@@ -413,7 +413,7 @@ impl<'a> QueryRunner<'a> {
                 };
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
-                        .execute_insert_tx(op_ref, tx, entry.return_result)
+                        .execute_insert_tx(op_ref, tx, entry.return_result, Some(self.resolver))
                         .await
                         .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
@@ -446,7 +446,7 @@ impl<'a> QueryRunner<'a> {
                         repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
                                 owned_table
-                                    .execute_insert_tx(&owned_op, tx, return_result)
+                                    .execute_insert_tx(&owned_op, tx, return_result, None)
                                     .await
                             })
                         })
@@ -491,7 +491,7 @@ impl<'a> QueryRunner<'a> {
                 };
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
-                        .execute_update_tx(op_ref, &ctx, tx)
+                        .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver))
                         .await
                         .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
@@ -522,7 +522,9 @@ impl<'a> QueryRunner<'a> {
                                 let ctx = FilterContext::new(interner, &owned_refs)
                                     .with_actor(owned_actor)
                                     .with_params(&owned_params);
-                                owned_table.execute_update_tx(&owned_op, &ctx, tx).await
+                                owned_table
+                                    .execute_update_tx(&owned_op, &ctx, tx, None)
+                                    .await
                             })
                         })
                         .await?
@@ -544,13 +546,14 @@ impl<'a> QueryRunner<'a> {
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_delete_tx(op, &ctx, tx).await.map_err(|e| {
-                        BatchError::QueryError {
+                    Some(tx) => table
+                        .execute_delete_tx(op, &ctx, tx, Some(self.resolver))
+                        .await
+                        .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
                             message: e.to_string(),
                             code: None,
-                        }
-                    })?,
+                        })?,
                     // F4b-3: "everything is a transaction" — a non-tx delete
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1 and UPDATE in F4b-2).
@@ -575,7 +578,9 @@ impl<'a> QueryRunner<'a> {
                                 let ctx = FilterContext::new(interner, &owned_refs)
                                     .with_actor(owned_actor)
                                     .with_params(&owned_params);
-                                owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                                owned_table
+                                    .execute_delete_tx(&owned_op, &ctx, tx, None)
+                                    .await
                             })
                         })
                         .await?
@@ -625,13 +630,14 @@ impl<'a> QueryRunner<'a> {
                         &subst_op
                     };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_set_tx(op_ref, tx).await.map_err(|e| {
-                        BatchError::QueryError {
+                    Some(tx) => table
+                        .execute_set_tx(op_ref, tx, Some(self.resolver))
+                        .await
+                        .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
                             message: e.to_string(),
                             code: None,
-                        }
-                    })?,
+                        })?,
                     // W3d-2: non-tx SET routes through the implicit single-op
                     // batch transaction (same pattern as DELETE in F5a, INSERT
                     // in F4b-1, UPDATE in F4b-2).
@@ -649,7 +655,9 @@ impl<'a> QueryRunner<'a> {
                         let owned_table = table.clone();
                         let owned_actor = self.actor.clone();
                         repo.run_implicit_batch_tx(owned_actor, alias, move |tx| {
-                            Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx).await })
+                            Box::pin(async move {
+                                owned_table.execute_set_tx(&owned_op, tx, None).await
+                            })
                         })
                         .await?
                     }
