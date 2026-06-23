@@ -42,8 +42,17 @@ pub trait RecordFields {
 // на OwnedFields (входящий `new` ещё несёт QueryValue::Dec до storage-кодирования). См. 01.
 
 // Валидатор — узкая роль. НЕ ShamirFunction.
+// РЕАЛИЗОВАНО (Phase 0, коммит 5b1955b): метод АСИНХРОННЫЙ (#[async_trait] —
+// wasm требует async-вызов гостя), а `new` — Option (DELETE не имеет новой
+// записи; присутствует только `old`).
+#[async_trait]
 pub trait RecordValidator: Send + Sync {
-    fn validate(&self, new: &dyn RecordFields, old: Option<&dyn RecordFields>, ctx: &ValidatorCtx) -> Validation;
+    async fn validate(
+        &self,
+        new: Option<&dyn RecordFields>,
+        old: Option<&dyn RecordFields>,
+        ctx: &ValidatorCtx<'_>,
+    ) -> Validation;
 }
 ```
 
@@ -52,9 +61,12 @@ pub trait RecordValidator: Send + Sync {
 **owned** (под `RecordRef::materialize_at -> Option<InnerValue>`, `record_ref.rs:95`, для
 контейнеров). Это снимает MAJOR ревью (borrow vs owned).
 
-`ValidatorCtx` — узкий контекст: `actor`, репо-`interner` (для де-интерна `field` в ошибках), и
-**опционально db-handle** (для реляционных проверок Phase C — FK; `09-…`). Не `FnCtx` (тот
-`Clone`, без лайфтайма).
+`ValidatorCtx` — узкий контекст: `actor` + **сужённый** доступ к интернеру. РЕАЛИЗОВАНО (Phase 0):
+поле `interner` приватно, наружу торчит ЕДИНСТВЕННАЯ capability — `field_name(id) -> Option<Arc<str>>`
+(де-интерн id→name для текста ошибки); declarative/user-валидаторы НЕ могут итерировать ключи,
+интернировать новые имена или иначе достать полный `Interner`. **db-handle** (tx-scoped read-only
+снапшот для реляционных проверок Phase C — FK; `09-…`) пока НЕ часть структуры — добавится в Phase C.
+Не `FnCtx` (тот `Clone`, без лайфтайма).
 
 ## Каждый вид потребляет один by-name вход НАТИВНО
 

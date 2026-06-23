@@ -147,7 +147,7 @@ impl TableManager {
             .as_ref()
             .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
 
-        let ctx = ValidatorCtx { actor, interner };
+        let ctx = ValidatorCtx::new(actor, interner);
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
             .await
@@ -215,7 +215,7 @@ impl TableManager {
             .as_ref()
             .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
 
-        let ctx = ValidatorCtx { actor, interner };
+        let ctx = ValidatorCtx::new(actor, interner);
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
             .await
