@@ -607,6 +607,29 @@ export class FieldBuilder {
   minLen(v: number): this { this._constraints.min_len = v; return this; }
   arrayOf(tag: string): this { this._constraints.array_of = tag; return this; }
 
+  // ── Phase B constraint setters ──────────────────────────────────
+
+  /**
+   * Phase B — scalar-bridge: validate the field by calling the named
+   * registered scalar as a predicate.
+   */
+  scalar(name: string): this { this._constraints.scalar = name; return this; }
+
+  /**
+   * Phase B — named format check (`"email"` / `"url"` / `"uuid"` / `"date"`).
+   */
+  format(kind: string): this { this._constraints.format = kind; return this; }
+
+  /**
+   * Phase B — cross-field comparison against another path.
+   * `op` is the comparison operator string (`"<"`, `"<="`, `"=="`, `"!="`,
+   * `">="`, `">"`).
+   */
+  compare(other: string[], op: string): this {
+    this._constraints.compare = { other, op };
+    return this;
+  }
+
   /** Finalize into a wire-ready `FieldRuleDto`. */
   build(): FieldRuleDto {
     const dto: FieldRuleDto = {

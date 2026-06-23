@@ -12,11 +12,12 @@ pub use access::{
 };
 pub use types::{
     AddSchemaRuleOp, AlterBufferConfigOp, BindValidatorOp, BufferConfigDto, BufferConfigPatch,
-    ChangesSinceOp, CommitMigrationOp, ConstraintsDto, CreateDbOp, CreateFunctionFolderOp,
-    CreateFunctionOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
-    DropFunctionOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, FieldRuleDto,
-    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp,
-    MigrationStatusOp, NumDto, PurgeHistoryOp, PurgeScope, RemoveSchemaRuleOp, RenameFunctionOp,
-    RenameValidatorOp, Retention, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
-    SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
+    ChangesSinceOp, CommitMigrationOp, CompareDto, ConstraintsDto, CreateDbOp,
+    CreateFunctionFolderOp, CreateFunctionOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
+    CreateValidatorOp, DropDbOp, DropFunctionOp, DropIndexOp, DropRepoOp, DropTableOp,
+    DropValidatorOp, FieldRuleDto, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
+    InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, NumDto, PurgeHistoryOp,
+    PurgeScope, RemoveSchemaRuleOp, RenameFunctionOp, RenameValidatorOp, Retention,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
+    UnbindValidatorOp,
 };

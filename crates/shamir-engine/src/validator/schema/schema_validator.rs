@@ -37,7 +37,7 @@ impl RecordValidator for SchemaValidator {
         &self,
         new: Option<&dyn RecordFields>,
         _old: Option<&dyn RecordFields>,
-        _ctx: &ValidatorCtx<'_>,
+        ctx: &ValidatorCtx<'_>,
     ) -> Validation {
         // If there is no new record (DELETE), the schema validator accepts
         // unconditionally — field constraints apply only to writes that
@@ -69,7 +69,7 @@ impl RecordValidator for SchemaValidator {
                 }
                 // Field present with a value — run type + constraint checks.
                 Some(_) => {
-                    rule.check(fields, &path_refs, &mut v);
+                    rule.check_extended(fields, &path_refs, Some(ctx), &mut v);
                 }
             }
         }

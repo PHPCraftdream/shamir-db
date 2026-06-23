@@ -671,3 +671,225 @@ async fn schema_optional_field_absent_accepted() {
         resp.err()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase B — scalar-bridge / format / cross-field
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Register a [`SchemaValidator`] directly as an `Arc<dyn RecordValidator>`
+/// and bind it to a table.  Unlike the `sync_schema_check` helper, this path
+/// runs the real `RecordValidator::validate` (async) so the validator
+/// receives a [`ValidatorCtx`] carrying the scalar resolver — Phase B
+/// scalar-bridge rules resolve through it.
+async fn register_and_bind_schema_validator(
+    db: &ShamirDb,
+    validator_name: &str,
+    db_name: &str,
+    repo_name: &str,
+    table_name: &str,
+    schema: SchemaValidator,
+) {
+    use shamir_engine::validator::RecordValidator;
+    use shamir_types::types::record_id::RecordId;
+
+    let id = RecordId::new();
+    let arc_validator: Arc<dyn RecordValidator> = Arc::new(schema);
+    db.validators()
+        .register(id, validator_name, arc_validator)
+        .expect("register schema validator");
+
+    db.bind_validator(
+        db_name,
+        repo_name,
+        table_name,
+        validator_name,
+        vec![WriteOp::Insert, WriteOp::Update, WriteOp::Upsert],
+        1000,
+    )
+    .await
+    .unwrap();
+}
+
+// ── Test 16: scalar-bridge through the engine ──────────────────────────────
+
+#[tokio::test]
+async fn phase_b_scalar_bridge_email_through_engine() {
+    let db = setup_db().await;
+
+    // scalar-bridge: validate "email" via the built-in `validate/is_email`.
+    let rules = vec![rule(["email"])
+        .string()
+        .scalar("validate/is_email")
+        .required()
+        .build()];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "email_schema", "testdb", "main", "users", schema)
+        .await;
+
+    // Valid email — accepted.
+    let req = insert_request("ok", "users", mpack!({"email": "alice@example.com"}));
+    let resp = db.execute("testdb", &req).await;
+    assert!(resp.is_ok(), "valid email should pass: {:?}", resp.err());
+
+    // Invalid email — rejected.
+    let req_bad = insert_request("bad", "users", mpack!({"email": "not-an-email"}));
+    let resp_bad = db.execute("testdb", &req_bad).await;
+    assert!(resp_bad.is_err(), "invalid email should be rejected");
+    let err_msg = resp_bad.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("scalar_rejected"),
+        "error should contain 'scalar_rejected', got: {err_msg}"
+    );
+}
+
+// ── Test 17: format (email) through the engine ─────────────────────────────
+
+#[tokio::test]
+async fn phase_b_format_email_through_engine() {
+    use shamir_engine::validator::schema::FormatKind;
+
+    let db = setup_db().await;
+
+    let rules = vec![rule(["email"])
+        .string()
+        .format(FormatKind::Email)
+        .required()
+        .build()];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "fmt_email", "testdb", "main", "users", schema).await;
+
+    // Valid email — accepted.
+    let req = insert_request("ok", "users", mpack!({"email": "bob@example.com"}));
+    assert!(db.execute("testdb", &req).await.is_ok());
+
+    // Invalid email — rejected.
+    let req_bad = insert_request("bad", "users", mpack!({"email": "garbage"}));
+    let resp_bad = db.execute("testdb", &req_bad).await;
+    assert!(resp_bad.is_err(), "bad format should be rejected");
+    assert!(resp_bad.unwrap_err().to_string().contains("bad_format"));
+}
+
+// ── Test 18: format (uuid) through the engine ──────────────────────────────
+
+#[tokio::test]
+async fn phase_b_format_uuid_through_engine() {
+    use shamir_engine::validator::schema::FormatKind;
+
+    let db = setup_db().await;
+
+    let rules = vec![rule(["device_id"])
+        .string()
+        .format(FormatKind::Uuid)
+        .required()
+        .build()];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "fmt_uuid", "testdb", "main", "users", schema).await;
+
+    // Valid UUID — accepted.
+    let req = insert_request(
+        "ok",
+        "users",
+        mpack!({"device_id": "550e8400-e29b-41d4-a716-446655440000"}),
+    );
+    assert!(db.execute("testdb", &req).await.is_ok());
+
+    // Invalid UUID — rejected.
+    let req_bad = insert_request("bad", "users", mpack!({"device_id": "not-a-uuid"}));
+    let resp_bad = db.execute("testdb", &req_bad).await;
+    assert!(resp_bad.is_err());
+    assert!(resp_bad.unwrap_err().to_string().contains("bad_format"));
+}
+
+// ── Test 19: format (date) through the engine ──────────────────────────────
+
+#[tokio::test]
+async fn phase_b_format_date_through_engine() {
+    use shamir_engine::validator::schema::FormatKind;
+
+    let db = setup_db().await;
+
+    let rules = vec![rule(["created_at"])
+        .string()
+        .format(FormatKind::Date)
+        .required()
+        .build()];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "fmt_date", "testdb", "main", "users", schema).await;
+
+    // Valid RFC-3339 date — accepted.
+    let req = insert_request(
+        "ok",
+        "users",
+        mpack!({"created_at": "2024-01-31T08:30:00Z"}),
+    );
+    assert!(db.execute("testdb", &req).await.is_ok());
+
+    // Valid bare calendar date — accepted.
+    let req_bare = insert_request("bare", "users", mpack!({"created_at": "2024-01-31"}));
+    assert!(db.execute("testdb", &req_bare).await.is_ok());
+
+    // Invalid date — rejected.
+    let req_bad = insert_request("bad", "users", mpack!({"created_at": "hello"}));
+    let resp_bad = db.execute("testdb", &req_bad).await;
+    assert!(resp_bad.is_err());
+    assert!(resp_bad.unwrap_err().to_string().contains("bad_format"));
+}
+
+// ── Test 20: cross-field (start <= end) through the engine ─────────────────
+
+#[tokio::test]
+async fn phase_b_cross_field_le_through_engine() {
+    use shamir_engine::validator::schema::CompareOp;
+
+    let db = setup_db().await;
+
+    let rules = vec![
+        rule(["start"]).int().required().build(),
+        rule(["end"])
+            .int()
+            .required()
+            .compare(vec!["start".into()], CompareOp::Ge)
+            .build(),
+    ];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "xfield", "testdb", "main", "users", schema).await;
+
+    // start=10, end=20 (end >= start) — accepted.
+    let req = insert_request("ok", "users", mpack!({"start": 10, "end": 20}));
+    assert!(db.execute("testdb", &req).await.is_ok());
+
+    // start=10, end=5 (end < start) — rejected.
+    let req_bad = insert_request("bad", "users", mpack!({"start": 10, "end": 5}));
+    let resp_bad = db.execute("testdb", &req_bad).await;
+    assert!(resp_bad.is_err(), "end < start should be rejected");
+    assert!(resp_bad
+        .unwrap_err()
+        .to_string()
+        .contains("compare_violation"));
+}
+
+// ── Test 21: cross-field absent other path is skipped ───────────────────────
+
+#[tokio::test]
+async fn phase_b_cross_field_skipped_when_other_absent() {
+    use shamir_engine::validator::schema::CompareOp;
+
+    let db = setup_db().await;
+
+    // Rule: end >= start, but only `end` is provided (start absent).
+    let rules = vec![rule(["end"])
+        .int()
+        .compare(vec!["start".into()], CompareOp::Ge)
+        .build()];
+    let schema = SchemaValidator::new(rules);
+    register_and_bind_schema_validator(&db, "xfield_skip", "testdb", "main", "users", schema).await;
+
+    // Only `end` present — cross-field check silently skips, write succeeds.
+    let req = insert_request("ok", "users", mpack!({"end": 42}));
+    let resp = db.execute("testdb", &req).await;
+    assert!(
+        resp.is_ok(),
+        "absent other path should skip cross-field: {:?}",
+        resp.err()
+    );
+}

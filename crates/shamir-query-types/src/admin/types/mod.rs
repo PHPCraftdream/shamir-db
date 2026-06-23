@@ -29,8 +29,8 @@ pub use migration_ops::{
 pub use repo_ops::{CreateRepoOp, DropRepoOp};
 pub use retention::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention, SetRetentionOp};
 pub use schema_ops::{
-    AddSchemaRuleOp, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto, RemoveSchemaRuleOp,
-    SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto,
+    RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 pub use table_ops::{CreateTableOp, DropTableOp};
 pub use validator_ops::{

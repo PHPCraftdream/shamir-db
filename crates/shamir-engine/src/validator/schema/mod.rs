@@ -1,16 +1,21 @@
-//! Declarative schema validator — Phase A.
+//! Declarative schema validator — Phase A (pure) + Phase B (scalar/format/cross-field).
 //!
-//! Types: [`TypeTag`], [`Constraints`], [`FieldRule`], [`SchemaValidator`].
+//! Types: [`TypeTag`], [`Constraints`], [`FieldRule`], [`SchemaValidator`],
+//! [`FormatKind`], [`CrossFieldCompare`], [`CompareOp`].
 //! Fluent builder: [`rule`].
 
 pub mod constraints;
+pub mod cross_field;
 pub mod field_rule;
+pub mod format;
 pub mod rule_builder;
 pub mod schema_validator;
 pub mod type_tag;
 
 pub use constraints::{Constraints, Num};
+pub use cross_field::{CompareOp, CrossFieldCompare, CrossFieldResult};
 pub use field_rule::FieldRule;
+pub use format::FormatKind;
 pub use rule_builder::{rule, RuleBuilder};
 pub use schema_validator::SchemaValidator;
 pub use type_tag::TypeTag;

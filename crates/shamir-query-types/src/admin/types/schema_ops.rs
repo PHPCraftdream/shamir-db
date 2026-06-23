@@ -66,6 +66,33 @@ pub struct ConstraintsDto {
     /// Array element type constraint (e.g. `"string"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub array_of: Option<String>,
+
+    /// Phase B — scalar-bridge: name of a registered scalar (built-in
+    /// funclib or user) used as a predicate over the field value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scalar: Option<String>,
+
+    /// Phase B — named format check (`"email"` / `"url"` / `"uuid"` / `"date"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+
+    /// Phase B — cross-field comparison against another path in the same
+    /// record (e.g. `{ "other": ["end"], "op": ">=" }`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare: Option<CompareDto>,
+}
+
+/// Cross-field comparison descriptor (wire form).
+///
+/// `other` is the path of the field to compare against; `op` is the
+/// comparison operator as a string (`"<"`, `"<="`, `"=="`, `"!="`,
+/// `">="`, `">"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompareDto {
+    /// The other field path (flat string segments, NOT interned).
+    pub other: Vec<String>,
+    /// Comparison operator: `"<"` / `"<="` / `"=="` / `"!="` / `">="` / `">"`.
+    pub op: String,
 }
 
 // ── Ops ────────────────────────────────────────────────────────────────

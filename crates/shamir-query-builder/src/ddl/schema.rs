@@ -1,8 +1,8 @@
 //! Builders for declarative schema DDL operations and the `field()` fluent API.
 
 use shamir_query_types::admin::{
-    AddSchemaRuleOp, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto, RemoveSchemaRuleOp,
-    SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, GetTableSchemaOp, NumDto,
+    RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -164,6 +164,37 @@ impl FieldBuilder {
     /// Set the array element type constraint.
     pub fn array_of(mut self, tag: impl Into<String>) -> Self {
         self.constraints.array_of = Some(tag.into());
+        self
+    }
+
+    // ── Phase B constraint setters ─────────────────────────────────
+
+    /// Phase B — scalar-bridge: validate the field by calling the named
+    /// registered scalar as a predicate.
+    pub fn scalar(mut self, name: impl Into<String>) -> Self {
+        self.constraints.scalar = Some(name.into());
+        self
+    }
+
+    /// Phase B — named format check (`"email"` / `"url"` / `"uuid"` / `"date"`).
+    pub fn format(mut self, kind: impl Into<String>) -> Self {
+        self.constraints.format = Some(kind.into());
+        self
+    }
+
+    /// Phase B — cross-field comparison against another path.
+    ///
+    /// `op` is the comparison operator as a string (`"<"`, `"<="`, `"=="`,
+    /// `"!="`, `">="`, `">"`).
+    pub fn compare<I, S>(mut self, other: I, op: impl Into<String>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.constraints.compare = Some(CompareDto {
+            other: other.into_iter().map(Into::into).collect(),
+            op: op.into(),
+        });
         self
     }
 

@@ -2,10 +2,14 @@
 //!
 //! [`Constraints`] holds the set of checks applied to a field value after
 //! the type tag passes.  Phase A covers pure (in-process, no DB) checks;
-//! Phases B/C will extend this struct with `scalar`, `foreign_key`, `unique`.
+//! Phase B adds `scalar` (escape-hatch via a registered scalar),
+//! `format` (email/url/uuid/date), and `compare` (cross-field).
+//! Phase C will extend this struct with `foreign_key`, `unique`.
 
 use shamir_types::types::value::QueryValue;
 
+use super::cross_field::CrossFieldCompare;
+use super::format::FormatKind;
 use super::type_tag::TypeTag;
 
 /// Numeric bound for `min` / `max` constraints.
@@ -20,10 +24,10 @@ pub enum Num {
     F64(f64),
 }
 
-/// Pure (in-process) constraints for a field rule.
+/// Constraints for a field rule.
 ///
 /// All fields are public for construction in tests and from the fluent
-/// builder.  Phase B will add `scalar: Option<ScalarRef>` (escape-hatch);
+/// builder.  Phase B adds the `scalar`, `format`, and `compare` fields;
 /// Phase C will add `foreign_key` and `unique`.
 #[derive(Debug, Clone, Default)]
 pub struct Constraints {
@@ -50,4 +54,17 @@ pub struct Constraints {
     /// Element type for `List` fields (`array_of`).  Only meaningful when
     /// the field's [`TypeTag`] is `List`.
     pub array_of: Option<TypeTag>,
+    /// Phase B — scalar-bridge: validate the field by calling the named
+    /// registered scalar (built-in funclib or user scalar) as a predicate.
+    /// The scalar receives the materialised field value as its single
+    /// argument and must return `Bool`.  When the resolver is unavailable
+    /// (`ValidatorCtx::scalars() == None`) the rule is silently skipped.
+    pub scalar: Option<String>,
+    /// Phase B — named format check (`email` / `url` / `uuid` / `date`).
+    /// Implemented as a thin in-process predicate; reuses funclib regex
+    /// patterns where they exist (email/url/uuid) to avoid duplication.
+    pub format: Option<FormatKind>,
+    /// Phase B — cross-field comparison against another path in the same
+    /// record (e.g. `start <= end`).
+    pub compare: Option<CrossFieldCompare>,
 }
