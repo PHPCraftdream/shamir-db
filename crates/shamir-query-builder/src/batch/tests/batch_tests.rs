@@ -1,3 +1,5 @@
+use shamir_collections::{new_map, TMap};
+use shamir_query_types::batch::ResultEncoding;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -539,4 +541,49 @@ fn row_ref_nested_field() {
     let qv: QueryValue = rmp_serde::from_slice(&rmp_serde::to_vec_named(&fv).unwrap()).unwrap();
     assert_eq!(qv["$query"], "@q");
     assert_eq!(qv["path"], "[1].addr.zip");
+}
+
+// ============================================================================
+// result_encoding setter
+// ============================================================================
+
+#[test]
+fn result_encoding_setter_emits_id() {
+    let mut b = Batch::new();
+    b.query("u", Query::from("users"));
+    b.result_encoding(ResultEncoding::Id);
+    let req = b.build();
+    assert_eq!(req.result_encoding, ResultEncoding::Id);
+}
+
+#[test]
+fn result_encoding_defaults_to_name_when_unset() {
+    let mut b = Batch::new();
+    b.query("u", Query::from("users"));
+    let req = b.build();
+    assert_eq!(req.result_encoding, ResultEncoding::Name);
+}
+
+// ============================================================================
+// interner_epochs setter
+// ============================================================================
+
+#[test]
+fn interner_epochs_setter_emits_map() {
+    let mut b = Batch::new();
+    b.query("u", Query::from("users"));
+    let mut epochs: TMap<String, u64> = new_map();
+    epochs.insert("repo_a".to_string(), 42);
+    epochs.insert("repo_b".to_string(), 7);
+    b.interner_epochs(epochs.clone());
+    let req = b.build();
+    assert_eq!(req.interner_epochs, epochs);
+}
+
+#[test]
+fn interner_epochs_defaults_to_empty_when_unset() {
+    let mut b = Batch::new();
+    b.query("u", Query::from("users"));
+    let req = b.build();
+    assert!(req.interner_epochs.is_empty());
 }

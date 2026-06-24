@@ -2,6 +2,7 @@
 
 pub mod buffer_config;
 pub mod db_ops;
+pub mod fk_action;
 pub mod function_ops;
 pub mod index_ops;
 pub mod interner_ops;
@@ -17,6 +18,7 @@ pub use buffer_config::{
     AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, GetBufferConfigOp, SetBufferConfigOp,
 };
 pub use db_ops::{CreateDbOp, DropDbOp};
+pub use fk_action::FkAction;
 pub use function_ops::{
     CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionOp,
 };
