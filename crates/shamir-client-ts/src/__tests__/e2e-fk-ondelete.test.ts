@@ -42,14 +42,14 @@ describe.skipIf(!SERVER_AVAILABLE)('Phase D.1 — ON DELETE RESTRICT', () => {
     // Create index on parent.id (required for FK DDL gate).
     br(
       await Batch.create('idx')
-        .add('idx', ddl.createIndex('parent', ['id'], { repo: 'main' }))
+        .add('idx', ddl.createIndex('parent_id_idx', 'parent', [['id']], { repo: 'main' }))
         .execute(client, db),
     );
 
     // Create index on child.parent_id (for efficient restrict lookup).
     br(
       await Batch.create('idx2')
-        .add('idx', ddl.createIndex('child', ['parent_id'], { repo: 'main' }))
+        .add('idx', ddl.createIndex('child_parent_id_idx', 'child', [['parent_id']], { repo: 'main' }))
         .execute(client, db),
     );
 
