@@ -105,6 +105,29 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // Phase D.3 — bound-validator drop guard.
+        //
+        // Refuse to drop a function that is bound as a validator on any table.
+        // Functions and validators share the FunctionNamespace; a function
+        // whose name collides with a bound validator cannot be dropped while
+        // the binding is live (dropping would leave the binding referencing a
+        // ghost).  The check queries the validator registry: if a validator
+        // with the same name exists and `is_bound`, reject.
+        if let Some(vid) = self.shamir.validators().id_for_name(&op.drop_function) {
+            if self.shamir.validators().is_bound(&vid) {
+                let bound_tables = self.shamir.validators().bound_tables(&vid);
+                return Err(err_code(
+                    "drop_refused_bound",
+                    format!(
+                        "cannot drop function '{}': still bound as a validator on tables: {}",
+                        op.drop_function,
+                        bound_tables.join(", ")
+                    ),
+                ));
+            }
+        }
+
         let existed = self
             .shamir
             .drop_function_as(&op.drop_function, self.actor.clone())
