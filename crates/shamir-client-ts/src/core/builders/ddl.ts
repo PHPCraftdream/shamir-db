@@ -616,6 +616,20 @@ export class FieldBuilder {
   scalar(name: string): this { this._constraints.scalar = name; return this; }
 
   /**
+   * Allowed-value set (enum constraint).
+   */
+  oneOf(values: import('../types/write.js').WireValue[]): this {
+    this._constraints.one_of = values;
+    return this;
+  }
+
+  /**
+   * Phase C3 — unique constraint.
+   * The field value must not duplicate any existing row in the same table.
+   */
+  unique(): this { this._constraints.unique = true; return this; }
+
+  /**
    * Phase B — named format check (`"email"` / `"url"` / `"uuid"` / `"date"`).
    */
   format(kind: string): this { this._constraints.format = kind; return this; }
@@ -648,7 +662,7 @@ export class FieldBuilder {
     // Spread only defined constraint keys (mirrors serde skip_serializing_if).
     for (const [k, v] of Object.entries(this._constraints)) {
       if (v !== undefined) {
-        (dto as Record<string, unknown>)[k] = v;
+        (dto as unknown as Record<string, unknown>)[k] = v;
       }
     }
     return dto;

@@ -72,6 +72,8 @@ export interface ConstraintsDto {
   compare?: CompareDto;
   /** Phase C2 — forward-only foreign-key reference. */
   foreign_key?: ForeignKeyDto;
+  /** Phase C3 — unique constraint. */
+  unique?: boolean;
 }
 
 /**

@@ -43,6 +43,8 @@ import {
   canonicalDropRole,
 } from '../hmac.js';
 
+import { principalId } from '../principal-id.js';
+
 // ── ResourceRef constructors (access.rs, untagged, single-key) ──────
 
 export function refDatabase(db: string): ResourceRef {
@@ -103,8 +105,17 @@ export function chmod(resource: ResourceRef, mode: number): ChmodOp {
   return { chmod: resource, mode };
 }
 
-export function chown(resource: ResourceRef, owner: number): ChownOp {
-  return { chown: resource, owner };
+/**
+ * Transfer ownership of a resource.
+ *
+ * `owner` accepts:
+ *   - `string`  — username, hashed to `principalId(username)` (bigint).
+ *   - `bigint`  — pre-computed principal id.
+ *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ */
+export function chown(resource: ResourceRef, owner: string | bigint | number): ChownOp {
+  const resolved = typeof owner === 'string' ? principalId(owner) : owner;
+  return { chown: resource, owner: resolved };
 }
 
 export function chgrp(resource: ResourceRef, group: number | null): ChgrpOp {
@@ -119,12 +130,30 @@ export function dropGroup(ref: GroupRef): DropGroupOp {
   return { drop_group: ref };
 }
 
-export function addGroupMember(ref: GroupRef, user: number): AddGroupMemberOp {
-  return { add_group_member: ref, user };
+/**
+ * Add a user to a group.
+ *
+ * `user` accepts:
+ *   - `string`  — username, hashed to `principalId(username)` (bigint).
+ *   - `bigint`  — pre-computed principal id.
+ *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ */
+export function addGroupMember(ref: GroupRef, user: string | bigint | number): AddGroupMemberOp {
+  const resolved = typeof user === 'string' ? principalId(user) : user;
+  return { add_group_member: ref, user: resolved };
 }
 
-export function removeGroupMember(ref: GroupRef, user: number): RemoveGroupMemberOp {
-  return { remove_group_member: ref, user };
+/**
+ * Remove a user from a group.
+ *
+ * `user` accepts:
+ *   - `string`  — username, hashed to `principalId(username)` (bigint).
+ *   - `bigint`  — pre-computed principal id.
+ *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ */
+export function removeGroupMember(ref: GroupRef, user: string | bigint | number): RemoveGroupMemberOp {
+  const resolved = typeof user === 'string' ? principalId(user) : user;
+  return { remove_group_member: ref, user: resolved };
 }
 
 export function accessTree(opts?: { depth?: number; db?: string }): AccessTreeOp {
