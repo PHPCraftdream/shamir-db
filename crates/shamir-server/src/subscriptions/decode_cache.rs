@@ -29,12 +29,19 @@ use tokio::sync::OnceCell;
 /// interner lookup; the rest share the cached result.
 static GLOBAL: Lazy<DecodeCache> = Lazy::new(DecodeCache::new);
 
-/// Key shape: `(commit_version, repo_hash, change_index)`. **CV-first**
+/// Key shape: `(commit_version, db_id, repo_hash, change_index)`. **CV-first**
 /// so eviction is a `remove_range` over the leading u64, not a full-map
 /// scan. Migrated from `DashMap` (O(1) get, O(N) eviction) to
 /// `scc::TreeIndex` (O(log N) get, O(evicted + log N) eviction) — see
 /// Stage 2 of the hidden-O(N) sweep (`docs/perf/hidden-on-sweep-stage0.md`).
-type CacheKey = (u64, u64, usize);
+///
+/// `db_id` (the `ShamirDb` instance pointer) is part of the key to prevent
+/// cross-database collisions: distinct databases each own a repo named
+/// `"main"` whose commit-version sequences start low and overlap, so a key
+/// without `db_id` returns a *different db's* record bytes for the same
+/// `(repo, commit_version, change_idx)` — corrupting subscription filter
+/// evaluation. Mirrors the `db_id` dimension the deliver cache already keys on.
+type CacheKey = (u64, u64, u64, usize);
 
 /// Inner tuple cached in the decode table: raw msgpack bytes + initialized interner cell.
 pub(crate) type CachedRecordBytes = (Arc<[u8]>, Arc<OnceCell<Interner>>);
@@ -61,9 +68,20 @@ impl DecodeCache {
     }
 }
 
-/// Try to get a cached decode result.
-pub(crate) fn cache_get(repo: &str, commit_version: u64, change_idx: usize) -> Option<CachedBytes> {
-    let key = (commit_version, DecodeCache::repo_hash(repo), change_idx);
+/// Try to get a cached decode result. `db_id` scopes the lookup to one
+/// `ShamirDb` instance — see `CacheKey` for why cross-db keying is required.
+pub(crate) fn cache_get(
+    db_id: u64,
+    repo: &str,
+    commit_version: u64,
+    change_idx: usize,
+) -> Option<CachedBytes> {
+    let key = (
+        commit_version,
+        db_id,
+        DecodeCache::repo_hash(repo),
+        change_idx,
+    );
     GLOBAL.inner.peek_with(&key, |_, v| Arc::clone(v))
 }
 
@@ -71,12 +89,18 @@ pub(crate) fn cache_get(repo: &str, commit_version: u64, change_idx: usize) -> O
 /// Benign race: if two bridges both insert, the first one wins (TreeIndex
 /// is insert-once at a key) — bytes are deterministic so either is correct.
 pub(crate) fn cache_insert(
+    db_id: u64,
     repo: &str,
     commit_version: u64,
     change_idx: usize,
     value: Option<CachedRecordBytes>,
 ) -> CachedBytes {
-    let key = (commit_version, DecodeCache::repo_hash(repo), change_idx);
+    let key = (
+        commit_version,
+        db_id,
+        DecodeCache::repo_hash(repo),
+        change_idx,
+    );
     let arc = Arc::new(value);
     // Insert-once semantics on TreeIndex: if the key already exists, the
     // returned Err carries (key, value). The first writer wins; subsequent
@@ -102,8 +126,9 @@ pub(crate) fn cache_evict_up_to(up_to: u64) {
         .is_ok()
     {
         // Inclusive upper bound at the max sentinel within `cv == up_to`
-        // — evicts every key whose first component <= up_to.
-        let hi = (up_to, u64::MAX, usize::MAX);
+        // — evicts every key whose first component (commit_version) <= up_to,
+        // across all db_id / repo_hash / change_idx values.
+        let hi = (up_to, u64::MAX, u64::MAX, usize::MAX);
         GLOBAL.inner.remove_range(..=hi);
     }
 }

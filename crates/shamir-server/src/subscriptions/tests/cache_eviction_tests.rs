@@ -20,6 +20,11 @@ use crate::subscriptions::deliver_cache::{
     deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert,
 };
 
+/// Fixed db_id for decode-cache tests — the key now carries a db dimension
+/// (cross-db collision fix); a single constant keeps these single-db tests'
+/// semantics unchanged.
+const DB: u64 = 0xD1;
+
 /// Parity: after `cache_evict_up_to(threshold)`, only entries with
 /// `commit_version > threshold` remain. Mirrors the old `retain(|k, _|
 /// cv > up_to)` semantics. Stable contract across the migration.
@@ -33,7 +38,7 @@ fn decode_cache_survivor_set_after_eviction_matches_retain_semantics() {
     let mut all_keys: Vec<(u64, usize)> = Vec::new();
     for cv in 1..=20u64 {
         for change_idx in 0..3usize {
-            cache_insert(&repo, cv, change_idx, None);
+            cache_insert(DB, &repo, cv, change_idx, None);
             all_keys.push((cv, change_idx));
         }
     }
@@ -44,7 +49,7 @@ fn decode_cache_survivor_set_after_eviction_matches_retain_semantics() {
 
     // Entries with cv <= 10 must be GONE; cv > 10 must remain.
     for (cv, change_idx) in &all_keys {
-        let got = cache_get(&repo, *cv, *change_idx);
+        let got = cache_get(DB, &repo, *cv, *change_idx);
         if *cv <= 10 {
             assert!(
                 got.is_none(),
@@ -101,28 +106,28 @@ fn deliver_cache_survivor_set_after_eviction_matches_retain_semantics() {
 fn decode_cache_evict_is_idempotent_for_same_threshold() {
     let repo = format!("decode_idempotent_{}", std::process::id());
     for cv in 1..=5u64 {
-        cache_insert(&repo, cv, 0, None);
+        cache_insert(DB, &repo, cv, 0, None);
     }
     cache_evict_up_to(3);
     // Survivors: cv=4, 5.
-    assert!(cache_get(&repo, 4, 0).is_some());
-    assert!(cache_get(&repo, 5, 0).is_some());
-    assert!(cache_get(&repo, 1, 0).is_none());
+    assert!(cache_get(DB, &repo, 4, 0).is_some());
+    assert!(cache_get(DB, &repo, 5, 0).is_some());
+    assert!(cache_get(DB, &repo, 1, 0).is_none());
 
     // Second evict at the same threshold: no-op, no panic, survivors unchanged.
     cache_evict_up_to(3);
-    assert!(cache_get(&repo, 4, 0).is_some());
-    assert!(cache_get(&repo, 5, 0).is_some());
+    assert!(cache_get(DB, &repo, 4, 0).is_some());
+    assert!(cache_get(DB, &repo, 5, 0).is_some());
 
     // Lower threshold: no-op (CAS gate prevents regression).
     cache_evict_up_to(2);
-    assert!(cache_get(&repo, 4, 0).is_some());
-    assert!(cache_get(&repo, 5, 0).is_some());
+    assert!(cache_get(DB, &repo, 4, 0).is_some());
+    assert!(cache_get(DB, &repo, 5, 0).is_some());
 
     // Higher threshold evicts further.
     cache_evict_up_to(4);
-    assert!(cache_get(&repo, 4, 0).is_none());
-    assert!(cache_get(&repo, 5, 0).is_some());
+    assert!(cache_get(DB, &repo, 4, 0).is_none());
+    assert!(cache_get(DB, &repo, 5, 0).is_some());
 }
 
 /// Insert overwrite semantics: a second insert at the same key returns
@@ -131,15 +136,15 @@ fn decode_cache_evict_is_idempotent_for_same_threshold() {
 #[test]
 fn decode_cache_insert_overwrites_existing_key() {
     let repo = format!("decode_overwrite_{}", std::process::id());
-    let _ = cache_insert(&repo, 100, 0, None);
-    let first = cache_get(&repo, 100, 0);
+    let _ = cache_insert(DB, &repo, 100, 0, None);
+    let first = cache_get(DB, &repo, 100, 0);
     assert!(first.is_some());
 
     // Re-insert at the same key: must succeed and the cached Arc must
     // resolve to the new value (None in both cases here, but the
     // important thing is no panic on double-insert).
-    let _ = cache_insert(&repo, 100, 0, None);
-    let second = cache_get(&repo, 100, 0);
+    let _ = cache_insert(DB, &repo, 100, 0, None);
+    let second = cache_get(DB, &repo, 100, 0);
     assert!(second.is_some());
 }
 
@@ -149,7 +154,7 @@ fn decode_cache_insert_overwrites_existing_key() {
 #[test]
 fn decode_cache_miss_returns_none() {
     let repo = format!("decode_miss_{}", std::process::id());
-    assert!(cache_get(&repo, 999_999, 0).is_none());
+    assert!(cache_get(DB, &repo, 999_999, 0).is_none());
 }
 
 /// Concurrent inserts at the same key by N tasks must all succeed

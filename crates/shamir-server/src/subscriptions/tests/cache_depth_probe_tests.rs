@@ -16,13 +16,18 @@ use crate::subscriptions::deliver_cache::{
     deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert,
 };
 
+/// Fixed db_id for the decode-cache depth probe — the key now carries a db
+/// dimension (cross-db collision fix); a constant keeps this single-db probe
+/// unchanged.
+const DB: u64 = 0xD2;
+
 /// Count survivors by probing `cache_get` for all entries in [lo_cv..=hi_cv].
 /// O(range * changes_per_commit) — fine for a measurement probe.
 fn decode_survivors(repo: &str, lo_cv: u64, hi_cv: u64, changes_per_commit: usize) -> usize {
     let mut count = 0;
     for cv in lo_cv..=hi_cv {
         for idx in 0..changes_per_commit {
-            if cache_get(repo, cv, idx).is_some() {
+            if cache_get(DB, repo, cv, idx).is_some() {
                 count += 1;
             }
         }
@@ -72,7 +77,7 @@ fn probe_decode_cache_depth_healthy_consumer() {
 
     for cv in 1..=commits {
         for idx in 0..changes_per_commit {
-            cache_insert(&repo, cv, idx, None);
+            cache_insert(DB, &repo, cv, idx, None);
         }
 
         // Consumer evicts every `consumer_lag` commits.
