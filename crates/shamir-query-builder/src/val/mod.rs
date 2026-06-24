@@ -5,8 +5,12 @@
 //! type that drives filters, function arguments, and computed write-values
 //! on the wire.
 
+mod cond;
+mod expr;
 mod filter_value;
 
+pub use cond::*;
+pub use expr::*;
 pub use filter_value::*;
 
 #[cfg(test)]
