@@ -73,12 +73,12 @@ engine mirror `Constraints`, `constraints.rs:34-83`):
 plus `.unique()` / `.foreign_key(...)`.
 
 **Key honesty notes:**
-- FK and unique are **fail-open under autocommit** — they only fire when the
-  write goes through a real transaction with a wired `ValidatorDb` resolver
-  (`schema_validator.rs:106-112`, `:160-165`). Single-statement implicit-tx
-  writes silently skip both. This is a real correctness caveat, not just docs.
-- FK is **forward-only existence**, no `on_delete` / `on_update` actions (no
-  cascade / restrict / set-null) — see gap G7.
+- FK + unique fail-open «под autocommit» — ✅ снято как ложная тревога (server
+  оборачивает каждый батч в tx → enforced; сырой engine implicit-путь —
+  defense-in-depth, не дыра данных). См. `DONE.md`.
+- FK actions (`ON DELETE`: RESTRICT/CASCADE/SET NULL) — ✅ реализованы (Phase D,
+  `DONE.md`). Остаётся `ON UPDATE`. Билдер: `.foreign_key(...)` +
+  `.foreign_key_on_delete(...)`.
 
 ### 1.3 WASM functions + function folders
 
@@ -244,14 +244,13 @@ field-name interning control surface unique to ShamirDB's storage model.
   `drop_db` / `drop_repo`. Dropping a table with indexes / bound validators /
   FK references is not guarded by a `cascade` / `restrict` toggle at the table
   level (only `DropValidator` refuses-if-bound).
-- **G3.** Referential integrity on **drop** is partial. `DropValidator`
-  refuses if `bound_in` non-empty (good). But `DropTable` does not refuse /
-  warn if another table's schema rule has a `foreign_key` pointing at it, and
-  `DropFunction` does not refuse if the function is bound as a validator.
-  `DDL.md` §5 calls this out as unfinished.
-- **G7.** FK actions (`ON DELETE` / `ON UPDATE` cascade/restrict/set-null/
-  set-default) are **absent**. FK is a forward-only existence check; deleting
-  a referenced row does not cascade or block.
+- **G3.** Referential integrity on **drop** — ✅ **частично закрыто** (см.
+  `DONE.md`). `DropValidator` refuses if `bound_in` non-empty; `DropTable`
+  теперь refuses под живым FK (`drop_refused_fk`, Phase D.3). **Остаток:**
+  `DropFunction` не refuses, если функция привязана как валидатор.
+- **G7.** FK actions (`ON DELETE`) — ✅ **DONE** как Phase D (см. `DONE.md`):
+  `RESTRICT` / `CASCADE` / `SET NULL` + `NoAction`-дефолт. `ON UPDATE` — вне
+  текущего скоупа (остаток).
 - **G8.** `NOT NULL` semantics: covered via `required` + `nullable` flags in
   the schema validator (pure check), but only enforced when a schema rule is
   declared. There is no engine-level "every row must have `_id`" invariant
@@ -285,10 +284,10 @@ field-name interning control surface unique to ShamirDB's storage model.
 | # | Gap | Rationale | Impact |
 |---|---|---|---|
 | **G10** | Access defaults open (`0o777`, owner=System); gate not uniform | Every resource world-readable/-writable until manually tightened; the entire RBAC/DAC edifice is opt-in | **Security** — ship blocker for any multi-tenant deployment |
-| **G7** | FK has no `ON DELETE` / `ON UPDATE` actions | Deleting a referenced row neither cascades nor blocks; orphans accumulate silently | **Referential integrity** — data corruption risk |
+| ~~G7~~ | ~~FK has no `ON DELETE` actions~~ | ✅ **DONE** — Phase D (RESTRICT/CASCADE/SET NULL); `ON UPDATE` остаётся | см. `DONE.md` |
 | **G2** | Drops lack `if_exists`; no `cascade` at table level | Scripts can't be idempotent; can't clean up a table with indexes/validators in one op | **Operability** — every migration/CI script fragile |
-| **G3** | Drop refuses only for validators (`bound_in`); not for FK targets / functions-used-as-validators | Drop a referenced table/function → silent dangling references | **Referential integrity** — same class as G7 |
-| — | FK + unique **fail-open under autocommit** (only enforced in tx-mode) | Single-statement inserts bypass relational checks entirely | **Correctness** — silent invariant hole; see `schema_validator.rs:106-112` |
+| **G3** (остаток) | Drop refuses for validators + FK targets (✅); `DropFunction`-as-validator ещё нет | Drop a function-used-as-validator → silent dangling reference | **Referential integrity** |
+| ~~—~~ | ~~FK + unique fail-open under autocommit~~ | ✅ снято — ложная тревога (enforced через серверную tx-обёртку), см. `DONE.md` | — |
 
 ### MEDIUM (usability / parity)
 
@@ -324,11 +323,12 @@ column DDL meaningless** (no `ALTER TABLE ADD COLUMN`). Its distinctive strength
 is the **validator model**: declarative schema rules (scalar/format/cross-field/
 FK/unique) **plus** arbitrary WASM `BEFORE`-write hooks, all enforced on the
 write path — a genuinely richer integrity surface than SQL `CHECK`. Its
-distinctive weakness is **referential lifecycle**: drops don't guard cross-type
-references, FK has no cascade actions, and the relational checks (FK/unique)
-silently no-op under autocommit. The single biggest ship blocker is the
-**open access defaults** (G10) — every other DDL feature is moot if the gate
-isn't uniformly enforced.
+historical weakness was **referential lifecycle** — теперь во многом закрыта:
+FK `ON DELETE` (RESTRICT/CASCADE/SET NULL) и drop-guard на `DropTable`
+реализованы (Phase D, `DONE.md`); FK/unique enforced под autocommit (ложная
+тревога снята). Остатки — `DropFunction`-guard и `ON UPDATE`. The single biggest
+ship blocker остаётся **open access defaults** (G10) — every other DDL feature
+is moot if the gate isn't uniformly enforced.
 
 **Counts:** 10 present feature groups (§1.1–§1.10) covering ~45 wire `BatchOp`
 variants; 20 prioritized gaps (5 HIGH, 7 MEDIUM, 8 LOW).

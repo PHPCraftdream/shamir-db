@@ -6,6 +6,13 @@
 **Method:** opened every cited file, confirmed each load-bearing claim by reading
 the actual type/method/field. Findings cite real `file:line`.
 
+> **Статус-апдейт (point-in-time audit, не переписан построчно):** часть находок
+> ниже уже отработана — см. `DONE.md`. В частности: keyset «engine-ready,
+> language-absent» (R…/H3) — ✅ реализовано; «FK + unique fail-open под
+> autocommit» — ✅ **снято как ложная тревога** (enforced через серверную
+> tx-обёртку; разбор в `META-REVIEW.md` §0). Читать findings ниже с этой
+> поправкой.
+
 ---
 
 ## Cross-report finding tally

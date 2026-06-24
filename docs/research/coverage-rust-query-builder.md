@@ -57,8 +57,8 @@ marked:
 | 23 | Field reference (`$ref`) | `FilterValue::FieldRef` | `val::col()` | ✅ | |
 | 24 | Query reference (`$query`) | `FilterValue::QueryRef` | `val::qref()`, `qref_all()` | ✅ | Auto-normalizes `@` prefix |
 | 25 | Function call (`$fn`) | `FilterValue::FnCall` | `val::func()` | ✅ | Uses `FnCall::complex` form only; no simple-form helper (`FnCall::simple`) |
-| 26 | Expression (`$expr`) | `FilterValue::Expr` / `FilterExpr` | no builder | ❌ | `FilterExpr` (Add/Sub/Mul/Div/Mod/Neg/Concat/Lower/Upper/Trim/Length/And/Or/Not/Eq/Ne/Gt/Gte/Lt/Lte) has zero constructor coverage. Callers must construct `FilterExpr::new(op, args)` manually. |
-| 27 | Conditional (`$cond`) | `FilterValue::Cond` / `Cond` | no builder | ❌ | `Cond::new(condition, then, or_else)` exists on the DTO but no builder wrapper. |
+| 26 | Expression (`$expr`) | `FilterValue::Expr` / `FilterExpr` | `val::expr(...)` + обёртки | ✅ | DONE (B3, `DONE.md`) — конструкторы для всех 18 операторов. |
+| 27 | Conditional (`$cond`) | `FilterValue::Cond` / `Cond` | `val::cond(...)` | ✅ | DONE (B3, `DONE.md`). |
 | 28 | Parameter reference (`$param`) | `FilterValue::Param` | `val::param()` | ✅ | |
 | **WRITE** | | | | | |
 | 29 | Insert | `InsertOp` / `BatchOp::Insert` | `write/insert.rs` → `insert()`, `Insert::into()`, `with_repo()` | ✅ | `records_idmsgpack` always `Vec::new()` — the id-keyed msgpack pass-through path is not exposed. |
@@ -69,8 +69,8 @@ marked:
 | 34 | Doc (record-value builder) | — | `write/doc.rs` → `doc()`, `Doc::set()`, `set_value()` | ✅ | FilterValue→QueryValue round-trip for expressions |
 | **BATCH** | | | | | |
 | 35 | Batch request assembly | `BatchRequest` | `batch/batch.rs` → `Batch::new()`, `named()` | ✅ | Full: name, id, transactional, isolation, durability, return_all, return_flagged, return_only, limits |
-| 36 | Batch: interner epochs | `BatchRequest::interner_epochs` | `Batch::build()` hardcodes `Default::default()` | 🟡 | No setter method. The wire field exists but the builder always sends an empty map. |
-| 37 | Batch: result encoding | `BatchRequest::result_encoding` | `Batch::build()` hardcodes `ResultEncoding::default()` (= Name) | 🟡 | No setter for `ResultEncoding::Id`. The `ResultEncoding` type is imported but unused. |
+| 36 | Batch: interner epochs | `BatchRequest::interner_epochs` | `Batch::interner_epochs(...)` | ✅ | DONE (B1, `DONE.md`). |
+| 37 | Batch: result encoding | `BatchRequest::result_encoding` | `Batch::result_encoding(...)` | ✅ | DONE (B1, `DONE.md`) — `ResultEncoding::Id` доступен из билдера. |
 | 38 | Sub-batch (nested BatchRequest + bind) | `SubBatchOp` / `BatchOp::Batch` | `Batch::sub_batch()`, `sub_batch_no_bind()` | ✅ | |
 | 39 | QueryEntry `after` ordering deps | `QueryEntry::after` | `Batch::after()` | ✅ | |
 | 40 | QueryEntry `return_result` flag | `QueryEntry::return_result` | `Batch::query_silent()`, `op_silent()` | ✅ | |
@@ -91,7 +91,9 @@ marked:
 | 51 | TxCommit | `DbRequest::TxCommit` | no builder | ❌ | |
 | 52 | TxRollback | `DbRequest::TxRollback` | no builder | ❌ | |
 
-**OQL summary:** 52 capabilities enumerated. 5 ❌ missing (SelectExpr, FilterExpr, Cond, InsertOp.records_idmsgpack, and the DbRequest-level ops). 2 🟡 partial (interner_epochs, result_encoding). The remaining 45 are ✅.
+**OQL summary:** 52 capabilities enumerated. ✅ DONE с момента отчёта: FilterExpr
+(`$expr`), Cond (`$cond`), interner_epochs, result_encoding — см. `DONE.md`.
+Остаются ❌: SelectExpr, `InsertOp.records_idmsgpack` (B4), DbRequest-level ops.
 
 ---
 
@@ -189,12 +191,9 @@ These are builder paths that *exist* but have friction:
    The `FnCall` type is re-exported from `query-types` but not from the
    builder's `val` module.
 
-2. **`Batch::build()` silently drops `interner_epochs` and `result_encoding`** —
-   the builder always sends `Default::default()` / `ResultEncoding::Name`. A
-   client that wants id-keyed pass-through (`ResultEncoding::Id`) or interner
-   delta sync must post-process the `BatchRequest` after `build()`. The
-   `ResultEncoding` type is imported in `batch.rs` but only used as the default
-   value — there is no `.result_encoding()` setter.
+2. ~~**`Batch::build()` drops `interner_epochs` / `result_encoding`**~~ —
+   ✅ DONE (B1, `DONE.md`): добавлены `Batch::interner_epochs(...)` и
+   `Batch::result_encoding(...)`; `ResultEncoding::Id` доступен из билдера.
 
 3. **`InsertOp.records_idmsgpack`** — the builder always produces an empty
    `Vec::new()`. The id-keyed msgpack pass-through path (the v2 wire
@@ -230,31 +229,16 @@ Ranked by impact (user-facing frequency × severity):
 
 ### High Priority
 
-1. **`FilterValue::Expr` / `FilterExpr` constructors (OQL #26)** — The
-   `$expr` expression type (arithmetic, string ops, logic, comparison) has
-   zero builder coverage. This is a rich sub-language (18 operators) that
-   users of computed filters will need. Adding `val::expr(op, args)` and
-   convenience wrappers (`val::add(a, b)`, `val::concat(parts)`, etc.) would
-   close the gap.
-
-2. **`FilterValue::Cond` / `Cond` constructor (OQL #27)** — The `$cond`
-   ternary operator has no builder wrapper. `Cond::new()` exists on the DTO
-   but `val::cond(if_filter, then, else)` would be ergonomic.
-
-3. **`Batch::result_encoding()` setter (OQL #37)** — Trivial to add: a chainable
-   method that stores a `ResultEncoding` and applies it in `build()`. The v2
-   id-keyed pass-through is the performance-critical path for high-throughput
-   clients.
+> ✅ DONE (см. `DONE.md`): `val::expr` (`$expr`, #26), `val::cond` (`$cond`,
+> #27), `Batch::result_encoding()` (#37), `Batch::interner_epochs()` (#36).
+> Прежние High-priority дыры билдера закрыты.
 
 ### Medium Priority
 
-4. **`InsertOp.records_idmsgpack` builder (OQL #30)** — Exposing the
+4. **`InsertOp.records_idmsgpack` builder (OQL #30, B4)** — Exposing the
    id-keyed msgpack path would let builder users opt into the v2 wire
    optimization. May require a `Doc::build_idmsgpack()` or an `Insert::row_idmsgpack(bytes)`
-   method.
-
-5. **`Batch::interner_epochs()` setter (OQL #36)** — Another trivial setter.
-   Needed for clients that cache interner dictionaries and want delta sync.
+   method. **(остаётся)**
 
 6. **`FieldBuilder::one_of()` (DDL #26)** — The enum constraint is a common
    schema-validation pattern. One-liner: `.one_of(vec![...])`.
