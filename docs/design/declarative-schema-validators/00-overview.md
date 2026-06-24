@@ -75,6 +75,7 @@ S.H.A.M.I.R. уже умеет два вида валидаторов запис
 | `06-client-rust-js-ts.md` | Клиент | кросс-язычные table-scoped билдеры |
 | `07-testing.md` | Тесты | unit + rust-e2e + ts/js-e2e матрица |
 | `09-builtin-checks.md` | Проверки | каталог: типы/функции/`foreign_key`/`unique` (фаза A/B/C) |
+| `10-referential-on-delete.md` | Реф. действия | Phase D: reverse-FK / ON DELETE (RESTRICT·CASCADE·SET NULL) + drop-guard |
 
 ## Фазировка
 
@@ -93,5 +94,7 @@ S.H.A.M.I.R. уже умеет два вида валидаторов запис
   непостроенных примитивов: **tx-scoped read-only снапшот для валидатора** (НЕ `DbGateway` —
   тот autocommit + ре-ентрант-дедлок) + индекс-интеграция. Несётся отдельной санкцией, **не
   блокирует 0/A/B**.
-- **Phase D+ — referential actions** (cascade/restrict при удалении ссылаемой строки) —
-  отдельно, за санкцией.
+- **Phase D — referential actions** (reverse-FK / ON DELETE: restrict/cascade/set-null
+  при удалении ссылаемой строки + drop-guard) — детальный план в
+  `10-referential-on-delete.md`. Фундамент (delete-хук `execute_delete_tx` +
+  `WriteOp::Delete` + resolver) **уже есть**; Phase D — декларативная обёртка.
