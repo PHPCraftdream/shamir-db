@@ -346,6 +346,37 @@ justified inline with a comment that names the contention model.
 
 ---
 
+## 🧬 Delegated work — prompt-first (MANDATORY)
+
+The prompt is the **source of the source**. Generated code is ephemeral and
+reproducible; the brief (what we wanted) + the test (how we check) are the
+durable artefacts. A lost working tree is recoverable iff the briefs and tests
+survive — they must live in git, not in scratch dirs.
+
+**Before running ANY delegated stage** (a `/crush` agent, an `Agent`
+sub-agent, a `/workflows` phase — anything that generates code):
+
+1. **Write the brief to `docs/prompts/<area>/<NN>-<name>.md` and commit it**
+   (`docs(prompts): brief for <stage>`) *before* launching the agent. Never
+   keep the only copy in `.crush/stdin/` — that dir is `.gitignore`d and will
+   not survive a stray reset.
+2. Launch the agent from that committed brief.
+3. After the orchestrator verifies the result (diff read + tests re-run),
+   commit the **generated code + tests** as its own commit (or short series).
+   **Commit each verified stage immediately** — do not let multiple stages
+   pile up uncommitted.
+
+**Every delegated brief MUST forbid git mutation.** Include verbatim:
+> ⛔ NEVER run `git reset` / `checkout` / `clean` / `stash` / `restore` /
+> `rm`, or any git command that mutates the working tree or index. Only edit
+> files; the orchestrator commits.
+
+This rule is not theoretical: on 2026-06-24 an agent ran `git reset --hard`
+and wiped hours of uncommitted work. Recovery was possible **only** because
+the briefs and test files were preserved. See `docs/prompts/README.md`.
+
+---
+
 ## 🏗️ Query construction — builder only
 
 Database queries are **always** built through a query builder — the Rust
