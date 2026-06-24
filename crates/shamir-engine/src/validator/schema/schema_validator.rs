@@ -74,10 +74,14 @@ impl RecordValidator for SchemaValidator {
                     rule.check_extended(fields, &path_refs, Some(ctx), &mut v);
 
                     // Phase C2 — foreign_key existence check (async DB read).
-                    // Runs only when ctx.db() is Some (tx-mode write path with
-                    // a resolver); silently skipped under autocommit / unit
-                    // tests where no resolver is wired (fail-open, matching
-                    // the scalar-bridge precedent).
+                    // Runs whenever ctx.db() is Some AND a cross-table resolver
+                    // is wired. In production the server wraps every batch in a
+                    // tx context with the resolver, so FK fires on BOTH
+                    // transactional and autocommit writes (see the
+                    // `autocommit also enforces FK` e2e). It is skipped only on
+                    // the raw-engine implicit path that passes resolver = None
+                    // (query_runner autocommit arm / unit fixtures) — there
+                    // db.exists_in returns Ok(false) → fail-open skip.
                     if let Some(fk) = &rule.constraints.foreign_key {
                         if let Some(db) = ctx.db() {
                             // Materialise the field value as QueryValue for the
@@ -103,18 +107,21 @@ impl RecordValidator for SchemaValidator {
                                 }
                             }
                         }
-                        // else: ctx.db() == None → FK check silently skipped.
-                        // Batch-consistency is only guaranteed in tx-mode
-                        // (multi-statement transactions where the resolver is
-                        // wired). Autocommit single-op inserts skip FK because
-                        // the implicit-tx path does not wire a cross-table
-                        // resolver.
+                        // else: ctx.db() == None → FK check skipped. This is
+                        // the raw-engine path with no tx threaded (legacy/unit
+                        // callers). Through the server, ctx.db() is always Some
+                        // and FK is enforced; only the resolver=None implicit
+                        // arm fails open (see foreign_key doc on Constraints).
                     }
 
                     // Phase C3 — unique constraint (async DB read).
-                    // Runs only when ctx.db() is Some (tx-mode write path);
-                    // silently skipped under autocommit (ctx.db() == None) —
-                    // same fail-open precedent as FK.
+                    // Runs whenever ctx.db() is Some. The unique probe
+                    // (exists_in_self) reads SELF-table state and needs NO
+                    // cross-table resolver, so it is enforced on BOTH
+                    // transactional and autocommit writes (the autocommit path
+                    // routes through an implicit tx → ctx.db() is Some). See
+                    // the `autocommit also enforces unique` e2e. Skipped only
+                    // when no tx is threaded at all (raw-engine/unit callers).
                     if rule.constraints.unique {
                         if let Some(db) = ctx.db() {
                             if let Some(field_qv) = rule.materialize_as_qv(fields, &path_refs) {
@@ -157,11 +164,13 @@ impl RecordValidator for SchemaValidator {
                                 }
                             }
                         }
-                        // else: ctx.db() == None → unique check silently
-                        // skipped. Autocommit (implicit tx) does not wire
-                        // the resolver / ValidatorDb, so relational checks
-                        // (FK, unique) are not enforced — matching the FK
-                        // precedent.
+                        // else: ctx.db() == None → unique check skipped. This
+                        // only happens on the raw-engine path with no tx
+                        // threaded (legacy/unit callers). The autocommit path
+                        // DOES thread an implicit tx, so ctx.db() is Some and
+                        // unique IS enforced there (no resolver needed — the
+                        // probe is self-table). See the `autocommit also
+                        // enforces unique` e2e.
                     }
                 }
             }
