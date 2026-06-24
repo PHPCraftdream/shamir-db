@@ -345,9 +345,12 @@ type itself counts as "present". Report 4 is the most precise.
 
 ## Residual risks (for the orchestrator)
 
-1. **The FK/unique fail-open under autocommit (Report 5)** is a **real
-   correctness bug**, not just a documentation gap. Any single-statement INSERT
-   bypasses both relational constraints. This should be tracked as a P0 issue.
+1. ~~**The FK/unique fail-open under autocommit (Report 5)** is a real
+   correctness bug...~~ **— ОТОЗВАНО 2026-06-24 (фактчек рантайма).** Построено
+   на устаревших комментариях `schema_validator.rs`. На деле `execute_insert_tx`
+   всегда даёт `Some(tx)`, сервер оборачивает батчи в tx → FK/unique **enforced
+   и под autocommit** (зелёные e2e `autocommit also enforces`). НЕ P0. См.
+   `META-REVIEW.md` §0 и `ACTION-ITEMS.md` A1.
 2. **The `it()` undercounting (Report 3)** means the test coverage picture is
    slightly better than the report suggests — but the *qualitative* gaps
    (no e2e for FTS/vector/call, no unit tests for Phase B/C constraints) are
