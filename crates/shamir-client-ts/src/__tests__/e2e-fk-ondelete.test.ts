@@ -147,12 +147,11 @@ describe.skipIf(!SERVER_AVAILABLE)('Phase D.1 — ON DELETE RESTRICT', () => {
 // Phase D.2 — ON DELETE CASCADE
 // ════════════════════════════════════════════════════════════════════════
 
-// TODO(#236): SKIPPED — CASCADE does not fire end-to-end yet. The engine unit
-// tests (fk_actions_tests) pass, but through the server the cascade plan is not
-// applied (the catalogue-compile schema path has a gap; discovery is proven OK
-// because D.1 RESTRICT — strict on_delete==Restrict filter — passes e2e). Flip
-// to describe.skipIf(!SERVER_AVAILABLE) once the plan_cascade/apply path is fixed.
-describe.skip('Phase D.2 — ON DELETE CASCADE', () => {
+// #236 FIXED — the catalogue writer dropped on_delete (always read back as
+// NoAction), so reverse-FK discovery missed every action. With the writer
+// persisting on_delete, CASCADE now fires end-to-end. Proven in-process by
+// crates/shamir-db/tests/declarative_schema_fk_ondelete_e2e.rs.
+describe.skipIf(!SERVER_AVAILABLE)('Phase D.2 — ON DELETE CASCADE', () => {
   let srv: ServerHandle;
   let client: ShamirClient | null = null;
   let db: string;
@@ -238,10 +237,9 @@ describe.skip('Phase D.2 — ON DELETE CASCADE', () => {
 // Phase D.2 — ON DELETE SET NULL
 // ════════════════════════════════════════════════════════════════════════
 
-// TODO(#236): SKIPPED — SET NULL does not fire end-to-end yet (same gap as
-// CASCADE above). Engine unit tests pass; the server path leaves the child's
-// FK field unchanged. Flip to skipIf(!SERVER_AVAILABLE) once fixed.
-describe.skip('Phase D.2 — ON DELETE SET NULL', () => {
+// #236 FIXED — same root cause as CASCADE (catalogue writer dropped on_delete).
+// SET NULL now nulls the child FK end-to-end.
+describe.skipIf(!SERVER_AVAILABLE)('Phase D.2 — ON DELETE SET NULL', () => {
   let srv: ServerHandle;
   let client: ShamirClient | null = null;
   let db: string;
@@ -328,11 +326,11 @@ describe.skip('Phase D.2 — ON DELETE SET NULL', () => {
 // Phase D.3 — drop-guard (DropTable refused while referenced by a live FK)
 // ════════════════════════════════════════════════════════════════════════
 
-// TODO(#236): SKIPPED — drop-guard does not fire end-to-end yet. DropTable on a
-// referenced table succeeds instead of being refused (drop_refused_fk). The
-// engine-side guard exists (admin_table_index.rs) but is not triggered via the
-// server's dropTable path. Flip to skipIf(!SERVER_AVAILABLE) once fixed.
-describe.skip('Phase D.3 — drop-guard', () => {
+// #236 FIXED — the drop-guard read the in-memory validator-binding cache,
+// which is incoherent between the admin DbInstance and the engine execute-path
+// instance. It now reads the persisted catalogue schema (system_store), so a
+// referenced parent is refused (drop_refused_fk) end-to-end.
+describe.skipIf(!SERVER_AVAILABLE)('Phase D.3 — drop-guard', () => {
   let srv: ServerHandle;
   let client: ShamirClient | null = null;
   let db: string;
