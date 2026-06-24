@@ -329,4 +329,27 @@ impl TableManager {
     pub async fn flush_metadata(&self) -> DbResult<()> {
         self.persist_registry.flush_all().await
     }
+
+    /// Collect all foreign-key references declared by this table's validators.
+    ///
+    /// Iterates the table's validator bindings, resolves each to a compiled
+    /// `RecordValidator` via the registry, and calls `fk_refs()` on each.
+    /// Returns `(field_path, ForeignKeyRef)` pairs.
+    ///
+    /// Used by Phase D reverse-FK discovery (the RESTRICT gate needs to find
+    /// which child tables reference a given parent table).
+    pub fn collect_fk_refs(&self) -> Vec<(Vec<String>, crate::validator::schema::ForeignKeyRef)> {
+        let reg = match &self.validator_registry {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let bindings = self.validator_bindings.load_full();
+        let mut refs = Vec::new();
+        for binding in bindings.iter() {
+            if let Some(validator) = reg.get_by_id(&binding.validator_id) {
+                refs.extend(validator.fk_refs());
+            }
+        }
+        refs
+    }
 }

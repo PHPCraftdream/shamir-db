@@ -30,6 +30,23 @@ impl SchemaValidator {
     pub fn new(rules: Vec<FieldRule>) -> Self {
         Self { rules }
     }
+
+    /// Collect all foreign-key references declared in the rules.
+    ///
+    /// Returns `(field_path, fk_ref)` for every rule that has a
+    /// `constraints.foreign_key` set. Used by Phase D reverse-FK
+    /// discovery (the RESTRICT gate).
+    pub fn collect_fk_refs(&self) -> Vec<(Vec<String>, super::ForeignKeyRef)> {
+        self.rules
+            .iter()
+            .filter_map(|r| {
+                r.constraints
+                    .foreign_key
+                    .as_ref()
+                    .map(|fk| (r.path.clone(), fk.clone()))
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -177,5 +194,9 @@ impl RecordValidator for SchemaValidator {
         }
 
         v
+    }
+
+    fn fk_refs(&self) -> Vec<(Vec<String>, super::ForeignKeyRef)> {
+        self.collect_fk_refs()
     }
 }

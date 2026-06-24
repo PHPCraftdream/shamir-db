@@ -140,6 +140,7 @@
 mod batch_execute;
 mod batch_validate;
 mod executor_traits;
+mod fk_restrict;
 mod interactive_tx;
 mod param_subst;
 mod query_runner;

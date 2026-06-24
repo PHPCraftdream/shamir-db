@@ -545,6 +545,26 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
+
+                // Phase D.1 — ON DELETE RESTRICT gate.
+                //
+                // TOCTOU caveat: this check runs BEFORE the delete, outside the
+                // atomic scope of the tx that performs the removal. A concurrent
+                // insert into a child table between this check and the delete
+                // could create a dangling reference. Tightening to an in-tx
+                // atomic check requires Arc<dyn TableResolver> (future refactor).
+                // Acceptable for MVP: delete is not a hot path, Restrict tables
+                // are opt-in, and the window is small.
+                super::fk_restrict::check_fk_restrict(
+                    self.resolver,
+                    table_ref,
+                    &table,
+                    &op.where_clause,
+                    &ctx,
+                    alias,
+                )
+                .await?;
+
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
                         .execute_delete_tx(op, &ctx, tx, Some(self.resolver))

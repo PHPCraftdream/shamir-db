@@ -20,6 +20,7 @@ pub use foreign_key::ForeignKeyRef;
 pub use format::FormatKind;
 pub use rule_builder::{rule, RuleBuilder};
 pub use schema_validator::SchemaValidator;
+pub use shamir_query_types::admin::FkAction;
 pub use type_tag::TypeTag;
 
 #[cfg(test)]

@@ -156,4 +156,13 @@ pub trait RecordValidator: Send + Sync {
         old: Option<&dyn RecordFields>,
         ctx: &ValidatorCtx<'_>,
     ) -> Validation;
+
+    /// Return all foreign-key references declared by this validator.
+    ///
+    /// Each entry is `(field_path, fk_ref)`. The default implementation
+    /// returns an empty vec — only [`SchemaValidator`] overrides this to
+    /// expose its declarative FK rules (Phase D reverse-FK discovery).
+    fn fk_refs(&self) -> Vec<(Vec<String>, super::schema::ForeignKeyRef)> {
+        Vec::new()
+    }
 }

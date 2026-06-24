@@ -228,9 +228,20 @@ fn parse_foreign_key_ref(
     let map = v.as_object()?;
     let ref_table = map.get("ref_table")?.as_str()?.to_string();
     let ref_field = map.get("ref_field")?.as_str()?.to_string();
-    Some(shamir_engine::validator::schema::ForeignKeyRef::new(
-        ref_table, ref_field,
-    ))
+    // Phase D: parse on_delete action. Legacy catalogue rows without the
+    // field get NoAction (the FkAction serde/wire default), preserving
+    // backward compatibility.
+    let on_delete = match map.get("on_delete").and_then(|v| v.as_str()) {
+        Some("restrict") => shamir_engine::validator::schema::FkAction::Restrict,
+        Some("cascade") => shamir_engine::validator::schema::FkAction::Cascade,
+        Some("set_null") => shamir_engine::validator::schema::FkAction::SetNull,
+        _ => shamir_engine::validator::schema::FkAction::NoAction,
+    };
+    Some(
+        shamir_engine::validator::schema::ForeignKeyRef::with_on_delete(
+            ref_table, ref_field, on_delete,
+        ),
+    )
 }
 
 /// Parse a cross-field compare constraint from a rule map.
