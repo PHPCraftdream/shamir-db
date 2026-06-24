@@ -69,15 +69,24 @@ pub struct Constraints {
     /// record (e.g. `start <= end`).
     pub compare: Option<CrossFieldCompare>,
     /// Phase C2 — forward-only foreign-key reference.  The field value must
-    /// exist in `ref_table.ref_field`.  Checked only when `ctx.db() == Some`
-    /// (tx-mode write path); silently skipped under autocommit (no resolver).
-    /// NULL values bypass the FK check (standard SQL semantics).
+    /// exist in `ref_table.ref_field`.  Enforced whenever the validator runs
+    /// with a cross-table resolver wired into `ctx.db()`.  In production the
+    /// server wraps every batch in a tx context with the resolver wired, so
+    /// FK fires on BOTH transactional and autocommit writes (proven by the
+    /// `foreign_key: autocommit also enforces FK` e2e).  The resolver is
+    /// absent only on the raw-engine implicit single-op path invoked WITHOUT
+    /// the server's tx wrapping (`query_runner` autocommit arm passes
+    /// `resolver = None`, some unit fixtures) — there FK silently skips
+    /// (fail-open).  NULL values bypass the FK check (standard SQL semantics).
     pub foreign_key: Option<ForeignKeyRef>,
     /// Phase C3 — unique constraint.  The field value must not duplicate any
-    /// existing committed row (or staged write within the same tx).
-    /// Checked only when `ctx.db() == Some` (tx-mode write path); silently
-    /// skipped under autocommit (no resolver wired — same precedent as FK).
-    /// NULL values bypass the unique check (standard SQL semantics: NULL is
-    /// never equal to anything, including another NULL).
+    /// existing committed row (or staged write within the same tx).  The
+    /// unique probe reads SELF-table state and needs NO cross-table resolver —
+    /// it is enforced whenever the validator runs with a tx (`ctx.db() ==
+    /// Some`).  Every write path threads a tx (the autocommit path routes
+    /// through an implicit Snapshot tx), so unique fires on BOTH transactional
+    /// and autocommit writes (proven by the `unique: autocommit also enforces
+    /// unique` e2e).  NULL values bypass the unique check (standard SQL
+    /// semantics: NULL is never equal to anything, including another NULL).
     pub unique: bool,
 }
