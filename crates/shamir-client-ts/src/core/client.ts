@@ -10,6 +10,7 @@
 import type { Platform } from './platform.js';
 import type { ConnectOptions, ResumeOptions } from './types/index.js';
 import type { BatchResponse, TransactionInfo } from './types/batch.js';
+import type { WireValue } from './types/write.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 import { signCanonical } from './hmac.js';
@@ -18,6 +19,12 @@ import { SubscriptionRouter } from './subscription-router.js';
 import type { PushEnvelope } from './types/subscribe.js';
 import { InternerCacheRegistry } from './field-map.js';
 import type { InternerDelta } from './field-map.js';
+import {
+  collectFieldNames,
+  encodeRecordIdMsgpack,
+  qvHasFnMarker,
+  deinternResponse,
+} from './interner-ops.js';
 
 /** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
 export interface TxOpened {
@@ -54,6 +61,11 @@ export class ShamirClient {
   private readonly subscriptionRouter = new SubscriptionRouter();
   /** Per-`(db, repo)` field-name ↔ id cache (Stage 5-wire interner). */
   private readonly _internerCache = new InternerCacheRegistry();
+  /**
+   * Max query-language version advertised by the server in auth_ok / resume_ok.
+   * 0 = pre-v2 server (no id-keyed write path). Set once at connect/resume.
+   */
+  private readonly _serverQueryVersion: number;
   private nextRequestId = 1;
 
   /**
@@ -78,6 +90,7 @@ export class ShamirClient {
     expiresAtNs: bigint,
     resumptionTicket?: Uint8Array,
     resumptionExpiresAtNs?: bigint,
+    serverQueryVersion?: number,
   ) {
     this.platform = platform;
     this.framer = framer;
@@ -86,6 +99,7 @@ export class ShamirClient {
     this._expiresAtNs = expiresAtNs;
     this._resumptionTicket = resumptionTicket;
     this._resumptionExpiresAtNs = resumptionExpiresAtNs;
+    this._serverQueryVersion = serverQueryVersion ?? 0;
 
     // Start the persistent read loop immediately. The loop is the sole consumer
     // of framer.recv(); it routes each incoming frame to the matching pending
@@ -116,6 +130,7 @@ export class ShamirClient {
         expiresAtNs,
         resumptionTicket,
         resumptionExpiresAtNs,
+        serverQueryVersion,
       } = await runHandshake(
         platform,
         framer,
@@ -130,6 +145,7 @@ export class ShamirClient {
         expiresAtNs,
         resumptionTicket,
         resumptionExpiresAtNs,
+        serverQueryVersion,
       );
     } catch (e) {
       await framer.close();
@@ -445,15 +461,22 @@ export class ShamirClient {
       // Convert bigint epochs to numbers for msgpack serialisation. The
       // epoch values are gap-free high-water marks and will fit in a JS
       // safe integer for any realistic number of fields (2^53 fields would
-      // require a universe-sized interner). If they ever exceed
-      // Number.MAX_SAFE_INTEGER, @msgpack/msgpack encodes them as bigint
-      // automatically because we pass them as-is — but the server reads
-      // u64 and both are fine.
-      const wireEpochs: Record<string, bigint> = {};
+      // require a universe-sized interner). The framing encoder
+      // (@msgpack/msgpack) does NOT encode BigInt by default — it throws
+      // "Unrecognized object: [object BigInt]" — so we narrow to Number
+      // here; the server reads u64 and accepts the msgpack uint just fine.
+      const wireEpochs: Record<string, number> = {};
       for (const [repo, e] of Object.entries(epochs)) {
-        wireEpochs[repo] = e;
+        wireEpochs[repo] = Number(e);
       }
-      enrichedBatch['interner_epochs'] = wireEpochs;
+      // Merge with any epochs already present (e.g. from executeWithTouch
+      // which may include epoch-0 cold repos for delta bootstrapping).
+      const existing = enrichedBatch['interner_epochs'] as
+        | Record<string, number>
+        | undefined;
+      enrichedBatch['interner_epochs'] = existing
+        ? { ...existing, ...wireEpochs }
+        : wireEpochs;
     }
 
     const r = await this.sendDbRequest({
@@ -565,6 +588,135 @@ export class ShamirClient {
    */
   get internerCache(): InternerCacheRegistry {
     return this._internerCache;
+  }
+
+  /**
+   * Max query-language version advertised by the server. `0` means pre-v2.
+   */
+  serverQueryVersion(): number {
+    return this._serverQueryVersion;
+  }
+
+  /**
+   * Execute a batch with automatic client-side field interning (Stage 5-wire).
+   *
+   * 1. Collects field names from INSERT/SET/UPDATE ops, grouped by repo.
+   * 2. Touches unknown field names per repo (populates the FieldMap cache).
+   * 3. On v2+ servers: encodes fully-literal INSERT records into id-keyed
+   *    msgpack (`records_idmsgpack`); removes them from `values`. Records
+   *    with `$fn` markers stay on `values` (server-side eval). Sets
+   *    `result_encoding = "id"` so the server returns id-keyed rows.
+   * 4. Calls `execute()`.
+   * 5. De-interns any id-keyed result rows back to name-keyed objects.
+   *
+   * Mirrors the Rust `Client::execute_with_touch`.
+   */
+  async executeWithTouch(db: string, batch: object): Promise<BatchResponse> {
+    const batchObj = batch as Record<string, unknown>;
+    const queries = batchObj['queries'] as
+      | Record<string, Record<string, unknown>>
+      | undefined;
+    if (!queries) {
+      return this.execute(db, batch);
+    }
+
+    // Collect field names per repo (write ops only).
+    const perRepo = new Map<string, string[]>();
+    // Collect ALL repos referenced by any data op (read + write) for
+    // de-interning the response.
+    const allRepos = new Set<string>();
+
+    for (const entry of Object.values(queries)) {
+      collectFieldNames(entry, perRepo);
+      // Extract repo from table-ref for all data ops.
+      const repo = extractRepo(entry);
+      if (repo !== undefined) {
+        allRepos.add(repo);
+      }
+    }
+
+    // Touch each repo's unknown fields. If touch fails (e.g. non-admin user
+    // lacks permission for interner_touch), fall back to plain execute — the
+    // id-on-wire path requires a warm cache so we skip it entirely.
+    let touchOk = true;
+    for (const [repo, names] of perRepo) {
+      const unique = [...new Set(names)].sort();
+      if (unique.length > 0) {
+        try {
+          await this.touchFields(db, repo, unique);
+        } catch {
+          touchOk = false;
+          break;
+        }
+      }
+    }
+
+    if (!touchOk) {
+      // Touch failed — fall back to plain execute (name-keyed, no id-on-wire).
+      return this.execute(db, batch);
+    }
+
+    // Ensure a FieldMap exists for every referenced repo. Explicitly attach
+    // interner_epochs (including epoch-0 cold repos) so the server returns
+    // deltas even for repos the client has never seen before.
+    const wireEpochs: Record<string, number> = {};
+    for (const repo of allRepos) {
+      const fm = this._internerCache.getOrCreate(db, repo);
+      wireEpochs[repo] = Number(fm.epoch());
+    }
+    // Also include any already-warm repos from prior requests.
+    const cached = this._internerCache.allEpochs(db);
+    for (const [repo, e] of Object.entries(cached)) {
+      if (!(repo in wireEpochs)) {
+        wireEpochs[repo] = Number(e);
+      }
+    }
+    if (Object.keys(wireEpochs).length > 0) {
+      batchObj['interner_epochs'] = wireEpochs;
+    }
+
+    // v2 id-keyed write path.
+    if (this._serverQueryVersion >= 2) {
+      for (const entry of Object.values(queries)) {
+        if ('insert_into' in entry && Array.isArray(entry['values'])) {
+          const tableRef = entry['insert_into'];
+          const repo = tableRefToRepo(tableRef);
+          const fm = this._internerCache.getOrCreate(db, repo);
+          const values = entry['values'] as WireValue[];
+          const remaining: WireValue[] = [];
+          const idmsgpackList: Uint8Array[] = [];
+
+          for (const qv of values) {
+            if (qvHasFnMarker(qv)) {
+              remaining.push(qv);
+            } else {
+              const bytes = encodeRecordIdMsgpack(
+                qv as Record<string, WireValue>,
+                fm,
+              );
+              idmsgpackList.push(bytes);
+            }
+          }
+
+          entry['values'] = remaining;
+          if (idmsgpackList.length > 0) {
+            entry['records_idmsgpack'] = idmsgpackList;
+          }
+        }
+      }
+      // Request id-keyed result rows only when no query-ref or sub-batch
+      // dependencies exist — those rely on server-side intermediate results
+      // staying name-keyed for path resolution ($param, queryRef).
+      if (!batchHasRefs(queries)) {
+        batchObj['result_encoding'] = 'id';
+      }
+    }
+
+    const response = await this.execute(db, batch);
+
+    // De-intern id-keyed result rows (no-op when result_encoding was not set).
+    const repos = [...allRepos];
+    return deinternResponse(this._internerCache, db, response, repos);
   }
 
   // ── Interactive (multi-call) transactions ─────────────────────────
@@ -692,4 +844,59 @@ export class ShamirClient {
   async close(): Promise<void> {
     await this.framer.close();
   }
+}
+
+// ── Helpers (module-private) ──────────────────────────────────────────────
+
+/** Extract the repo string from a table-ref wire value. */
+function tableRefToRepo(tableRef: unknown): string {
+  if (Array.isArray(tableRef) && tableRef.length >= 1) {
+    return String(tableRef[0]);
+  }
+  // Bare string = default repo "main".
+  return 'main';
+}
+
+/**
+ * Extract the repo from any data-op entry (INSERT/UPDATE/SET/DELETE/SELECT).
+ * Returns `undefined` for non-data ops.
+ */
+function extractRepo(entry: Record<string, unknown>): string | undefined {
+  if ('insert_into' in entry) return tableRefToRepo(entry['insert_into']);
+  if ('update' in entry) return tableRefToRepo(entry['update']);
+  if ('set' in entry && !('key' in entry)) return undefined; // not a SetOp
+  if ('set' in entry && 'key' in entry) return tableRefToRepo(entry['set']);
+  if ('delete_from' in entry) return tableRefToRepo(entry['delete_from']);
+  if ('from' in entry) {
+    // ReadQuery: { from: table, repo?: string }
+    const repo = entry['repo'];
+    return typeof repo === 'string' ? repo : 'main';
+  }
+  return undefined;
+}
+
+/**
+ * Detect if any query entry contains query-ref (`$query_ref`) or sub-batch
+ * (`batch`) dependencies. When present, the server resolves intermediate
+ * results by name-keyed field paths — requesting `result_encoding = 'id'`
+ * would break those resolutions.
+ */
+function batchHasRefs(
+  queries: Record<string, Record<string, unknown>>,
+): boolean {
+  for (const entry of Object.values(queries)) {
+    if ('batch' in entry) return true;
+    if (hasQueryRef(entry)) return true;
+  }
+  return false;
+}
+
+/** Recursively check if a value contains `{ "$query": ... }` or `{ "$param": ... }`. */
+function hasQueryRef(val: unknown): boolean {
+  if (val === null || val === undefined) return false;
+  if (typeof val !== 'object') return false;
+  if (Array.isArray(val)) return val.some(hasQueryRef);
+  const obj = val as Record<string, unknown>;
+  if ('$query' in obj || '$param' in obj) return true;
+  return Object.values(obj).some(hasQueryRef);
 }

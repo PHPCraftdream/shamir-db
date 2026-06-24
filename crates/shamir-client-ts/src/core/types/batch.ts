@@ -121,6 +121,20 @@ export interface BatchRequest {
    * Backward-compatible: absent → server sends no delta.
    */
   interner_epochs?: Record<string, number | bigint>;
+
+  /**
+   * Id-keyed msgpack-encoded record payloads for INSERT ops (Stage 5-wire).
+   * Set by `executeWithTouch` on v2 servers — field names are replaced by
+   * their interned u64 ids and the record is msgpack-encoded.
+   * Present per query-entry, not at batch level (the entry carries it).
+   */
+  records_idmsgpack?: Uint8Array[];
+
+  /**
+   * Desired result encoding. `"id"` requests id-keyed result rows from the
+   * server (v2+); the client de-interns them transparently.
+   */
+  result_encoding?: 'id' | 'name';
 }
 
 // ── Response types ──────────────────────────────────────────────────

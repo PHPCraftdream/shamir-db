@@ -56,7 +56,7 @@ export class Db {
   ) {}
 
   private get ctx(): ExecCtx {
-    return { exec: (b) => this.client.execute(this.name, b) };
+    return { exec: (b) => this.client.executeWithTouch(this.name, b) };
   }
 
   /**
