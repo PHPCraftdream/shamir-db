@@ -763,6 +763,19 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
             "ref_field".to_string(),
             QueryValue::Str(fk.ref_field.clone()),
         );
+        // Phase D — persist the ON DELETE action so reverse-FK discovery
+        // (RESTRICT / CASCADE / SET NULL) survives the catalogue round-trip.
+        // Mirrors `foreign_key_dto_from_qv` read mapping. NoAction is omitted
+        // so legacy rows (and the common default) stay byte-identical.
+        let on_delete = match fk.on_delete {
+            FkAction::Restrict => Some("restrict"),
+            FkAction::Cascade => Some("cascade"),
+            FkAction::SetNull => Some("set_null"),
+            FkAction::NoAction => None,
+        };
+        if let Some(action) = on_delete {
+            fk_m.insert("on_delete".to_string(), QueryValue::Str(action.to_string()));
+        }
         m.insert("foreign_key".to_string(), QueryValue::Map(fk_m));
     }
 }

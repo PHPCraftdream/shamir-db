@@ -3,6 +3,7 @@
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
@@ -119,25 +120,46 @@ impl ShamirAdminExecutor {
         // Refuse to drop a table that is still referenced by another table's
         // foreign key (any action — Restrict, Cascade, SetNull, NoAction).
         // Dropping a referenced parent would orphan the child FK and leave
-        // dangling references.  The check scans all other tables in the repo
-        // for FK declarations pointing at `op.drop_table`.
+        // dangling references.
+        //
+        // Discovery reads the PERSISTED catalogue schema from the system-store
+        // (not the in-memory `TableManager` binding cache). The admin path's
+        // `DbInstance` and the engine execute-path instance keep independent
+        // in-memory buffers, so a validator binding just written through the
+        // execute-path compile step is not reliably visible on the admin
+        // handle. The catalogue is the coherent source of truth — every
+        // `set_table_schema` commits the FK there before this guard runs.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             let table_names = db.list_tables(&op.repo).unwrap_or_default();
             for name in &table_names {
                 if name == &op.drop_table {
                     continue;
                 }
-                let child_table = match db.get_table(&op.repo, name).await {
-                    Ok(t) => t,
-                    Err(_) => continue,
+                let rec = match self
+                    .shamir
+                    .system_store()
+                    .load_table_record(&self.db_name, &op.repo, name)
+                    .await
+                {
+                    Ok(Some(r)) => r,
+                    _ => continue,
                 };
-                for (_field_path, fk) in child_table.collect_fk_refs() {
-                    if fk.ref_table == op.drop_table {
+                let rules = match rec.get(SCHEMA_FIELD) {
+                    Some(QueryValue::List(rules)) => rules,
+                    _ => continue,
+                };
+                for rule in rules {
+                    let refs_drop = rule
+                        .get("foreign_key")
+                        .and_then(|fk| fk.get("ref_table"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|rt| rt == op.drop_table);
+                    if refs_drop {
                         return Err(err_code(
                             "drop_refused_fk",
                             format!(
-                                "cannot drop table '{}': still referenced by foreign key in '{}.{}'",
-                                op.drop_table, name, _field_path.join(".")
+                                "cannot drop table '{}': still referenced by a foreign key in '{}'",
+                                op.drop_table, name
                             ),
                         ));
                     }
