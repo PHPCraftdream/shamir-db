@@ -43,14 +43,26 @@ export interface CompareDto {
  * Mirrors `ConstraintsDto` in `schema_ops.rs` — all `skip_serializing_if`.
  */
 /**
+ * Foreign-key ON DELETE action (`FkAction`, `rename_all = "snake_case"`).
+ * The serde default is `no_action` (backward-compat for persisted schemas);
+ * the *builder* default for new FKs is `restrict`.
+ */
+export type FkAction = 'no_action' | 'restrict' | 'cascade' | 'set_null';
+
+/**
  * Foreign-key reference descriptor (wire form).
  * Mirrors `ForeignKeyDto` in `schema_ops.rs`.
+ * `on_delete` is `#[serde(default, skip_serializing_if = "FkAction::is_no_action")]`
+ * — it is omitted from the wire when `no_action`; the builder always sets
+ * a non-default value (default `restrict`).
  */
 export interface ForeignKeyDto {
   /** The parent table name (flat, same repo). */
   ref_table: string;
   /** The field in the parent table that must contain the referenced value. */
   ref_field: string;
+  /** ON DELETE action; omitted from wire when `no_action`. */
+  on_delete?: FkAction;
 }
 
 export interface ConstraintsDto {

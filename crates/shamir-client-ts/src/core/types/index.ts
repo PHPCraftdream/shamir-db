@@ -58,6 +58,7 @@ export type {
   NumDto,
   ConstraintsDto,
   ForeignKeyDto,
+  FkAction,
   FieldRuleDto,
   SetTableSchemaOp,
   AddSchemaRuleOp,
