@@ -63,6 +63,12 @@ export interface HandshakeResult {
   /** Optional resumption ticket for fast reconnection (if server issued one). */
   resumptionTicket?: Uint8Array;
   resumptionExpiresAtNs?: bigint;
+  /**
+   * Max query-language version this server supports. `0` means the server
+   * predates query-lang negotiation (pre-v2). Positional index 7 in the
+   * AuthOk array.
+   */
+  serverQueryVersion: number;
 }
 
 /**
@@ -171,5 +177,9 @@ export async function runHandshake(
       ? BigInt(okRaw[6] as number | bigint)
       : undefined;
 
-  return { sessionId, serverPubKey, expiresAtNs, resumptionTicket, resumptionExpiresAtNs };
+  // Positional index 7: server_query_version (u8, default 0).
+  const serverQueryVersion =
+    typeof okRaw[7] === 'number' ? okRaw[7] : 0;
+
+  return { sessionId, serverPubKey, expiresAtNs, resumptionTicket, resumptionExpiresAtNs, serverQueryVersion };
 }

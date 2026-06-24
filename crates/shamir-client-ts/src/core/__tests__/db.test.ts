@@ -51,6 +51,15 @@ function fakeClient(captured: Captured[]) {
         execution_time_us: 0,
       };
     },
+    executeWithTouch: async (db: string, batch: object): Promise<BatchResponse> => {
+      captured.push({ db, batch });
+      return {
+        id: ((batch as { id?: unknown }).id ?? 1) as WireValue,
+        results: { _: okResult },
+        execution_plan: [],
+        execution_time_us: 0,
+      };
+    },
     txBegin: async (): Promise<import('../client.js').TxOpened> => ({
       tx_handle: 0,
       snapshot_version: 0,
@@ -273,7 +282,7 @@ describe('Db handle (unit)', () => {
 
     const resp = await Batch.create('l1-test')
       .add('q', Query.from('t'))
-      .execute({ execute: fc.execute } as unknown as import('../client.js').ShamirClient, 'l1_db');
+      .execute({ execute: fc.execute, executeWithTouch: fc.executeWithTouch } as unknown as import('../client.js').ShamirClient, 'l1_db');
 
     expect(captured.length).toBe(1);
     expect(captured[0].db).toBe('l1_db');
@@ -351,6 +360,7 @@ describe('Db handle (unit)', () => {
       router,
       client: {
         execute: async (_db: string, _batch: object): Promise<BatchResponse> => resp,
+        executeWithTouch: async (_db: string, _batch: object): Promise<BatchResponse> => resp,
         get subscriptions(): SubscriptionRouter {
           return router;
         },
@@ -397,6 +407,7 @@ describe('Db handle (unit)', () => {
     };
     const client = {
       execute: async (): Promise<BatchResponse> => resp,
+      executeWithTouch: async (): Promise<BatchResponse> => resp,
       get subscriptions(): SubscriptionRouter {
         return router;
       },
@@ -447,6 +458,10 @@ describe('Db.tx() (unit)', () => {
     return {
       execute: async (db: string, batch: object): Promise<BatchResponse> => {
         calls.push({ method: 'execute', args: [db, batch] });
+        return okBatchResponse;
+      },
+      executeWithTouch: async (db: string, batch: object): Promise<BatchResponse> => {
+        calls.push({ method: 'executeWithTouch', args: [db, batch] });
         return okBatchResponse;
       },
       txBegin: async (
@@ -617,13 +632,15 @@ describe('Db.tx() (unit)', () => {
 describe('Db.run edge cases', () => {
   /** Fake client whose execute returns a BatchResponse with NO `_` result. */
   function emptyResultClient() {
+    const resp: BatchResponse = {
+      id: 1 as WireValue,
+      results: {},
+      execution_plan: [],
+      execution_time_us: 0,
+    };
     return {
-      execute: async (): Promise<BatchResponse> => ({
-        id: 1 as WireValue,
-        results: {},
-        execution_plan: [],
-        execution_time_us: 0,
-      }),
+      execute: async (): Promise<BatchResponse> => resp,
+      executeWithTouch: async (): Promise<BatchResponse> => resp,
     } as unknown as import('../client.js').ShamirClient;
   }
 

@@ -40,6 +40,7 @@ const DEFAULT_LIMITS: BatchLimits = {
 /** Minimal client interface needed by `.execute()`. */
 interface BatchClient {
   execute(db: string, batch: object): Promise<BatchResponse>;
+  executeWithTouch(db: string, batch: object): Promise<BatchResponse>;
 }
 
 /** Fluent builder for a `BatchRequest`. */
@@ -223,11 +224,12 @@ export class Batch {
   }
 
   /**
-   * Build and send the batch via `client.execute(db, batch)`, which unwraps
-   * the `DbResponse::Batch` envelope and returns the {@link BatchResponse}.
+   * Build and send the batch via `client.executeWithTouch(db, batch)`, which
+   * handles smart-write (id-on-wire) transparently on v2 servers and falls
+   * back to plain execute on v1.
    */
   execute(client: BatchClient, db: string): Promise<BatchResponse> {
-    return client.execute(db, this.build());
+    return client.executeWithTouch(db, this.build());
   }
 
   /** @internal Bind an execution context (set by `Db.batch()`). */
