@@ -9,7 +9,7 @@ use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, ReadQuery};
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::table_manager::TableManager;
 
@@ -437,6 +437,65 @@ impl TableManager {
 
         Some((def.name_interned, take, skip, item.direction))
     }
+
+    /// Eligibility check for the keyset-seek (Pagination::After) fast path.
+    ///
+    /// Returns `Some((index_name, encoded_key, limit, direction))` when the
+    /// query shape matches the ORDER BY + LIMIT K fast path AND additionally
+    /// carries `Pagination::After { key: [single_value], limit }`.
+    ///
+    /// MVP: only single-column seek keys are supported (key.len() == 1).
+    /// Multi-element keys return `None` so the query falls through to the
+    /// full-scan path (correct, just not optimised).
+    pub fn try_plan_keyset_seek(
+        &self,
+        query: &ReadQuery,
+        interner: &Interner,
+    ) -> Option<(
+        u64,
+        Vec<u8>,
+        usize,
+        shamir_query_types::read::OrderDirection,
+    )> {
+        // Same shape guards as the ORDER BY + LIMIT K fast path.
+        if query.r#where.is_some()
+            || query.group_by.is_some()
+            || query.select.distinct
+            || query.count_total
+            || exec::has_aggregates(&query.select)
+        {
+            return None;
+        }
+        let order_by = query.order_by.as_ref()?;
+        if order_by.items.len() != 1 {
+            return None;
+        }
+        let item = &order_by.items[0];
+
+        // Must be keyset pagination.
+        let (key, limit_opt) = query.pagination.keyset()?;
+        // MVP: single-column seek key only.
+        if key.len() != 1 {
+            return None;
+        }
+        let limit = limit_opt? as usize;
+        if limit == 0 {
+            return None;
+        }
+
+        // Sorted index must cover the order_by field.
+        let mgr = self.sorted_indexes();
+        if !mgr.has_indexes() {
+            return None;
+        }
+        let field_path = intern_field_path(&item.field, interner)?;
+        let def = mgr.find_by_field(&field_path)?;
+
+        // Encode the single seek value.
+        let encoded_key = encode_query_value_for_sort(&key[0])?;
+
+        Some((def.name_interned, encoded_key, limit, item.direction))
+    }
 }
 
 /// Encode a scalar `FilterValue` with `sort_codec` so range bounds
@@ -451,6 +510,23 @@ pub(super) fn encode_filter_value_for_sort(value: &FilterValue) -> Option<Vec<u8
         FilterValue::Bool(b) => sort_codec::encode_bool(&mut buf, *b),
         FilterValue::Null => sort_codec::encode_null(&mut buf),
         FilterValue::Binary(b) => sort_codec::encode_bytes(&mut buf, b),
+        _ => return None,
+    }
+    Some(buf)
+}
+
+/// Encode a scalar `QueryValue` with `sort_codec` — the keyset-seek
+/// analogue of `encode_filter_value_for_sort`. Returns `None` for
+/// values that can't be indexed (NaN floats, Dec/Big/List/Set/Map).
+pub(super) fn encode_query_value_for_sort(value: &QueryValue) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    match value {
+        QueryValue::Int(i) => sort_codec::encode_i64(&mut buf, *i),
+        QueryValue::F64(f) => sort_codec::encode_f64(&mut buf, *f).ok()?,
+        QueryValue::Str(s) => sort_codec::encode_str(&mut buf, s),
+        QueryValue::Bool(b) => sort_codec::encode_bool(&mut buf, *b),
+        QueryValue::Null => sort_codec::encode_null(&mut buf),
+        QueryValue::Bin(b) => sort_codec::encode_bytes(&mut buf, b),
         _ => return None,
     }
     Some(buf)
