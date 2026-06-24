@@ -407,7 +407,7 @@ impl TableManager {
     ///
     /// Used by [`delete_tx`] to feed index planners via a zero-copy
     /// `RecordView` lens instead of a decoded `InnerValue` tree.
-    pub(super) async fn read_one_tx_bytes(
+    pub(crate) async fn read_one_tx_bytes(
         &self,
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,

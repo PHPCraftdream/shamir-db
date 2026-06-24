@@ -199,4 +199,17 @@ impl RecordValidator for SchemaValidator {
     fn fk_refs(&self) -> Vec<(Vec<String>, super::ForeignKeyRef)> {
         self.collect_fk_refs()
     }
+
+    fn nullable_for_field(&self, field: &str) -> Option<bool> {
+        // Match single-segment fields directly; for multi-segment paths,
+        // compare the dot-joined form.
+        self.rules.iter().find_map(|r| {
+            let matches = r.path.len() == 1 && r.path[0] == field;
+            if matches {
+                Some(r.constraints.nullable)
+            } else {
+                None
+            }
+        })
+    }
 }

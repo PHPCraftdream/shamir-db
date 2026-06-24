@@ -21,6 +21,13 @@ impl TableManager {
         self.validator_bindings.load_full()
     }
 
+    /// Borrow the global validator registry wired into this table, if any.
+    /// `None` for system tables / tables without validators. Used by Phase D.2
+    /// (SET NULL nullable enforcement) to inspect `SchemaValidator` rules.
+    pub fn validator_registry_ref(&self) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
+        self.validator_registry.as_ref()
+    }
+
     /// Append (or replace if same `validator_id`) a validator binding,
     /// persist to the info-twin, and swap the in-memory snapshot.
     ///

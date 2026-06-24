@@ -565,15 +565,40 @@ impl<'a> QueryRunner<'a> {
                 )
                 .await?;
 
+                // Phase D.2 — ON DELETE CASCADE + SET NULL.
+                //
+                // Build the cascade/setnull plan BEFORE the tx closure (the
+                // resolver cannot be captured into the HRTB closure — same
+                // constraint as the RESTRICT gate). The plan is owned data
+                // (pre-resolved child TableManager handles + parent values);
+                // the full cascade tree (including grandchildren) is resolved
+                // at planning time so no resolver is needed inside the tx.
+                let cascade_plan = super::fk_actions::plan_cascade(
+                    self.resolver,
+                    table_ref,
+                    &table,
+                    &op.where_clause,
+                    &ctx,
+                    alias,
+                )
+                .await?;
+
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table
-                        .execute_delete_tx(op, &ctx, tx, Some(self.resolver))
-                        .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: None,
-                        })?,
+                    Some(tx) => {
+                        // Apply cascade/setnull inside the explicit tx BEFORE
+                        // the parent delete (child rows reference parent values,
+                        // not parent row existence at mutation time; ordering
+                        // is cleaner this way).
+                        super::fk_actions::apply_cascade_plan(cascade_plan, tx, alias).await?;
+                        table
+                            .execute_delete_tx(op, &ctx, tx, Some(self.resolver))
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?
+                    }
                     // F4b-3: "everything is a transaction" — a non-tx delete
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1 and UPDATE in F4b-2).
@@ -592,8 +617,23 @@ impl<'a> QueryRunner<'a> {
                         let owned_refs = resolved_refs.clone();
                         let owned_params = self.params.clone();
                         let owned_actor = self.actor.clone();
+                        let owned_alias = alias.to_string();
                         repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
+                                // Apply cascade/setnull inside the implicit tx
+                                // BEFORE the parent delete. The plan carries
+                                // pre-resolved child handles (no resolver needed
+                                // inside the closure).
+                                super::fk_actions::apply_cascade_plan(
+                                    cascade_plan,
+                                    tx,
+                                    &owned_alias,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    shamir_storage::error::DbError::Validation(e.to_string())
+                                })?;
+
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
                                     .with_actor(owned_actor)

@@ -761,7 +761,7 @@ impl TableManager {
     ///
     /// The record MUST already exist (this is an update, not an upsert);
     /// `old_bytes` is the committed storage bytes the caller matched.
-    pub(super) async fn update_tx_bytes(
+    pub(crate) async fn update_tx_bytes(
         &self,
         id: RecordId,
         old_bytes: &Bytes,

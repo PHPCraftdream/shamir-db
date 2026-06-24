@@ -113,6 +113,38 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // Phase D.3 — reverse-FK drop guard.
+        //
+        // Refuse to drop a table that is still referenced by another table's
+        // foreign key (any action — Restrict, Cascade, SetNull, NoAction).
+        // Dropping a referenced parent would orphan the child FK and leave
+        // dangling references.  The check scans all other tables in the repo
+        // for FK declarations pointing at `op.drop_table`.
+        if let Some(db) = self.shamir.get_db(&self.db_name) {
+            let table_names = db.list_tables(&op.repo).unwrap_or_default();
+            for name in &table_names {
+                if name == &op.drop_table {
+                    continue;
+                }
+                let child_table = match db.get_table(&op.repo, name).await {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                for (_field_path, fk) in child_table.collect_fk_refs() {
+                    if fk.ref_table == op.drop_table {
+                        return Err(err_code(
+                            "drop_refused_fk",
+                            format!(
+                                "cannot drop table '{}': still referenced by foreign key in '{}.{}'",
+                                op.drop_table, name, _field_path.join(".")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         let removed = self
             .shamir
             .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)

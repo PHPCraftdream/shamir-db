@@ -165,4 +165,14 @@ pub trait RecordValidator: Send + Sync {
     fn fk_refs(&self) -> Vec<(Vec<String>, super::schema::ForeignKeyRef)> {
         Vec::new()
     }
+
+    /// Whether the validator declares `field` as nullable.
+    ///
+    /// Returns `None` if this validator has no rule for `field`; the caller
+    /// continues searching other validators.  Only [`SchemaValidator`]
+    /// overrides this (Phase D.2 — SET NULL nullable enforcement).  The
+    /// default returns `None` (no opinion → caller fails closed).
+    fn nullable_for_field(&self, _field: &str) -> Option<bool> {
+        None
+    }
 }
