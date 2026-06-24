@@ -14,6 +14,7 @@ pub mod index2_persistence_tests;
 pub mod index_scan_tests;
 pub mod insert_tx_tests;
 pub mod interner_manager_tests;
+pub mod keyset_seek_tests;
 pub mod persistence_tests;
 pub mod read_one_tx_tests;
 pub mod record_counter_tests;

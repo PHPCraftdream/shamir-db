@@ -17,7 +17,7 @@ use shamir_storage::error::DbResult;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::read_exec::{
     apply_select_value_bytes, try_project_page_only, try_project_page_only_bytes,
@@ -423,11 +423,105 @@ impl TableManager {
         })
     }
 
-    /// (helper)
-    /// Encode a FilterValue scalar into sort-stable bytes. Returns
-    /// None for values we can't index (NaN, Null, arrays, maps).
-    /// kept inside this impl block as a free fn via `fn encode_*`
-    /// below.
+    /// Execute the keyset-seek (Pagination::After) fast path.
+    ///
+    /// Uses the sorted index to fetch all record IDs in the half-plane
+    /// beyond the seek key (inclusive boundary from `lookup_range`),
+    /// then excludes rows whose ORDER BY value equals the seek value
+    /// (exclusive semantics), sorts by ORDER BY direction, and takes
+    /// `limit`.
+    ///
+    /// ASC  → lower bound = seek key, upper = open; strictly greater.
+    /// DESC → lower = open, upper bound = seek key; strictly less.
+    #[allow(clippy::too_many_arguments)] // read-path parameters mirror query plan fields
+    pub(super) async fn read_keyset_seek(
+        &self,
+        query: &ReadQuery,
+        _ctx: &FilterContext<'_>,
+        interner: &Interner,
+        index_name: u64,
+        encoded_key: &[u8],
+        limit: usize,
+        direction: shamir_query_types::read::OrderDirection,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        use shamir_query_types::read::OrderDirection;
+
+        // Build the inclusive half-plane range and collect record IDs.
+        // ASC  → [seek_key, +∞)   (we'll drop rows == seek_key below)
+        // DESC → (-∞, seek_key]   (ditto)
+        let (lower, upper) = match direction {
+            OrderDirection::Asc => (Some(encoded_key), None),
+            OrderDirection::Desc => (None, Some(encoded_key)),
+        };
+
+        let record_ids = self
+            .sorted_indexes()
+            .lookup_range(index_name, lower, upper)
+            .await?;
+
+        let id_vec: Vec<RecordId> = record_ids.into_iter().collect();
+
+        // Fetch record bytes.
+        let raw = self.get_many_bytes(&id_vec).await?;
+
+        // Extract the seek value from the pagination DTO for the
+        // exclusivity filter. The planner guarantees key.len() == 1.
+        let seek_qv = query
+            .pagination
+            .keyset()
+            .and_then(|(key, _)| key.first())
+            .cloned();
+
+        // Determine the ORDER BY field name for value extraction.
+        let order_field: Option<&str> = query
+            .order_by
+            .as_ref()
+            .and_then(|ob| ob.items.first())
+            .and_then(|item| item.field.first())
+            .map(|s| s.as_str());
+
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
+        for (id, opt) in id_vec.iter().zip(raw) {
+            if let Some(bytes) = opt {
+                matched.push((*id, bytes));
+            }
+        }
+
+        // Project to QueryValue, exclude rows whose value equals the seek
+        // value (exclusive bound), then sort + truncate.
+        let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
+
+        // Exclusive filter: drop rows whose ORDER BY value matches the seek key.
+        if let (Some(seek), Some(field)) = (seek_qv.as_ref(), order_field) {
+            result_qv.retain(|qv| extract_qv_field(qv, field) != Some(seek));
+        }
+
+        // Sort by ORDER BY direction (the index returned IDs unordered by value
+        // since lookup_range returns a BTreeSet<RecordId>).
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by_qv(&mut result_qv, order_by);
+        }
+
+        // Truncate to limit.
+        result_qv.truncate(limit);
+
+        let records_scanned = matched.len() as u64;
+        let records_returned = result_qv.len() as u64;
+        let result: Vec<QueryRecord> = result_qv.into_iter().map(QueryRecord::Direct).collect();
+
+        Ok(QueryResult {
+            records: result,
+            stats: Some(QueryStats {
+                index_used: Some(format!("sorted_idx_{index_name}_keyset")),
+                records_scanned,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            }),
+            pagination: exec::fast_path_pagination(&query.pagination),
+            value: None,
+        })
+    }
     ///
     /// Index scan path: fetch records by index, apply residual filter + pipeline.
     ///
@@ -614,4 +708,10 @@ impl TableManager {
             })
         }
     }
+}
+
+/// Extract a top-level field from a `QueryValue::Map` row.
+/// Returns `None` for non-map rows or missing keys.
+fn extract_qv_field<'a>(row: &'a QueryValue, field: &str) -> Option<&'a QueryValue> {
+    row.get(field)
 }

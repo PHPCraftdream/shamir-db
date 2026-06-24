@@ -503,6 +503,33 @@ impl TableManager {
             }
         }
 
+        // Opt #6b — sorted-index keyset-seek (Pagination::After) fast path.
+        //
+        // When the query carries `Pagination::After { key: [v], limit }`
+        // and matches the ORDER BY single-column shape, use the sorted
+        // index to seek directly past the key. Mirrors #6 but with a
+        // bounded range lookup instead of first_k / last_k.
+        //
+        // Checked BEFORE #6 because `Pagination::After` also resolves to
+        // a finite (skip=0, take=limit) pair — without this ordering the
+        // generic ORDER BY + LIMIT path would shadow the seek.
+        if let Some((idx_name, encoded_key, limit, direction)) =
+            self.try_plan_keyset_seek(query, interner)
+        {
+            return self
+                .read_keyset_seek(
+                    query,
+                    ctx,
+                    interner,
+                    idx_name,
+                    &encoded_key,
+                    limit,
+                    direction,
+                    start,
+                )
+                .await;
+        }
+
         // Opt #6 — sorted-index ORDER BY field ASC LIMIT K fast path.
         //
         // When the query is exactly `ORDER BY field ASC LIMIT K` (or
