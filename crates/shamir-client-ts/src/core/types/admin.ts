@@ -108,7 +108,7 @@ export interface ChmodOp {
 
 export interface ChownOp {
   chown: ResourceRef;
-  owner: number;
+  owner: number | bigint;
 }
 
 /**
@@ -130,12 +130,12 @@ export interface DropGroupOp {
 
 export interface AddGroupMemberOp {
   add_group_member: GroupRef;
-  user: number;
+  user: number | bigint;
 }
 
 export interface RemoveGroupMemberOp {
   remove_group_member: GroupRef;
-  user: number;
+  user: number | bigint;
 }
 
 /**

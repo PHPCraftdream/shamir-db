@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { admin } from '../admin.js';
+import { principalId } from '../../principal-id.js';
 import type { Action } from '../../types/admin.js';
 import {
   canonicalDropUser,
@@ -142,12 +143,29 @@ describe('chmod', () => {
 });
 
 describe('chown', () => {
-  it('emits {chown: ResourceRef, owner}', () => {
+  it('emits {chown: ResourceRef, owner} with number', () => {
     const op = admin.chown(admin.refDatabase('mydb'), 7);
     expect(op).toEqual({
       chown: { database: 'mydb' },
       owner: 7,
     });
+  });
+
+  it('accepts bigint owner', () => {
+    const op = admin.chown(admin.refDatabase('mydb'), 42n);
+    expect(op).toEqual({
+      chown: { database: 'mydb' },
+      owner: 42n,
+    });
+  });
+
+  it('accepts string username and hashes to principalId', () => {
+    const op = admin.chown(admin.refDatabase('mydb'), 'alice');
+    expect(op).toEqual({
+      chown: { database: 'mydb' },
+      owner: principalId('alice'),
+    });
+    expect(typeof op.owner).toBe('bigint');
   });
 });
 
@@ -188,12 +206,21 @@ describe('dropGroup', () => {
 });
 
 describe('addGroupMember', () => {
-  it('emits {add_group_member: GroupRef, user}', () => {
+  it('emits {add_group_member: GroupRef, user} with number', () => {
     const op = admin.addGroupMember(admin.groupName('devs'), 42);
     expect(op).toEqual({
       add_group_member: { name: 'devs' },
       user: 42,
     });
+  });
+
+  it('accepts string username and hashes to principalId', () => {
+    const op = admin.addGroupMember(admin.groupName('devs'), 'bob');
+    expect(op).toEqual({
+      add_group_member: { name: 'devs' },
+      user: principalId('bob'),
+    });
+    expect(typeof op.user).toBe('bigint');
   });
 });
 

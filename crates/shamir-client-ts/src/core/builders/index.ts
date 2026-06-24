@@ -14,8 +14,28 @@
 export * from './filter.js';
 export * from './select.js';
 export * from './write.js';
-export * from './ddl.js';
+export {
+  currentOnly, olderThan, olderThanAge,
+  FieldBuilder,
+  createDb, createRepo, createTable, createIndex,
+  setTableSchema, addSchemaRule, removeSchemaRule, getTableSchema,
+  setBufferConfig, getBufferConfig, alterBufferConfig,
+  migrationStatus,
+  createFunction, dropFunction, renameFunction,
+  createValidator, dropValidator, renameValidator,
+  bindValidator, unbindValidator, listValidators,
+  createFunctionFolder,
+  setRetention, purgeHistory, changesSince,
+  listDatabases, listRepos, listTables, listIndexes,
+  listUsers, listRoles, listFunctions, listValidators_, listFunctionFolders,
+  dropDb, dropRepo, dropTable, dropIndex,
+  startMigration, commitMigration, rollbackMigration,
+  ddl,
+  // `field` is NOT re-exported here — it collides with select.field.
+  // Use `ddl.field(...)` or import directly from './ddl.js'.
+} from './ddl.js';
 export * from './admin.js';
+export { principalId } from '../principal-id.js';
 export * from './query.js';
 export * from './call.js';
 export * from './batch.js';
