@@ -224,6 +224,26 @@ impl FieldBuilder {
         self
     }
 
+    /// Phase D — foreign-key reference with an explicit `ON DELETE` action.
+    ///
+    /// Like [`foreign_key`](Self::foreign_key) but lets the caller choose the
+    /// referential action applied when a referenced parent row is deleted
+    /// (`Restrict` / `Cascade` / `SetNull` / `NoAction`). Mirrors the TS
+    /// builder's `foreignKey(table, field, { onDelete })`.
+    pub fn foreign_key_on_delete(
+        mut self,
+        ref_table: impl Into<String>,
+        ref_field: impl Into<String>,
+        on_delete: FkAction,
+    ) -> Self {
+        self.constraints.foreign_key = Some(ForeignKeyDto {
+            ref_table: ref_table.into(),
+            ref_field: ref_field.into(),
+            on_delete,
+        });
+        self
+    }
+
     /// Finalize into a [`FieldRuleDto`].
     pub fn build(self) -> FieldRuleDto {
         FieldRuleDto {
