@@ -965,3 +965,42 @@ fn test_kitchen_sink() {
         }),
     );
 }
+
+// ── keyset (seek) pagination ───────────────────────────────────────
+
+#[test]
+fn test_after_with_limit() {
+    let rq = Query::from("users")
+        .order_by_asc("score")
+        .after(
+            vec![shamir_types::types::value::QueryValue::Int(30)],
+            Some(2),
+        )
+        .build();
+    assert_wire(
+        rq,
+        mpack!({
+            "from": "users",
+            "select": {"items": [{"type": "all"}], "distinct": false},
+            "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
+            "pagination": {"mode": "After", "key": [30_i64], "limit": 2}
+        }),
+    );
+}
+
+#[test]
+fn test_after_without_limit_omits_limit_key() {
+    let rq = Query::from("users")
+        .order_by_asc("score")
+        .after(vec![shamir_types::types::value::QueryValue::Int(30)], None)
+        .build();
+    assert_wire(
+        rq,
+        mpack!({
+            "from": "users",
+            "select": {"items": [{"type": "all"}], "distinct": false},
+            "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
+            "pagination": {"mode": "After", "key": [30_i64]}
+        }),
+    );
+}

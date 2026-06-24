@@ -3,6 +3,7 @@ use shamir_query_types::read::{
     At, GroupBy, OrderBy, OrderByItem, OrderDirection, Pagination, ReadQuery, Select, Temporal,
 };
 use shamir_query_types::TableRef;
+use shamir_types::types::value::QueryValue;
 
 use crate::filter::{self as f};
 use crate::val::IntoFieldPath;
@@ -178,6 +179,21 @@ impl Query {
             page,
             page_size: size,
         };
+        self
+    }
+
+    /// Keyset (seek) pagination: return up to `limit` rows ordered strictly
+    /// after the seek tuple `key`.
+    ///
+    /// `key` is an ordered tuple with one [`QueryValue`] per ORDER BY column
+    /// (typically the last row's values from the previous page). `limit`
+    /// caps the page size (`None` = server default).
+    ///
+    /// The seek is **strictly greater** (ASC) or **strictly less** (DESC) than
+    /// `key` — rows matching the seek tuple are excluded, so pages never
+    /// overlap.
+    pub fn after(mut self, key: Vec<QueryValue>, limit: Option<u64>) -> Self {
+        self.pagination = Pagination::after(key, limit);
         self
     }
 
