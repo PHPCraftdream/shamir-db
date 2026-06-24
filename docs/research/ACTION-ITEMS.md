@@ -11,6 +11,10 @@
   (claim отчёта, мной не перепроверен).
 - **Объём** — грубая оценка (S / M / L).
 
+> **Это список ОСТАВШЕЙСЯ работы.** Уже выполненное вынесено в `DONE.md`
+> (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, A3-DropTable) и здесь
+> не повторяется.
+
 > Принцип проекта (`docs/roadmap/PLAN.md` §3): OQL/DDL — object-native, не SQL.
 > Поэтому часть «пробелов» зрелых СУБД (JOIN, CTE, window, текстовый фронтенд)
 > — **намеренно вне скоупа**, а не недоделка. Они вынесены в §G отдельно как
@@ -22,24 +26,7 @@
 
 Эти пункты — про молчаливые дыры инвариантов и доступа.
 
-### A1. ~~FK/unique fail-open под autocommit~~ — ЛОЖНАЯ ТРЕВОГА (НЕ P0)
-> **ПЕРЕСМОТРЕНО 2026-06-24 (зелёный фактчек кода).** Этот пункт был построен
-> на **устаревших комментариях** в `schema_validator.rs`. После прямой проверки
-> рантайма — **бага в продакшене нет**.
-- **Что оказалось:** `execute_insert_tx` ВСЕГДА передаёт `Some(tx)` валидаторам
-  (`write_exec.rs:176`) → `ctx.db()==Some` и под autocommit. `unique`
-  (`exists_in_self`) **не требует** resolver → работает всегда. Сервер
-  оборачивает каждый батч в tx-контекст → берётся tx-mode ветка с
-  `Some(self.resolver)` (`query_runner.rs:494`), не autocommit-ветка `None`
-  (`:449`) → FK тоже enforced.
-- **Доказательство:** зелёные e2e `foreign_key: autocommit also enforces FK` и
-  `unique: autocommit also enforces unique` (`e2e-schema-validators.test.ts:605/775`).
-- **Что реально осталось (НЕ P0):** латентная непоследовательность — сырой
-  engine implicit-путь (`query_runner.rs:449/526`) даёт `resolver:None`;
-  defense-in-depth, **не дыра данных**. Закрывается заодно в Phase D.1.
-- **Урок:** провалена верификация по комментариям вместо рантайма — и в
-  отчётах, и в `REVIEW.md`/`META-REVIEW.md`. Комментарии исправлены (коммит
-  `0d3fd13`).
+> A1 (FK/unique fail-open) снят как ложная тревога — см. `DONE.md`.
 
 ### A2. Открытые access-дефолты (`0o777`, owner=System), гейт не везде ✅ verified
 - **Источник:** `completeness-ddl.md` G10 (назван ship-blocker).
@@ -52,15 +39,13 @@
   заведён).
 - **Объём:** L. Блокер для любого multi-tenant деплоя.
 
-### A3. Дропы без referential-guard ✅ partial / 📄
+### A3. `DropFunction` без referential-guard (остаток) 📄
 - **Источник:** `completeness-ddl.md` G3.
-- **Факт:** `DropValidator` отказывает при `bound_in≠∅` (хорошо). Но `DropTable`
-  не отказывает, если на неё ссылается чужой FK-rule; `DropFunction` не
-  отказывает, если функция привязана как валидатор. (claim про DropValidator я
-  пометил «не перепроверял» вслед за REVIEW.)
-- **Что сделать:** симметричные guard-проверки на дроп таблицы/функции; либо
-  `cascade`, либо `restrict`-отказ.
-- **Объём:** M.
+- **Сделано:** `DropTable` теперь отказывает под живым FK (`drop_refused_fk`) —
+  Phase D.3, см. `DONE.md`. `DropValidator` уже отказывает при `bound_in≠∅`.
+- **Остаток:** `DropFunction` не отказывает, если функция привязана как
+  валидатор — добавить симметричный guard (`cascade`/`restrict`-отказ).
+- **Объём:** S-M.
 
 ---
 
@@ -68,12 +53,8 @@
 
 Места, где клиент не может выразить то, что умеет движок/wire. Все ✅ verified.
 
-### B1. Rust `Batch`: нет сеттеров `result_encoding` / `interner_epochs` ✅
-- **Источник:** `coverage-rust-query-builder.md` #36/#37.
-- **Факт:** `batch/batch.rs:628` хардкодит `ResultEncoding::default()`; сеттера
-  нет. v2 id-keyed pass-through (перф-путь) недоступен из билдера.
-- **Сделать:** chainable `.result_encoding(enc)` + `.interner_epochs(map)`.
-- **Объём:** S (тривиально). **Самый дешёвый перф-relevant пункт.**
+> B1 (`result_encoding`/`interner_epochs`) и B3 (`$expr`/`$cond`) — сделаны,
+> см. `DONE.md`. Заодно добавлен `FieldBuilder::foreign_key_on_delete()`.
 
 ### B2. Rust `FieldBuilder`: нет `.one_of()` ✅
 - **Источник:** `coverage-rust-query-builder.md` #26 (TS его уже имеет — `ddl.ts:621`).
@@ -81,14 +62,6 @@
   на wire есть (`schema_ops.rs:65`), сеттера в билдере нет.
 - **Сделать:** `.one_of(values)` в `ddl/schema.rs::FieldBuilder` (паритет с TS).
 - **Объём:** S.
-
-### B3. Rust: нет конструкторов `FilterExpr` (`$expr`) / `Cond` (`$cond`) ✅
-- **Источник:** `coverage-rust-query-builder.md` #26/#27 (HIGH в его gap-list).
-- **Факт:** `val/filter_value.rs` заканчивается на `qref_all()`; обёрток нет.
-  TS их уже имеет (`filter.expr()`/`filter.cond()`) — Rust отстаёт.
-- **Сделать:** `val::expr(op,args)` + удобные обёртки (`add/concat/…`),
-  `val::cond(if,then,else)`.
-- **Объём:** M (богатое под-API: 18 операторов).
 
 ### B4. Rust `InsertOp.records_idmsgpack` не выставлен ✅
 - **Источник:** `coverage-rust-query-builder.md` #30.
@@ -155,14 +128,7 @@
 
 ## D. Эволюция OQL — реальные кандидаты (P2)
 
-### D1. Keyset / cursor-пагинация (DTO-surface) ✅ engine-ready
-- **Источник:** `completeness-oql.md` H3 — назван «самой дешёвой high-impact
-  победой».
-- **Факт:** движок уже умеет sorted-index seek (`read_planner.rs:403`
-  `try_plan_order_limit_fast_path`). Не хватает только DTO-поверхности
-  (`Pagination::After(key)`); сейчас только offset-пагинация → deep-page O(offset).
-- **Сделать:** добавить `After(keyset)`-вариант в `Pagination` + план seek.
-- **Объём:** M. **Лучший ROI в языке: машинерия есть, нужен только surface.**
+> D1 (keyset/cursor-пагинация) — сделано end-to-end, см. `DONE.md`.
 
 ### D2. RETURNING-симметрия для INSERT/DELETE 📄
 - **Источник:** `completeness-oql.md` §2.8 (M7).
@@ -204,16 +170,12 @@
 ### E5. Две дороги к uniqueness (schema-rule vs index-flag) — согласовать 📄
 - **Источник:** `completeness-ddl.md` G15.
 - **Факт:** `ConstraintsDto.unique` (через валидатор) и `CreateIndexOp.unique`
-  (на уровне индекса) — разные пути enforcement. Риск рассогласования (см. также
-  A1: rule-путь вообще fail-open под autocommit).
+  (на уровне индекса) — разные пути enforcement. Риск рассогласования.
 - **Сделать:** свести к одному источнику истины уникальности.
-- **Объём:** M. Тесно связано с A1.
+- **Объём:** M.
 
-### E6. FK-actions (`ON DELETE`/`ON UPDATE`) 📄
-- **Источник:** `completeness-ddl.md` G7.
-- **Факт:** FK — forward-only existence; удаление referenced-строки не каскадит
-  и не блокирует → тихие сироты.
-- **Объём:** L.
+> E6 (FK-actions `ON DELETE`) — реализовано как Phase D (RESTRICT/CASCADE/
+> SET NULL + drop-guard), см. `DONE.md`. `ON UPDATE` — вне текущего скоупа.
 
 ---
 
@@ -255,16 +217,16 @@
 
 ---
 
-## Сводная карта приоритетов
+## Сводная карта приоритетов (осталось)
 
 | Tier | Пункты | Суть |
 |---|---|---|
-| **P0 — корректность/безопасность** | A2, A3 | открытые access-дефолты; guard на дропах. **(A1 снят — ложная тревога, см. выше)** |
-| **P1 — билдеры + тесты** | B1–B4, C1, C2 | дешёвые билдер-сеттеры; e2e FTS/vector/call; unit на Phase B/C |
-| **P2 — эволюция языка** | D1, E1, E3, E5 | keyset-пагинация (лучший ROI); RENAME; if_exists; unify unique |
-| **P3 — доки + DX** | F1–F5, B5–B7, C3, D2, E2/E4/E6 | правки отчётов; DX-билдеры; досборка e2e; DEFAULT/DESCRIBE/FK-actions |
+| **P0 — корректность/безопасность** | A2, A3 | открытые access-дефолты; guard на `DropFunction` |
+| **P1 — билдеры + тесты** | B2, B4, C1, C2 | билдер-сеттеры (`one_of`/idmsgpack); e2e FTS/vector/call; unit на Phase B/C |
+| **P2 — эволюция языка** | E1, E3, E5 | RENAME; if_exists; unify unique |
+| **P3 — доки + DX** | F1–F5, B5–B7, C3, D2, E2/E4 | правки отчётов; DX-билдеры; досборка e2e; DEFAULT/DESCRIBE |
 
-**Если делать ровно три вещи:** D1 (keyset — настоящий engine-ready win),
-Phase D (reverse-FK ON DELETE — реально недостающая возможность), A2
-(access-дефолты — единственный оставшийся настоящий P0). A1 снят как ложная
-тревога после фактчека кода.
+**Следующий настоящий P0:** A2 (открытые access-дефолты `0o777`/owner=System) —
+единственный оставшийся блокер уровня корректности/безопасности.
+
+> Выполненное (A1, B1, B3, D1, Phase D/E6, A3-DropTable) — в `DONE.md`.

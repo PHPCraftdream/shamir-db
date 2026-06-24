@@ -306,16 +306,11 @@ For each: **status** (absent / partial / intentional / engine-has-no-surface),
 - **Verdict:** whole-row DISTINCT only; per-column / first-per-group
   distinct is absent (workaround: GROUP BY + first/last aggregate).
 
-### 2.7 Keyset / cursor pagination — **partial**
-- **Evidence:** `Pagination` (`limit.rs`) has only `LimitOffset` and `Page`
-  (both offset-based internally — `resolve()` → `(skip, take)`). No
-  `After(key)` / seek variant. `with_version` exposes the MVCC version
-  (useful for a cursor) but the language does not encode a keyset.
-- **Engine capability:** the sorted-index top-K fast path
-  (`try_plan_order_limit_fast_path`) already does index-ordered seek — the
-  engine could support keyset seek, but there's **no language surface**.
-- **Mature baseline:** SQL keyset / "seek method" pagination
-  (`WHERE (k1,k2) > (v1,v2) ORDER BY … LIMIT n`), Cursor API.
+### 2.7 Keyset / cursor pagination — ✅ **DONE** (см. `DONE.md`)
+- **Реализовано:** `Pagination::After { key, limit }` (wire-тег `"After"`) +
+  engine sorted-index seek (строго-после ASC / строго-до DESC, exclusive) +
+  Rust `Query::after` / TS `.after` билдеры; e2e зелёный. Изначальный gap
+  (только offset → deep-page O(offset)) закрыт.
 - **Verdict:** offset pagination only; deep-page O(offset) cost remains.
   Engine has the index capability but no DTO surface — a clear
   "engine-ready, language-absent" gap.
@@ -449,7 +444,7 @@ intentionally out of scope, or adequately covered by a workaround.
 |---|-----|--------------------|--------|
 | H1 | **Multi-table JOIN** (inner/outer/cross) | The single most-requested relational primitive; `$query` semi-joins cover parent→detail but not arbitrary predicate joins or outer joins. | Blocks porting any relational schema/report to OQL; forces client-side N+1 or stored-proc fan-out. |
 | H2 | **Window functions** (ROW_NUMBER/RANK/LAG/LEAD OVER PARTITION) | Per-group analytics (running totals, rankings, time-series shifts) have no declarative path; GROUP BY cannot express framed computation. | Blocks common BI / leaderboard / time-series queries. |
-| H3 | **Keyset / cursor pagination DTO** | Deep offset pagination is O(offset); engine already has sorted-index top-K seek but no language surface (`After(key)`). | Large tables degrade under paged UIs; memory + latency grow with page depth. |
+| ~~H3~~ | ~~**Keyset / cursor pagination DTO**~~ | ✅ **DONE** — `Pagination::After` + engine seek + Rust/TS билдеры (см. `DONE.md`). | — |
 | H4 | **Set operations** (UNION/INTERSECT/EXCEPT) | Combining two result sets (e.g. "ids in both", "ids in A not in B") is inexpressible in one request. | Common dedup/diff workloads need client-side merge or a stored proc. |
 | H5 | **Correlated subquery / EXISTS-as-subquery** | `$query` is uncorrelated only; `Exists` is field-existence, not subquery existence; no derived table. | "Users who have at least one order > $100" needs a batch + IN-ref, not a single declarative query. |
 
