@@ -29,8 +29,8 @@
 
 use crate::access::{Action, ResourcePath};
 use crate::query::admin::{
-    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
-    NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, FkAction, ForeignKeyDto,
+    GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -844,9 +844,19 @@ fn foreign_key_dto_from_qv(v: &QueryValue) -> Option<ForeignKeyDto> {
     let m = v.as_object()?;
     let ref_table = m.get("ref_table")?.as_str()?.to_string();
     let ref_field = m.get("ref_field")?.as_str()?.to_string();
+    // Legacy catalogue rows written before on_delete exist — default to
+    // NoAction (the serde/wire default) so they round-trip unchanged.
+    let on_delete = match m.get("on_delete").and_then(|v| v.as_str()) {
+        Some("no_action") => FkAction::NoAction,
+        Some("restrict") => FkAction::Restrict,
+        Some("cascade") => FkAction::Cascade,
+        Some("set_null") => FkAction::SetNull,
+        _ => FkAction::default(),
+    };
     Some(ForeignKeyDto {
         ref_table,
         ref_field,
+        on_delete,
     })
 }
 
