@@ -15,6 +15,7 @@
  */
 
 import type { FieldPath, FilterValue, Filter } from './filter.js';
+import type { WireValue } from './write.js';
 
 // ── TableRef ─────────────────────────────────────────────────────────
 
@@ -107,10 +108,13 @@ export interface OrderBy {
  * rename_all, so the discriminant keeps PascalCase variant names). The
  * `None` variant is skip-serialized, so it never appears on the wire.
  * `offset` is `#[serde(default)]` without skip → always present.
+ * `After` is keyset/seek pagination: `key` is always present (an array
+ * of {@link WireValue}); `limit` is skip-if-none → omitted when unset.
  */
 export type Pagination =
   | { mode: 'LimitOffset'; limit?: number; offset: number }
-  | { mode: 'Page'; page: number; page_size: number };
+  | { mode: 'Page'; page: number; page_size: number }
+  | { mode: 'After'; key: WireValue[]; limit?: number };
 
 // ── Temporal ─────────────────────────────────────────────────────────
 

@@ -521,6 +521,32 @@ describe('field()', () => {
   });
 });
 
+// ── foreignKey (on_delete) ──────────────────────────────────────────
+
+describe('field().foreignKey()', () => {
+  it('defaults on_delete to "restrict"', () => {
+    const rule = ddl.field(['parent_id']).int().foreignKey('parent', 'id').build();
+    expect(rule.foreign_key).toEqual({
+      ref_table: 'parent',
+      ref_field: 'id',
+      on_delete: 'restrict',
+    });
+  });
+
+  it('emits on_delete: "cascade" when explicitly set', () => {
+    const rule = ddl
+      .field(['parent_id'])
+      .int()
+      .foreignKey('parent', 'id', { onDelete: 'cascade' })
+      .build();
+    expect(rule.foreign_key).toEqual({
+      ref_table: 'parent',
+      ref_field: 'id',
+      on_delete: 'cascade',
+    });
+  });
+});
+
 // ── schema DDL ops ─────────────────────────────────────────────────
 
 describe('setTableSchema', () => {

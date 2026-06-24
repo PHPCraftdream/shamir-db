@@ -47,7 +47,7 @@ export function atTimestamp(timestamp: number): At {
   return { timestamp };
 }
 
-type PaginationMode = 'none' | 'limitoffset' | 'page';
+type PaginationMode = 'none' | 'limitoffset' | 'page' | 'after';
 
 /** Fluent builder for an OQL `ReadQuery`. */
 export class Query {
@@ -65,6 +65,8 @@ export class Query {
   private offsetValue = 0;
   private pageNumber = 1;
   private pageSize = 0;
+  private afterKey: WireValue[] | null = null;
+  private afterLimit: number | null = null;
 
   private countTotalFlag = false;
   private temporalValue: Temporal | null = null;
@@ -190,6 +192,18 @@ export class Query {
     this.paginationMode = 'page';
     this.pageNumber = page;
     this.pageSize = pageSize;
+    return this;
+  }
+
+  /**
+   * Keyset (seek) pagination: resume after the row identified by `key`
+   * (the sort values of the last row seen). Pass an optional `limit` to
+   * cap the page size.
+   */
+  after(key: WireValue[], limit?: number): this {
+    this.paginationMode = 'after';
+    this.afterKey = key;
+    this.afterLimit = limit ?? null;
     return this;
   }
 
@@ -323,6 +337,14 @@ export class Query {
       case 'limitoffset': {
         const p: Pagination = { mode: 'LimitOffset', offset: this.offsetValue };
         if (this.limitValue !== null) p.limit = this.limitValue;
+        return p;
+      }
+      case 'after': {
+        const p: Pagination = {
+          mode: 'After',
+          key: this.afterKey!,
+        };
+        if (this.afterLimit !== null) p.limit = this.afterLimit;
         return p;
       }
       default:

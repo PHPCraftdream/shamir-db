@@ -19,6 +19,7 @@ import type {
   WriteOpKind,
   FieldRuleDto,
   ConstraintsDto,
+  FkAction,
   SetTableSchemaOp,
   AddSchemaRuleOp,
   RemoveSchemaRuleOp,
@@ -647,9 +648,19 @@ export class FieldBuilder {
   /**
    * Phase C2 — forward-only foreign-key reference.
    * The field value must exist in `refTable.refField`.
+   * `onDelete` defaults to `'restrict'` (matching the Rust builder); pass
+   * `'cascade'` / `'set_null'` / `'no_action'` to override.
    */
-  foreignKey(refTable: string, refField: string): this {
-    this._constraints.foreign_key = { ref_table: refTable, ref_field: refField };
+  foreignKey(
+    refTable: string,
+    refField: string,
+    opts?: { onDelete?: FkAction },
+  ): this {
+    this._constraints.foreign_key = {
+      ref_table: refTable,
+      ref_field: refField,
+      on_delete: opts?.onDelete ?? 'restrict',
+    };
     return this;
   }
 

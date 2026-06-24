@@ -151,6 +151,18 @@ describe('pagination', () => {
     expect(Query.from('items').countTotal().build().count_total).toBe(true);
     expect(Query.from('items').build().count_total).toBeUndefined();
   });
+
+  it('after(key, limit) emits After with key + limit', () => {
+    expect(
+      Query.from('t').orderByAsc('score').after([30], 2).build().pagination,
+    ).toEqual({ mode: 'After', key: [30], limit: 2 });
+  });
+
+  it('after(key) without limit omits the limit key', () => {
+    const p = Query.from('t').orderByAsc('score').after([30]).build().pagination;
+    expect(p).toEqual({ mode: 'After', key: [30] });
+    expect(p).not.toHaveProperty('limit');
+  });
 });
 
 describe('temporal', () => {
