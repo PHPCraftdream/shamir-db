@@ -64,6 +64,20 @@ pub(crate) async fn bridge_task(
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.
     let db_id = Arc::as_ptr(&db) as u64;
+    // Decode/deliver cache discriminator: combines the instance pointer AND
+    // the database NAME. The instance ptr alone is identical for every
+    // database hosted by one ShamirDb (the production / e2e shape: one server,
+    // many `createDb` databases), so a key without the db name lets two
+    // databases that share a repo name ("main") and overlapping low
+    // commit-versions collide in the GLOBAL cache — returning another db's
+    // record bytes for filter evaluation. Hashing in `db_name` isolates them.
+    let db_disc: u64 = {
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let mut h = shamir_collections::THasher::default().build_hasher();
+        db_id.hash(&mut h);
+        db_name.hash(&mut h);
+        h.finish()
+    };
 
     let run = async {
         let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
@@ -333,7 +347,7 @@ pub(crate) async fn bridge_task(
                         let decoded_arc: CachedBytes = match (&change.op, change.value.as_deref()) {
                             (ChangeOp::Put, Some(bytes)) => {
                                 if let Some(cached) =
-                                    cache_get(&repo, event.commit_version, change_idx)
+                                    cache_get(db_disc, &repo, event.commit_version, change_idx)
                                 {
                                     cached
                                 } else {
@@ -341,7 +355,13 @@ pub(crate) async fn bridge_task(
                                         .get_table_interner_cell(&db_name, &repo, &change.table)
                                         .await
                                         .map(|interner_cell| (bytes_to_arc(bytes), interner_cell));
-                                    cache_insert(&repo, event.commit_version, change_idx, entry)
+                                    cache_insert(
+                                        db_disc,
+                                        &repo,
+                                        event.commit_version,
+                                        change_idx,
+                                        entry,
+                                    )
                                 }
                             }
                             _ => {
@@ -380,7 +400,7 @@ pub(crate) async fn bridge_task(
                         let owned_buf;
                         let data_ref: &[u8] = if let Some(mode) = deliver_mode_disc {
                             if let Some(arc) = deliver_cache_get(
-                                db_id,
+                                db_disc,
                                 &repo,
                                 event.commit_version,
                                 change_idx,
@@ -413,7 +433,7 @@ pub(crate) async fn bridge_task(
                                 )
                                 .await;
                                 cached_arc = deliver_cache_insert(
-                                    db_id,
+                                    db_disc,
                                     &repo,
                                     event.commit_version,
                                     change_idx,
