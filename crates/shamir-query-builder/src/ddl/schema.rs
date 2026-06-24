@@ -1,8 +1,8 @@
 //! Builders for declarative schema DDL operations and the `field()` fluent API.
 
 use shamir_query_types::admin::{
-    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
-    NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
+    AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, FkAction, ForeignKeyDto,
+    GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -219,6 +219,7 @@ impl FieldBuilder {
         self.constraints.foreign_key = Some(ForeignKeyDto {
             ref_table: ref_table.into(),
             ref_field: ref_field.into(),
+            on_delete: FkAction::Restrict,
         });
         self
     }
