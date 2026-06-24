@@ -1,9 +1,15 @@
-//! Pagination — LIMIT/OFFSET and page-based pagination.
+//! Pagination — LIMIT/OFFSET, page-based, and keyset (seek) pagination.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::value::QueryValue;
 
-/// Pagination mode for queries
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Pagination mode for queries.
+///
+/// Note: this enum is **not** `Copy` because the [`Pagination::After`] variant
+/// owns a `Vec<QueryValue>` seek key. Call sites already pass `Pagination` by
+/// reference or by move, so dropping `Copy` has no ripple beyond the derive
+/// list itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode")]
 #[derive(Default)]
 pub enum Pagination {
@@ -23,13 +29,85 @@ pub enum Pagination {
         /// Number of records per page
         page_size: u64,
     },
+    /// Keyset / seek pagination: return up to `limit` rows ordered strictly
+    /// after the tuple `key`. `key` is the ordered tuple of values matching
+    /// the query's ORDER BY columns.
+    ///
+    /// Seek semantics do not map onto the `(skip, take)` model exposed by
+    /// [`Pagination::resolve`]; use [`Pagination::keyset`] to inspect the seek
+    /// tuple. The planner consumes `keyset()` in a downstream task.
+    ///
+    /// Wire tag is `"After"` (PascalCase) — consistent with the sibling
+    /// `LimitOffset` / `Page` / `None` variants, which use the default
+    /// serde-variant-name tag (no rename).
+    After {
+        /// Ordered seek tuple (one value per ORDER BY column).
+        key: Vec<QueryValue>,
+        /// Maximum records to return after the seek tuple.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
     /// No pagination
     #[default]
     None,
 }
 
+/// Manual equality because `QueryValue` does not implement `PartialEq`.
+///
+/// For the `After` variant the seek tuple is compared by canonical
+/// MessagePack encoding (`rmp_serde::to_vec_named`); the offset-based variants
+/// compare their `u64` fields directly.
+impl PartialEq for Pagination {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Pagination::LimitOffset {
+                    limit: l1,
+                    offset: o1,
+                },
+                Pagination::LimitOffset {
+                    limit: l2,
+                    offset: o2,
+                },
+            ) => l1 == l2 && o1 == o2,
+            (
+                Pagination::Page {
+                    page: p1,
+                    page_size: s1,
+                },
+                Pagination::Page {
+                    page: p2,
+                    page_size: s2,
+                },
+            ) => p1 == p2 && s1 == s2,
+            (
+                Pagination::After {
+                    key: k1,
+                    limit: lim1,
+                },
+                Pagination::After {
+                    key: k2,
+                    limit: lim2,
+                },
+            ) => lim1 == lim2 && key_bytes(k1) == key_bytes(k2),
+            (Pagination::None, Pagination::None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Encode a seek-tuple slice to canonical MessagePack bytes for equality.
+fn key_bytes(key: &[QueryValue]) -> Vec<u8> {
+    rmp_serde::to_vec_named(key).expect("serializing Vec<QueryValue> is infallible")
+}
+
 impl Pagination {
-    /// Resolve to (skip, take) pair
+    /// Resolve to (skip, take) pair.
+    ///
+    /// For [`Pagination::After`] this returns `(0, limit)` — seek semantics
+    /// are **not** expressible as (skip, take) and are consumed by the planner
+    /// via [`Pagination::keyset`]. The `(0, limit)` value keeps `resolve`
+    /// total for existing offset-based call sites (limit still caps the page).
     pub fn resolve(&self) -> (u64, Option<u64>) {
         match self {
             Pagination::LimitOffset { limit, offset } => (*offset, *limit),
@@ -37,7 +115,20 @@ impl Pagination {
                 let skip = page.saturating_sub(1) * page_size;
                 (skip, Some(*page_size))
             }
+            Pagination::After { limit, .. } => (0, *limit),
             Pagination::None => (0, Option::None),
+        }
+    }
+
+    /// Seek-tuple accessor for keyset pagination.
+    ///
+    /// Returns `Some((key_slice, limit))` for [`Pagination::After`], and
+    /// `None` for every other variant. The planner uses this to build a
+    /// strict-prefix range scan over the ORDER BY key space.
+    pub fn keyset(&self) -> Option<(&[QueryValue], Option<u64>)> {
+        match self {
+            Pagination::After { key, limit } => Some((key.as_slice(), *limit)),
+            _ => None,
         }
     }
 
@@ -49,6 +140,12 @@ impl Pagination {
     /// Page-based pagination
     pub fn page(page: u64, page_size: u64) -> Self {
         Pagination::Page { page, page_size }
+    }
+
+    /// Keyset / seek pagination: return up to `limit` rows ordered after the
+    /// tuple `key`.
+    pub fn after(key: Vec<QueryValue>, limit: Option<u64>) -> Self {
+        Pagination::After { key, limit }
     }
 
     /// Check if this is the default (no pagination)

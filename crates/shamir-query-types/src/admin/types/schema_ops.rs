@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use shamir_types::types::value::QueryValue;
 
+use super::fk_action::FkAction;
+
 fn default_repo() -> String {
     "main".to_string()
 }
@@ -102,6 +104,16 @@ pub struct ForeignKeyDto {
     pub ref_table: String,
     /// The field in the parent table that must contain the referenced value.
     pub ref_field: String,
+    /// Referential action on parent delete (Phase D).
+    ///
+    /// Serde default is [`FkAction::NoAction`] (so legacy schemas stored
+    /// without `on_delete` round-trip unchanged and do not alter delete
+    /// behavior on reload). Omitted from the wire via
+    /// `skip_serializing_if = "FkAction::is_no_action"`. The *builder* default
+    /// for a new foreign key is `Restrict` (safe-by-default), set explicitly by
+    /// the builder — not via this serde default.
+    #[serde(default, skip_serializing_if = "FkAction::is_no_action")]
+    pub on_delete: FkAction,
 }
 
 /// Cross-field comparison descriptor (wire form).

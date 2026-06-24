@@ -29,6 +29,8 @@ pub struct Batch {
     return_all: bool,
     return_only: Option<Vec<String>>,
     limits: BatchLimits,
+    result_encoding: ResultEncoding,
+    interner_epochs: TMap<String, u64>,
 }
 
 impl Default for Batch {
@@ -50,6 +52,8 @@ impl Batch {
             return_all: true,
             return_only: None,
             limits: BatchLimits::default(),
+            result_encoding: ResultEncoding::default(),
+            interner_epochs: new_map(),
         }
     }
 
@@ -124,6 +128,18 @@ impl Batch {
     /// Override default execution limits.
     pub fn limits(&mut self, limits: BatchLimits) -> &mut Self {
         self.limits = limits;
+        self
+    }
+
+    /// Set the result encoding (Name vs Id).
+    pub fn result_encoding(&mut self, enc: ResultEncoding) -> &mut Self {
+        self.result_encoding = enc;
+        self
+    }
+
+    /// Set the per-repo interner epochs the client has cached.
+    pub fn interner_epochs(&mut self, epochs: TMap<String, u64>) -> &mut Self {
+        self.interner_epochs = epochs;
         self
     }
 
@@ -624,8 +640,8 @@ impl Batch {
             return_all: self.return_all,
             return_only: self.return_only.clone(),
             limits: self.limits.clone(),
-            interner_epochs: Default::default(),
-            result_encoding: ResultEncoding::default(),
+            interner_epochs: self.interner_epochs.clone(),
+            result_encoding: self.result_encoding,
         }
     }
 
