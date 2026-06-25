@@ -12,9 +12,11 @@
 - **Объём** — грубая оценка (S / M / L).
 
 > **Это список ОСТАВШЕЙСЯ работы.** Уже выполненное вынесено в `DONE.md`
-> (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, и вся **кампания Phase E**:
-> A3-полностью, C1, C2, D2, E3, E4, M5-EXPLAIN, F1–F5, E1-частично) и здесь
-> не повторяется.
+> (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, вся **кампания Phase E**:
+> A3, C1, C2, D2, E3, E4, M5-EXPLAIN, F1–F5; **E.4-followon**: E1 полностью; и
+> **кампания Phase G**: B2 `one_of`, B4 `row_idmsgpack`, C3 e2e-lifecycle, **A2
+> access-enforcement**) и здесь не повторяется. **Все P0/P1 закрыты** — остался
+> только P2/P3 (эволюция языка + DX).
 
 > Принцип проекта (`docs/roadmap/PLAN.md` §3): OQL/DDL — object-native, не SQL.
 > Поэтому часть «пробелов» зрелых СУБД (JOIN, CTE, window, текстовый фронтенд)
@@ -29,16 +31,12 @@
 
 > A1 (FK/unique fail-open) снят как ложная тревога — см. `DONE.md`.
 
-### A2. Открытые access-дефолты (`0o777`, owner=System), гейт не везде ✅ verified
-- **Источник:** `completeness-ddl.md` G10 (назван ship-blocker).
-- **Факт:** `crates/shamir-types/src/access.rs:104` `pub const OPEN: u16 = 0o777`;
-  `:172` «Open default: owner = System, group = None, mode = 0o777». Всё
-  world-rwx, пока гейт не включат повсеместно.
-- **Что сделать:** довести owner-on-create (создатель = владелец, не System) +
-  переход open→enforced дефолта; пройтись по всем admin-путям, что гейт
-  вызывается единообразно. Сверить с `docs/roadmap/DDL.md` §0/§3 (там трек уже
-  заведён).
-- **Объём:** L. Блокер для любого multi-tenant деплоя.
+> ### A2 (открытые access-дефолты `0o777`/owner=System) — ✅ **СДЕЛАНО = Phase G.4**
+> owner-on-create (G.4a, уже было) + единообразный `Action::Create` гейт на
+> create-путях (G.4b, `7ef8860`) + переход дефолта **`open 0o777 → enforced
+> 0o700`** для новых объектов, Strategy A (G.4c, `e9769b4`, + починка 51 фикстуры)
+> + group-path negative/positive e2e (G.4d, `356aaf0`). Последний настоящий P0
+> закрыт. См. `DONE.md` (раздел «Phase G»).
 
 > A3 (`DropFunction`-as-validator guard) — ✅ сделано (Phase E.3:
 > `drop_refused_bound` + integration-покрытие; guard был с Phase D.3). Вместе с
@@ -53,19 +51,12 @@
 > B1 (`result_encoding`/`interner_epochs`) и B3 (`$expr`/`$cond`) — сделаны,
 > см. `DONE.md`. Заодно добавлен `FieldBuilder::foreign_key_on_delete()`.
 
-### B2. Rust `FieldBuilder`: нет `.one_of()` ✅
-- **Источник:** `coverage-rust-query-builder.md` #26 (TS его уже имеет — `ddl.ts:621`).
-- **Факт:** греп `one_of` по `shamir-query-builder/src` — пусто. `ConstraintsDto.one_of`
-  на wire есть (`schema_ops.rs:65`), сеттера в билдере нет.
-- **Сделать:** `.one_of(values)` в `ddl/schema.rs::FieldBuilder` (паритет с TS).
-- **Объём:** S.
+> ### B2 (Rust `FieldBuilder::one_of()`) — ✅ **СДЕЛАНО = Phase G.1** (`3753cbb`)
+> `.one_of(values)` в `ddl/schema.rs::FieldBuilder` (паритет с TS). См. `DONE.md`.
 
-### B4. Rust `InsertOp.records_idmsgpack` не выставлен ✅
-- **Источник:** `coverage-rust-query-builder.md` #30.
-- **Факт:** `write/insert.rs:55` хардкод `Vec::new()`. id-keyed msgpack путь
-  (v2-оптимизация) без точки входа в билдере.
-- **Сделать:** `Insert::row_idmsgpack(bytes)` или `Doc::build_idmsgpack()`.
-- **Объём:** M.
+> ### B4 (Rust `Insert::row_idmsgpack`) — ✅ **СДЕЛАНО = Phase G.2** (`f32ed0c`)
+> `Insert::row_idmsgpack(bytes)` + проброс в `InsertOp.records_idmsgpack` вместо
+> хардкода `Vec::new()`; `ByteBuf` реэкспортнут из query-types. См. `DONE.md`.
 
 ### B5. TS: interner-DDL билдеры (`internerDump`/`internerTouch`) 🟡 уточнить
 - **Источник:** `coverage-ts-query-builder.md` G7 — но **claim завышен**: TS
@@ -99,13 +90,9 @@
 > C2 (Phase B/C field-констрейнты unit) — ✅ сделано (Phase E.9: +7 wire-shape
 > unit на 6 сеттеров в `ddl.test.ts`). См. `DONE.md`.
 
-### C3. Тонкое e2e: `commitMigration`-success, `dropUser`/`dropRole`, `chgrp` 📄
-- **Источник:** `coverage-ts-tests.md` P2/P3.
-- **Факт:** e2e-миграция гоняет только rollback-путь; `dropUser`/`dropRole`/
-  `chgrp` — unit-only.
-- **Сделать:** добить успешный commit-путь + по e2e-кейсу на дроп user/role и
-  на chgrp-эффект.
-- **Объём:** S-M.
+> ### C3 (тонкое e2e: commit-migration / dropUser-dropRole / chgrp) — ✅ **СДЕЛАНО = Phase G.3** (`09eeeed`)
+> e2e commit-путь миграции (start→cutover_ready→commit→dst readable→status
+> not_found) + dropUser/dropRole (HMAC) + chgrp readback. +4 it() (39/39). См. `DONE.md`.
 
 ---
 
@@ -185,13 +172,14 @@ challenge/response; F5 Rust `one_of` ✅→❌ (B2 ещё открыт). См. `
 
 | Tier | Пункты | Суть |
 |---|---|---|
-| **P0 — корректность/безопасность** | A2 | открытые access-дефолты (`0o777`/owner=System) |
-| **P1 — билдеры** | B2, B4 | билдер-сеттеры (`one_of` / `records_idmsgpack`) |
+| **P0 — корректность/безопасность** | ✅ нет | A2 закрыт (Phase G.4) |
+| **P1 — билдеры** | ✅ нет | B2, B4 сделаны (Phase G.1/G.2) |
 | **P2 — эволюция языка** | E5 | unify uniqueness (schema-rule vs index-flag) |
-| **P3 — DX + досборка** | B5–B7, C3, E2 | DX-билдеры; тонкое e2e (commit/dropUser/chgrp); DEFAULT |
+| **P3 — DX + досборка** | B5–B7, E2 | DX-билдеры (`internerDump`, `Doc $ref/$fn`, `deliverCall`); DEFAULT-значения |
 
-**Следующий настоящий P0:** A2 (открытые access-дефолты `0o777`/owner=System) —
-единственный оставшийся блокер уровня корректности/безопасности.
+**Все P0 и P1 закрыты.** Остаток — только P2 (E5 unify-uniqueness) и P3
+(B5–B7 DX-билдеры, E2 DEFAULT-значения) — эволюция/DX, не блокеры.
 
-> Выполненное (A1, B1, B3, D1, Phase D/E6, **вся кампания Phase E**: A3, C1, C2,
-> D2, E3, E4, M5, F1–F5; **E.4-followon**: E1 полностью = F.1/F.2/F.3) — в `DONE.md`.
+> Выполненное (A1, A2, B1, B2, B3, B4, C1, C2, C3, D1, Phase D/E6, **вся кампания
+> Phase E**: A3, D2, E3, E4, M5, F1–F5; **E.4-followon**: E1 полностью = F.1/F.2/F.3;
+> **Phase G**: B2/B4/C3 + A2 = G.1–G.4) — в `DONE.md`.
