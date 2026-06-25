@@ -280,7 +280,7 @@ Wire source: `shamir-query-types/src/admin/` + `auth/`. Rust builder: `shamir-qu
 | 177 | `.compare(other, op)` (Phase B) | ✅ | ✅ | `builders/ddl.ts:642` |
 | 178 | `.foreign_key(table, field)` (Phase C2) | ✅ | ✅ | `builders/ddl.ts:651` |
 | 179 | `.unique()` (Phase C3) | ✅ | ✅ | `builders/ddl.ts:630` |
-| 180 | `.one_of(values)` | ✅ wire: `ConstraintsDto.one_of` | ✅ `.oneOf()` | `builders/ddl.ts:621` |
+| 180 | `.one_of(values)` | ❌ **no Rust setter** (wire field `ConstraintsDto.one_of` exists in `schema_ops.rs:67`, but `FieldBuilder` has no `.one_of()` method — gap B2 open) | ✅ `.oneOf()` | `builders/ddl.ts:621` — **TS exceeds Rust** |
 | 181 | `set_table_schema(table)` | ✅ `ddl::set_table_schema` | ✅ `setTableSchema()` | `builders/ddl.ts:680` |
 | 182 | `.expected_version(v)` | ✅ `SetTableSchemaBuilder::expected_version` | ✅ `{expectedVersion}` | `builders/ddl.ts:683` |
 | 183 | `add_schema_rule(table)` | ✅ `ddl::add_schema_rule` | ✅ `addSchemaRule()` | `builders/ddl.ts:696` |
@@ -434,7 +434,7 @@ Wire source: `shamir-query-types/src/auth/types.rs`. Rust builder: `shamir-query
 
 ## 4. Summary
 
-- **TS exceeds Rust** in: `currentOnly()` retention helper (#212), `refFunctionFolder()` (#228), Resource scope constructors (#250), `filter.expr()` / `filter.cond()` builders (#80, #81), and `filter.computed()` with inline `exprArgs` (#66).
+- **TS exceeds Rust** in: `currentOnly()` retention helper (#212), `refFunctionFolder()` (#228), Resource scope constructors (#250), `filter.expr()` / `filter.cond()` builders (#80, #81), `filter.computed()` with inline `exprArgs` (#66), and `.oneOf()` (#180 — Rust `FieldBuilder` has no `.one_of()` method; gap B2 open).
 - **TS matches Rust** on all core OQL (select/filter/order/pagination/temporal) and the vast majority of DDL.
 - **3 functional gaps** (P0): interner DDL, Doc builder, subscribe deliver_call.
 - **3 ergonomic gaps** (P1): inline where-methods, typed Handle, try_build validation.

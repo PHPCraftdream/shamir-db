@@ -96,7 +96,8 @@ same-record cross-field), `QueryRef` (`$query`, cross-batch result reference),
   accumulators).
 
 ### 1.6 Scalar function library — `shamir-funclib`
-`crates/shamir-funclib/src/lib.rs::register_builtins` wires 12 folders;
+`crates/shamir-funclib/src/lib.rs::register_builtins` wires 11 folders
+(`canonical` is registered under the `crypto` folder, not as a separate one);
 `ScalarRegistry` (`registry.rs`) maps folder-qualified names (`math/abs`,
 `strings/lower`, …) to `FnEntry` (arity-checked, purity/determinism/trusted-pure
 metadata — the functional-index safety gate).
@@ -106,7 +107,7 @@ metadata — the functional-index safety gate).
   starts_with/ends_with/contains/index_of/repeat/reverse/pad_left/pad_right
   + 8-name regex family), `arrays` (11), `cast` (8), `datetime` (23),
   `value_nav` (5), `validate` (12), `encode` (12), `object` (8), `text` (7),
-  `crypto` (6), `canonical` (1).
+  `crypto` (7 — incl. the `canonical` functions registered under the same folder).
 - Functions are pure `fn(&[QueryValue]) -> ScalarResult`, callable in filters
   (`$fn`), projection (`SelectItem::Function`), and as schema-rule predicates
   (the `scalar` constraint — see §1.10).

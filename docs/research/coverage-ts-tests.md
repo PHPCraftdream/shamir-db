@@ -7,7 +7,7 @@ capabilities reachable through the TS client builders
 (`src/core/builders/`) and the wire protocol (`shamir-query-types`).
 
 **As of:** 2026-06-24.
-**Unit-test total reported:** 641 (incl. newly added `framing.test.ts`,
+**Unit-test total reported:** 692 (incl. newly added `framing.test.ts`,
 `select.test.ts`, `protocol.test.ts`).
 **Audit method:** read every builder file + every test file in
 `core/__tests__/`, `core/builders/__tests__/`, and `src/__tests__/`; cited
@@ -24,15 +24,15 @@ a server. They are the "always green" backbone.
 
 | File | Domain | Approx. `it` count | Coverage style |
 |---|---|---|---|
-| `filter.test.ts` | all 32 filter ctors + value refs | ~30 | exhaustive wire-shape |
-| `select.test.ts` | `all/field/countAll/aggregate/count/sum/avg/min/max/aggregateFn/func` | ~18 | exhaustive wire-shape |
-| `write.test.ts` | `insert/update/upsert/del` + `UpdateBuilder.returning` modes | ~14 | exhaustive wire-shape |
-| `query.test.ts` | `Query` fluent builder: projection, where, groupBy/having, orderBy, pagination (limit/offset, page), temporal (as_of/history), withVersion | ~22 | exhaustive wire-shape |
-| `ddl.test.ts` | every DDL ctor incl. HMAC-gated ops + `FieldBuilder` types/constraints + schema DDL | ~45 | exhaustive wire-shape |
-| `admin.test.ts` | ACL (`chmod/chown/chgrp/...`) + RBAC (`createUser/createRole/...`) + HMAC (`dropUser/dropRole`) | ~30 | exhaustive wire-shape |
-| `batch.test.ts` | `Batch.add/subBatch/transactional/durability/limits/returnAll/returnOnly` | ~18 | exhaustive wire-shape |
+| `filter.test.ts` | all 32 filter ctors + value refs | ~40 | exhaustive wire-shape |
+| `select.test.ts` | `all/field/countAll/aggregate/count/sum/avg/min/max/aggregateFn/func` | ~28 | exhaustive wire-shape |
+| `write.test.ts` | `insert/update/upsert/del` + `UpdateBuilder.returning` modes | ~23 | exhaustive wire-shape |
+| `query.test.ts` | `Query` fluent builder: projection, where, groupBy/having, orderBy, pagination (limit/offset, page), temporal (as_of/history), withVersion | ~27 | exhaustive wire-shape |
+| `ddl.test.ts` | every DDL ctor incl. HMAC-gated ops + `FieldBuilder` types/constraints + schema DDL | ~97 | exhaustive wire-shape |
+| `admin.test.ts` | ACL (`chmod/chown/chgrp/...`) + RBAC (`createUser/createRole/...`) + HMAC (`dropUser/dropRole`) | ~48 | exhaustive wire-shape |
+| `batch.test.ts` | `Batch.add/subBatch/transactional/durability/limits/returnAll/returnOnly` | ~25 | exhaustive wire-shape |
 | `call.test.ts` | `call(name, params?, repo?)` | 8 | exhaustive wire-shape |
-| `subscribe.test.ts` | `subscribe` sources/events/deliver modes + `unsubscribeOp` | ~17 | exhaustive wire-shape |
+| `subscribe.test.ts` | `subscribe` sources/events/deliver modes + `unsubscribeOp` | ~16 | exhaustive wire-shape |
 
 ### 1.2 Core unit tests — `core/__tests__/` (NO server)
 
@@ -68,14 +68,14 @@ binary IS present, all the `it(...)` cases below execute end-to-end.**
 
 | File | Theme | `it` count | Highlights |
 |---|---|---|---|
-| `e2e.test.ts` | core CRUD + filters + aggregations + sorting/pagination + batch deps + HMAC gate + tx/itx + Db handle + nested subBatch | ~55 | `filters: eq/ne/gt/gte/lt/lte/in/not_in/between/and/or/nested AND-OR/nested field path`; `agg: count_all/sum/avg/min/max/group_by`; `sort/page: asc/desc/multi-field/limit/offset/count_total`; `batch: $query parent→child, IN-expansion, execution_plan stages`; `HMAC: drop_table/db with/without/wrong hmac`; `tx/itx: transactional insert, cross-table atomic, serializable, rollback`; `db.tx` + `nested: P3b $param-in-INSERT, atomicity, tx-in-tx rejected` |
-| `e2e-data.test.ts` | data lifecycle + deep filters + projection + versioning + interner stress | ~23 | `upsert new/overwrite`, `update by where / partial merge`, `delete by where / delete-all`, `filter-deep: NOT / AND+OR+NOT / IN+between / nested path / nested+comparison`, `agg empty-result`, `versioning: withVersion/asOfVersion/asOfTimestamp`, `interner: round-trip, non-ASCII, nested-map keys, 50+ batch stress, id-widths, $fn values remain strings` |
-| `e2e-ddl.test.ts` | DDL lifecycle: create→list→drop for db/repo/table/index + function + validator + buffer-config + retention + migration + schema | ~13 | `createDb createRepo createTable createIndex`, `function: createFunctionFolder + createFunction(wasm) + renameFunction + dropFunction`, `validator: create(wasm) + bind + listValidators + unbind + drop`, `buffer-config: set/get/alter`, `retention: setRetention + changesSince + purgeHistory`, `migration: startMigration + migrationStatus + rollbackMigration`, `schema: setTableSchema + getTableSchema + addSchemaRule + removeSchemaRule`, `listUsers / listRoles` |
-| `e2e-permissions.test.ts` | ACL + RBAC end-to-end | ~17 | `A1–A3 denied paths (DDL/read/insert on owner-only)`, `A4–A5 chmod 0o777↔0o700 flip`, `A6 createGroup`, `A8 createRole/grantRole/revokeRole + superuser via SCRAM`, `A9 accessTree`, `B1–B8 multi-db/multi-user isolation + cross-grant`, `A10 data write after open` |
-| `e2e-schema-validators.test.ts` | declarative schema + validator behaviour | ~26 | `required/type_mismatch/out_of_range(unsigned)/one_of/len/min_len/max_len/nullable/nested/optional`, `format: email/uuid/date/url`, `compare (end>=start) incl. skipped-when-other-absent`, `foreign_key: accept/reject/fk_requires_index/autocommit-enforces`, `unique: accept/duplicate/batch-duplicate read-your-own-writes/unique_requires_index/autocommit-enforces`, `lifecycle add/remove/getTableSchema`, `persistence across reconnect`, `multiple violations accumulated` |
-| `e2e-interner.test.ts` | client-side field-interner cache | ~6 | `touchFields cold/warm/idempotent/partial-miss`, `execute attaches interner_epochs`, `id-cache-miss path re-fetches` |
-| `e2e-subscriptions.test.ts` | live subscriptions | ~7 | `records deliver on insert`, `filter drops unmatched server-side`, `multi two streams`, `handle reactive sub-batch`, `initial pre-seeded`, `unsubscribe done`, `multi-repo refused` |
-| `e2e-principal.test.ts` | cross-language principal-id parity | ~3 | TS `principalId` == server `access_tree` id; `chown`/`addGroupMember` with username → BigInt on wire |
+| `e2e.test.ts` | core CRUD + filters + aggregations + sorting/pagination + batch deps + HMAC gate + tx/itx + Db handle + nested subBatch | ~74 | `filters: eq/ne/gt/gte/lt/lte/in/not_in/between/and/or/nested AND-OR/nested field path`; `agg: count_all/sum/avg/min/max/group_by`; `sort/page: asc/desc/multi-field/limit/offset/count_total`; `batch: $query parent→child, IN-expansion, execution_plan stages`; `HMAC: drop_table/db with/without/wrong hmac`; `tx/itx: transactional insert, cross-table atomic, serializable, rollback`; `db.tx` + `nested: P3b $param-in-INSERT, atomicity, tx-in-tx rejected` |
+| `e2e-data.test.ts` | data lifecycle + deep filters + projection + versioning + interner stress | ~33 | `upsert new/overwrite`, `update by where / partial merge`, `delete by where / delete-all`, `filter-deep: NOT / AND+OR+NOT / IN+between / nested path / nested+comparison`, `agg empty-result`, `versioning: withVersion/asOfVersion/asOfTimestamp`, `interner: round-trip, non-ASCII, nested-map keys, 50+ batch stress, id-widths, $fn values remain strings` |
+| `e2e-ddl.test.ts` | DDL lifecycle: create→list→drop for db/repo/table/index + function + validator + buffer-config + retention + migration + schema | ~15 | `createDb createRepo createTable createIndex`, `function: createFunctionFolder + createFunction(wasm) + renameFunction + dropFunction`, `validator: create(wasm) + bind + listValidators + unbind + drop`, `buffer-config: set/get/alter`, `retention: setRetention + changesSince + purgeHistory`, `migration: startMigration + migrationStatus + rollbackMigration`, `schema: setTableSchema + getTableSchema + addSchemaRule + removeSchemaRule`, `listUsers / listRoles` |
+| `e2e-permissions.test.ts` | ACL + RBAC end-to-end | ~20 | `A1–A3 denied paths (DDL/read/insert on owner-only)`, `A4–A5 chmod 0o777↔0o700 flip`, `A6 createGroup`, `A8 createRole/grantRole/revokeRole + superuser via SCRAM`, `A9 accessTree`, `B1–B8 multi-db/multi-user isolation + cross-grant`, `A10 data write after open` |
+| `e2e-schema-validators.test.ts` | declarative schema + validator behaviour | ~27 | `required/type_mismatch/out_of_range(unsigned)/one_of/len/min_len/max_len/nullable/nested/optional`, `format: email/uuid/date/url`, `compare (end>=start) incl. skipped-when-other-absent`, `foreign_key: accept/reject/fk_requires_index/autocommit-enforces`, `unique: accept/duplicate/batch-duplicate read-your-own-writes/unique_requires_index/autocommit-enforces`, `lifecycle add/remove/getTableSchema`, `persistence across reconnect`, `multiple violations accumulated` |
+| `e2e-interner.test.ts` | client-side field-interner cache | ~7 | `touchFields cold/warm/idempotent/partial-miss`, `execute attaches interner_epochs`, `id-cache-miss path re-fetches` |
+| `e2e-subscriptions.test.ts` | live subscriptions | ~8 | `records deliver on insert`, `filter drops unmatched server-side`, `multi two streams`, `handle reactive sub-batch`, `initial pre-seeded`, `unsubscribe done`, `multi-repo refused` |
+| `e2e-principal.test.ts` | cross-language principal-id parity | ~4 | TS `principalId` == server `access_tree` id; `chown`/`addGroupMember` with username → BigInt on wire |
 
 ---
 
