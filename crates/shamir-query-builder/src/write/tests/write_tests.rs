@@ -174,6 +174,42 @@ fn insert_with_repo() {
     assert_eq!(got["insert_into"], mpack!(["hot", "sessions"]));
 }
 
+/// `row_idmsgpack` carries id-keyed bytes through build() and the wire,
+/// coexisting with literal `row()` records.
+#[test]
+fn insert_row_idmsgpack_wire() {
+    let raw: Vec<u8> = vec![0x82, 0x01, 0xa5, 0x61, 0x6c, 0x69, 0x63, 0x65];
+    let op = insert("users")
+        .row(mpack!({ "id": 1 }))
+        .row_idmsgpack(raw.clone())
+        .build();
+    assert_eq!(op.values.len(), 1);
+    assert_eq!(op.records_idmsgpack.len(), 1);
+    assert_eq!(op.records_idmsgpack[0].as_ref(), raw.as_slice());
+
+    // Serializes as msgpack bin (0xc4), not seq-of-u8; round-trips equal.
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    assert!(
+        bytes.contains(&0xc4),
+        "idmsgpack must serialize as bin8: {bytes:x?}"
+    );
+    let back: InsertOp = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(op, back);
+}
+
+/// Absent records_idmsgpack omitted from wire (skip_serializing_if).
+#[test]
+fn insert_no_idmsgpack_absent_in_wire() {
+    let op = insert("users").row(mpack!({ "id": 1 })).build();
+    assert!(op.records_idmsgpack.is_empty());
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let j: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(
+        j.get("records_idmsgpack").is_none(),
+        "must be absent when empty"
+    );
+}
+
 // ============================================================================
 // Update
 // ============================================================================

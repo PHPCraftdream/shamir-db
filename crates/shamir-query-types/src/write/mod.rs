@@ -8,6 +8,7 @@ pub mod write_result;
 mod tests;
 
 pub use inserted_record::InsertedRecord;
+pub use serde_bytes::ByteBuf;
 pub use types::{
     DeleteOp, DeleteSelect, InsertOp, InsertSelect, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect,
 };
