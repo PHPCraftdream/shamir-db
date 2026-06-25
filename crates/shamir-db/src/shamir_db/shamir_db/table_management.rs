@@ -226,28 +226,6 @@ impl ShamirDb {
             )));
         }
 
-        // MVCC-overlay guard: a table that has accepted writes holds its
-        // current row versions in an in-memory `cells` map on its
-        // `MvccStore`. The rename copies the durable `__data__` /
-        // `__info__` / `__history__` stores and registers a fresh
-        // `MvccStore` for the new name — the old overlay does not travel
-        // with it, so populated rows would vanish after the rename.
-        // Refuse up-front instead of silently losing data; a follow-on
-        // that migrates the overlay (or rebinds the existing MvccStore)
-        // can lift this guard.
-        if let Ok(table) = db.get_table(repo_name, from).await {
-            if let Some(mvcc) = table.mvcc_store() {
-                if mvcc.cell_count() > 0 {
-                    return Err(DbError::Validation(format!(
-                        "cannot rename table '{}': it has {} live row(s) in the \
-                         MVCC overlay; rename of populated tables is not yet supported",
-                        from,
-                        mvcc.cell_count()
-                    )));
-                }
-            }
-        }
-
         // Reverse-FK guard: refuse if another table in this repo
         // references `from` as `ref_table`. The child's persisted schema
         // stores the parent name literally, so renaming would dangle it.

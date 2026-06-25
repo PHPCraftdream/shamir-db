@@ -4,6 +4,7 @@ mod test_stores;
 pub mod append_only_fast_path_tests;
 pub mod cell_reservation_tests;
 pub mod crud_tests;
+pub mod drain_tests;
 pub mod error_tests;
 pub mod gc_tests;
 pub mod get_current_many_tests;
