@@ -24,8 +24,9 @@ keyset** и **Phase D (reverse-FK ON DELETE)** целиком. Плюс дешё
 (Completeness & Operability)** целиком: 9 фаз (if_exists, table-cascade,
 DropFunction-guard, RENAME TABLE, RETURNING-симметрия, DESCRIBE, EXPLAIN, e2e
 FTS/vector/call, unit C2 + doc-fixes), закрывшая action-items **A3, C1, C2, D2,
-E3, E4, F1–F5, M5** и частично **E1**. Остался из тройки только **A2**
-(access-дефолты, P0).
+E3, E4, F1–F5, M5**. Затем **E.4-followon** (F.1 RENAME INDEX, F.2 populated-table
+rename со снятием MVCC-барьера, F.3 RENAME REPO) закрыл **E1 полностью** (#250).
+Остался из тройки только **A2** (access-дефолты, P0).
 
 ---
 
@@ -168,13 +169,48 @@ RENAME таблицы **с данными** невозможен простым 
 копией (history вакуумится при `Retention::current_only`). Поэтому E.4 покрыл
 **RenameTable для пустых таблиц** + guard `cell_count>0`, отказывающий rename
 populated-таблицы (вместо тихой потери данных) + guard'ы на schema-bearing и
-destination-exists. **Остаток** (RenameRepo/RenameIndex + снятие MVCC-барьера) —
-follow-on, задача **#250**.
+destination-exists. **Остаток** (RenameRepo/RenameIndex + снятие MVCC-барьера)
+был вынесен в follow-on (#250) и **полностью закрыт** кампанией E.4-followon
+(F.1/F.2/F.3) — см. ниже; MVCC-барьер снят в F.2.
 
 ### Верификация финального дерева
 `fmt --all` ✓ · `clippy --workspace --all-targets -D warnings` ✓ 0 · Rust
 **2363/2363** · TS-юниты **462/462** · e2e **9/9** против свежесобранного сервера.
 Каждая фаза проверена оркестратором (zero-trust) перед коммитом.
+
+---
+
+## E.4-followon — RENAME INDEX / REPO + populated-table (полный трек E1, #250)
+
+Декомпозиция остатка **#250** на три leaf-фазы. План:
+`docs/research/E4-FOLLOWON-PLAN.md`. Брифы: `docs/prompts/ddl-lifecycle/
+{05-rename-index,06-populated-rename,07-rename-repo}.md`. Стратегия:
+commit-per-phase, **вся работа делегирована crush** (при падениях — рестарт в той
+же сессии), каждая фаза zero-trust-верифицирована оркестратором (поймано и
+починено **3 реальных дефекта**, которые агент не заметил). e2e — через
+`SHAMIR_SERVER_BIN` override (debug-сервер вместо 25-мин release).
+
+| Фаза | Что | Тесты | Коммит | Статус |
+|---|---|---|---|---|
+| **F.1** | `RENAME INDEX` — rekey записи индекса; sorted/index2 in-place, regular/unique hash drop+rebuild (physical key хэширует `name_interned`) | Rust integ 3/3 · TS-unit +4 · e2e 2/2 | `1ac6b91` | ✅ |
+| **F.2** | populated `RENAME TABLE` — `MvccStore::drain_to_history` (overlay→history) + снят guard `cell_count>0`; **MVCC-барьер E.4 СНЯТ** | drain unit 8/8 · rename 4/4 · durability cold-restart · e2e 2/2 | `722f05d` | ✅ |
+| **F.3** | `RENAME REPO` — zero-copy rekey реестра DbInstance + каталога (репо — логический ключ; под-сторы переезжают целиком) | Rust integ 3/3 · TS-unit 102 · e2e 3/3 · core 474 | `5e3ea60` | ✅ |
+
+**Снятый барьер (F.2):** живые версии строк из MVCC-overlay теперь синхронно
+дренируются в durable history ПЕРЕД store-copy → populated-rename не теряет
+данные. Доказано durability-тестом (insert → rename → drop `ShamirDb` → reopen
+fjall → все строки целы, старое имя не резолвится).
+
+**Побочно (F.3):** вскрыт и починен латентный клиентский баг `extractRepo`
+(`client.ts`) — для ReadQuery с array-form `from` (`Query.withRepo`) возвращал
+`'main'` вместо реального репо → de-intern промах для non-default репо.
+
+**Известная limitation (как в rename_table):** validator bindings по
+`table_ref="db/repo/table"` оставляют dangling refs при rename репо/таблицы —
+вне scope (отдельный follow-on, если понадобится).
+
+**Верификация:** каждая фаза — `clippy --workspace --all-targets -D warnings` ✓ ·
+`fmt` ✓ · полная тестовая лестница вплоть до e2e TS.
 
 ---
 
@@ -194,10 +230,10 @@ follow-on, задача **#250**.
 | E4 / G5 (DESCRIBE) | ✅ = E.6 | `daca34d` |
 | M5 (EXPLAIN) | ✅ = E.7 | `40f66f3` |
 | E6 (FK-actions) | ✅ = Phase D | таблица выше |
-| E1 (RENAME) | ✅ частично = E.4 (TABLE); остаток #250 | `a7dcda5` |
+| E1 (RENAME) | ✅ **полностью**: E.4 (TABLE) + F.1 (INDEX) + F.2 (populated) + F.3 (REPO) | `a7dcda5`,`1ac6b91`,`722f05d`,`5e3ea60` |
 | F1–F5 (doc-fixes) | ✅ = E.9 | `fc14e46` |
 | **#236 (D.2/D.3 e2e gap)** | ✅ fixed & verified, закоммичен/запушен | `f0c64a6` |
 
 **Осталось из «трёх главных»:** A2 (открытые access-дефолты `0o777`/owner=System)
 — единственный настоящий невыполненный P0. Прочий остаток (B2/B4/B5–B7, C3, E2,
-E5, E1-follow-on #250) — в `ACTION-ITEMS.md`.
+E5) — в `ACTION-ITEMS.md`. E1-follow-on (#250) **закрыт** (см. E.4-followon выше).

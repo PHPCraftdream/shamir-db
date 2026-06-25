@@ -122,15 +122,12 @@
 
 ## E. Эволюция DDL — реальные кандидаты (P2)
 
-### E1. `RENAME` (остаток) — repo/index + populated-table 🟡 частично сделано
-- **Источник:** `completeness-ddl.md` G6.
-- **Сделано:** `RENAME TABLE` (Phase E.4, Object 1) — rekey каталога +
-  reverse-index + `copy_store`, с честными guard'ами (populated/schema/
-  destination). См. `DONE.md`.
-- **Остаток (задача #250):** RenameRepo / RenameIndex (+db/role/group/folder) и
-  снятие архитектурного барьера — rename **populated** таблицы требует миграции
-  in-memory MVCC-overlay (вторжение в `shamir-tx`).
-- **Объём:** M (repo/index) + L (overlay-миграция).
+> E1 (`RENAME` — table/index/repo + populated-table) — ✅ **СДЕЛАНО ПОЛНОСТЬЮ**.
+> `RENAME TABLE` (Phase E.4) + кампания **E.4-followon**: F.1 RENAME INDEX,
+> F.2 populated-table rename (снят MVCC-overlay-барьер через
+> `MvccStore::drain_to_history`), F.3 RENAME REPO. См. `DONE.md`. Остаток
+> `db/role/group/folder` RENAME — не запрашивался, тривиальное расширение по тому
+> же паттерну при необходимости.
 
 ### E2. `DEFAULT`-значения полей 📄
 - **Источник:** `completeness-ddl.md` G9.
@@ -190,11 +187,11 @@ challenge/response; F5 Rust `one_of` ✅→❌ (B2 ещё открыт). См. `
 |---|---|---|
 | **P0 — корректность/безопасность** | A2 | открытые access-дефолты (`0o777`/owner=System) |
 | **P1 — билдеры** | B2, B4 | билдер-сеттеры (`one_of` / `records_idmsgpack`) |
-| **P2 — эволюция языка** | E1-остаток (#250), E5 | RenameRepo/Index + populated-overlay; unify unique |
+| **P2 — эволюция языка** | E5 | unify uniqueness (schema-rule vs index-flag) |
 | **P3 — DX + досборка** | B5–B7, C3, E2 | DX-билдеры; тонкое e2e (commit/dropUser/chgrp); DEFAULT |
 
 **Следующий настоящий P0:** A2 (открытые access-дефолты `0o777`/owner=System) —
 единственный оставшийся блокер уровня корректности/безопасности.
 
 > Выполненное (A1, B1, B3, D1, Phase D/E6, **вся кампания Phase E**: A3, C1, C2,
-> D2, E3, E4, M5, F1–F5, E1-частично) — в `DONE.md`.
+> D2, E3, E4, M5, F1–F5; **E.4-followon**: E1 полностью = F.1/F.2/F.3) — в `DONE.md`.
