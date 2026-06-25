@@ -8,6 +8,20 @@
 //! existing planner / engine handle it unchanged. The crate has no engine or
 //! runtime dependency, so it compiles to WASM for browser clients.
 //!
+//! # Scope boundary — query construction, not transport envelope
+//!
+//! This crate builds the **`BatchRequest`** body and the `BatchOp` ops inside
+//! it — the OQL/DDL surface. It deliberately does **not** construct the
+//! top-level `DbRequest` envelope variants (`Ping`, `CreateScramUser`,
+//! `TxBegin`/`TxExecute`/`TxCommit`/`TxRollback`): those are a *transport /
+//! session-lifecycle* concern owned by the client SDKs, which already expose
+//! them ergonomically (`shamir-client`: `ping()` / `create_scram_user()`;
+//! `shamir-client-ts`: `ping()` / `createScramUser()` / `txBegin`/`txExecute`/
+//! `txCommit`/`txRollback()` + the `db.tx()` handle). Keeping `DbRequest` out
+//! of this crate preserves the clean layering (and the WASM-lean footprint):
+//! the builder produces what goes *inside* an `Execute`, the SDK wraps the
+//! envelope around it. This is by design, not a coverage gap.
+//!
 //! See `docs/roadmap/QUERY_BUILDER.md` for the full design.
 //!
 //! Modules are wired in here phase by phase as they land:
