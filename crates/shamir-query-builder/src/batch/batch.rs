@@ -211,6 +211,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Rename a table.
+    pub fn rename_table(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: index ────────────────────────────────────────────────
 
     /// Create an index on a table.

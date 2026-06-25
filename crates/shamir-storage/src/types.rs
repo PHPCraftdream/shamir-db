@@ -349,4 +349,33 @@ pub trait Repo: Send + Sync {
 
     /// Lists all stores in the repository.
     async fn stores_list(&self) -> DbResult<Vec<String>>;
+
+    /// Copy every key/value from store `from` into store `to`.
+    ///
+    /// Used by `RENAME TABLE`: a table's physical data lives in three
+    /// name-keyed stores (`__data__<t>`, `__info__<t>`, `__history__<t>`)
+    /// and the storage layer has no native store-rename primitive, so
+    /// rename is implemented as copy-then-orphan (the old store is left
+    /// in place — same disposition as `DROP TABLE`, which intentionally
+    /// orphans `__data__` since the catalogue is the source of truth).
+    ///
+    /// Default impl streams the source in batches of 256 and calls
+    /// `set_many` on the destination. Backends with a native copy/rename
+    /// primitive may override.
+    async fn copy_store(&self, from: &str, to: &str) -> DbResult<()> {
+        use futures::StreamExt;
+
+        const BATCH: usize = 256;
+        let src = self.store_get(from).await?;
+        let dst = self.store_get(to).await?;
+        let mut stream = src.iter_stream(BATCH);
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            if batch.is_empty() {
+                continue;
+            }
+            dst.set_many(batch).await?;
+        }
+        Ok(())
+    }
 }

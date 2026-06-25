@@ -1,4 +1,4 @@
-//! Table-level DDL operations: create / drop table.
+//! Table-level DDL operations: create / drop / rename table.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,4 +52,26 @@ pub struct DropTableOp {
     /// a foreign key from another table still blocks the drop.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cascade: bool,
+}
+
+/// Rename a table inside a repository.
+///
+/// The physical data stores (`__data__`, `__info__`, `__history__`) are
+/// copied from the old name to the new one, the catalogue record is
+/// re-keyed, and the in-memory table config is migrated. Bindings that
+/// reference the table by id (record ids, index ids) travel with the
+/// copied `__info__` store; bindings keyed by *name* (declarative schema
+/// validator, FK references from other tables) are guarded up-front and
+/// refuse the rename with a typed error code instead of leaving dangling
+/// references.
+///
+/// ```text
+/// { "rename_table": "old_name", "to": "new_name", "repo": "main" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameTableOp {
+    pub rename_table: String,
+    pub to: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
 }

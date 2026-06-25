@@ -32,6 +32,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             // ── Table / Index ──────────────────────────────────────────
             BatchOp::CreateTable(op) => self.handle_create_table(op).await,
             BatchOp::DropTable(op) => self.handle_drop_table(op).await,
+            op @ BatchOp::RenameTable(_) => self.handle_rename_table(op).await,
             BatchOp::CreateIndex(op) => self.handle_create_index(op).await,
             BatchOp::DropIndex(op) => self.handle_drop_index(op).await,
 
