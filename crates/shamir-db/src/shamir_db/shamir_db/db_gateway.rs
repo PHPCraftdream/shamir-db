@@ -167,6 +167,7 @@ impl DbGateway for FacadeDbGateway {
             insert_into: table_ref,
             values: vec![doc],
             records_idmsgpack: Vec::new(),
+            select: None,
         };
 
         let mut queries = new_map();

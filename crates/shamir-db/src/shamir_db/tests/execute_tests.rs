@@ -121,6 +121,77 @@ async fn test_execute_crud_pipeline() {
 }
 
 // ============================================================================
+// RETURNING-симметрия (Phase E.5 #245): DELETE с returning возвращает
+// удалённые строки; INSERT с projection возвращает только выбранные поля.
+// ============================================================================
+
+#[tokio::test]
+async fn test_execute_delete_returning_returns_deleted_rows() {
+    let shamir = setup_shamir().await;
+
+    // Seed three users.
+    let mut b = Batch::new();
+    b.id(1);
+    b.op_silent(
+        "ins",
+        insert("users")
+            .row(doc().set("name", "Alice").set("status", "active"))
+            .row(doc().set("name", "Bob").set("status", "active"))
+            .row(doc().set("name", "Carol").set("status", "inactive")),
+    );
+    let q1 = b.to_request_via_msgpack();
+    shamir.execute("testdb", &q1).await.unwrap();
+
+    // Delete active users with RETURNING — wire-roundtrip through the batch
+    // executor, msgpack codec, and QueryRecord::Inserted deserialiser.
+    let mut b = Batch::new();
+    b.id(1);
+    b.delete(
+        "del",
+        delete("users").where_(eq("status", "active")).returning(),
+    );
+    let q2 = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &q2).await.unwrap();
+
+    // `QueryResult` does not surface `affected` (that's a WriteResult-only
+    // field); the wire-roundtrip result is observable through records.
+    assert_eq!(resp.results["del"].records.len(), 2);
+
+    // Each returned row carries the deleted record's fields.
+    let names: Vec<&str> = resp.results["del"]
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_str("name"))
+        .collect();
+    assert!(names.contains(&"Alice"), "names={:?}", names);
+    assert!(names.contains(&"Bob"), "names={:?}", names);
+}
+
+#[tokio::test]
+async fn test_execute_insert_returning_fields_projects() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins",
+        insert("users")
+            .row(doc().set("name", "Alice").set("age", 30).set("city", "NYC"))
+            .returning_fields(["name", "city"]),
+    );
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+
+    assert_eq!(resp.results["ins"].records.len(), 1);
+    let rec = &resp.results["ins"].records[0];
+    // Projection kept name + city.
+    assert_eq!(rec.get_value_str("name"), Some("Alice"));
+    assert_eq!(rec.get_value_str("city"), Some("NYC"));
+    // Projection dropped age.
+    assert!(rec.get_value_str("age").is_none());
+}
+
+// ============================================================================
 // Multi-table batch with $query dependency
 // ============================================================================
 

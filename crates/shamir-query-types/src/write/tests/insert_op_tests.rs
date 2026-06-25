@@ -53,6 +53,7 @@ fn insert_op_records_idmsgpack_roundtrip_via_msgpack() {
         insert_into: table_ref(),
         values: vec![QueryValue::Null],
         records_idmsgpack: vec![ByteBuf::from(raw_record.clone())],
+        select: None,
     };
 
     // Serialize to msgpack (named map format — the real transport shape).

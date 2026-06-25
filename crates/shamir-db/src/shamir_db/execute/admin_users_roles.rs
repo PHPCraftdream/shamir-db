@@ -181,6 +181,7 @@ impl ShamirAdminExecutor {
                 field: vec!["name".to_string()],
                 value: crate::query::filter::FilterValue::String(op.drop_user.clone()),
             },
+            select: None,
         };
         // F5a: route the delete through the implicit-tx file-WAL path
         // (`run_implicit_batch_tx` + `execute_delete_tx`) instead of the
@@ -332,6 +333,7 @@ impl ShamirAdminExecutor {
                 field: vec!["name".to_string()],
                 value: crate::query::filter::FilterValue::String(op.drop_role.clone()),
             },
+            select: None,
         };
         // F5a: implicit-tx file-WAL delete path (see handle_drop_user).
         let repo = self

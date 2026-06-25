@@ -58,16 +58,43 @@ export interface UpdateSelect {
   fields?: string[];
 }
 
+/**
+ * Configuration for returning records from a DELETE operation.
+ *
+ * DELETE has no changed/unchanged mode — every matched row is removed —
+ * so the only knob is an optional field projection. `fields` is
+ * `skip_serializing_if = "Option::is_none"` → omitted when absent. The mere
+ * presence of a `DeleteSelect` on a `DeleteOp` opts in to RETURNING.
+ */
+export interface DeleteSelect {
+  fields?: string[];
+}
+
+/**
+ * Optional projection over records returned from INSERT.
+ *
+ * INSERT always returns the inserted rows when the caller asks for results;
+ * `InsertSelect` only carries an optional field projection. `fields` is
+ * `skip_serializing_if = "Option::is_none"` → omitted when absent.
+ */
+export interface InsertSelect {
+  fields?: string[];
+}
+
 // ── Write operations ─────────────────────────────────────────────────
 
 /**
  * INSERT operation (`write/types.rs`). `insert_into` is a `TableRef`
  * (bare string for repo "main", or `[repo, table]` tuple). `values` is a
  * non-empty array of records.
+ *
+ * `select` is `skip_serializing_if = "Option::is_none"` → omitted unless
+ * `opts.returningFields` was passed to `insert(...)`.
  */
 export interface InsertOp {
   insert_into: TableRefWire;
   values: WireValue[];
+  select?: InsertSelect;
 }
 
 /**
@@ -97,12 +124,16 @@ export interface SetOp {
 
 /**
  * DELETE operation (`write/types.rs`).
- * `where` is `#[serde(rename = "where")]` — **required** (no skip), always
- * present on the wire.
+ *   - `where` is `#[serde(rename = "where")]` — **required** (no skip),
+ *     always present on the wire.
+ *   - `select` is `#[serde(default, skip_serializing_if = "Option::is_none")]`
+ *     → omitted unless `opts.returning` / `opts.returningFields` was passed
+ *     to `del(...)`.
  */
 export interface DeleteOp {
   delete_from: TableRefWire;
   where: Filter;
+  select?: DeleteSelect;
 }
 
 /** Union of all write operation wire shapes. */

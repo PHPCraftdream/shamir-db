@@ -215,6 +215,7 @@ async fn validator_db_no_deadlock_cross_and_self_read() {
         insert_into: TableRef::new("parent"),
         values: vec![QueryValue::Map(parent_row)],
         records_idmsgpack: Vec::new(),
+        select: None,
     };
 
     let (mut parent_tx, _guard) = resolver
@@ -239,6 +240,7 @@ async fn validator_db_no_deadlock_cross_and_self_read() {
         insert_into: TableRef::new("child"),
         values: vec![QueryValue::Map(child_row)],
         records_idmsgpack: Vec::new(),
+        select: None,
     };
 
     let (mut child_tx, _child_guard) = resolver
