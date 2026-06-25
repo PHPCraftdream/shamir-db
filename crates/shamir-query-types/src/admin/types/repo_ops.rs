@@ -32,4 +32,8 @@ pub struct DropRepoOp {
     /// the repository itself is dropped.
     #[serde(default, skip_serializing_if = "is_false")]
     pub cascade: bool,
+    /// When `true`, dropping a non-existent repository is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }

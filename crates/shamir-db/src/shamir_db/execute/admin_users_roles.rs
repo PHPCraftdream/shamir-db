@@ -97,6 +97,39 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: user not found → no-op.
+        if op.if_exists {
+            let table = self
+                .shamir
+                .system_store()
+                .users_table()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let interner = table
+                .interner()
+                .get()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let refs = crate::types::common::new_map();
+            let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+            let lookup = crate::query::read::ReadQuery::new("users").filter(
+                crate::query::filter::Filter::Eq {
+                    field: vec!["name".to_string()],
+                    value: crate::query::filter::FilterValue::String(op.drop_user.clone()),
+                },
+            );
+            let existing = table
+                .read(&lookup, &ctx)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            if existing.records.is_empty() {
+                return Ok(admin_result(mpack!({
+                    "dropped_user": @(QueryValue::Str(op.drop_user.clone())),
+                    "existed": false,
+                })));
+            }
+        }
+
         let table = self
             .shamir
             .system_store()
@@ -248,6 +281,39 @@ impl ShamirAdminExecutor {
         };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // if_exists early-exit: role not found → no-op.
+        if op.if_exists {
+            let table = self
+                .shamir
+                .system_store()
+                .roles_table()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let interner = table
+                .interner()
+                .get()
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            let refs = crate::types::common::new_map();
+            let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+            let lookup = crate::query::read::ReadQuery::new("roles").filter(
+                crate::query::filter::Filter::Eq {
+                    field: vec!["name".to_string()],
+                    value: crate::query::filter::FilterValue::String(op.drop_role.clone()),
+                },
+            );
+            let existing = table
+                .read(&lookup, &ctx)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            if existing.records.is_empty() {
+                return Ok(admin_result(mpack!({
+                    "dropped_role": @(QueryValue::Str(op.drop_role.clone())),
+                    "existed": false,
+                })));
+            }
+        }
 
         // Role management is global-admin only (Manage on the root).
         self.shamir

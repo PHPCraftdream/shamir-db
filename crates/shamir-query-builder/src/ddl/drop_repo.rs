@@ -9,6 +9,7 @@ pub fn drop_repo(name: impl Into<String>) -> DropRepo {
         name: name.into(),
         hmac: None,
         cascade: false,
+        if_exists: false,
     }
 }
 
@@ -17,6 +18,7 @@ pub struct DropRepo {
     name: String,
     hmac: Option<String>,
     cascade: bool,
+    if_exists: bool,
 }
 
 impl DropRepo {
@@ -32,12 +34,20 @@ impl DropRepo {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent repo is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropRepo(DropRepoOp {
             drop_repo: self.name,
             hmac: self.hmac,
             cascade: self.cascade,
+            if_exists: self.if_exists,
         })
     }
 }

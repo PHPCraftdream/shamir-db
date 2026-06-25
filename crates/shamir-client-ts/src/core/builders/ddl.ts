@@ -250,8 +250,13 @@ export function createFunction(
 }
 
 /** Drop a stored function. */
-export function dropFunction(name: string): DropFunctionOp {
-  return { drop_function: name };
+export function dropFunction(
+  name: string,
+  opts?: { if_exists?: boolean },
+): DropFunctionOp {
+  const op: DropFunctionOp = { drop_function: name };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 /** Rename a stored function. */
@@ -281,8 +286,13 @@ export function createValidator(
 }
 
 /** Drop a validator. */
-export function dropValidator(name: string): DropValidatorOp {
-  return { drop_validator: name };
+export function dropValidator(
+  name: string,
+  opts?: { if_exists?: boolean },
+): DropValidatorOp {
+  const op: DropValidatorOp = { drop_validator: name };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 /** Rename a validator. */
@@ -448,7 +458,7 @@ export function listFunctionFolders(opts?: { parent?: string }): ListOp {
 export function dropDb(
   signer: HmacSigner,
   db: string,
-  opts?: { cascade?: boolean },
+  opts?: { cascade?: boolean; if_exists?: boolean },
 ): DropDbOp {
   const canonical = canonicalDropDb(db);
   const op: DropDbOp = {
@@ -456,6 +466,7 @@ export function dropDb(
     hmac: signer.hmacTagHex(canonical),
   };
   if (opts?.cascade) op.cascade = true;
+  if (opts?.if_exists) op.if_exists = true;
   return op;
 }
 
@@ -464,7 +475,7 @@ export function dropRepo(
   signer: HmacSigner,
   dbInUse: string,
   repo: string,
-  opts?: { cascade?: boolean },
+  opts?: { cascade?: boolean; if_exists?: boolean },
 ): DropRepoOp {
   const canonical = canonicalDropRepo(dbInUse, repo);
   const op: DropRepoOp = {
@@ -472,6 +483,7 @@ export function dropRepo(
     hmac: signer.hmacTagHex(canonical),
   };
   if (opts?.cascade) op.cascade = true;
+  if (opts?.if_exists) op.if_exists = true;
   return op;
 }
 
@@ -481,13 +493,16 @@ export function dropTable(
   dbInUse: string,
   repo: string,
   table: string,
+  opts?: { if_exists?: boolean },
 ): DropTableOp {
   const canonical = canonicalDropTable(dbInUse, repo, table);
-  return {
+  const op: DropTableOp = {
     drop_table: table,
     repo,
     hmac: signer.hmacTagHex(canonical),
   };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 /** Drop an index (HMAC-gated). */
@@ -497,7 +512,7 @@ export function dropIndex(
   repo: string,
   table: string,
   index: string,
-  opts?: { unique?: boolean },
+  opts?: { unique?: boolean; if_exists?: boolean },
 ): DropIndexOp {
   const unique = opts?.unique ?? false;
   const canonical = canonicalDropIndex(dbInUse, repo, table, index, unique);
@@ -508,6 +523,7 @@ export function dropIndex(
     hmac: signer.hmacTagHex(canonical),
   };
   if (unique) op.unique = true;
+  if (opts?.if_exists) op.if_exists = true;
   return op;
 }
 

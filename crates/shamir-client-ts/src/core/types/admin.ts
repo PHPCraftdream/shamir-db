@@ -126,6 +126,7 @@ export interface CreateGroupOp {
 
 export interface DropGroupOp {
   drop_group: GroupRef;
+  if_exists?: boolean;
 }
 
 export interface AddGroupMemberOp {
@@ -173,6 +174,7 @@ export interface CreateUserOp {
 export interface DropUserOp {
   drop_user: string;
   hmac: string;
+  if_exists?: boolean;
 }
 
 export interface CreateRoleOp {
@@ -187,6 +189,7 @@ export interface CreateRoleOp {
 export interface DropRoleOp {
   drop_role: string;
   hmac: string;
+  if_exists?: boolean;
 }
 
 export interface GrantRoleOp {

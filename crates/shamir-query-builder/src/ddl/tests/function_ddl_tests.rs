@@ -43,7 +43,7 @@ fn create_function_from_wasm_with_replace() {
 
 #[test]
 fn drop_function_wire() {
-    let op = ddl::drop_function("my_fn");
+    let op = ddl::drop_function("my_fn").build();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -103,7 +103,7 @@ fn create_validator_from_wasm_replace() {
 
 #[test]
 fn drop_validator_wire() {
-    let op = ddl::drop_validator("v_age");
+    let op = ddl::drop_validator("v_age").build();
     let j = roundtrip(&op);
     assert_eq!(
         j,

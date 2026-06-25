@@ -170,7 +170,8 @@ fn create_group_wire() {
 fn drop_group_by_name_wire() {
     let op = ddl::drop_group(ddl::GroupRef::Name {
         name: "devs".into(),
-    });
+    })
+    .build();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -184,7 +185,7 @@ fn drop_group_by_name_wire() {
 
 #[test]
 fn drop_group_by_id_wire() {
-    let op = ddl::drop_group(ddl::GroupRef::Id { id: 3 });
+    let op = ddl::drop_group(ddl::GroupRef::Id { id: 3 }).build();
     let j = roundtrip(&op);
     assert_eq!(
         j,

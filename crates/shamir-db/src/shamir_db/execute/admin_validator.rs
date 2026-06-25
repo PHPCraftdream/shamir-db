@@ -96,6 +96,20 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: validator not registered → no-op.
+        if op.if_exists
+            && self
+                .shamir
+                .validators()
+                .id_for_name(&op.drop_validator)
+                .is_none()
+        {
+            return Ok(admin_result(mpack!({
+                "dropped_validator": @(QueryValue::Str(op.drop_validator.clone())),
+                "existed": false,
+            })));
+        }
+
         self.shamir
             .authorize_access(
                 &self.actor,

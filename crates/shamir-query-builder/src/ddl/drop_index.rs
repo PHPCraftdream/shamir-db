@@ -11,6 +11,7 @@ pub fn drop_index(name: impl Into<String>, table: impl Into<String>) -> DropInde
         unique: false,
         repo: "main".to_owned(),
         hmac: None,
+        if_exists: false,
     }
 }
 
@@ -21,6 +22,7 @@ pub struct DropIndex {
     unique: bool,
     repo: String,
     hmac: Option<String>,
+    if_exists: bool,
 }
 
 impl DropIndex {
@@ -42,6 +44,13 @@ impl DropIndex {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent index is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropIndex(DropIndexOp {
@@ -50,6 +59,7 @@ impl DropIndex {
             unique: self.unique,
             repo: self.repo,
             hmac: self.hmac,
+            if_exists: self.if_exists,
         })
     }
 }

@@ -59,6 +59,14 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: missing db → no-op.
+        if op.if_exists && !self.shamir.has_db(&op.drop_db) {
+            return Ok(admin_result(mpack!({
+                "dropped": @(QueryValue::Str(op.drop_db.clone())),
+                "existed": false,
+            })));
+        }
+
         self.shamir
             .authorize_access(
                 &self.actor,
@@ -201,6 +209,20 @@ impl ShamirAdminExecutor {
         };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // if_exists early-exit: missing db or repo → no-op.
+        if op.if_exists {
+            let exists = self
+                .shamir
+                .get_db(&self.db_name)
+                .is_some_and(|db| db.has_repo(&op.drop_repo));
+            if !exists {
+                return Ok(admin_result(mpack!({
+                    "dropped_repo": @(QueryValue::Str(op.drop_repo.clone())),
+                    "existed": false,
+                })));
+            }
+        }
 
         self.shamir
             .authorize_access(

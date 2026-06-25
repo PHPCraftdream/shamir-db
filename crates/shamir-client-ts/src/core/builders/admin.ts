@@ -126,8 +126,13 @@ export function createGroup(name: string): CreateGroupOp {
   return { create_group: name };
 }
 
-export function dropGroup(ref: GroupRef): DropGroupOp {
-  return { drop_group: ref };
+export function dropGroup(
+  ref: GroupRef,
+  opts?: { if_exists?: boolean },
+): DropGroupOp {
+  const op: DropGroupOp = { drop_group: ref };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 /**
@@ -200,12 +205,15 @@ export function createUser(
 export function dropUser(
   signer: HmacSigner,
   username: string,
+  opts?: { if_exists?: boolean },
 ): DropUserOp {
   const canonical = canonicalDropUser(username);
-  return {
+  const op: DropUserOp = {
     drop_user: username,
     hmac: signer.hmacTagHex(canonical),
   };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 export function createRole(
@@ -219,12 +227,15 @@ export function createRole(
 export function dropRole(
   signer: HmacSigner,
   role: string,
+  opts?: { if_exists?: boolean },
 ): DropRoleOp {
   const canonical = canonicalDropRole(role);
-  return {
+  const op: DropRoleOp = {
     drop_role: role,
     hmac: signer.hmacTagHex(canonical),
   };
+  if (opts?.if_exists) op.if_exists = true;
+  return op;
 }
 
 export function grantRole(role: string, user: string): GrantRoleOp {

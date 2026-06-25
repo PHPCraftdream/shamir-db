@@ -95,6 +95,14 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: function not registered → no-op.
+        if op.if_exists && !self.shamir.functions().contains(&op.drop_function) {
+            return Ok(admin_result(mpack!({
+                "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
+                "existed": false,
+            })));
+        }
+
         self.shamir
             .authorize_access(
                 &self.actor,

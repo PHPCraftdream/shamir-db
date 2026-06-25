@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use shamir_types::types::value::QueryValue;
 
+use crate::admin::types::db_ops::is_false;
 use crate::auth::SecretString;
 use crate::filter::Filter;
 
@@ -217,6 +218,10 @@ pub struct DropUserOp {
     /// purely to allow types to roundtrip uncheckedly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, dropping a non-existent user is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Create a role.
@@ -233,6 +238,10 @@ pub struct DropRoleOp {
     /// Hex HMAC over `b"drop_role\0<role>"`. See `DropUserOp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, dropping a non-existent role is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Grant a role to a user.

@@ -65,11 +65,47 @@ impl IntoBatchOp for CreateFunction {
     }
 }
 
-/// Drop a stored function by name.
-pub fn drop_function(name: impl Into<String>) -> BatchOp {
-    BatchOp::DropFunction(DropFunctionOp {
-        drop_function: name.into(),
-    })
+/// Drop a stored function by name. Returns a builder for optional flags.
+pub fn drop_function(name: impl Into<String>) -> DropFunction {
+    DropFunction {
+        name: name.into(),
+        if_exists: false,
+    }
+}
+
+/// Builder for [`DropFunctionOp`].
+pub struct DropFunction {
+    name: String,
+    if_exists: bool,
+}
+
+impl DropFunction {
+    /// Enable `IF EXISTS` semantics: dropping a non-existent function is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::DropFunction(DropFunctionOp {
+            drop_function: self.name,
+            if_exists: self.if_exists,
+        })
+    }
+}
+
+impl From<DropFunction> for BatchOp {
+    fn from(b: DropFunction) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for DropFunction {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 /// Rename a stored function.

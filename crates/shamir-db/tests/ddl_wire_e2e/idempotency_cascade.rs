@@ -337,3 +337,131 @@ async fn drop_table_cleans_validator_bound_in() {
         "validator should have existed and been dropped after bound_in cleanup"
     );
 }
+
+// =====================================================================
+// Phase E.1: if_exists on drop ops
+// =====================================================================
+
+#[tokio::test]
+async fn drop_table_if_exists_nonexistent_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("dt");
+    b.drop_table("op", ddl::drop_table("no_such_table").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_table_without_if_exists_existing_succeeds() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("dt");
+    b.drop_table("op", ddl::drop_table("users").repo("main").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true),
+    );
+}
+
+#[tokio::test]
+async fn drop_index_if_exists_nonexistent_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("di");
+    b.drop_index("op", ddl::drop_index("no_such_idx", "users").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_index_if_exists_missing_table_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("di");
+    b.drop_index(
+        "op",
+        ddl::drop_index("some_idx", "no_such_table").if_exists(),
+    );
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_db_if_exists_nonexistent_is_noop() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("bootstrap").await;
+
+    let mut b = Batch::new();
+    b.id("dd");
+    b.drop_db("op", ddl::drop_db("no_such_db").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("bootstrap", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_repo_if_exists_nonexistent_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("dr");
+    b.drop_repo("op", ddl::drop_repo("no_such_repo").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_function_if_exists_nonexistent_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("df");
+    b.drop_function("op", ddl::drop_function("no_such_fn").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}
+
+#[tokio::test]
+async fn drop_validator_if_exists_nonexistent_is_noop() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("dv");
+    b.drop_validator("op", ddl::drop_validator("no_such_val").if_exists());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(false),
+    );
+}

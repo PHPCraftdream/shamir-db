@@ -9,6 +9,7 @@ pub fn drop_table(name: impl Into<String>) -> DropTable {
         name: name.into(),
         repo: "main".to_owned(),
         hmac: None,
+        if_exists: false,
     }
 }
 
@@ -17,6 +18,7 @@ pub struct DropTable {
     name: String,
     repo: String,
     hmac: Option<String>,
+    if_exists: bool,
 }
 
 impl DropTable {
@@ -32,12 +34,20 @@ impl DropTable {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent table is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropTable(DropTableOp {
             drop_table: self.name,
             repo: self.repo,
             hmac: self.hmac,
+            if_exists: self.if_exists,
         })
     }
 }
