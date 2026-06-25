@@ -1,6 +1,7 @@
 mod cross_repo_guard_tests;
 mod executor_tests;
 mod fk_actions_tests;
+mod fk_on_update_tests;
 mod fk_restrict_tests;
 mod planner_tests;
 mod reference_tests;
