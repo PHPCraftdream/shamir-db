@@ -762,6 +762,108 @@ describe.skipIf(!SERVER_AVAILABLE)(
       // holding the numeric group id (or null).
       expect(dbNode!.group).toBe(gid);
     });
+
+    // ════════════════════════════════════════════════════════════════════
+    //  G.4d (A2) — group-membership access grant path
+    // ════════════════════════════════════════════════════════════════════
+
+    const USER_G = `perm_g_${process.pid}`;
+    const USER_G_PW = 'group user password';
+    let gClient: ShamirClient | null = null;
+
+    afterAll(async () => {
+      if (gClient) {
+        try { await gClient.close(); } catch { /* ok */ }
+        gClient = null;
+      }
+    }, 15_000);
+
+    it('A11/G4d-group: group membership + chgrp + group bits grant read; removal re-denies', async () => {
+      // Fresh db + table, seeded as admin.
+      const gdb = await setupDb(adminClient!, 'perm_grp', ['vault']);
+      await seed(adminClient!, gdb, 'vault', [
+        { id: 'g1', secret: 'group-only' },
+      ]);
+
+      // Fresh non-superuser user.
+      gClient = await createUserAndConnect(USER_G, USER_G_PW);
+
+      // Precondition: without group membership the user is denied
+      // (enforced 0o700 default on all three resources).
+      try {
+        await Batch.create('g-denied-pre')
+          .add('r', Query.from('vault'))
+          .execute(gClient, gdb);
+        expect.unreachable('should be denied before group grant');
+      } catch (e: unknown) {
+        expect((e as Error).message).toMatch(/access_denied/);
+      }
+
+      // Create a group and add the user.
+      const grpResp = br(await adminClient!.execute(gdb, {
+        id: 'mk-group-g4d',
+        queries: {
+          g: admin.createGroup(`g4d_grp_${process.pid}_${Date.now()}`),
+        },
+      }));
+      const gid = (grpResp.results.g.records[0] as Record<string, unknown>)
+        .group_id as number;
+      expect(typeof gid).toBe('number');
+      expect(gid).toBeGreaterThan(0);
+
+      br(await adminClient!.execute(gdb, {
+        id: 'add-member-g4d',
+        queries: {
+          a: admin.addGroupMember(admin.groupId(gid), USER_G),
+        },
+      }));
+
+      // chgrp db + store + table to the group, then chmod 0o770
+      // (owner-rwx + group-rwx: group gets x on ancestors for traversal
+      // and r on the table; other = 0).
+      br(await adminClient!.execute(gdb, {
+        id: 'chgrp-g4d',
+        queries: {
+          cg_db: admin.chgrp(admin.refDatabase(gdb), gid),
+          cg_store: admin.chgrp(admin.refStore(gdb, 'main'), gid),
+          cg_tbl: admin.chgrp(admin.refTable(gdb, 'main', 'vault'), gid),
+        },
+      }));
+      br(await adminClient!.execute(gdb, {
+        id: 'chmod-g4d',
+        queries: {
+          cm_db: admin.chmod(admin.refDatabase(gdb), 0o770),
+          cm_store: admin.chmod(admin.refStore(gdb, 'main'), 0o770),
+          cm_tbl: admin.chmod(admin.refTable(gdb, 'main', 'vault'), 0o770),
+        },
+      }));
+
+      // Now the user CAN read via group bits.
+      const resp = br(await Batch.create('g-read-ok')
+        .add('r', Query.from('vault'))
+        .execute(gClient, gdb));
+      expect(resp.results.r.records.length).toBe(1);
+      expect(resp.results.r.records[0].secret).toBe('group-only');
+
+      // Remove the user from the group → access re-denied
+      // (group bits are still 0o770, but the user is no longer a member;
+      // other = 0, so no fallback).
+      br(await adminClient!.execute(gdb, {
+        id: 'rm-member-g4d',
+        queries: {
+          r: admin.removeGroupMember(admin.groupId(gid), USER_G),
+        },
+      }));
+
+      try {
+        await Batch.create('g-denied-post')
+          .add('r', Query.from('vault'))
+          .execute(gClient, gdb);
+        expect.unreachable('should be denied after group removal');
+      } catch (e: unknown) {
+        expect((e as Error).message).toMatch(/access_denied/);
+      }
+    });
   },
 );
 
