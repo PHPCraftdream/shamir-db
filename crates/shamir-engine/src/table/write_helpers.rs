@@ -136,6 +136,48 @@ pub(super) fn resolve_computed_record<'a>(
     Ok(Cow::Owned(QueryValue::Map(out)))
 }
 
+// ============================================================================
+// Literal DEFAULT stamp (Phase ②.4c — insert path)
+// ============================================================================
+
+/// Stamp literal default values onto ABSENT fields of a record (Phase ②.4c).
+///
+/// For each `(path, default)` rule:
+/// - **MVP scope: single-segment paths only.** Multi-segment paths
+///   (`["address","zip"]`) are silently skipped (future work — nested
+///   default stamping needs a recursive walker; none of the current ②.4b
+///   surface exercises nested defaults).
+/// - **ABSENCE = the field key is NOT present in the record map.** A field
+///   explicitly present as `Null` is NOT absent — it is an explicit value
+///   and is never overwritten (the keystone replay-safe invariant from
+///   DDL-EVOLUTION-PLAN §②.4a variant B).
+/// - If absent, `field` is inserted with `default.clone()`. The stamp is
+///   therefore idempotent: re-applying on an already-stamped record is a
+///   no-op (the key is now present).
+///
+/// Non-map records are returned unchanged (defaults are field-scoped). The
+/// caller is expected to fast-skip when `defaults` is empty (the common hot
+/// path — tables without a `default` rule).
+pub(super) fn apply_defaults(rec: &mut QueryValue, defaults: &[(Vec<String>, QueryValue)]) {
+    let m = match rec {
+        QueryValue::Map(m) => m,
+        _ => return,
+    };
+    for (path, default) in defaults {
+        // MVP: single-segment path only. A multi-segment default is a
+        // future enhancement; skip it here rather than partially applying.
+        let field = match path.first() {
+            Some(f) if path.len() == 1 => f,
+            _ => continue,
+        };
+        // ABSENCE check: only stamp when the key is missing. Present-as-Null
+        // is an explicit value — do NOT overwrite.
+        if !m.contains_key(field) {
+            m.insert(field.clone(), default.clone());
+        }
+    }
+}
+
 /// Evaluate a [`FilterValue`] to a [`QueryValue`] in the write-time computed
 /// context: literals map directly, `$ref` navigates `literal` (the record's
 /// own literal fields) as a `QueryValue::Map` path,

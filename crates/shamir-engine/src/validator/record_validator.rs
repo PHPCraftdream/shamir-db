@@ -175,4 +175,15 @@ pub trait RecordValidator: Send + Sync {
     fn nullable_for_field(&self, _field: &str) -> Option<bool> {
         None
     }
+
+    /// Return all literal-default rules declared by this validator.
+    ///
+    /// Each entry is `(field_path, default_value)` for every rule whose
+    /// `constraints.default = Some(...)`.  Only [`SchemaValidator`] overrides
+    /// this (Phase ②.4c — the pre-encode INSERT stamp uses the aggregated
+    /// list to fill absent fields before validation + storage).  The default
+    /// returns an empty vec — native/WASM validators carry no defaults.
+    fn defaults(&self) -> Vec<(Vec<String>, shamir_types::types::value::QueryValue)> {
+        Vec::new()
+    }
 }

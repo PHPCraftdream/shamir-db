@@ -11,6 +11,8 @@ use crate::validator::encode::Validation;
 use crate::validator::record_fields::RecordFields;
 use crate::validator::record_validator::{RecordValidator, ValidatorCtx};
 
+use shamir_types::types::value::QueryValue;
+
 use super::field_rule::FieldRule;
 
 /// Declarative schema validator.
@@ -45,6 +47,23 @@ impl SchemaValidator {
                     .as_ref()
                     .map(|fk| (r.path.clone(), fk.clone()))
             })
+            .collect()
+    }
+
+    /// Collect all literal-default rules declared in this validator.
+    ///
+    /// Returns `(field_path, default_value)` for every rule whose
+    /// `constraints.default = Some(...)`.  Used by the ②.4c INSERT
+    /// stamp-enforcement: the write path calls this once per batch and
+    /// fills each ABSENT field with its default BEFORE encode + validation,
+    /// so the stamped value is what gets stored AND validated.  Present
+    /// fields (including explicit `Null`) are never touched — replay-safe
+    /// by construction (the stamped field is present on reload, so the
+    /// stamp never fires twice; see DDL-EVOLUTION-PLAN §②.4a variant B).
+    pub fn collect_defaults(&self) -> Vec<(Vec<String>, QueryValue)> {
+        self.rules
+            .iter()
+            .filter_map(|r| r.constraints.default.clone().map(|dv| (r.path.clone(), dv)))
             .collect()
     }
 }
@@ -239,6 +258,10 @@ impl RecordValidator for SchemaValidator {
 
     fn fk_refs(&self) -> Vec<(Vec<String>, super::ForeignKeyRef)> {
         self.collect_fk_refs()
+    }
+
+    fn defaults(&self) -> Vec<(Vec<String>, QueryValue)> {
+        self.collect_defaults()
     }
 
     fn nullable_for_field(&self, field: &str) -> Option<bool> {

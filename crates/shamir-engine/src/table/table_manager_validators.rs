@@ -359,4 +359,32 @@ impl TableManager {
         }
         refs
     }
+
+    /// Collect all literal-default rules declared by this table's bound
+    /// validators.
+    ///
+    /// Mirrors [`collect_fk_refs`](Self::collect_fk_refs): iterates bindings,
+    /// resolves each via the registry, calls `defaults()` on the compiled
+    /// `RecordValidator`, and aggregates the `(field_path, default_value)`
+    /// pairs.  Returns an empty vec when there is no registry or no bound
+    /// validator declares a default (the common case — fast-skip on the
+    /// insert hot path).
+    ///
+    /// Used by Phase ②.4c — `execute_insert_tx` / `execute_set_tx` call this
+    /// once per batch and stamp each absent field with its literal default
+    /// BEFORE encode + validation.
+    pub fn schema_defaults(&self) -> Vec<(Vec<String>, QueryValue)> {
+        let reg = match &self.validator_registry {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let bindings = self.validator_bindings.load_full();
+        let mut defaults = Vec::new();
+        for binding in bindings.iter() {
+            if let Some(validator) = reg.get_by_id(&binding.validator_id) {
+                defaults.extend(validator.defaults());
+            }
+        }
+        defaults
+    }
 }
