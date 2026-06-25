@@ -1,6 +1,10 @@
 //! [`IntoFieldPath`] trait and ergonomic constructors for [`FilterValue`].
 
-use shamir_query_types::filter::{FieldPath, FilterValue, FnCall};
+use shamir_query_types::filter::{FieldPath, FilterValue};
+
+// Re-export `FnCall` so callers can pattern-match on the result of
+// `func_simple` / `func` without a separate `shamir_query_types` import.
+pub use shamir_query_types::filter::FnCall;
 
 // ── IntoFieldPath trait ──────────────────────────────────────────────
 
@@ -100,6 +104,17 @@ pub fn col(path: impl IntoFieldPath) -> FilterValue {
 pub fn func(name: impl Into<String>, args: impl IntoIterator<Item = FilterValue>) -> FilterValue {
     FilterValue::FnCall {
         call: FnCall::complex(name, args.into_iter().collect()),
+    }
+}
+
+/// Create a no-argument [`FilterValue::FnCall`] — the simple wire form
+/// `{"$fn":"NOW"}`.
+///
+/// Uses [`FnCall::simple`] under the hood. Mirrors the TS builder's
+/// `filter.fn(name)` called without args.
+pub fn func_simple(name: impl Into<String>) -> FilterValue {
+    FilterValue::FnCall {
+        call: FnCall::simple(name),
     }
 }
 

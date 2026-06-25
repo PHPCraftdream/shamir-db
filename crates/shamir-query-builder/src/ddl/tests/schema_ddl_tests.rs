@@ -420,3 +420,27 @@ fn field_one_of_absent_when_none() {
         "one_of must be absent when not set, got: {j:?}"
     );
 }
+
+// ============================================================================
+// FieldBuilder type-tag setters — set / null_type
+// ============================================================================
+
+/// `.set()` produces the `"set"` type tag in the wire encoding.
+#[test]
+fn field_set_type_tag_wire() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["tags"]).set())
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["rule"]["type"], "set");
+}
+
+/// `.null_type()` produces the `"null"` type tag in the wire encoding.
+#[test]
+fn field_null_type_tag_wire() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["erased"]).null_type())
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["rule"]["type"], "null");
+}

@@ -32,6 +32,20 @@ pub fn function(name: impl Into<String>) -> ResourceRef {
     }
 }
 
+/// Reference a function folder by its path segments.
+///
+/// Mirrors the TS builder's `refFunctionFolder(segments)`. The segments
+/// form the folder path (e.g. `["reports", "daily"]`).
+pub fn function_folder<I, S>(segments: I) -> ResourceRef
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    ResourceRef::FunctionFolder {
+        function_folder: segments.into_iter().map(Into::into).collect(),
+    }
+}
+
 /// Reference the function namespace singleton.
 pub fn function_namespace() -> ResourceRef {
     ResourceRef::FunctionNamespace {

@@ -94,6 +94,21 @@ impl FieldBuilder {
         self
     }
 
+    /// Set the type tag to `"set"`.
+    pub fn set(mut self) -> Self {
+        self.ty = "set".to_owned();
+        self
+    }
+
+    /// Set the type tag to `"null"`.
+    ///
+    /// Named `null_type` (not `null`) to avoid confusion with the null
+    /// literal filter value.
+    pub fn null_type(mut self) -> Self {
+        self.ty = "null".to_owned();
+        self
+    }
+
     /// Set the type tag to an arbitrary string.
     pub fn type_tag(mut self, tag: impl Into<String>) -> Self {
         self.ty = tag.into();
