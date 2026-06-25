@@ -24,6 +24,7 @@ import type {
   ChgrpOp,
   CreateGroupOp,
   DropGroupOp,
+  RenameGroupOp,
   AddGroupMemberOp,
   RemoveGroupMemberOp,
   AccessTreeOp,
@@ -133,6 +134,15 @@ export function dropGroup(
   const op: DropGroupOp = { drop_group: ref };
   if (opts?.if_exists) op.if_exists = true;
   return op;
+}
+
+/**
+ * Rename a group. Groups are id-keyed, so this only updates the display
+ * name; members and resource references (which store the group id) are
+ * unaffected.
+ */
+export function renameGroup(ref: GroupRef, to: string): RenameGroupOp {
+  return { rename_group: ref, to };
 }
 
 /**
@@ -265,6 +275,7 @@ export const admin = {
   chgrp,
   createGroup,
   dropGroup,
+  renameGroup,
   addGroupMember,
   removeGroupMember,
   accessTree,

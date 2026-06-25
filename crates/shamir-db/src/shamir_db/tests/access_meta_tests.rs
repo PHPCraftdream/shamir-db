@@ -1,7 +1,9 @@
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
+use crate::query::admin::GroupRef;
 use crate::shamir_db::ShamirDb;
 use crate::shamir_db::SystemStoreConfig;
+use crate::DbError;
 use shamir_types::access::{Actor, Mode, PermClass, ResourceMeta, ResourcePath};
 
 // ============================================================================
@@ -289,6 +291,170 @@ async fn drop_group_removes_it() {
     let members = shamir.group_members(gid).await.unwrap();
     assert!(members.is_empty());
     assert!(!shamir.user_in_group(1, gid).await.unwrap());
+}
+
+// ============================================================================
+// rename_group — id-keyed display-name swap, no reference rekey
+// ============================================================================
+
+#[tokio::test]
+async fn rename_group_by_name_preserves_id_and_members() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let gid = shamir.create_group("devs").await.unwrap();
+    shamir.add_group_member(gid, 10).await.unwrap();
+    shamir.add_group_member(gid, 20).await.unwrap();
+
+    shamir
+        .rename_group(
+            &GroupRef::Name {
+                name: "devs".to_string(),
+            },
+            "engineers",
+        )
+        .await
+        .unwrap();
+
+    // New name resolves to the SAME group id.
+    let gid_after = shamir
+        .resolve_group_id(&GroupRef::Name {
+            name: "engineers".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(gid_after, gid);
+
+    // Old name no longer resolves.
+    let err = shamir
+        .resolve_group_id(&GroupRef::Name {
+            name: "devs".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::NotFound(_)), "got {err:?}");
+
+    // Members preserved across the rename.
+    let members = shamir.group_members(gid).await.unwrap();
+    assert!(members.contains(&10));
+    assert!(members.contains(&20));
+    assert_eq!(members.len(), 2);
+}
+
+#[tokio::test]
+async fn rename_group_by_id_preserves_members() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let gid = shamir.create_group("qa").await.unwrap();
+    shamir.add_group_member(gid, 7).await.unwrap();
+
+    shamir
+        .rename_group(&GroupRef::Id { id: gid }, "qa-renamed")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        shamir
+            .resolve_group_id(&GroupRef::Name {
+                name: "qa-renamed".to_string()
+            })
+            .await
+            .unwrap(),
+        gid
+    );
+    assert_eq!(shamir.group_members(gid).await.unwrap(), vec![7]);
+}
+
+#[tokio::test]
+async fn rename_group_to_its_own_name_is_idempotent() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let gid = shamir.create_group("self").await.unwrap();
+    // Renaming to the current name is a tolerated no-op.
+    shamir
+        .rename_group(
+            &GroupRef::Name {
+                name: "self".to_string(),
+            },
+            "self",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        shamir
+            .resolve_group_id(&GroupRef::Name {
+                name: "self".to_string()
+            })
+            .await
+            .unwrap(),
+        gid
+    );
+}
+
+#[tokio::test]
+async fn rename_group_to_taken_name_is_key_exists() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let _a = shamir.create_group("alpha").await.unwrap();
+    let b = shamir.create_group("beta").await.unwrap();
+
+    let err = shamir
+        .rename_group(&GroupRef::Id { id: b }, "alpha")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::KeyExists(_)), "got {err:?}");
+
+    // Source group unchanged on failure.
+    assert_eq!(
+        shamir
+            .resolve_group_id(&GroupRef::Name {
+                name: "beta".to_string()
+            })
+            .await
+            .unwrap(),
+        b
+    );
+}
+
+#[tokio::test]
+async fn rename_group_missing_is_not_found() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let err = shamir
+        .rename_group(
+            &GroupRef::Name {
+                name: "ghost".to_string(),
+            },
+            "ghosts",
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::NotFound(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn rename_group_does_not_break_resource_group_ref() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await;
+
+    let gid = shamir.create_group("devs").await.unwrap();
+
+    // Stamp a database resource with group = gid, then rename the group.
+    let mut meta = shamir
+        .resource_meta(&ResourcePath::database("testdb"))
+        .await;
+    meta.group = Some(gid);
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &meta)
+        .await
+        .unwrap();
+
+    shamir
+        .rename_group(&GroupRef::Id { id: gid }, "engineers")
+        .await
+        .unwrap();
+
+    // The resource still references the same (immutable) group id.
+    let after = shamir
+        .resource_meta(&ResourcePath::database("testdb"))
+        .await;
+    assert_eq!(after.group, Some(gid));
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! Admin handlers: Chmod, Chown, Chgrp, CreateGroup, DropGroup, AddGroupMember, RemoveGroupMember, AccessTree.
+//! Admin handlers: Chmod, Chown, Chgrp, CreateGroup, DropGroup, RenameGroup, AddGroupMember, RemoveGroupMember, AccessTree.
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
@@ -197,6 +197,45 @@ impl ShamirAdminExecutor {
         Ok(admin_result(mpack!({
             "dropped_group_id": @(QueryValue::Int(group_id as i64)),
             "existed": true,
+        })))
+    }
+
+    pub(super) async fn handle_rename_group(
+        &self,
+        op: &crate::query::admin::RenameGroupOp,
+    ) -> Result<QueryResult, BatchError> {
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // Groups are global; managing them requires Manage on the root.
+        self.shamir
+            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(err_access)?;
+
+        // Resolve the source group; rename requires it to exist (no if_exists).
+        let group_id = self
+            .shamir
+            .resolve_group_id(&op.rename_group)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .rename_group(&op.rename_group, &op.to)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        Ok(admin_result(mpack!({
+            "renamed_group": @(QueryValue::Int(group_id as i64)),
+            "to": @(QueryValue::Str(op.to.clone())),
         })))
     }
 

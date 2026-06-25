@@ -140,6 +140,21 @@ pub struct DropGroupOp {
     pub if_exists: bool,
 }
 
+/// Rename an existing group. The group is id-keyed, so renaming only
+/// updates the display name stored under the (unchanged) `group_id`;
+/// members and resource references (which store `group_id`, not the name)
+/// are untouched.
+///
+/// ```text
+/// { "rename_group": { "name": "devs" }, "to": "engineers" }
+/// { "rename_group": { "id": 3 }, "to": "engineers" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameGroupOp {
+    pub rename_group: GroupRef,
+    pub to: String,
+}
+
 /// Add a user to a group.
 ///
 /// ```text

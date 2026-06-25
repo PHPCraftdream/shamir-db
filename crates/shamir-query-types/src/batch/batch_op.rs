@@ -12,8 +12,9 @@ use crate::admin::{
     DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
     InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionFolderOp, RenameFunctionOp,
-    RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp, RollbackMigrationOp,
-    SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
+    RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
+    UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -86,6 +87,7 @@ pub enum BatchOp {
     Chgrp(ChgrpOp),
     CreateGroup(CreateGroupOp),
     DropGroup(DropGroupOp),
+    RenameGroup(RenameGroupOp),
     AddGroupMember(AddGroupMemberOp),
     RemoveGroupMember(RemoveGroupMemberOp),
 
@@ -183,6 +185,7 @@ impl Serialize for BatchOp {
             BatchOp::Chgrp(op) => op.serialize(serializer),
             BatchOp::CreateGroup(op) => op.serialize(serializer),
             BatchOp::DropGroup(op) => op.serialize(serializer),
+            BatchOp::RenameGroup(op) => op.serialize(serializer),
             BatchOp::AddGroupMember(op) => op.serialize(serializer),
             BatchOp::RemoveGroupMember(op) => op.serialize(serializer),
             BatchOp::AccessTree(op) => op.serialize(serializer),
@@ -314,6 +317,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateGroupOp, _>(&bytes).map(BatchOp::CreateGroup)
         } else if has("drop_group") {
             qv_to::<DropGroupOp, _>(&bytes).map(BatchOp::DropGroup)
+        } else if has("rename_group") {
+            qv_to::<RenameGroupOp, _>(&bytes).map(BatchOp::RenameGroup)
         } else if has("add_group_member") {
             qv_to::<AddGroupMemberOp, _>(&bytes).map(BatchOp::AddGroupMember)
         } else if has("remove_group_member") {
@@ -427,6 +432,7 @@ impl BatchOp {
                 | BatchOp::Chgrp(_)
                 | BatchOp::CreateGroup(_)
                 | BatchOp::DropGroup(_)
+                | BatchOp::RenameGroup(_)
                 | BatchOp::AddGroupMember(_)
                 | BatchOp::RemoveGroupMember(_)
                 | BatchOp::AccessTree(_)

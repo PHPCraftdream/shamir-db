@@ -234,6 +234,41 @@ impl ShamirDb {
         self.system_store.remove_group(group_id).await
     }
 
+    /// Rename an existing group.
+    ///
+    /// Groups are id-keyed: members and resource references store the
+    /// (immutable) `group_id`, never the name. Renaming therefore rewrites
+    /// only the display name under the existing `group_id` — no reference
+    /// rekey is required.
+    ///
+    /// - Resolves the source [`GroupRef`] to a `group_id` (NotFound if absent).
+    /// - Guards name uniqueness: if some *other* group already holds `to`,
+    ///   returns [`DbError::KeyExists`]. Renaming a group to its own current
+    ///   name is a tolerated no-op.
+    /// - Preserves membership by reloading it before the overwrite.
+    pub async fn rename_group(
+        &self,
+        group_ref: &crate::query::admin::GroupRef,
+        to: &str,
+    ) -> DbResult<()> {
+        let gid = self.resolve_group_id(group_ref).await?;
+
+        // Uniqueness guard: reject if a *different* group already owns `to`.
+        let groups = self.system_store.load_groups().await?;
+        let conflict = groups.iter().any(|g| {
+            g.get("name").and_then(|v| v.as_str()) == Some(to)
+                && g.get("group_id").and_then(|v| v.as_u64()) != Some(gid)
+        });
+        if conflict {
+            return Err(DbError::KeyExists(format!("group '{}' already exists", to)));
+        }
+
+        // Preserve membership across the name rewrite.
+        let members = self.group_members(gid).await?;
+        self.system_store.save_group(gid, to, &members).await?;
+        Ok(())
+    }
+
     /// Add a user to a group.
     pub async fn add_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
         self.system_store.add_group_member(group_id, user_id).await
