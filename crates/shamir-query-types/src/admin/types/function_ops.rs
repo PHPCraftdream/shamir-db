@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::db_ops::is_false;
+
 /// Create (or replace) a stored function from Rust source or pre-compiled WASM.
 ///
 /// Exactly one of `source` or `wasm` must be provided. `wasm` is the raw
@@ -26,10 +28,15 @@ pub struct CreateFunctionOp {
 ///
 /// ```text
 /// { "drop_function": "my_fn" }
+/// { "drop_function": "my_fn", "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropFunctionOp {
     pub drop_function: String,
+    /// When `true`, dropping a non-existent function is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Rename a stored function.

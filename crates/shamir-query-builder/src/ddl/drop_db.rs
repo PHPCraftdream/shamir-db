@@ -9,14 +9,16 @@ pub fn drop_db(name: impl Into<String>) -> DropDb {
         name: name.into(),
         hmac: None,
         cascade: false,
+        if_exists: false,
     }
 }
 
-/// Builder for [`DropDbOp`] (supports optional HMAC and cascade).
+/// Builder for [`DropDbOp`] (supports optional HMAC, cascade, and if_exists).
 pub struct DropDb {
     name: String,
     hmac: Option<String>,
     cascade: bool,
+    if_exists: bool,
 }
 
 impl DropDb {
@@ -32,12 +34,20 @@ impl DropDb {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent database is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropDb(DropDbOp {
             drop_db: self.name,
             hmac: self.hmac,
             cascade: self.cascade,
+            if_exists: self.if_exists,
         })
     }
 }

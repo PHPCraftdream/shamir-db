@@ -747,3 +747,62 @@ describe('HMAC-gated ops', () => {
     });
   });
 });
+
+// ── if_exists on drop ops ──────────────────────────────────────────
+
+describe('if_exists on drop ops', () => {
+  it('dropFunction omits if_exists when not set', () => {
+    const op = ddl.dropFunction('my_fn');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropFunction emits if_exists when true', () => {
+    const op = ddl.dropFunction('my_fn', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropValidator omits if_exists when not set', () => {
+    const op = ddl.dropValidator('v');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropValidator emits if_exists when true', () => {
+    const op = ddl.dropValidator('v', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropDb emits if_exists when true', () => {
+    const op = ddl.dropDb(fakeSigner, 'testdb', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropDb omits if_exists when not set', () => {
+    const op = ddl.dropDb(fakeSigner, 'testdb');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropRepo emits if_exists when true', () => {
+    const op = ddl.dropRepo(fakeSigner, 'mydb', 'main', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropTable emits if_exists when true', () => {
+    const op = ddl.dropTable(fakeSigner, 'mydb', 'main', 'users', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropTable omits if_exists when not set', () => {
+    const op = ddl.dropTable(fakeSigner, 'mydb', 'main', 'users');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropIndex emits if_exists when true', () => {
+    const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropIndex omits if_exists when not set', () => {
+    const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+});

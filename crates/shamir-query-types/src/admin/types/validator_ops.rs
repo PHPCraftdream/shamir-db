@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::db_ops::is_false;
+
 fn default_repo() -> String {
     "main".to_string()
 }
@@ -27,10 +29,15 @@ pub struct CreateValidatorOp {
 ///
 /// ```text
 /// { "drop_validator": "v_age" }
+/// { "drop_validator": "v_age", "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropValidatorOp {
     pub drop_validator: String,
+    /// When `true`, dropping a non-existent validator is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Rename a validator.

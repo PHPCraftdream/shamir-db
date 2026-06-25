@@ -65,7 +65,7 @@ fn create_function_folder_serde_roundtrip() {
 
 #[test]
 fn drop_function_serde_roundtrip() {
-    let op = ddl::drop_function("my_fn");
+    let op = ddl::drop_function("my_fn").into_batch_op();
     assert!(op.is_admin());
     let op2 = msgpack_roundtrip(op.clone());
     assert_eq!(op, op2);

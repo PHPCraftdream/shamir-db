@@ -77,6 +77,7 @@ pub fn drop_user(name: impl Into<String>) -> DropUser {
     DropUser {
         name: name.into(),
         hmac: None,
+        if_exists: false,
     }
 }
 
@@ -84,6 +85,7 @@ pub fn drop_user(name: impl Into<String>) -> DropUser {
 pub struct DropUser {
     name: String,
     hmac: Option<String>,
+    if_exists: bool,
 }
 
 impl DropUser {
@@ -93,11 +95,19 @@ impl DropUser {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent user is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropUser(DropUserOp {
             drop_user: self.name,
             hmac: self.hmac,
+            if_exists: self.if_exists,
         })
     }
 }
@@ -127,6 +137,7 @@ pub fn drop_role(name: impl Into<String>) -> DropRole {
     DropRole {
         name: name.into(),
         hmac: None,
+        if_exists: false,
     }
 }
 
@@ -134,6 +145,7 @@ pub fn drop_role(name: impl Into<String>) -> DropRole {
 pub struct DropRole {
     name: String,
     hmac: Option<String>,
+    if_exists: bool,
 }
 
 impl DropRole {
@@ -143,11 +155,19 @@ impl DropRole {
         self
     }
 
+    /// Enable `IF EXISTS` semantics: dropping a non-existent role is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropRole(DropRoleOp {
             drop_role: self.name,
             hmac: self.hmac,
+            if_exists: self.if_exists,
         })
     }
 }

@@ -98,9 +98,47 @@ pub fn create_group(name: impl Into<String>) -> BatchOp {
     })
 }
 
-/// Drop a group by reference (name or id).
-pub fn drop_group(group: GroupRef) -> BatchOp {
-    BatchOp::DropGroup(DropGroupOp { drop_group: group })
+/// Drop a group by reference (name or id). Returns a builder for optional flags.
+pub fn drop_group(group: GroupRef) -> DropGroup {
+    DropGroup {
+        group,
+        if_exists: false,
+    }
+}
+
+/// Builder for [`DropGroupOp`].
+pub struct DropGroup {
+    group: GroupRef,
+    if_exists: bool,
+}
+
+impl DropGroup {
+    /// Enable `IF EXISTS` semantics: dropping a non-existent group is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::DropGroup(DropGroupOp {
+            drop_group: self.group,
+            if_exists: self.if_exists,
+        })
+    }
+}
+
+impl From<DropGroup> for BatchOp {
+    fn from(b: DropGroup) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for DropGroup {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 /// Add a user to a group.

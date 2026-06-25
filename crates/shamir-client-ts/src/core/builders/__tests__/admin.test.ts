@@ -396,3 +396,37 @@ describe('revokeRole', () => {
     expect(op).toEqual({ revoke_role: 'reader', user: 'bob' });
   });
 });
+
+// ── if_exists on admin drop ops ────────────────────────────────────
+
+describe('if_exists on admin drop ops', () => {
+  it('dropGroup emits if_exists when true', () => {
+    const op = admin.dropGroup(admin.groupName('devs'), { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropGroup omits if_exists when not set', () => {
+    const op = admin.dropGroup(admin.groupName('devs'));
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropUser emits if_exists when true', () => {
+    const op = admin.dropUser(fakeSigner, 'alice', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropUser omits if_exists when not set', () => {
+    const op = admin.dropUser(fakeSigner, 'alice');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('dropRole emits if_exists when true', () => {
+    const op = admin.dropRole(fakeSigner, 'reader', { if_exists: true });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('dropRole omits if_exists when not set', () => {
+    const op = admin.dropRole(fakeSigner, 'reader');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+});

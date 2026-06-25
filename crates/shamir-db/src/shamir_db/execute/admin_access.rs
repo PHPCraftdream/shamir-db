@@ -176,17 +176,27 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
             .await
             .map_err(err_access)?;
-        let group_id = self
-            .shamir
-            .resolve_group_id(&op.drop_group)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+
+        // if_exists: resolve_group_id may fail for non-existent group → no-op.
+        let group_id = match self.shamir.resolve_group_id(&op.drop_group).await {
+            Ok(id) => id,
+            Err(e) => {
+                if op.if_exists {
+                    return Ok(admin_result(mpack!({
+                        "dropped_group_id": @(QueryValue::Null),
+                        "existed": false,
+                    })));
+                }
+                return Err(err(e.to_string()));
+            }
+        };
         self.shamir
             .drop_group(group_id)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "dropped_group_id": @(QueryValue::Int(group_id as i64)),
+            "existed": true,
         })))
     }
 

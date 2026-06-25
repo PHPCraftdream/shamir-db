@@ -67,11 +67,47 @@ impl IntoBatchOp for CreateValidator {
     }
 }
 
-/// Drop a validator by name.
-pub fn drop_validator(name: impl Into<String>) -> BatchOp {
-    BatchOp::DropValidator(DropValidatorOp {
-        drop_validator: name.into(),
-    })
+/// Drop a validator by name. Returns a builder for optional flags.
+pub fn drop_validator(name: impl Into<String>) -> DropValidator_ {
+    DropValidator_ {
+        name: name.into(),
+        if_exists: false,
+    }
+}
+
+/// Builder for [`DropValidatorOp`].
+pub struct DropValidator_ {
+    name: String,
+    if_exists: bool,
+}
+
+impl DropValidator_ {
+    /// Enable `IF EXISTS` semantics: dropping a non-existent validator is
+    /// a silent no-op (`existed: false`) instead of an error.
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::DropValidator(DropValidatorOp {
+            drop_validator: self.name,
+            if_exists: self.if_exists,
+        })
+    }
+}
+
+impl From<DropValidator_> for BatchOp {
+    fn from(b: DropValidator_) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for DropValidator_ {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 /// Rename a validator.

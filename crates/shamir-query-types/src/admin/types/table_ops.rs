@@ -41,4 +41,9 @@ pub struct DropTableOp {
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, dropping a non-existent table (or a table whose
+    /// parent db/repo is missing) is a silent no-op returning
+    /// `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }

@@ -106,6 +106,20 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: missing db or missing table → no-op.
+        if op.if_exists {
+            let exists = self
+                .shamir
+                .get_db(&self.db_name)
+                .is_some_and(|db| db.has_table(&op.repo, &op.drop_table));
+            if !exists {
+                return Ok(admin_result(mpack!({
+                    "dropped_table": @(QueryValue::Str(op.drop_table.clone())),
+                    "existed": false,
+                })));
+            }
+        }
+
         self.shamir
             .authorize_access(
                 &self.actor,
@@ -319,6 +333,31 @@ impl ShamirAdminExecutor {
         };
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // if_exists early-exit: missing db, table, or index → no-op.
+        if op.if_exists {
+            let db_opt = self.shamir.get_db(&self.db_name);
+            let table_opt = match &db_opt {
+                Some(db) => db.get_table(&op.repo, &op.table).await.ok(),
+                None => None,
+            };
+            let index_exists = match &table_opt {
+                Some(table) => {
+                    if op.unique {
+                        table.unique_index_exists(&op.drop_index).await
+                    } else {
+                        table.index_exists(&op.drop_index).await
+                    }
+                }
+                None => false,
+            };
+            if !index_exists {
+                return Ok(admin_result(mpack!({
+                    "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
+                    "existed": false,
+                })));
+            }
+        }
 
         self.shamir
             .authorize_access(

@@ -265,6 +265,7 @@ export interface CreateFunctionOp {
 
 export interface DropFunctionOp {
   drop_function: string;
+  if_exists?: boolean;
 }
 
 export interface RenameFunctionOp {
@@ -281,6 +282,7 @@ export interface CreateValidatorOp {
 
 export interface DropValidatorOp {
   drop_validator: string;
+  if_exists?: boolean;
 }
 
 export interface RenameValidatorOp {
@@ -351,18 +353,21 @@ export interface DropDbOp {
   drop_db: string;
   hmac: string;
   cascade?: true;
+  if_exists?: boolean;
 }
 
 export interface DropRepoOp {
   drop_repo: string;
   hmac: string;
   cascade?: true;
+  if_exists?: boolean;
 }
 
 export interface DropTableOp {
   drop_table: string;
   repo: string;
   hmac: string;
+  if_exists?: boolean;
 }
 
 export interface DropIndexOp {
@@ -371,6 +376,7 @@ export interface DropIndexOp {
   repo: string;
   hmac: string;
   unique?: true;
+  if_exists?: boolean;
 }
 
 export interface StartMigrationOp {

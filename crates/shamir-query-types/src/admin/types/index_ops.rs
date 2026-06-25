@@ -88,4 +88,9 @@ pub struct DropIndexOp {
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, dropping a non-existent index (or one whose parent
+    /// db/table is missing) is a silent no-op returning
+    /// `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }

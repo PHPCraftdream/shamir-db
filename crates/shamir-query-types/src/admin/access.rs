@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::types::db_ops::is_false;
+
 #[cfg(feature = "server")]
 use shamir_types::access::ResourcePath;
 
@@ -127,10 +129,15 @@ pub struct CreateGroupOp {
 /// ```text
 /// { "drop_group": { "name": "devs" } }
 /// { "drop_group": { "id": 3 } }
+/// { "drop_group": { "name": "devs" }, "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropGroupOp {
     pub drop_group: GroupRef,
+    /// When `true`, dropping a non-existent group is a silent no-op
+    /// returning `{"existed": false}` instead of an error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Add a user to a group.
