@@ -101,3 +101,61 @@ mode 0o700. System байпасит гейт, поэтому admin читает 
 
 ## Коммит (оркестратор, после zero-trust verify; возможно разбить)
 `feat(access): G.4c — enforced (owner-rwx) default for new objects (Strategy A)`
+
+---
+
+## Part 2 — ФАКТИЧЕСКИЕ ПРОВАЛЫ (51) и как чинить (addendum после прогона)
+
+Part 1 (движок) сделана и зелёная по fmt/clippy. Полный `./scripts/test.sh --full`
+дал **51 провал** в `shamir-db` + `shamir-server` (НЕ в unit на System — те байпасят).
+Полный список: `.crush/stdin/g4c-failures.txt`; детали паник — в `.crush/stdin/g4c-test.log`.
+
+**Корневая причина (главная):** тесты ставили mode на TARGET-ресурс, но опирались
+на то, что ПРЕДКИ (db/store) были `0o777` (open) → traversal Execute проходил.
+Теперь `create_db`/`add_repo` штампуют enforced (owner=System, `0o700`) → не-владелец
+НЕ имеет Execute на предке → traversal denied ещё до target. Пример:
+`enforcement_tests::owner_can_read_write_mode_700` (target owner=User(10) mode=700,
+но предки System/700 → User(10) denied на предке).
+
+### Категории и фикс (НЕ ослаблять спеку — обновлять ОСОЗНАННО):
+
+**A. Traversal/enforcement-тесты, опиравшиеся на open-предков**
+(`enforcement_tests::{owner_can_read_write_mode_700, group_member_authorized_via_group_bits,
+record_enforcement_inherits_table_meta, traversal_allows_when_ancestors_grant_execute,
+traversal_denied_without_execute_on_ancestor}`, `facade_gateway_acl_tests`,
+`enforcement_dml_e2e::*`, `getter_only_e2e::setuid_*`, `stored_proc_e2e::setuid_*`,
+`sec1_ddl_gate_e2e::*`, `access_ddl::*`):
+→ В SETUP дать тест-актору Execute на ПРЕДКАХ: `set_resource_meta` на db и store с
+   mode, дающим Execute другим (напр. `0o711`), ЛИБО owner=тот же актор, ЛИБО chmod
+   предков в open. Subject теста (enforcement на target) должен стать достижим.
+   НЕ менять смысл target-проверки.
+
+**B. Тесты, БУКВАЛЬНО ассертящие старый open-дефолт**
+(`access_meta_tests::{database,store,table}_resource_meta_defaults_to_open`,
+`enforcement_tests::open_default_allows_any_user`,
+`enforcement_dml_e2e::default_mode_allows_all_users`,
+`permission_e2e::permission_open_default_allows_any_user`):
+→ Обновить ожидание на ENFORCED-дефолт: create-дефолт теперь owner-rwx `0o700`,
+   stranger DENIED. Чтобы НЕ потерять покрытие open-пути — где тест проверял
+   «open allows all», переформулировать: явно `chmod 0o777` ресурс, ЗАТЕМ ассертить,
+   что open по-прежнему пускает всех (и отдельно — что дефолт без chmod теперь
+   enforced-denies). Так покрыты ОБА пути.
+
+**C. owner_on_create-тесты** (`ddl_wire_e2e::ownership::owner_on_create_*`,
+`ddl_wire_e2e::folders_introspection::*`):
+→ owner-ассерты остаются (owner корректен). Обновить MODE-ожидание с open(`0o777`)
+   на enforced(`0o700`) там, где тест проверяет дефолтный mode созданного объекта.
+   `*_system_stays_system` — owner=System остаётся, mode теперь 0o700.
+
+**D. Инфраструктурные тесты (subject не про доступ)**
+(`shamir-server::{db_handler::*, interactive_tx_e2e::*, subscriptions_e2e::*,
+slow_query_log::*, permission_e2e::permission_group_grant}`):
+→ Реальный юзер операции теперь denied на admin/System-создаваемом ресурсе. В SETUP:
+   либо оперировать владельцем/System, либо `chmod` целевой ресурс в open, чтобы
+   subject теста (subscriptions/tx/limits/slow-log) не блокировался доступом.
+   `permission_group_grant` — поправить так, чтобы group-grant действительно давал
+   доступ при enforced-дефолте (это и есть корректная проверка).
+
+### Гейт повторно — ПОЛНЫЙ, до 0 провалов
+`./scripts/test.sh --full` (0 failed) + пересборка сервера + ПОЛНЫЙ `npx vitest run`.
+В финале — список КАЖДОГО починенного теста с категорией (A/B/C/D) и причиной.
