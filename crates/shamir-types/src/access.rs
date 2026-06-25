@@ -194,6 +194,20 @@ impl ResourceMeta {
         }
     }
 
+    /// Enforced default: owner = actor, group = None, mode = owner-rwx (`0o700`).
+    ///
+    /// New mode-bearing objects are private to their creator (Strategy A).
+    /// Legacy catalogue records without a `mode` field still load as
+    /// [`open`](Self::open) via [`from_record`], so only NEW objects are
+    /// enforced — existing data is unaffected.
+    pub fn owned_enforced(actor: Actor) -> Self {
+        Self {
+            owner: actor,
+            group: None,
+            mode: Mode::from_rwx(true, false, false),
+        }
+    }
+
     /// Inject `owner`/`group`/`mode` fields into a `QueryValue::Map`
     /// catalogue record for persistence.
     pub fn inject_into(&self, rec: &mut QueryValue) {

@@ -8,8 +8,10 @@
  * ## Server permission model (documented, not invented)
  *
  * ShamirDB uses **Unix-style mode bits** (chmod/chown/chgrp) for
- * per-resource access control.  New resources default to mode `0o777`
- * (open to all).  `listDatabases` is classified as an **admin op** and
+ * per-resource access control.  G.4c: new resources default to enforced
+ * owner-rwx (0o700); tests that need open access explicitly `chmod 0o777`
+ * the db + store + table so traversal-Execute reaches the target.
+ * `listDatabases` is classified as an **admin op** and
  * requires `is_superuser` (the "superuser" role); non-superusers
  * receive `permission_denied`.  When superusers call `listDatabases`,
  * they see ALL databases — the server does NOT filter the catalog by
@@ -179,12 +181,22 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('A4: admin chmod to 0o777 (open) -> user A CAN read', async () => {
-      // Grant access by opening mode bits
+      // Grant access by opening mode bits.
+      // G.4c: new stores default to enforced (0o700), so the store must also
+      // be opened for traversal-Execute to reach the table.
       br(await adminClient!.execute(capDb, {
         id: 'chmod-open',
         queries: {
-          ch: admin.chmod(
+          ch_db: admin.chmod(
             admin.refDatabase(capDb),
+            0o777,
+          ),
+          ch_store: admin.chmod(
+            admin.refStore(capDb, 'main'),
+            0o777,
+          ),
+          ch_tbl: admin.chmod(
+            admin.refTable(capDb, 'main', 'secrets'),
             0o777,
           ),
         },
@@ -448,12 +460,22 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('B5: admin opens db1 to user A (chmod 0o777) -> A can read db1, still denied db2', async () => {
-      // Open db1 to all
+      // Open db1 to all.
+      // G.4c: the store + table default to enforced (0o700); open them too so
+      // traversal-Execute reaches the table.
       br(await adminClient!.execute(visDb1, {
         id: 'open-db1',
         queries: {
-          ch: admin.chmod(
+          ch_db: admin.chmod(
             admin.refDatabase(visDb1),
+            0o777,
+          ),
+          ch_store: admin.chmod(
+            admin.refStore(visDb1, 'main'),
+            0o777,
+          ),
+          ch_tbl: admin.chmod(
+            admin.refTable(visDb1, 'main', 't1'),
             0o777,
           ),
         },
@@ -490,12 +512,21 @@ describe.skipIf(!SERVER_AVAILABLE)(
         },
       }));
 
-      // Open db2 to all
+      // Open db2 to all.
+      // G.4c: the store + table default to enforced (0o700); open them too.
       br(await adminClient!.execute(visDb2, {
         id: 'open-db2',
         queries: {
-          ch: admin.chmod(
+          ch_db: admin.chmod(
             admin.refDatabase(visDb2),
+            0o777,
+          ),
+          ch_store: admin.chmod(
+            admin.refStore(visDb2, 'main'),
+            0o777,
+          ),
+          ch_tbl: admin.chmod(
+            admin.refTable(visDb2, 'main', 't2'),
             0o777,
           ),
         },
@@ -521,12 +552,21 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('B7: admin grants A access to db2 -> A can now read both', async () => {
-      // Open db1 back for all
+      // Open db1 back for all.
+      // G.4c: re-open the store + table too (they default to enforced).
       br(await adminClient!.execute(visDb1, {
         id: 'open-db1-again',
         queries: {
-          ch: admin.chmod(
+          ch_db: admin.chmod(
             admin.refDatabase(visDb1),
+            0o777,
+          ),
+          ch_store: admin.chmod(
+            admin.refStore(visDb1, 'main'),
+            0o777,
+          ),
+          ch_tbl: admin.chmod(
+            admin.refTable(visDb1, 'main', 't1'),
             0o777,
           ),
         },

@@ -11,15 +11,29 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_types::access::{Action, Actor, ResourcePath};
+use shamir_types::access::{Action, Actor, ResourceMeta, ResourcePath};
 
 /// Helper: create a ShamirDb with database "testdb", repo "main", table "users".
+///
+/// G.4c: new objects default to enforced (owner-rwx 0o700). These tests
+/// exercise chmod/chown/chgrp on the TABLE, so the db + store ancestors are
+/// opened here to keep traversal-Execute from masking the table-level
+/// behaviour under test.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", repo_config).await.unwrap();
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
     shamir
 }
 

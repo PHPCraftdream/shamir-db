@@ -79,6 +79,29 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("prod", cfg).await.expect("add repo");
+    // G.4c: new objects default to enforced (0o700, System). Open the db +
+    // repo ancestors so the non-superuser user session (Actor::User) can
+    // traverse them. This test exercises slow-query logging, not access
+    // control.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::database("prod"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::store("prod", "main"),
+            &open,
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::table("prod", "main", "items"),
+            &open,
+        )
+        .await
+        .unwrap();
     let handler =
         ShamirDbHandler::new(Arc::new(shamir)).with_slow_query(SlowQueryConfig { threshold_us: 1 });
 

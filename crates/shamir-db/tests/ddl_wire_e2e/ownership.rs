@@ -15,8 +15,18 @@ async fn owner_on_create_db_user_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let user_actor = Actor::User(42);
 
-    // Bootstrap a db to dispatch admin ops through.
+    // Bootstrap a db to dispatch admin ops through. G.4c: create_db defaults to
+    // enforced (0o700, System), so open the bootstrap db so the user actor can
+    // traverse it to reach the Create path. The bootstrap db is setup-only;
+    // the SUBJECT is the user-created "owned_db".
     shamir.create_db("bootstrap").await;
+    shamir
+        .set_resource_meta(
+            &ResourcePath::database("bootstrap"),
+            &shamir_types::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
 
     // Create a NEW database via execute_as with a user actor.
     let mut b = Batch::new();
@@ -37,7 +47,8 @@ async fn owner_on_create_db_user_actor() {
         Actor::User(42),
         "db owner should be the user actor"
     );
-    assert_eq!(meta.mode, 0o777, "mode must stay open");
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700, "mode must be enforced (0o700)");
     assert!(meta.group.is_none(), "group must stay None");
 }
 
@@ -56,7 +67,8 @@ async fn owner_on_create_db_system_actor() {
         Actor::System,
         "system db owner should be System"
     );
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }
 
 #[tokio::test]
@@ -64,8 +76,16 @@ async fn owner_on_create_repo_user_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let user_actor = Actor::User(99);
 
-    // Create db first (as system — we only care about the repo).
+    // Create db first (as system — we only care about the repo). G.4c: open
+    // the db so the user actor can traverse it to reach the Create path.
     shamir.create_db("testdb").await;
+    shamir
+        .set_resource_meta(
+            &ResourcePath::database("testdb"),
+            &shamir_types::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
 
     // Create repo via execute_as with user actor.
     let mut b = Batch::new();
@@ -85,7 +105,8 @@ async fn owner_on_create_repo_user_actor() {
         Actor::User(99),
         "repo owner should be the user actor"
     );
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }
 
 #[tokio::test]
@@ -96,6 +117,17 @@ async fn owner_on_create_table_user_actor() {
     shamir.create_db("testdb").await;
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
+    // G.4c: open db + repo ancestors so the user actor can traverse them to
+    // reach the Create path. The SUBJECT is the user-created table.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
 
     // Create table via execute_as with user actor.
     let mut b = Batch::new();
@@ -115,7 +147,8 @@ async fn owner_on_create_table_user_actor() {
         Actor::User(7),
         "table owner should be the user actor"
     );
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }
 
 #[tokio::test]
@@ -126,6 +159,16 @@ async fn owner_on_create_function_user_actor() {
     shamir.create_db("testdb").await;
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
+    // G.4c: open db + repo ancestors so the user actor can traverse them.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
 
     let wasm = accept_wasm();
     let mut b = Batch::new();
@@ -145,7 +188,8 @@ async fn owner_on_create_function_user_actor() {
         Actor::User(13),
         "function owner should be the user actor"
     );
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }
 
 #[tokio::test]
@@ -172,5 +216,6 @@ async fn owner_on_create_function_system_stays_system() {
         Actor::System,
         "system-created function owner should be System"
     );
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }

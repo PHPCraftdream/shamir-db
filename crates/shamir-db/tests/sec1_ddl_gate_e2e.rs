@@ -14,7 +14,7 @@
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
-use shamir_types::access::Actor;
+use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 const OWNER: u64 = 7;
 const OTHER: u64 = 99;
@@ -36,6 +36,19 @@ async fn setup() -> ShamirDb {
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    // G.4c: new objects default to enforced (0o700, System). Open the db +
+    // store ancestors so the per-resource `restrict_*` helpers below are the
+    // sole gate — otherwise the owner (Actor::User(OWNER)) would be denied
+    // traversal on the System-owned ancestors before reaching the target.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
         .await
         .unwrap();
     shamir

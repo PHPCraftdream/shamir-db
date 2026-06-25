@@ -211,7 +211,7 @@ impl ShamirDb {
         let mut record = shamir_types::types::value::QueryValue::Map(m);
         meta.inject_into(&mut record);
         self.system_store
-            .save_function(name, &record, &ResourceMeta::owned_by(actor.clone()))
+            .save_function(name, &record, &ResourceMeta::owned_enforced(actor.clone()))
             .await?;
 
         if opts.replace {
@@ -403,7 +403,11 @@ impl ShamirDb {
             );
             let record = shamir_types::types::value::QueryValue::Map(m);
             self.system_store
-                .save_function_folder(&path_key, &record, &ResourceMeta::owned_by(actor.clone()))
+                .save_function_folder(
+                    &path_key,
+                    &record,
+                    &ResourceMeta::owned_enforced(actor.clone()),
+                )
                 .await?;
             created.push(path_key);
         }
