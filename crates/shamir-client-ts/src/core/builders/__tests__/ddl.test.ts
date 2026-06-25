@@ -547,6 +547,132 @@ describe('field().foreignKey()', () => {
   });
 });
 
+// ── field() Phase B/C constraint wire-shapes ────────────────────────
+//
+// Covers the six field constraints that were previously only exercised by
+// server-gated e2e tests: scalar / one_of / format / compare / unique /
+// foreign_key (full on_delete matrix). Each test asserts the flattened wire
+// shape of `FieldRuleDto` (constraints are `#[serde(flatten)]`).
+
+describe('field() Phase B/C constraint wire-shapes', () => {
+  it('scalar(name) flattens to {scalar: name} on the rule', () => {
+    const rule = ddl.field(['email']).string().scalar('is_email').build();
+    expect(rule).toEqual({
+      path: ['email'],
+      type: 'string',
+      scalar: 'is_email',
+    });
+  });
+
+  it('oneOf(values) flattens to {one_of: [...]} on the rule', () => {
+    const rule = ddl
+      .field(['status'])
+      .string()
+      .oneOf(['draft', 'published', 'archived'])
+      .build();
+    expect(rule).toEqual({
+      path: ['status'],
+      type: 'string',
+      one_of: ['draft', 'published', 'archived'],
+    });
+  });
+
+  it('format(kind) flattens to {format: kind} on the rule', () => {
+    const rule = ddl.field(['email']).string().format('email').build();
+    expect(rule).toEqual({
+      path: ['email'],
+      type: 'string',
+      format: 'email',
+    });
+  });
+
+  it('compare(other, op) flattens to {compare: {other, op}} on the rule', () => {
+    const rule = ddl
+      .field(['end_date'])
+      .string()
+      .compare(['start_date'], '>=')
+      .build();
+    expect(rule).toEqual({
+      path: ['end_date'],
+      type: 'string',
+      compare: {
+        other: ['start_date'],
+        op: '>=',
+      },
+    });
+  });
+
+  it('unique() flattens to {unique: true} on the rule', () => {
+    const rule = ddl.field(['email']).string().unique().build();
+    expect(rule).toEqual({
+      path: ['email'],
+      type: 'string',
+      unique: true,
+    });
+  });
+
+  it('foreignKey on_delete matrix: restrict (default) / cascade / set_null / no_action', () => {
+    // default → restrict
+    const restrict = ddl.field(['owner_id']).int().foreignKey('users', 'id').build();
+    expect(restrict.foreign_key).toEqual({
+      ref_table: 'users',
+      ref_field: 'id',
+      on_delete: 'restrict',
+    });
+
+    // explicit cascade
+    const cascade = ddl
+      .field(['owner_id'])
+      .int()
+      .foreignKey('users', 'id', { onDelete: 'cascade' })
+      .build();
+    expect(cascade.foreign_key).toEqual({
+      ref_table: 'users',
+      ref_field: 'id',
+      on_delete: 'cascade',
+    });
+
+    // explicit set_null
+    const setNull = ddl
+      .field(['owner_id'])
+      .int()
+      .foreignKey('users', 'id', { onDelete: 'set_null' })
+      .build();
+    expect(setNull.foreign_key).toEqual({
+      ref_table: 'users',
+      ref_field: 'id',
+      on_delete: 'set_null',
+    });
+
+    // explicit no_action
+    const noAction = ddl
+      .field(['owner_id'])
+      .int()
+      .foreignKey('users', 'id', { onDelete: 'no_action' })
+      .build();
+    expect(noAction.foreign_key).toEqual({
+      ref_table: 'users',
+      ref_field: 'id',
+      on_delete: 'no_action',
+    });
+  });
+
+  it('constraints are omitted entirely when no Phase B/C setter is called', () => {
+    const rule = ddl.field(['name']).string().max(64).build();
+    expect(rule).toEqual({
+      path: ['name'],
+      type: 'string',
+      max: 64,
+    });
+    expect(rule).not.toHaveProperty('scalar');
+    expect(rule).not.toHaveProperty('one_of');
+    expect(rule).not.toHaveProperty('format');
+    expect(rule).not.toHaveProperty('compare');
+    expect(rule).not.toHaveProperty('unique');
+    expect(rule).not.toHaveProperty('foreign_key');
+  });
+});
+
 // ── schema DDL ops ─────────────────────────────────────────────────
 
 describe('setTableSchema', () => {
