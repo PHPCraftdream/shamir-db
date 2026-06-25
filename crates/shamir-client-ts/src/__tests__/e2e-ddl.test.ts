@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import type { ShamirClient } from '../index.js';
-import { Batch, ddl, write } from '../index.js';
+import { Batch, Query, ddl, write } from '../index.js';
 import {
   SERVER_AVAILABLE,
   HOST,
@@ -461,6 +461,82 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await Batch.create('roll-mig')
         .add('r', ddl.rollbackMigration(client!, db, migId))
         .execute(client!, db));
+    });
+
+    // G.3 (C3): commit-path of a migration — start (cutover_ready) →
+    // commit (committed) → dst repo readable with all seed rows → status
+    // after commit is not_found (active map entry removed by the server).
+    it('migration: startMigration -> commitMigration -> dst readable -> status not_found', async () => {
+      const db = await setupDb(client!, 'ddl_migc', ['migdata']);
+
+      // Seed known rows into the source table.
+      await seed(client!, db, 'migdata', [
+        { id: 'c1', val: 'alpha' },
+        { id: 'c2', val: 'bravo' },
+        { id: 'c3', val: 'charlie' },
+      ]);
+
+      // Destination repo (in_memory is the only supported engine).
+      br(await Batch.create('mk-dst-repo-c')
+        .add('r', ddl.createRepo('dst_repo_c', { engine: 'in_memory' }))
+        .execute(client!, db));
+
+      // start migration (HMAC) — server runs snapshot+drain+cutover_ready
+      // synchronously, so phase is "cutover_ready" on return.
+      const startResp = br(await Batch.create('start-mig-c')
+        .add('m', ddl.startMigration(
+          client!,
+          db,
+          'main',
+          'migdata',
+          'dst_repo_c',
+          'in_memory',
+        ))
+        .execute(client!, db));
+      const migRow = startResp.results.m.records[0] as Record<string, unknown>;
+      expect(migRow.phase).toBe('cutover_ready');
+      const migId = migRow.migration_id as string;
+      expect(typeof migId).toBe('string');
+      expect(migId.length).toBeGreaterThan(0);
+
+      // commit migration (HMAC) — final drain, bulk-populate index2,
+      // remove from active map.
+      const commitResp = br(await Batch.create('commit-mig')
+        .add('c', ddl.commitMigration(client!, db, migId))
+        .execute(client!, db));
+      const commitRow = commitResp.results.c.records[0] as Record<string, unknown>;
+      expect(commitRow.phase).toBe('committed');
+      expect(commitRow.migration_id).toBe(migId);
+      // dst_records reflects the 3 seed rows copied over.
+      const dstRecords = commitRow.dst_records as number;
+      expect(dstRecords).toBe(3);
+
+      // Read the migrated table from the dst repo — all seed rows present.
+      const readResp = br(await Batch.create('read-dst-c')
+        .add('r', Query.withRepo('dst_repo_c', 'migdata'))
+        .execute(client!, db));
+      const rows = readResp.results.r.records as Array<Record<string, unknown>>;
+      const ids = rows.map(r => r.id).sort();
+      expect(ids).toEqual(['c1', 'c2', 'c3']);
+      // spot-check one value to prove the payload survived the cutover.
+      const c2 = rows.find(r => r.id === 'c2');
+      expect(c2?.val).toBe('bravo');
+
+      // Status after commit — the server removed the migration from its
+      // active map, so a status query on the (now-terminal) id fails with
+      // code "not_found".
+      try {
+        const statusResp = br(await Batch.create('mig-status-after-commit')
+          .add('s', ddl.migrationStatus(migId))
+          .execute(client!, db));
+        // If the server returned an empty record set instead of erroring,
+        // treat that as the not_found signal.
+        const statusRecs = statusResp.results.s.records;
+        expect(statusRecs.length).toBe(0);
+      } catch (e: unknown) {
+        const msg = (e as Error).message;
+        expect(msg).toMatch(/not_found/);
+      }
     });
 
     // ── 10. Schema DDL basic round-trip (boundary for #210) ────────────

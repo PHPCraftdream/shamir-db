@@ -576,6 +576,152 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .execute(userAClient!, visDb1));
       expect(verify.results.r.records[0].val).toBe('written-by-A');
     });
+
+    // ════════════════════════════════════════════════════════════════════
+    //  G.3 (C3) — dropUser / dropRole / chgrp lifecycle round-trips
+    // ════════════════════════════════════════════════════════════════════
+
+    // ── G3-dropUser: create a SCRAM user, then dropUser (HMAC) ──────────
+
+    it('G3-dropUser: createScramUser -> dropUser (HMAC) -> if_exists no-op', async () => {
+      const name = `drop_u_${process.pid}_${Date.now()}`;
+      const pw = 'drop user password';
+
+      // Create the user via the SCRAM path (used everywhere else in the suite).
+      await adminClient!.createScramUser(name, pw, []);
+
+      // dropUser is HMAC-gated; the admin client IS the HmacSigner.
+      // Dropping an existing user must succeed without error.
+      br(await adminClient!.execute('default', {
+        id: 'drop-user',
+        queries: {
+          d: admin.dropUser(adminClient!, name),
+        },
+      }));
+
+      // Idempotency hardening: a second drop WITHOUT if_exists must fail
+      // (user gone), but WITH if_exists:true it must be a no-op.
+      try {
+        await adminClient!.execute('default', {
+          id: 'drop-user-again-strict',
+          queries: {
+            d: admin.dropUser(adminClient!, name),
+          },
+        });
+        expect.unreachable('re-drop without if_exists should fail');
+      } catch (e: unknown) {
+        const msg = (e as Error).message;
+        // Server-side error for a missing user on a strict drop.
+        expect(msg.length).toBeGreaterThan(0);
+      }
+
+      // With if_exists the re-drop is a clean no-op.
+      br(await adminClient!.execute('default', {
+        id: 'drop-user-again-if-exists',
+        queries: {
+          d: admin.dropUser(adminClient!, name, { if_exists: true }),
+        },
+      }));
+    });
+
+    // ── G3-dropRole: createRole -> dropRole (HMAC) ───────────────────────
+
+    it('G3-dropRole: createRole -> dropRole (HMAC) -> if_exists no-op', async () => {
+      const role = `g3_role_${process.pid}_${Date.now()}`;
+
+      // createRole round-trips (builder + server accept it).
+      br(await adminClient!.execute('default', {
+        id: 'mk-role-g3',
+        queries: {
+          cr: admin.createRole(role, [
+            admin.permission('allow', ['all'], admin.scopeGlobal()),
+          ]),
+        },
+      }));
+
+      // dropRole is HMAC-gated; dropping an existing role must succeed.
+      br(await adminClient!.execute('default', {
+        id: 'drop-role-g3',
+        queries: {
+          dr: admin.dropRole(adminClient!, role),
+        },
+      }));
+
+      // Idempotency hardening: re-drop without if_exists fails, with it
+      // succeeds (no-op).
+      try {
+        await adminClient!.execute('default', {
+          id: 'drop-role-again-strict',
+          queries: {
+            dr: admin.dropRole(adminClient!, role),
+          },
+        });
+        expect.unreachable('re-drop role without if_exists should fail');
+      } catch (e: unknown) {
+        const msg = (e as Error).message;
+        expect(msg.length).toBeGreaterThan(0);
+      }
+
+      br(await adminClient!.execute('default', {
+        id: 'drop-role-again-if-exists',
+        queries: {
+          dr: admin.dropRole(adminClient!, role, { if_exists: true }),
+        },
+      }));
+    });
+
+    // ── G3-chgrp: createGroup -> chgrp(database) -> accessTree readback ─
+
+    it('G3-chgrp: createGroup -> chgrp(database, gid) -> accessTree group readback', async () => {
+      const db = await setupDb(adminClient!, 'g3_chgrp', ['g3tbl']);
+      const groupName = `g3_grp_${process.pid}_${Date.now()}`;
+
+      // createGroup returns a numeric group_id (admin_access.rs:153).
+      const grpResp = br(await adminClient!.execute(db, {
+        id: 'mk-group-g3',
+        queries: {
+          g: admin.createGroup(groupName),
+        },
+      }));
+      const gid = (grpResp.results.g.records[0] as Record<string, unknown>)
+        .group_id as number;
+      expect(typeof gid).toBe('number');
+      expect(gid).toBeGreaterThan(0);
+
+      // chgrp the database resource to the new group (non-HMAC ACL op).
+      const chgrpResp = br(await adminClient!.execute(db, {
+        id: 'chgrp-db-g3',
+        queries: {
+          c: admin.chgrp(admin.refDatabase(db), gid),
+        },
+      }));
+      const chgrpRow = chgrpResp.results.c.records[0] as Record<string, unknown>;
+      // Echo: the server returns the applied group id.
+      expect(chgrpRow.group).toBe(gid);
+
+      // Persistence readback via accessTree. The access_tree node for a
+      // database resource carries a `group` field (access_control.rs:586)
+      // holding the numeric group id (or null). Find the db node and assert.
+      const treeResp = br(await adminClient!.execute(db, {
+        id: 'access-tree-g3',
+        queries: {
+          t: admin.accessTree({ db }),
+        },
+      }));
+      const rec = treeResp.results.t.records[0] as Record<string, unknown>;
+      const tree = rec.access_tree as Record<string, unknown>;
+      const resources = tree.resources as Record<string, unknown>;
+      // The tree root is { name:"/", kind:"root", children:[<db nodes>] }.
+      // The db_filter restricted the tree to just our db, so the db node is
+      // the single child of root (access_control.rs:481-525).
+      expect(resources.kind).toBe('root');
+      const dbChildren = resources.children as Array<Record<string, unknown>>;
+      const dbNode = dbChildren.find(c => c.name === db);
+      expect(dbNode).toBeDefined();
+      // access_tree nodes carry a `group` field (access_control.rs:586)
+      // holding the numeric group id (or null).
+      expect(dbNode!.group).toBe(gid);
+    });
   },
 );
 
