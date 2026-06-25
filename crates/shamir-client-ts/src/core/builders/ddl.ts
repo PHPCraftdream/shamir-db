@@ -46,6 +46,8 @@ import type {
   SetRetentionOp,
   PurgeHistoryOp,
   ChangesSinceOp,
+  InternerDumpOp,
+  InternerTouchOp,
   ListOp,
   DropDbOp,
   DropRepoOp,
@@ -404,6 +406,35 @@ export function changesSince(
   };
   if (opts?.limit !== undefined) op.limit = opts.limit;
   return op;
+}
+
+/**
+ * Dump a repo's interner dictionary (id → name). `interner_dump` defaults
+ * to "main" and is always present on the wire; `since` is omitted unless
+ * set (delta-refresh cursor — only entries with id > `since`).
+ */
+export function internerDump(
+  opts?: { repo?: string; since?: number },
+): InternerDumpOp {
+  const op: InternerDumpOp = {
+    interner_dump: repoOrDefault(opts?.repo),
+  };
+  if (opts?.since != null) op.since = opts.since;
+  return op;
+}
+
+/**
+ * Register field NAMES in a repo's interner (idempotent — returns the
+ * name → id mapping). `interner_touch` defaults to "main".
+ */
+export function internerTouch(
+  names: string[],
+  opts?: { repo?: string },
+): InternerTouchOp {
+  return {
+    interner_touch: repoOrDefault(opts?.repo),
+    names,
+  };
 }
 
 // ── List ops ────────────────────────────────────────────────────────
@@ -843,6 +874,8 @@ export const ddl = {
   setRetention,
   purgeHistory,
   changesSince,
+  internerDump,
+  internerTouch,
   listDatabases,
   listRepos,
   listTables,

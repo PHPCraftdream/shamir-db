@@ -992,3 +992,42 @@ describe('renameRepo', () => {
     expect(Object.keys(op)).toHaveLength(2);
   });
 });
+
+// ── internerDump / internerTouch ────────────────────────────────────
+
+describe('internerDump', () => {
+  it('defaults interner_dump to "main"; since omitted', () => {
+    const op = ddl.internerDump();
+    expect(op).toEqual({ interner_dump: 'main' });
+    expect(op).not.toHaveProperty('since');
+  });
+
+  it('respects explicit repo + since', () => {
+    const op = ddl.internerDump({ repo: 'archive', since: 12 });
+    expect(op).toEqual({ interner_dump: 'archive', since: 12 });
+  });
+
+  it('omits since when only repo is set', () => {
+    const op = ddl.internerDump({ repo: 'x' });
+    expect(op).toEqual({ interner_dump: 'x' });
+    expect(op).not.toHaveProperty('since');
+  });
+});
+
+describe('internerTouch', () => {
+  it('defaults interner_touch to "main"; passes names through', () => {
+    const op = ddl.internerTouch(['age', 'name']);
+    expect(op).toEqual({
+      interner_touch: 'main',
+      names: ['age', 'name'],
+    });
+  });
+
+  it('respects explicit repo', () => {
+    const op = ddl.internerTouch(['age'], { repo: 'archive' });
+    expect(op).toEqual({
+      interner_touch: 'archive',
+      names: ['age'],
+    });
+  });
+});

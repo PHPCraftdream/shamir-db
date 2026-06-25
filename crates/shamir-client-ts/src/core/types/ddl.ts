@@ -340,6 +340,31 @@ export interface ChangesSinceOp {
   limit?: number;
 }
 
+/**
+ * Dump a repo's interner dictionary (id → name). Wire form:
+ *   `{ interner_dump: "main" }` or `{ interner_dump: "main", since: 12 }`.
+ * `interner_dump` has `#[serde(default = "default_repo")]` and NO skip —
+ * it is ALWAYS present (emits "main" when unset). `since` is
+ * `#[serde(default, skip_serializing_if = "Option::is_none")]` — omitted
+ * when absent (delta-refresh cursor: only entries with id > `since`).
+ */
+export interface InternerDumpOp {
+  interner_dump: string;
+  since?: number;
+}
+
+/**
+ * Register field NAMES in a repo's interner, returning the (name → id)
+ * mapping. Idempotent. Wire form:
+ *   `{ interner_touch: "main", names: ["age","name"] }`.
+ * `interner_touch` has `#[serde(default = "default_repo")]` and NO skip —
+ * it is ALWAYS present. `names` is always required (never skipped).
+ */
+export interface InternerTouchOp {
+  interner_touch: string;
+  names: string[];
+}
+
 // ── List ops (internally tagged: `#[serde(tag = "list")]`) ──────────
 
 export type ListOp =
@@ -463,4 +488,6 @@ export type DdlOp =
   | SetRetentionOp
   | PurgeHistoryOp
   | ChangesSinceOp
+  | InternerDumpOp
+  | InternerTouchOp
   | ListOp;
