@@ -90,6 +90,7 @@ export type {
   UnbindValidatorOp,
   ListValidatorsOp,
   CreateFunctionFolderOp,
+  RenameFunctionFolderOp,
   SetRetentionOp,
   PurgeHistoryOp,
   ChangesSinceOp,

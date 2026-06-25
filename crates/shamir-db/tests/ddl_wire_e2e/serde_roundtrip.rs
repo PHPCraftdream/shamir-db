@@ -64,6 +64,15 @@ fn create_function_folder_serde_roundtrip() {
 }
 
 #[test]
+fn rename_function_folder_serde_roundtrip() {
+    let op = ddl::rename_function_folder(["a", "b"], ["a", "c"]);
+    assert!(op.is_admin());
+    assert!(op.table_ref().is_none());
+    let op2 = msgpack_roundtrip(op.clone());
+    assert_eq!(op, op2);
+}
+
+#[test]
 fn drop_function_serde_roundtrip() {
     let op = ddl::drop_function("my_fn").into_batch_op();
     assert!(op.is_admin());

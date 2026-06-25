@@ -264,6 +264,15 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Rename a function folder (and its descendant subtree).
+    pub fn rename_function_folder(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: validator ────────────────────────────────────────────
 
     /// Create (or replace) a validator.

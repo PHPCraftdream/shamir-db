@@ -25,6 +25,7 @@ export {
   createValidator, dropValidator, renameValidator,
   bindValidator, unbindValidator, listValidators,
   createFunctionFolder,
+  renameFunctionFolder,
   setRetention, purgeHistory, changesSince,
   listDatabases, listRepos, listTables, listIndexes,
   listUsers, listRoles, listFunctions, listValidators_, listFunctionFolders,

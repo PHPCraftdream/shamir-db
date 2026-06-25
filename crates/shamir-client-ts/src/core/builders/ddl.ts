@@ -43,6 +43,7 @@ import type {
   UnbindValidatorOp,
   ListValidatorsOp,
   CreateFunctionFolderOp,
+  RenameFunctionFolderOp,
   SetRetentionOp,
   PurgeHistoryOp,
   ChangesSinceOp,
@@ -367,6 +368,14 @@ export function createFunctionFolder(
   segments: string[],
 ): CreateFunctionFolderOp {
   return { create_function_folder: segments };
+}
+
+/** Rename a function folder (and its descendant subtree) by path segments. */
+export function renameFunctionFolder(
+  from: string[],
+  to: string[],
+): RenameFunctionFolderOp {
+  return { rename_function_folder: from, to };
 }
 
 /** Change a live table's history-retention policy. */
@@ -871,6 +880,7 @@ export const ddl = {
   unbindValidator,
   listValidators,
   createFunctionFolder,
+  renameFunctionFolder,
   setRetention,
   purgeHistory,
   changesSince,

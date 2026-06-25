@@ -59,3 +59,18 @@ pub struct RenameFunctionOp {
 pub struct CreateFunctionFolderOp {
     pub create_function_folder: Vec<String>,
 }
+
+/// Rename a function folder (and all nested descendants) by path segments.
+///
+/// Both `rename_function_folder` (source path) and `to` (destination path) are
+/// segment vectors. The rename rekeys the folder record at `from` and every
+/// descendant whose path is prefixed by `from + "/"`, preserving `ResourceMeta`.
+///
+/// ```text
+/// { "rename_function_folder": ["a", "b"], "to": ["a", "c"] }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameFunctionFolderOp {
+    pub rename_function_folder: Vec<String>,
+    pub to: Vec<String>,
+}

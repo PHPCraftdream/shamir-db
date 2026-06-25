@@ -420,7 +420,8 @@ impl SessionPermissions {
             | BatchOp::BindValidator(_)
             | BatchOp::UnbindValidator(_)
             | BatchOp::ListValidators(_)
-            | BatchOp::CreateFunctionFolder(_) => (Action::Alter, Resource::Global),
+            | BatchOp::CreateFunctionFolder(_)
+            | BatchOp::RenameFunctionFolder(_) => (Action::Alter, Resource::Global),
 
             // Imperative history purge — table-scoped alter.
             BatchOp::PurgeHistory(op) => (

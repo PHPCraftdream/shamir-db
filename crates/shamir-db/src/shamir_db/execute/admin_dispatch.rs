@@ -75,6 +75,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::DropFunction(_) => self.handle_drop_function(op).await,
             op @ BatchOp::RenameFunction(_) => self.handle_rename_function(op).await,
             op @ BatchOp::CreateFunctionFolder(_) => self.handle_create_function_folder(op).await,
+            op @ BatchOp::RenameFunctionFolder(_) => self.handle_rename_function_folder(op).await,
 
             // ── Validator DDL ──────────────────────────────────────────
             op @ BatchOp::CreateValidator(_) => self.handle_create_validator(op).await,

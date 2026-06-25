@@ -11,9 +11,9 @@ use crate::admin::{
     CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
     DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
     InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameIndexOp, RenameRepoOp,
-    RenameTableOp, RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
-    SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionFolderOp, RenameFunctionOp,
+    RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp, RollbackMigrationOp,
+    SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -117,6 +117,7 @@ pub enum BatchOp {
 
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
+    RenameFunctionFolder(RenameFunctionFolderOp),
 
     // Per-repo interner introspection / registration (Stage 5d)
     InternerDump(InternerDumpOp),
@@ -200,6 +201,7 @@ impl Serialize for BatchOp {
             BatchOp::GetTableSchema(op) => op.serialize(serializer),
             BatchOp::DescribeTable(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
+            BatchOp::RenameFunctionFolder(op) => op.serialize(serializer),
             BatchOp::InternerDump(op) => op.serialize(serializer),
             BatchOp::InternerTouch(op) => op.serialize(serializer),
             BatchOp::PurgeHistory(op) => op.serialize(serializer),
@@ -348,6 +350,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<GetTableSchemaOp, _>(&bytes).map(BatchOp::GetTableSchema)
         } else if has("create_function_folder") {
             qv_to::<CreateFunctionFolderOp, _>(&bytes).map(BatchOp::CreateFunctionFolder)
+        } else if has("rename_function_folder") {
+            qv_to::<RenameFunctionFolderOp, _>(&bytes).map(BatchOp::RenameFunctionFolder)
         } else if has("interner_dump") {
             qv_to::<InternerDumpOp, _>(&bytes).map(BatchOp::InternerDump)
         } else if has("interner_touch") {
@@ -441,6 +445,7 @@ impl BatchOp {
                 | BatchOp::GetTableSchema(_)
                 | BatchOp::DescribeTable(_)
                 | BatchOp::CreateFunctionFolder(_)
+                | BatchOp::RenameFunctionFolder(_)
                 | BatchOp::InternerDump(_)
                 | BatchOp::InternerTouch(_)
                 | BatchOp::PurgeHistory(_)
