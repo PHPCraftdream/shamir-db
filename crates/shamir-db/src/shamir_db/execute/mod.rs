@@ -16,6 +16,7 @@
 //! - [`admin_function`]    — CreateFunction, DropFunction, RenameFunction, CreateFunctionFolder
 //! - [`admin_validator`]   — CreateValidator, DropValidator, RenameValidator, BindValidator, UnbindValidator, ListValidators
 //! - [`admin_schema`]      — SetTableSchema, AddSchemaRule, RemoveSchemaRule, GetTableSchema
+//! - [`admin_describe`]    — DescribeTable
 //! - [`admin_retention`]   — SetRetention, PurgeHistory, ChangesSince
 //! - [`admin_interner`]    — InternerDump, InternerTouch
 //! - [`ambient_interner`]  — ambient epoch-delta sync (Part A)
@@ -25,6 +26,7 @@
 mod admin_access;
 mod admin_buffer;
 mod admin_db_repo;
+mod admin_describe;
 mod admin_dispatch;
 mod admin_function;
 mod admin_interner;

@@ -8,9 +8,9 @@ use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, BindValidatorOp,
     ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
     CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreateRepoOp,
-    CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
-    DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
-    InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
+    CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
+    DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
+    InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameTableOp, RenameValidatorOp,
     RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
     UnbindValidatorOp,
@@ -109,6 +109,10 @@ pub enum BatchOp {
     RemoveSchemaRule(RemoveSchemaRuleOp),
     GetTableSchema(GetTableSchemaOp),
 
+    /// Describe a table — full introspection (schema, indexes, validators,
+    /// retention, buffer, access meta) in a single response.
+    DescribeTable(DescribeTableOp),
+
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
 
@@ -190,6 +194,7 @@ impl Serialize for BatchOp {
             BatchOp::AddSchemaRule(op) => op.serialize(serializer),
             BatchOp::RemoveSchemaRule(op) => op.serialize(serializer),
             BatchOp::GetTableSchema(op) => op.serialize(serializer),
+            BatchOp::DescribeTable(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
             BatchOp::InternerDump(op) => op.serialize(serializer),
             BatchOp::InternerTouch(op) => op.serialize(serializer),
@@ -329,6 +334,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<AddSchemaRuleOp, _>(&bytes).map(BatchOp::AddSchemaRule)
         } else if has("remove_schema_rule") {
             qv_to::<RemoveSchemaRuleOp, _>(&bytes).map(BatchOp::RemoveSchemaRule)
+        } else if has("describe_table") {
+            qv_to::<DescribeTableOp, _>(&bytes).map(BatchOp::DescribeTable)
         } else if has("get_table_schema") {
             qv_to::<GetTableSchemaOp, _>(&bytes).map(BatchOp::GetTableSchema)
         } else if has("create_function_folder") {
@@ -422,6 +429,7 @@ impl BatchOp {
                 | BatchOp::AddSchemaRule(_)
                 | BatchOp::RemoveSchemaRule(_)
                 | BatchOp::GetTableSchema(_)
+                | BatchOp::DescribeTable(_)
                 | BatchOp::CreateFunctionFolder(_)
                 | BatchOp::InternerDump(_)
                 | BatchOp::InternerTouch(_)

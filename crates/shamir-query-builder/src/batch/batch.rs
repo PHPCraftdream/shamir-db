@@ -404,6 +404,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Describe a table — full introspection in one response.
+    pub fn describe_table(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: retention ─────────────────────────────────────────────
 
     /// Change a live table's history-retention policy.

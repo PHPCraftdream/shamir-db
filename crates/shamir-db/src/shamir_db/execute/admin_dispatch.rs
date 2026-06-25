@@ -87,6 +87,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::AddSchemaRule(op) => self.handle_add_schema_rule(op).await,
             BatchOp::RemoveSchemaRule(op) => self.handle_remove_schema_rule(op).await,
             BatchOp::GetTableSchema(op) => self.handle_get_table_schema(op).await,
+            BatchOp::DescribeTable(op) => self.handle_describe_table(op).await,
 
             // ── Retention / History ────────────────────────────────────
             op @ BatchOp::SetRetention(_) => self.handle_set_retention(op).await,
