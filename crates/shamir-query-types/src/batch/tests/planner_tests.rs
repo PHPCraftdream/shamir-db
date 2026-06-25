@@ -23,6 +23,7 @@ fn read_entry(table: &str) -> QueryEntry {
         count_total: false,
         temporal: crate::read::Temporal::default(),
         with_version: false,
+        explain: false,
     };
     QueryEntry {
         op: BatchOp::Read(q),

@@ -192,6 +192,7 @@ async fn sub_batch_bind_injects_param() {
         count_total: false,
         temporal: shamir_query_types::read::Temporal::default(),
         with_version: false,
+        explain: false,
     };
 
     let mut inner_queries = new_map();
@@ -545,6 +546,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         count_total: false,
         temporal: shamir_query_types::read::Temporal::default(),
         with_version: false,
+        explain: false,
     };
 
     let mut inner_queries = new_map();
@@ -636,6 +638,7 @@ async fn unbound_param_in_bind_errors() {
                 count_total: false,
                 temporal: shamir_query_types::read::Temporal::default(),
                 with_version: false,
+                explain: false,
             }),
             return_result: true,
             after: Vec::new(),

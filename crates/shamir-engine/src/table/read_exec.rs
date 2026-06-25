@@ -11,8 +11,8 @@ use futures::StreamExt;
 use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
-    exec, GroupBy, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery, Select,
-    SelectItem, Temporal,
+    exec, ExplainPlan, GroupBy, PaginationInfo, PlanType, QueryRecord, QueryResult, QueryStats,
+    ReadQuery, Select, SelectItem, Temporal,
 };
 use bytes::Bytes;
 use serde_bytes::ByteBuf;
@@ -211,6 +211,18 @@ impl TableManager {
             }
         }
 
+        // ── EXPLAIN dry-run: planner only, no materialisation ──────────
+        if query.explain {
+            let plan = self.build_explain_plan(query, interner);
+            return Ok(QueryResult {
+                records: Vec::new(),
+                stats: None,
+                pagination: None,
+                value: None,
+                explain: Some(plan),
+            });
+        }
+
         // Opt #2 (1000×-class): `SELECT count(*) FROM table` (no WHERE,
         // no GROUP BY, no DISTINCT, no ORDER BY, no pagination, no
         // count_total flag) is answered directly from the persistent
@@ -276,6 +288,7 @@ impl TableManager {
                                 }),
                                 pagination: None,
                                 value: None,
+                                explain: None,
                             });
                         }
                     }
@@ -299,6 +312,7 @@ impl TableManager {
                     }),
                     pagination: None,
                     value: None,
+                    explain: None,
                 });
             }
         }
@@ -374,6 +388,7 @@ impl TableManager {
                         }),
                         pagination,
                         value: None,
+                        explain: None,
                     });
                 }
             }
@@ -422,6 +437,7 @@ impl TableManager {
                             }),
                             pagination: None,
                             value: None,
+                            explain: None,
                         });
                     }
                 }
@@ -496,6 +512,7 @@ impl TableManager {
                                 }),
                                 pagination: None,
                                 value: None,
+                                explain: None,
                             });
                         }
                     }
@@ -844,6 +861,7 @@ impl TableManager {
             }),
             pagination,
             value: None,
+            explain: None,
         })
     }
 
@@ -952,6 +970,7 @@ impl TableManager {
             }),
             pagination,
             value: None,
+            explain: None,
         })
     }
 
@@ -1178,7 +1197,162 @@ impl TableManager {
             }),
             pagination,
             value: None,
+            explain: None,
         })
+    }
+
+    /// Build an [`ExplainPlan`] by running only the planner decision tree
+    /// (the same cascade as `read_impl`) but without materialising any rows.
+    fn build_explain_plan(&self, query: &ReadQuery, interner: &Interner) -> ExplainPlan {
+        // 1. Counter shortcut: count(*) without WHERE.
+        if query.r#where.is_none()
+            && query.group_by.is_none()
+            && query.order_by.is_none()
+            && !query.select.distinct
+            && !query.count_total
+            && query.pagination.is_none()
+            && query.select.items.len() == 1
+        {
+            if let SelectItem::CountAll { .. } = &query.select.items[0] {
+                return ExplainPlan {
+                    plan_type: PlanType::CounterShortcut,
+                    index_used: Some("__record_counter__".into()),
+                    estimated_rows: None,
+                };
+            }
+            // MIN aggregate via sorted index.
+            if let SelectItem::Aggregate {
+                func: shamir_query_types::read::AggFunc::Min,
+                field: shamir_query_types::read::AggregateField::Field(path),
+                ..
+            } = &query.select.items[0]
+            {
+                if let Some(fp) = intern_field_path(path, interner) {
+                    if let Some(def) = self.sorted_indexes().find_by_field(&fp) {
+                        return ExplainPlan {
+                            plan_type: PlanType::MinMaxIndex,
+                            index_used: Some(format!("sorted_idx_{}_min", def.name_interned)),
+                            estimated_rows: Some(1),
+                        };
+                    }
+                }
+            }
+        }
+
+        // 2. Index2 (FTS / Functional / Vector).
+        if let Some(ref filter) = query.r#where {
+            if !self.index2_registry().is_empty() {
+                // Check FTS / Vector / Computed shapes without actually running lookup.
+                let might_use_index2 = matches!(
+                    filter,
+                    crate::query::filter::Filter::Fts { .. }
+                        | crate::query::filter::Filter::VectorSimilarity { .. }
+                        | crate::query::filter::Filter::Computed { .. }
+                );
+                if might_use_index2 {
+                    return ExplainPlan {
+                        plan_type: PlanType::Index2,
+                        index_used: Some("index2".into()),
+                        estimated_rows: None,
+                    };
+                }
+            }
+        }
+
+        // 3. BTree index scan (Eq / In / And).
+        if let Some(ref filter) = query.r#where {
+            if let Some((idx_name, _lookup_sets, _residual)) =
+                self.try_plan_index_scan(filter, interner)
+            {
+                return ExplainPlan {
+                    plan_type: PlanType::IndexScan,
+                    index_used: Some(format!("idx_{idx_name}")),
+                    estimated_rows: None,
+                };
+            }
+        }
+
+        // 3b. MAX aggregate via sorted index.
+        if query.r#where.is_none()
+            && query.group_by.is_none()
+            && query.order_by.is_none()
+            && !query.select.distinct
+            && !query.count_total
+            && query.pagination.is_none()
+            && query.select.items.len() == 1
+        {
+            if let SelectItem::Aggregate {
+                func: shamir_query_types::read::AggFunc::Max,
+                field: shamir_query_types::read::AggregateField::Field(path),
+                ..
+            } = &query.select.items[0]
+            {
+                if let Some(fp) = intern_field_path(path, interner) {
+                    if let Some(def) = self.sorted_indexes().find_by_field(&fp) {
+                        return ExplainPlan {
+                            plan_type: PlanType::MinMaxIndex,
+                            index_used: Some(format!("sorted_idx_{}_max", def.name_interned)),
+                            estimated_rows: Some(1),
+                        };
+                    }
+                }
+            }
+        }
+
+        // 4. Keyset seek.
+        if let Some((idx_name, _encoded_key, _limit, _direction)) =
+            self.try_plan_keyset_seek(query, interner)
+        {
+            return ExplainPlan {
+                plan_type: PlanType::KeysetSeek,
+                index_used: Some(format!("sorted_idx_{idx_name}")),
+                estimated_rows: None,
+            };
+        }
+
+        // 5. ORDER BY + LIMIT fast path.
+        if let Some((idx_name, take, skip, _direction)) =
+            self.try_plan_order_limit_fast_path(query, interner)
+        {
+            return ExplainPlan {
+                plan_type: PlanType::OrderLimitFast,
+                index_used: Some(format!("sorted_idx_{idx_name}")),
+                estimated_rows: Some((skip + take) as u64),
+            };
+        }
+
+        // 6. Sorted-index range scan (top-level).
+        if let Some(ref filter) = query.r#where {
+            if let Some((idx_name, _lo, _hi, _residual)) =
+                self.try_plan_sorted_index_scan(filter, interner)
+            {
+                return ExplainPlan {
+                    plan_type: PlanType::SortedIndexScan,
+                    index_used: Some(format!("sorted_idx_{idx_name}")),
+                    estimated_rows: None,
+                };
+            }
+        }
+
+        // 7. AND-range extraction.
+        if let Some(ref filter) = query.r#where {
+            if let Some((idx_name, _lo, _hi, _residual)) =
+                self.try_plan_and_range_index_scan(filter, interner)
+            {
+                return ExplainPlan {
+                    plan_type: PlanType::AndRangeIndexScan,
+                    index_used: Some(format!("sorted_idx_{idx_name}")),
+                    estimated_rows: None,
+                };
+            }
+        }
+
+        // 8. Full scan (fallback).
+        ExplainPlan {
+            plan_type: PlanType::FullScan,
+            index_used: None,
+            estimated_rows: None,
+        }
     }
 }
 

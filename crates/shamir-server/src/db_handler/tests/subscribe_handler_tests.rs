@@ -94,6 +94,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             stats: None,
             pagination: None,
             value: Some(QueryValue::Map(initial_value)),
+            explain: None,
         },
     );
 

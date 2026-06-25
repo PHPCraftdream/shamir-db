@@ -114,6 +114,7 @@ impl DbGateway for FacadeDbGateway {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         };
 
         let mut queries = new_map();
@@ -234,6 +235,7 @@ impl DbGateway for FacadeDbGateway {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         };
 
         let mut queries = new_map();

@@ -365,6 +365,7 @@ fn bench_in_query_ref_scaling(c: &mut Criterion) {
             stats: None,
             pagination: None,
             value: None,
+            explain: None,
         },
     );
     let ctx = FilterContext::new(&interner, &refs);

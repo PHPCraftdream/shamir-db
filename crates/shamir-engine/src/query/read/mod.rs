@@ -18,9 +18,9 @@ pub use exec::{apply_distinct_qv, apply_pagination, apply_select_value, has_aggr
 pub use order::apply_order_by_qv;
 pub use parser::query_from_value;
 pub use shamir_query_types::read::{
-    AggFunc, AggregateField, At, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
-    Pagination, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery, Select,
-    SelectExpr, SelectExprValue, SelectItem, Temporal,
+    AggFunc, AggregateField, At, ExplainPlan, GroupBy, NullsOrder, OrderBy, OrderByItem,
+    OrderDirection, Pagination, PaginationInfo, PlanType, QueryRecord, QueryResult, QueryStats,
+    ReadQuery, Select, SelectExpr, SelectExprValue, SelectItem, Temporal,
 };
 
 #[cfg(test)]

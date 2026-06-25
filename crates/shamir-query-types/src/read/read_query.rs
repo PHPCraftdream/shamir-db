@@ -39,6 +39,10 @@ pub struct ReadQuery {
     /// slice; this is just the request flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub with_version: bool,
+    /// EXPLAIN / dry-run: run only the planner (index selection, plan
+    /// type) and return a plan preview WITHOUT materialising any rows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explain: bool,
 }
 
 fn default_select() -> Select {
@@ -62,6 +66,7 @@ impl ReadQuery {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         }
     }
 
@@ -77,6 +82,7 @@ impl ReadQuery {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         }
     }
 

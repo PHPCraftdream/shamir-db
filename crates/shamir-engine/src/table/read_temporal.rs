@@ -139,6 +139,7 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
+                explain: None,
             });
         }
 
@@ -173,6 +174,7 @@ impl TableManager {
             }),
             pagination,
             value: None,
+            explain: None,
         })
     }
 
@@ -368,6 +370,7 @@ impl TableManager {
             }),
             pagination: None,
             value: None,
+            explain: None,
         })
     }
 }

@@ -35,6 +35,7 @@ fn ref_map(alias: &str, records: Vec<QueryRecord>) -> TMap<String, QueryResult> 
             stats: None,
             pagination: None,
             value: None,
+            explain: None,
         },
     );
     refs
