@@ -192,6 +192,37 @@ fn col_slice() {
 // ── func (FnCall) ────────────────────────────────────────────────────
 
 #[test]
+fn func_simple_no_args() {
+    // Simple wire form: {"$fn":"NOW"} — no "name"/"args" object.
+    let fv = func_simple("NOW");
+    // Structurally a Simple FnCall, not a Complex one.
+    assert!(matches!(
+        fv,
+        FilterValue::FnCall {
+            call: FnCall::Simple(_)
+        }
+    ));
+    assert_wire(
+        fv,
+        mpack!({
+            "$fn": "NOW"
+        }),
+    );
+}
+
+#[test]
+fn func_simple_distinct_from_func_empty_args() {
+    // `func("NOW", [])` serializes as {"$fn":{"name":"NOW"}} (complex form);
+    // `func_simple("NOW")` must serialize as the bare-string form.
+    let simple_bytes = rmp_serde::to_vec_named(&func_simple("NOW")).expect("serialize");
+    let complex_bytes = rmp_serde::to_vec_named(&func("NOW", [])).expect("serialize");
+    assert_ne!(
+        simple_bytes, complex_bytes,
+        "func_simple must produce the simple wire form, not the complex one"
+    );
+}
+
+#[test]
 fn func_no_args() {
     assert_wire(
         func("NOW", []),

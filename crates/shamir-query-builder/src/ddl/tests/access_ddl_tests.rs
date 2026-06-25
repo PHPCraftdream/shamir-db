@@ -134,6 +134,42 @@ fn chgrp_store_wire() {
     );
 }
 
+// ============================================================================
+// res::function_folder
+// ============================================================================
+
+#[test]
+fn chmod_function_folder_wire() {
+    // ResourceRef::FunctionFolder carries a Vec<String> of path segments.
+    let op = ddl::chmod(ddl::res::function_folder(["reports", "daily"]), 0o755);
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "chmod": {
+                "function_folder": ["reports", "daily"]
+            },
+            "mode": 493
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn chown_function_folder_wire() {
+    let op = ddl::chown(ddl::res::function_folder(["reports"]), 7);
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        mpack!({
+            "chown": {
+                "function_folder": ["reports"]
+            },
+            "owner": 7
+        })
+    );
+}
+
 #[test]
 fn chgrp_null_group_wire() {
     let op = ddl::chgrp(ddl::res::database("testdb"), None);
