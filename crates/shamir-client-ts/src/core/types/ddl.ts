@@ -52,9 +52,12 @@ export type FkAction = 'no_action' | 'restrict' | 'cascade' | 'set_null';
 /**
  * Foreign-key reference descriptor (wire form).
  * Mirrors `ForeignKeyDto` in `schema_ops.rs`.
- * `on_delete` is `#[serde(default, skip_serializing_if = "FkAction::is_no_action")]`
- * — it is omitted from the wire when `no_action`; the builder always sets
- * a non-default value (default `restrict`).
+ * `on_delete` / `on_update` are
+ * `#[serde(default, skip_serializing_if = "FkAction::is_no_action")]` — they
+ * are omitted from the wire when `no_action`; the builder always sets
+ * `on_delete` to a non-default value (default `restrict`), while `on_update`
+ * defaults to `no_action` (additive — existing FK callers keep current
+ * behavior).
  */
 export interface ForeignKeyDto {
   /** The parent table name (flat, same repo). */
@@ -63,6 +66,8 @@ export interface ForeignKeyDto {
   ref_field: string;
   /** ON DELETE action; omitted from wire when `no_action`. */
   on_delete?: FkAction;
+  /** ON UPDATE action (Phase ②.2a — surface only); omitted when `no_action`. */
+  on_update?: FkAction;
 }
 
 export interface ConstraintsDto {

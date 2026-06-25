@@ -237,9 +237,17 @@ fn parse_foreign_key_ref(
         Some("set_null") => shamir_engine::validator::schema::FkAction::SetNull,
         _ => shamir_engine::validator::schema::FkAction::NoAction,
     };
+    // Phase ②.2a: parse on_update action (surface only; enforcement in ②.2b).
+    // Legacy rows without the field default to NoAction, mirroring on_delete.
+    let on_update = match map.get("on_update").and_then(|v| v.as_str()) {
+        Some("restrict") => shamir_engine::validator::schema::FkAction::Restrict,
+        Some("cascade") => shamir_engine::validator::schema::FkAction::Cascade,
+        Some("set_null") => shamir_engine::validator::schema::FkAction::SetNull,
+        _ => shamir_engine::validator::schema::FkAction::NoAction,
+    };
     Some(
-        shamir_engine::validator::schema::ForeignKeyRef::with_on_delete(
-            ref_table, ref_field, on_delete,
+        shamir_engine::validator::schema::ForeignKeyRef::with_actions(
+            ref_table, ref_field, on_delete, on_update,
         ),
     )
 }

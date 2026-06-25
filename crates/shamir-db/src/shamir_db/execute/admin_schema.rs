@@ -776,6 +776,18 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
         if let Some(action) = on_delete {
             fk_m.insert("on_delete".to_string(), QueryValue::Str(action.to_string()));
         }
+        // Phase ②.2a — persist the ON UPDATE action (surface only; enforcement
+        // lands in ②.2b). Symmetric to `on_delete` above; NoAction is omitted
+        // so legacy rows (and the default) stay byte-identical.
+        let on_update = match fk.on_update {
+            FkAction::Restrict => Some("restrict"),
+            FkAction::Cascade => Some("cascade"),
+            FkAction::SetNull => Some("set_null"),
+            FkAction::NoAction => None,
+        };
+        if let Some(action) = on_update {
+            fk_m.insert("on_update".to_string(), QueryValue::Str(action.to_string()));
+        }
         m.insert("foreign_key".to_string(), QueryValue::Map(fk_m));
     }
 }
@@ -866,10 +878,20 @@ fn foreign_key_dto_from_qv(v: &QueryValue) -> Option<ForeignKeyDto> {
         Some("set_null") => FkAction::SetNull,
         _ => FkAction::default(),
     };
+    // Phase ②.2a — read on_update (surface only; enforcement lands in ②.2b).
+    // Legacy rows without the field default to NoAction, mirroring on_delete.
+    let on_update = match m.get("on_update").and_then(|v| v.as_str()) {
+        Some("no_action") => FkAction::NoAction,
+        Some("restrict") => FkAction::Restrict,
+        Some("cascade") => FkAction::Cascade,
+        Some("set_null") => FkAction::SetNull,
+        _ => FkAction::default(),
+    };
     Some(ForeignKeyDto {
         ref_table,
         ref_field,
         on_delete,
+        on_update,
     })
 }
 

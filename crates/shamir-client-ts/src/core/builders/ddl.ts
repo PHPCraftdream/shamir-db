@@ -19,6 +19,7 @@ import type {
   WriteOpKind,
   FieldRuleDto,
   ConstraintsDto,
+  ForeignKeyDto,
   FkAction,
   SetTableSchemaOp,
   AddSchemaRuleOp,
@@ -749,17 +750,24 @@ export class FieldBuilder {
    * The field value must exist in `refTable.refField`.
    * `onDelete` defaults to `'restrict'` (matching the Rust builder); pass
    * `'cascade'` / `'set_null'` / `'no_action'` to override.
+   * `onUpdate` defaults to `'no_action'` (Phase ②.2a — surface only;
+   * enforcement in ②.2b; additive — existing callers keep current behavior).
    */
   foreignKey(
     refTable: string,
     refField: string,
-    opts?: { onDelete?: FkAction },
+    opts?: { onDelete?: FkAction; onUpdate?: FkAction },
   ): this {
-    this._constraints.foreign_key = {
+    const fk: ForeignKeyDto = {
       ref_table: refTable,
       ref_field: refField,
       on_delete: opts?.onDelete ?? 'restrict',
     };
+    const onUpdate = opts?.onUpdate ?? 'no_action';
+    if (onUpdate !== 'no_action') {
+      fk.on_update = onUpdate;
+    }
+    this._constraints.foreign_key = fk;
     return this;
   }
 

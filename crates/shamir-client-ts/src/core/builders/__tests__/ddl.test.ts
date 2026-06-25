@@ -532,7 +532,7 @@ describe('field()', () => {
   });
 });
 
-// ── foreignKey (on_delete) ──────────────────────────────────────────
+// ── foreignKey (on_delete / on_update) ──────────────────────────────
 
 describe('field().foreignKey()', () => {
   it('defaults on_delete to "restrict"', () => {
@@ -555,6 +555,59 @@ describe('field().foreignKey()', () => {
       ref_field: 'id',
       on_delete: 'cascade',
     });
+  });
+
+  // ── Phase ②.2a — on_update (surface only) ────────────────────────────
+
+  it('omits on_update when not set (default no_action)', () => {
+    const rule = ddl.field(['parent_id']).int().foreignKey('parent', 'id').build();
+    expect(rule.foreign_key).toBeDefined();
+    expect(rule.foreign_key!.on_update).toBeUndefined();
+  });
+
+  it('emits on_update: "cascade" when explicitly set (and on_delete defaults to "restrict")', () => {
+    const rule = ddl
+      .field(['parent_id'])
+      .int()
+      .foreignKey('parent', 'id', { onUpdate: 'cascade' })
+      .build();
+    expect(rule.foreign_key).toEqual({
+      ref_table: 'parent',
+      ref_field: 'id',
+      on_delete: 'restrict',
+      on_update: 'cascade',
+    });
+  });
+
+  it('emits both on_delete and on_update when both are set', () => {
+    const rule = ddl
+      .field(['parent_id'])
+      .int()
+      .foreignKey('parent', 'id', {
+        onDelete: 'set_null',
+        onUpdate: 'cascade',
+      })
+      .build();
+    expect(rule.foreign_key).toEqual({
+      ref_table: 'parent',
+      ref_field: 'id',
+      on_delete: 'set_null',
+      on_update: 'cascade',
+    });
+  });
+
+  it('omits on_update when explicitly set to "no_action"', () => {
+    const rule = ddl
+      .field(['parent_id'])
+      .int()
+      .foreignKey('parent', 'id', { onUpdate: 'no_action' })
+      .build();
+    expect(rule.foreign_key).toEqual({
+      ref_table: 'parent',
+      ref_field: 'id',
+      on_delete: 'restrict',
+    });
+    expect(rule.foreign_key!.on_update).toBeUndefined();
   });
 });
 

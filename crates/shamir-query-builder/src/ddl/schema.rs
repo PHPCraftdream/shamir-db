@@ -241,6 +241,12 @@ impl FieldBuilder {
     ///
     /// The field value must exist in `ref_table.ref_field`.  An index on
     /// `(ref_table, ref_field)` is required at DDL time (fail-closed).
+    ///
+    /// `on_delete` defaults to `Restrict` (safe-by-default) and `on_update`
+    /// to `NoAction` (additive — existing FK callers keep current behavior).
+    /// Use [`foreign_key_on_update`](Self::foreign_key_on_update) or
+    /// [`foreign_key_with_actions`](Self::foreign_key_with_actions) to specify
+    /// a non-default update action.
     pub fn foreign_key(
         mut self,
         ref_table: impl Into<String>,
@@ -250,6 +256,7 @@ impl FieldBuilder {
             ref_table: ref_table.into(),
             ref_field: ref_field.into(),
             on_delete: FkAction::Restrict,
+            on_update: FkAction::NoAction,
         });
         self
     }
@@ -260,6 +267,9 @@ impl FieldBuilder {
     /// referential action applied when a referenced parent row is deleted
     /// (`Restrict` / `Cascade` / `SetNull` / `NoAction`). Mirrors the TS
     /// builder's `foreignKey(table, field, { onDelete })`.
+    ///
+    /// `on_update` defaults to `NoAction` (additive — use
+    /// [`foreign_key_with_actions`](Self::foreign_key_with_actions) to set both).
     pub fn foreign_key_on_delete(
         mut self,
         ref_table: impl Into<String>,
@@ -270,6 +280,49 @@ impl FieldBuilder {
             ref_table: ref_table.into(),
             ref_field: ref_field.into(),
             on_delete,
+            on_update: FkAction::NoAction,
+        });
+        self
+    }
+
+    /// Phase ②.2a — foreign-key reference with an explicit `ON UPDATE` action
+    /// (surface only; enforcement lands in ②.2b).
+    ///
+    /// Mirror of [`foreign_key_on_delete`](Self::foreign_key_on_delete) for the
+    /// update path. `on_delete` defaults to `Restrict` (safe-by-default). Use
+    /// [`foreign_key_with_actions`](Self::foreign_key_with_actions) to set both.
+    pub fn foreign_key_on_update(
+        mut self,
+        ref_table: impl Into<String>,
+        ref_field: impl Into<String>,
+        on_update: FkAction,
+    ) -> Self {
+        self.constraints.foreign_key = Some(ForeignKeyDto {
+            ref_table: ref_table.into(),
+            ref_field: ref_field.into(),
+            on_delete: FkAction::Restrict,
+            on_update,
+        });
+        self
+    }
+
+    /// Phase ②.2a — foreign-key reference with both actions set explicitly
+    /// (surface only; enforcement lands in ②.2b).
+    ///
+    /// Combined constructor for FKs that need both `on_delete` and `on_update`
+    /// referential actions.
+    pub fn foreign_key_with_actions(
+        mut self,
+        ref_table: impl Into<String>,
+        ref_field: impl Into<String>,
+        on_delete: FkAction,
+        on_update: FkAction,
+    ) -> Self {
+        self.constraints.foreign_key = Some(ForeignKeyDto {
+            ref_table: ref_table.into(),
+            ref_field: ref_field.into(),
+            on_delete,
+            on_update,
         });
         self
     }

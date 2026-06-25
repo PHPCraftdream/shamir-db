@@ -1,7 +1,7 @@
 //! Tests for Database, Repository, Table, Index, Buffer config DDL constructors,
 //! and `create_db` with `if_not_exists`.
 
-use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch};
+use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch, FkAction, ForeignKeyDto};
 use shamir_types::mpack;
 
 use crate::ddl;
@@ -443,4 +443,84 @@ fn field_null_type_tag_wire() {
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["type"], "null");
+}
+
+// ============================================================================
+// Foreign-key builder (Phase C2 / D / ②.2a)
+// ============================================================================
+
+/// `foreign_key(...)` sets `on_delete = Restrict` (safe-by-default) and
+/// `on_update = NoAction` (additive — existing FK callers keep current
+/// behavior). Regression: adding the `on_update` field must not change the
+/// observable wire shape for plain FKs.
+#[test]
+fn foreign_key_defaults_on_delete_restrict_on_update_no_action() {
+    let rule = ddl::field(["parent_id"])
+        .int()
+        .foreign_key("parent", "id")
+        .build();
+    assert_eq!(
+        rule.constraints.foreign_key,
+        Some(ForeignKeyDto {
+            ref_table: "parent".to_string(),
+            ref_field: "id".to_string(),
+            on_delete: FkAction::Restrict,
+            on_update: FkAction::NoAction,
+        })
+    );
+}
+
+/// `foreign_key_on_delete(...)` sets `on_update = NoAction` (additive).
+#[test]
+fn foreign_key_on_delete_sets_on_update_no_action() {
+    let rule = ddl::field(["parent_id"])
+        .int()
+        .foreign_key_on_delete("parent", "id", FkAction::Cascade)
+        .build();
+    assert_eq!(
+        rule.constraints.foreign_key,
+        Some(ForeignKeyDto {
+            ref_table: "parent".to_string(),
+            ref_field: "id".to_string(),
+            on_delete: FkAction::Cascade,
+            on_update: FkAction::NoAction,
+        })
+    );
+}
+
+/// `foreign_key_on_update(...)` (Phase ②.2a) sets `on_delete = Restrict`
+/// (safe-by-default) and `on_update` from the argument.
+#[test]
+fn foreign_key_on_update_sets_on_delete_restrict() {
+    let rule = ddl::field(["parent_id"])
+        .int()
+        .foreign_key_on_update("parent", "id", FkAction::Cascade)
+        .build();
+    assert_eq!(
+        rule.constraints.foreign_key,
+        Some(ForeignKeyDto {
+            ref_table: "parent".to_string(),
+            ref_field: "id".to_string(),
+            on_delete: FkAction::Restrict,
+            on_update: FkAction::Cascade,
+        })
+    );
+}
+
+/// `foreign_key_with_actions(...)` (Phase ②.2a) sets both actions explicitly.
+#[test]
+fn foreign_key_with_actions_sets_both() {
+    let rule = ddl::field(["parent_id"])
+        .int()
+        .foreign_key_with_actions("parent", "id", FkAction::SetNull, FkAction::Cascade)
+        .build();
+    assert_eq!(
+        rule.constraints.foreign_key,
+        Some(ForeignKeyDto {
+            ref_table: "parent".to_string(),
+            ref_field: "id".to_string(),
+            on_delete: FkAction::SetNull,
+            on_update: FkAction::Cascade,
+        })
+    );
 }
