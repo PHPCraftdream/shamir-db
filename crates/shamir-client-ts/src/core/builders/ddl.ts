@@ -24,6 +24,7 @@ import type {
   AddSchemaRuleOp,
   RemoveSchemaRuleOp,
   GetTableSchemaOp,
+  DescribeTableOp,
   CreateDbOp,
   CreateRepoOp,
   CreateTableOp,
@@ -771,6 +772,17 @@ export function getTableSchema(
   };
 }
 
+/** Describe a table — full introspection in one response. */
+export function describeTable(
+  table: string,
+  opts?: { repo?: string },
+): DescribeTableOp {
+  return {
+    describe_table: table,
+    repo: repoOrDefault(opts?.repo),
+  };
+}
+
 /** Aggregate namespace — every DDL constructor in one object. */
 export const ddl = {
   currentOnly,
@@ -786,6 +798,7 @@ export const ddl = {
   addSchemaRule,
   removeSchemaRule,
   getTableSchema,
+  describeTable,
   setBufferConfig,
   getBufferConfig,
   alterBufferConfig,

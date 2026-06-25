@@ -54,6 +54,19 @@ pub struct DropTableOp {
     pub cascade: bool,
 }
 
+/// Describe a table — return its full form (schema, indexes, validators,
+/// retention, buffer config, owner/mode) in a single response.
+///
+/// ```text
+/// { "describe_table": "users", "repo": "main" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DescribeTableOp {
+    pub describe_table: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+}
+
 /// Rename a table inside a repository.
 ///
 /// The physical data stores (`__data__`, `__info__`, `__history__`) are

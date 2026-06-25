@@ -662,7 +662,7 @@ fn serialise_one_rule_catalogue(rule: &FieldRuleDto, interner: &Interner) -> Que
 
 /// Serialise a list of DTO rules into the **flat (de-interned) wire form**
 /// — paths as `List[Str]`, suitable for `GetTableSchema` responses.
-fn serialise_rules_flat(rules: &[FieldRuleDto]) -> QueryValue {
+pub(super) fn serialise_rules_flat(rules: &[FieldRuleDto]) -> QueryValue {
     let items: Vec<QueryValue> = rules.iter().map(serialise_one_rule_flat).collect();
     QueryValue::List(items)
 }
@@ -784,7 +784,7 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
 
 /// Parse a catalogue-form schema (`List[Map]` with interned path ids) back
 /// into the wire DTO form (flat string paths). Used by add/remove/get.
-fn dto_list_from_catalogue(qv: &QueryValue, interner: &Interner) -> Vec<FieldRuleDto> {
+pub(super) fn dto_list_from_catalogue(qv: &QueryValue, interner: &Interner) -> Vec<FieldRuleDto> {
     let items = match qv {
         QueryValue::List(l) => l,
         _ => return Vec::new(),

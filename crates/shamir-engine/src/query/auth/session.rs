@@ -499,6 +499,14 @@ impl SessionPermissions {
                     table: op.get_table_schema.clone(),
                 },
             ),
+            BatchOp::DescribeTable(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.describe_table.clone(),
+                },
+            ),
 
             // Subscriptions — read-level access; actual table checks happen
             // when the subscription is activated.

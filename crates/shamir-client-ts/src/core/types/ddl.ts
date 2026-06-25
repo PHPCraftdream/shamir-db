@@ -129,6 +129,12 @@ export interface GetTableSchemaOp {
   repo: string;
 }
 
+/** Describe a table — full introspection in one response. */
+export interface DescribeTableOp {
+  describe_table: string;
+  repo: string;
+}
+
 // ── HMAC signer ─────────────────────────────────────────────────────
 
 /**
@@ -420,6 +426,7 @@ export type DdlOp =
   | AddSchemaRuleOp
   | RemoveSchemaRuleOp
   | GetTableSchemaOp
+  | DescribeTableOp
   | CreateIndexOp
   | DropIndexOp
   | SetBufferConfigOp
