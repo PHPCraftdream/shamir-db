@@ -28,6 +28,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::DropDb(op) => self.handle_drop_db(op).await,
             BatchOp::CreateRepo(op) => self.handle_create_repo(op).await,
             BatchOp::DropRepo(op) => self.handle_drop_repo(op).await,
+            BatchOp::RenameRepo(op) => self.handle_rename_repo(op).await,
 
             // ── Table / Index ──────────────────────────────────────────
             BatchOp::CreateTable(op) => self.handle_create_table(op).await,

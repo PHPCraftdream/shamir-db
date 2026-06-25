@@ -383,6 +383,11 @@ export interface RenameTableOp {
   repo?: string;
 }
 
+export interface RenameRepoOp {
+  rename_repo: string;
+  to: string;
+}
+
 export interface RenameIndexOp {
   rename_index: string;
   to: string;
@@ -426,6 +431,7 @@ export type DdlOp =
   | DropDbOp
   | CreateRepoOp
   | DropRepoOp
+  | RenameRepoOp
   | CreateTableOp
   | DropTableOp
   | RenameTableOp

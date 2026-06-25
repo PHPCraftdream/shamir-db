@@ -115,6 +115,27 @@ impl DbInstance {
         self.repos.remove(repo_name).is_some()
     }
 
+    /// Re-key a repository from `from` to `to` in the logical registry
+    /// (Phase F.3 — RENAME REPO).
+    ///
+    /// The `RepoInstance` is removed from its old key, its `name` field is
+    /// updated to `to` via [`RepoInstance::with_name`], and it is re-inserted
+    /// under the new key. **No per-table store copy happens**: table stores
+    /// (`__data__<table>`, `__info__<table>`, `__history__<table>`) are keyed
+    /// only by table name *inside* the repo, so the tables travel with the
+    /// repo under the new logical key at zero cost.
+    ///
+    /// Returns `false` if the source repo was not registered.
+    pub fn rename_repo(&self, from: &str, to: &str) -> bool {
+        if let Some((_, instance)) = self.repos.remove(from) {
+            let renamed = instance.with_name(to.to_string());
+            self.repos.insert(to.to_string(), renamed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Access the per-DB user scalar layer for registration.
     pub fn scalars(&self) -> &Arc<UserScalarLayer> {
         &self.scalars

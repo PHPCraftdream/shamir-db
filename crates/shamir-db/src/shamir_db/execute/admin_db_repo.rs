@@ -268,4 +268,46 @@ impl ShamirAdminExecutor {
             "existed": @(QueryValue::Bool(removed)),
         })))
     }
+
+    pub(super) async fn handle_rename_repo(
+        &self,
+        op: &crate::query::admin::RenameRepoOp,
+    ) -> Result<QueryResult, BatchError> {
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        validate_name_component(&op.rename_repo, "repo_name")?;
+        validate_name_component(&op.to, "repo_name")?;
+
+        // Auth: Write on the source repo (rename mutates the repo's
+        // identity). Mirrors rename_table's auth path.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::store(self.db_name.clone(), op.rename_repo.clone()),
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
+        self.shamir
+            .rename_repo_as(&self.db_name, &op.rename_repo, &op.to, self.actor.clone())
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        Ok(admin_result(mpack!({
+            "renamed_repo": @(QueryValue::Str(op.rename_repo.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+        })))
+    }
 }

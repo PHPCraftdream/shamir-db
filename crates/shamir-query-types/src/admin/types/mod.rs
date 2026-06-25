@@ -28,7 +28,7 @@ pub use list_ops::ListOp;
 pub use migration_ops::{
     CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp, StartMigrationOp,
 };
-pub use repo_ops::{CreateRepoOp, DropRepoOp};
+pub use repo_ops::{CreateRepoOp, DropRepoOp, RenameRepoOp};
 pub use retention::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention, SetRetentionOp};
 pub use schema_ops::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,

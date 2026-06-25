@@ -11,9 +11,9 @@ use crate::admin::{
     CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
     DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
     InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameIndexOp, RenameTableOp,
-    RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
-    StartMigrationOp, UnbindValidatorOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameIndexOp, RenameRepoOp,
+    RenameTableOp, RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp,
+    SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -54,6 +54,7 @@ pub enum BatchOp {
     DropDb(DropDbOp),
     CreateRepo(CreateRepoOp),
     DropRepo(DropRepoOp),
+    RenameRepo(RenameRepoOp),
     CreateTable(CreateTableOp),
     DropTable(DropTableOp),
     RenameTable(RenameTableOp),
@@ -155,6 +156,7 @@ impl Serialize for BatchOp {
             BatchOp::DropDb(op) => op.serialize(serializer),
             BatchOp::CreateRepo(op) => op.serialize(serializer),
             BatchOp::DropRepo(op) => op.serialize(serializer),
+            BatchOp::RenameRepo(op) => op.serialize(serializer),
             BatchOp::CreateTable(op) => op.serialize(serializer),
             BatchOp::DropTable(op) => op.serialize(serializer),
             BatchOp::RenameTable(op) => op.serialize(serializer),
@@ -258,6 +260,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateRepoOp, _>(&bytes).map(BatchOp::CreateRepo)
         } else if has("drop_repo") {
             qv_to::<DropRepoOp, _>(&bytes).map(BatchOp::DropRepo)
+        } else if has("rename_repo") {
+            qv_to::<RenameRepoOp, _>(&bytes).map(BatchOp::RenameRepo)
         } else if has("create_table") {
             qv_to::<CreateTableOp, _>(&bytes).map(BatchOp::CreateTable)
         } else if has("drop_table") {
@@ -393,6 +397,7 @@ impl BatchOp {
                 | BatchOp::DropDb(_)
                 | BatchOp::CreateRepo(_)
                 | BatchOp::DropRepo(_)
+                | BatchOp::RenameRepo(_)
                 | BatchOp::CreateTable(_)
                 | BatchOp::DropTable(_)
                 | BatchOp::RenameTable(_)

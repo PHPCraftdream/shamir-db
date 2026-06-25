@@ -868,7 +868,14 @@ function extractRepo(entry: Record<string, unknown>): string | undefined {
   if ('set' in entry && 'key' in entry) return tableRefToRepo(entry['set']);
   if ('delete_from' in entry) return tableRefToRepo(entry['delete_from']);
   if ('from' in entry) {
-    // ReadQuery: { from: table, repo?: string }
+    // ReadQuery: `from` is a TableRefWire — either a bare table name
+    // (default repo "main"), a `[repo, table]` pair, OR a legacy form
+    // `{ from: table, repo?: string }`. Resolve the repo from whichever
+    // form is present so the interner cache is keyed correctly.
+    const fromVal = entry['from'];
+    if (Array.isArray(fromVal)) {
+      return tableRefToRepo(fromVal);
+    }
     const repo = entry['repo'];
     return typeof repo === 'string' ? repo : 'main';
   }

@@ -176,6 +176,177 @@ impl ShamirDb {
         }
     }
 
+    /// Rename a repository, preserving its tables, data, indexes, and
+    /// catalogue metadata (Phase F.3 — RENAME REPO).
+    ///
+    /// Contract:
+    /// - **Logical re-key only** — the in-memory `RepoInstance` is moved
+    ///   to the new key in `DbInstance::repos` and its `name` field is
+    ///   updated. The repo's physical table stores
+    ///   (`__data__<table>` / `__info__<table>` / `__history__<table>`)
+    ///   are keyed only by table name *inside* the repo, so they travel
+    ///   with the repo under the new logical key at zero cost. No
+    ///   `rename_table_stores` is invoked and no drain is needed.
+    /// - **Catalogue re-key** — the old `(db, from)` repositories row is
+    ///   removed and a new `(db, to)` row is written preserving
+    ///   `engine` / `path` / `ResourceMeta`. Every child table's catalogue
+    ///   row `(db, from, table)` is likewise re-keyed to `(db, to, table)`.
+    ///
+    /// Guards (refuse with a typed [`DbError`] instead of leaving
+    /// dangling state):
+    /// - The source repo must exist; the destination must not.
+    pub async fn rename_repo_as(
+        &self,
+        db_name: &str,
+        from: &str,
+        to: &str,
+        _actor: Actor,
+    ) -> DbResult<()> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+
+        // Existence guards.
+        if !db.has_repo(from) {
+            return Err(DbError::NotFound(format!(
+                "Repository '{}/{}' not found",
+                db_name, from
+            )));
+        }
+        if db.has_repo(to) {
+            return Err(DbError::Validation(format!(
+                "cannot rename repo '{}/{}' to '{}': destination repository already exists",
+                db_name, from, to
+            )));
+        }
+
+        // Snapshot the table list BEFORE the re-key so the catalogue rows
+        // can be rewritten once the in-memory re-key has succeeded.
+        let table_names = db.list_tables(from).unwrap_or_default();
+
+        // Load the persisted repo record to preserve engine/path/meta
+        // across the re-key.
+        let old_repo_record = self
+            .system_store
+            .load_repository_record(db_name, from)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "repository catalogue record for '{}/{}' not found",
+                    db_name, from
+                ))
+            })?;
+
+        let engine = old_repo_record
+            .get("engine")
+            .and_then(|v| v.as_str())
+            .unwrap_or("in_memory")
+            .to_string();
+        let path = old_repo_record
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let existing_meta = ResourceMeta::from_record(&old_repo_record);
+
+        // 1. In-memory re-key (no per-table store copy).
+        let renamed = db.rename_repo(from, to);
+        debug_assert!(renamed, "rename_repo returned false despite has_repo guard");
+
+        // 2. Persist the new repo catalogue row FIRST so a crash between
+        //    the two writes leaves the new repo resolvable on reboot; a
+        //    stale (db, from) row resurrects nothing because the live
+        //    registration under `from` is already gone.
+        if let Err(e) = self
+            .system_store
+            .save_repository(db_name, to, &engine, path.as_deref(), &existing_meta)
+            .await
+        {
+            log::warn!(
+                "shamir_db::rename_repo: failed to persist new catalogue row '{}/{}': {}",
+                db_name,
+                to,
+                e
+            );
+        }
+        if let Err(e) = self.system_store.remove_repository(db_name, from).await {
+            log::warn!(
+                "shamir_db::rename_repo: failed to remove old catalogue row '{}/{}': {}",
+                db_name,
+                from,
+                e
+            );
+        }
+
+        // 3. Re-key every child table's catalogue row: load the old row,
+        //    write a new one under `(db, to, table)` preserving meta +
+        //    enable_indexes, then remove the old `(db, from, table)` row.
+        //    Write-before-remove so a crash leaves the new row resolvable.
+        for table_name in &table_names {
+            match self
+                .system_store
+                .load_table_record(db_name, from, table_name)
+                .await
+            {
+                Ok(Some(rec)) => {
+                    let enable_indexes = rec
+                        .get("enable_indexes")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let table_meta = ResourceMeta::from_record(&rec);
+                    if let Err(e) = self
+                        .system_store
+                        .save_table(db_name, to, table_name, enable_indexes, &table_meta)
+                        .await
+                    {
+                        log::warn!(
+                            "shamir_db::rename_repo: failed to persist new table catalogue \
+                             row '{}/{}/{}': {}",
+                            db_name,
+                            to,
+                            table_name,
+                            e
+                        );
+                    }
+                    if let Err(e) = self
+                        .system_store
+                        .remove_table(db_name, from, table_name)
+                        .await
+                    {
+                        log::warn!(
+                            "shamir_db::rename_repo: failed to remove old table catalogue \
+                             row '{}/{}/{}': {}",
+                            db_name,
+                            from,
+                            table_name,
+                            e
+                        );
+                    }
+                }
+                Ok(None) => {
+                    log::warn!(
+                        "shamir_db::rename_repo: no catalogue row for '{}/{}/{}' \
+                         (continuing)",
+                        db_name,
+                        from,
+                        table_name
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "shamir_db::rename_repo: failed to load table catalogue \
+                         '{}/{}/{}': {}",
+                        db_name,
+                        from,
+                        table_name,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Drain every repo's in-memory MemBuffers to their durable backing.
     ///
     /// Called on graceful shutdown to close the ~500 ms buffered-commit

@@ -309,6 +309,31 @@ impl SystemStore {
             .collect())
     }
 
+    /// Load a single repository's catalogue record by `(db_name, repo_name)`.
+    /// Returns `Ok(None)` when no matching row exists. Used by rename_repo to
+    /// preserve `engine` / `path` / `ResourceMeta` across the re-key.
+    pub async fn load_repository_record(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+    ) -> DbResult<Option<QueryValue>> {
+        let all = self.load_repositories().await?;
+        for rec in all {
+            let matches = rec
+                .get("db_name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|d| d == db_name)
+                && rec
+                    .get("repo_name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|r| r == repo_name);
+            if matches {
+                return Ok(Some(rec));
+            }
+        }
+        Ok(None)
+    }
+
     // ========================================================================
     // Table catalogue (per-repo table list — I.2)
     // ========================================================================

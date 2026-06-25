@@ -979,3 +979,16 @@ describe('renameIndex', () => {
     expect(op.repo).toBe('analytics');
   });
 });
+
+// ── renameRepo ─────────────────────────────────────────────────────
+
+describe('renameRepo', () => {
+  it('emits exactly {rename_repo, to} (2 keys)', () => {
+    const op = ddl.renameRepo('analytics', 'telemetry');
+    expect(op).toEqual({
+      rename_repo: 'analytics',
+      to: 'telemetry',
+    });
+    expect(Object.keys(op)).toHaveLength(2);
+  });
+});
