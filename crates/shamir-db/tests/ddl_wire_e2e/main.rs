@@ -6,6 +6,7 @@
 
 mod helpers;
 
+mod drop_function_guard;
 mod error_codes;
 mod folders_introspection;
 mod idempotency_cascade;
