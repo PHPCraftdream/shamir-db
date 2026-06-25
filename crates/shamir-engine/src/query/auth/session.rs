@@ -407,6 +407,7 @@ impl SessionPermissions {
             | BatchOp::Chgrp(_)
             | BatchOp::CreateGroup(_)
             | BatchOp::DropGroup(_)
+            | BatchOp::RenameGroup(_)
             | BatchOp::AddGroupMember(_)
             | BatchOp::RemoveGroupMember(_) => (Action::Alter, Resource::Global),
 

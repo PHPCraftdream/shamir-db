@@ -66,6 +66,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::Chgrp(op) => self.handle_chgrp(op).await,
             BatchOp::CreateGroup(op) => self.handle_create_group(op).await,
             BatchOp::DropGroup(op) => self.handle_drop_group(op).await,
+            BatchOp::RenameGroup(op) => self.handle_rename_group(op).await,
             BatchOp::AddGroupMember(op) => self.handle_add_group_member(op).await,
             BatchOp::RemoveGroupMember(op) => self.handle_remove_group_member(op).await,
             op @ BatchOp::AccessTree(_) => self.handle_access_tree(op).await,

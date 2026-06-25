@@ -205,6 +205,18 @@ describe('dropGroup', () => {
   });
 });
 
+describe('renameGroup', () => {
+  it('by name', () => {
+    const op = admin.renameGroup(admin.groupName('devs'), 'engineers');
+    expect(op).toEqual({ rename_group: { name: 'devs' }, to: 'engineers' });
+  });
+
+  it('by id', () => {
+    const op = admin.renameGroup(admin.groupId(3), 'engineers');
+    expect(op).toEqual({ rename_group: { id: 3 }, to: 'engineers' });
+  });
+});
+
 describe('addGroupMember', () => {
   it('emits {add_group_member: GroupRef, user} with number', () => {
     const op = admin.addGroupMember(admin.groupName('devs'), 42);

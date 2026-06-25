@@ -110,6 +110,7 @@ export type {
   ChgrpOp,
   CreateGroupOp,
   DropGroupOp,
+  RenameGroupOp,
   AddGroupMemberOp,
   RemoveGroupMemberOp,
   AccessTreeOp,

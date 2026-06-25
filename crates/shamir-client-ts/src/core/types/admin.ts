@@ -129,6 +129,11 @@ export interface DropGroupOp {
   if_exists?: boolean;
 }
 
+export interface RenameGroupOp {
+  rename_group: GroupRef;
+  to: string;
+}
+
 export interface AddGroupMemberOp {
   add_group_member: GroupRef;
   user: number | bigint;
@@ -211,6 +216,7 @@ export type AdminOp =
   | ChgrpOp
   | CreateGroupOp
   | DropGroupOp
+  | RenameGroupOp
   | AddGroupMemberOp
   | RemoveGroupMemberOp
   | AccessTreeOp

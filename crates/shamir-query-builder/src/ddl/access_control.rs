@@ -1,6 +1,6 @@
 use shamir_query_types::admin::{
     AccessTreeOp, AddGroupMemberOp, ChgrpOp, ChmodOp, ChownOp, CreateGroupOp, DropGroupOp,
-    GroupRef, RemoveGroupMemberOp, ResourceRef,
+    GroupRef, RemoveGroupMemberOp, RenameGroupOp, ResourceRef,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -139,6 +139,16 @@ impl IntoBatchOp for DropGroup {
     fn into_batch_op(self) -> BatchOp {
         self.build()
     }
+}
+
+/// Rename a group by reference (name or id) to `to`. Because groups are
+/// id-keyed, this only updates the display name; members and resource
+/// references (which store the group id) are unaffected.
+pub fn rename_group(group: GroupRef, to: impl Into<String>) -> BatchOp {
+    BatchOp::RenameGroup(RenameGroupOp {
+        rename_group: group,
+        to: to.into(),
+    })
 }
 
 /// Add a user to a group.
