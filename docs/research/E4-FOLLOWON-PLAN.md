@@ -2,6 +2,13 @@
 
 # E.4-followon — поэтапный план (RenameRepo / RenameIndex + populated-table MVCC-overlay миграция)
 
+> ✅ **ВЫПОЛНЕНО ПОЛНОСТЬЮ.** Все три фазы реализованы, верифицированы (zero-trust)
+> и закоммичены: **F.1** RENAME INDEX (`1ac6b91`), **F.2** populated-table rename
+> со снятием MVCC-overlay-барьера через `MvccStore::drain_to_history` (`722f05d`),
+> **F.3** RENAME REPO (`5e3ea60`). Стратегия — вся работа делегирована crush,
+> commit-per-phase. Факт и тестовые вердикты — в `DONE.md` (раздел «E.4-followon»).
+> Документ оставлен как запись планирования.
+
 Follow-on кампании Phase E (после E.4 Object 1 `RENAME TABLE`, коммит `a7dcda5`).
 Декомпозиция исходной задачи #250 на три leaf-фазы **F.1 → F.2 → F.3**
 (эскалация риска). Каждая фаза — отдельный коммит, с тестовой лестницей
