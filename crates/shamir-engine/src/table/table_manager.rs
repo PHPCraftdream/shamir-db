@@ -425,6 +425,13 @@ impl TableManager {
 
     /// Clone the handle to this table's unique-write serialisation lock.
     ///
+    /// **Physical authority for uniqueness (HIGH-A) — defense-in-depth contract
+    /// (②.3b).** This `tokio::sync::Mutex` is the serialiser that closes the
+    /// non-tx ↔ tx-commit unique race; the logical fail-fast probe in
+    /// `schema_validator.rs` (`Phase C3 — unique constraint`) runs ABOVE this
+    /// layer as early diagnosis + a clean field-scoped error, but is NOT the
+    /// atomicity authority (it has a pre-commit TOCTOU window).
+    ///
     /// HIGH-A — closing the non-tx ↔ tx-commit unique race. Non-tx
     /// `insert` / `set` / `delete` take this `tokio::sync::Mutex` around their
     /// validate-then-write-then-index window (see those methods). The tx
