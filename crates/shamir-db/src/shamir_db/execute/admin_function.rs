@@ -247,4 +247,83 @@ impl ShamirAdminExecutor {
             )),
         })))
     }
+
+    pub(super) async fn handle_rename_function_folder(
+        &self,
+        batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let BatchOp::RenameFunctionFolder(op) = batch_op else {
+            unreachable!("handle_rename_function_folder called with non-RenameFunctionFolder op");
+        };
+
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // Validate both paths: non-empty and each segment well-formed.
+        if op.rename_function_folder.is_empty() {
+            return Err(err(
+                "rename_function_folder source path must not be empty".to_string()
+            ));
+        }
+        if op.to.is_empty() {
+            return Err(err(
+                "rename_function_folder destination path must not be empty".to_string(),
+            ));
+        }
+        for segment in &op.rename_function_folder {
+            validate_name_component(segment, "source folder segment")?;
+        }
+        for segment in &op.to {
+            validate_name_component(segment, "destination folder segment")?;
+        }
+
+        // Auth: Write on the source folder (it is itself a resource).
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::FunctionFolder {
+                    path: op.rename_function_folder.clone(),
+                },
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
+        // Auth: Create on the destination parent (mirror create_function_folder).
+        let parent_path = if op.to.len() == 1 {
+            ResourcePath::FunctionNamespace
+        } else {
+            ResourcePath::FunctionFolder {
+                path: op.to[..op.to.len() - 1].to_vec(),
+            }
+        };
+        self.shamir
+            .authorize_access(&self.actor, &parent_path, Action::Create)
+            .await
+            .map_err(err_access)?;
+
+        self.shamir
+            .rename_function_folder_as(&op.rename_function_folder, &op.to, self.actor.clone())
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        Ok(admin_result(mpack!({
+            "renamed_function_folder": @(QueryValue::List(
+                op.rename_function_folder.iter().map(|s| QueryValue::Str(s.clone())).collect(),
+            )),
+            "to": @(QueryValue::List(
+                op.to.iter().map(|s| QueryValue::Str(s.clone())).collect(),
+            )),
+        })))
+    }
 }

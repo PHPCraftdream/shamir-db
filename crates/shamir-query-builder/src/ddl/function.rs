@@ -1,5 +1,6 @@
 use shamir_query_types::admin::{
-    CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionOp,
+    CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionFolderOp,
+    RenameFunctionOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -120,5 +121,16 @@ pub fn rename_function(from: impl Into<String>, to: impl Into<String>) -> BatchO
 pub fn create_function_folder(segments: impl IntoIterator<Item = impl Into<String>>) -> BatchOp {
     BatchOp::CreateFunctionFolder(CreateFunctionFolderOp {
         create_function_folder: segments.into_iter().map(Into::into).collect(),
+    })
+}
+
+/// Rename a function folder (and its descendant subtree) by path segments.
+pub fn rename_function_folder(
+    from: impl IntoIterator<Item = impl Into<String>>,
+    to: impl IntoIterator<Item = impl Into<String>>,
+) -> BatchOp {
+    BatchOp::RenameFunctionFolder(RenameFunctionFolderOp {
+        rename_function_folder: from.into_iter().map(Into::into).collect(),
+        to: to.into_iter().map(Into::into).collect(),
     })
 }

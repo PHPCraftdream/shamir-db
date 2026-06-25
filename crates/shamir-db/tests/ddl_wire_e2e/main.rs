@@ -12,4 +12,5 @@ mod folders_introspection;
 mod idempotency_cascade;
 mod lifecycle;
 mod ownership;
+mod rename_folder;
 mod serde_roundtrip;

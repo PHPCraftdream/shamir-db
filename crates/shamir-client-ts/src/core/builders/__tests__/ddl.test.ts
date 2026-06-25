@@ -392,6 +392,17 @@ describe('createFunctionFolder', () => {
   });
 });
 
+// ── renameFunctionFolder ───────────────────────────────────────────
+
+describe('renameFunctionFolder', () => {
+  it('emits {rename_function_folder: string[], to: string[]}', () => {
+    expect(ddl.renameFunctionFolder(['a', 'b'], ['a', 'c'])).toEqual({
+      rename_function_folder: ['a', 'b'],
+      to: ['a', 'c'],
+    });
+  });
+});
+
 // ── list ops ────────────────────────────────────────────────────────
 
 describe('list ops', () => {

@@ -322,6 +322,11 @@ export interface CreateFunctionFolderOp {
   create_function_folder: string[];
 }
 
+export interface RenameFunctionFolderOp {
+  rename_function_folder: string[];
+  to: string[];
+}
+
 export interface SetRetentionOp {
   set_retention: string;
   repo: string;
@@ -485,6 +490,7 @@ export type DdlOp =
   | UnbindValidatorOp
   | ListValidatorsOp
   | CreateFunctionFolderOp
+  | RenameFunctionFolderOp
   | SetRetentionOp
   | PurgeHistoryOp
   | ChangesSinceOp

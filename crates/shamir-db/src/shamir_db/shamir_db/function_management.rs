@@ -429,6 +429,127 @@ impl ShamirDb {
         Ok(paths)
     }
 
+    /// Rename a function folder subtree by rekeying all records whose path is
+    /// `from` or prefixed by `from + "/"`, preserving each record's
+    /// `ResourceMeta` (owner / group / mode). Does NOT touch stored functions
+    /// (they live in a flat namespace keyed by name, not by folder path).
+    ///
+    /// Guards: `from` must exist; `to` must be free (no record at `to` itself
+    /// nor any descendant of `to`). The migration is collected before any
+    /// mutation, then applied remove-old / save-new, so no partial state is
+    /// left if a write fails mid-way (the destination guard already guarantees
+    /// the target subtree is empty, so writes cannot collide with surviving
+    /// old keys).
+    pub async fn rename_function_folder_as(
+        &self,
+        from: &[String],
+        to: &[String],
+        actor: Actor,
+    ) -> DbResult<()> {
+        self.authorize_access(
+            &actor,
+            &ResourcePath::FunctionFolder {
+                path: from.to_vec(),
+            },
+            Action::Write,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+
+        let from_key = from.join("/");
+        let to_key = to.join("/");
+
+        // Guard: source must exist.
+        if self
+            .system_store
+            .load_function_folder(&from_key)
+            .await?
+            .is_none()
+        {
+            return Err(DbError::NotFound(format!(
+                "function folder '{}' not found",
+                from_key
+            )));
+        }
+        // Guard: destination must be free — no record at `to` itself nor any
+        // descendant (`to` subtree empty).
+        if self
+            .system_store
+            .load_function_folder(&to_key)
+            .await?
+            .is_some()
+        {
+            return Err(DbError::KeyExists(format!(
+                "function folder '{}' already exists",
+                to_key
+            )));
+        }
+        let all = self.system_store.load_function_folders().await?;
+        for rec in &all {
+            if let Some(p) = rec.get("path").and_then(|v| v.as_str()) {
+                if p == to_key || p.starts_with(&format!("{}/", to_key)) {
+                    return Err(DbError::KeyExists(format!(
+                        "function folder '{}' already exists",
+                        p
+                    )));
+                }
+            }
+        }
+
+        // Collect the migrations up-front: (old_key, new_key, new_record, meta).
+        let prefix_with_slash = format!("{}/", from_key);
+        let mut migrations: Vec<(String, String, QueryValue, ResourceMeta)> = Vec::new();
+        for rec in all {
+            let path = match rec.get("path").and_then(|v| v.as_str()) {
+                Some(p) => p.to_string(),
+                None => continue,
+            };
+            let is_self = path == from_key;
+            let is_descendant = path.starts_with(&prefix_with_slash);
+            if !is_self && !is_descendant {
+                continue;
+            }
+            // Compute the new key by replacing the `from_key` prefix.
+            let new_key = if is_self {
+                to_key.clone()
+            } else {
+                // descendant: strip `from_key + "/"`, prepend `to_key + "/"`.
+                format!("{}/{}", to_key, &path[prefix_with_slash.len()..])
+            };
+            let mut new_rec = rec.clone();
+            if let QueryValue::Map(ref mut m) = new_rec {
+                m.insert("path".to_string(), QueryValue::Str(new_key.clone()));
+                // Reconstruct the segments vector for the new key.
+                let new_segments: Vec<QueryValue> = new_key
+                    .split('/')
+                    .map(|s| QueryValue::Str(s.to_string()))
+                    .collect();
+                m.insert("segments".to_string(), QueryValue::List(new_segments));
+            }
+            let meta = ResourceMeta::from_record(&new_rec);
+            migrations.push((path, new_key, new_rec, meta));
+        }
+
+        // Apply: remove old keys first, then save new records with preserved
+        // meta. The destination guard already guaranteed no key collisions.
+        for (old_key, _, _, _) in &migrations {
+            self.system_store.remove_function_folder(old_key).await?;
+        }
+        for (_, new_key, new_rec, meta) in &migrations {
+            self.system_store
+                .save_function_folder(new_key, new_rec, meta)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Thin wrapper around [`rename_function_folder_as`] with `Actor::System`.
+    pub async fn rename_function_folder(&self, from: &[String], to: &[String]) -> DbResult<()> {
+        self.rename_function_folder_as(from, to, Actor::System)
+            .await
+    }
+
     // ========================================================================
     // Function invocation
     // ========================================================================
