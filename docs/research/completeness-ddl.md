@@ -125,8 +125,12 @@ This is the WASM-native equivalent of CHECK + BEFORE INSERT/UPDATE triggers
 - `create_user(name, password, roles?, profile?, database?)` — password is
   hashed to **Argon2id PHC** at rest (`User.password_hash`, `types.rs:148-150`),
   wrapped in `SecretString` (zeroized on drop). The brief said "SCRAM"; the
-  actual scheme is Argon2id — a strictly stronger choice than SCRAM's PBKDF2
-  default, but it is **not** the SCRAM-SHA-256 protocol (no challenge/response).
+  actual at-rest scheme is Argon2id — a strictly stronger KDF than SCRAM's
+  PBKDF2 default. Wire-level authentication **does** use a SCRAM-style
+  challenge/response handshake (client `protocol.ts` / `scram.ts`: 4-message
+  SCRAM-SHA-256 with Argon2id as the SASLprep password-stretching step);
+  Argon2id here replaces PBKDF2 as the salted KDF inside that handshake, it is
+  not the absence of a challenge/response protocol.
 - `drop_user`, `create_role(name, permissions)`, `drop_role`,
   `grant_role(role, user)`, `revoke_role(role, user)`.
 - `Permission { effect: Allow|Deny, actions: Vec<Action>, resource: Resource,

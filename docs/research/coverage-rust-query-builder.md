@@ -271,9 +271,9 @@ Ranked by impact (user-facing frequency × severity):
 
 | Domain | Capabilities Enumerated | ✅ Covered | 🟡 Partial | ❌ Missing |
 |--------|------------------------|------------|------------|------------|
-| **OQL** | 52 | 41 | 4 | 7 |
+| **OQL** | 52 | 38 | 4 | 10 |
 | **DDL** | 60 | 56 | 2 | 0 |
-| **Total** | **112** | **97** | **6** | **7** |
+| **Total** | **112** | **94** | **6** | **10** |
 
 The DDL surface is near-perfectly covered — every `BatchOp` admin variant has a
 dedicated builder. The OQL gaps cluster around expression/value sub-languages
