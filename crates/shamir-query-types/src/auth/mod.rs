@@ -10,5 +10,5 @@ mod tests;
 pub use secret::SecretString;
 pub use types::{
     Action, CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, Effect, GrantRoleOp, Permission,
-    Resource, RevokeRoleOp, Role, User,
+    RenameRoleOp, Resource, RevokeRoleOp, Role, User,
 };

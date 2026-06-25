@@ -327,6 +327,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Rename a role.
+    pub fn rename_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     /// Grant a role to a user.
     pub fn grant_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)

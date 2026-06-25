@@ -1,6 +1,6 @@
 use shamir_query_types::auth::{
-    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, Permission, RevokeRoleOp,
-    SecretString,
+    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, Permission, RenameRoleOp,
+    RevokeRoleOp, SecretString,
 };
 use shamir_query_types::batch::BatchOp;
 use shamir_types::types::value::QueryValue;
@@ -197,5 +197,14 @@ pub fn revoke_role(role: impl Into<String>, user: impl Into<String>) -> BatchOp 
     BatchOp::RevokeRole(RevokeRoleOp {
         revoke_role: role.into(),
         user: user.into(),
+    })
+}
+
+/// Rename a role (`from` → `to`). Re-keys the role record and rewrites
+/// `roles` references in every user that holds the old name.
+pub fn rename_role(from: impl Into<String>, to: impl Into<String>) -> BatchOp {
+    BatchOp::RenameRole(RenameRoleOp {
+        rename_role: from.into(),
+        to: to.into(),
     })
 }

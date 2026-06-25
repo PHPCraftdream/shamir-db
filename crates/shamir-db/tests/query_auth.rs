@@ -363,6 +363,194 @@ async fn test_grant_role_to_nonexistent_user() {
 }
 
 // ============================================================================
+// Rename role
+// ============================================================================
+
+#[tokio::test]
+async fn test_rename_role_rekeys_user_references() {
+    let shamir = setup_shamir().await;
+
+    // Create user + role + grant.
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user(
+        "user",
+        ddl::create_user("alice", "pass").roles(["readonly"]),
+    );
+    b.create_role(
+        "role",
+        ddl::create_role(
+            "viewer",
+            vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        ),
+    );
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.grant_role("grant", ddl::grant_role("viewer", "alice"));
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    // Rename viewer → reader.
+    let mut b = Batch::new();
+    b.id(3);
+    b.rename_role("rn", ddl::rename_role("viewer", "reader"));
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["rn"].records[0].get_value_str("renamed_role"),
+        Some("viewer")
+    );
+    assert_eq!(
+        resp.results["rn"].records[0].get_value_str("to"),
+        Some("reader")
+    );
+
+    // roles_table: new name present, old absent.
+    let mut b = Batch::new();
+    b.id(4);
+    b.list_roles("list", ddl::list_roles());
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
+    let roles = rec["roles"].as_array().unwrap();
+    assert!(roles.iter().any(|r| r["name"] == "reader"));
+    assert!(!roles.iter().any(|r| r["name"] == "viewer"));
+
+    // User: roles list now has "reader", no "viewer".
+    let mut b = Batch::new();
+    b.id(5);
+    b.list_users("list", ddl::list_users());
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
+    let users = rec["users"].as_array().unwrap();
+    let alice = users
+        .iter()
+        .find(|u| u["name"] == "alice")
+        .expect("alice present");
+    let alice_roles = alice["roles"].as_array().unwrap();
+    assert!(alice_roles.iter().any(|r| r == "reader"));
+    assert!(alice_roles.iter().any(|r| r == "readonly"));
+    assert!(!alice_roles.iter().any(|r| r == "viewer"));
+}
+
+#[tokio::test]
+async fn test_rename_role_without_grants() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role("cr", ddl::create_role("orphan", vec![]));
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.rename_role("rn", ddl::rename_role("orphan", "renamed"));
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["rn"].records[0].get_value_str("renamed_role"),
+        Some("orphan")
+    );
+
+    // users untouched (none exist, but the op succeeds).
+    let mut b = Batch::new();
+    b.id(3);
+    b.list_roles("list", ddl::list_roles());
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
+    let roles = rec["roles"].as_array().unwrap();
+    assert!(roles.iter().any(|r| r["name"] == "renamed"));
+    assert!(!roles.iter().any(|r| r["name"] == "orphan"));
+}
+
+#[tokio::test]
+async fn test_rename_role_already_exists() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role("r1", ddl::create_role("alpha", vec![]));
+    b.create_role("r2", ddl::create_role("beta", vec![]));
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.rename_role("rn", ddl::rename_role("alpha", "beta"));
+    let req = b.to_request_via_msgpack();
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(err.code(), Some("already_exists"));
+}
+
+#[tokio::test]
+async fn test_rename_role_not_found() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.rename_role("rn", ddl::rename_role("ghost", "phantom"));
+    let req = b.to_request_via_msgpack();
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(err.code(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn test_rename_role_multiple_users_rekeyed() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user("u1", ddl::create_user("alice", "p").roles(["editor"]));
+    b.create_user("u2", ddl::create_user("bob", "p").roles(["editor"]));
+    b.create_user("u3", ddl::create_user("carol", "p").roles(["other"]));
+    b.create_role("r", ddl::create_role("editor", vec![]));
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.rename_role("rn", ddl::rename_role("editor", "staff"));
+    let req = b.to_request_via_msgpack();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.list_users("list", ddl::list_users());
+    let req = b.to_request_via_msgpack();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["list"].records[0].as_value().into_owned();
+    let users = rec["users"].as_array().unwrap();
+
+    let check = |name: &str, expect_staff: bool| {
+        let u = users
+            .iter()
+            .find(|u| u["name"] == name)
+            .unwrap_or_else(|| panic!("{name} present"));
+        let r = u["roles"].as_array().unwrap();
+        assert_eq!(
+            r.iter().any(|x| x == "staff"),
+            expect_staff,
+            "{name} staff mismatch"
+        );
+        assert!(!r.iter().any(|x| x == "editor"), "{name} still has editor");
+    };
+    check("alice", true);
+    check("bob", true);
+    check("carol", false);
+}
+
+// ============================================================================
 // SessionPermissions — unit tests
 // ============================================================================
 

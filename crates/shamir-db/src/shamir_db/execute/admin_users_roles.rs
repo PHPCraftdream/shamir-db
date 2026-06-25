@@ -1,4 +1,5 @@
-//! Admin handlers: CreateUser, DropUser, CreateRole, DropRole, GrantRole, RevokeRole.
+//! Admin handlers: CreateUser, DropUser, CreateRole, DropRole, RenameRole,
+//! GrantRole, RevokeRole.
 
 use std::sync::Arc;
 
@@ -358,6 +359,228 @@ impl ShamirAdminExecutor {
         Ok(admin_result(mpack!({
             "dropped_role": @(QueryValue::Str(op.drop_role.clone())),
             "existed": @(QueryValue::Bool(result.affected > 0)),
+        })))
+    }
+
+    pub(super) async fn handle_rename_role(
+        &self,
+        op: &crate::query::auth::RenameRoleOp,
+    ) -> Result<QueryResult, BatchError> {
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        let from = op.rename_role.clone();
+        let to = op.to.clone();
+
+        // Renaming to itself is a no-op success (the role already exists
+        // under that name, so there is nothing to re-key).
+        if from == to {
+            return Ok(admin_result(mpack!({
+                "renamed_role": @(QueryValue::Str(from.clone())),
+                "to": @(QueryValue::Str(to.clone())),
+            })));
+        }
+
+        // Role management is global-admin only (Manage on the root).
+        self.shamir
+            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(err_access)?;
+
+        let roles_table = self
+            .shamir
+            .system_store()
+            .roles_table()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let roles_interner = roles_table
+            .interner()
+            .get()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let refs = crate::types::common::new_map();
+        let roles_ctx = crate::query::filter::FilterContext::new(roles_interner, &refs);
+
+        // Guard source-exists: role `from` must be present.
+        let source_lookup =
+            crate::query::read::ReadQuery::new("roles").filter(crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(from.clone()),
+            });
+        let source_result = roles_table
+            .read(&source_lookup, &roles_ctx)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        if source_result.records.is_empty() {
+            return Err(err_code("not_found", format!("Role '{}' not found", from)));
+        }
+
+        // Guard dest-free: role `to` must not already exist.
+        let dest_lookup =
+            crate::query::read::ReadQuery::new("roles").filter(crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(to.clone()),
+            });
+        let dest_result = roles_table
+            .read(&dest_lookup, &roles_ctx)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        if !dest_result.records.is_empty() {
+            return Err(err_code(
+                "already_exists",
+                format!("Role '{}' already exists", to),
+            ));
+        }
+
+        // Re-key the role record: clone the stored value, update `name`
+        // to the new key, write it under `to`, then delete the old `from`
+        // record.
+        let mut role_qv = source_result.records[0].as_value().into_owned();
+        if let QueryValue::Map(ref mut m) = role_qv {
+            m.insert("name".to_string(), QueryValue::Str(to.clone()));
+        }
+        let role_set_op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new("roles"),
+            key: mpack!({"name": @(QueryValue::Str(to.clone()))}),
+            value: role_qv,
+        };
+        self.shamir
+            .system_store()
+            .set_via_implicit_tx(&roles_table, &role_set_op)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        let role_del_op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new("roles"),
+            where_clause: crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(from.clone()),
+            },
+            select: None,
+        };
+        let repo = self
+            .shamir
+            .system_store()
+            .system_repo()
+            .map_err(|e| err(e.to_string()))?;
+        let owned_op = role_del_op.clone();
+        let owned_table = roles_table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move {
+                let interner = owned_table.interner().get().await?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                owned_table
+                    .execute_delete_tx(&owned_op, &ctx, tx, None)
+                    .await
+            })
+        })
+        .await?;
+        roles_table
+            .interner()
+            .persist()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        // Rekey references in users: read every user, and for each whose
+        // `roles` list contains `from`, replace it with `to` and write the
+        // record back. Mirrors the per-user mutation in `handle_grant_role`.
+        let users_table = self
+            .shamir
+            .system_store()
+            .users_table()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let users_interner = users_table
+            .interner()
+            .get()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        let users_refs = crate::types::common::new_map();
+        let users_ctx = crate::query::filter::FilterContext::new(users_interner, &users_refs);
+        let all_users_query = crate::query::read::ReadQuery::new("users");
+        let users_result = users_table
+            .read(&all_users_query, &users_ctx)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        let from_marker = QueryValue::Str(from.clone());
+        let to_marker = QueryValue::Str(to.clone());
+        for rec in &users_result.records {
+            let needs_rekey = rec
+                .get_value_owned("roles")
+                .and_then(|v| {
+                    if let QueryValue::List(l) = v {
+                        Some(l.iter().any(|r| r == &from_marker))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false);
+            if !needs_rekey {
+                continue;
+            }
+
+            let user_name = rec
+                .get_value_owned("name")
+                .and_then(|v| {
+                    if let QueryValue::Str(s) = v {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| err("user record missing 'name'".to_string()))?;
+
+            // Per-user lock as in grant/revoke.
+            let user_lock = self
+                .shamir
+                .admin_user_locks()
+                .entry(user_name.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            let _user_guard = user_lock.lock().await;
+
+            let mut user_qv = rec.as_value().into_owned();
+            if let QueryValue::Map(ref mut m) = user_qv {
+                if let Some(QueryValue::List(ref mut list)) = m.get_mut("roles") {
+                    for entry in list.iter_mut() {
+                        if entry == &from_marker {
+                            *entry = to_marker.clone();
+                        }
+                    }
+                }
+            }
+            let user_set_op = crate::query::write::SetOp {
+                set: crate::query::TableRef::new("users"),
+                key: mpack!({"name": @(QueryValue::Str(user_name.clone()))}),
+                value: user_qv,
+            };
+            self.shamir
+                .system_store()
+                .set_via_implicit_tx(&users_table, &user_set_op)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
+        users_table
+            .interner()
+            .persist()
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        Ok(admin_result(mpack!({
+            "renamed_role": @(QueryValue::Str(from.clone())),
+            "to": @(QueryValue::Str(to.clone())),
         })))
     }
 
