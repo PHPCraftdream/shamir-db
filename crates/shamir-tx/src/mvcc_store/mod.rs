@@ -14,6 +14,7 @@
 //! read the log at `key‖0xFF‖version`; otherwise range-scan the log for the
 //! newest version ≤ snapshot (see [`MvccStore::resolve_read`]).
 
+mod drain;
 pub mod key_lock;
 pub mod mvcc_gc;
 pub mod mvcc_history;
@@ -355,11 +356,11 @@ impl MvccStore {
     }
 
     /// Approximate number of live in-memory record cells (keys with a
-    /// current version). Used by `RENAME TABLE` to refuse up-front when
-    /// the source table carries un-migrated MVCC overlay state: renaming
-    /// a populated table today would orphan its in-memory `cells` map
-    /// (the new table constructs a fresh, empty `MvccStore`). Returns 0
-    /// for a fresh or fully-vacuumed-cold table.
+    /// current version). Formerly used by `RENAME TABLE` to refuse
+    /// populated-table renames; Phase F.2 replaced that guard with
+    /// [`drain_to_history`](Self::drain_to_history) so populated renames
+    /// now work. Retained as a diagnostic / test accessor.
+    #[allow(dead_code)]
     pub fn cell_count(&self) -> usize {
         // O(N) ack: RENAME is a one-shot admin op (off hot-path); a single
         // traversal to count live cells and refuse a populated-table rename

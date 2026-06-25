@@ -3,11 +3,12 @@
 //! Covers the rename contract documented in `docs/prompts/ddl-lifecycle/04-rename.md`:
 //! - rename an empty table: old name stops resolving, new name resolves and
 //!   accepts/serves data, the catalogue reflects the new name only;
+//! - rename a populated table (Phase F.2): the MVCC overlay is force-drained
+//!   into `__history__` before the store copy, so all committed rows travel
+//!   with the renamed table;
 //! - refuse when the destination already exists;
 //! - refuse when the table carries a declarative schema (auto-bound schema
-//!   validator embeds the table path — migrating it is a follow-on);
-//! - refuse when the table is populated (live rows live in the MVCC overlay,
-//!   which does not travel with the store-level copy — follow-on).
+//!   validator embeds the table path — migrating it is a follow-on).
 //!
 //! Tests build batch requests via `shamir_query_builder` and round-trip them
 //! through MessagePack to mirror the real wire path (same harness as
@@ -55,9 +56,7 @@ async fn exec_err(shamir: &ShamirDb, req: BatchRequest) -> BatchError {
 
 /// Rename an empty (just-created) table: the catalogue row, in-memory
 /// config, and reverse-index entry are all migrated. Old name stops
-/// resolving, new name resolves. This is the supported rename surface
-/// today — see `rename_table_refuses_populated` for the populated-table
-/// guard (MVCC overlay migration is a follow-on).
+/// resolving, new name resolves.
 #[tokio::test]
 async fn rename_table_migrates_empty_table() {
     let shamir = setup_shamir().await;
@@ -174,36 +173,87 @@ async fn rename_table_refuses_schema_bearing() {
     }
 }
 
-/// A populated table cannot be renamed yet — its live row versions live
-/// in the MVCC overlay (in-memory `cells`), which does not travel with
-/// the store-level copy. The guard refuses up-front instead of silently
-/// losing data. Lifting this requires migrating the MvccStore overlay
-/// (follow-on).
+/// Rename a **populated** table: the MVCC overlay is force-drained into
+/// `__history__` before the store copy (Phase F.2), so ALL committed rows
+/// travel with the renamed table. After rename:
+/// - the old name no longer resolves;
+/// - the new name resolves with every previously-inserted row;
+/// - indexes on the new table work;
+/// - a new row can be inserted into the renamed table and read back
+///   (the new MvccStore's overlay is live).
 #[tokio::test]
-async fn rename_table_refuses_populated() {
+async fn rename_table_migrates_populated() {
     let shamir = setup_shamir().await;
     create_table(&shamir, "users").await;
 
-    // Insert one row so the MVCC overlay becomes non-empty.
-    let mut b = Batch::new();
-    b.id(1);
-    b.insert("ins", insert("users").row(doc! { "name" => "Alice" }));
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    // Insert 3 rows so the MVCC overlay is non-empty.
+    for name in ["Alice", "Bob", "Carol"] {
+        let mut b = Batch::new();
+        b.id(1);
+        b.insert("ins", insert("users").row(doc! { "name" => name }));
+        let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    }
 
-    // users → people must fail with an MVCC-overlay-related message.
+    // Rename users → people (must succeed — F.2 force-drains the overlay).
     let mut b = Batch::new();
     b.id(2);
     b.rename_table("rn", ddl::rename_table("users", "people").repo("main"));
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    assert_eq!(
+        resp.results["rn"].records[0].get_value_str("renamed_table"),
+        Some("users")
+    );
+
+    // Old name no longer resolves — insert into `users` must fail.
+    let mut b = Batch::new();
+    b.id(3);
+    b.insert("ins", insert("users").row(doc! { "name" => "Ghost" }));
     let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
-    match err {
-        BatchError::QueryError { message, .. } => {
-            assert!(
-                message.to_lowercase().contains("mvcc")
-                    || message.to_lowercase().contains("populated"),
-                "expected MVCC/populated refusal, got: {}",
-                message
-            );
-        }
-        other => panic!("expected QueryError, got {:?}", other),
-    }
+    assert!(
+        matches!(err, BatchError::QueryError { .. }),
+        "expected QueryError for old name, got {:?}",
+        err
+    );
+
+    // New name resolves — query ALL rows back (data migrated via drain).
+    let mut b = Batch::new();
+    b.id(4);
+    b.query("all", Query::from("people"));
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let records = &resp.results["all"].records;
+    assert_eq!(
+        records.len(),
+        3,
+        "renamed table must have all 3 migrated rows"
+    );
+    let names: shamir_collections::TFxSet<_> = records
+        .iter()
+        .filter_map(|r| r.get_value_str("name").map(|s| s.to_string()))
+        .collect();
+    assert!(names.contains("Alice"), "Alice must be in renamed table");
+    assert!(names.contains("Bob"), "Bob must be in renamed table");
+    assert!(names.contains("Carol"), "Carol must be in renamed table");
+
+    // Append a new row into the renamed table — new MvccStore overlay is live.
+    let mut b = Batch::new();
+    b.id(5);
+    b.insert("ins", insert("people").row(doc! { "name" => "Dave" }));
+    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+
+    let mut b = Batch::new();
+    b.id(6);
+    b.query("all2", Query::from("people"));
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let records = &resp.results["all2"].records;
+    assert_eq!(
+        records.len(),
+        4,
+        "renamed table must have 4 rows after append"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|r| r.get_value_str("name") == Some("Dave")),
+        "appended row must be readable"
+    );
 }

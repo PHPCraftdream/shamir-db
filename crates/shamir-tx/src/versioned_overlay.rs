@@ -229,6 +229,32 @@ impl VersionedOverlay {
         out
     }
 
+    /// Return ALL `(key, version, value)` entries with `version <= floor`,
+    /// WITHOUT collapsing per-key to the latest version (unlike
+    /// [`snapshot_le`](Self::snapshot_le)).
+    ///
+    /// Used by the synchronous drain path
+    /// ([`MvccStore::drain_to_history`](super::mvcc_store::MvccStore::drain_to_history))
+    /// which must land EVERY individual `(key, version)` pair into the durable
+    /// history log — not just the per-key winner. Intermediate versions within
+    /// the overlay window carry distinct commit versions, and each version is a
+    /// distinct row in the version timeline.
+    ///
+    /// Entries are yielded in ascending `(key, version)` order (the B+ tree's
+    /// natural sort), which groups all versions of one key contiguously — ideal
+    /// for the drain's per-version grouping. Lock-free iteration.
+    pub fn iter_all_le(&self, floor: u64) -> Vec<(Bytes, u64, Bytes)> {
+        if floor == 0 {
+            return Vec::new();
+        }
+        let guard = scc::ebr::Guard::new();
+        self.tree
+            .iter(&guard)
+            .filter(|((_, v), _)| *v <= floor)
+            .map(|((k, v), val)| (k.clone(), *v, val.clone()))
+            .collect()
+    }
+
     /// Number of entries currently in the overlay.
     #[inline]
     pub fn len(&self) -> usize {

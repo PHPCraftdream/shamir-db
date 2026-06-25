@@ -396,14 +396,19 @@ impl RepoInstance {
             None => return Ok(false),
         };
 
-        // 0. Flush the source table's MVCC overlay into `__history__<from>`
-        //    so the copy picks up every committed row. Without this, rows
-        //    written through the non-tx path that still live in the
-        //    in-memory version log would be missed (L14: data reads/writes
-        //    route through `__history__`, never `__data__`).
+        // 0. Force-drain the source table's MVCC overlay into
+        //    `__history__<from>` so the copy picks up EVERY committed row.
+        //    `drain_to_history` snapshots the overlay up to the visibility
+        //    watermark, writes each version through
+        //    `write_committed_to_history`, advances the durable watermark,
+        //    and reclaims the overlay — synchronously. Without this, rows
+        //    that still live only in the in-memory overlay (not yet drained
+        //    by the background drainer) would be missed by the store copy.
+        //    Idempotent: if the overlay is already drained (all entries are
+        //    in history), this is a no-op.
         let from_token = table_token_for(from);
         if let Some(mvcc) = self.per_table_mvcc.get(&from_token) {
-            mvcc.flush_history().await?;
+            mvcc.drain_to_history().await?;
         }
 
         // 1. Copy physical stores under the new name. `copy_store` is

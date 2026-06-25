@@ -26,13 +26,19 @@ const EXE_NAME = process.platform === 'win32' ? 'shamir-server.exe' : 'shamir-se
 /**
  * Resolve the server binary path.
  *
- * 1. If CARGO_TARGET_DIR is set and the binary exists there, use it.
- * 2. Otherwise fall back to <repo>/target/release/<exe>.
+ * 1. If SHAMIR_SERVER_BIN is set, use it verbatim — an explicit override that
+ *    lets a faster `cargo build` (debug) profile feed the e2e suite without a
+ *    20-minute release build. Highest priority.
+ * 2. If CARGO_TARGET_DIR is set and the release binary exists there, use it.
+ * 3. Otherwise fall back to <repo>/target/release/<exe>.
  *
  * Prefers CARGO_TARGET_DIR when both exist — `target/release` may contain
  * a stale binary that lacks recent server features.
  */
 export function serverBinPath(): string {
+  const explicit = process.env.SHAMIR_SERVER_BIN;
+  if (explicit) return explicit;
+
   const cargoTargetDir = process.env.CARGO_TARGET_DIR;
   if (cargoTargetDir) {
     const candidate = path.join(cargoTargetDir, 'release', EXE_NAME);
