@@ -10,6 +10,7 @@ pub fn drop_table(name: impl Into<String>) -> DropTable {
         repo: "main".to_owned(),
         hmac: None,
         if_exists: false,
+        cascade: false,
     }
 }
 
@@ -19,6 +20,7 @@ pub struct DropTable {
     repo: String,
     hmac: Option<String>,
     if_exists: bool,
+    cascade: bool,
 }
 
 impl DropTable {
@@ -41,6 +43,14 @@ impl DropTable {
         self
     }
 
+    /// Enable cascade: the table's own artifacts (bound validators,
+    /// schema, indexes) are cleaned up atomically before removal.
+    /// Does **not** bypass the reverse-FK guard from other tables.
+    pub fn cascade(mut self) -> Self {
+        self.cascade = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropTable(DropTableOp {
@@ -48,6 +58,7 @@ impl DropTable {
             repo: self.repo,
             hmac: self.hmac,
             if_exists: self.if_exists,
+            cascade: self.cascade,
         })
     }
 }

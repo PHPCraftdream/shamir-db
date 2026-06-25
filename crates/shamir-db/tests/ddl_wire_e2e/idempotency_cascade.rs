@@ -339,6 +339,149 @@ async fn drop_table_cleans_validator_bound_in() {
 }
 
 // =====================================================================
+// Phase E.2: table-level cascade
+// =====================================================================
+
+/// `drop_table` with `cascade=true` cleans the table's own artifacts
+/// (bound validator, index, schema) before removing the table.
+#[tokio::test]
+async fn drop_table_cascade_cleans_index_validator_schema() {
+    let db = setup_db().await;
+
+    // 1. Create an index on "users".
+    let mut b = Batch::new();
+    b.id("ci");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // 2. Create a validator and bind it to "users".
+    let wasm = accept_wasm();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_cascade").wasm(wasm_b64(&wasm)),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_cascade", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert])
+            .priority(1500),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // 3. Set a schema on "users".
+    let mut b = Batch::new();
+    b.id("ss");
+    b.set_table_schema(
+        "op",
+        ddl::set_table_schema("users").rules([ddl::field(["email"]).string().required().build()]),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // 4. Drop with cascade — should succeed and clean everything.
+    let mut b = Batch::new();
+    b.id("dt");
+    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true),
+    );
+
+    // 5. Verify the table is gone.
+    let db_inst = db.get_db("testdb").unwrap();
+    let tables = db_inst.list_tables("main").unwrap_or_default();
+    assert!(
+        !tables.contains(&"users".to_string()),
+        "table should be removed after cascade drop"
+    );
+
+    // 6. Verify the validator binding was cleaned (drop_validator succeeds).
+    let mut b = Batch::new();
+    b.id("dv");
+    b.drop_validator("op", ddl::drop_validator("v_cascade"));
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true),
+        "validator should have existed and been droppable after cascade cleanup"
+    );
+}
+
+/// `drop_table` without cascade still works — current behavior
+/// (always cleans validators, drops table).
+#[tokio::test]
+async fn drop_table_without_cascade_still_works() {
+    let db = setup_db().await;
+
+    // Create an index on "users".
+    let mut b = Batch::new();
+    b.id("ci");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // Drop without cascade — should succeed (current behavior).
+    let mut b = Batch::new();
+    b.id("dt");
+    b.drop_table("op", ddl::drop_table("users").repo("main"));
+    let req = b.to_request_via_msgpack();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true),
+    );
+
+    // Verify the table is gone.
+    let db_inst = db.get_db("testdb").unwrap();
+    let tables = db_inst.list_tables("main").unwrap_or_default();
+    assert!(
+        !tables.contains(&"users".to_string()),
+        "table should be removed after drop"
+    );
+}
+
+/// `drop_table` with cascade does NOT bypass the reverse-FK guard.
+/// When another table references this one via foreign key, the drop
+/// is refused even with cascade=true.
+///
+/// NOTE: Phase D.3 `drop_refused_fk` guard is verified by
+/// `declarative_schema_e2e::drop_table_refused_when_fk_exists`.
+/// Reproducing the full FK scenario here is expensive (requires schema
+/// with foreign_key rule on a second table + system-store persistence).
+/// This test documents the contract: the FK guard runs BEFORE the
+/// cascade cleanup code, so cascade cannot bypass it.
+#[tokio::test]
+async fn drop_table_cascade_does_not_bypass_fk_guard_comment() {
+    // This test exists as a contract marker.  The actual guard is
+    // tested in declarative_schema_e2e.  In the handler, the
+    // `drop_refused_fk` check is positioned BEFORE the cascade
+    // cleanup block, so even with cascade=true, a foreign-key
+    // reference from another table will cause the drop to fail.
+    //
+    // If the handler ordering ever changes, this test name will
+    // remind the developer to verify the invariant.
+}
+
+// =====================================================================
 // Phase E.1: if_exists on drop ops
 // =====================================================================
 

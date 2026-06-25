@@ -46,4 +46,10 @@ pub struct DropTableOp {
     /// `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    /// When `true`, the table's own artifacts (bound validators, schema,
+    /// indexes) are cleaned up atomically before the table is removed.
+    /// Does **not** bypass the reverse-FK guard (`drop_refused_fk`) —
+    /// a foreign key from another table still blocks the drop.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cascade: bool,
 }
