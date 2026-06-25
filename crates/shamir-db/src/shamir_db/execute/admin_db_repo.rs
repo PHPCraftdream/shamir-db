@@ -22,6 +22,8 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         validate_name_component(&op.create_db, "db_name")?;
         if self.shamir.has_db(&op.create_db) {
@@ -37,6 +39,10 @@ impl ShamirAdminExecutor {
                 format!("Database '{}' already exists", op.create_db),
             ));
         }
+        self.shamir
+            .authorize_access(&self.actor, &ResourcePath::Root, Action::Create)
+            .await
+            .map_err(err_access)?;
         self.shamir
             .create_db_as(&op.create_db, self.actor.clone())
             .await;
@@ -128,6 +134,8 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         validate_name_component(&self.db_name, "db_name")?;
         validate_name_component(&op.create_repo, "repo_name")?;
@@ -151,6 +159,17 @@ impl ShamirAdminExecutor {
                 ));
             }
         }
+
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::Database {
+                    db: self.db_name.clone(),
+                },
+                Action::Create,
+            )
+            .await
+            .map_err(err_access)?;
 
         let factory = match op.engine.as_deref() {
             Some("in_memory") => BoxRepoFactory::in_memory(),
