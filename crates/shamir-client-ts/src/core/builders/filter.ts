@@ -16,6 +16,9 @@ import type {
   Filter,
   ComputedFilter,
   ExprOp,
+  FnCall,
+  FilterExprValue,
+  CondValue,
 } from '../types/filter.js';
 
 /** Normalise a field spec (bare string or path array) to the wire form. */
@@ -207,7 +210,7 @@ export function computed(
  * Produces `{ "$param": name }` on the wire — matches the server's
  * `FilterValue::Param` variant.
  */
-export function param(name: string): FilterValue {
+export function param(name: string): { $param: string } {
   return { $param: name };
 }
 
@@ -219,9 +222,12 @@ export function param(name: string): FilterValue {
  * `path` is optional — when provided it extracts a scalar (`'[0].id'`)
  * or a column (`'[].id'`) from the upstream result.
  */
-export function queryRef(alias: string, path?: string): FilterValue {
-  const v: FilterValue = { $query: alias };
-  if (path !== undefined) (v as { $query: string; path?: string }).path = path;
+export function queryRef(
+  alias: string,
+  path?: string,
+): { $query: string; path?: string } {
+  const v: { $query: string; path?: string } = { $query: alias };
+  if (path !== undefined) v.path = path;
   return v;
 }
 
@@ -229,7 +235,7 @@ export function queryRef(alias: string, path?: string): FilterValue {
  * Reference to another field in the same document.
  * A bare string is normalised to a 1-element path array.
  */
-export function ref(field: string | string[]): FilterValue {
+export function ref(field: string | string[]): { $ref: FieldPath } {
   return { $ref: fp(field) };
 }
 
@@ -242,7 +248,7 @@ export function ref(field: string | string[]): FilterValue {
  * variant (`{ "$fn": "NOW" }`), matching `FnCall::Simple` in Rust. Otherwise
  * the Complex variant is emitted (`{ "$fn": { "name": ..., "args": [...] } }`).
  */
-export function fn(name: string, args?: FilterValue[]): FilterValue {
+export function fn(name: string, args?: FilterValue[]): { $fn: FnCall } {
   if (!args || args.length === 0) {
     return { $fn: name };
   }
@@ -254,7 +260,7 @@ export function fn(name: string, args?: FilterValue[]): FilterValue {
  *
  * Mirrors `FilterExpr { op, args }` in `filter_expr.rs`.
  */
-export function expr(op: ExprOp, args: FilterValue[]): FilterValue {
+export function expr(op: ExprOp, args: FilterValue[]): { $expr: FilterExprValue } {
   return { $expr: { op, args } };
 }
 
@@ -263,7 +269,11 @@ export function expr(op: ExprOp, args: FilterValue[]): FilterValue {
  *
  * Mirrors `Cond { if, then, else }` in `cond.rs`.
  */
-export function cond(ifFilter: Filter, then: FilterValue, orElse: FilterValue): FilterValue {
+export function cond(
+  ifFilter: Filter,
+  then: FilterValue,
+  orElse: FilterValue,
+): { $cond: CondValue } {
   return { $cond: { if: ifFilter, then, else: orElse } };
 }
 

@@ -39,6 +39,7 @@ export type { ConnectOptions, ResumeOptions } from './connection.js';
 
 export type {
   WireValue,
+  WriteValue,
   UpdateReturnMode,
   UpdateSelect,
   InsertOp,
