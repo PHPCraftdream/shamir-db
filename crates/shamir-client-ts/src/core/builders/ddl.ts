@@ -52,6 +52,7 @@ import type {
   DropTableOp,
   DropIndexOp,
   RenameTableOp,
+  RenameIndexOp,
   StartMigrationOp,
   CommitMigrationOp,
   RollbackMigrationOp,
@@ -522,6 +523,22 @@ export function renameTable(
   return op;
 }
 
+/** Rename an index on a table (in-place rekey, no data loss). Not HMAC-gated. */
+export function renameIndex(
+  table: string,
+  from: string,
+  to: string,
+  opts?: { repo?: string },
+): RenameIndexOp {
+  const op: RenameIndexOp = {
+    rename_index: from,
+    to,
+    table,
+  };
+  if (opts?.repo !== undefined) op.repo = opts.repo;
+  return op;
+}
+
 /** Drop an index (HMAC-gated). */
 export function dropIndex(
   signer: HmacSigner,
@@ -830,6 +847,7 @@ export const ddl = {
   dropTable,
   dropIndex,
   renameTable,
+  renameIndex,
   startMigration,
   commitMigration,
   rollbackMigration,

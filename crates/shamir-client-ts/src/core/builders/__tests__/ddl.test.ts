@@ -942,3 +942,40 @@ describe('if_exists on drop ops', () => {
     expect(op).not.toHaveProperty('if_exists');
   });
 });
+
+// ── renameTable / renameIndex ──────────────────────────────────────
+
+describe('renameTable', () => {
+  it('emits {rename_table, to}; repo omitted when not set', () => {
+    const op = ddl.renameTable('users', 'people');
+    expect(op).toEqual({
+      rename_table: 'users',
+      to: 'people',
+    });
+    expect(op).not.toHaveProperty('repo');
+  });
+
+  it('includes repo when explicitly set', () => {
+    const op = ddl.renameTable('users', 'people', { repo: 'analytics' });
+    expect(op.repo).toBe('analytics');
+  });
+});
+
+describe('renameIndex', () => {
+  it('emits {rename_index, to, table}; repo omitted when not set', () => {
+    const op = ddl.renameIndex('users', 'idx_email', 'idx_mail');
+    expect(op).toEqual({
+      rename_index: 'idx_email',
+      to: 'idx_mail',
+      table: 'users',
+    });
+    expect(op).not.toHaveProperty('repo');
+  });
+
+  it('includes repo when explicitly set', () => {
+    const op = ddl.renameIndex('users', 'idx_email', 'idx_mail', {
+      repo: 'analytics',
+    });
+    expect(op.repo).toBe('analytics');
+  });
+});

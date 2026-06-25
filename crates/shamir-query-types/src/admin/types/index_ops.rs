@@ -74,6 +74,32 @@ pub struct CreateIndexOp {
     pub if_not_exists: bool,
 }
 
+/// Rename an index on a table (in-place rekey, no data loss).
+///
+/// Wire shape: `{ "rename_index": "old_name", "to": "new_name",
+///               "table": "users", "repo": "main" }`.
+///
+/// Semantics:
+/// - The index posting-list entries are migrated from the old interned-name
+///   prefix to the new one. All index types are handled: regular (hash),
+///   unique, sorted, and index2 (fts / functional / vector). index2 backends
+///   are rebuilt under the new name because their data is opaque to a raw
+///   key-rewrite.
+/// - Refuses when the destination name is already taken by any index on the
+///   same table.
+/// - Refuses when the source index does not exist (unless `if_exists = true`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameIndexOp {
+    /// Old index name.
+    pub rename_index: String,
+    /// New index name.
+    pub to: String,
+    /// Parent table.
+    pub table: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+}
+
 /// Drop an index.
 ///
 /// Requires `hmac` over

@@ -325,6 +325,17 @@ impl SessionPermissions {
                     table: op.table.clone(),
                 },
             ),
+            // RenameIndex — Write on the parent table (mutates the index's
+            // identity). The live executor re-checks Write in
+            // admin_table_index::handle_rename_index.
+            BatchOp::RenameIndex(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.table.clone(),
+                },
+            ),
 
             // Per-table buffer config — read for get, alter/update
             // for set + alter. The table-level Alter action is

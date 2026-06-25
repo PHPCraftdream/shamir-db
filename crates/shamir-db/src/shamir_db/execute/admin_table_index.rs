@@ -494,4 +494,58 @@ impl ShamirAdminExecutor {
             "existed": @(QueryValue::Bool(removed)),
         })))
     }
+
+    pub(super) async fn handle_rename_index(
+        &self,
+        batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let BatchOp::RenameIndex(op) = batch_op else {
+            unreachable!("handle_rename_index called with non-RenameIndex op");
+        };
+
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // Auth: Write on the parent table (rename mutates the index's
+        // identity). Mirrors the index create/drop auth path.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.table.clone()),
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
+        let db = self
+            .shamir
+            .get_db(&self.db_name)
+            .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+        let table = db
+            .get_table(&op.repo, &op.table)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+
+        table
+            .rename_index(&op.rename_index, &op.to)
+            .await
+            .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
+
+        Ok(admin_result(mpack!({
+            "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+            "table": @(QueryValue::Str(op.table.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
+        })))
+    }
 }

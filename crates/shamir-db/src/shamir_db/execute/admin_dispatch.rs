@@ -35,6 +35,7 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::RenameTable(_) => self.handle_rename_table(op).await,
             BatchOp::CreateIndex(op) => self.handle_create_index(op).await,
             BatchOp::DropIndex(op) => self.handle_drop_index(op).await,
+            op @ BatchOp::RenameIndex(_) => self.handle_rename_index(op).await,
 
             // ── Buffer ─────────────────────────────────────────────────
             BatchOp::GetBufferConfig(op) => self.handle_get_buffer_config(op).await,

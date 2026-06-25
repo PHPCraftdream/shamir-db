@@ -716,4 +716,41 @@ impl IndexManager {
     pub fn get_index_definition(&self, name_interned: u64) -> Option<IndexDefinition> {
         self.indexes.get_index(name_interned)
     }
+
+    /// Re-key an in-memory regular-index definition from `old_id` to `new_id`
+    /// and persist the updated metadata.
+    ///
+    /// This is the metadata half of RENAME INDEX — the physical posting
+    /// entries are re-keyed separately by the engine (`rekey_hash_prefix`)
+    /// before this method is called. Here we only swap the in-memory
+    /// `IndexDefinition` and re-save the system blob.
+    pub async fn rename_index_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        let old_def = self.indexes.get_index(old_id).ok_or_else(|| {
+            shamir_storage::error::DbError::Internal(
+                "index definition disappeared mid-rename".to_string(),
+            )
+        })?;
+        self.indexes.remove_index(old_id);
+        let new_def = IndexDefinition::new(new_id, old_def.paths.clone());
+        self.indexes.add_index(new_def);
+        self.save_index_info().await
+    }
+
+    /// Re-key an in-memory unique-index definition from `old_id` to `new_id`
+    /// and persist the updated metadata.
+    ///
+    /// Metadata half of RENAME INDEX for unique indexes — the physical
+    /// posting entries are re-keyed separately by the engine
+    /// (`rekey_hash_prefix` with `is_unique=true`).
+    pub async fn rename_unique_index_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        let old_def = self.indexes_unique.get_index(old_id).ok_or_else(|| {
+            shamir_storage::error::DbError::Internal(
+                "unique index definition disappeared mid-rename".to_string(),
+            )
+        })?;
+        self.indexes_unique.remove_index(old_id);
+        let new_def = IndexDefinition::new(new_id, old_def.paths.clone());
+        self.indexes_unique.add_index(new_def);
+        self.save_index_info_unique().await
+    }
 }
