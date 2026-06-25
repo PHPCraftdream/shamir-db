@@ -371,6 +371,12 @@ export interface DropTableOp {
   cascade?: true;
 }
 
+export interface RenameTableOp {
+  rename_table: string;
+  to: string;
+  repo?: string;
+}
+
 export interface DropIndexOp {
   drop_index: string;
   table: string;
@@ -409,6 +415,7 @@ export type DdlOp =
   | DropRepoOp
   | CreateTableOp
   | DropTableOp
+  | RenameTableOp
   | SetTableSchemaOp
   | AddSchemaRuleOp
   | RemoveSchemaRuleOp

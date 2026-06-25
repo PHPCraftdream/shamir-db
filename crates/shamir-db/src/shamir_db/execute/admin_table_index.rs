@@ -1,7 +1,7 @@
 //! Admin handlers: CreateTable, DropTable, CreateIndex, DropIndex.
 
 use crate::access::{Action, ResourcePath};
-use crate::query::batch::BatchError;
+use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
@@ -237,6 +237,59 @@ impl ShamirAdminExecutor {
         Ok(admin_result(mpack!({
             "dropped_table": @(QueryValue::Str(op.drop_table.clone())),
             "existed": @(QueryValue::Bool(removed)),
+        })))
+    }
+
+    pub(super) async fn handle_rename_table(
+        &self,
+        batch_op: &BatchOp,
+    ) -> Result<QueryResult, BatchError> {
+        let BatchOp::RenameTable(op) = batch_op else {
+            unreachable!("handle_rename_table called with non-RenameTable op");
+        };
+
+        let err = |msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: None,
+        };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
+
+        // Auth: Write on the source table (rename mutates the table's
+        // identity). Mirrors the function/validator rename auth path.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::table(
+                    self.db_name.clone(),
+                    op.repo.clone(),
+                    op.rename_table.clone(),
+                ),
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
+        self.shamir
+            .rename_table_as(
+                &self.db_name,
+                &op.repo,
+                &op.rename_table,
+                &op.to,
+                self.actor.clone(),
+            )
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        Ok(admin_result(mpack!({
+            "renamed_table": @(QueryValue::Str(op.rename_table.clone())),
+            "to": @(QueryValue::Str(op.to.clone())),
+            "repo": @(QueryValue::Str(op.repo.clone())),
         })))
     }
 

@@ -11,7 +11,7 @@ use crate::admin::{
     CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
     DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp,
     InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameValidatorOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameTableOp, RenameValidatorOp,
     RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
     UnbindValidatorOp,
 };
@@ -56,6 +56,7 @@ pub enum BatchOp {
     DropRepo(DropRepoOp),
     CreateTable(CreateTableOp),
     DropTable(DropTableOp),
+    RenameTable(RenameTableOp),
     CreateIndex(CreateIndexOp),
     DropIndex(DropIndexOp),
     SetBufferConfig(SetBufferConfigOp),
@@ -151,6 +152,7 @@ impl Serialize for BatchOp {
             BatchOp::DropRepo(op) => op.serialize(serializer),
             BatchOp::CreateTable(op) => op.serialize(serializer),
             BatchOp::DropTable(op) => op.serialize(serializer),
+            BatchOp::RenameTable(op) => op.serialize(serializer),
             BatchOp::CreateIndex(op) => op.serialize(serializer),
             BatchOp::DropIndex(op) => op.serialize(serializer),
             BatchOp::SetBufferConfig(op) => op.serialize(serializer),
@@ -253,6 +255,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateTableOp, _>(&bytes).map(BatchOp::CreateTable)
         } else if has("drop_table") {
             qv_to::<DropTableOp, _>(&bytes).map(BatchOp::DropTable)
+        } else if has("rename_table") {
+            qv_to::<RenameTableOp, _>(&bytes).map(BatchOp::RenameTable)
         } else if has("create_index") {
             qv_to::<CreateIndexOp, _>(&bytes).map(BatchOp::CreateIndex)
         } else if has("drop_index") {
@@ -380,6 +384,7 @@ impl BatchOp {
                 | BatchOp::DropRepo(_)
                 | BatchOp::CreateTable(_)
                 | BatchOp::DropTable(_)
+                | BatchOp::RenameTable(_)
                 | BatchOp::CreateIndex(_)
                 | BatchOp::DropIndex(_)
                 | BatchOp::SetBufferConfig(_)

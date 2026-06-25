@@ -298,6 +298,17 @@ impl SessionPermissions {
                     table: op.drop_table.clone(),
                 },
             ),
+            // RenameTable — Write on the source table (rename mutates the
+            // table's identity). The live executor re-checks Write in
+            // admin_table_index::handle_rename_table.
+            BatchOp::RenameTable(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.rename_table.clone(),
+                },
+            ),
             BatchOp::CreateIndex(op) => (
                 Action::Create,
                 Resource::Table {

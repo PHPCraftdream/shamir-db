@@ -1,5 +1,7 @@
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::table::{TableConfig, TableManager};
+use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
+use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 
 use super::ShamirDb;
@@ -132,6 +134,207 @@ impl ShamirDb {
 
         // 3. Drop the table itself.
         self.drop_table(db_name, repo_name, table_name).await
+    }
+
+    /// Rename a table. Convenience wrapper around [`rename_table_as`]
+    /// using [`Actor::System`].
+    pub async fn rename_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        from: &str,
+        to: &str,
+    ) -> DbResult<()> {
+        self.rename_table_as(db_name, repo_name, from, to, Actor::System)
+            .await
+    }
+
+    /// Rename a table inside a repository, preserving its data,
+    /// catalogue metadata, and in-memory registration.
+    ///
+    /// Contract:
+    /// - The physical data stores (`__data__`, `__info__`, `__history__`)
+    ///   are **copied** from the old name to the new one (see
+    ///   [`RepoInstance::rename_table_stores`]). The old stores are
+    ///   orphaned — same disposition as `DROP TABLE`, which orphans
+    ///   `__data__` because the catalogue is the source of truth.
+    /// - The catalogue record is re-keyed: the old `(db, repo, from)`
+    ///   row is removed and a new `(db, repo, to)` row is written with
+    ///   the same `enable_indexes` flag and the same `ResourceMeta`
+    ///   (owner/group/mode) as the original.
+    /// - The reverse-index (`token_names`) entry for the old name is
+    ///   cleared and a fresh one for the new name is installed.
+    ///
+    /// Guards (refuse with a typed [`DbError::Validation`] instead of
+    /// leaving dangling references):
+    /// - The source table must exist; the destination must not.
+    /// - The table must not carry a declarative schema — the schema
+    ///   validator is registered under a name that embeds the table
+    ///   name (`__schema__/<db>/<repo>/<table>`), so a rename would
+    ///   orphan it. Rename of schema-bearing tables is a follow-on.
+    /// - The table must not be referenced by a foreign key in any
+    ///   other table in the same repo — `ref_table` is stored by name
+    ///   in the child's persisted schema, so a rename would dangle it.
+    pub async fn rename_table_as(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        from: &str,
+        to: &str,
+        _actor: Actor,
+    ) -> DbResult<()> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+
+        // Existence guards.
+        if !db.has_table(repo_name, from) {
+            return Err(DbError::NotFound(format!(
+                "Table '{}/{}/{}' not found",
+                db_name, repo_name, from
+            )));
+        }
+        if db.has_table(repo_name, to) {
+            return Err(DbError::Validation(format!(
+                "cannot rename '{}/{}' to '{}': destination table already exists",
+                repo_name, from, to
+            )));
+        }
+
+        // Load the persisted catalogue row to (a) guard against schema /
+        // FK references and (b) preserve ResourceMeta across the re-key.
+        let old_record = self
+            .system_store
+            .load_table_record(db_name, repo_name, from)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "table catalogue record for '{}/{}/{}' not found",
+                    db_name, repo_name, from
+                ))
+            })?;
+
+        // Schema guard: a declarative schema registers a validator whose
+        // name embeds the table path. Renaming would orphan it.
+        if old_record.get(SCHEMA_FIELD).is_some()
+            && !matches!(old_record.get(SCHEMA_FIELD), Some(QueryValue::Null))
+        {
+            return Err(DbError::Validation(format!(
+                "cannot rename table '{}': it carries a declarative schema; \
+                 rename of schema-bearing tables is not yet supported",
+                from
+            )));
+        }
+
+        // MVCC-overlay guard: a table that has accepted writes holds its
+        // current row versions in an in-memory `cells` map on its
+        // `MvccStore`. The rename copies the durable `__data__` /
+        // `__info__` / `__history__` stores and registers a fresh
+        // `MvccStore` for the new name — the old overlay does not travel
+        // with it, so populated rows would vanish after the rename.
+        // Refuse up-front instead of silently losing data; a follow-on
+        // that migrates the overlay (or rebinds the existing MvccStore)
+        // can lift this guard.
+        if let Ok(table) = db.get_table(repo_name, from).await {
+            if let Some(mvcc) = table.mvcc_store() {
+                if mvcc.cell_count() > 0 {
+                    return Err(DbError::Validation(format!(
+                        "cannot rename table '{}': it has {} live row(s) in the \
+                         MVCC overlay; rename of populated tables is not yet supported",
+                        from,
+                        mvcc.cell_count()
+                    )));
+                }
+            }
+        }
+
+        // Reverse-FK guard: refuse if another table in this repo
+        // references `from` as `ref_table`. The child's persisted schema
+        // stores the parent name literally, so renaming would dangle it.
+        let table_names = db.list_tables(repo_name).unwrap_or_default();
+        for name in &table_names {
+            if name == from {
+                continue;
+            }
+            let rec = match self
+                .system_store
+                .load_table_record(db_name, repo_name, name)
+                .await
+            {
+                Ok(Some(r)) => r,
+                _ => continue,
+            };
+            let rules = match rec.get(SCHEMA_FIELD) {
+                Some(QueryValue::List(rules)) => rules,
+                _ => continue,
+            };
+            for rule in rules {
+                let refs_from = rule
+                    .get("foreign_key")
+                    .and_then(|fk| fk.get("ref_table"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|rt| rt == from);
+                if refs_from {
+                    return Err(DbError::Validation(format!(
+                        "cannot rename table '{}': still referenced by a foreign key in '{}'",
+                        from, name
+                    )));
+                }
+            }
+        }
+
+        // Preserve ResourceMeta (owner/group/mode) across the re-key.
+        let existing_meta = ResourceMeta::from_record(&old_record);
+        let enable_indexes = old_record
+            .get("enable_indexes")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // 1. Copy physical stores + swap the live registration
+        //    (configs / tables OnceCell / token_names reverse-index).
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let existed = repo.rename_table_stores(from, to).await?;
+        debug_assert!(
+            existed,
+            "rename_table_stores returned false despite has_table guard"
+        );
+
+        // 2. Re-key the catalogue row. Write the new row first so a crash
+        //    between the two leaves the new table resolvable on reboot;
+        //    a stale `(db, repo, from)` row resurrects nothing because
+        //    the live registration under `from` is already gone.
+        if let Err(e) = self
+            .system_store
+            .save_table(db_name, repo_name, to, enable_indexes, &existing_meta)
+            .await
+        {
+            log::warn!(
+                "shamir_db::rename_table: failed to persist new catalogue row \
+                 '{}/{}/{}': {}",
+                db_name,
+                repo_name,
+                to,
+                e
+            );
+        }
+        if let Err(e) = self
+            .system_store
+            .remove_table(db_name, repo_name, from)
+            .await
+        {
+            log::warn!(
+                "shamir_db::rename_table: failed to remove old catalogue row \
+                 '{}/{}/{}': {}",
+                db_name,
+                repo_name,
+                from,
+                e
+            );
+        }
+
+        Ok(())
     }
 
     /// Direct table access shortcut.

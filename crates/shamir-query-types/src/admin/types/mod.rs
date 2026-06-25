@@ -34,7 +34,7 @@ pub use schema_ops::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, ForeignKeyDto, GetTableSchemaOp,
     NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
-pub use table_ops::{CreateTableOp, DropTableOp};
+pub use table_ops::{CreateTableOp, DropTableOp, RenameTableOp};
 pub use validator_ops::{
     BindValidatorOp, CreateValidatorOp, DropValidatorOp, ListValidatorsOp, RenameValidatorOp,
     UnbindValidatorOp,

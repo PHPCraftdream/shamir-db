@@ -354,6 +354,20 @@ impl MvccStore {
         self.history.flush().await
     }
 
+    /// Approximate number of live in-memory record cells (keys with a
+    /// current version). Used by `RENAME TABLE` to refuse up-front when
+    /// the source table carries un-migrated MVCC overlay state: renaming
+    /// a populated table today would orphan its in-memory `cells` map
+    /// (the new table constructs a fresh, empty `MvccStore`). Returns 0
+    /// for a fresh or fully-vacuumed-cold table.
+    pub fn cell_count(&self) -> usize {
+        // O(N) ack: RENAME is a one-shot admin op (off hot-path); a single
+        // traversal to count live cells and refuse a populated-table rename
+        // is acceptable here — no AtomicUsize mirror is warranted for it.
+        #[allow(clippy::disallowed_methods)]
+        self.cells.len()
+    }
+
     /// T4-purge: the store's current wall-clock millis (test-overridable
     /// via [`Self::set_test_now`]). Exposed so the PurgeHistory executor
     /// can resolve `OlderThanAge { age_secs }` against the SAME clock

@@ -377,6 +377,68 @@ impl RepoInstance {
         removed
     }
 
+    /// Rename a table's live registration: copies the three physical
+    /// data stores (`__data__`, `__info__`, `__history__`) from the old
+    /// name to the new one via [`Repo::copy_store`], then swaps the
+    /// in-memory config + reverse-index entry. Returns `false` if the
+    /// source table was not configured.
+    ///
+    /// The OLD physical stores are intentionally orphaned (same
+    /// disposition as `drop_table`, which orphans `__data__` because
+    /// the catalogue is the source of truth). If the caller also needs
+    /// the old stores gone, follow up with `store_delete` per namespace.
+    pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
+        // Snapshot the old config BEFORE mutating `configs` so a missing
+        // table is reported cleanly and a concurrent `remove_table` can
+        // only make us return `false` (no half-applied rename).
+        let old_config = match self.configs.get(from) {
+            Some(c) => c.clone(),
+            None => return Ok(false),
+        };
+
+        // 0. Flush the source table's MVCC overlay into `__history__<from>`
+        //    so the copy picks up every committed row. Without this, rows
+        //    written through the non-tx path that still live in the
+        //    in-memory version log would be missed (L14: data reads/writes
+        //    route through `__history__`, never `__data__`).
+        let from_token = table_token_for(from);
+        if let Some(mvcc) = self.per_table_mvcc.get(&from_token) {
+            mvcc.flush_history().await?;
+        }
+
+        // 1. Copy physical stores under the new name. `copy_store` is
+        //    idempotent on an empty destination (a fresh store).
+        self.repo
+            .copy_store(&format!("__data__{}", from), &format!("__data__{}", to))
+            .await?;
+        self.repo
+            .copy_store(&format!("__info__{}", from), &format!("__info__{}", to))
+            .await?;
+        self.repo
+            .copy_store(
+                &format!("__history__{}", from),
+                &format!("__history__{}", to),
+            )
+            .await?;
+
+        // 2. Drop the old live registration. `remove_table` also clears
+        //    the in-memory `OnceCell<TableManager>` and the old
+        //    `token_names` reverse-index entry.
+        let _ = self.remove_table(from);
+
+        // 3. Register the new table config (preserving `enable_indexes`)
+        //    and install its reverse-index entry. Reuses `add_table` so
+        //    the new `OnceCell` lazily constructs a fresh `TableManager`
+        //    pointing at the just-copied stores on first access.
+        let new_config = TableConfig {
+            name: to.to_string(),
+            enable_indexes: old_config.enable_indexes,
+        };
+        self.add_table(new_config);
+
+        Ok(true)
+    }
+
     /// Returns the repo's transactional info_store under the
     /// `"__tx__"` namespace.
     ///

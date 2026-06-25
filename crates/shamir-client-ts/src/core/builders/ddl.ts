@@ -50,6 +50,7 @@ import type {
   DropRepoOp,
   DropTableOp,
   DropIndexOp,
+  RenameTableOp,
   StartMigrationOp,
   CommitMigrationOp,
   RollbackMigrationOp,
@@ -506,6 +507,20 @@ export function dropTable(
   return op;
 }
 
+/** Rename a table inside a repository. Not HMAC-gated. */
+export function renameTable(
+  from: string,
+  to: string,
+  opts?: { repo?: string },
+): RenameTableOp {
+  const op: RenameTableOp = {
+    rename_table: from,
+    to,
+  };
+  if (opts?.repo !== undefined) op.repo = opts.repo;
+  return op;
+}
+
 /** Drop an index (HMAC-gated). */
 export function dropIndex(
   signer: HmacSigner,
@@ -522,8 +537,7 @@ export function dropIndex(
     table,
     repo,
     hmac: signer.hmacTagHex(canonical),
-  };
-  if (unique) op.unique = true;
+  };  if (unique) op.unique = true;
   if (opts?.if_exists) op.if_exists = true;
   return op;
 }
@@ -802,6 +816,7 @@ export const ddl = {
   dropRepo,
   dropTable,
   dropIndex,
+  renameTable,
   startMigration,
   commitMigration,
   rollbackMigration,
