@@ -137,7 +137,7 @@ impl ShamirDb {
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
         self.system_store
-            .save_validator(name, &record, &ResourceMeta::owned_by(actor))
+            .save_validator(name, &record, &ResourceMeta::owned_enforced(actor))
             .await?;
 
         if replace {
@@ -293,7 +293,7 @@ impl ShamirDb {
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
         self.system_store
-            .save_validator(name, &record, &ResourceMeta::owned_by(actor))
+            .save_validator(name, &record, &ResourceMeta::owned_enforced(actor))
             .await?;
 
         if replace {

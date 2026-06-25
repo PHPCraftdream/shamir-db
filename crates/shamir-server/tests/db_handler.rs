@@ -68,6 +68,27 @@ async fn make_db_with_table(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> 
     shamir.create_db(db).await;
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
+    // G.4c: new objects default to enforced (0o700, System). These tests run
+    // DML as a non-superuser user session (Actor::User), so open the db +
+    // repo + table so the user can traverse and read/write. The tests are
+    // not about access control — they exercise wire semantics, limits,
+    // pagination, etc.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::database(db), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::store(db, repo), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::table(db, repo, table),
+            &open,
+        )
+        .await
+        .unwrap();
     Arc::new(shamir)
 }
 

@@ -61,6 +61,20 @@ async fn owner_can_read_write_mode_700() {
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
 
+    // G.4c: create defaults are now enforced (0o700, owner=System). For this
+    // test the SUBJECT is the table's owner-only mode; the db/store ancestors
+    // must be open so traversal-Execute passes and the target mode is the
+    // sole gate. Open the ancestors explicitly.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "data"), &open)
+        .await
+        .unwrap();
+
     let meta = ResourceMeta {
         owner: Actor::User(10),
         group: None,
@@ -115,6 +129,18 @@ async fn group_member_authorized_via_group_bits() {
     let gid = shamir.create_group("devs").await.unwrap();
     shamir.add_group_member(gid, 20).await.unwrap();
 
+    // G.4c: open the db/store ancestors so traversal-Execute passes; the
+    // table's group bits are the SUBJECT of this test.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "data"), &open)
+        .await
+        .unwrap();
+
     let meta = ResourceMeta {
         owner: Actor::User(10),
         group: Some(gid),
@@ -158,6 +184,18 @@ async fn traversal_denied_without_execute_on_ancestor() {
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
 
+    // G.4c: the store ancestor now defaults to enforced (0o700, System-owned),
+    // which would ALSO deny traversal. To isolate the DATABASE as the denied
+    // ancestor (the test's SUBJECT), open the store so the db is the first
+    // ancestor that denies Execute to User(99).
+    shamir
+        .set_resource_meta(
+            &ResourcePath::store("testdb", "data"),
+            &ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+
     // Database: owner=User(10), mode=0o700 (no execute for others).
     let db_meta = ResourceMeta {
         owner: Actor::User(10),
@@ -191,7 +229,20 @@ async fn traversal_allows_when_ancestors_grant_execute() {
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
 
-    // Database: open (others have execute).
+    // Database + store: open (others have execute) so traversal passes.
+    // G.4c: create defaults are now enforced (0o700), so we must open the
+    // ancestors explicitly to exercise the "traversal passes, target denies"
+    // path that this test verifies.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "data"), &open)
+        .await
+        .unwrap();
+
     // Table: mode=0o700 (owner-only).
     let table_meta = ResourceMeta {
         owner: Actor::User(10),
@@ -203,7 +254,7 @@ async fn traversal_allows_when_ancestors_grant_execute() {
         .await
         .unwrap();
 
-    // Traversal of ancestors passes (open defaults), but target is denied.
+    // Traversal of ancestors passes (opened above), but target is denied.
     let err = shamir
         .authorize_access(
             &Actor::User(99),
@@ -228,21 +279,38 @@ async fn open_default_allows_any_user() {
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
 
-    // All resources have open defaults (0o777, System owner).
+    // G.4c: create defaults are now enforced (owner-rwx 0o700), so a stranger
+    // is DENIED by default. Verify both paths:
+    //   (1) enforced default denies a non-owner;
+    //   (2) after an explicit chmod to OPEN (0o777), everyone is allowed.
+    let stranger = Actor::User(99);
+    let table_path = ResourcePath::table("testdb", "data", "users");
+
+    // (1) Enforced default: stranger denied (traversal fails on System-owned
+    //     0o700 ancestors before even reaching the table).
     assert!(shamir
-        .authorize_access(
-            &Actor::User(99),
-            &ResourcePath::table("testdb", "data", "users"),
-            Action::Read,
-        )
+        .authorize_access(&stranger, &table_path, Action::Read)
+        .await
+        .is_err());
+
+    // (2) Explicit chmod to OPEN on db, store, and table: now everyone can.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "data"), &open)
+        .await
+        .unwrap();
+    shamir.set_resource_meta(&table_path, &open).await.unwrap();
+
+    assert!(shamir
+        .authorize_access(&stranger, &table_path, Action::Read)
         .await
         .is_ok());
     assert!(shamir
-        .authorize_access(
-            &Actor::User(99),
-            &ResourcePath::table("testdb", "data", "users"),
-            Action::Write,
-        )
+        .authorize_access(&stranger, &table_path, Action::Write)
         .await
         .is_ok());
 }
@@ -298,6 +366,18 @@ async fn record_enforcement_inherits_table_meta() {
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("testdb", config).await.unwrap();
+
+    // G.4c: open the db/store ancestors so traversal-Execute passes; the
+    // table's owner-only mode (inherited by records) is the SUBJECT.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "data"), &open)
+        .await
+        .unwrap();
 
     let table_meta = ResourceMeta {
         owner: Actor::User(10),

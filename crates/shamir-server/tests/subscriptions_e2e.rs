@@ -79,6 +79,26 @@ async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     shamir.create_db(db).await;
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
+    // G.4c: new objects default to enforced (0o700, System). These tests run
+    // subscribe/insert ops as a non-superuser user session (Actor::User), so
+    // open the db + repo + table so the user can traverse and read/write.
+    // The tests are about subscription semantics, not access control.
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::database(db), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::store(db, repo), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::table(db, repo, table),
+            &open,
+        )
+        .await
+        .unwrap();
     Arc::new(shamir)
 }
 
@@ -97,6 +117,41 @@ async fn make_db_two_repos(
     let cfg_b =
         RepoConfig::new(repo_b, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table_b));
     shamir.add_repo(db, cfg_b).await.expect("add repo b");
+    // G.4c: open the db + both repos + both tables so the non-superuser user
+    // session can traverse them (these tests are about subscription semantics).
+    let open = shamir_types::access::ResourceMeta::open();
+    shamir
+        .set_resource_meta(&shamir_types::access::ResourcePath::database(db), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::store(db, repo_a),
+            &open,
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::store(db, repo_b),
+            &open,
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::table(db, repo_a, table_a),
+            &open,
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &shamir_types::access::ResourcePath::table(db, repo_b, table_b),
+            &open,
+        )
+        .await
+        .unwrap();
     Arc::new(shamir)
 }
 

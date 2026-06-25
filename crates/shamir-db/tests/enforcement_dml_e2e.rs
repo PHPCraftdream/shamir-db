@@ -1,15 +1,3 @@
-//! End-to-end tests for DML (data) enforcement at the facade level.
-//!
-//! Proves that `execute_as(Actor::User, ...)` respects table-level POSIX
-//! mode for Read / Insert / Update / Set / Delete operations.
-//!
-//! Default mode is 0o777 (open) — so existing behaviour is unchanged.
-//! Enforcement activates when `chmod` restricts a resource.
-//!
-//! **Query construction** uses the `shamir-query-builder` crate (Batch +
-//! q!/doc! macros) and round-trips through msgpack to exercise the wire
-//! encoding path.
-
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
@@ -24,12 +12,26 @@ use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 // ---------------------------------------------------------------------------
 
 /// Helper: create an in-memory ShamirDb with `testdb` / `main` / `items`.
+///
+/// G.4c: new objects default to enforced (0o700, System). These tests
+/// exercise table-level DML enforcement, so the db + store ancestors are
+/// opened here to keep traversal-Execute from masking the table-level
+/// behaviour under test.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
     let config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("testdb", config).await.unwrap();
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
     shamir
 }
 
@@ -49,7 +51,7 @@ async fn seed_record(shamir: &ShamirDb) {
 }
 
 // ============================================================================
-// Default 0o777: any user can read, insert, delete — nothing is broken
+// Default mode: enforced (0o700) denies strangers; explicit open allows all
 // ============================================================================
 
 #[tokio::test]
@@ -57,16 +59,37 @@ async fn default_mode_allows_all_users() {
     let shamir = setup().await;
     seed_record(&shamir).await;
 
-    // Read
+    // G.4c: the table was created with enforced default (owner=System,
+    // 0o700). A stranger is now DENIED by default (the create-default path).
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
     let read_req = b.to_request_via_msgpack();
 
+    let denied = shamir
+        .execute_as(Actor::User(99), "testdb", &read_req)
+        .await;
+    assert!(
+        denied.is_err(),
+        "enforced default (0o700) should deny a non-owner stranger"
+    );
+
+    // Explicit chmod to OPEN (0o777) — the open path still allows everyone.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::table("testdb", "main", "items"),
+            &ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+
     let resp = shamir
         .execute_as(Actor::User(99), "testdb", &read_req)
         .await;
-    assert!(resp.is_ok(), "default 0o777 should allow any user to read");
+    assert!(
+        resp.is_ok(),
+        "after explicit chmod 0o777, any user should be able to read"
+    );
 
     // Insert
     let mut b = Batch::new();
@@ -83,7 +106,7 @@ async fn default_mode_allows_all_users() {
     let resp = shamir.execute_as(Actor::User(99), "testdb", &ins_req).await;
     assert!(
         resp.is_ok(),
-        "default 0o777 should allow any user to insert"
+        "after explicit chmod 0o777, any user should be able to insert"
     );
 }
 

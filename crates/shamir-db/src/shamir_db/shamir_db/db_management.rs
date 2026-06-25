@@ -36,7 +36,7 @@ impl ShamirDb {
             let record = shamir_types::types::value::QueryValue::Map(m);
             if let Err(e) = self
                 .system_store
-                .save_database(name, &record, &ResourceMeta::owned_by(actor))
+                .save_database(name, &record, &ResourceMeta::owned_enforced(actor))
                 .await
             {
                 log::warn!("shamir_db::create_db: failed to persist '{}': {}", name, e);
@@ -115,7 +115,7 @@ impl ShamirDb {
             }
         }
 
-        let meta = ResourceMeta::owned_by(actor.clone());
+        let meta = ResourceMeta::owned_enforced(actor.clone());
 
         // Persist to system store
         if let Err(e) = self

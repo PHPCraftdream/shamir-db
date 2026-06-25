@@ -38,6 +38,17 @@ async fn execute_as_user_denied_on_restricted_database() {
     let shamir = setup().await;
 
     // Lock the database to owner=User(1), mode=0o700 (owner-only).
+    // G.4c: the store + table default to enforced (0o700, System). Open them
+    // so the database mode is the sole gate — this is the SUBJECT of the test.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::table("testdb", "main", "items"), &open)
+        .await
+        .unwrap();
     let meta = ResourceMeta {
         owner: Actor::User(1),
         group: None,

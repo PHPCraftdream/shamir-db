@@ -5,25 +5,31 @@ use crate::shamir_db::SystemStoreConfig;
 use shamir_types::access::{Actor, Mode, PermClass, ResourceMeta, ResourcePath};
 
 // ============================================================================
-// Catalogue round-trip: resource_meta returns open defaults on create
+// Catalogue round-trip: resource_meta returns enforced defaults on create
+//
+// G.4c (Strategy A): new mode-bearing objects are owner-rwx (0o700), private
+// to their creator. Legacy records without a `mode` field still load as OPEN
+// via `from_record` — see `root_meta_defaults_to_open` / `unknown_database_*`
+// below for the OPEN-default path (Root is synthetic and never persisted).
 // ============================================================================
 
 #[tokio::test]
-async fn database_resource_meta_defaults_to_open() {
+async fn database_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
     let meta = shamir
         .resource_meta(&ResourcePath::database("testdb"))
         .await;
-    let open = ResourceMeta::open();
-    assert_eq!(meta.owner, open.owner);
-    assert_eq!(meta.group, open.group);
-    assert_eq!(meta.mode, open.mode);
+    // create_db defaults to Actor::System; enforced default is owner-rwx 0o700.
+    let enforced = ResourceMeta::owned_enforced(Actor::System);
+    assert_eq!(meta.owner, enforced.owner);
+    assert_eq!(meta.group, enforced.group);
+    assert_eq!(meta.mode, enforced.mode);
 }
 
 #[tokio::test]
-async fn store_resource_meta_defaults_to_open() {
+async fn store_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
     let config = RepoConfig::new("data", BoxRepoFactory::in_memory());
@@ -32,14 +38,15 @@ async fn store_resource_meta_defaults_to_open() {
     let meta = shamir
         .resource_meta(&ResourcePath::store("testdb", "data"))
         .await;
-    let open = ResourceMeta::open();
-    assert_eq!(meta.owner, open.owner);
-    assert_eq!(meta.group, open.group);
-    assert_eq!(meta.mode, open.mode);
+    // add_repo defaults to Actor::System; enforced default is owner-rwx 0o700.
+    let enforced = ResourceMeta::owned_enforced(Actor::System);
+    assert_eq!(meta.owner, enforced.owner);
+    assert_eq!(meta.group, enforced.group);
+    assert_eq!(meta.mode, enforced.mode);
 }
 
 #[tokio::test]
-async fn table_resource_meta_defaults_to_open() {
+async fn table_resource_meta_defaults_to_enforced() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
     let config =
@@ -49,10 +56,12 @@ async fn table_resource_meta_defaults_to_open() {
     let meta = shamir
         .resource_meta(&ResourcePath::table("testdb", "data", "users"))
         .await;
-    let open = ResourceMeta::open();
-    assert_eq!(meta.owner, open.owner);
-    assert_eq!(meta.group, open.group);
-    assert_eq!(meta.mode, open.mode);
+    // add_repo defaults to Actor::System; inline tables inherit the enforced
+    // owner-rwx 0o700 default (Strategy A).
+    let enforced = ResourceMeta::owned_enforced(Actor::System);
+    assert_eq!(meta.owner, enforced.owner);
+    assert_eq!(meta.group, enforced.group);
+    assert_eq!(meta.mode, enforced.mode);
 }
 
 // ============================================================================

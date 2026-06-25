@@ -303,6 +303,36 @@ fn chmod_batch(db: &str, store: &str, table: &str, mode: u16) -> DbRequest {
     }
 }
 
+/// Build a batch with a single chmod op on a database (top-level container).
+fn chmod_db_batch(db: &str, mode: u16) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("chmod_db");
+    b.chmod(
+        "cm",
+        shamir_query_builder::ddl::chmod(shamir_query_builder::ddl::res::database(db), mode),
+    );
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: db.into(),
+        batch: b.build(),
+    }
+}
+
+/// Build a batch with a single chmod op on a store/repo.
+fn chmod_store_batch(db: &str, store: &str, mode: u16) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("chmod_store");
+    b.chmod(
+        "cm",
+        shamir_query_builder::ddl::chmod(shamir_query_builder::ddl::res::store(db, store), mode),
+    );
+    DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: db.into(),
+        batch: b.build(),
+    }
+}
+
 /// Build a batch with a single chgrp op on a table.
 fn chgrp_batch(db: &str, store: &str, table: &str, group: u64) -> DbRequest {
     let mut b = shamir_query_builder::batch::Batch::new();
@@ -600,6 +630,37 @@ async fn permission_group_grant() {
         resp
     );
 
+    // G.4c: new objects default to enforced (0o700, owner=System since admin
+    // is superuser). The group-grant test must let a group member traverse the
+    // db + repo ancestors to reach the table (whose group bits are the SUBJECT
+    // of this test). Open the db + repo so Execute is granted to everyone.
+    let resp = roundtrip(
+        &chmod_db_batch(db_name, 0o755),
+        admin_sid,
+        &mut admin_rid,
+        &mut admin_w,
+        &mut admin_r,
+    )
+    .await;
+    assert!(
+        matches!(resp, DbResponse::Batch { .. }),
+        "chmod_db: {:?}",
+        resp
+    );
+    let resp = roundtrip(
+        &chmod_store_batch(db_name, "main", 0o755),
+        admin_sid,
+        &mut admin_rid,
+        &mut admin_w,
+        &mut admin_r,
+    )
+    .await;
+    assert!(
+        matches!(resp, DbResponse::Batch { .. }),
+        "chmod_store: {:?}",
+        resp
+    );
+
     // Create two non-admin users: bob (member) and carol (non-member)
     let bob_pw = b"bob-password".to_vec();
     let carol_pw = b"carol-password".to_vec();
@@ -745,7 +806,14 @@ async fn permission_group_grant() {
     handle.shutdown().await;
 }
 
-/// Scenario 3: open default (0o777) — any authenticated user is ALLOWED.
+/// Scenario 3: enforced default denies a stranger; explicit OPEN (0o777)
+/// allows any authenticated user.
+///
+/// G.4c (Strategy A): new objects default to enforced owner-rwx (0o700), so a
+/// non-owner stranger is now DENIED by default. This test proves BOTH paths:
+///   (1) the enforced default denies a stranger (no chmod);
+///   (2) after an explicit chmod to OPEN (0o777) on db + repo + table, any
+///       authenticated user is ALLOWED (the open-mode path is unchanged).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn permission_open_default_allows_any_user() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -784,7 +852,7 @@ async fn permission_open_default_allows_any_user() {
         resp
     );
 
-    // NO chmod — table stays at default 0o777 (open)
+    // No chmod on the table yet — G.4c: create defaults are enforced (0o700).
     let resp = roundtrip(
         &create_repo_table_req(db_name, table_name),
         admin_sid,
@@ -819,7 +887,7 @@ async fn permission_open_default_allows_any_user() {
         resp
     );
 
-    // --- Dave reads from public table → ALLOWED (open default) ---
+    // --- Dave reads from public table → DENIED (enforced default 0o700) ---
     let (dave_sid, mut dave_r, mut dave_w, mut dave_rid) =
         scram_login(server_addr, "dave", &dave_pw).await;
 
@@ -831,9 +899,43 @@ async fn permission_open_default_allows_any_user() {
         &mut dave_r,
     )
     .await;
+    match resp {
+        DbResponse::Error { code, .. } => assert_eq!(
+            code, "access_denied",
+            "enforced default (0o700) should deny a non-owner stranger"
+        ),
+        other => panic!(
+            "expected access_denied under enforced default, got {:?}",
+            other
+        ),
+    }
+
+    // --- Admin chmod db + repo + table to OPEN (0o777) ---
+    for req in [
+        chmod_db_batch(db_name, 0o777),
+        chmod_store_batch(db_name, "main", 0o777),
+        chmod_batch(db_name, "main", table_name, 0o777),
+    ] {
+        let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
+        assert!(
+            matches!(resp, DbResponse::Batch { .. }),
+            "chmod open: {:?}",
+            resp
+        );
+    }
+
+    // --- Dave reads again → ALLOWED (explicit OPEN path is unchanged) ---
+    let resp = roundtrip(
+        &read_req(db_name, table_name),
+        dave_sid,
+        &mut dave_rid,
+        &mut dave_w,
+        &mut dave_r,
+    )
+    .await;
     assert!(
         matches!(resp, DbResponse::Batch { .. }),
-        "dave should be allowed on open-default table: {:?}",
+        "dave should be allowed after explicit chmod 0o777: {:?}",
         resp
     );
 

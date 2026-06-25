@@ -80,6 +80,15 @@ async fn create_function_folder_meta_owner_is_actor() {
     shamir.create_db("testdb").await;
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
+    // G.4c: open the db so the user actor can traverse it to reach the
+    // function-namespace Create path.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::database("testdb"),
+            &shamir_types::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
 
     let user_actor = Actor::User(55);
 
@@ -103,7 +112,8 @@ async fn create_function_folder_meta_owner_is_actor() {
         Actor::User(55),
         "folder owner should be the creating user actor"
     );
-    assert_eq!(meta.mode, 0o777, "mode must stay open");
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700, "mode must be enforced (0o700)");
 }
 
 #[tokio::test]
@@ -129,7 +139,8 @@ async fn function_folder_meta_survives_reopen() {
         })
         .await;
     assert_eq!(meta.owner, Actor::System);
-    assert_eq!(meta.mode, 0o777);
+    // G.4c: new objects default to enforced owner-rwx (0o700).
+    assert_eq!(meta.mode, 0o700);
 }
 
 // =====================================================================

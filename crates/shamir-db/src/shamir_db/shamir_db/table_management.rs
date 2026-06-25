@@ -60,7 +60,7 @@ impl ShamirDb {
                 repo_name,
                 table_name,
                 enable_indexes,
-                &ResourceMeta::owned_by(actor),
+                &ResourceMeta::owned_enforced(actor),
             )
             .await
         {

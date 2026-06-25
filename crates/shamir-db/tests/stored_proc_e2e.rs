@@ -297,6 +297,10 @@ async fn call_returns_null() {
 
 /// Setup: db "testdb", repo "main", table "secrets" with two rows, locked
 /// to owner User(A) with mode 0o750.
+///
+/// G.4c: new objects default to enforced (0o700, System). These tests
+/// exercise setuid-driven table reads, so the db + store ancestors are opened
+/// here so traversal-Execute does not mask the table-level setuid behaviour.
 async fn setup_with_secrets() -> ShamirDb {
     let shamir = setup_shamir().await;
 
@@ -310,6 +314,17 @@ async fn setup_with_secrets() -> ShamirDb {
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Open db + store ancestors so non-System actors can traverse them.
+    let open = ResourceMeta::open();
+    shamir
+        .set_resource_meta(&ResourcePath::database("testdb"), &open)
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(&ResourcePath::store("testdb", "main"), &open)
         .await
         .unwrap();
 
