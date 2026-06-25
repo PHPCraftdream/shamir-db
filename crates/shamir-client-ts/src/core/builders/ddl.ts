@@ -493,7 +493,7 @@ export function dropTable(
   dbInUse: string,
   repo: string,
   table: string,
-  opts?: { if_exists?: boolean },
+  opts?: { if_exists?: boolean; cascade?: boolean },
 ): DropTableOp {
   const canonical = canonicalDropTable(dbInUse, repo, table);
   const op: DropTableOp = {
@@ -502,6 +502,7 @@ export function dropTable(
     hmac: signer.hmacTagHex(canonical),
   };
   if (opts?.if_exists) op.if_exists = true;
+  if (opts?.cascade) op.cascade = true;
   return op;
 }
 

@@ -796,6 +796,16 @@ describe('if_exists on drop ops', () => {
     expect(op).not.toHaveProperty('if_exists');
   });
 
+  it('dropTable emits cascade when true', () => {
+    const op = ddl.dropTable(fakeSigner, 'mydb', 'main', 'users', { cascade: true });
+    expect(op.cascade).toBe(true);
+  });
+
+  it('dropTable omits cascade when not set', () => {
+    const op = ddl.dropTable(fakeSigner, 'mydb', 'main', 'users');
+    expect(op).not.toHaveProperty('cascade');
+  });
+
   it('dropIndex emits if_exists when true', () => {
     const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx', { if_exists: true });
     expect(op.if_exists).toBe(true);

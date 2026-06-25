@@ -181,6 +181,54 @@ impl ShamirAdminExecutor {
             }
         }
 
+        // cascade: explicitly drop the table's own indexes (regular,
+        // unique, sorted, index2) before removing validators and the
+        // table itself.  Without cascade, indexes are orphaned in
+        // storage (harmless — the catalogue entry is gone so they
+        // will never be loaded again).
+        if op.cascade {
+            if let Some(db) = self.shamir.get_db(&self.db_name) {
+                if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
+                    // Legacy regular indexes.
+                    let regular_ids: Vec<u64> = table
+                        .index_manager_ref()
+                        .iter_indexes()
+                        .map(|d| d.name_interned)
+                        .collect();
+                    for id in regular_ids {
+                        let _ = table.index_manager_ref().drop_index(id).await;
+                    }
+                    // Legacy unique indexes.
+                    let unique_ids: Vec<u64> = table
+                        .index_manager_ref()
+                        .iter_unique_indexes()
+                        .map(|d| d.name_interned)
+                        .collect();
+                    for id in unique_ids {
+                        let _ = table.index_manager_ref().drop_unique_index(id).await;
+                    }
+                    // Sorted indexes.
+                    let sorted_ids: Vec<u64> = table
+                        .sorted_indexes()
+                        .iter_indexes()
+                        .iter()
+                        .map(|d| d.name_interned)
+                        .collect();
+                    for id in sorted_ids {
+                        let _ = table.sorted_indexes().drop_index(id).await;
+                    }
+                    // index2 registry — remove all backends.
+                    let backends = table.index2_registry().all_backends().await;
+                    for b in &backends {
+                        let _ = table
+                            .index2_registry()
+                            .remove_by_id(b.descriptor().id)
+                            .await;
+                    }
+                }
+            }
+        }
+
         let removed = self
             .shamir
             .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)

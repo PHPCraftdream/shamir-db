@@ -368,6 +368,7 @@ export interface DropTableOp {
   repo: string;
   hmac: string;
   if_exists?: boolean;
+  cascade?: true;
 }
 
 export interface DropIndexOp {
