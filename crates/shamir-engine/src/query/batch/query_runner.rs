@@ -194,6 +194,7 @@ impl<'a> QueryRunner<'a> {
                 stats: None,
                 pagination: None,
                 value,
+                explain: None,
             });
         }
 
@@ -268,6 +269,7 @@ impl<'a> QueryRunner<'a> {
                 stats: None,
                 pagination: None,
                 value: Some(QueryValue::Map(grant_map)),
+                explain: None,
             });
         }
 
@@ -281,6 +283,7 @@ impl<'a> QueryRunner<'a> {
                 stats: None,
                 pagination: None,
                 value: Some(QueryValue::Map(grant_map)),
+                explain: None,
             });
         }
 
@@ -822,6 +825,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
         }),
         pagination: None,
         value: None,
+        explain: None,
     }
 }
 

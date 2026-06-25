@@ -17,7 +17,7 @@ pub use group_by::GroupBy;
 pub use limit::{Pagination, PaginationInfo};
 pub use order_by::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 pub use query_record::QueryRecord;
-pub use query_result::{QueryResult, QueryStats};
+pub use query_result::{ExplainPlan, PlanType, QueryResult, QueryStats};
 pub use read_query::ReadQuery;
 pub use select::{Select, SelectItem};
 pub use select_expr::{SelectExpr, SelectExprValue};

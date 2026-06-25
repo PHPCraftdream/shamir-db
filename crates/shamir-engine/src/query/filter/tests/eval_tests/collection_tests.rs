@@ -96,6 +96,7 @@ fn test_in_query_ref_column() {
             stats: None,
             pagination: None,
             value: None,
+            explain: None,
         },
     );
 
@@ -133,6 +134,7 @@ fn test_in_query_ref_column_no_match() {
             stats: None,
             pagination: None,
             value: None,
+            explain: None,
         },
     );
 
@@ -169,6 +171,7 @@ fn test_not_in_query_ref_column() {
             stats: None,
             pagination: None,
             value: None,
+            explain: None,
         },
     );
 

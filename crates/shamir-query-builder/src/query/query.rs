@@ -28,6 +28,7 @@ pub struct Query {
     count_total: bool,
     temporal: Temporal,
     with_version: bool,
+    explain: bool,
 }
 
 impl Query {
@@ -44,6 +45,7 @@ impl Query {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         }
     }
 
@@ -60,6 +62,7 @@ impl Query {
             count_total: false,
             temporal: Temporal::Latest,
             with_version: false,
+            explain: false,
         }
     }
 
@@ -283,6 +286,13 @@ impl Query {
         self
     }
 
+    /// EXPLAIN / dry-run: run only the planner and return a plan preview
+    /// without materialising any rows.
+    pub fn explain(mut self) -> Self {
+        self.explain = true;
+        self
+    }
+
     // ── terminal ────────────────────────────────────────────────
 
     /// Consume the builder and produce the wire-ready [`ReadQuery`].
@@ -314,6 +324,7 @@ impl Query {
             count_total: self.count_total,
             temporal: self.temporal,
             with_version: self.with_version,
+            explain: self.explain,
         }
     }
 }

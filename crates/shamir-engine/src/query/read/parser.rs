@@ -73,6 +73,7 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         count_total,
         temporal: Temporal::Latest,
         with_version: false,
+        explain: false,
     })
 }
 

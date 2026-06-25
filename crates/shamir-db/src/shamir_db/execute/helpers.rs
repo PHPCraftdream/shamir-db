@@ -18,6 +18,7 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
         }),
         pagination: None,
         value: None,
+        explain: None,
     }
 }
 

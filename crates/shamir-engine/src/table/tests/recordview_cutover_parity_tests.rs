@@ -200,6 +200,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         }),
         pagination: None,
         value: None,
+        explain: None,
     }
 }
 

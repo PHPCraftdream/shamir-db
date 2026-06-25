@@ -173,6 +173,7 @@ impl TableManager {
                                     }),
                                     pagination,
                                     value: None,
+                                    explain: None,
                                 });
                             }
 
@@ -196,6 +197,7 @@ impl TableManager {
                                 }),
                                 pagination,
                                 value: None,
+                                explain: None,
                             });
                         }
                     }
@@ -280,6 +282,7 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
+                explain: None,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -325,6 +328,7 @@ impl TableManager {
                     }),
                     pagination,
                     value: None,
+                    explain: None,
                 });
             }
 
@@ -349,6 +353,7 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
+                explain: None,
             })
         }
     }
@@ -420,6 +425,7 @@ impl TableManager {
             // through the shared helper so the wire contract holds.
             pagination: exec::fast_path_pagination(&query.pagination),
             value: None,
+            explain: None,
         })
     }
 
@@ -520,6 +526,7 @@ impl TableManager {
             }),
             pagination: exec::fast_path_pagination(&query.pagination),
             value: None,
+            explain: None,
         })
     }
     ///
@@ -629,6 +636,7 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
+                explain: None,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -675,6 +683,7 @@ impl TableManager {
                     }),
                     pagination,
                     value: None,
+                    explain: None,
                 });
             }
 
@@ -705,6 +714,7 @@ impl TableManager {
                 }),
                 pagination,
                 value: None,
+                explain: None,
             })
         }
     }
