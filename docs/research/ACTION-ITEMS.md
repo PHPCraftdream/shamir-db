@@ -12,7 +12,8 @@
 - **Объём** — грубая оценка (S / M / L).
 
 > **Это список ОСТАВШЕЙСЯ работы.** Уже выполненное вынесено в `DONE.md`
-> (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, A3-DropTable) и здесь
+> (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, и вся **кампания Phase E**:
+> A3-полностью, C1, C2, D2, E3, E4, M5-EXPLAIN, F1–F5, E1-частично) и здесь
 > не повторяется.
 
 > Принцип проекта (`docs/roadmap/PLAN.md` §3): OQL/DDL — object-native, не SQL.
@@ -39,13 +40,9 @@
   заведён).
 - **Объём:** L. Блокер для любого multi-tenant деплоя.
 
-### A3. `DropFunction` без referential-guard (остаток) 📄
-- **Источник:** `completeness-ddl.md` G3.
-- **Сделано:** `DropTable` теперь отказывает под живым FK (`drop_refused_fk`) —
-  Phase D.3, см. `DONE.md`. `DropValidator` уже отказывает при `bound_in≠∅`.
-- **Остаток:** `DropFunction` не отказывает, если функция привязана как
-  валидатор — добавить симметричный guard (`cascade`/`restrict`-отказ).
-- **Объём:** S-M.
+> A3 (`DropFunction`-as-validator guard) — ✅ сделано (Phase E.3:
+> `drop_refused_bound` + integration-покрытие; guard был с Phase D.3). Вместе с
+> A3-DropTable (Phase D.3) referential lifecycle на дропах закрыт. См. `DONE.md`.
 
 ---
 
@@ -97,24 +94,10 @@
 
 ## C. Покрытие тестами — реальные дыры (P1)
 
-### C1. Нет e2e для FTS / vector / `call` ✅ (по моим знаниям сессии)
-- **Источник:** `coverage-ts-tests.md` P0 (1/2/3).
-- **Факт:** ни один e2e не создаёт FTS- или vector-индекс и не гоняет
-  similarity/`fts`-запрос; ни один e2e не вызывает stored-функцию через `call()`
-  (хотя `createFunction` e2e-покрыт). Серде-регрессия в `Fts`/`VectorSimilarity`/
-  `CallOp` пройдёт unit-тесты и тихо сломает фичу.
-- **Сделать:** по e2e-кейсу на каждую: createIndex(fts)+fts-query;
-  createIndex(vector)+top-k; createFunction+call+assert result.
-- **Объём:** M. **Headline-фичи с нулевым интеграционным покрытием.**
-
-### C2. Phase B/C FieldBuilder-констрейнты без unit-тестов ✅ verified
-- **Источник:** `coverage-ts-tests.md` (§3.4, P3 #13).
-- **Факт:** `scalar/oneOf/format/compare/foreignKey/unique` (как констрейнты
-  поля) покрыты **только** server-gated e2e. Без бинаря сервера — **нулевое**
-  покрытие в дефолтном `vitest run`.
-- **Сделать:** wire-shape unit-тесты на эти 6 сеттеров в `ddl.test.ts` (как уже
-  сделано для остальных) — слой билдера должен быть покрыт независимо от сервера.
-- **Объём:** S. Дешёвая страховка.
+> C1 (e2e FTS/vector/call) — ✅ сделано (Phase E.8: по e2e-кейсу на каждую через
+> release-сервер, 9/9). См. `DONE.md`.
+> C2 (Phase B/C field-констрейнты unit) — ✅ сделано (Phase E.9: +7 wire-shape
+> unit на 6 сеттеров в `ddl.test.ts`). См. `DONE.md`.
 
 ### C3. Тонкое e2e: `commitMigration`-success, `dropUser`/`dropRole`, `chgrp` 📄
 - **Источник:** `coverage-ts-tests.md` P2/P3.
@@ -129,23 +112,25 @@
 ## D. Эволюция OQL — реальные кандидаты (P2)
 
 > D1 (keyset/cursor-пагинация) — сделано end-to-end, см. `DONE.md`.
-
-### D2. RETURNING-симметрия для INSERT/DELETE 📄
-- **Источник:** `completeness-oql.md` §2.8 (M7).
-- **Факт:** `UpdateOp` имеет `UpdateSelect`; INSERT/DELETE returning слабее/
-  асимметричен.
-- **Сделать:** привести returning-семантику к единому виду.
-- **Объём:** M.
+> D2 / M7 (RETURNING-симметрия INSERT/DELETE) — ✅ сделано (Phase E.5: `select`
+> на DeleteOp/InsertOp + проекция полей; заодно починен латентный
+> update-projection баг). См. `DONE.md`.
+> M5 (EXPLAIN / dry-run plan) — ✅ сделано (Phase E.7: флаг `explain` на ReadQuery,
+> preview плана без материализации). См. `DONE.md`.
 
 ---
 
 ## E. Эволюция DDL — реальные кандидаты (P2)
 
-### E1. `RENAME` для db/repo/table/index/role/group/folder 📄
+### E1. `RENAME` (остаток) — repo/index + populated-table 🟡 частично сделано
 - **Источник:** `completeness-ddl.md` G6.
-- **Факт:** переименовывать умеют только функции и валидаторы. Rename — самая
-  дешёвая неразрушающая эволюция, отсутствует повсеместно.
-- **Объём:** M.
+- **Сделано:** `RENAME TABLE` (Phase E.4, Object 1) — rekey каталога +
+  reverse-index + `copy_store`, с честными guard'ами (populated/schema/
+  destination). См. `DONE.md`.
+- **Остаток (задача #250):** RenameRepo / RenameIndex (+db/role/group/folder) и
+  снятие архитектурного барьера — rename **populated** таблицы требует миграции
+  in-memory MVCC-overlay (вторжение в `shamir-tx`).
+- **Объём:** M (repo/index) + L (overlay-миграция).
 
 ### E2. `DEFAULT`-значения полей 📄
 - **Источник:** `completeness-ddl.md` G9.
@@ -155,17 +140,10 @@
   `VALIDATORS.md` отмечены как future).
 - **Объём:** M-L.
 
-### E3. `if_exists` на дропах + `cascade` на уровне таблицы 📄
-- **Источник:** `completeness-ddl.md` G2.
-- **Факт:** `if_not_exists` на create есть; `if_exists` на drop нет нигде;
-  `cascade` только на db/repo. Скрипты не идемпотентны.
-- **Объём:** S-M. Операционно важно для CI/миграций.
-
-### E4. `DESCRIBE` / `SHOW CREATE` (полная форма объекта) 📄
-- **Источник:** `completeness-ddl.md` G5.
-- **Факт:** `list_*` отдаёт только имена; нет одной операции, возвращающей
-  полную форму таблицы (schema+indexes+validators+retention+buffer+owner/mode).
-- **Объём:** M. Нужно SDK/тулингу.
+> E3 (`if_exists` на дропах + table-level `cascade`) — ✅ сделано (Phase E.1:
+> `if_exists` на всех drop-ops; Phase E.2: `cascade` на `drop_table`). См. `DONE.md`.
+> E4 / G5 (`DESCRIBE` / `SHOW CREATE`) — ✅ сделано (Phase E.6: `DescribeTableOp`
+> компонует полную форму из существующих reads). См. `DONE.md`.
 
 ### E5. Две дороги к uniqueness (schema-rule vs index-flag) — согласовать 📄
 - **Источник:** `completeness-ddl.md` G15.
@@ -179,22 +157,11 @@
 
 ---
 
-## F. Гигиена самих отчётов — быстрые правки (P3)
+## F. Гигиена самих отчётов — быстрые правки (P3) → ✅ ВСЕ СДЕЛАНЫ (Phase E.9)
 
-Подтверждённые мной неточности в уже закоммиченных доках. Чинить только по
-явной просьбе (правки доков, не кода).
-
-- **F1.** `coverage-rust-query-builder.md`: сводка ❌ говорит «5» (стр.94) и «7»
-  (стр.290) — реально **10**. Привести к одному числу. ✅ verified.
-- **F2.** `coverage-ts-tests.md`: `it()`-счётчики занижены на 15–40% — взять из
-  `vitest run` (ddl=75, e2e=74, filter=40, admin=42, select=28…). ✅ verified.
-- **F3.** `completeness-oql.md` §1.6: «12 folders» → **11** (canonical под
-  crypto, `lib.rs:60`). ✅ verified.
-- **F4.** `completeness-ddl.md` §1.5: парентезу «(no challenge/response)» убрать/
-  уточнить — SCRAM-handshake существует (`protocol.ts`/`scram.ts`); Argon2id
-  относится к at-rest хешированию, не к отсутствию протокола. ✅ verified.
-- **F5.** `coverage-ts-query-builder.md` #180: Rust `one_of` помечен ✅ — на деле
-  Rust-сеттера нет (это ещё один «TS exceeds Rust»). Поправить рейтинг. ✅ verified.
+F1–F5 исправлены в Phase E.9 (коммит `fc14e46`): F1 счётчик ❌→10; F2 `it()`-
+счётчики из `vitest run` (total→692); F3 «12 folders»→11; F4 формулировка SCRAM
+challenge/response; F5 Rust `one_of` ✅→❌ (B2 ещё открыт). См. `DONE.md`.
 
 ---
 
@@ -221,12 +188,13 @@
 
 | Tier | Пункты | Суть |
 |---|---|---|
-| **P0 — корректность/безопасность** | A2, A3 | открытые access-дефолты; guard на `DropFunction` |
-| **P1 — билдеры + тесты** | B2, B4, C1, C2 | билдер-сеттеры (`one_of`/idmsgpack); e2e FTS/vector/call; unit на Phase B/C |
-| **P2 — эволюция языка** | E1, E3, E5 | RENAME; if_exists; unify unique |
-| **P3 — доки + DX** | F1–F5, B5–B7, C3, D2, E2/E4 | правки отчётов; DX-билдеры; досборка e2e; DEFAULT/DESCRIBE |
+| **P0 — корректность/безопасность** | A2 | открытые access-дефолты (`0o777`/owner=System) |
+| **P1 — билдеры** | B2, B4 | билдер-сеттеры (`one_of` / `records_idmsgpack`) |
+| **P2 — эволюция языка** | E1-остаток (#250), E5 | RenameRepo/Index + populated-overlay; unify unique |
+| **P3 — DX + досборка** | B5–B7, C3, E2 | DX-билдеры; тонкое e2e (commit/dropUser/chgrp); DEFAULT |
 
 **Следующий настоящий P0:** A2 (открытые access-дефолты `0o777`/owner=System) —
 единственный оставшийся блокер уровня корректности/безопасности.
 
-> Выполненное (A1, B1, B3, D1, Phase D/E6, A3-DropTable) — в `DONE.md`.
+> Выполненное (A1, B1, B3, D1, Phase D/E6, **вся кампания Phase E**: A3, C1, C2,
+> D2, E3, E4, M5, F1–F5, E1-частично) — в `DONE.md`.
