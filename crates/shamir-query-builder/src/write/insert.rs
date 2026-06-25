@@ -1,6 +1,6 @@
 //! [`Insert`] builder for [`InsertOp`].
 
-use shamir_query_types::write::{InsertOp, InsertSelect};
+use shamir_query_types::write::{ByteBuf, InsertOp, InsertSelect};
 use shamir_query_types::TableRef;
 use shamir_types::types::value::QueryValue;
 
@@ -8,6 +8,7 @@ use shamir_types::types::value::QueryValue;
 pub struct Insert {
     table_ref: TableRef,
     values: Vec<QueryValue>,
+    records_idmsgpack: Vec<ByteBuf>,
     select: Option<InsertSelect>,
 }
 
@@ -22,6 +23,7 @@ impl Insert {
         Self {
             table_ref: TableRef::new(table),
             values: Vec::new(),
+            records_idmsgpack: Vec::new(),
             select: None,
         }
     }
@@ -31,6 +33,7 @@ impl Insert {
         Self {
             table_ref: TableRef::with_repo(repo, table),
             values: Vec::new(),
+            records_idmsgpack: Vec::new(),
             select: None,
         }
     }
@@ -47,6 +50,18 @@ impl Insert {
     /// Append multiple records.
     pub fn rows(mut self, values: impl IntoIterator<Item = impl Into<QueryValue>>) -> Self {
         self.values.extend(values.into_iter().map(Into::into));
+        self
+    }
+
+    /// Append one record already encoded as id-keyed storage msgpack.
+    ///
+    /// This is the pass-through write path for fully-literal, client-interned
+    /// records (v2 write optimization): `bytes` is one record's id-keyed
+    /// storage msgpack (what `query_value_to_storage_bytes` emits). Coexists
+    /// with `row()`/`rows()` — `values` and idmsgpack records are inserted in
+    /// the same op. Records with `$fn`/computed markers must use `row()`.
+    pub fn row_idmsgpack(mut self, bytes: impl Into<ByteBuf>) -> Self {
+        self.records_idmsgpack.push(bytes.into());
         self
     }
 
@@ -68,7 +83,7 @@ impl Insert {
         InsertOp {
             insert_into: self.table_ref,
             values: self.values,
-            records_idmsgpack: Vec::new(),
+            records_idmsgpack: self.records_idmsgpack,
             select: self.select,
         }
     }
