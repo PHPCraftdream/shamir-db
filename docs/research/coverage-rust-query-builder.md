@@ -221,6 +221,17 @@ These are builder paths that *exist* but have friction:
    transport layer wraps the envelope), but it means the builder does not cover
    the full wire surface.
 
+   > ✅ **RESOLVED — by-design (Phase ①.4).** Confirmed the right boundary:
+   > `query-builder` builds the `BatchRequest` *body*; the `DbRequest`
+   > envelope is a transport / session-lifecycle concern owned by the SDKs,
+   > which already expose all six ops ergonomically (`shamir-client`:
+   > `ping()` / `create_scram_user()`; `shamir-client-ts`: `ping()` /
+   > `createScramUser()` / `txBegin/Execute/Commit/Rollback()` + `db.tx()`).
+   > Adding envelope builders here would duplicate the SDK and pollute the
+   > WASM-lean query-construction layer. The boundary is now documented in
+   > `crates/shamir-query-builder/src/lib.rs` (§"Scope boundary"). No code
+   > added — the user-facing surface was already 100% via the SDKs.
+
 ---
 
 ## Prioritized Gap List
