@@ -34,6 +34,7 @@ import type {
   DropRoleOp,
   GrantRoleOp,
   RevokeRoleOp,
+  RenameRoleOp,
 } from '../types/admin.js';
 
 import type { Filter } from '../types/filter.js';
@@ -256,6 +257,14 @@ export function revokeRole(role: string, user: string): RevokeRoleOp {
   return { revoke_role: role, user };
 }
 
+/**
+ * Rename a role. Re-keys the role record and updates the `roles` list of
+ * every user that holds the old name.
+ */
+export function renameRole(from: string, to: string): RenameRoleOp {
+  return { rename_role: from, to };
+}
+
 /** Aggregate namespace — every admin constructor in one object. */
 export const admin = {
   refDatabase,
@@ -286,4 +295,5 @@ export const admin = {
   dropRole,
   grantRole,
   revokeRole,
+  renameRole,
 };

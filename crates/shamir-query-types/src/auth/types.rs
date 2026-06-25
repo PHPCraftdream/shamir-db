@@ -244,6 +244,14 @@ pub struct DropRoleOp {
     pub if_exists: bool,
 }
 
+/// Rename a role (re-key the role record and rekey `roles` references
+/// in every user that holds the old name).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameRoleOp {
+    pub rename_role: String,
+    pub to: String,
+}
+
 /// Grant a role to a user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GrantRoleOp {

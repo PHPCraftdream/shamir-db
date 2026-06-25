@@ -409,6 +409,13 @@ describe('revokeRole', () => {
   });
 });
 
+describe('renameRole', () => {
+  it('emits {rename_role, to}', () => {
+    const op = admin.renameRole('viewer', 'reader');
+    expect(op).toEqual({ rename_role: 'viewer', to: 'reader' });
+  });
+});
+
 // ── if_exists on admin drop ops ────────────────────────────────────
 
 describe('if_exists on admin drop ops', () => {

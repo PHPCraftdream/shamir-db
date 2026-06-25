@@ -207,6 +207,11 @@ export interface RevokeRoleOp {
   user: string;
 }
 
+export interface RenameRoleOp {
+  rename_role: string;
+  to: string;
+}
+
 // ── Union ───────────────────────────────────────────────────────────
 
 /** Union of all ACL + RBAC admin operations. */
@@ -225,4 +230,5 @@ export type AdminOp =
   | CreateRoleOp
   | DropRoleOp
   | GrantRoleOp
-  | RevokeRoleOp;
+  | RevokeRoleOp
+  | RenameRoleOp;

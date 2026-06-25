@@ -16,7 +16,9 @@ use crate::admin::{
     RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
     UnbindValidatorOp,
 };
-use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
+use crate::auth::{
+    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RenameRoleOp, RevokeRoleOp,
+};
 use crate::call::CallOp;
 use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
@@ -78,6 +80,7 @@ pub enum BatchOp {
     DropUser(DropUserOp),
     CreateRole(CreateRoleOp),
     DropRole(DropRoleOp),
+    RenameRole(RenameRoleOp),
     GrantRole(GrantRoleOp),
     RevokeRole(RevokeRoleOp),
 
@@ -178,6 +181,7 @@ impl Serialize for BatchOp {
             BatchOp::DropUser(op) => op.serialize(serializer),
             BatchOp::CreateRole(op) => op.serialize(serializer),
             BatchOp::DropRole(op) => op.serialize(serializer),
+            BatchOp::RenameRole(op) => op.serialize(serializer),
             BatchOp::GrantRole(op) => op.serialize(serializer),
             BatchOp::RevokeRole(op) => op.serialize(serializer),
             BatchOp::Chmod(op) => op.serialize(serializer),
@@ -301,6 +305,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateRoleOp, _>(&bytes).map(BatchOp::CreateRole)
         } else if has("drop_role") {
             qv_to::<DropRoleOp, _>(&bytes).map(BatchOp::DropRole)
+        } else if has("rename_role") {
+            qv_to::<RenameRoleOp, _>(&bytes).map(BatchOp::RenameRole)
         } else if has("grant_role") {
             qv_to::<GrantRoleOp, _>(&bytes).map(BatchOp::GrantRole)
         } else if has("revoke_role") {
@@ -425,6 +431,7 @@ impl BatchOp {
                 | BatchOp::DropUser(_)
                 | BatchOp::CreateRole(_)
                 | BatchOp::DropRole(_)
+                | BatchOp::RenameRole(_)
                 | BatchOp::GrantRole(_)
                 | BatchOp::RevokeRole(_)
                 | BatchOp::Chmod(_)

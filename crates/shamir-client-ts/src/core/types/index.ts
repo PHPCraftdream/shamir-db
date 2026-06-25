@@ -120,6 +120,7 @@ export type {
   DropRoleOp,
   GrantRoleOp,
   RevokeRoleOp,
+  RenameRoleOp,
   AdminOp,
 } from './admin.js';
 
