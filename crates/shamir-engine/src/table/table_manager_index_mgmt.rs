@@ -1,7 +1,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -334,4 +338,218 @@ impl TableManager {
 
         Ok(IndexDefinition::new(name_id, interned_paths))
     }
+
+    // ============================================================================
+    // Rename index (rekey in place, preserve all posting data)
+    // ============================================================================
+
+    /// Rename an index from `old_name` to `new_name` on this table.
+    ///
+    /// Handles all four index kinds:
+    ///   - **regular** (hash, `is_unique=0`): drop+rebuild — the hash-index
+    ///     physical key embeds `name_interned` into the dual hash
+    ///     (`compute_leaf_hashes` / `compute_lookup_hashes` both mix
+    ///     `name_interned` into h1+h2), so a raw key-rewrite would leave
+    ///     orphaned entries that the lookup path (which recomputes hashes
+    ///     with the NEW name_interned) cannot find. The index is derived
+    ///     data, so drop+rebuild from the live record stream is safe.
+    ///   - **unique** (hash, `is_unique=1`): same as regular — drop+rebuild.
+    ///   - **sorted** (B-tree-by-value, `SORTED_TAG` prefix): rekeys physical
+    ///     entries from old to new name_interned (big-endian 8 bytes after
+    ///     the tag byte). No hash mixing — sorted keys embed the raw
+    ///     value bytes, not a hash of (name, value), so the rewrite is exact.
+    ///   - **index2** (FTS / functional / vector): posting entries are keyed
+    ///     by the compact `u32` `index_id`, not by name_interned, so no
+    ///     physical move is needed — only the `by_name` lookup table in the
+    ///     registry is updated, and the persisted metadata is re-saved.
+    ///
+    /// Returns `Err` when the source does not exist or the destination name is
+    /// already occupied by any index on this table.
+    pub async fn rename_index(&self, old_name: &str, new_name: &str) -> DbResult<()> {
+        let old_id = self.intern_string(old_name).await?;
+        let new_id = self.intern_string(new_name).await?;
+
+        if old_id == new_id {
+            // Nothing to do — same interned id means same name.
+            return Ok(());
+        }
+
+        // ── Classify what kind(s) of index exist under old_name ──────────────
+        let is_regular = self.index_manager.index_exists(old_id);
+        let is_unique = self.index_manager.unique_index_exists(old_id);
+        let is_sorted = self.sorted_indexes.find_by_name_interned(old_id).is_some();
+        let is_index2 = self.index2_registry.get_by_name(old_id).await.is_some();
+
+        if !is_regular && !is_unique && !is_sorted && !is_index2 {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "index '{}' not found on this table",
+                old_name
+            )));
+        }
+
+        // ── Guard: destination name must not be occupied ──────────────────────
+        let dst_regular = self.index_manager.index_exists(new_id);
+        let dst_unique = self.index_manager.unique_index_exists(new_id);
+        let dst_sorted = self.sorted_indexes.find_by_name_interned(new_id).is_some();
+        let dst_index2 = self.index2_registry.get_by_name(new_id).await.is_some();
+
+        if dst_regular || dst_unique || dst_sorted || dst_index2 {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "index '{}' already exists on this table; cannot rename '{}' to it",
+                new_name, old_name
+            )));
+        }
+
+        // ── Regular (hash): drop + rebuild under new name ────────────────────
+        // Hash-index keys embed name_interned into hash1/hash2; a raw key
+        // rewrite breaks lookup. Rebuild from the live record stream instead.
+        if is_regular {
+            let old_def = self
+                .index_manager
+                .get_index_definition(old_id)
+                .ok_or_else(|| {
+                    shamir_storage::error::DbError::Internal(
+                        "index definition disappeared mid-rename".to_string(),
+                    )
+                })?;
+            let interner = self.interner.get().await?;
+            let paths = resolve_index_paths(interner, &old_def.paths);
+            let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+
+            self.index_manager.drop_index(old_id).await?;
+            self.create_index(new_name, &path_refs).await?;
+        }
+
+        // ── Unique (hash): drop + rebuild under new name ─────────────────────
+        if is_unique {
+            let old_def = self
+                .index_manager
+                .get_unique_index_definition(old_id)
+                .ok_or_else(|| {
+                    shamir_storage::error::DbError::Internal(
+                        "unique index definition disappeared mid-rename".to_string(),
+                    )
+                })?;
+            let interner = self.interner.get().await?;
+            let paths = resolve_index_paths(interner, &old_def.paths);
+            let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+
+            self.index_manager.drop_unique_index(old_id).await?;
+            self.create_unique_index(new_name, &path_refs).await?;
+        }
+
+        // ── Rekey sorted index posting entries ────────────────────────────────
+        if is_sorted {
+            rekey_sorted_prefix(&*self.info_store, old_id, new_id).await?;
+
+            // Drop old sorted-index definition and register new one.
+            // `drop_index` would delete the physical entries we just moved, so
+            // we use `rename_definition` which only swaps the in-memory entry.
+            self.sorted_indexes
+                .rename_definition(old_id, new_id)
+                .await?;
+        }
+
+        // ── Rekey index2 (FTS / functional / vector) ──────────────────────────
+        // Physical posting entries are keyed by `index_id` (u32), not by
+        // name_interned — no data movement needed. Only the by_name lookup
+        // table in the registry changes, plus the persisted metadata.
+        if is_index2 {
+            // rename_entry moves the by_name mapping from old_id → new_id.
+            let ok = self.index2_registry.rename_entry(old_id, new_id).await;
+            if !ok {
+                return Err(shamir_storage::error::DbError::Internal(
+                    "index2 rename_entry failed (concurrent conflict?)".to_string(),
+                ));
+            }
+            crate::index2::persistence::save_index2_metadata(
+                &self.index2_registry,
+                &self.info_store,
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Prefix-scan rekey helpers (module-private)
+// ============================================================================
+
+/// Rekey all posting entries of a sorted index.
+///
+/// Sorted-index physical key layout:
+///   `[SORTED_TAG: 1][name_interned BE: 8][encoded_value: var][record_id: 16]`
+///
+/// For each key found under the old prefix, bytes [1..9] are replaced
+/// with `new_id.to_be_bytes()` (note: **big-endian**, unlike hash indexes).
+async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -> DbResult<()> {
+    // SORTED_TAG = 0x80 — the tag byte that distinguishes sorted-index physical
+    // keys from hash-index keys and system RecordId keys in the same info_store.
+    // Mirrors `shamir_index::legacy::sorted_index_definition::SORTED_TAG` (pub(crate)
+    // there, so we inline the constant here with a comment instead of importing).
+    const SORTED_TAG: u8 = 0x80;
+
+    let mut old_prefix_buf = Vec::with_capacity(9);
+    old_prefix_buf.push(SORTED_TAG);
+    old_prefix_buf.extend_from_slice(&old_id.to_be_bytes());
+    let old_prefix = Bytes::from(old_prefix_buf);
+
+    let new_id_bytes = new_id.to_be_bytes();
+
+    let stream = info_store.scan_prefix_stream(old_prefix, FULL_SCAN_BATCH);
+    futures::pin_mut!(stream);
+
+    let mut to_write: Vec<(Bytes, Bytes)> = Vec::new();
+    let mut to_remove: Vec<Bytes> = Vec::new();
+
+    while let Some(batch) = stream.next().await {
+        for (key, value) in batch? {
+            if key.len() < 9 {
+                continue; // malformed; skip
+            }
+            let mut new_key = key.to_vec();
+            new_key[1..9].copy_from_slice(&new_id_bytes);
+            to_write.push((Bytes::from(new_key), value));
+            to_remove.push(key);
+        }
+    }
+
+    if !to_write.is_empty() {
+        let _ = info_store.set_many(to_write).await?;
+    }
+    if !to_remove.is_empty() {
+        let _ = info_store.remove_many(to_remove).await?;
+    }
+
+    Ok(())
+}
+
+/// Resolve interned path ids back to dot-separated string paths.
+///
+/// Used by `rename_index` to capture the field paths of a hash index
+/// before drop+rebuild: the `IndexDefinition.paths` are `Vec<IndexInfoItem>`
+/// whose segments are interned u64 ids. We resolve each segment through the
+/// interner to recover the original string path (e.g. `"user.email"`).
+fn resolve_index_paths(
+    interner: &shamir_types::core::interner::Interner,
+    paths: &[IndexInfoItem],
+) -> Vec<String> {
+    use shamir_types::core::interner::InternerKey;
+    paths
+        .iter()
+        .map(|item| {
+            item.path
+                .iter()
+                .map(|&id| {
+                    interner
+                        .get_str(&InternerKey::new(id))
+                        .map(|s| (*s).to_string())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        })
+        .collect()
 }

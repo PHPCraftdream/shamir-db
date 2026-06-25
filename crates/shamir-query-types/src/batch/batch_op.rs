@@ -11,9 +11,9 @@ use crate::admin::{
     CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
     DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
     InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameTableOp, RenameValidatorOp,
-    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
-    UnbindValidatorOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionOp, RenameIndexOp, RenameTableOp,
+    RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
+    StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -59,6 +59,7 @@ pub enum BatchOp {
     RenameTable(RenameTableOp),
     CreateIndex(CreateIndexOp),
     DropIndex(DropIndexOp),
+    RenameIndex(RenameIndexOp),
     SetBufferConfig(SetBufferConfigOp),
     GetBufferConfig(GetBufferConfigOp),
     AlterBufferConfig(AlterBufferConfigOp),
@@ -159,6 +160,7 @@ impl Serialize for BatchOp {
             BatchOp::RenameTable(op) => op.serialize(serializer),
             BatchOp::CreateIndex(op) => op.serialize(serializer),
             BatchOp::DropIndex(op) => op.serialize(serializer),
+            BatchOp::RenameIndex(op) => op.serialize(serializer),
             BatchOp::SetBufferConfig(op) => op.serialize(serializer),
             BatchOp::GetBufferConfig(op) => op.serialize(serializer),
             BatchOp::AlterBufferConfig(op) => op.serialize(serializer),
@@ -266,6 +268,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateIndexOp, _>(&bytes).map(BatchOp::CreateIndex)
         } else if has("drop_index") {
             qv_to::<DropIndexOp, _>(&bytes).map(BatchOp::DropIndex)
+        } else if has("rename_index") {
+            qv_to::<RenameIndexOp, _>(&bytes).map(BatchOp::RenameIndex)
         } else if has("set_buffer_config") {
             qv_to::<SetBufferConfigOp, _>(&bytes).map(BatchOp::SetBufferConfig)
         } else if has("get_buffer_config") {
@@ -394,6 +398,7 @@ impl BatchOp {
                 | BatchOp::RenameTable(_)
                 | BatchOp::CreateIndex(_)
                 | BatchOp::DropIndex(_)
+                | BatchOp::RenameIndex(_)
                 | BatchOp::SetBufferConfig(_)
                 | BatchOp::GetBufferConfig(_)
                 | BatchOp::AlterBufferConfig(_)

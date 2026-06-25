@@ -22,7 +22,7 @@ pub use fk_action::FkAction;
 pub use function_ops::{
     CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionOp,
 };
-pub use index_ops::{CreateIndexOp, DropIndexOp};
+pub use index_ops::{CreateIndexOp, DropIndexOp, RenameIndexOp};
 pub use interner_ops::{InternerDumpOp, InternerTouchOp};
 pub use list_ops::ListOp;
 pub use migration_ops::{

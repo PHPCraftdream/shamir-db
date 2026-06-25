@@ -101,6 +101,36 @@ impl IndexRegistry {
         out
     }
 
+    /// Update the `by_name` mapping from `old_name_interned` to `new_name_interned`
+    /// without touching the physical posting entries (they are keyed by `index_id`, not
+    /// by name). Returns `true` if the entry was found and updated, `false` otherwise.
+    ///
+    /// This is the rekey primitive for RENAME INDEX on index2 backends: since
+    /// posting keys embed the compact `u32` id (not the interned string id), the
+    /// stored data survives a rename without any scan/copy.
+    pub async fn rename_entry(&self, old_name_interned: u64, new_name_interned: u64) -> bool {
+        // Look up the numeric id behind the old name.
+        let id = match self.by_name.read_async(&old_name_interned, |_, v| *v).await {
+            Some(v) => v,
+            None => return false,
+        };
+        // Remove old name mapping.
+        let _ = self.by_name.remove_async(&old_name_interned).await;
+        // Insert new name mapping. If insertion fails (new_name already registered)
+        // re-insert the old mapping to keep the registry consistent, then return false.
+        if self
+            .by_name
+            .insert_async(new_name_interned, id)
+            .await
+            .is_err()
+        {
+            // Restore old entry on conflict.
+            let _ = self.by_name.insert_async(old_name_interned, id).await;
+            return false;
+        }
+        true
+    }
+
     /// Find a backend whose first field path matches and whose kind
     /// matches the given tag ("fts", "functional", "vector").
     pub async fn find_by_field_and_kind(

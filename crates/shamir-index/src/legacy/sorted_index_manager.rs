@@ -139,6 +139,33 @@ impl SortedIndexManager {
         Ok(true)
     }
 
+    /// Re-key an in-memory sorted-index definition from `old_id` to `new_id`
+    /// and persist the updated metadata.
+    ///
+    /// This is the metadata half of RENAME INDEX for sorted indexes — the
+    /// physical posting entries are re-keyed separately by the engine
+    /// (`rekey_sorted_prefix`). Here we only swap the in-memory entry and
+    /// re-save the definitions blob.
+    ///
+    /// Note: `drop_index` would delete the physical entries we just moved, so
+    /// we bypass it and manipulate the `indexes` map directly.
+    pub async fn rename_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        let old_def = self
+            .indexes
+            .get(&old_id)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::Internal(
+                    "sorted index definition disappeared mid-rename".to_string(),
+                )
+            })?;
+        self.indexes.remove(&old_id);
+        let mut new_def = old_def;
+        new_def.name_interned = new_id;
+        self.indexes.insert(new_id, new_def);
+        self.persist_defs().await
+    }
+
     // ============================================================================
     // Covering-index helpers
     // ============================================================================

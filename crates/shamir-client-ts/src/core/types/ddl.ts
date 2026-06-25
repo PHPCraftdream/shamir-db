@@ -383,6 +383,13 @@ export interface RenameTableOp {
   repo?: string;
 }
 
+export interface RenameIndexOp {
+  rename_index: string;
+  to: string;
+  table: string;
+  repo?: string;
+}
+
 export interface DropIndexOp {
   drop_index: string;
   table: string;
@@ -429,6 +436,7 @@ export type DdlOp =
   | DescribeTableOp
   | CreateIndexOp
   | DropIndexOp
+  | RenameIndexOp
   | SetBufferConfigOp
   | GetBufferConfigOp
   | AlterBufferConfigOp

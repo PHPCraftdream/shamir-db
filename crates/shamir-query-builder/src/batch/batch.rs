@@ -228,6 +228,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Rename an index on a table (in-place rekey, no data loss).
+    pub fn rename_index(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: function ─────────────────────────────────────────────
 
     /// Create (or replace) a stored function.
