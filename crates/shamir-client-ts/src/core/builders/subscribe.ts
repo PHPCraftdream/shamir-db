@@ -7,6 +7,7 @@
 
 import type { Filter, FilterValue } from '../types/filter.js';
 import type { BatchRequest } from '../types/batch.js';
+import type { CallOp } from '../types/call.js';
 import type { TableRefWire } from '../types/query.js';
 import type {
   EventMask,
@@ -33,10 +34,16 @@ export interface SubscribeSource {
   where?: Filter | ((f: typeof filter) => Filter);
   /** Events to watch. Defaults to `['any']`. */
   on?: EventName[];
-  /** Simple deliver mode (mutually exclusive with `handle`). */
+  /** Simple deliver mode (mutually exclusive with `handle`/`call`). */
   deliver?: 'records' | 'keys';
-  /** Callback that builds a sub-batch for DeliverMode.Batch (mutually exclusive with `deliver`). */
+  /** Callback that builds a sub-batch for DeliverMode.Batch (mutually exclusive with `deliver`/`call`). */
   handle?: (b: Batch) => Batch;
+  /**
+   * Stored-function call to invoke on delivery (DeliverMode.Call).
+   * Build with the {@link call} constructor; mutually exclusive with
+   * `deliver`/`handle`.
+   */
+  call?: CallOp;
   /** Parameter bindings for the sub-batch (only meaningful with `handle`). */
   bind?: Record<string, FilterValue>;
 }
@@ -65,12 +72,26 @@ function resolveTableRef(store: string, table: string): TableRefWire {
 }
 
 function resolveDeliverMode(src: SubscribeSource): DeliverMode | undefined {
+  // Enforce mutual exclusion of deliver modes within a single source.
+  const active: string[] = [];
+  if (src.handle) active.push('handle');
+  if (src.call) active.push('call');
+  if (src.deliver) active.push(`deliver:'${src.deliver}'`);
+  if (active.length > 1) {
+    throw new Error(
+      `subscribe: mutually exclusive deliver options on one source — at most one of { deliver, handle, call } may be set (got: ${active.join(', ')})`,
+    );
+  }
+
   if (src.handle) {
     const inner = src.handle(Batch.create());
     const req: BatchRequest = inner.build();
     const sub: { batch: BatchRequest; bind?: Record<string, FilterValue> } = { batch: req };
     if (src.bind && Object.keys(src.bind).length > 0) sub.bind = src.bind;
     return { batch: sub };
+  }
+  if (src.call) {
+    return { call: src.call };
   }
   if (src.deliver === 'keys') return 'keys';
   if (src.deliver === 'records') return 'records';
@@ -115,7 +136,7 @@ export function subscribe(
     for (let i = 1; i < resolvedModes.length; i++) {
       if (JSON.stringify(resolvedModes[i]) !== firstKey) {
         throw new Error(
-          'subscribe: conflicting deliver/handle across sources — all sources in one subscription must agree on delivery mode',
+          'subscribe: conflicting deliver/handle/call across sources — all sources in one subscription must agree on delivery mode',
         );
       }
     }

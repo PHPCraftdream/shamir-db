@@ -11,7 +11,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { Filter, FieldPath } from '../types/filter.js';
+import type { Filter, FieldPath, FilterValue } from '../types/filter.js';
 import type {
   TableRefWire,
   Select,
@@ -29,7 +29,7 @@ import type {
 import type { QueryResult } from '../types/batch.js';
 import type { WireValue } from '../types/write.js';
 import type { ExecCtx } from '../exec-ctx.js';
-import { and } from './filter.js';
+import { and, or, filter as filterNs } from './filter.js';
 import { field as selectField } from './select.js';
 
 /** Normalise a field spec (bare string or path array) to the wire form. */
@@ -125,6 +125,106 @@ export class Query {
     this.whereFilter =
       this.whereFilter === null ? filter : and(this.whereFilter, filter);
     return this;
+  }
+
+  /** OR the given filter into the existing WHERE (smart-flattened). */
+  orWhere(filter: Filter): this {
+    this.whereFilter =
+      this.whereFilter === null ? filter : or(this.whereFilter, filter);
+    return this;
+  }
+
+  // ── Inline AND where-* methods ────────────────────────────────────
+  // Each builds a leaf Filter via the existing `filter.*` constructors and
+  // AND-combines it into the current WHERE (same semantics as `andWhere`).
+
+  /** AND `field == value`. */
+  whereEq(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.eq(field, value));
+  }
+  /** AND `field != value`. */
+  whereNe(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.ne(field, value));
+  }
+  /** AND `field > value`. */
+  whereGt(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.gt(field, value));
+  }
+  /** AND `field >= value`. */
+  whereGte(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.gte(field, value));
+  }
+  /** AND `field < value`. */
+  whereLt(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.lt(field, value));
+  }
+  /** AND `field <= value`. */
+  whereLte(field: string | string[], value: FilterValue): this {
+    return this.andWhere(filterNs.lte(field, value));
+  }
+  /** AND `field IN (values…)`. */
+  whereIn(field: string | string[], values: FilterValue[]): this {
+    return this.andWhere(filterNs.in_(field, values));
+  }
+  /** AND `field LIKE pattern`. */
+  whereLike(field: string | string[], pattern: string): this {
+    return this.andWhere(filterNs.like(field, pattern));
+  }
+
+  // ── Inline OR where-* methods ─────────────────────────────────────
+  // Same leaves, OR-combined (same semantics as `orWhere`).
+
+  /** OR `field == value`. */
+  orWhereEq(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.eq(field, value));
+  }
+  /** OR `field != value`. */
+  orWhereNe(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.ne(field, value));
+  }
+  /** OR `field > value`. */
+  orWhereGt(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.gt(field, value));
+  }
+  /** OR `field >= value`. */
+  orWhereGte(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.gte(field, value));
+  }
+  /** OR `field < value`. */
+  orWhereLt(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.lt(field, value));
+  }
+  /** OR `field <= value`. */
+  orWhereLte(field: string | string[], value: FilterValue): this {
+    return this.orWhere(filterNs.lte(field, value));
+  }
+  /** OR `field IN (values…)`. */
+  orWhereIn(field: string | string[], values: FilterValue[]): this {
+    return this.orWhere(filterNs.in_(field, values));
+  }
+  /** OR `field LIKE pattern`. */
+  orWhereLike(field: string | string[], pattern: string): this {
+    return this.orWhere(filterNs.like(field, pattern));
+  }
+
+  // ── Grouped where ─────────────────────────────────────────────────
+
+  /**
+   * AND a nested group: the callback receives the filter namespace and must
+   * return a `Filter`; that filter is AND-combined into the current WHERE.
+   * Equivalent to `.andWhere(cb(filter))`.
+   */
+  whereGroup(cb: (f: typeof filterNs) => Filter): this {
+    return this.andWhere(cb(filterNs));
+  }
+
+  /**
+   * OR a nested group: the callback receives the filter namespace and must
+   * return a `Filter`; that filter is OR-combined into the current WHERE.
+   * Equivalent to `.orWhere(cb(filter))`.
+   */
+  whereGroupOr(cb: (f: typeof filterNs) => Filter): this {
+    return this.orWhere(cb(filterNs));
   }
 
   // ── GROUP BY / HAVING ──────────────────────────────────────────────

@@ -70,6 +70,149 @@ describe('where', () => {
   });
 });
 
+// ── G1: inline where-* methods ──────────────────────────────────────
+
+describe('inline where* methods (G1)', () => {
+  it('whereEq builds an eq leaf and AND-combines', () => {
+    const q = Query.from('users').whereEq('status', 'active').build();
+    expect(q.where).toEqual({ op: 'eq', field: ['status'], value: 'active' });
+  });
+
+  it('whereNe / whereGt / whereGte / whereLt / whereLte', () => {
+    const q = Query.from('u')
+      .whereNe('a', 1)
+      .whereGt('b', 2)
+      .whereGte('c', 3)
+      .whereLt('d', 4)
+      .whereLte('e', 5)
+      .build();
+    expect(q.where).toEqual({
+      op: 'and',
+      filters: [
+        { op: 'ne', field: ['a'], value: 1 },
+        { op: 'gt', field: ['b'], value: 2 },
+        { op: 'gte', field: ['c'], value: 3 },
+        { op: 'lt', field: ['d'], value: 4 },
+        { op: 'lte', field: ['e'], value: 5 },
+      ],
+    });
+  });
+
+  it('whereIn / whereLike', () => {
+    const q = Query.from('u')
+      .whereIn('id', [1, 2, 3])
+      .whereLike('name', 'Al%')
+      .build();
+    expect(q.where).toEqual({
+      op: 'and',
+      filters: [
+        { op: 'in', field: ['id'], values: [1, 2, 3] },
+        { op: 'like', field: ['name'], pattern: 'Al%' },
+      ],
+    });
+  });
+
+  it('whereEq with nested path → field path array', () => {
+    const q = Query.from('u').whereEq(['addr', 'city'], 'NYC').build();
+    expect(q.where).toEqual({
+      op: 'eq',
+      field: ['addr', 'city'],
+      value: 'NYC',
+    });
+  });
+
+  it('orWhere* methods OR-combine', () => {
+    const q = Query.from('u')
+      .whereEq('a', 1)
+      .orWhereEq('b', 2)
+      .orWhereGt('c', 3)
+      .build();
+    expect(q.where).toEqual({
+      op: 'or',
+      filters: [
+        { op: 'eq', field: ['a'], value: 1 },
+        { op: 'eq', field: ['b'], value: 2 },
+        { op: 'gt', field: ['c'], value: 3 },
+      ],
+    });
+  });
+
+  it('orWhereIn / orWhereLike / orWhereNe / orWhereGte / orWhereLt / orWhereLte', () => {
+    const q = Query.from('u')
+      .orWhereNe('a', 1)
+      .orWhereGte('b', 2)
+      .orWhereLt('c', 3)
+      .orWhereLte('d', 4)
+      .orWhereIn('e', [5])
+      .orWhereLike('f', 'x%')
+      .build();
+    expect(q.where).toEqual({
+      op: 'or',
+      filters: [
+        { op: 'ne', field: ['a'], value: 1 },
+        { op: 'gte', field: ['b'], value: 2 },
+        { op: 'lt', field: ['c'], value: 3 },
+        { op: 'lte', field: ['d'], value: 4 },
+        { op: 'in', field: ['e'], values: [5] },
+        { op: 'like', field: ['f'], pattern: 'x%' },
+      ],
+    });
+  });
+
+  it('whereGroup(cb) AND-combines a nested filter', () => {
+    const q = Query.from('u')
+      .whereEq('status', 'active')
+      .whereGroup((f) => f.or(f.eq('a', 1), f.eq('b', 2)))
+      .build();
+    expect(q.where).toEqual({
+      op: 'and',
+      filters: [
+        { op: 'eq', field: ['status'], value: 'active' },
+        { op: 'or', filters: [
+          { op: 'eq', field: ['a'], value: 1 },
+          { op: 'eq', field: ['b'], value: 2 },
+        ]},
+      ],
+    });
+  });
+
+  it('whereGroupOr(cb) OR-combines a nested filter', () => {
+    const q = Query.from('u')
+      .whereEq('a', 1)
+      .whereGroupOr((f) => f.and(f.eq('b', 2), f.eq('c', 3)))
+      .build();
+    expect(q.where).toEqual({
+      op: 'or',
+      filters: [
+        { op: 'eq', field: ['a'], value: 1 },
+        { op: 'and', filters: [
+          { op: 'eq', field: ['b'], value: 2 },
+          { op: 'eq', field: ['c'], value: 3 },
+        ]},
+      ],
+    });
+  });
+
+  it('andWhere + orWhere smart-flatten together', () => {
+    const q = Query.from('u')
+      .whereEq('a', 1)
+      .andWhere(filter.eq('b', 2))
+      .orWhere(filter.eq('c', 3))
+      .build();
+    // (a AND b) OR c  →  { or: [ { and: [a, b] }, c ] }
+    expect(q.where).toEqual({
+      op: 'or',
+      filters: [
+        { op: 'and', filters: [
+          { op: 'eq', field: ['a'], value: 1 },
+          { op: 'eq', field: ['b'], value: 2 },
+        ]},
+        { op: 'eq', field: ['c'], value: 3 },
+      ],
+    });
+  });
+});
+
 describe('group by / having', () => {
   it('groupBy emits field-path arrays; having nests inside group_by', () => {
     const q = Query.from('orders')
