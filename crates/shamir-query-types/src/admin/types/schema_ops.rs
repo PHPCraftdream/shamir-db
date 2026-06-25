@@ -114,6 +114,20 @@ pub struct ForeignKeyDto {
     /// the builder — not via this serde default.
     #[serde(default, skip_serializing_if = "FkAction::is_no_action")]
     pub on_delete: FkAction,
+    /// Referential action on parent update (Phase ②.2a — surface only;
+    /// enforcement lands in ②.2b).
+    ///
+    /// Symmetric to [`on_delete`](Self::on_delete): same serde-default /
+    /// `skip_serializing_if = "FkAction::is_no_action"` split so legacy schemas
+    /// persisted without `on_update` deserialize to [`FkAction::NoAction`] and
+    /// round-trip byte-identical. The builder default for a *new* foreign key
+    /// is `NoAction` (additive — existing FK callers keep current behavior);
+    /// callers wanting a non-default update action use
+    /// [`foreign_key_on_update`](shamir_query_builder::ddl::schema::FieldBuilder::foreign_key_on_update)
+    /// or
+    /// [`foreign_key_with_actions`](shamir_query_builder::ddl::schema::FieldBuilder::foreign_key_with_actions).
+    #[serde(default, skip_serializing_if = "FkAction::is_no_action")]
+    pub on_update: FkAction,
 }
 
 /// Cross-field comparison descriptor (wire form).
