@@ -18,6 +18,7 @@ import type { Filter } from '../types/filter.js';
 import type {
   TableRefWire,
   WireValue,
+  WriteValue,
   UpdateReturnMode,
   UpdateSelect,
   DeleteSelect,
@@ -39,16 +40,20 @@ function tableRef(repo: string | undefined, table: string): TableRefWire {
  * Build an `InsertOp`. Accepts a single record or an array; normalises to
  * an array internally.
  *
+ * Each record is a `WriteValue` — plain literals OR computed expressions
+ * (`filter.fn('NOW')`, `filter.ref('price')`, …) produced by the `filter.*`
+ * constructors. This mirrors Rust `write::Doc::set(key, impl Into<FilterValue>)`.
+ *
  * `opts.returningFields`, when provided, emits an `InsertSelect` projection
  * on the wire so each returned row carries only the named fields. Mirror of
  * `UpdateBuilder.returning(..., fields)` / `DeleteBuilder.returning(fields)`.
  */
 export function insert(
   table: string,
-  values: WireValue | WireValue[],
+  values: WriteValue | WriteValue[],
   opts?: { repo?: string; returningFields?: string[] },
 ): InsertOp {
-  const rows = Array.isArray(values) ? values : [values];
+  const rows = (Array.isArray(values) ? values : [values]) as WireValue[];
   const op: InsertOp = { insert_into: tableRef(opts?.repo, table), values: rows };
   if (opts?.returningFields !== undefined) {
     op.select = { fields: opts.returningFields };
@@ -80,9 +85,13 @@ export class UpdateBuilder {
     return this;
   }
 
-  /** Set the fields to update (partial record). Required before `.build()`. */
-  set(obj: WireValue): this {
-    this.setValue = obj;
+  /**
+   * Set the fields to update. The record may mix plain literals and computed
+   * expressions (`filter.fn('NOW')`, `filter.ref('subtotal')`, …) — mirrors
+   * Rust `Doc::set`. Required before `.build()`.
+   */
+  set(obj: WriteValue): this {
+    this.setValue = obj as WireValue;
     return this;
   }
 
@@ -128,14 +137,18 @@ export function update(
 
 // ── upsert (set) ─────────────────────────────────────────────────────
 
-/** Build a `SetOp` (upsert by key). */
+/**
+ * Build a `SetOp` (upsert by key). Both `key` and `value` accept `WriteValue` —
+ * plain literals OR computed expressions (`filter.fn(...)`, `filter.queryRef(...)`,
+ * …) — mirroring Rust `Doc::set`.
+ */
 export function upsert(
   table: string,
-  key: WireValue,
-  value: WireValue,
+  key: WriteValue,
+  value: WriteValue,
   opts?: { repo?: string },
 ): SetOp {
-  return { set: tableRef(opts?.repo, table), key, value };
+  return { set: tableRef(opts?.repo, table), key: key as WireValue, value: value as WireValue };
 }
 
 // ── delete ───────────────────────────────────────────────────────────

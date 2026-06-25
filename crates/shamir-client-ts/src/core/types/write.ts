@@ -18,7 +18,7 @@
  */
 
 import type { TableRefWire } from './query.js';
-import type { Filter } from './filter.js';
+import type { Filter, FilterValue } from './filter.js';
 
 // Re-export TableRefWire for the write builder.
 export type { TableRefWire } from './query.js';
@@ -37,6 +37,56 @@ export type WireValue =
   | string
   | WireValue[]
   | { [key: string]: WireValue };
+
+/**
+ * Computed-expression forms (`$fn` / `$ref` / `$query` / `$expr` / `$cond` /
+ * `$param`) admitted inside a write-operation value. These mirror the object
+ * variants returned by the `filter.fn()` / `filter.ref()` / `filter.queryRef()`
+ * / `filter.expr()` / `filter.cond()` / `filter.param()` constructors (now
+ * typed to return the narrow per-variant shape).
+ *
+ * Defined as a structural shape — not `Extract<FilterValue, …>` — so that a
+ * record mixing literals and expressions is assignable to `WriteValue`: the
+ * full `FilterValue` union also carries `Uint8Array`, which would make every
+ * field of such a record incompatible with the recursive record/object arm of
+ * `WriteValue`.
+ *
+ * Mirrors the Rust invariant that `FilterValue` and `QueryValue` share the same
+ * serde wire encoding — `write::Doc::set` accepts `impl Into<FilterValue>` for
+ * both literals and computed expressions (see
+ * `crates/shamir-query-builder/src/write/doc.rs`).
+ */
+export type ComputedExpr =
+  | { $ref: (string | number)[] }
+  | { $query: string; path?: string }
+  | { $fn: string | { name: string; args?: FilterValue[] } }
+  | { $expr: { op: string; args: FilterValue[] } }
+  | { $cond: { if: Filter; then: FilterValue; else: FilterValue } }
+  | { $param: string };
+
+/**
+ * Value accepted at a write-operation field position (`write.insert`,
+ * `UpdateBuilder.set`, `write.upsert`). Extends `WireValue` with the computed
+ * expression forms (`ComputedExpr`) so the idiomatic JS literal works without a
+ * cast:
+ *
+ * ```ts
+ * write.insert('events', { created_at: filter.fn('NOW'), total: filter.ref('price') })
+ * ```
+ *
+ * `ComputedExpr` carries the `$`-tagged expression objects only (not the full
+ * `FilterValue` union, which also includes `Uint8Array`); the `filter.*`
+ * constructors return the same narrow variants, so a record mixing literals and
+ * expressions type-checks cleanly against the recursive record/object arm.
+ */
+export type WriteValue =
+  | null
+  | boolean
+  | number
+  | string
+  | WriteValue[]
+  | ComputedExpr
+  | { [key: string]: WriteValue };
 
 // ── Update select types ──────────────────────────────────────────────
 
