@@ -18,6 +18,6 @@ pub use types::{
     DropTableOp, DropValidatorOp, FieldRuleDto, FkAction, ForeignKeyDto, GetBufferConfigOp,
     GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp,
     NumDto, PurgeHistoryOp, PurgeScope, RemoveSchemaRuleOp, RenameFunctionOp, RenameIndexOp,
-    RenameTableOp, RenameValidatorOp, Retention, RollbackMigrationOp, SetBufferConfigOp,
-    SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
+    RenameRepoOp, RenameTableOp, RenameValidatorOp, Retention, RollbackMigrationOp,
+    SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp, UnbindValidatorOp,
 };

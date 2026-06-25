@@ -37,3 +37,29 @@ pub struct DropRepoOp {
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
 }
+
+/// Rename a repository inside the current database, preserving all of its
+/// tables, their data, indexes, and catalogue metadata.
+///
+/// The repository's record in the catalogue is re-keyed: the old
+/// `(db, from)` row is removed and a new `(db, to)` row is written with
+/// the same `engine`/`path` and the same `ResourceMeta` (owner/group/mode)
+/// as the original. Every child table's catalogue row is likewise re-keyed
+/// from `(db, from, table)` to `(db, to, table)`. In-memory, the
+/// `RepoInstance` is moved to the new key in `DbInstance::repos` and its
+/// internal `name` field is updated — **no per-table store copy happens**
+/// because table stores are keyed only by table name inside the repo (the
+/// repo name is NOT part of the physical store namespace).
+///
+/// Guards (refuse with a typed error instead of leaving dangling state):
+/// - The source repo must exist.
+/// - The destination must NOT exist.
+///
+/// ```text
+/// { "rename_repo": "old_name", "to": "new_name" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameRepoOp {
+    pub rename_repo: String,
+    pub to: String,
+}

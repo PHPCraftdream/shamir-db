@@ -237,6 +237,17 @@ impl RepoInstance {
         &self.name
     }
 
+    /// Return a clone of this `RepoInstance` with its `name` field replaced
+    /// by `new_name`. Used by [`DbInstance::rename_repo`] (Phase F.3) to
+    /// re-key a repository under a new logical name without touching any of
+    /// its physical table stores — the tables travel "for free" because they
+    /// are keyed by table name *inside* the repo, not by the repo name.
+    pub fn with_name(&self, new_name: String) -> Self {
+        let mut cloned = self.clone();
+        cloned.name = new_name;
+        cloned
+    }
+
     /// Per-table MvccStore map used by the commit pipeline to route
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
