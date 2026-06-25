@@ -388,3 +388,35 @@ fn create_db_if_not_exists_wire() {
     );
     assert!(op.is_admin());
 }
+
+// ============================================================================
+// FieldBuilder constraints — one_of
+// ============================================================================
+
+/// `one_of` values survive a msgpack round-trip with the correct scalar shapes.
+#[test]
+fn field_one_of_wire() {
+    let op = ddl::add_schema_rule("users")
+        .rule(
+            ddl::field(["status"])
+                .string()
+                .one_of(vec![mpack!("active"), mpack!("archived")]),
+        )
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["rule"]["one_of"], mpack!(["active", "archived"]));
+}
+
+/// `one_of` is absent from the wire encoding when not set.
+#[test]
+fn field_one_of_absent_when_none() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["status"]).string())
+        .build();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let j: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(
+        j["rule"].get("one_of").is_none(),
+        "one_of must be absent when not set, got: {j:?}"
+    );
+}

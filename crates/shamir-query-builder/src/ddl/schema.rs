@@ -5,6 +5,7 @@ use shamir_query_types::admin::{
     GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use shamir_query_types::batch::BatchOp;
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::IntoBatchOp;
 
@@ -164,6 +165,20 @@ impl FieldBuilder {
     /// Set the array element type constraint.
     pub fn array_of(mut self, tag: impl Into<String>) -> Self {
         self.constraints.array_of = Some(tag.into());
+        self
+    }
+
+    /// Enum constraint: the field value must be one of these.
+    ///
+    /// Accepts an iterator of already-typed [`QueryValue`]s (mirroring the
+    /// `functional_args` builder). Use the `mpack!` macro to build scalars
+    /// ergonomically: `.one_of(vec![mpack!("active"), mpack!("archived")])`.
+    /// Mirrors the TS builder's `oneOf(values)`.
+    pub fn one_of<I>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = QueryValue>,
+    {
+        self.constraints.one_of = Some(values.into_iter().collect());
         self
     }
 
