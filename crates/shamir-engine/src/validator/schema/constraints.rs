@@ -52,6 +52,12 @@ pub struct Constraints {
     pub unsigned: bool,
     /// Enumerated allowed values.  A single-element vec is a `const` check.
     pub one_of: Option<Vec<QueryValue>>,
+    /// Literal default value stamped on INSERT for an absent field
+    /// (Phase ②.4b — surface only; the pre-validation stamp on the insert
+    /// path lands in ②.4c).  Constant `QueryValue`; replay-safe by
+    /// construction (the stamped field is present on reload, so the stamp
+    /// never fires twice — see DDL-EVOLUTION-PLAN §②.4a variant B).
+    pub default: Option<QueryValue>,
     /// Element type for `List` fields (`array_of`).  Only meaningful when
     /// the field's [`TypeTag`] is `List`.
     pub array_of: Option<TypeTag>,

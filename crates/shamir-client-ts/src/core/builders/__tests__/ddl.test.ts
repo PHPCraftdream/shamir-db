@@ -532,6 +532,33 @@ describe('field()', () => {
   });
 });
 
+// ── field().default() (Phase ②.4b — surface only) ───────────────────
+// INSERT-path stamp-enforcement lands in ②.4c; here we only assert the
+// wire-shape: `.default(value)` emits a top-level `default: <value>` key
+// and is omitted when unset (mirrors serde `skip_serializing_if`).
+
+describe('field().default()', () => {
+  it('emits default: <number> on the wire', () => {
+    const rule = ddl.field(['count']).int().default(5).build();
+    expect(rule.default).toBe(5);
+    expect(rule).toEqual({
+      path: ['count'],
+      type: 'int',
+      default: 5,
+    });
+  });
+
+  it('emits default: <string> on the wire (any WireValue)', () => {
+    const rule = ddl.field(['role']).string().default('guest').build();
+    expect(rule.default).toBe('guest');
+  });
+
+  it('omits default when not set', () => {
+    const rule = ddl.field(['x']).int().build();
+    expect(rule).not.toHaveProperty('default');
+  });
+});
+
 // ── foreignKey (on_delete / on_update) ──────────────────────────────
 
 describe('field().foreignKey()', () => {

@@ -65,6 +65,13 @@ pub struct ConstraintsDto {
     /// Enum constraint: the value must be one of these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub one_of: Option<Vec<QueryValue>>,
+    /// Literal default value stamped on INSERT for an absent field
+    /// (Phase ②.4b — surface only; stamp-enforcement lands in ②.4c).
+    /// Carried as a constant `QueryValue`; computed defaults (`now()`,
+    /// scalars) are out of scope (would need the mutating-validator
+    /// framework — see DDL-EVOLUTION-PLAN §②.4a variant A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<QueryValue>,
     /// Array element type constraint (e.g. `"string"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub array_of: Option<String>,

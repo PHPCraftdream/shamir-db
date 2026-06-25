@@ -134,6 +134,10 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         }
     });
 
+    // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
+    // Read as-is: the persisted form is a QueryValue scalar.
+    let default = item.get("default").cloned();
+
     let array_of = item
         .get("array_of")
         .and_then(|v| v.as_str())
@@ -165,6 +169,7 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         min_len,
         unsigned,
         one_of,
+        default,
         array_of,
         scalar,
         format,

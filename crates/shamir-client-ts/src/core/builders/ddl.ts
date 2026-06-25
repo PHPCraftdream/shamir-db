@@ -725,6 +725,16 @@ export class FieldBuilder {
   }
 
   /**
+   * Phase ②.4b — literal default stamped on INSERT for an absent field
+   * (surface only; stamp-enforcement lands in ②.4c). Mirrors the Rust
+   * builder's `.default(value)`.
+   */
+  default(value: import('../types/write.js').WireValue): this {
+    this._constraints.default = value;
+    return this;
+  }
+
+  /**
    * Phase C3 — unique constraint.
    * The field value must not duplicate any existing row in the same table.
    */
