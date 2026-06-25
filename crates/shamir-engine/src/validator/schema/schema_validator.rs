@@ -132,13 +132,53 @@ impl RecordValidator for SchemaValidator {
                     }
 
                     // Phase C3 — unique constraint (async DB read).
-                    // Runs whenever ctx.db() is Some. The unique probe
-                    // (exists_in_self) reads SELF-table state and needs NO
-                    // cross-table resolver, so it is enforced on BOTH
-                    // transactional and autocommit writes (the autocommit path
-                    // routes through an implicit tx → ctx.db() is Some). See
-                    // the `autocommit also enforces unique` e2e. Skipped only
-                    // when no tx is threaded at all (raw-engine/unit callers).
+                    //
+                    // ┌─────────────────────────────────────────────────────────┐
+                    // │ DEFENSE-IN-DEPTH: two-layer unique contract (②.3b)     │
+                    // ├─────────────────────────────────────────────────────────┤
+                    // │ This block is the LOGICAL layer — a fail-fast probe     │
+                    // │ producing a clean field-scoped `unique_violation`. It  │
+                    // │ is NOT the authority on physical atomicity; that role  │
+                    // │ belongs to the index-guard layer (HIGH-A):             │
+                    // │                                                       │
+                    // │   • `unique_write_lock` (table_manager.rs:426)         │
+                    // │     — `tokio::sync::Mutex` serialising the non-tx      │
+                    // │     validate-then-write-then-index window AND the tx   │
+                    // │     commit re-check + posting (closes the non-tx ↔     │
+                    // │     tx-commit race).                                  │
+                    // │   • within-batch dedup — `commit_tx_inner` Phase 2.6   │
+                    // │     scans the staged write set before postings apply.  │
+                    // │                                                       │
+                    // │ The DDL-invariant `validate_unique_indexes`            │
+                    // │ (admin_schema.rs:103) — `unique` schema-rule ⟹ single │
+                    // │-field unique index — GUARANTEES the probe is O(1): it  │
+                    // │ resolves the field's index and delegates to            │
+                    // │ `ValidatorDb::exists_in_self` → `lookup_by_index`      │
+                    // │ (validator_db.rs:299), with a scan fallback only when  │
+                    // │ the value type has no inner scalar form.              │
+                    // │                                                       │
+                    // │ The probe fires on BOTH transactional and autocommit   │
+                    // │ writes: the autocommit path routes through             │
+                    // │ `run_implicit_batch_tx`, so `ctx.db()` is `Some` here  │
+                    // │ (unlike the FK check, which additionally requires a   │
+                    // │ cross-table resolver — see the FK block above). The    │
+                    // │ probe is skipped ONLY when no tx is threaded at all    │
+                    // │ (raw-engine / unit callers); in that arm the index-    │
+                    // │ guard alone still enforces uniqueness physically.      │
+                    // │                                                       │
+                    // │ Because the probe runs pre-commit it has a TOCTOU      │
+                    // │ window — it is early diagnosis, not the serialiser.    │
+                    // │ Treat the two layers as complementary, not redundant.  │
+                    // └─────────────────────────────────────────────────────────┘
+                    //
+                    // NULL-bypass: `materialize_as_qv` returns `None` for a
+                    // missing/NULL field, so a unique field whose value is NULL
+                    // skips the probe entirely (SQL semantics — unique does not
+                    // constrain NULL). The index-guard layer does the same.
+                    //
+                    // UPDATE-skip-if-unchanged: on UPDATE, if the new value
+                    // equals the old (committed) value for this field, the
+                    // probe is skipped — the record already owns that value.
                     if rule.constraints.unique {
                         if let Some(db) = ctx.db() {
                             if let Some(field_qv) = rule.materialize_as_qv(fields, &path_refs) {
@@ -181,13 +221,14 @@ impl RecordValidator for SchemaValidator {
                                 }
                             }
                         }
-                        // else: ctx.db() == None → unique check skipped. This
+                        // else: ctx.db() == None → unique probe skipped. This
                         // only happens on the raw-engine path with no tx
                         // threaded (legacy/unit callers). The autocommit path
-                        // DOES thread an implicit tx, so ctx.db() is Some and
-                        // unique IS enforced there (no resolver needed — the
-                        // probe is self-table). See the `autocommit also
-                        // enforces unique` e2e.
+                        // DOES thread an implicit tx (`run_implicit_batch_tx`),
+                        // so ctx.db() is Some and the probe fires there too.
+                        // The index-guard layer (`unique_write_lock`, HIGH-A)
+                        // still enforces uniqueness physically even when this
+                        // probe is skipped — see the contract block above.
                     }
                 }
             }
