@@ -493,15 +493,45 @@ impl<'a> QueryRunner<'a> {
                     };
                     &subst_op
                 };
+
+                // Phase ②.2b — ON UPDATE referential-action enforcement.
+                //
+                // Mirrors the delete-path (Phase D.1/D.2): build the fan-out
+                // plan BEFORE the tx closure (the resolver cannot be captured
+                // into the HRTB closure of `run_implicit_batch_tx` — same
+                // constraint as RESTRICT/CASCADE on delete). The plan carries
+                // pre-resolved child `TableManager` handles + the old→new
+                // value pairs; an empty plan (the common case — update does
+                // not touch a referenced parent field) is a fast no-op.
+                //
+                // TOCTOU caveat: same as delete — see fk_on_update.rs docs.
+                let fk_update_plan = super::fk_on_update::plan_fk_on_update(
+                    self.resolver,
+                    table_ref,
+                    &table,
+                    op_ref,
+                    &ctx,
+                    alias,
+                )
+                .await?;
+
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table
-                        .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver))
-                        .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: None,
-                        })?,
+                    Some(tx) => {
+                        // Apply child fan-out (cascade/setnull) inside the
+                        // explicit tx, BEFORE the parent update. Child rows
+                        // reference parent *values* (not row identity), so
+                        // re-keying them first keeps the tx consistent.
+                        super::fk_on_update::apply_fk_update_plan(fk_update_plan, tx, alias)
+                            .await?;
+                        table
+                            .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver))
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?
+                    }
                     // F4b-2: "everything is a transaction" — a non-tx update
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1).
@@ -520,8 +550,23 @@ impl<'a> QueryRunner<'a> {
                         let owned_refs = resolved_refs.clone();
                         let owned_params = self.params.clone();
                         let owned_actor = self.actor.clone();
+                        let owned_alias = alias.to_string();
                         repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
+                                // Apply child fan-out inside the implicit tx
+                                // BEFORE the parent update. The plan carries
+                                // pre-resolved child handles (no resolver
+                                // needed inside the closure).
+                                super::fk_on_update::apply_fk_update_plan(
+                                    fk_update_plan,
+                                    tx,
+                                    &owned_alias,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    shamir_storage::error::DbError::Validation(e.to_string())
+                                })?;
+
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
                                     .with_actor(owned_actor)
