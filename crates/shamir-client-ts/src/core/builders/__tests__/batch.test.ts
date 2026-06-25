@@ -9,6 +9,7 @@ import { Batch } from '../batch.js';
 import { Query } from '../query.js';
 import { write } from '../write.js';
 import { filter } from '../filter.js';
+import { Handle, RowRef } from '../handle.js';
 import type {
   BatchResponse,
   BatchRequest,
@@ -317,5 +318,171 @@ describe('Batch — response type smoke', () => {
     };
     expect(resp.transaction).toBeUndefined();
     expect(resp.results).toEqual({});
+  });
+});
+
+// ── G3: typed Handle / RowRef ───────────────────────────────────────
+
+describe('Batch — Handle / RowRef (G3)', () => {
+  it('handle() returns a Handle for a registered alias', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    const h = b.handle('u');
+    expect(h).toBeInstanceOf(Handle);
+  });
+
+  it('ref() is an alias for handle()', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.ref('u')).toBeInstanceOf(Handle);
+  });
+
+  it('handle() throws for an unregistered alias', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(() => b.handle('nope')).toThrow(/not registered/);
+  });
+
+  it('handle() does not break add() chaining', () => {
+    // add() still returns this; handle() is a separate accessor.
+    const b = Batch.create()
+      .add('u', Query.from('users'))
+      .add('o', Query.from('orders'));
+    expect(b.handle('u').column('id')).toEqual({ $query: 'u', path: '[].id' });
+  });
+
+  it('Handle.column(field) → $query path "[].field"', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').column('id')).toEqual({ $query: 'u', path: '[].id' });
+  });
+
+  it('Handle.column(nested) → "[].a.b"', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').column(['addr', 'city'])).toEqual({
+      $query: 'u',
+      path: '[].addr.city',
+    });
+  });
+
+  it('Handle.row(i) returns a RowRef', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').row(2)).toBeInstanceOf(RowRef);
+  });
+
+  it('Handle.first() = row(0)', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    const first = b.handle('u').first();
+    expect(first.field('id')).toEqual({ $query: 'u', path: '[0].id' });
+  });
+
+  it('Handle.all() → bare $query ref (no path)', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').all()).toEqual({ $query: 'u' });
+  });
+
+  it('RowRef.field(f) → "[i].field"', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').row(3).field('name')).toEqual({
+      $query: 'u',
+      path: '[3].name',
+    });
+  });
+
+  it('RowRef.field(nested) → "[i].a.b"', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').row(1).field(['profile', 'age'])).toEqual({
+      $query: 'u',
+      path: '[1].profile.age',
+    });
+  });
+
+  it('RowRef.get() → "[i]"', () => {
+    const b = Batch.create().add('u', Query.from('users'));
+    expect(b.handle('u').row(5).get()).toEqual({ $query: 'u', path: '[5]' });
+  });
+
+  it('Handle.column() wires into a downstream query filter', () => {
+    // Real usage: build the batch in two steps so the Handle is materialised
+    // before the downstream query references it.
+    const step1 = Batch.create().add('u', Query.from('users'));
+    const userIds = step1.handle('u').column('id');
+    const b = step1
+      .add('o', Query.from('orders').where(filter.eq('user_id', userIds)))
+      .build();
+    expect((b.queries.o as { where: unknown }).where).toEqual({
+      op: 'eq',
+      field: ['user_id'],
+      value: { $query: 'u', path: '[].id' },
+    });
+  });
+});
+
+// ── G4: tryBuild validation ─────────────────────────────────────────
+
+describe('Batch — tryBuild (G4)', () => {
+  it('returns the built request on success (same shape as build)', () => {
+    const b = Batch.create()
+      .add('u', Query.from('users'))
+      .add(
+        'o',
+        Query.from('orders').where(filter.eq('user_id', filter.queryRef('u', '[].id'))),
+        { after: ['u'] },
+      );
+    const req = b.tryBuild();
+    expect((req.queries.o as { where: unknown }).where).toEqual({
+      op: 'eq',
+      field: ['user_id'],
+      value: { $query: 'u', path: '[].id' },
+    });
+    expect(req.queries.o.after).toEqual(['u']);
+  });
+
+  it('throws when a $query ref points to an undeclared alias', () => {
+    const b = Batch.create().add(
+      'o',
+      Query.from('orders').where(filter.eq('user_id', filter.queryRef('ghost', '[].id'))),
+    );
+    expect(() => b.tryBuild()).toThrow(/unknown \$query alias 'ghost'/);
+  });
+
+  it('throws when an after-dep names an undeclared alias', () => {
+    const b = Batch.create().add('o', Query.from('orders'), { after: ['nope'] });
+    expect(() => b.tryBuild()).toThrow(/after-dependency 'nope'/);
+  });
+
+  it('validates $query refs nested inside and/or groups', () => {
+    const b = Batch.create().add(
+      'o',
+      Query.from('orders').where(
+        filter.and(
+          filter.eq('status', 'open'),
+          filter.eq('uid', filter.queryRef('missing')),
+        ),
+      ),
+    );
+    expect(() => b.tryBuild()).toThrow(/unknown \$query alias 'missing'/);
+  });
+
+  it('validates $query refs inside SubBatchOp.bind', () => {
+    const inner = Batch.create('inner').add('q', Query.from('items')).build();
+    const b = Batch.create().subBatch('proc', inner, {
+      bind: { uid: filter.queryRef('undeclared', '[0].id') },
+    });
+    expect(() => b.tryBuild()).toThrow(/unknown \$query alias 'undeclared'/);
+  });
+
+  it('build() stays unchecked (does not throw on bad refs)', () => {
+    const b = Batch.create().add(
+      'o',
+      Query.from('orders').where(filter.eq('uid', filter.queryRef('ghost'))),
+    );
+    expect(() => b.build()).not.toThrow();
+  });
+
+  it('succeeds with no refs and no after deps', () => {
+    const b = Batch.create()
+      .add('a', Query.from('users'))
+      .add('b', Query.from('orders'));
+    expect(b.tryBuild().queries).toEqual({
+      a: { from: 'users' },
+      b: { from: 'orders' },
+    });
   });
 });

@@ -39,4 +39,5 @@ export { principalId } from '../principal-id.js';
 export * from './query.js';
 export * from './call.js';
 export * from './batch.js';
+export * from './handle.js';
 export * from './subscribe.js';

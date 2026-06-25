@@ -19,10 +19,11 @@ import type {
   BatchRequest,
   BatchResponse,
 } from '../types/batch.js';
-import type { FilterValue } from '../types/filter.js';
+import type { FilterValue, Filter } from '../types/filter.js';
 import type { ExecCtx } from '../exec-ctx.js';
 import type { SubscribeSource, SubscribeOpts } from './subscribe.js';
 import { subscribe, unsubscribeOp } from './subscribe.js';
+import { Handle } from './handle.js';
 
 /** Something that has a `.build()` method returning a wire op. */
 interface Buildable {
@@ -224,6 +225,49 @@ export class Batch {
   }
 
   /**
+   * Validated build — assembles the wire `BatchRequest` (like {@link build})
+   * and then checks every entry for dangling references:
+   *
+   *  (a) a `$query` ref whose `alias` is not declared in this batch;
+   *  (b) an `after` entry that names an undeclared alias.
+   *
+   * Throws a descriptive `Error` on the first violation. On success returns
+   * the built request (identical to `build()`).
+   *
+   * `build()` itself remains unchecked for backward compatibility.
+   */
+  tryBuild(): BatchRequest {
+    const req = this.build();
+    const declared = new Set(Object.keys(req.queries));
+
+    for (const [alias, entry] of Object.entries(req.queries)) {
+      // (a) $query refs anywhere in the entry's filter/value tree.
+      for (const ref of collectQueryRefs(entry)) {
+        if (!declared.has(ref)) {
+          throw new Error(
+            `Batch.tryBuild: entry '${alias}' references unknown $query alias '${ref}' ` +
+              `(declared: ${[...declared].sort().join(', ') || '∅'})`,
+          );
+        }
+      }
+
+      // (b) `after` dependencies must name declared aliases.
+      if (entry.after) {
+        for (const dep of entry.after) {
+          if (!declared.has(dep)) {
+            throw new Error(
+              `Batch.tryBuild: entry '${alias}' has after-dependency '${dep}' ` +
+                `that is not declared in this batch`,
+            );
+          }
+        }
+      }
+    }
+
+    return req;
+  }
+
+  /**
    * Build and send the batch via `client.executeWithTouch(db, batch)`, which
    * handles smart-write (id-on-wire) transparently on v2 servers and falls
    * back to plain execute on v1.
@@ -258,6 +302,29 @@ export class Batch {
   }
 
   /**
+   * Return a typed {@link Handle} for an already-registered `alias`, enabling
+   * type-safe `$query` result references (`.column()`, `.row(i)`, `.first()`,
+   * `.all()`). Does NOT mutate the batch — it is an accessor only, so
+   * `Batch.add()` chaining (which returns `this`) is unaffected.
+   *
+   * Throws if `alias` has not been declared via `.add()` / `.subBatch()` /
+   * `.subscribe()`.
+   */
+  handle(alias: string): Handle {
+    if (!(alias in this.queriesMap)) {
+      throw new Error(
+        `Batch.handle('${alias}'): alias not registered — add it first via .add('${alias}', …)`,
+      );
+    }
+    return new Handle(alias);
+  }
+
+  /** Alias for {@link handle}. */
+  ref(alias: string): Handle {
+    return this.handle(alias);
+  }
+
+  /**
    * Build and send via the bound context. Throws if not bound.
    * Layer-2 counterpart to `execute(client, db)`.
    */
@@ -268,5 +335,162 @@ export class Batch {
       );
     }
     return this.ctxValue.exec(this.build());
+  }
+}
+
+// ── $query-ref collection (for tryBuild validation) ───────────────────
+//
+// These helpers recursively walk a built `QueryEntry` looking for
+// `{ $query: alias, path? }` values. They cover every position a
+// `FilterValue` can appear: filter leaves (`value`, `values[]`, `from`,
+// `to`), composite filters (`and`/`or`/`not`), and value composites
+// (`$fn.args`, `$expr.args`, `$cond.then`/`$cond.else`, `$param`→none,
+// plain arrays, and `SubBatchOp.bind` maps).
+
+/** Recursive collector: yields every `$query` alias referenced in `fv`. */
+function collectFromFilterValue(fv: FilterValue, out: string[]): void {
+  if (fv === null || fv === undefined) return;
+  if (typeof fv === 'boolean' || typeof fv === 'number' || typeof fv === 'string') {
+    return;
+  }
+  if (fv instanceof Uint8Array) return;
+  if (Array.isArray(fv)) {
+    for (const item of fv) collectFromFilterValue(item, out);
+    return;
+  }
+  // Object-shaped FilterValue.
+  const obj = fv as Record<string, unknown>;
+  if ('$query' in obj && typeof obj.$query === 'string') {
+    out.push(obj.$query as string);
+    return;
+  }
+  if ('$ref' in obj) return; // field ref — no nested query alias.
+  if ('$param' in obj) return; // param name — not a query alias.
+  if ('$fn' in obj) {
+    const fn = obj.$fn;
+    if (typeof fn === 'string') return; // FnCall::Simple — no args.
+    if (fn && typeof fn === 'object') {
+      const args = (fn as { args?: unknown[] }).args;
+      if (Array.isArray(args)) for (const a of args) collectFromFilterValue(a as FilterValue, out);
+    }
+    return;
+  }
+  if ('$expr' in obj) {
+    const args = (obj.$expr as { args?: unknown[] }).args;
+    if (Array.isArray(args)) for (const a of args) collectFromFilterValue(a as FilterValue, out);
+    return;
+  }
+  if ('$cond' in obj) {
+    const c = obj.$cond as { if?: unknown; then?: unknown; else?: unknown };
+    if (c.if) collectFromFilter(c.if as Filter, out);
+    if (c.then !== undefined) collectFromFilterValue(c.then as FilterValue, out);
+    if (c.else !== undefined) collectFromFilterValue(c.else as FilterValue, out);
+    return;
+  }
+}
+
+/** Recursive collector over a `Filter` tree. */
+function collectFromFilter(f: Filter, out: string[]): void {
+  switch (f.op) {
+    case 'and':
+    case 'or':
+      for (const sub of f.filters) collectFromFilter(sub, out);
+      return;
+    case 'not':
+      collectFromFilter(f.filter, out);
+      return;
+    case 'eq':
+    case 'ne':
+    case 'gt':
+    case 'gte':
+    case 'lt':
+    case 'lte':
+    case 'field':
+    case 'contains':
+      collectFromFilterValue(f.value, out);
+      return;
+    case 'in':
+    case 'not_in':
+    case 'contains_any':
+    case 'contains_all':
+      for (const v of f.values) collectFromFilterValue(v, out);
+      return;
+    case 'between':
+      collectFromFilterValue(f.from, out);
+      collectFromFilterValue(f.to, out);
+      return;
+    case 'computed':
+      collectFromFilterValue(f.value, out);
+      if (f.expr_args) for (const v of f.expr_args) collectFromFilterValue(v, out);
+      return;
+    // leaf filters with no FilterValue positions.
+    case 'like':
+    case 'i_like':
+    case 'regex':
+    case 'is_null':
+    case 'is_not_null':
+    case 'exists':
+    case 'not_exists':
+    case 'fts':
+    case 'vector_similarity':
+      return;
+    default: {
+      // Exhaustiveness guard — if a new variant appears, this fails at compile
+      // time when the switch is tightened; at runtime we no-op.
+      const _exhaustive: never = f;
+      void _exhaustive;
+      return;
+    }
+  }
+}
+
+/**
+ * Collect every `$query` alias referenced inside a built `QueryEntry`.
+ * Covers: top-level `ReadQuery.where`, `SubBatchOp` (bind map + nested
+ * queries), and `SubscribeOp.deliver.batch.bind`. Recurses into nested
+ * sub-batches so deeply-nested refs are caught.
+ */
+function collectQueryRefs(entry: QueryEntry): string[] {
+  const out: string[] = [];
+  collectFromEntry(entry as Record<string, unknown>, out);
+  return out;
+}
+
+/** Recursive walker over a single entry object. */
+function collectFromEntry(e: Record<string, unknown>, out: string[]): void {
+  // ReadQuery.where
+  if (e.where && typeof e.where === 'object') {
+    collectFromFilter(e.where as Filter, out);
+  }
+
+  // SubBatchOp: { batch: BatchRequest, bind?: Record<string, FilterValue> }
+  // — `bind` lives on the entry itself, not inside `batch`.
+  if (e.batch && typeof e.batch === 'object') {
+    // bind map on this entry.
+    if (e.bind && typeof e.bind === 'object') {
+      for (const v of Object.values(e.bind as Record<string, unknown>)) {
+        collectFromFilterValue(v as FilterValue, out);
+      }
+    }
+    // recurse into the inner batch's queries.
+    const sub = e.batch as { queries?: Record<string, unknown> };
+    if (sub.queries) {
+      for (const inner of Object.values(sub.queries)) {
+        if (inner && typeof inner === 'object') {
+          collectFromEntry(inner as Record<string, unknown>, out);
+        }
+      }
+    }
+  }
+
+  // DeliverMode.batch (inside SubscribeOp.deliver) — shape:
+  //   { batch: { batch: BatchRequest, bind?: Record<string, FilterValue> } }
+  if (e.deliver && typeof e.deliver === 'object') {
+    const d = e.deliver as { batch?: { bind?: Record<string, unknown> } };
+    if (d.batch?.bind) {
+      for (const v of Object.values(d.batch.bind)) {
+        collectFromFilterValue(v as FilterValue, out);
+      }
+    }
   }
 }

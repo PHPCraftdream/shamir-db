@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { subscribe, unsubscribeOp } from '../subscribe.js';
 import { eq, exists } from '../filter.js';
+import { call } from '../call.js';
 import { Batch } from '../batch.js';
 import { Query } from '../query.js';
 
@@ -162,6 +163,81 @@ describe('subscribe', () => {
       { fromVersion: 99 },
     );
     expect(op.from_version).toBe(99);
+  });
+
+  // ── G6: deliverCall ──────────────────────────────────────────────
+
+  it('call option produces externally-tagged { call: CallOp } deliver', () => {
+    const op = subscribe({
+      store: 'main',
+      table: 'messages',
+      where: eq('x', 1),
+      call: call('notify', ['body']),
+    });
+    expect(op.deliver).toEqual({
+      call: {
+        call: 'notify',
+        repo: 'main',
+        params: ['body'],
+      },
+    });
+  });
+
+  it('call with no params omits params field', () => {
+    const op = subscribe({
+      store: 'main',
+      table: 't',
+      call: call('ping'),
+    });
+    expect(op.deliver).toEqual({ call: { call: 'ping', repo: 'main' } });
+  });
+
+  it('call in custom repo is carried through', () => {
+    const op = subscribe({
+      store: 'main',
+      table: 't',
+      call: call('fn', [], { repo: 'analytics' }),
+    });
+    expect(op.deliver).toEqual({ call: { call: 'fn', repo: 'analytics' } });
+  });
+
+  it('call + deliver on same source throws (mutual exclusion)', () => {
+    expect(() =>
+      subscribe({
+        store: 'main',
+        table: 't',
+        deliver: 'records',
+        call: call('fn'),
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it('call + handle on same source throws (mutual exclusion)', () => {
+    expect(() =>
+      subscribe({
+        store: 'main',
+        table: 't',
+        handle: (b) => b.add('i', Query.from('x')),
+        call: call('fn'),
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it('call across sources that agree is allowed', () => {
+    const op = subscribe([
+      { store: 'main', table: 'a', call: call('fn') },
+      { store: 'main', table: 'b', call: call('fn') },
+    ]);
+    expect(op.deliver).toEqual({ call: { call: 'fn', repo: 'main' } });
+  });
+
+  it('call vs deliver across sources conflicts', () => {
+    expect(() =>
+      subscribe([
+        { store: 'main', table: 'a', call: call('fn') },
+        { store: 'main', table: 'b', deliver: 'keys' },
+      ]),
+    ).toThrow(/conflicting deliver\/handle\/call/);
   });
 });
 
