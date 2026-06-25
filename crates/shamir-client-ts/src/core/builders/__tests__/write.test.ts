@@ -44,6 +44,18 @@ describe('insert', () => {
     const op = write.insert('users', { id: 1 }, { repo: 'main' });
     expect(op.insert_into).toBe('users');
   });
+
+  it('opts.returningFields emits select.fields projection', () => {
+    const op = write.insert('users', { name: 'Alice', age: 30 }, {
+      returningFields: ['name'],
+    });
+    expect(op.select).toEqual({ fields: ['name'] });
+  });
+
+  it('without returningFields omits select key', () => {
+    const op = write.insert('users', { name: 'Alice' });
+    expect(op).not.toHaveProperty('select');
+  });
 });
 
 // ── update ───────────────────────────────────────────────────────────
@@ -152,6 +164,32 @@ describe('del', () => {
         { op: 'eq', field: ['status'], value: 'inactive' },
       ],
     });
+  });
+
+  it('opts.returning emits empty select (all fields)', () => {
+    const op = write.del('users', filter.eq('id', 42), { returning: true });
+    expect(op.select).toEqual({});
+    expect(op.select).not.toHaveProperty('fields');
+  });
+
+  it('opts.returningFields emits select.fields projection', () => {
+    const op = write.del('users', filter.eq('id', 42), {
+      returningFields: ['id', 'name'],
+    });
+    expect(op.select).toEqual({ fields: ['id', 'name'] });
+  });
+
+  it('returningFields takes precedence over returning', () => {
+    const op = write.del('users', filter.eq('id', 42), {
+      returning: true,
+      returningFields: ['id'],
+    });
+    expect(op.select).toEqual({ fields: ['id'] });
+  });
+
+  it('without returning opts omits select key', () => {
+    const op = write.del('users', filter.eq('id', 42));
+    expect(op).not.toHaveProperty('select');
   });
 });
 

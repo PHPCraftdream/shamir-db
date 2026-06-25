@@ -10,7 +10,7 @@ use crate::filter::Filter;
 use crate::TableRef;
 
 // ============================================================================
-// UPDATE SELECT TYPES
+// UPDATE / DELETE / INSERT SELECT TYPES
 // ============================================================================
 
 /// Mode for returning records from UPDATE operation.
@@ -29,11 +29,41 @@ pub enum UpdateReturnMode {
 }
 
 /// Configuration for selecting results from UPDATE operation.
+///
+/// `return_mode` selects which matched rows are returned (changed/unchanged/all);
+/// `fields`, when present, restricts each returned row to the named fields
+/// (a projection).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateSelect {
     #[serde(default)]
     pub return_mode: UpdateReturnMode,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+}
+
+/// Configuration for returning records from DELETE operation.
+///
+/// DELETE has no "changed/unchanged" distinction — every matched row is
+/// removed — so the only knob is whether to return rows at all (the mere
+/// presence of `DeleteSelect` on [`DeleteOp`] opts in) and an optional
+/// field projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DeleteSelect {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+}
+
+/// Optional projection applied to records returned from INSERT.
+///
+/// Mirrors the `fields` half of [`UpdateSelect`] / [`DeleteSelect`]. INSERT
+/// has no row-filtering mode — every inserted row is returned when the
+/// caller asks for results — so only the projection is configurable. The
+/// mere presence of an `InsertSelect` on [`InsertOp`] is a no-op marker
+/// (records already come back by default via `return_result`); it only
+/// matters when `fields` is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct InsertSelect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
 }
@@ -61,6 +91,14 @@ pub struct InsertOp {
     /// Serializes as msgpack `bin` (not seq-of-u8) via `serde_bytes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records_idmsgpack: Vec<ByteBuf>,
+
+    /// Optional projection over the returned inserted records.
+    ///
+    /// Backward-compatible: when `None` (the default), inserted records
+    /// come back unchanged. When `Some(InsertSelect { fields: Some(names) })`,
+    /// each returned row is restricted to the named fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<InsertSelect>,
 }
 
 /// Update operation - updates records matching a filter.
@@ -103,4 +141,10 @@ pub struct DeleteOp {
     /// Filter condition (required for safety).
     #[serde(rename = "where")]
     pub where_clause: Filter,
+
+    /// Optional RETURNING configuration. When `None`, no rows are returned
+    /// (only `affected`). When `Some`, the matched-and-deleted rows are
+    /// returned, optionally restricted to a field projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<DeleteSelect>,
 }

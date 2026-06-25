@@ -198,6 +198,7 @@ impl SystemStore {
                 field: vec!["name".to_string()],
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         Ok(())
@@ -285,6 +286,7 @@ impl SystemStore {
                     },
                 ],
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -389,6 +391,7 @@ impl SystemStore {
                     },
                 ],
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -502,6 +505,7 @@ impl SystemStore {
                 field: vec!["name".to_string()],
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -670,6 +674,7 @@ impl SystemStore {
                 field: vec!["group_id".to_string()],
                 value: crate::query::filter::FilterValue::Int(group_id as i64),
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         table.data_store().flush().await?;
@@ -884,6 +889,7 @@ impl SystemStore {
                 field: vec!["name".to_string()],
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -977,6 +983,7 @@ impl SystemStore {
                 field: vec!["path".to_string()],
                 value: crate::query::filter::FilterValue::String(path_key.to_string()),
             },
+            select: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.

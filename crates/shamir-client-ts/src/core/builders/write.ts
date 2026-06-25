@@ -20,6 +20,8 @@ import type {
   WireValue,
   UpdateReturnMode,
   UpdateSelect,
+  DeleteSelect,
+  InsertSelect,
   InsertOp,
   UpdateOp,
   SetOp,
@@ -36,14 +38,22 @@ function tableRef(repo: string | undefined, table: string): TableRefWire {
 /**
  * Build an `InsertOp`. Accepts a single record or an array; normalises to
  * an array internally.
+ *
+ * `opts.returningFields`, when provided, emits an `InsertSelect` projection
+ * on the wire so each returned row carries only the named fields. Mirror of
+ * `UpdateBuilder.returning(..., fields)` / `DeleteBuilder.returning(fields)`.
  */
 export function insert(
   table: string,
   values: WireValue | WireValue[],
-  opts?: { repo?: string },
+  opts?: { repo?: string; returningFields?: string[] },
 ): InsertOp {
   const rows = Array.isArray(values) ? values : [values];
-  return { insert_into: tableRef(opts?.repo, table), values: rows };
+  const op: InsertOp = { insert_into: tableRef(opts?.repo, table), values: rows };
+  if (opts?.returningFields !== undefined) {
+    op.select = { fields: opts.returningFields };
+  }
+  return op;
 }
 
 // ── update (fluent builder) ──────────────────────────────────────────
@@ -133,13 +143,25 @@ export function upsert(
 /**
  * Build a `DeleteOp`. Exported as `del` since `delete` is a reserved word
  * in JavaScript. `where` is required (no skip on the wire).
+ *
+ * `opts.returning` (boolean) or `opts.returningFields` (string[]) opts in
+ * to RETURNING — emitted as a `DeleteSelect` on the wire. When
+ * `returningFields` is given, each returned row is restricted to the named
+ * fields; `returning: true` alone returns all fields. Mirror of
+ * `UpdateBuilder.returning(mode, fields)`.
  */
 export function del(
   table: string,
   where: Filter,
-  opts?: { repo?: string },
+  opts?: { repo?: string; returning?: boolean; returningFields?: string[] },
 ): DeleteOp {
-  return { delete_from: tableRef(opts?.repo, table), where };
+  const op: DeleteOp = { delete_from: tableRef(opts?.repo, table), where };
+  if (opts?.returningFields !== undefined) {
+    op.select = { fields: opts.returningFields };
+  } else if (opts?.returning) {
+    op.select = {};
+  }
+  return op;
 }
 
 /** Aggregate namespace — every write constructor in one object. */

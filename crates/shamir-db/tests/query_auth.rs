@@ -760,6 +760,7 @@ fn test_check_batch_denies() {
                 insert_into: TableRef::new("users"),
                 values: vec![],
                 records_idmsgpack: Vec::new(),
+                select: None,
             }),
             return_result: true,
             after: Vec::new(),

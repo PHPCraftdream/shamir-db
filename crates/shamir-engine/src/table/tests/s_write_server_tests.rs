@@ -115,6 +115,7 @@ fn idmsgpack_op(table: &str, bufs: Vec<ByteBuf>) -> InsertOp {
         insert_into: TableRef::new(table),
         values: Vec::new(),
         records_idmsgpack: bufs,
+        select: None,
     }
 }
 

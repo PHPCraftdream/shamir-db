@@ -408,6 +408,7 @@ impl<'a> QueryRunner<'a> {
                         insert_into: op.insert_into.clone(),
                         values,
                         records_idmsgpack: Vec::new(),
+                        select: op.select.clone(),
                     };
                     &subst_op
                 };

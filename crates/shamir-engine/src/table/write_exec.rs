@@ -277,6 +277,18 @@ impl TableManager {
                     });
                 }
             }
+            // Optional RETURNING projection (InsertSelect.fields). When set,
+            // restrict every returned row to the named fields. This is a
+            // post-build pass — the rows above were already materialised by
+            // `build_insert_result_records` / the id-keyed branch, so the
+            // projection just walks each `fields: QueryValue::Map` and drops
+            // unrequested keys. Cheap (one map rebuild per row) and only
+            // runs when the caller actually asks for it.
+            if let Some(fields) = op.select.as_ref().and_then(|s| s.fields.as_deref()) {
+                for rec in records.iter_mut() {
+                    rec.fields = project_query_value(rec.fields.clone(), Some(fields));
+                }
+            }
             records
         } else {
             Vec::new()
@@ -503,10 +515,12 @@ impl TableManager {
                             m.insert(k.clone(), v.clone());
                         }
                     }
-                    result_records.push(InsertedRecord {
-                        id: None,
-                        fields: QueryValue::Map(m),
-                    });
+                    // Optional field projection (UpdateSelect.fields). When
+                    // present, restrict the returned row to the named fields
+                    // — symmetric with INSERT/DELETE RETURNING projections.
+                    let projection = op.select.as_ref().and_then(|s| s.fields.as_deref());
+                    let fields = project_query_value(QueryValue::Map(m), projection);
+                    result_records.push(InsertedRecord { id: None, fields });
                 }
             }
         }
@@ -540,27 +554,32 @@ impl TableManager {
             let bindings = self.validator_bindings();
             bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
         };
+        // RETURNING: when the caller opted in via `op.select`, the matched
+        // records' raw bytes must be retained alongside the id so we can
+        // de-intern them into a `QueryValue` map for the result. Combined
+        // with `has_delete_validators` — either reason forces bytes-on.
+        let wants_records = op.select.is_some();
+        let keep_bytes = has_delete_validators || wants_records;
 
         // `to_delete`: (RecordId, Option<Bytes>).
         //
         // - Full-scan arm: the filter runs over a `RecordView` lens (no
         //   `InnerValue` tree decode). Bytes are kept alongside the id so the
         //   validator pass below can build a `RecordView` without a second
-        //   store read. `RecordCow::Owned` (aggregate / GROUP-BY path) has the
-        //   tree already; we serialize it once if validators are needed.
+        //   store read, and so RETURNING can de-intern the row. When neither
+        //   validators nor RETURNING are active, bytes are dropped (skip the
+        //   per-row clone). `RecordCow::Owned` (aggregate / GROUP-BY path)
+        //   has the tree already; we serialize it once if needed.
         // - Index arm: the planner already resolved the id set; bytes are
         //   serialised from the already-decoded `InnerValue` only when
-        //   validators are active, otherwise the record is skipped.
+        //   validators or RETURNING are active, otherwise the record is
+        //   skipped.
         let to_delete: Vec<(RecordId, Option<Bytes>)> =
             if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
                 via_index
                     .into_iter()
                     .map(|(id, iv)| {
-                        let bytes = if has_delete_validators {
-                            iv.to_bytes().ok()
-                        } else {
-                            None
-                        };
+                        let bytes = if keep_bytes { iv.to_bytes().ok() } else { None };
                         (id, bytes)
                     })
                     .collect()
@@ -600,7 +619,7 @@ impl TableManager {
                                 // memory. Filter via the tree (implements
                                 // RecordRef), serialise only when needed.
                                 if callback.matches(&tree, ctx) {
-                                    let bytes = if has_delete_validators {
+                                    let bytes = if keep_bytes {
                                         tree.to_bytes().ok()
                                     } else {
                                         None
@@ -641,16 +660,50 @@ impl TableManager {
             }
         }
 
+        // Stage the deletions and collect ids of actually-removed rows for
+        // RETURNING. Only rows that `delete_tx` reports as removed (the id
+        // existed in this tx's view) contribute to `affected` and to the
+        // returned records.
         let mut affected: u64 = 0;
-        for (id, _) in to_delete {
+        let mut removed_with_bytes: Vec<Bytes> = Vec::new();
+        for (id, maybe_bytes) in to_delete {
             if self.delete_tx(id, Some(&mut *tx)).await? {
                 affected += 1;
+                if wants_records {
+                    if let Some(b) = maybe_bytes {
+                        removed_with_bytes.push(b);
+                    }
+                }
+            }
+        }
+
+        // Build RETURNING rows. Each removed record's bytes are de-interned
+        // via the base interner (always safe — these are committed rows) and
+        // wrapped as `InsertedRecord { id: None, fields }` so the wire shape
+        // matches UPDATE-RETURNING. When `op.select.fields` is set, each row
+        // is restricted to the named fields.
+        let mut result_records: Vec<InsertedRecord> = Vec::new();
+        if wants_records {
+            let projection = op.select.as_ref().and_then(|s| s.fields.as_deref());
+            result_records.reserve(removed_with_bytes.len());
+            for bytes in &removed_with_bytes {
+                let view = RecordView::new(bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "execute_delete_tx: RecordView for returning: {e}"
+                    ))
+                })?;
+                let qv = record_view_to_query_value(&view, interner)?;
+                let projected = project_query_value(qv, projection);
+                result_records.push(InsertedRecord {
+                    id: None,
+                    fields: projected,
+                });
             }
         }
 
         Ok(WriteResult {
             affected,
-            records: Vec::new(),
+            records: result_records,
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }
@@ -909,4 +962,32 @@ fn build_insert_result_records(
             fields: (**value).clone(),
         })
         .collect()
+}
+
+/// Apply an optional field projection to a `QueryValue::Map`.
+///
+/// When `fields` is `None` or the value is not a map, `value` is returned
+/// unchanged. When `fields` is `Some(names)`, a new map is built containing
+/// only the entries whose key is in `names`, preserving the projection's
+/// order (callers typically ask for a stable, predictable wire shape). Keys
+/// absent from the input map are silently dropped — RETURNING a missing
+/// field is not an error, it is just absent from the row.
+///
+/// Used by INSERT / DELETE RETURNING to honour `InsertSelect.fields` /
+/// `DeleteSelect.fields`.
+fn project_query_value(value: QueryValue, fields: Option<&[String]>) -> QueryValue {
+    let Some(names) = fields else {
+        return value;
+    };
+    let Value::Map(src) = value else {
+        return value;
+    };
+    let mut out: shamir_types::types::common::TMap<String, Value<String>> =
+        shamir_types::types::common::new_map();
+    for name in names {
+        if let Some(v) = src.get(name) {
+            out.insert(name.clone(), v.clone());
+        }
+    }
+    QueryValue::Map(out)
 }
