@@ -727,6 +727,11 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
     if let Some(items) = &c.one_of {
         m.insert("one_of".to_string(), QueryValue::List(items.clone()));
     }
+    // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
+    // Persisted as-is (QueryValue scalar), mirroring how `one_of` items travel.
+    if let Some(v) = &c.default {
+        m.insert("default".to_string(), v.clone());
+    }
     if let Some(s) = &c.array_of {
         m.insert("array_of".to_string(), QueryValue::Str(s.clone()));
     }
@@ -840,6 +845,8 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
                 None
             }
         }),
+        // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
+        default: m.get("default").cloned(),
         array_of: m.get("array_of").and_then(|v| v.as_str()).map(String::from),
         scalar: m.get("scalar").and_then(|v| v.as_str()).map(String::from),
         format: m.get("format").and_then(|v| v.as_str()).map(String::from),

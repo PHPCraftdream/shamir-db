@@ -422,6 +422,46 @@ fn field_one_of_absent_when_none() {
 }
 
 // ============================================================================
+// FieldBuilder constraints — default (Phase ②.4b — surface only)
+// ============================================================================
+
+/// `.default(Int(5))` emits a top-level `"default": 5` on the wire (mirrors
+/// how `one_of` travels). Surface only — INSERT-path stamp is ②.4c, not here.
+#[test]
+fn field_default_int_wire() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["count"]).int().default(mpack!(5)))
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["rule"]["default"], mpack!(5));
+}
+
+/// `.default(Str(...))` carries the string shape (any QueryValue variant).
+#[test]
+fn field_default_str_wire() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["role"]).string().default(mpack!("guest")))
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["rule"]["default"], mpack!("guest"));
+}
+
+/// `default` is absent from the wire encoding when not set (additive —
+/// rules written before ②.4b keep their byte-identical shape).
+#[test]
+fn field_default_absent_when_none() {
+    let op = ddl::add_schema_rule("users")
+        .rule(ddl::field(["status"]).string())
+        .build();
+    let bytes = rmp_serde::to_vec_named(&op).unwrap();
+    let j: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(
+        j["rule"].get("default").is_none(),
+        "default must be absent when not set, got: {j:?}"
+    );
+}
+
+// ============================================================================
 // FieldBuilder type-tag setters — set / null_type
 // ============================================================================
 

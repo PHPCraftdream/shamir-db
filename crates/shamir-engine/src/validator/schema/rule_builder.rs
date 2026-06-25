@@ -173,6 +173,17 @@ impl RuleBuilder {
         self
     }
 
+    /// Set the literal default value stamped on INSERT for an absent field
+    /// (Phase ②.4b — surface only; stamp-enforcement lands in ②.4c).
+    // Inherent method named `default` — clippy's `should_implement_trait`
+    // fires only when the type implements `Default`; `RuleBuilder` does not,
+    // but we allow it defensively in case `Default` is ever derived here.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default(mut self, value: QueryValue) -> Self {
+        self.constraints.default = Some(value);
+        self
+    }
+
     /// Set the element type for `List` fields (`array_of` check).
     pub fn array_of_string(mut self) -> Self {
         self.constraints.array_of = Some(TypeTag::String);

@@ -3,6 +3,7 @@
 use crate::validator::schema::constraints::Num;
 use crate::validator::schema::rule_builder::rule;
 use crate::validator::schema::type_tag::TypeTag;
+use shamir_types::types::value::QueryValue;
 
 #[test]
 fn rule_builder_string_required() {
@@ -56,4 +57,35 @@ fn rule_builder_f64_min_max() {
     assert_eq!(r.ty, TypeTag::F64);
     assert_eq!(r.constraints.min, Some(Num::F64(0.0)));
     assert_eq!(r.constraints.max, Some(Num::F64(100.0)));
+}
+
+// ── Phase ②.4b — literal default (surface only) ─────────────────────────────
+
+/// `.default(Int(5))` sets `constraints.default = Some(Int(5))`. Surface only —
+/// the INSERT-path stamp lives in ②.4c and is NOT under test here.
+#[test]
+fn rule_builder_default_int() {
+    let r = rule(["x"]).int().default(QueryValue::Int(5)).build();
+    assert_eq!(r.constraints.default, Some(QueryValue::Int(5)));
+}
+
+/// `.default(Str(...))` proves the field carries any `QueryValue` variant.
+#[test]
+fn rule_builder_default_str() {
+    let r = rule(["role"])
+        .string()
+        .default(QueryValue::Str("guest".to_string()))
+        .build();
+    assert_eq!(
+        r.constraints.default,
+        Some(QueryValue::Str("guest".to_string()))
+    );
+}
+
+/// Absence of `.default(...)` leaves `constraints.default = None` (additive —
+/// rules written before ②.4b keep their shape).
+#[test]
+fn rule_builder_default_none_when_unset() {
+    let r = rule(["x"]).int().build();
+    assert!(r.constraints.default.is_none());
 }

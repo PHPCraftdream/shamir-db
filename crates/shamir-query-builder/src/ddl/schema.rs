@@ -197,6 +197,19 @@ impl FieldBuilder {
         self
     }
 
+    /// Phase ②.4b — set the literal default stamped on INSERT for an absent
+    /// field (surface only; stamp-enforcement lands in ②.4c). Mirrors the TS
+    /// builder's `.default(value)`.
+    //
+    // Inherent method named `default` — `FieldBuilder` does not implement
+    // `Default` (clippy `should_implement_trait` would not fire), but we
+    // allow it defensively for symmetry with the engine `RuleBuilder`.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default(mut self, value: QueryValue) -> Self {
+        self.constraints.default = Some(value);
+        self
+    }
+
     // ── Phase B constraint setters ─────────────────────────────────
 
     /// Phase B — scalar-bridge: validate the field by calling the named

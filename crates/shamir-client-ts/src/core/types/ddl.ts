@@ -80,6 +80,12 @@ export interface ConstraintsDto {
   max_len?: number;
   min_len?: number;
   one_of?: WireValue[];
+  /**
+   * Phase ②.4b — literal default stamped on INSERT for an absent field
+   * (surface only; stamp-enforcement lands in ②.4c). Constant `WireValue`;
+   * computed defaults (`now()`, scalars) are out of scope.
+   */
+  default?: WireValue;
   array_of?: string;
   /** Phase B — scalar-bridge: registered scalar name used as a predicate. */
   scalar?: string;
