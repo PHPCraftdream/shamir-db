@@ -35,7 +35,7 @@ use shamir_types::access::Actor;
 use super::record_cow::RecordCow;
 use super::table_manager::TableManager;
 use super::write_helpers::{
-    intern_via_layered, make_layered_interner, resolve_computed_record,
+    apply_defaults, intern_via_layered, make_layered_interner, resolve_computed_record,
     validator_failure_to_db_error,
 };
 
@@ -88,6 +88,15 @@ impl TableManager {
         // uniform schema.
         let intern_to_base = tx.implicit;
         let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
+        // Phase ②.4c — literal-default rules for this table, fetched ONCE per
+        // batch. Empty for the common case (no `default` declared) → the
+        // `apply_defaults` call below is skipped entirely (fast-skip; the
+        // hot path pays nothing). When non-empty, each ABSENT field is
+        // stamped with its default AFTER `resolve_computed_record` and BEFORE
+        // encode — so both the stored bytes and the validator see the
+        // default value. Explicit values (including explicit `Null`) are
+        // never overwritten (replay-safe invariant, DDL-EVOLUTION-PLAN §②.4a).
+        let defaults = self.schema_defaults();
         // Collected on the base-intern path only: `(field_name, base_id)` for
         // every name genuinely NEW to the base interner this insert. Drained
         // into `tx.interner_deltas` after the immutable-borrow block ends.
@@ -134,8 +143,14 @@ impl TableManager {
             let mut out = Vec::with_capacity(op.values.len());
             let mut scratch = Vec::new();
             for value in &op.values {
-                let resolved = resolve_computed_record(value, interner)
+                let mut resolved = resolve_computed_record(value, interner)
                     .map_err(shamir_storage::error::DbError::Codec)?;
+                // Phase ②.4c — stamp literal defaults onto absent fields
+                // BEFORE encode so both stored bytes and validators see them.
+                // Fast-skip when the table declares no defaults (common case).
+                if !defaults.is_empty() {
+                    apply_defaults(resolved.to_mut(), &defaults);
+                }
                 let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 out.push(bytes);
@@ -215,6 +230,20 @@ impl TableManager {
                 let bindings = self.validator_bindings();
                 bindings.iter().any(|b| b.ops.contains(&WriteOp::Insert))
             };
+            // Phase ②.4c — DEFAULT stamp on the id-keyed branch.
+            //
+            // MVP choice: (ii) — the id-keyed (client-pre-interned) path
+            // assumes a COMPLETE record and does NOT stamp literal defaults
+            // here. Rationale: the bytes are pre-interned msgpack from the
+            // client; stamping a default would require decode → stamp →
+            // re-encode (re-interning brand-new field names through the tx
+            // overlay), which breaks the lens-only verbatim fast path that
+            // makes id-keyed worth using. The common case (no defaults on
+            // the table) is a verbatim copy regardless — `has_defaults` is
+            // computed purely for documentation/clarity and does not gate a
+            // decode here. If a future use case needs defaults on id-keyed,
+            // gate a decode-stamp-reencode behind `has_defaults` (variant (i)).
+            let _has_defaults = !defaults.is_empty();
             for buf in &op.records_idmsgpack {
                 // 1. Structural validation — reject non-map bytes.
                 let view = RecordView::new(buf.as_ref()).map_err(|e| {
