@@ -204,6 +204,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Rename a database (pure catalogue re-key, no file move).
+    pub fn rename_db(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: table ────────────────────────────────────────────────
 
     /// Create a table.

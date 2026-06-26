@@ -1,6 +1,7 @@
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::RepoConfig;
+use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 
 use super::ShamirDb;
@@ -64,6 +65,241 @@ impl ShamirDb {
         }
 
         removed
+    }
+
+    /// Thin System-actor wrapper around [`rename_db_as`].
+    pub async fn rename_db(&self, from: &str, to: &str) -> DbResult<()> {
+        self.rename_db_as(from, to, Actor::System).await
+    }
+
+    /// Rename a database — **pure catalogue re-key** (campaign ②.1d,
+    /// variant γ). The physical on-disk location of every repository is
+    /// stored *inside* its persisted `repositories` row (`path` field)
+    /// and re-read from there on boot (`core.rs`), NOT reconstructed from
+    /// the database name. So this method:
+    ///
+    /// 1. Moves the in-memory `DbInstance` from key `from` to key `to`
+    ///    in `dbs`. Open repo handles travel with the moved instance;
+    ///    their `path` fields are untouched (key invariant γ).
+    /// 2. Re-keys the persisted `databases` registry row (write-new-
+    ///    before-remove-old so a crash leaves the new row resolvable).
+    /// 3. Re-keys EVERY child catalogue row carrying `db_name`:
+    ///    `repositories` (preserve `engine`/`path`/`ResourceMeta`) and
+    ///    `tables` (preserve `enable_indexes`/`schema`/`schema_validator_id`/
+    ///    `schema_version`/`ResourceMeta` via `save_table_meta`).
+    ///
+    /// **Catalogue completeness (grep-audit of `system_store.rs`):** the
+    /// only persisted system-store tables carrying a `db_name` column are
+    /// `TABLE_DATABASES` (key `name`), `TABLE_REPOSITORIES`, and
+    /// `TABLE_TABLES`. All other catalogues (`settings`, `users`, `roles`,
+    /// `functions`, `groups`, `validators`, `function_folders`) are global
+    /// and do NOT carry `db_name`. Schema (`schema`/`schema_validator_id`/
+    /// `schema_version`) lives as fields inside the `tables` catalogue
+    /// record, so re-keying that record via `save_table_meta` preserves
+    /// the schema. Indexes are in-memory structures inside the live
+    /// `RepoInstance` and travel with the moved `DbInstance` — they are
+    /// NOT persisted in a db_name-keyed catalogue.
+    ///
+    /// Guards (refuse with a typed [`DbError`]):
+    /// - `from` must not be `SYSTEM_DB_NAME`.
+    /// - The source database must exist (in-memory OR persisted).
+    /// - The destination must NOT exist (in-memory AND persisted).
+    pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
+        // ── Guards ────────────────────────────────────────────────────
+        if from == SYSTEM_DB_NAME {
+            return Err(DbError::Validation(format!(
+                "cannot rename the system database '{}'",
+                SYSTEM_DB_NAME
+            )));
+        }
+        // Source must exist in-memory (live registration).
+        if !self.has_db(from) {
+            return Err(DbError::NotFound(format!("Database '{}' not found", from)));
+        }
+        // Destination must be free both in-memory and in the catalogue.
+        if self.has_db(to) {
+            return Err(DbError::Validation(format!(
+                "cannot rename database '{}' to '{}': destination already exists",
+                from, to
+            )));
+        }
+        if self.system_store.load_database(to).await?.is_some() {
+            return Err(DbError::Validation(format!(
+                "cannot rename database '{}' to '{}': a persisted database record already exists",
+                from, to
+            )));
+        }
+
+        // ── (1) In-memory re-key ──────────────────────────────────────
+        // DbInstance has no internal `name` field (only `repos` + `scalars`),
+        // so a pure map move is sufficient — open handles travel with the
+        // Arc-cloned instance and their `path` fields are untouched.
+        let inst = self
+            .dbs
+            .remove(from)
+            .map(|(_, v)| v)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", from)))?;
+        self.dbs.insert(to.to_string(), inst);
+
+        // ── (2) databases-registry re-key (write-before-remove) ───────
+        // Load the old row, clone it, rewrite "name" → to, persist under
+        // the new key preserving owner/group/mode via from_record, THEN
+        // remove the old row. A crash between the two writes leaves the
+        // new row resolvable; the old row is inert (no live registration).
+        let old_db_rec = self
+            .system_store
+            .load_database(from)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "database catalogue record for '{}' not found",
+                    from
+                ))
+            })?;
+        let mut new_db_rec = old_db_rec.clone();
+        if let QueryValue::Map(m) = &mut new_db_rec {
+            m.insert("name".to_string(), QueryValue::Str(to.to_string()));
+        }
+        let db_meta = ResourceMeta::from_record(&old_db_rec);
+        if let Err(e) = self
+            .system_store
+            .save_database(to, &new_db_rec, &db_meta)
+            .await
+        {
+            log::warn!(
+                "shamir_db::rename_db: failed to persist new database row '{}': {}",
+                to,
+                e
+            );
+        }
+        if let Err(e) = self.system_store.remove_database(from).await {
+            log::warn!(
+                "shamir_db::rename_db: failed to remove old database row '{}': {}",
+                from,
+                e
+            );
+        }
+
+        // ── (3) Re-key all child catalogue rows carrying `db_name` ────
+        // (3a) repositories: load all, filter by db_name==from, re-key.
+        let repos = self.system_store.load_repositories().await?;
+        for rec in repos {
+            let rec_db = rec
+                .get("db_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if rec_db != from {
+                continue;
+            }
+            let repo_name = rec
+                .get("repo_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let engine = rec
+                .get("engine")
+                .and_then(|v| v.as_str())
+                .unwrap_or("in_memory")
+                .to_string();
+            let path = rec
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let repo_meta = ResourceMeta::from_record(&rec);
+
+            // Write-new-before-remove-old; `path` is preserved verbatim
+            // (key invariant γ — physical location is unchanged).
+            if let Err(e) = self
+                .system_store
+                .save_repository(to, &repo_name, &engine, path.as_deref(), &repo_meta)
+                .await
+            {
+                log::warn!(
+                    "shamir_db::rename_db: failed to persist new repository row '{}/{}': {}",
+                    to,
+                    repo_name,
+                    e
+                );
+            }
+            if let Err(e) = self.system_store.remove_repository(from, &repo_name).await {
+                log::warn!(
+                    "shamir_db::rename_db: failed to remove old repository row '{}/{}': {}",
+                    from,
+                    repo_name,
+                    e
+                );
+            }
+        }
+
+        // (3b) tables: load all, filter by db_name==from, re-key via
+        // save_table_meta so the full record (including schema /
+        // schema_validator_id / schema_version) is preserved. We rewrite
+        // the db_name field in the record body AND rely on save_table_meta
+        // to extract (db_name, repo_name, table_name) for the key.
+        let tables = self.system_store.load_tables().await?;
+        for rec in tables {
+            let rec_db = rec
+                .get("db_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if rec_db != from {
+                continue;
+            }
+            let mut new_rec = rec.clone();
+            if let QueryValue::Map(m) = &mut new_rec {
+                m.insert("db_name".to_string(), QueryValue::Str(to.to_string()));
+            } else {
+                // Defensive: if the record isn't a map we can't re-key it.
+                log::warn!(
+                    "shamir_db::rename_db: table catalogue record for '{}/{}/{}' is not a map \
+                     (skipping)",
+                    from,
+                    rec.get("repo_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    rec.get("table_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                );
+                continue;
+            }
+            let repo_name = new_rec
+                .get("repo_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let table_name = new_rec
+                .get("table_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            // Write-new-before-remove-old.
+            if let Err(e) = self.system_store.save_table_meta(&new_rec).await {
+                log::warn!(
+                    "shamir_db::rename_db: failed to persist new table row '{}/{}/{}': {}",
+                    to,
+                    repo_name,
+                    table_name,
+                    e
+                );
+            }
+            if let Err(e) = self
+                .system_store
+                .remove_table(from, &repo_name, &table_name)
+                .await
+            {
+                log::warn!(
+                    "shamir_db::rename_db: failed to remove old table row '{}/{}/{}': {}",
+                    from,
+                    repo_name,
+                    table_name,
+                    e
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {

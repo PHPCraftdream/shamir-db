@@ -9,6 +9,6 @@ pub use shamir_query_types::admin::{
     CreateIndexOp, CreateRepoOp, CreateTableOp, DescribeTableOp, DropDbOp, DropGroupOp,
     DropIndexOp, DropRepoOp, DropTableOp, FieldRuleDto, FkAction, ForeignKeyDto, GetBufferConfigOp,
     GetTableSchemaOp, GroupRef, ListOp, NumDto, PurgeScope, RemoveGroupMemberOp,
-    RemoveSchemaRuleOp, RenameGroupOp, RenameRepoOp, ResourceRef, SetBufferConfigOp,
+    RemoveSchemaRuleOp, RenameDbOp, RenameGroupOp, RenameRepoOp, ResourceRef, SetBufferConfigOp,
     SetTableSchemaOp,
 };

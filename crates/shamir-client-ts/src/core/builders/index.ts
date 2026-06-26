@@ -31,6 +31,7 @@ export {
   listUsers, listRoles, listFunctions, listValidators_, listFunctionFolders,
   dropDb, dropRepo, dropTable, dropIndex,
   startMigration, commitMigration, rollbackMigration,
+  renameRepo, renameDb,
   ddl,
   // `field` is NOT re-exported here — it collides with select.field.
   // Use `ddl.field(...)` or import directly from './ddl.js'.
