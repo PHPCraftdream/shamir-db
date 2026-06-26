@@ -113,31 +113,47 @@
 > `RENAME TABLE` (Phase E.4) + кампания **E.4-followon**: F.1 RENAME INDEX,
 > F.2 populated-table rename (снят MVCC-overlay-барьер через
 > `MvccStore::drain_to_history`), F.3 RENAME REPO. См. `DONE.md`. Остаток
-> `db/role/group/folder` RENAME — не запрашивался, тривиальное расширение по тому
-> же паттерну при необходимости.
+> `folder/group/role/db` RENAME — ✅ **СДЕЛАН ЦЕЛИКОМ в кампании ② (②.1a-d)**:
+> `RenameFunctionFolder` (path-rekey + потомки), `RenameGroup` (id-keyed →
+> display-name), `RenameRole` (name-keyed → rekey ссылок в users), **`RenameDb`**
+> (чистый каталог-rekey, вариант γ — физ-путь декуплён в persisted `path`-поле,
+> rename без fs-move; предпосылка отложения «нужен on-disk каскад» оказалась
+> ложной). G6 закрыт полностью. См. `DONE.md`.
 
-### E2. `DEFAULT`-значения полей 📄
+### E2. `DEFAULT`-значения полей 📄 → ✅ **СДЕЛАНО (кампания ②.4)**
 - **Источник:** `completeness-ddl.md` G9.
-- **Факт:** поле можно `required`, но движок не подставит значение (литерал/
-  computed) на insert. Нет server-side `created_at`-штампа.
-- **Сделать:** опционально завязать на «mutating/transform validators» (в
-  `VALIDATORS.md` отмечены как future).
-- **Объём:** M-L.
+- **Было:** поле можно `required`, но движок не подставит значение на insert.
+- **Факт:** ✅ литерал-`DEFAULT` реализован — `default: Option<QueryValue>` в
+  `Constraints`/DTO/билдерах (②.4b) + штамп на INSERT до валидации для
+  ОТСУТСТВУЮЩЕГО поля (②.4c, `apply_defaults`); явное значение (вкл. явный NULL)
+  не перетирается; replay-safe by-construction. Computed-`DEFAULT`
+  (`created_at`/`now()`) — НЕ сделан осознанно: требует mutating/transform-
+  валидаторов → отдельная будущая (A)-мини-кампания. См. `DONE.md`,
+  `DDL-EVOLUTION-PLAN.md §②.4`.
 
 > E3 (`if_exists` на дропах + table-level `cascade`) — ✅ сделано (Phase E.1:
 > `if_exists` на всех drop-ops; Phase E.2: `cascade` на `drop_table`). См. `DONE.md`.
 > E4 / G5 (`DESCRIBE` / `SHOW CREATE`) — ✅ сделано (Phase E.6: `DescribeTableOp`
 > компонует полную форму из существующих reads). См. `DONE.md`.
 
-### E5. Две дороги к uniqueness (schema-rule vs index-flag) — согласовать 📄
+### E5. Две дороги к uniqueness (schema-rule vs index-flag) — согласовать 📄 → ✅ **СДЕЛАНО (кампания ②.3)**
 - **Источник:** `completeness-ddl.md` G15.
-- **Факт:** `ConstraintsDto.unique` (через валидатор) и `CreateIndexOp.unique`
-  (на уровне индекса) — разные пути enforcement. Риск рассогласования.
-- **Сделать:** свести к одному источнику истины уникальности.
-- **Объём:** M.
+- **Было:** `ConstraintsDto.unique` (через валидатор-probe) и `CreateIndexOp.unique`
+  (на уровне индекса) — разные пути; риск рассогласования.
+- **Факт:** ✅ согласовано через **(B) defense-in-depth** (②.3a дизайн): два слоя
+  КОМПЛЕМЕНТАРНЫ, не дубль — probe (логический fail-fast, чистая `unique_violation`,
+  O(1) через обязательный индекс) поверх index-guard (физическая атомарность,
+  HIGH-A race-closing), связаны DDL-инвариантом `validate_unique_indexes`
+  (`unique`-rule ⟹ unique-index, иначе `unique_requires_index`). Зафиксировано
+  нормативным two-layer контрактом в коде + coherence-тестами (②.3b). probe НЕ
+  снят (снятие потеряло бы чистую ошибку/семантику ради мнимого выигрыша). См.
+  `DONE.md`, `DDL-EVOLUTION-PLAN.md §②.3`.
 
 > E6 (FK-actions `ON DELETE`) — реализовано как Phase D (RESTRICT/CASCADE/
-> SET NULL + drop-guard), см. `DONE.md`. `ON UPDATE` — вне текущего скоупа.
+> SET NULL + drop-guard), см. `DONE.md`. `ON UPDATE` — ✅ **СДЕЛАН в кампании ②.2**
+> (`fk_on_update.rs`: no-op gate → Restrict/Cascade-rekey/SetNull на UPDATE-пути,
+> триггер «referenced value changed», single-field MVP). См. `DONE.md`,
+> `DDL-EVOLUTION-PLAN.md §②.2`.
 
 ---
 
@@ -174,12 +190,16 @@ challenge/response; F5 Rust `one_of` ✅→❌ (B2 ещё открыт). См. `
 |---|---|---|
 | **P0 — корректность/безопасность** | ✅ нет | A2 закрыт (Phase G.4) |
 | **P1 — билдеры** | ✅ нет | B2, B4 сделаны (Phase G.1/G.2) |
-| **P2 — эволюция языка** | E5 | unify uniqueness (schema-rule vs index-flag) |
-| **P3 — DX + досборка** | B5–B7, E2 | DX-билдеры (`internerDump`, `Doc $ref/$fn`, `deliverCall`); DEFAULT-значения |
+| **P2 — эволюция языка** | ✅ нет | E5 unify-uniqueness закрыт (кампания ②.3) |
+| **P3 — DX + досборка** | ✅ нет | B5–B7 (кампания ①), E2 DEFAULT (кампания ②.4) |
 
-**Все P0 и P1 закрыты.** Остаток — только P2 (E5 unify-uniqueness) и P3
-(B5–B7 DX-билдеры, E2 DEFAULT-значения) — эволюция/DX, не блокеры.
+**Все P0–P3 закрыты.** Остаток в работе по DDL — только осознанно отложенное:
+**RENAME db** (②.1d, отдельная мини-таска: on-disk каскад + crash-safety) и
+будущая **(A)-мини-кампания** mutating/transform-валидаторов (computed-`DEFAULT`/
+server-stamping `created_at`). Не блокеры.
 
 > Выполненное (A1, A2, B1, B2, B3, B4, C1, C2, C3, D1, Phase D/E6, **вся кампания
 > Phase E**: A3, D2, E3, E4, M5, F1–F5; **E.4-followon**: E1 полностью = F.1/F.2/F.3;
-> **Phase G**: B2/B4/C3 + A2 = G.1–G.4) — в `DONE.md`.
+> **Phase G**: B2/B4/C3 + A2 = G.1–G.4; **кампания ① Builder parity**: B5–B7;
+> **кампания ② DDL-эволюция**: E1-остаток (folder/group/role RENAME), E6 `ON
+> UPDATE`, E5 unify-uniqueness, E2 `DEFAULT`) — в `DONE.md`.

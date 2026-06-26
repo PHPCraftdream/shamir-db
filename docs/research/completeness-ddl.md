@@ -77,8 +77,9 @@ plus `.unique()` / `.foreign_key(...)`.
   оборачивает каждый батч в tx → enforced; сырой engine implicit-путь —
   defense-in-depth, не дыра данных). См. `DONE.md`.
 - FK actions (`ON DELETE`: RESTRICT/CASCADE/SET NULL) — ✅ реализованы (Phase D,
-  `DONE.md`). Остаётся `ON UPDATE`. Билдер: `.foreign_key(...)` +
-  `.foreign_key_on_delete(...)`.
+  `DONE.md`). `ON UPDATE` — ✅ реализован в кампании ②.2 (`fk_on_update.rs`).
+  Билдер: `.foreign_key(...)` + `.foreign_key_on_delete(...)` +
+  `.foreign_key_on_update(...)` + `.foreign_key_with_actions(...)`.
 
 ### 1.3 WASM functions + function folders
 
@@ -194,14 +195,20 @@ field-name interning control surface unique to ShamirDB's storage model.
 - **G5.** No `DESCRIBE` / `SHOW CREATE` — `list_*` returns names only; there is
   no single op that returns a table's full DDL (columns/schema + indexes +
   validators + retention + buffer config + owner/mode) in one round-trip.
-- **G6.** No `RENAME` for db / repo / table / index / column / role / group /
-  folder. Only functions and validators can be renamed. Rename is the cheapest
-  non-destructive evolution op and is uniformly missing.
-- **G9.** No `DEFAULT` value semantics. A field can be `required` (reject if
-  absent) but the engine will not synthesize a value (literal or computed) for
-  an absent field on insert. The validator design explicitly defers
-  "transform / mutating validators" that could stamp defaults server-side
-  (`VALIDATORS.md` "Future extensions"). Today defaults must be client-side.
+- **G6.** ✅ **РЕШЁН ПОЛНОСТЬЮ** (Phase E.4 + E.4-followon + кампания ②.1a-d).
+  `RENAME` есть для function/validator (изначально), table/index/repo (Phase E.4 +
+  F.1/F.2/F.3), folder/group/role (②.1a/b/c) и **db** (②.1d — чистый каталог-rekey,
+  вариант γ; предпосылка «нужен on-disk fs-move + crash-recovery» оказалась ложной:
+  физ-путь repo декуплён от имени db в persisted `path`-поле, boot берёт его
+  оттуда → rename = каталог-rekey без переноса файлов). `RENAME column` — N/A
+  (schemaless store). Изначальный gap (uniformly missing) закрыт целиком.
+- **G9.** ✅ **РЕШЁН** (кампания ②.4) для литерал-`DEFAULT`. `default:
+  Option<QueryValue>` в schema-constraints + штамп на INSERT до валидации для
+  отсутствующего поля (`apply_defaults`); явное значение (вкл. явный NULL) не
+  перетирается; replay-safe by-construction. **Остаток (осознанный):** computed-
+  `DEFAULT` (server-side `created_at`/`now()`-штамп) требует mutating/transform-
+  валидаторов (`VALIDATORS.md` "Future extensions") → будущая отдельная
+  (A)-мини-кампания.
 - **G11.** No sequences / auto-increment / `SERIAL` / `IDENTITY`. `RecordId` is
   a `[u8;16]` catalogue id; there is no monotonically increasing per-table
   counter generator. App-side only.
@@ -243,34 +250,44 @@ field-name interning control surface unique to ShamirDB's storage model.
   explicitly endorses this ("alter means indexes / buffer config / validators
   / access"). **Verdict: intentionally out of scope (column DDL); present
   (split across ops) for accessory DDL.**
-- **G2.** Idempotency is **incomplete**: `if_not_exists` exists on creates,
-  but `if_exists` does **not** exist on any drop. `cascade` exists only on
-  `drop_db` / `drop_repo`. Dropping a table with indexes / bound validators /
-  FK references is not guarded by a `cascade` / `restrict` toggle at the table
-  level (only `DropValidator` refuses-if-bound).
-- **G3.** Referential integrity on **drop** — ✅ **частично закрыто** (см.
+- **G2.** ✅ **ЗАКРЫТО** (Phase E.1 + E.2, см. `DONE.md`). `if_exists` есть на
+  всех drop-ops (E.1); `cascade` есть на `drop_table` (E.2, в дополнение к
+  `drop_db`/`drop_repo`). Дроп таблицы с индексами/валидаторами покрывается
+  table-level `cascade`; referential-дроп — `restrict`-семантикой (G3/Phase D.3).
+- **G3.** Referential integrity on **drop** — ✅ **ЗАКРЫТО ПОЛНОСТЬЮ** (см.
   `DONE.md`). `DropValidator` refuses if `bound_in` non-empty; `DropTable`
-  теперь refuses под живым FK (`drop_refused_fk`, Phase D.3). **Остаток:**
-  `DropFunction` не refuses, если функция привязана как валидатор.
-- **G7.** FK actions (`ON DELETE`) — ✅ **DONE** как Phase D (см. `DONE.md`):
-  `RESTRICT` / `CASCADE` / `SET NULL` + `NoAction`-дефолт. `ON UPDATE` — вне
-  текущего скоупа (остаток).
+  refuses под живым FK (`drop_refused_fk`, Phase D.3); `DropFunction` refuses,
+  если функция привязана как валидатор (`drop_refused_bound`,
+  `admin_function.rs:119-137` + e2e `ddl_wire_e2e/drop_function_guard.rs`).
+  Бывший «остаток» (DropFunction-as-validator) закрыт.
+- **G7.** FK actions — ✅ **DONE** полностью. `ON DELETE` — Phase D
+  (`RESTRICT`/`CASCADE`/`SET NULL` + `NoAction`-дефолт). `ON UPDATE` — кампания
+  ②.2 (`fk_on_update.rs`: триггер «referenced value changed» → no-op gate →
+  Restrict / Cascade-rekey old→new / SetNull, single-field MVP). См. `DONE.md`.
 - **G8.** `NOT NULL` semantics: covered via `required` + `nullable` flags in
   the schema validator (pure check), but only enforced when a schema rule is
   declared. There is no engine-level "every row must have `_id`" invariant
   beyond the storage key. Practically fine, architecturally validator-based
   rather than constraint-enforced.
-- **G10.** Access-control **defaults are open** (`owner = System`, `mode =
-  0o777`) and the gate is "not yet uniformly invoked on every admin path"
-  (`DDL.md` §0, §3). owner-on-create and the open→enforced transition are
-  explicitly unfinished. This is the single biggest production-hardening gap.
-- **G15.** Constraint storage is validator-based, not catalog-enforced. A
-  `unique` schema rule requires an index to exist at DDL time (fail-closed
-  per the `unique()` builder doc), but the unique check itself runs through
-  the validator pass (`schema_validator.rs:114-165`), not through the index
-  insert path. The index's own `unique=true` flag (`CreateIndexOp.unique`) is
-  a *separate*, index-level enforcement. Two paths to uniqueness is a
-  coherence risk.
+- **G10.** ✅ **ЗАКРЫТО** (Phase G.4, см. `DONE.md`). Бывший «single biggest
+  production-hardening gap» снят: (G.4a) owner-on-create — все mode-bearing
+  ресурсы штампуют владельца; (G.4b) единообразный `Action::Create` гейт на
+  `create_db/repo/table` (снят TODO authz-gap); (G.4c, P0) дефолт сменён
+  `open 0o777 → enforced 0o700` для НОВЫХ объектов (`ResourceMeta::owned_enforced`
+  на всех create-сайтах db/repo/table/function/validator; legacy грузится OPEN
+  через `from_record`); (G.4d) group-path e2e. Гейт `authorize_access` стоит на
+  всех admin-путях (каждый handler покрыт). **Остаток:** ноль (один устаревший
+  doc-комментарий `db_management.rs:15` «Mode stays 0o777» — код там зовёт
+  `owned_enforced`; правится в ③.0).
+- **G15.** ✅ **РЕШЁН** (кампания ②.3) — формализован как **(B) defense-in-depth**,
+  не баг-дубль. Два слоя КОМПЛЕМЕНТАРНЫ: probe (`schema_validator.rs`) —
+  логический fail-fast, чистая `unique_violation`, O(1) через обязательный
+  индекс; index-guard (`unique_write_lock`) — физическая атомарность, HIGH-A
+  race-closing. Связаны DDL-инвариантом `validate_unique_indexes` (`unique`-rule
+  ⟹ unique-index, иначе `unique_requires_index`). «Coherence risk» закрыт
+  нормативным two-layer контрактом в коде + coherence-тестами; probe НЕ снят
+  (источник физической истины — индекс; probe = ранний отказ + диагностика).
+  См. `DONE.md`, `DDL-EVOLUTION-PLAN.md §②.3`.
 
 ### Intentionally out of scope (per docs)
 
@@ -287,21 +304,21 @@ field-name interning control surface unique to ShamirDB's storage model.
 
 | # | Gap | Rationale | Impact |
 |---|---|---|---|
-| **G10** | Access defaults open (`0o777`, owner=System); gate not uniform | Every resource world-readable/-writable until manually tightened; the entire RBAC/DAC edifice is opt-in | **Security** — ship blocker for any multi-tenant deployment |
-| ~~G7~~ | ~~FK has no `ON DELETE` actions~~ | ✅ **DONE** — Phase D (RESTRICT/CASCADE/SET NULL); `ON UPDATE` остаётся | см. `DONE.md` |
-| **G2** | Drops lack `if_exists`; no `cascade` at table level | Scripts can't be idempotent; can't clean up a table with indexes/validators in one op | **Operability** — every migration/CI script fragile |
-| **G3** (остаток) | Drop refuses for validators + FK targets (✅); `DropFunction`-as-validator ещё нет | Drop a function-used-as-validator → silent dangling reference | **Referential integrity** |
+| ~~G10~~ | ~~Access defaults open (`0o777`, owner=System); gate not uniform~~ | ✅ **DONE** — Phase G.4 (owner-on-create + uniform Create-гейт + дефолт `0o777→0o700` enforced + group-path e2e) | см. `DONE.md` |
+| ~~G7~~ | ~~FK has no `ON DELETE`/`ON UPDATE` actions~~ | ✅ **DONE** — Phase D (`ON DELETE`) + кампания ②.2 (`ON UPDATE`) | см. `DONE.md` |
+| ~~G2~~ | ~~Drops lack `if_exists`; no `cascade` at table level~~ | ✅ **DONE** — Phase E.1 (`if_exists` на всех drop-ops) + E.2 (`cascade` на `drop_table`) | см. `DONE.md` |
+| ~~G3~~ | ~~Drop refuses for validators + FK targets; `DropFunction`-as-validator ещё нет~~ | ✅ **DONE** — `DropValidator`/`DropTable` (Phase D.3) + `DropFunction`-as-validator (`drop_refused_bound`) | см. `DONE.md` |
 | ~~—~~ | ~~FK + unique fail-open under autocommit~~ | ✅ снято — ложная тревога (enforced через серверную tx-обёртку), см. `DONE.md` | — |
 
 ### MEDIUM (usability / parity)
 
 | # | Gap | Rationale | Impact |
 |---|---|---|---|
-| **G6** | No `RENAME` for db/repo/table/index/column/role/group/folder | Rename is the cheapest non-destructive evolution; its absence forces dump/recreate | **Schema evolution** friction |
-| **G9** | No `DEFAULT` (literal or computed) | Every insert must supply every required field; no server-side `created_at` stamping | **Usability** — app-side boilerplate |
+| ~~G6~~ | ~~No `RENAME` for db/repo/table/index/column/role/group/folder~~ | ✅ **DONE ПОЛНОСТЬЮ** — table/index/repo (Phase E.4 + F.1/F.2/F.3) + folder/group/role/**db** (②.1a-d); column N/A (schemaless) | см. `DONE.md` |
+| ~~G9~~ | ~~No `DEFAULT` (literal or computed)~~ | ✅ **DONE** (literal) — кампания ②.4 (`default` + штамп на insert); computed-`DEFAULT` → будущая (A)-мини-кампания (mutating-валидаторы) | см. `DONE.md` |
 | **G11** | No sequences / auto-increment | No server-side surrogate key generator; app must produce its own | **Usability** — common DBMS expectation |
-| **G5** | No `DESCRIBE` / `SHOW CREATE` | No single op returns a table's full shape (schema+indexes+validators+meta) | **Introspection** — tooling/SDK friction |
-| **G15** | Two uniqueness paths (schema-rule `unique` vs index `unique=true`) | Coherence risk: rule without index fails closed; index without rule silently enforces differently | **Correctness** — needs reconciliation |
+| ~~G5~~ | ~~No `DESCRIBE` / `SHOW CREATE`~~ | ✅ **DONE** — Phase E.6 (`DescribeTableOp` компонует полную форму: schema+indexes+validators+meta) | см. `DONE.md` |
+| ~~G15~~ | ~~Two uniqueness paths (schema-rule `unique` vs index `unique=true`)~~ | ✅ **DONE** — кампания ②.3: формализован как defense-in-depth (probe + index-guard, связаны DDL-инвариантом `unique`-rule⟹index); нормативный контракт + coherence-тесты | см. `DONE.md` |
 | **G17** | No quotas / per-user / per-db limits | No way to cap a tenant's footprint | **Multi-tenancy** — fair-share / noisy-neighbour |
 | **G20** | No schema-version migration framework | `schema_version` exists but no changelog/apply abstraction | **Operability** — teams can't version-control their schema |
 
@@ -327,12 +344,19 @@ column DDL meaningless** (no `ALTER TABLE ADD COLUMN`). Its distinctive strength
 is the **validator model**: declarative schema rules (scalar/format/cross-field/
 FK/unique) **plus** arbitrary WASM `BEFORE`-write hooks, all enforced on the
 write path — a genuinely richer integrity surface than SQL `CHECK`. Its
-historical weakness was **referential lifecycle** — теперь во многом закрыта:
-FK `ON DELETE` (RESTRICT/CASCADE/SET NULL) и drop-guard на `DropTable`
-реализованы (Phase D, `DONE.md`); FK/unique enforced под autocommit (ложная
-тревога снята). Остатки — `DropFunction`-guard и `ON UPDATE`. The single biggest
-ship blocker остаётся **open access defaults** (G10) — every other DDL feature
-is moot if the gate isn't uniformly enforced.
+historical weakness was **referential lifecycle** — теперь закрыта полностью: FK
+`ON DELETE` (RESTRICT/CASCADE/SET NULL) + drop-guard на `DropTable` (Phase D),
+`DropFunction`-as-validator guard (G3), FK `ON UPDATE` (кампания ②.2), FK/unique
+enforced под autocommit (ложная тревога снята). Бывший «single biggest ship
+blocker» — open access defaults (G10) — ✅ **закрыт** Phase G.4 (owner-on-create +
+uniform gate + дефолт `0o777→0o700` enforced). **Из HIGH-приоритетов открытых не
+осталось.** Реальный остаток по DDL — только осознанно отложенное: `RENAME db`
+(②.1d, on-disk каскад) и computed-`DEFAULT`/server-stamping (будущая
+mutating-валидаторная мини-кампания). Живой фронтир — Movement C (репликация),
+не ширина DDL.
 
 **Counts:** 10 present feature groups (§1.1–§1.10) covering ~45 wire `BatchOp`
-variants; 20 prioritized gaps (5 HIGH, 7 MEDIUM, 8 LOW).
+variants. Из 20 каталогизированных gap'ов закрыты G2/G3/G5/G6/G7/G9/G10/G15
+(кампании Phase D/E/G + ①/②); открытые HIGH — ноль; остаток —
+intentionally-out-of-scope (column DDL, SQL CHECK, sequences G11) + отложенное
+(RENAME db, computed-DEFAULT).
