@@ -57,6 +57,7 @@ import type {
   DropIndexOp,
   RenameTableOp,
   RenameRepoOp,
+  RenameDbOp,
   RenameIndexOp,
   StartMigrationOp,
   CommitMigrationOp,
@@ -574,6 +575,15 @@ export function renameRepo(from: string, to: string): RenameRepoOp {
   return op;
 }
 
+/** Rename a database (pure catalogue re-key, no file move). Not HMAC-gated. */
+export function renameDb(from: string, to: string): RenameDbOp {
+  const op: RenameDbOp = {
+    rename_db: from,
+    to,
+  };
+  return op;
+}
+
 /** Rename an index on a table (in-place rekey, no data loss). Not HMAC-gated. */
 export function renameIndex(
   table: string,
@@ -919,6 +929,7 @@ export const ddl = {
   dropIndex,
   renameTable,
   renameRepo,
+  renameDb,
   renameIndex,
   startMigration,
   commitMigration,

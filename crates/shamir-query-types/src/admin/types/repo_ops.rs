@@ -63,3 +63,29 @@ pub struct RenameRepoOp {
     pub rename_repo: String,
     pub to: String,
 }
+
+/// Rename a database, re-keying every catalogue row that carries its name
+/// (databases / repositories / tables) plus the in-memory `DbInstance`.
+///
+/// This is a **pure catalogue re-key** (campaign ②.1d, variant γ): the
+/// physical on-disk location of every repository is stored *inside* the
+/// persisted `repositories` row (`path` field) and is re-read from there
+/// on boot (`core.rs`), NOT reconstructed from the database name. Therefore
+/// `rename_db` only rewrites catalogue rows + the in-memory `dbs` map; no
+/// files are moved, no handles drained, no stores reopened. Open repo
+/// handles travel with the moved `DbInstance`; their `path` fields are
+/// untouched.
+///
+/// Guards (refuse with a typed error instead of leaving dangling state):
+/// - `SYSTEM_DB` cannot be renamed.
+/// - The source database must exist.
+/// - The destination must NOT exist.
+///
+/// ```text
+/// { "rename_db": "old_name", "to": "new_name" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameDbOp {
+    pub rename_db: String,
+    pub to: String,
+}

@@ -11,7 +11,7 @@ use crate::admin::{
     CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
     DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
     InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
-    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameFunctionFolderOp, RenameFunctionOp,
+    RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
     RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
     UnbindValidatorOp,
@@ -58,6 +58,7 @@ pub enum BatchOp {
     CreateRepo(CreateRepoOp),
     DropRepo(DropRepoOp),
     RenameRepo(RenameRepoOp),
+    RenameDb(RenameDbOp),
     CreateTable(CreateTableOp),
     DropTable(DropTableOp),
     RenameTable(RenameTableOp),
@@ -163,6 +164,7 @@ impl Serialize for BatchOp {
             BatchOp::CreateRepo(op) => op.serialize(serializer),
             BatchOp::DropRepo(op) => op.serialize(serializer),
             BatchOp::RenameRepo(op) => op.serialize(serializer),
+            BatchOp::RenameDb(op) => op.serialize(serializer),
             BatchOp::CreateTable(op) => op.serialize(serializer),
             BatchOp::DropTable(op) => op.serialize(serializer),
             BatchOp::RenameTable(op) => op.serialize(serializer),
@@ -271,6 +273,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<DropRepoOp, _>(&bytes).map(BatchOp::DropRepo)
         } else if has("rename_repo") {
             qv_to::<RenameRepoOp, _>(&bytes).map(BatchOp::RenameRepo)
+        } else if has("rename_db") {
+            qv_to::<RenameDbOp, _>(&bytes).map(BatchOp::RenameDb)
         } else if has("create_table") {
             qv_to::<CreateTableOp, _>(&bytes).map(BatchOp::CreateTable)
         } else if has("drop_table") {
@@ -413,6 +417,7 @@ impl BatchOp {
                 | BatchOp::CreateRepo(_)
                 | BatchOp::DropRepo(_)
                 | BatchOp::RenameRepo(_)
+                | BatchOp::RenameDb(_)
                 | BatchOp::CreateTable(_)
                 | BatchOp::DropTable(_)
                 | BatchOp::RenameTable(_)

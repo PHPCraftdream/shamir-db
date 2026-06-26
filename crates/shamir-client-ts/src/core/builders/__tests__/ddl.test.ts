@@ -1084,6 +1084,19 @@ describe('renameRepo', () => {
   });
 });
 
+// ── renameDb ───────────────────────────────────────────────────────
+
+describe('renameDb', () => {
+  it('emits exactly {rename_db, to} (2 keys)', () => {
+    const op = ddl.renameDb('old_db', 'new_db');
+    expect(op).toEqual({
+      rename_db: 'old_db',
+      to: 'new_db',
+    });
+    expect(Object.keys(op)).toHaveLength(2);
+  });
+});
+
 // ── internerDump / internerTouch ────────────────────────────────────
 
 describe('internerDump', () => {

@@ -292,6 +292,15 @@ impl SessionPermissions {
                     repo: op.rename_repo.clone(),
                 },
             ),
+            // RenameDb — Write on the source database (rename mutates the
+            // db's identity). The live executor re-checks Write in
+            // admin_db_repo::handle_rename_db.
+            BatchOp::RenameDb(op) => (
+                Action::Write,
+                Resource::Database {
+                    database: op.rename_db.clone(),
+                },
+            ),
             BatchOp::CreateTable(op) => (
                 Action::Create,
                 Resource::Table {
