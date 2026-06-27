@@ -264,6 +264,16 @@ impl RecordValidator for SchemaValidator {
         self.collect_defaults()
     }
 
+    /// ③.2b: return declarative transform rules for this schema.
+    ///
+    /// TODO (#281/#282): collect `auto_now` / `auto_now_add` / expression-default
+    /// from `ConstraintsDto`/`Constraints` once the schema-surface fields land.
+    /// For now returns empty — wiring is inert until those fields exist, which
+    /// is the expected and correct state for this framework stage.
+    fn transforms(&self) -> Vec<(Vec<String>, crate::validator::TransformSpec)> {
+        Vec::new()
+    }
+
     fn nullable_for_field(&self, field: &str) -> Option<bool> {
         // Match single-segment fields directly; for multi-segment paths,
         // compare the dot-joined form.

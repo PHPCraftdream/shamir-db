@@ -23,7 +23,7 @@ mod table_manager_streaming;
 mod table_manager_tx_ops;
 mod table_manager_validators;
 mod write_exec;
-mod write_helpers;
+pub(crate) mod write_helpers;
 
 #[cfg(test)]
 pub mod tests;

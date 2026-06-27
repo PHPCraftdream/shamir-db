@@ -22,7 +22,7 @@ use shamir_types::types::common::TMap;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::validator::ValidatorFailure;
+use crate::validator::{TransformSpec, ValidatorFailure};
 
 use super::table_manager::TableManager;
 
@@ -174,6 +174,84 @@ pub(super) fn apply_defaults(rec: &mut QueryValue, defaults: &[(Vec<String>, Que
         // is an explicit value — do NOT overwrite.
         if !m.contains_key(field) {
             m.insert(field.clone(), default.clone());
+        }
+    }
+}
+
+// ============================================================================
+// Declarative TRANSFORM stamp (Phase ③.2b — insert path)
+// ============================================================================
+
+/// Apply declarative transform rules to a record BEFORE encode (③.2b).
+///
+/// For each `(path, spec)` rule:
+/// - **MVP scope: single-segment paths only.** Multi-segment paths are
+///   silently skipped (matching `apply_defaults` MVP — future work).
+/// - [`TransformSpec::AutoNow`] — unconditionally overwrites the field with
+///   `QueryValue::Int(now_ns as i64)`.  This is the `updated_at` semantic:
+///   the server clock is always authoritative.
+/// - [`TransformSpec::AutoNowAdd`] — stamps `QueryValue::Int(now_ns as i64)`
+///   only if the field is absent (`!contains_key`).  This is the `created_at`
+///   semantic: an explicitly-supplied value is preserved.
+/// - [`TransformSpec::ComputedDefault`] — evaluates the expression through
+///   `eval_write_value` only if the field is absent.  On evaluation error the
+///   stamp is skipped silently (fail-open), consistent with the scalar-bridge
+///   fail-open precedent from Phase B.  The record map at the time of
+///   evaluation is passed as the `literal` context so `$ref` can address
+///   sibling fields already stamped by `apply_defaults`.
+///
+/// Non-map records are returned unchanged (transforms are field-scoped).
+/// The caller is expected to fast-skip when `transforms` is empty (the
+/// common hot path — no transforms declared).
+pub(crate) fn apply_transforms(
+    rec: &mut QueryValue,
+    transforms: &[(Vec<String>, TransformSpec)],
+    scalars: &ScalarRegistry,
+    now_ns: u64,
+) {
+    let m = match rec {
+        QueryValue::Map(m) => m,
+        _ => return,
+    };
+    for (path, spec) in transforms {
+        // MVP: single-segment path only.  Multi-segment is a future enhancement.
+        let field = match path.first() {
+            Some(f) if path.len() == 1 => f,
+            _ => continue,
+        };
+        match spec {
+            TransformSpec::AutoNow => {
+                // Unconditional: overwrites any caller-supplied value.
+                // Server clock is authoritative for `updated_at`.
+                m.insert(field.clone(), QueryValue::Int(now_ns as i64));
+            }
+            TransformSpec::AutoNowAdd => {
+                // Absence-guarded: preserve an explicitly-supplied value.
+                if !m.contains_key(field.as_str()) {
+                    m.insert(field.clone(), QueryValue::Int(now_ns as i64));
+                }
+            }
+            TransformSpec::ComputedDefault(expr) => {
+                // Absence-guarded: only fill missing fields.
+                if !m.contains_key(field.as_str()) {
+                    // Snapshot the current map as the literal context for
+                    // $ref resolution.  Cloning here is bounded by the number
+                    // of ComputedDefault transforms (rare at schema-level) and
+                    // avoids a self-borrow conflict between `m` (mut) and the
+                    // literal slice passed to eval_write_value.
+                    let literal: TMap<String, QueryValue> = m.clone();
+                    // Fail-open on error: skip the stamp silently rather than
+                    // aborting the write.  This matches the scalar-bridge
+                    // fail-open precedent (Phase B, ValidatorCtx::scalars =
+                    // None → skip silently).  A future strict mode could
+                    // surface the error as a ValidatorFailure, but
+                    // ComputedDefault is a best-effort default, not a hard
+                    // integrity constraint — that role belongs to CHECK rules.
+                    if let Ok(v) = eval_write_value(expr, &literal, scalars) {
+                        m.insert(field.clone(), v);
+                    }
+                }
+            }
         }
     }
 }
