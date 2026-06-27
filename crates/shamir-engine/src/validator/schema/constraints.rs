@@ -100,4 +100,20 @@ pub struct Constraints {
     /// unique` e2e).  NULL values bypass the unique check (standard SQL
     /// semantics: NULL is never equal to anything, including another NULL).
     pub unique: bool,
+
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on EVERY write (INSERT and UPDATE). The server clock is
+    /// always authoritative — any caller-supplied value is overwritten.
+    ///
+    /// Semantic: `updated_at` pattern.  Aggregated by
+    /// `SchemaValidator::transforms()` as `TransformSpec::AutoNow`.
+    pub auto_now: bool,
+
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on INSERT only, and only when the field is absent.
+    /// An explicitly-supplied value (including explicit `Null`) is preserved.
+    ///
+    /// Semantic: `created_at` pattern.  Aggregated by
+    /// `SchemaValidator::transforms()` as `TransformSpec::AutoNowAdd`.
+    pub auto_now_add: bool,
 }

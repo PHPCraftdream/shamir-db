@@ -775,6 +775,24 @@ export class FieldBuilder {
   }
 
   /**
+   * ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+   * this field on **every** write (INSERT and UPDATE). The server clock is
+   * always authoritative — any caller-supplied value is overwritten.
+   *
+   * Typical usage: `updated_at` field. Mirrors the Rust `.auto_now()` builder.
+   */
+  autoNow(): this { this._constraints.auto_now = true; return this; }
+
+  /**
+   * ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+   * this field on **INSERT** only, and only when the field is absent.
+   * An explicitly-supplied value (including explicit `null`) is preserved.
+   *
+   * Typical usage: `created_at` field. Mirrors the Rust `.auto_now_add()` builder.
+   */
+  autoNowAdd(): this { this._constraints.auto_now_add = true; return this; }
+
+  /**
    * Phase C2 — forward-only foreign-key reference.
    * The field value must exist in `refTable.refField`.
    * `onDelete` defaults to `'restrict'` (matching the Rust builder); pass

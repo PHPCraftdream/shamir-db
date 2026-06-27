@@ -182,20 +182,25 @@ pub(super) fn apply_defaults(rec: &mut QueryValue, defaults: &[(Vec<String>, Que
 // Declarative TRANSFORM stamp (Phase ③.2b — insert path)
 // ============================================================================
 
-/// Apply declarative transform rules to a record BEFORE encode (③.2b).
+/// Apply declarative transform rules to a record BEFORE encode (③.2b/③.2d).
 ///
-/// For each `(path, spec)` rule:
+/// # `is_insert` gate (③.2d)
+///
+/// - [`TransformSpec::AutoNow`] — runs on **every** write (INSERT and UPDATE):
+///   unconditionally overwrites the field with `QueryValue::Int(now_ns as i64)`.
+///   This is the `updated_at` semantic; the server clock is always authoritative.
+/// - [`TransformSpec::AutoNowAdd`] and [`TransformSpec::ComputedDefault`] — run
+///   **only on INSERT** (`is_insert == true`): absence-guarded, so explicitly-
+///   supplied values (including explicit `Null`) are preserved.  On UPDATE the
+///   partial `set`-map does not contain `created_at`, so stamping it there would
+///   be wrong — gating on `is_insert` prevents that.
+///
+/// # Other semantics
+///
 /// - **MVP scope: single-segment paths only.** Multi-segment paths are
 ///   silently skipped (matching `apply_defaults` MVP — future work).
-/// - [`TransformSpec::AutoNow`] — unconditionally overwrites the field with
-///   `QueryValue::Int(now_ns as i64)`.  This is the `updated_at` semantic:
-///   the server clock is always authoritative.
-/// - [`TransformSpec::AutoNowAdd`] — stamps `QueryValue::Int(now_ns as i64)`
-///   only if the field is absent (`!contains_key`).  This is the `created_at`
-///   semantic: an explicitly-supplied value is preserved.
-/// - [`TransformSpec::ComputedDefault`] — evaluates the expression through
-///   `eval_write_value` only if the field is absent.  On evaluation error the
-///   stamp is skipped silently (fail-open), consistent with the scalar-bridge
+/// - [`TransformSpec::ComputedDefault`]: on evaluation error the stamp is
+///   skipped silently (fail-open), consistent with the scalar-bridge
 ///   fail-open precedent from Phase B.  The record map at the time of
 ///   evaluation is passed as the `literal` context so `$ref` can address
 ///   sibling fields already stamped by `apply_defaults`.
@@ -208,6 +213,7 @@ pub(crate) fn apply_transforms(
     transforms: &[(Vec<String>, TransformSpec)],
     scalars: &ScalarRegistry,
     now_ns: u64,
+    is_insert: bool,
 ) {
     let m = match rec {
         QueryValue::Map(m) => m,
@@ -221,19 +227,22 @@ pub(crate) fn apply_transforms(
         };
         match spec {
             TransformSpec::AutoNow => {
-                // Unconditional: overwrites any caller-supplied value.
-                // Server clock is authoritative for `updated_at`.
+                // Unconditional on every write: overwrites any caller-supplied
+                // value.  Server clock is authoritative for `updated_at`.
                 m.insert(field.clone(), QueryValue::Int(now_ns as i64));
             }
             TransformSpec::AutoNowAdd => {
-                // Absence-guarded: preserve an explicitly-supplied value.
-                if !m.contains_key(field.as_str()) {
+                // INSERT-only (is_insert gate) + absence-guarded: preserve an
+                // explicitly-supplied value.  On UPDATE the partial set-map does
+                // not contain `created_at` — skipping avoids a wrong stamp.
+                if is_insert && !m.contains_key(field.as_str()) {
                     m.insert(field.clone(), QueryValue::Int(now_ns as i64));
                 }
             }
             TransformSpec::ComputedDefault(expr) => {
-                // Absence-guarded: only fill missing fields.
-                if !m.contains_key(field.as_str()) {
+                // INSERT-only (is_insert gate) + absence-guarded: only fill
+                // missing fields on INSERT.
+                if is_insert && !m.contains_key(field.as_str()) {
                     // Snapshot the current map as the literal context for
                     // $ref resolution.  Cloning here is bounded by the number
                     // of ComputedDefault transforms (rare at schema-level) and

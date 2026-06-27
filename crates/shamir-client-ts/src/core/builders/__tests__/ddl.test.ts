@@ -786,6 +786,57 @@ describe('field() Phase B/C constraint wire-shapes', () => {
     expect(rule).not.toHaveProperty('compare');
     expect(rule).not.toHaveProperty('unique');
     expect(rule).not.toHaveProperty('foreign_key');
+    expect(rule).not.toHaveProperty('auto_now');
+    expect(rule).not.toHaveProperty('auto_now_add');
+  });
+});
+
+// ── ③.2d server-stamping builders ──────────────────────────────────
+
+describe('FieldBuilder — ③.2d autoNow / autoNowAdd', () => {
+  it('autoNow() flattens to {auto_now: true} on the rule', () => {
+    const rule = ddl.field(['updated_at']).int().autoNow().build();
+    expect(rule).toEqual({
+      path: ['updated_at'],
+      type: 'int',
+      auto_now: true,
+    });
+  });
+
+  it('autoNowAdd() flattens to {auto_now_add: true} on the rule', () => {
+    const rule = ddl.field(['created_at']).int().autoNowAdd().build();
+    expect(rule).toEqual({
+      path: ['created_at'],
+      type: 'int',
+      auto_now_add: true,
+    });
+  });
+
+  it('auto_now is omitted when not set', () => {
+    const rule = ddl.field(['created_at']).int().build();
+    expect(rule).not.toHaveProperty('auto_now');
+  });
+
+  it('auto_now_add is omitted when not set', () => {
+    const rule = ddl.field(['updated_at']).int().build();
+    expect(rule).not.toHaveProperty('auto_now_add');
+  });
+
+  it('autoNow and autoNowAdd can coexist on different fields in a schema', () => {
+    const schema = [
+      ddl.field(['created_at']).int().autoNowAdd().build(),
+      ddl.field(['updated_at']).int().autoNow().build(),
+    ];
+    expect(schema[0]).toEqual({
+      path: ['created_at'],
+      type: 'int',
+      auto_now_add: true,
+    });
+    expect(schema[1]).toEqual({
+      path: ['updated_at'],
+      type: 'int',
+      auto_now: true,
+    });
   });
 });
 

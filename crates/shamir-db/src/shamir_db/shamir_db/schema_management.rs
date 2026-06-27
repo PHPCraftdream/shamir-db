@@ -141,12 +141,11 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
     // serde wire encoding, so the bytes are byte-identical.
     // On decode failure (corrupt catalogue) we silently drop the default rather
     // than aborting the entire boot-pass.
-    let default: Option<crate::query::filter::FilterValue> =
-        item.get("default").and_then(|qv| {
-            rmp_serde::to_vec_named(qv)
-                .ok()
-                .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
-        });
+    let default: Option<crate::query::filter::FilterValue> = item.get("default").and_then(|qv| {
+        rmp_serde::to_vec_named(qv)
+            .ok()
+            .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
+    });
 
     let array_of = item
         .get("array_of")
@@ -168,6 +167,15 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         .get("unique")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // ③.2d — server-stamping flags (absent in legacy catalogue rows = false).
+    let auto_now = item
+        .get("auto_now")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let auto_now_add = item
+        .get("auto_now_add")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let constraints = Constraints {
         required,
@@ -186,6 +194,8 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         compare,
         foreign_key,
         unique,
+        auto_now,
+        auto_now_add,
     };
 
     Ok(FieldRule {
