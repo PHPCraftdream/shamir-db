@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use shamir_types::types::value::QueryValue;
 
+use crate::filter::FilterValue;
+
 use super::fk_action::FkAction;
 
 fn default_repo() -> String {
@@ -65,13 +67,21 @@ pub struct ConstraintsDto {
     /// Enum constraint: the value must be one of these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub one_of: Option<Vec<QueryValue>>,
-    /// Literal default value stamped on INSERT for an absent field
-    /// (Phase ②.4b — surface only; stamp-enforcement lands in ②.4c).
-    /// Carried as a constant `QueryValue`; computed defaults (`now()`,
-    /// scalars) are out of scope (would need the mutating-validator
-    /// framework — see DDL-EVOLUTION-PLAN §②.4a variant A).
+    /// Default value (literal or expression) stamped on INSERT for an absent
+    /// field (③.2c: extended from Phase ②.4b literal-only to expression).
+    ///
+    /// - Literal `FilterValue` variants (Null/Bool/Int/Float/String/Binary)
+    ///   are serde-untagged-compatible with `QueryValue`, so existing wire
+    ///   schemas round-trip unchanged (②.4b regression: literal defaults
+    ///   remain on the fast `apply_defaults` path).
+    /// - Expression variants (`$fn`, `$ref`, `$expr`, `$cond`) are NEW (③.2c):
+    ///   routed through `apply_transforms` as `ComputedDefault(expr)`.
+    ///   Evaluated at admission-time through `builtin_scalars()` — the same
+    ///   boundary as inline `$fn` fields (`resolve_computed_record`).
+    ///   User-registered scalars are NOT available in computed-defaults
+    ///   (future work, same boundary as inline-$fn).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<QueryValue>,
+    pub default: Option<FilterValue>,
     /// Array element type constraint (e.g. `"string"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub array_of: Option<String>,

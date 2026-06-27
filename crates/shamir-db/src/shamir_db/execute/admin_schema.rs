@@ -727,10 +727,16 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
     if let Some(items) = &c.one_of {
         m.insert("one_of".to_string(), QueryValue::List(items.clone()));
     }
-    // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
-    // Persisted as-is (QueryValue scalar), mirroring how `one_of` items travel.
-    if let Some(v) = &c.default {
-        m.insert("default".to_string(), v.clone());
+    // ③.2c — default (literal or expression; extends ②.4b literal-only).
+    // Serialise FilterValue → QueryValue via the msgpack round-trip: both types
+    // share the same untagged-serde encoding, so expression defaults ($fn etc.)
+    // persist faithfully and round-trip back to FilterValue on read.
+    if let Some(fv) = &c.default {
+        if let Ok(bytes) = rmp_serde::to_vec_named(fv) {
+            if let Ok(qv) = rmp_serde::from_slice::<QueryValue>(&bytes) {
+                m.insert("default".to_string(), qv);
+            }
+        }
     }
     if let Some(s) = &c.array_of {
         m.insert("array_of".to_string(), QueryValue::Str(s.clone()));
@@ -845,8 +851,14 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
                 None
             }
         }),
-        // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
-        default: m.get("default").cloned(),
+        // ③.2c — default (literal or expression; extends ②.4b literal-only).
+        // Recover FilterValue from the catalogue QueryValue via msgpack round-trip.
+        // On decode failure silently drop (treated as absent default).
+        default: m.get("default").and_then(|qv| {
+            rmp_serde::to_vec_named(qv)
+                .ok()
+                .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
+        }),
         array_of: m.get("array_of").and_then(|v| v.as_str()).map(String::from),
         scalar: m.get("scalar").and_then(|v| v.as_str()).map(String::from),
         format: m.get("format").and_then(|v| v.as_str()).map(String::from),

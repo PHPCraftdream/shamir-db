@@ -735,11 +735,20 @@ export class FieldBuilder {
   }
 
   /**
-   * Phase ②.4b — literal default stamped on INSERT for an absent field
-   * (surface only; stamp-enforcement lands in ②.4c). Mirrors the Rust
-   * builder's `.default(value)`.
+   * ③.2c — default value (literal or expression) stamped on INSERT for an
+   * absent field (extends Phase ②.4b literal-only to expression).
+   *
+   * - **Literal** forms (null/bool/number/string/array/object) route through
+   *   the fast `apply_defaults` path (②.4c behaviour is unchanged).
+   * - **Expression** `ComputedExpr` forms (`$fn` / `$ref` / etc.) route
+   *   through `apply_transforms` → `eval_write_value` → `builtin_scalars()`
+   *   at admission-time. User scalars are NOT available here (same boundary
+   *   as inline `$fn` write-field expressions).
+   *
+   * Accepts `WriteValue` (superset of `WireValue` + `ComputedExpr`). Mirrors
+   * the Rust builder's `.default(impl Into<FilterValue>)`.
    */
-  default(value: import('../types/write.js').WireValue): this {
+  default(value: import('../types/write.js').WriteValue): this {
     this._constraints.default = value;
     return this;
   }

@@ -12,6 +12,7 @@
 //! ];
 //! ```
 
+use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
 
 use super::constraints::{Constraints, Num};
@@ -173,14 +174,28 @@ impl RuleBuilder {
         self
     }
 
-    /// Set the literal default value stamped on INSERT for an absent field
-    /// (Phase ②.4b — surface only; stamp-enforcement lands in ②.4c).
+    /// Set the default value stamped on INSERT for an absent field (③.2c:
+    /// extended from Phase ②.4b literal-only to expression).
+    ///
+    /// - **Literal** `FilterValue` scalars (Null/Bool/Int/Float/String/Binary)
+    ///   route through the fast `apply_defaults` path (②.4c behaviour is
+    ///   unchanged).
+    /// - **Expression** `FilterValue` forms (`$fn` / `$ref` / etc.) route
+    ///   through `apply_transforms` → `eval_write_value` → `builtin_scalars()`
+    ///   at admission-time.  User scalars are NOT available here (same boundary
+    ///   as inline `$fn` in `resolve_computed_record`).
+    ///
+    /// Legacy callers that pass a `QueryValue` directly are unaffected because
+    /// `QueryValue` implements `Into<FilterValue>` via the untagged-serde
+    /// round-trip (they share the same msgpack encoding).  To pass a `QueryValue`
+    /// literal use `.default(FilterValue::Int(5))` or the `From` impls on
+    /// `FilterValue`.
     // Inherent method named `default` — clippy's `should_implement_trait`
     // fires only when the type implements `Default`; `RuleBuilder` does not,
     // but we allow it defensively in case `Default` is ever derived here.
     #[allow(clippy::should_implement_trait)]
-    pub fn default(mut self, value: QueryValue) -> Self {
-        self.constraints.default = Some(value);
+    pub fn default(mut self, value: impl Into<FilterValue>) -> Self {
+        self.constraints.default = Some(value.into());
         self
     }
 

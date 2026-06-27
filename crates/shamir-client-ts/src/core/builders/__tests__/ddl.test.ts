@@ -532,12 +532,14 @@ describe('field()', () => {
   });
 });
 
-// ── field().default() (Phase ②.4b — surface only) ───────────────────
-// INSERT-path stamp-enforcement lands in ②.4c; here we only assert the
-// wire-shape: `.default(value)` emits a top-level `default: <value>` key
-// and is omitted when unset (mirrors serde `skip_serializing_if`).
+// ── field().default() (③.2c: literal and expression defaults) ───────
+// INSERT-path stamp-enforcement: literals → apply_defaults fast path (②.4c);
+// expressions (ComputedExpr/$fn/$ref) → apply_transforms (③.2c).
+// Here we only assert the wire-shape (mirrors serde `skip_serializing_if`).
 
 describe('field().default()', () => {
+  // ── Literal defaults (②.4b regression — must remain green) ──────────
+
   it('emits default: <number> on the wire', () => {
     const rule = ddl.field(['count']).int().default(5).build();
     expect(rule.default).toBe(5);
@@ -556,6 +558,29 @@ describe('field().default()', () => {
   it('omits default when not set', () => {
     const rule = ddl.field(['x']).int().build();
     expect(rule).not.toHaveProperty('default');
+  });
+
+  // ── Expression defaults (③.2c) ────────────────────────────────────────
+
+  it('emits default: {$fn: "strings/upper"} for simple $fn expression', () => {
+    const rule = ddl.field(['tag']).string().default({ $fn: 'strings/upper' }).build();
+    expect(rule.default).toEqual({ $fn: 'strings/upper' });
+    expect(rule).toEqual({
+      path: ['tag'],
+      type: 'string',
+      default: { $fn: 'strings/upper' },
+    });
+  });
+
+  it('emits default: {$fn: {name, args}} for complex $fn expression', () => {
+    const expr = { $fn: { name: 'strings/upper', args: [{ $ref: ['value'] }] } };
+    const rule = ddl.field(['tag']).string().default(expr).build();
+    expect(rule.default).toEqual(expr);
+  });
+
+  it('emits default: {$ref: [field]} for field-reference expression', () => {
+    const rule = ddl.field(['tag']).string().default({ $ref: ['source'] }).build();
+    expect(rule.default).toEqual({ $ref: ['source'] });
   });
 });
 
