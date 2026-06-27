@@ -9,7 +9,7 @@ use crate::query::TableResolver;
 use crate::validator::{
     record_fields::{OwnedFields, ViewFields},
     record_validator::ValidatorCtx,
-    ValidatorDb, ValidatorFailure,
+    TransformSpec, ValidatorDb, ValidatorFailure,
 };
 
 use super::table_manager::TableManager;
@@ -386,5 +386,36 @@ impl TableManager {
             }
         }
         defaults
+    }
+
+    /// Collect all declarative transform rules declared by this table's bound
+    /// validators.
+    ///
+    /// Close twin of [`schema_defaults`](Self::schema_defaults): iterates
+    /// bindings, resolves each via the registry, calls `transforms()` on the
+    /// compiled `RecordValidator`, and aggregates the
+    /// `(field_path, TransformSpec)` pairs.  Returns an empty vec when there
+    /// is no registry or no bound validator declares a transform (the common
+    /// case — fast-skip on the insert hot path).
+    ///
+    /// Used by ③.2b — `execute_insert_tx` calls this once per batch and
+    /// applies each transform (computed-default / timestamp stamping) to each
+    /// record AFTER `apply_defaults` and BEFORE encode + CHECK-validators.
+    /// The wiring is inert until `SchemaValidator::transforms()` returns
+    /// non-empty entries (arriving in #281/#282 with the schema-surface
+    /// fields `auto_now` / `auto_now_add` / expression-default).
+    pub fn schema_transforms(&self) -> Vec<(Vec<String>, TransformSpec)> {
+        let reg = match &self.validator_registry {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let bindings = self.validator_bindings.load_full();
+        let mut transforms = Vec::new();
+        for binding in bindings.iter() {
+            if let Some(validator) = reg.get_by_id(&binding.validator_id) {
+                transforms.extend(validator.transforms());
+            }
+        }
+        transforms
     }
 }

@@ -186,4 +186,15 @@ pub trait RecordValidator: Send + Sync {
     fn defaults(&self) -> Vec<(Vec<String>, shamir_types::types::value::QueryValue)> {
         Vec::new()
     }
+
+    /// Return all declarative transform rules declared by this validator.
+    ///
+    /// Each entry is `(field_path, transform_spec)`.  Only
+    /// [`SchemaValidator`] overrides this (③.2b framework — the pre-encode
+    /// INSERT pass applies computed-defaults and server-side timestamps).
+    /// The default returns an empty vec — native/WASM validators carry no
+    /// transforms.  Zеркало `defaults()`.
+    fn transforms(&self) -> Vec<(Vec<String>, super::TransformSpec)> {
+        Vec::new()
+    }
 }

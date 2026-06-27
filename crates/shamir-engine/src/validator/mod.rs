@@ -18,6 +18,7 @@ pub mod record_fields;
 pub mod record_validator;
 mod registry;
 pub mod schema;
+pub mod transform_spec;
 
 mod decode;
 mod encode;
@@ -38,6 +39,7 @@ pub use persisted_validators::PersistedValidators;
 pub use query_value_conv::{inner_to_query_value, inner_to_query_value_with};
 pub use record_fields::{OwnedFields, RecordFields, ViewFields};
 pub use record_validator::{RecordValidator, ValidatorCtx};
+pub use transform_spec::TransformSpec;
 pub use validation_outcome::{ValidationOutcome, ValidatorFailure};
 pub use validator_binding::ValidatorBinding;
 pub use validator_db::ValidatorDb;

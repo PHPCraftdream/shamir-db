@@ -8,12 +8,13 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHashMap;
 
+use crate::function::builtin_scalars;
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::write::{
@@ -35,8 +36,8 @@ use shamir_types::access::Actor;
 use super::record_cow::RecordCow;
 use super::table_manager::TableManager;
 use super::write_helpers::{
-    apply_defaults, intern_via_layered, make_layered_interner, resolve_computed_record,
-    validator_failure_to_db_error,
+    apply_defaults, apply_transforms, intern_via_layered, make_layered_interner,
+    resolve_computed_record, validator_failure_to_db_error,
 };
 
 impl TableManager {
@@ -97,6 +98,19 @@ impl TableManager {
         // default value. Explicit values (including explicit `Null`) are
         // never overwritten (replay-safe invariant, DDL-EVOLUTION-PLAN §②.4a).
         let defaults = self.schema_defaults();
+        // ③.2b — declarative transform rules for this table, fetched ONCE per
+        // batch.  Empty until #281/#282 land the schema-surface fields
+        // (`auto_now` / `auto_now_add` / expression-default) → wiring is
+        // inert for now, which is the expected and correct state.
+        let transforms = self.schema_transforms();
+        // now_ns: admission-time wall-clock nanoseconds, computed ONCE per
+        // batch so every record in the batch shares the same timestamp
+        // (deterministic within a batch, not per-record).  Off-replay by
+        // construction — transforms run at admission, not WAL-replay.
+        let now_ns: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         // Collected on the base-intern path only: `(field_name, base_id)` for
         // every name genuinely NEW to the base interner this insert. Drained
         // into `tx.interner_deltas` after the immutable-borrow block ends.
@@ -150,6 +164,13 @@ impl TableManager {
                 // Fast-skip when the table declares no defaults (common case).
                 if !defaults.is_empty() {
                     apply_defaults(resolved.to_mut(), &defaults);
+                }
+                // ③.2b — apply declarative transforms (computed-default +
+                // server-side timestamps) AFTER literal defaults and BEFORE
+                // encode so both stored bytes and CHECK-validators see the
+                // transformed values.  Fast-skip when empty (hot path).
+                if !transforms.is_empty() {
+                    apply_transforms(resolved.to_mut(), &transforms, builtin_scalars(), now_ns);
                 }
                 let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
