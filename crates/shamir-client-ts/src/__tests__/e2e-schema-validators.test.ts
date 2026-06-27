@@ -23,7 +23,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-import type { ShamirClient, BatchResponse } from '../index.js';
+import type { ShamirClient, BatchResponse, WriteValue } from '../index.js';
 import { Batch, ddl, write } from '../index.js';
 import {
   SERVER_AVAILABLE,
@@ -47,7 +47,7 @@ async function tryInsert(
   client: ShamirClient,
   db: string,
   table: string,
-  record: Record<string, unknown>,
+  record: WriteValue,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const resp = br(
@@ -73,7 +73,7 @@ async function tryInsertTx(
   client: ShamirClient,
   db: string,
   table: string,
-  record: Record<string, unknown>,
+  record: WriteValue,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const resp = br(
@@ -99,8 +99,8 @@ async function tryInsertTxTwo(
   client: ShamirClient,
   db: string,
   table: string,
-  r1: Record<string, unknown>,
-  r2: Record<string, unknown>,
+  r1: WriteValue,
+  r2: WriteValue,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     const resp = br(

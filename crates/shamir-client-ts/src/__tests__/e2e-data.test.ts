@@ -688,6 +688,341 @@ describe.skipIf(!SERVER_AVAILABLE)(
       // This is documented as a builder gap — $fn is only available in
       // filter/select contexts (filter.fn()), not in write.insert() values.
     });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 11. PATTERN MATCHING — like / ilike / regex (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let patternDb: string;
+
+    it('pattern-setup: create db + seed', async () => {
+      patternDb = await setupDb(client!, 'pattern', ['words']);
+      await seed(client!, patternDb, 'words', [
+        { id: 'p1', word: 'Apple', tag: 'fruit' },
+        { id: 'p2', word: 'apricot', tag: 'fruit' },
+        { id: 'p3', word: 'Banana', tag: 'fruit' },
+        { id: 'p4', word: 'carrot', tag: 'veggie' },
+        { id: 'p5', word: 'cherry', tag: 'fruit' },
+      ]);
+    });
+
+    it('filter: like — case-sensitive prefix match', async () => {
+      // "c%" matches 'carrot' and 'cherry' (lowercase c).
+      const resp = br(await Batch.create('f-like')
+        .add('r', Query.from('words').where(filter.like('word', 'c%')))
+        .execute(client!, patternDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('p4');
+      expect(ids).toContain('p5');
+      expect(ids).not.toContain('p1'); // 'Apple' — uppercase A
+    });
+
+    it('filter: ilike — case-insensitive prefix match', async () => {
+      // "a%" matches 'Apple' and 'apricot' (case-insensitive).
+      const resp = br(await Batch.create('f-ilike')
+        .add('r', Query.from('words').where(filter.ilike('word', 'a%')))
+        .execute(client!, patternDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('p1'); // 'Apple'
+      expect(ids).toContain('p2'); // 'apricot'
+      expect(ids).not.toContain('p3'); // 'Banana'
+    });
+
+    it('filter: regex — matches pattern', async () => {
+      // "^[Aa]" matches words starting with uppercase or lowercase A.
+      const resp = br(await Batch.create('f-regex')
+        .add('r', Query.from('words').where(filter.regex('word', '^[Aa]')))
+        .execute(client!, patternDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('p1'); // 'Apple'
+      expect(ids).toContain('p2'); // 'apricot'
+      expect(ids).not.toContain('p3'); // 'Banana'
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 12. NULL / EXISTENCE FILTERS — isNull / isNotNull / exists / notExists (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let nullDb: string;
+
+    it('null-setup: create db + seed (sparse records)', async () => {
+      nullDb = await setupDb(client!, 'nullex', ['items']);
+      await seed(client!, nullDb, 'items', [
+        { id: 'n1', val: 'present', extra: 'yes' },
+        { id: 'n2', val: null },              // val is null, extra absent
+        { id: 'n3', extra: 'only-extra' },    // val absent entirely
+      ]);
+    });
+
+    it('filter: isNull — selects rows where val IS NULL', async () => {
+      const resp = br(await Batch.create('f-is-null')
+        .add('r', Query.from('items').where(filter.isNull('val')))
+        .execute(client!, nullDb));
+      const ids = resp.results.r.records.map(r => r.id);
+      expect(ids).toContain('n2');
+      expect(ids).not.toContain('n1');
+    });
+
+    it('filter: isNotNull — selects rows where val IS NOT NULL', async () => {
+      const resp = br(await Batch.create('f-is-not-null')
+        .add('r', Query.from('items').where(filter.isNotNull('val')))
+        .execute(client!, nullDb));
+      const ids = resp.results.r.records.map(r => r.id);
+      expect(ids).toContain('n1');
+      expect(ids).not.toContain('n2');
+    });
+
+    it('filter: exists — selects rows where extra field is present', async () => {
+      const resp = br(await Batch.create('f-exists')
+        .add('r', Query.from('items').where(filter.exists('extra')))
+        .execute(client!, nullDb));
+      const ids = resp.results.r.records.map(r => r.id);
+      expect(ids).toContain('n1');
+      expect(ids).toContain('n3');
+      expect(ids).not.toContain('n2');
+    });
+
+    it('filter: notExists — selects rows where extra field is absent', async () => {
+      const resp = br(await Batch.create('f-not-exists')
+        .add('r', Query.from('items').where(filter.notExists('extra')))
+        .execute(client!, nullDb));
+      const ids = resp.results.r.records.map(r => r.id);
+      expect(ids).toContain('n2');
+      expect(ids).not.toContain('n1');
+      expect(ids).not.toContain('n3');
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 13. CONTAINMENT FILTERS — contains / containsAny / containsAll (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let arrDb: string;
+
+    it('contains-setup: create db + seed (array fields)', async () => {
+      arrDb = await setupDb(client!, 'arrdata', ['docs']);
+      await seed(client!, arrDb, 'docs', [
+        { id: 'c1', tags: ['a', 'b', 'c'] },
+        { id: 'c2', tags: ['b', 'd'] },
+        { id: 'c3', tags: ['x', 'y'] },
+        { id: 'c4', tags: ['a', 'b', 'd', 'e'] },
+      ]);
+    });
+
+    it('filter: contains — rows where tags contains "a"', async () => {
+      const resp = br(await Batch.create('f-contains')
+        .add('r', Query.from('docs').where(filter.contains('tags', 'a')))
+        .execute(client!, arrDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('c1');
+      expect(ids).toContain('c4');
+      expect(ids).not.toContain('c2');
+      expect(ids).not.toContain('c3');
+    });
+
+    it('filter: containsAny — rows where tags contains "a" or "d"', async () => {
+      const resp = br(await Batch.create('f-contains-any')
+        .add('r', Query.from('docs').where(filter.containsAny('tags', ['a', 'd'])))
+        .execute(client!, arrDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('c1'); // has 'a'
+      expect(ids).toContain('c2'); // has 'd'
+      expect(ids).toContain('c4'); // has both
+      expect(ids).not.toContain('c3');
+    });
+
+    it('filter: containsAll — rows where tags contains both "a" and "b"', async () => {
+      const resp = br(await Batch.create('f-contains-all')
+        .add('r', Query.from('docs').where(filter.containsAll('tags', ['a', 'b'])))
+        .execute(client!, arrDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toContain('c1'); // ['a','b','c']
+      expect(ids).toContain('c4'); // ['a','b','d','e']
+      expect(ids).not.toContain('c2'); // only 'b', not 'a'
+      expect(ids).not.toContain('c3');
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 14. PAGE-MODE PAGINATION — Query.page(n, size) (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let pageDb: string;
+
+    it('page-setup: create db + seed 10 rows', async () => {
+      pageDb = await setupDb(client!, 'paged', ['rows']);
+      const records = Array.from({ length: 10 }, (_, i) => ({
+        id: `r${String(i).padStart(2, '0')}`,
+        n: i,
+      }));
+      await seed(client!, pageDb, 'rows', records);
+    });
+
+    it('pagination: page(1, 3) returns first 3 rows', async () => {
+      const resp = br(await Batch.create('page-1')
+        .add('r', Query.from('rows').orderByAsc('n').page(1, 3))
+        .execute(client!, pageDb));
+      const recs = resp.results.r.records;
+      expect(recs.length).toBe(3);
+      expect(recs[0].n).toBe(0);
+      expect(recs[1].n).toBe(1);
+      expect(recs[2].n).toBe(2);
+    });
+
+    it('pagination: page(2, 3) returns rows 4-6', async () => {
+      const resp = br(await Batch.create('page-2')
+        .add('r', Query.from('rows').orderByAsc('n').page(2, 3))
+        .execute(client!, pageDb));
+      const recs = resp.results.r.records;
+      expect(recs.length).toBe(3);
+      expect(recs[0].n).toBe(3);
+      expect(recs[1].n).toBe(4);
+      expect(recs[2].n).toBe(5);
+    });
+
+    it('pagination: page(4, 3) returns last 1 row (partial page)', async () => {
+      const resp = br(await Batch.create('page-4')
+        .add('r', Query.from('rows').orderByAsc('n').page(4, 3))
+        .execute(client!, pageDb));
+      const recs = resp.results.r.records;
+      expect(recs.length).toBe(1);
+      expect(recs[0].n).toBe(9);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 15. DISTINCT — Query.distinct() deduplicates result rows (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('distinct: duplicate tag values collapsed to unique set', async () => {
+      // fDb is from section 5; has 6 rows with tags 'red','red','blue','blue','green','green'.
+      const resp = br(await Batch.create('distinct-tags')
+        .add('r', Query.from('t')
+          .select([select.field('tag')])
+          .distinct()
+          .orderByAsc('tag'))
+        .execute(client!, fDb));
+      const tags = resp.results.r.records.map(r => r.tag);
+      expect(tags).toEqual(['blue', 'green', 'red']);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 16. SCALAR PROJECTION — select.func (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let funcDb: string;
+
+    it('func-setup: create db + seed', async () => {
+      funcDb = await setupDb(client!, 'funcproj', ['names']);
+      await seed(client!, funcDb, 'names', [
+        { id: 'f1', name: 'alice' },
+        { id: 'f2', name: 'bob' },
+        { id: 'f3', name: 'charlie' },
+      ]);
+    });
+
+    it('select.func: strings/upper applied to name field', async () => {
+      const resp = br(await Batch.create('func-upper')
+        .add('r', Query.from('names')
+          .where(filter.eq('id', 'f1'))
+          .select([
+            select.field('id'),
+            select.func('strings/upper', [filter.ref('name')], 'upper_name'),
+          ]))
+        .execute(client!, funcDb));
+      const rec = resp.results.r.records[0];
+      expect(rec.id).toBe('f1');
+      expect(rec.upper_name).toBe('ALICE');
+    });
+
+    it('select.func: strings/length returns character count', async () => {
+      const resp = br(await Batch.create('func-length')
+        .add('r', Query.from('names')
+          .orderByAsc('id')
+          .select([
+            select.field('id'),
+            select.func('strings/length', [filter.ref('name')], 'name_len'),
+          ]))
+        .execute(client!, funcDb));
+      const recs = resp.results.r.records;
+      // alice=5, bob=3, charlie=7
+      const alice = recs.find(r => r.id === 'f1');
+      const bob = recs.find(r => r.id === 'f2');
+      expect(alice?.name_len).toBe(5);
+      expect(bob?.name_len).toBe(3);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 17. LIBRARY AGGREGATE — select.aggregateFn (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('aggregateFn: count_distinct over tag column', async () => {
+      // fDb from section 5 has 6 rows: 2 red, 2 blue, 2 green → 3 distinct tags.
+      const resp = br(await Batch.create('agg-count-distinct')
+        .add('r', Query.from('t')
+          .select([
+            select.aggregateFn('count_distinct', 'tag', { alias: 'n_tags' }),
+          ]))
+        .execute(client!, fDb));
+      const rec = resp.results.r.records[0];
+      expect(rec.n_tags).toBe(3);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 18. HISTORY RANGE — Query.history() temporal range reads (P1 gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    let histDb: string;
+
+    it('history-setup: create db + make multiple versions of a record', async () => {
+      histDb = await setupDb(client!, 'hist', ['log']);
+      // v1
+      await br(await Batch.create('hist-v1')
+        .add('i', write.insert('log', [{ id: 'doc1', rev: 1, note: 'created' }]))
+        .transactional()
+        .execute(client!, histDb));
+      // v2
+      await br(await Batch.create('hist-v2')
+        .add('u', write.update('log')
+          .where(filter.eq('id', 'doc1'))
+          .set({ rev: 2, note: 'updated' })
+          .build())
+        .transactional()
+        .execute(client!, histDb));
+      // v3
+      await br(await Batch.create('hist-v3')
+        .add('u', write.update('log')
+          .where(filter.eq('id', 'doc1'))
+          .set({ rev: 3, note: 'final' })
+          .build())
+        .transactional()
+        .execute(client!, histDb));
+    });
+
+    it('history: range read returns multiple versions of the same record', async () => {
+      const resp = br(await Batch.create('hist-range')
+        .add('r', Query.from('log')
+          .where(filter.eq('id', 'doc1'))
+          .history({ order: 'asc' }))
+        .execute(client!, histDb));
+      const recs = resp.results.r.records;
+      // Should see at least 3 versions (the three writes above).
+      expect(recs.length).toBeGreaterThanOrEqual(3);
+      // Oldest first (asc) — rev field ascends.
+      const revs = recs.map(r => r.rev as number);
+      expect(revs[0]).toBe(1);
+      expect(revs[revs.length - 1]).toBe(3);
+    });
+
+    it('history: desc order returns newest version first', async () => {
+      const resp = br(await Batch.create('hist-desc')
+        .add('r', Query.from('log')
+          .where(filter.eq('id', 'doc1'))
+          .history({ order: 'desc', limit: 2 }))
+        .execute(client!, histDb));
+      const recs = resp.results.r.records;
+      // limit=2, newest first → rev 3 then rev 2.
+      expect(recs.length).toBe(2);
+      expect(recs[0].rev).toBe(3);
+      expect(recs[1].rev).toBe(2);
+    });
   },
 );
 
