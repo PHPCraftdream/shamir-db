@@ -110,6 +110,34 @@ pub struct ConstraintsDto {
     /// DDL time (fail-closed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unique: Option<bool>,
+
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on EVERY write (INSERT and UPDATE). The server clock is
+    /// always authoritative — any caller-supplied value is overwritten.
+    ///
+    /// Semantic: `updated_at` pattern.  Corresponds to [`TransformSpec::AutoNow`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::admin::types::schema_ops::is_false"
+    )]
+    pub auto_now: bool,
+
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on INSERT only, and only when the field is absent.
+    /// An explicitly-supplied value (including explicit `Null`) is preserved.
+    ///
+    /// Semantic: `created_at` pattern.  Corresponds to [`TransformSpec::AutoNowAdd`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::admin::types::schema_ops::is_false"
+    )]
+    pub auto_now_add: bool,
+}
+
+/// Serde helper: skip serializing a `bool` field when it is `false` (the default).
+#[doc(hidden)]
+pub fn is_false(v: &bool) -> bool {
+    !v
 }
 
 /// Foreign-key reference descriptor (wire form).

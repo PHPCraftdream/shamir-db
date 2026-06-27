@@ -304,17 +304,30 @@ impl RecordValidator for SchemaValidator {
         self.collect_defaults()
     }
 
-    /// ③.2c: return declarative transform rules for this schema.
+    /// ③.2c/③.2d: return declarative transform rules for this schema.
     ///
-    /// Returns `ComputedDefault(expr)` for every rule whose
-    /// `constraints.default` is an expression `FilterValue` (i.e. NOT a
-    /// literal). Literal defaults live in `defaults()` → fast
-    /// `apply_defaults` path; expression defaults land here and are
-    /// evaluated through `apply_transforms` → `eval_write_value` →
-    /// `builtin_scalars()` at admission-time (same boundary as inline
-    /// `$fn` in `resolve_computed_record`; user scalars — future).
+    /// Emits:
+    /// - `ComputedDefault(expr)` for every rule whose `constraints.default`
+    ///   is an expression `FilterValue` (③.2c — literal defaults live in
+    ///   `defaults()` → fast `apply_defaults` path instead).
+    /// - `(path, AutoNowAdd)` for every rule with `constraints.auto_now_add = true`
+    ///   (③.2d — stamp `created_at` on INSERT when field is absent).
+    /// - `(path, AutoNow)` for every rule with `constraints.auto_now = true`
+    ///   (③.2d — stamp `updated_at` unconditionally on every write).
     fn transforms(&self) -> Vec<(Vec<String>, crate::validator::TransformSpec)> {
-        self.collect_computed_defaults()
+        let mut out = self.collect_computed_defaults();
+        for rule in &self.rules {
+            if rule.constraints.auto_now_add {
+                out.push((
+                    rule.path.clone(),
+                    crate::validator::TransformSpec::AutoNowAdd,
+                ));
+            }
+            if rule.constraints.auto_now {
+                out.push((rule.path.clone(), crate::validator::TransformSpec::AutoNow));
+            }
+        }
+        out
     }
 
     fn nullable_for_field(&self, field: &str) -> Option<bool> {

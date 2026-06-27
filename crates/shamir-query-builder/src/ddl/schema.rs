@@ -262,6 +262,26 @@ impl FieldBuilder {
         self
     }
 
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on **every** write (INSERT and UPDATE). The server clock is
+    /// always authoritative — any caller-supplied value is overwritten.
+    ///
+    /// Typical usage: `updated_at` field.
+    pub fn auto_now(mut self) -> Self {
+        self.constraints.auto_now = true;
+        self
+    }
+
+    /// ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+    /// this field on **INSERT** only, and only when the field is absent.
+    /// An explicitly-supplied value (including explicit `Null`) is preserved.
+    ///
+    /// Typical usage: `created_at` field.
+    pub fn auto_now_add(mut self) -> Self {
+        self.constraints.auto_now_add = true;
+        self
+    }
+
     /// Phase C2 — forward-only foreign-key reference.
     ///
     /// The field value must exist in `ref_table.ref_field`.  An index on

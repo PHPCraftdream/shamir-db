@@ -763,6 +763,13 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
     if let Some(v) = c.unique {
         m.insert("unique".to_string(), QueryValue::Bool(v));
     }
+    // ③.2d — server-stamping flags (omit when false — legacy rows stay unchanged).
+    if c.auto_now {
+        m.insert("auto_now".to_string(), QueryValue::Bool(true));
+    }
+    if c.auto_now_add {
+        m.insert("auto_now_add".to_string(), QueryValue::Bool(true));
+    }
     // Phase C2 — foreign_key.
     if let Some(fk) = &c.foreign_key {
         let mut fk_m = new_map();
@@ -865,6 +872,12 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
         compare: m.get("compare").and_then(compare_dto_from_qv),
         foreign_key: m.get("foreign_key").and_then(foreign_key_dto_from_qv),
         unique: m.get("unique").and_then(|v| v.as_bool()),
+        // ③.2d — server-stamping flags (absent = false for legacy rows).
+        auto_now: m.get("auto_now").and_then(|v| v.as_bool()).unwrap_or(false),
+        auto_now_add: m
+            .get("auto_now_add")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
 
     Some(FieldRuleDto {

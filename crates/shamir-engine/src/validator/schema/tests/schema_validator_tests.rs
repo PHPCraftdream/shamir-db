@@ -308,7 +308,7 @@ fn computed_default_fn_call_stamps_absent_field() {
         TransformSpec::ComputedDefault(expr),
     )];
 
-    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0, true);
 
     // The computed default should have stamped "HELLO" into the absent "tag" field.
     let tag = match &rec {
@@ -346,7 +346,7 @@ fn computed_default_does_not_overwrite_present_value() {
         TransformSpec::ComputedDefault(expr),
     )];
 
-    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0, true);
 
     // Present value must NOT be overwritten.
     let tag = match &rec {
@@ -381,7 +381,7 @@ fn computed_default_does_not_overwrite_explicit_null() {
         TransformSpec::ComputedDefault(expr),
     )];
 
-    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0, true);
 
     // Explicit Null is present → absence check fails → no stamp.
     let tag = match &rec {

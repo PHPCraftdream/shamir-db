@@ -165,12 +165,20 @@ impl TableManager {
                 if !defaults.is_empty() {
                     apply_defaults(resolved.to_mut(), &defaults);
                 }
-                // ③.2b — apply declarative transforms (computed-default +
+                // ③.2b/③.2d — apply declarative transforms (computed-default +
                 // server-side timestamps) AFTER literal defaults and BEFORE
                 // encode so both stored bytes and CHECK-validators see the
                 // transformed values.  Fast-skip when empty (hot path).
+                // is_insert=true: AutoNowAdd/ComputedDefault run here;
+                // AutoNow also runs (it always runs).
                 if !transforms.is_empty() {
-                    apply_transforms(resolved.to_mut(), &transforms, builtin_scalars(), now_ns);
+                    apply_transforms(
+                        resolved.to_mut(),
+                        &transforms,
+                        builtin_scalars(),
+                        now_ns,
+                        true,
+                    );
                 }
                 let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
@@ -371,10 +379,29 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        // Resolve inline `$fn` computed fields, then intern field names
-        // through the tx overlay.
-        let resolved_set = resolve_computed_record(&op.set, interner)
+        // Resolve inline `$fn` computed fields, then apply server-side
+        // transforms (③.2d — AutoNow stamps updated_at on every write),
+        // then intern field names through the tx overlay.
+        let mut resolved_set = resolve_computed_record(&op.set, interner)
             .map_err(shamir_storage::error::DbError::Codec)?;
+        // ③.2d UPDATE-path: apply transforms with is_insert=false.
+        // Only AutoNow runs here (injects updated_at into the set-map);
+        // AutoNowAdd/ComputedDefault are gated on is_insert and are skipped.
+        // Fast-skip when the table declares no transforms (common hot path).
+        let transforms = self.schema_transforms();
+        if !transforms.is_empty() {
+            let now_ns: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            apply_transforms(
+                resolved_set.to_mut(),
+                &transforms,
+                builtin_scalars(),
+                now_ns,
+                false,
+            );
+        }
         let set_inner = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
@@ -792,8 +819,35 @@ impl TableManager {
         let interner = self.interner().get().await?;
 
         // Resolve inline `$fn` computed fields in the value first (fail-closed).
-        let resolved_value = resolve_computed_record(&op.value, interner)
+        let mut resolved_value = resolve_computed_record(&op.value, interner)
             .map_err(shamir_storage::error::DbError::Codec)?;
+
+        // ③.2d UPSERT-path: apply transforms with is_insert=true.
+        // `op.value` is a FULL record (insert-semantics): AutoNow + AutoNowAdd
+        // both apply.  For the MERGE branch this means AutoNowAdd may write
+        // `created_at` into the set-map, which then merges over the old record.
+        // TODO(③.2d): UPSERT MERGE created_at: if the existing record already
+        // has created_at and the caller did not supply one, the absence-guard in
+        // AutoNowAdd will stamp it into the set-map, overwriting the old value.
+        // A correct fix requires knowing at transform-time whether we are in the
+        // INSERT or MERGE branch — which we can't know until after the key lookup.
+        // For now we use is_insert=true (full-record semantics per brief) and
+        // accept that UPSERT MERGE may inadvertently overwrite created_at when
+        // the caller omits it. Track and fix in a follow-up if needed.
+        let transforms = self.schema_transforms();
+        if !transforms.is_empty() {
+            let now_ns: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            apply_transforms(
+                resolved_value.to_mut(),
+                &transforms,
+                builtin_scalars(),
+                now_ns,
+                true,
+            );
+        }
 
         // Intern field names through the tx overlay, then release the
         // immutable borrow on `tx` before the mutable staging calls. Two

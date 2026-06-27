@@ -103,6 +103,23 @@ export interface ConstraintsDto {
   foreign_key?: ForeignKeyDto;
   /** Phase C3 — unique constraint. */
   unique?: boolean;
+  /**
+   * ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+   * this field on **every** write (INSERT and UPDATE). The server clock is
+   * always authoritative — any caller-supplied value is overwritten.
+   *
+   * Typical usage: `updated_at` field. Omitted from the wire when `false`
+   * (mirrors `#[serde(default, skip_serializing_if = "is_false")]`).
+   */
+  auto_now?: boolean;
+  /**
+   * ③.2d — server-stamping: stamp the server wall-clock nanoseconds onto
+   * this field on **INSERT** only, and only when the field is absent.
+   * An explicitly-supplied value (including explicit `null`) is preserved.
+   *
+   * Typical usage: `created_at` field. Omitted from the wire when `false`.
+   */
+  auto_now_add?: boolean;
 }
 
 /**
