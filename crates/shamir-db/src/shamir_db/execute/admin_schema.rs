@@ -33,6 +33,10 @@ use crate::query::admin::{
     GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
 };
 use crate::query::batch::BatchError;
+use crate::query::filter::{
+    filter_value_to_query_value as fv_to_qv_literal,
+    query_value_to_filter_value as qv_to_fv_literal, FilterValue,
+};
 use crate::query::read::QueryResult;
 use crate::shamir_db::shamir_db::schema_management::{
     parse_schema, SCHEMA_FIELD, SCHEMA_VALIDATOR_ID_FIELD, SCHEMA_VERSION_FIELD,
@@ -728,14 +732,38 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
         m.insert("one_of".to_string(), QueryValue::List(items.clone()));
     }
     // ③.2c — default (literal or expression; extends ②.4b literal-only).
-    // Serialise FilterValue → QueryValue via the msgpack round-trip: both types
-    // share the same untagged-serde encoding, so expression defaults ($fn etc.)
-    // persist faithfully and round-trip back to FilterValue on read.
+    // WRITE: FilterValue → QueryValue.
+    // Literals use a direct match (no allocation, no msgpack).
+    // Expression defaults ($fn/$ref/$expr/$cond/$param/$query) have no direct
+    // QueryValue equivalent and are serialised via msgpack round-trip, which
+    // preserves the untagged-serde shape faithfully.
+    // On failure (malformed expression) we log a warning instead of silently
+    // dropping — boot-resilience is preserved (the field is omitted rather
+    // than aborting), but the failure is now visible in the log.
     if let Some(fv) = &c.default {
-        if let Ok(bytes) = rmp_serde::to_vec_named(fv) {
-            if let Ok(qv) = rmp_serde::from_slice::<QueryValue>(&bytes) {
-                m.insert("default".to_string(), qv);
+        let qv_opt: Option<QueryValue> = if let Some(qv) = fv_to_qv_literal(fv) {
+            // Literal path: direct, zero-copy conversion.
+            Some(qv)
+        } else {
+            // Expression path: msgpack round-trip.
+            match rmp_serde::to_vec_named(fv)
+                .ok()
+                .and_then(|bytes| rmp_serde::from_slice::<QueryValue>(&bytes).ok())
+            {
+                Some(qv) => Some(qv),
+                None => {
+                    log::warn!(
+                        "admin_schema::insert_constraint_fields: \
+                         failed to serialise default FilterValue to QueryValue — \
+                         field omitted from catalogue. value = {:?}",
+                        fv
+                    );
+                    None
+                }
             }
+        };
+        if let Some(qv) = qv_opt {
+            m.insert("default".to_string(), qv);
         }
     }
     if let Some(s) = &c.array_of {
@@ -859,13 +887,14 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
             }
         }),
         // ③.2c — default (literal or expression; extends ②.4b literal-only).
-        // Recover FilterValue from the catalogue QueryValue via msgpack round-trip.
-        // On decode failure silently drop (treated as absent default).
-        default: m.get("default").and_then(|qv| {
-            rmp_serde::to_vec_named(qv)
-                .ok()
-                .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
-        }),
+        // READ: QueryValue → FilterValue.
+        // Literals use a direct match (no msgpack). Map (expression defaults
+        // like {"$fn":...}) fall back to msgpack. On genuine decode failure
+        // we log a warning — the default is dropped (boot-resilience preserved),
+        // but the failure is visible in the log instead of being silent.
+        default: m
+            .get("default")
+            .and_then(|qv| catalogue_qv_to_filter_value(qv, "dto_one_from_catalogue", "default")),
         array_of: m.get("array_of").and_then(|v| v.as_str()).map(String::from),
         scalar: m.get("scalar").and_then(|v| v.as_str()).map(String::from),
         format: m.get("format").and_then(|v| v.as_str()).map(String::from),
@@ -925,6 +954,39 @@ fn foreign_key_dto_from_qv(v: &QueryValue) -> Option<ForeignKeyDto> {
         on_delete,
         on_update,
     })
+}
+
+/// Convert a catalogue [`QueryValue`] back to a [`FilterValue`].
+///
+/// Strategy (READ path):
+/// 1. Literal variants (Null/Bool/Int/F64/Str/Bin/List) → direct match via
+///    [`qv_to_fv_literal`] (no msgpack, zero-copy for common case).
+/// 2. `Map` (expression defaults such as `{"$fn": ...}`) → msgpack round-trip,
+///    which preserves the untagged-serde shape that encodes expression variants.
+/// 3. Other exotic types (Dec/Big/Set) → msgpack round-trip as last resort.
+/// 4. Genuine failure → `log::warn!` with context (caller + field name) and
+///    `None` (default is dropped, boot-resilience preserved — no panic).
+fn catalogue_qv_to_filter_value(qv: &QueryValue, caller: &str, field: &str) -> Option<FilterValue> {
+    // Tier 1: direct literal match.
+    if let Some(fv) = qv_to_fv_literal(qv) {
+        return Some(fv);
+    }
+    // Tier 2: msgpack for Map (expression defaults) and exotic types.
+    if let Some(fv) = rmp_serde::to_vec_named(qv)
+        .ok()
+        .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
+    {
+        return Some(fv);
+    }
+    // Tier 3: genuine decode failure — log visibly, drop gracefully.
+    log::warn!(
+        "admin_schema::{}: catalogue default decode failed for field '{}' — \
+         dropped. qv = {:?}",
+        caller,
+        field,
+        qv
+    );
+    None
 }
 
 /// Extract a `CompareDto` from a catalogue Map.

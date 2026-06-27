@@ -26,7 +26,8 @@ pub use resolve::{
     resolve_field_ref, resolve_filter_query, resolve_filter_value,
 };
 pub use shamir_query_types::filter::{
-    Cond, FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall,
+    filter_value_to_query_value, query_value_to_filter_value, Cond, FieldPath, Filter, FilterExpr,
+    FilterExprOp, FilterValue, FnCall,
 };
 
 #[cfg(test)]
