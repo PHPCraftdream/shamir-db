@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use crate::{DbError, DbResult};
+use shamir_engine::query::filter::{query_value_to_filter_value as qv_to_fv_literal, FilterValue};
 use shamir_engine::validator::schema::{FieldRule, SchemaValidator};
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
 use shamir_types::core::interner::Interner;
@@ -67,6 +68,40 @@ pub fn parse_schema(schema: &QueryValue, interner: &Interner) -> DbResult<Vec<Fi
         rules.push(parse_one_rule(item, interner)?);
     }
     Ok(rules)
+}
+
+/// Convert a catalogue [`QueryValue`] `default` field back to a [`FilterValue`].
+///
+/// Strategy (boot-path READ):
+/// 1. Literal variants → direct match via [`qv_to_fv_literal`] (no msgpack).
+/// 2. `Map` (expression defaults such as `{"$fn": ...}`) → msgpack round-trip.
+/// 3. Genuine failure → `log::warn!` with the rule path for context; returns
+///    `None` so the boot-pass continues (boot-resilience) but the failure is
+///    now visible rather than silently discarded.
+fn parse_one_rule_default(qv: &QueryValue, item: &QueryValue) -> Option<FilterValue> {
+    // Tier 1: direct literal match (no allocation).
+    if let Some(fv) = qv_to_fv_literal(qv) {
+        return Some(fv);
+    }
+    // Tier 2: msgpack for Map (expression defaults) and exotic types.
+    if let Some(fv) = rmp_serde::to_vec_named(qv)
+        .ok()
+        .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
+    {
+        return Some(fv);
+    }
+    // Tier 3: genuine decode failure — log visibly, drop gracefully.
+    let path_hint = item
+        .get("path")
+        .map(|p| format!("{:?}", p))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    log::warn!(
+        "schema_management::parse_one_rule: catalogue default decode failed \
+         for field path {} — default dropped. qv = {:?}",
+        path_hint,
+        qv
+    );
+    None
 }
 
 /// Parse one rule map, de-interning the `path` field ids.
@@ -135,17 +170,14 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
     });
 
     // ③.2c — default (literal or expression; extends ②.4b literal-only).
-    // The persisted form is a QueryValue (written by `insert_constraint_fields`
-    // as a serialised FilterValue).  We recover it as FilterValue via the
-    // msgpack round-trip: QueryValue and FilterValue share the same untagged-
-    // serde wire encoding, so the bytes are byte-identical.
-    // On decode failure (corrupt catalogue) we silently drop the default rather
-    // than aborting the entire boot-pass.
-    let default: Option<crate::query::filter::FilterValue> = item.get("default").and_then(|qv| {
-        rmp_serde::to_vec_named(qv)
-            .ok()
-            .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
-    });
+    // READ: QueryValue → FilterValue.
+    // Literals use a direct match (no msgpack allocation). Map (expression
+    // defaults like {"$fn":...}) and exotic types fall back to msgpack.
+    // On genuine decode failure we log a warning and drop the default so
+    // the boot-pass continues — failure is visible, not silent.
+    let default: Option<FilterValue> = item
+        .get("default")
+        .and_then(|qv| parse_one_rule_default(qv, item));
 
     let array_of = item
         .get("array_of")
