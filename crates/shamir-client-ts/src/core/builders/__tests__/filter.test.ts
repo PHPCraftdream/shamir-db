@@ -401,3 +401,51 @@ describe('param — batch parameter reference ($param)', () => {
     });
   });
 });
+
+describe('bin — binary literal (FilterValue::Binary)', () => {
+  it('number[] is converted to Uint8Array', () => {
+    const result = filter.bin([0xde, 0xad]);
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(Array.from(result)).toEqual([0xde, 0xad]);
+  });
+
+  it('Uint8Array passes through unchanged (same reference)', () => {
+    const input = new Uint8Array([1, 2, 3]);
+    const result = filter.bin(input);
+    expect(result).toBe(input);
+    expect(Array.from(result)).toEqual([1, 2, 3]);
+  });
+
+  it('bin inside eq gives correct wire form', () => {
+    expect(filter.eq(['b'], filter.bin([0, 1]))).toEqual({
+      op: 'eq',
+      field: ['b'],
+      value: new Uint8Array([0, 1]),
+    });
+  });
+});
+
+describe('litU64 — lossy u64 escape-hatch (FilterValue::Int)', () => {
+  it('litU64(42) returns number 42', () => {
+    expect(filter.litU64(42)).toBe(42);
+  });
+
+  it('litU64(42n) returns number 42 (within safe integer range)', () => {
+    const result = filter.litU64(42n);
+    expect(Number(result)).toBe(42);
+  });
+
+  it('litU64 with bigint above 2^53 returns number (lossy — msgpack-safe)', () => {
+    const large = 2n ** 60n + 1n;
+    const result = filter.litU64(large);
+    expect(typeof result).toBe('number');
+  });
+
+  it('litU64 inside eq gives correct wire form', () => {
+    expect(filter.eq(['n'], filter.litU64(7))).toEqual({
+      op: 'eq',
+      field: ['n'],
+      value: 7,
+    });
+  });
+});

@@ -277,6 +277,36 @@ export function cond(
   return { $cond: { if: ifFilter, then, else: orElse } };
 }
 
+// ── Binary / u64 literal helpers ────────────────────────────────────
+
+/**
+ * Binary literal constructor. Mirrors Rust `bin()` (`filter_value.rs:75`)
+ * → `FilterValue::Binary`.
+ *
+ * Sugar-normaliser: `number[]` is converted to `new Uint8Array(bytes)`;
+ * a `Uint8Array` passes through unchanged. The returned `Uint8Array` is
+ * directly valid as a `FilterValue` (wire: `Binary`).
+ */
+export function bin(bytes: Uint8Array | number[]): Uint8Array {
+  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+}
+
+/**
+ * Explicit lossy escape-hatch for full u64 values. Mirrors Rust
+ * `lit_u64` (`filter_value.rs:68`) — values above `i64::MAX` wrap
+ * silently (Rust casts `v as i64` without bounds checks).
+ *
+ * Accepts `bigint` for ergonomics (callers may already hold a bigint),
+ * but ALWAYS returns `number` via `Number(v)`. Values above `2^53` lose
+ * precision — this is the JS analogue of Rust's lossy cast. The result
+ * is a msgpack-safe integer (no bigint on the wire).
+ *
+ * NO runtime range checks are added — no throw.
+ */
+export function litU64(v: bigint | number): number {
+  return typeof v === 'bigint' ? Number(v) : v;
+}
+
 // ── Logical combinators ──────────────────────────────────────────────
 
 /**
@@ -353,4 +383,6 @@ export const filter = {
   fn,
   expr,
   cond,
+  bin,
+  litU64,
 };
