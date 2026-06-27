@@ -16,7 +16,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
-import type { WireValue } from './write.js';
+import type { WireValue, WriteValue } from './write.js';
 
 // ── Schema DTO types ────────────────────────────────────────────────
 
@@ -81,11 +81,17 @@ export interface ConstraintsDto {
   min_len?: number;
   one_of?: WireValue[];
   /**
-   * Phase ②.4b — literal default stamped on INSERT for an absent field
-   * (surface only; stamp-enforcement lands in ②.4c). Constant `WireValue`;
-   * computed defaults (`now()`, scalars) are out of scope.
+   * ③.2c — default value (literal or expression) stamped on INSERT for an
+   * absent field (extends Phase ②.4b literal-only to expression).
+   *
+   * Literal `WriteValue` forms (null/bool/number/string/array/object) route
+   * through the fast `apply_defaults` path (②.4c behaviour is unchanged).
+   * Expression `ComputedExpr` forms (`$fn` / `$ref` / etc.) route through
+   * `apply_transforms` → `eval_write_value` → `builtin_scalars()` at
+   * admission-time.  User-registered scalars are NOT available here (same
+   * boundary as inline `$fn` write-field expressions).
    */
-  default?: WireValue;
+  default?: WriteValue;
   array_of?: string;
   /** Phase B — scalar-bridge: registered scalar name used as a predicate. */
   scalar?: string;

@@ -134,9 +134,19 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         }
     });
 
-    // Phase ②.4b — literal default (surface only; stamp-enforcement in ②.4c).
-    // Read as-is: the persisted form is a QueryValue scalar.
-    let default = item.get("default").cloned();
+    // ③.2c — default (literal or expression; extends ②.4b literal-only).
+    // The persisted form is a QueryValue (written by `insert_constraint_fields`
+    // as a serialised FilterValue).  We recover it as FilterValue via the
+    // msgpack round-trip: QueryValue and FilterValue share the same untagged-
+    // serde wire encoding, so the bytes are byte-identical.
+    // On decode failure (corrupt catalogue) we silently drop the default rather
+    // than aborting the entire boot-pass.
+    let default: Option<crate::query::filter::FilterValue> =
+        item.get("default").and_then(|qv| {
+            rmp_serde::to_vec_named(qv)
+                .ok()
+                .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
+        });
 
     let array_of = item
         .get("array_of")

@@ -198,3 +198,199 @@ async fn full_schema_accept() {
     let v = run_schema(rules, Some(&qv)).await;
     assert!(v.is_ok());
 }
+
+// ── ③.2c: collect_defaults / transforms split ────────────────────────────────
+
+#[test]
+fn literal_default_appears_in_collect_defaults_not_transforms() {
+    use shamir_query_types::filter::FilterValue;
+    let rules = vec![rule(["role"])
+        .string()
+        .default(FilterValue::String("guest".to_string()))
+        .build()];
+    let sv = SchemaValidator::new(rules);
+
+    let defaults = sv.collect_defaults();
+    let transforms = sv.collect_computed_defaults();
+
+    assert_eq!(
+        defaults.len(),
+        1,
+        "literal default must appear in collect_defaults"
+    );
+    assert_eq!(defaults[0].0, vec!["role".to_string()]);
+    assert_eq!(defaults[0].1, QueryValue::Str("guest".to_string()));
+    assert!(
+        transforms.is_empty(),
+        "no expression defaults → transforms empty"
+    );
+}
+
+#[test]
+fn expression_default_appears_in_transforms_not_collect_defaults() {
+    use crate::validator::TransformSpec;
+    use shamir_query_types::filter::{FilterValue, FnCall};
+    let expr = FilterValue::FnCall {
+        call: FnCall::simple("strings/upper"),
+    };
+    let rules = vec![rule(["tag"]).string().default(expr.clone()).build()];
+    let sv = SchemaValidator::new(rules);
+
+    let defaults = sv.collect_defaults();
+    let transforms = sv.collect_computed_defaults();
+
+    assert!(
+        defaults.is_empty(),
+        "expression default must NOT appear in collect_defaults"
+    );
+    assert_eq!(
+        transforms.len(),
+        1,
+        "expression default must appear in transforms"
+    );
+    assert_eq!(transforms[0].0, vec!["tag".to_string()]);
+    assert!(matches!(
+        &transforms[0].1,
+        TransformSpec::ComputedDefault(_)
+    ));
+}
+
+#[test]
+fn mixed_literal_and_expression_defaults_split_correctly() {
+    use shamir_query_types::filter::{FilterValue, FnCall};
+    let expr = FilterValue::FnCall {
+        call: FnCall::simple("strings/upper"),
+    };
+    let rules = vec![
+        rule(["role"])
+            .string()
+            .default(FilterValue::String("guest".to_string()))
+            .build(),
+        rule(["tag"]).string().default(expr).build(),
+    ];
+    let sv = SchemaValidator::new(rules);
+
+    let defaults = sv.collect_defaults();
+    let transforms = sv.collect_computed_defaults();
+
+    assert_eq!(defaults.len(), 1, "exactly one literal default");
+    assert_eq!(
+        transforms.len(),
+        1,
+        "exactly one expression default (transform)"
+    );
+}
+
+// ── ③.2c: computed-default expression evaluated via apply_transforms ──────────
+
+#[test]
+fn computed_default_fn_call_stamps_absent_field() {
+    use crate::function::builtin_scalars;
+    use crate::table::write_helpers::apply_transforms;
+    use crate::validator::TransformSpec;
+    use shamir_query_types::filter::{FilterValue, FnCall};
+    use shamir_types::types::common::new_map;
+
+    // strings/upper("hello") → "HELLO"
+    let expr = FilterValue::FnCall {
+        call: FnCall::complex(
+            "strings/upper",
+            vec![FilterValue::String("hello".to_string())],
+        ),
+    };
+
+    let mut m = new_map();
+    m.insert("name".to_string(), QueryValue::Str("alice".into()));
+    let mut rec = QueryValue::Map(m);
+
+    let transforms = vec![(
+        vec!["tag".to_string()],
+        TransformSpec::ComputedDefault(expr),
+    )];
+
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+
+    // The computed default should have stamped "HELLO" into the absent "tag" field.
+    let tag = match &rec {
+        QueryValue::Map(m) => m.get("tag").cloned(),
+        _ => None,
+    };
+    assert_eq!(
+        tag,
+        Some(QueryValue::Str("HELLO".to_string())),
+        "computed default expr should evaluate strings/upper('hello') → 'HELLO'"
+    );
+}
+
+#[test]
+fn computed_default_does_not_overwrite_present_value() {
+    use crate::function::builtin_scalars;
+    use crate::table::write_helpers::apply_transforms;
+    use crate::validator::TransformSpec;
+    use shamir_query_types::filter::{FilterValue, FnCall};
+    use shamir_types::types::common::new_map;
+
+    let expr = FilterValue::FnCall {
+        call: FnCall::complex(
+            "strings/upper",
+            vec![FilterValue::String("hello".to_string())],
+        ),
+    };
+
+    let mut m = new_map();
+    m.insert("tag".to_string(), QueryValue::Str("existing".into()));
+    let mut rec = QueryValue::Map(m);
+
+    let transforms = vec![(
+        vec!["tag".to_string()],
+        TransformSpec::ComputedDefault(expr),
+    )];
+
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+
+    // Present value must NOT be overwritten.
+    let tag = match &rec {
+        QueryValue::Map(m) => m.get("tag").cloned(),
+        _ => None,
+    };
+    assert_eq!(
+        tag,
+        Some(QueryValue::Str("existing".to_string())),
+        "computed default must not overwrite a present value"
+    );
+}
+
+#[test]
+fn computed_default_does_not_overwrite_explicit_null() {
+    use crate::function::builtin_scalars;
+    use crate::table::write_helpers::apply_transforms;
+    use crate::validator::TransformSpec;
+    use shamir_query_types::filter::{FilterValue, FnCall};
+    use shamir_types::types::common::new_map;
+
+    let expr = FilterValue::FnCall {
+        call: FnCall::simple("strings/upper"),
+    };
+
+    let mut m = new_map();
+    m.insert("tag".to_string(), QueryValue::Null);
+    let mut rec = QueryValue::Map(m);
+
+    let transforms = vec![(
+        vec!["tag".to_string()],
+        TransformSpec::ComputedDefault(expr),
+    )];
+
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), 0);
+
+    // Explicit Null is present → absence check fails → no stamp.
+    let tag = match &rec {
+        QueryValue::Map(m) => m.get("tag").cloned(),
+        _ => None,
+    };
+    assert_eq!(
+        tag,
+        Some(QueryValue::Null),
+        "computed default must not overwrite explicit Null (keystone invariant)"
+    );
+}

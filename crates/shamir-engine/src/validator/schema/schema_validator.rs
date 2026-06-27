@@ -5,6 +5,7 @@
 //! plus async DB-read FK checks (Phase C2).
 
 use async_trait::async_trait;
+use shamir_query_types::filter::FilterValue;
 
 use crate::query::TableRef;
 use crate::validator::encode::Validation;
@@ -50,20 +51,59 @@ impl SchemaValidator {
             .collect()
     }
 
-    /// Collect all literal-default rules declared in this validator.
+    /// Collect all **literal**-default rules declared in this validator.
     ///
     /// Returns `(field_path, default_value)` for every rule whose
-    /// `constraints.default = Some(...)`.  Used by the ②.4c INSERT
-    /// stamp-enforcement: the write path calls this once per batch and
-    /// fills each ABSENT field with its default BEFORE encode + validation,
-    /// so the stamped value is what gets stored AND validated.  Present
-    /// fields (including explicit `Null`) are never touched — replay-safe
-    /// by construction (the stamped field is present on reload, so the
-    /// stamp never fires twice; see DDL-EVOLUTION-PLAN §②.4a variant B).
+    /// `constraints.default = Some(literal)` where `literal` is a
+    /// [`FilterValue`] scalar (Null/Bool/Int/Float/String/Binary/Array).
+    /// Expression forms (`$fn` / `$ref` / `$expr` / `$cond` / `$param` /
+    /// `$query`) are routed through `transforms()` → `apply_transforms` as
+    /// `ComputedDefault(expr)` instead.
+    ///
+    /// Used by the ②.4c INSERT stamp: the write path calls this once per
+    /// batch and fills each ABSENT field with its default BEFORE encode +
+    /// validation, so the stamped value is what gets stored AND validated.
+    /// Present fields (including explicit `Null`) are never touched —
+    /// replay-safe by construction (see DDL-EVOLUTION-PLAN §②.4a variant B).
     pub fn collect_defaults(&self) -> Vec<(Vec<String>, QueryValue)> {
         self.rules
             .iter()
-            .filter_map(|r| r.constraints.default.clone().map(|dv| (r.path.clone(), dv)))
+            .filter_map(|r| {
+                let fv = r.constraints.default.as_ref()?;
+                if is_literal_filter_value(fv) {
+                    filter_value_to_query_value(fv).map(|qv| (r.path.clone(), qv))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Collect computed-default transform rules declared in this validator.
+    ///
+    /// Returns `(field_path, ComputedDefault(expr))` for every rule whose
+    /// `constraints.default = Some(expr)` where `expr` is an expression
+    /// `FilterValue` (`$fn` / `$ref` / `$expr` / `$cond` / etc.).
+    ///
+    /// Literal defaults are routed through `collect_defaults()` → fast path.
+    /// Expression defaults land here → `apply_transforms` evaluates them
+    /// through `builtin_scalars()` at admission-time (same boundary as
+    /// inline `$fn` fields in `resolve_computed_record`).  User-registered
+    /// scalars are NOT available in computed-defaults (future work).
+    pub fn collect_computed_defaults(&self) -> Vec<(Vec<String>, crate::validator::TransformSpec)> {
+        self.rules
+            .iter()
+            .filter_map(|r| {
+                let fv = r.constraints.default.as_ref()?;
+                if !is_literal_filter_value(fv) {
+                    Some((
+                        r.path.clone(),
+                        crate::validator::TransformSpec::ComputedDefault(fv.clone()),
+                    ))
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 }
@@ -264,14 +304,17 @@ impl RecordValidator for SchemaValidator {
         self.collect_defaults()
     }
 
-    /// ③.2b: return declarative transform rules for this schema.
+    /// ③.2c: return declarative transform rules for this schema.
     ///
-    /// TODO (#281/#282): collect `auto_now` / `auto_now_add` / expression-default
-    /// from `ConstraintsDto`/`Constraints` once the schema-surface fields land.
-    /// For now returns empty — wiring is inert until those fields exist, which
-    /// is the expected and correct state for this framework stage.
+    /// Returns `ComputedDefault(expr)` for every rule whose
+    /// `constraints.default` is an expression `FilterValue` (i.e. NOT a
+    /// literal). Literal defaults live in `defaults()` → fast
+    /// `apply_defaults` path; expression defaults land here and are
+    /// evaluated through `apply_transforms` → `eval_write_value` →
+    /// `builtin_scalars()` at admission-time (same boundary as inline
+    /// `$fn` in `resolve_computed_record`; user scalars — future).
     fn transforms(&self) -> Vec<(Vec<String>, crate::validator::TransformSpec)> {
-        Vec::new()
+        self.collect_computed_defaults()
     }
 
     fn nullable_for_field(&self, field: &str) -> Option<bool> {
@@ -285,5 +328,52 @@ impl RecordValidator for SchemaValidator {
                 None
             }
         })
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Returns `true` when `fv` is a scalar literal that can be losslessly
+/// converted to a [`QueryValue`] without evaluation.
+///
+/// The set of literal variants:
+///   - `Null`, `Bool`, `Int`, `Float`, `String`, `Binary`, `Array`.
+///
+/// Everything else (`FieldRef`, `QueryRef`, `FnCall`, `Expr`, `Cond`,
+/// `Param`) is an **expression** that requires evaluation at admission-time
+/// → routed through `collect_computed_defaults()`.
+pub(crate) fn is_literal_filter_value(fv: &FilterValue) -> bool {
+    matches!(
+        fv,
+        FilterValue::Null
+            | FilterValue::Bool(_)
+            | FilterValue::Int(_)
+            | FilterValue::Float(_)
+            | FilterValue::String(_)
+            | FilterValue::Binary(_)
+            | FilterValue::Array(_)
+    )
+}
+
+/// Convert a literal [`FilterValue`] to its [`QueryValue`] equivalent.
+///
+/// Only call this after confirming [`is_literal_filter_value`] is `true`;
+/// expression variants return `None` as a safety guard.  The conversion is
+/// shallow (Array items are recursively converted).
+pub(crate) fn filter_value_to_query_value(fv: &FilterValue) -> Option<QueryValue> {
+    match fv {
+        FilterValue::Null => Some(QueryValue::Null),
+        FilterValue::Bool(b) => Some(QueryValue::Bool(*b)),
+        FilterValue::Int(i) => Some(QueryValue::Int(*i)),
+        FilterValue::Float(f) => Some(QueryValue::F64(*f)),
+        FilterValue::String(s) => Some(QueryValue::Str(s.clone())),
+        FilterValue::Binary(b) => Some(QueryValue::Bin(b.clone())),
+        FilterValue::Array(items) => {
+            let qv_items: Option<Vec<QueryValue>> =
+                items.iter().map(filter_value_to_query_value).collect();
+            qv_items.map(QueryValue::List)
+        }
+        // Expression variants — not literals.
+        _ => None,
     }
 }

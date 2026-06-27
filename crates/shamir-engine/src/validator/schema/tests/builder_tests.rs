@@ -3,7 +3,7 @@
 use crate::validator::schema::constraints::Num;
 use crate::validator::schema::rule_builder::rule;
 use crate::validator::schema::type_tag::TypeTag;
-use shamir_types::types::value::QueryValue;
+use shamir_query_types::filter::FilterValue;
 
 #[test]
 fn rule_builder_string_required() {
@@ -59,26 +59,26 @@ fn rule_builder_f64_min_max() {
     assert_eq!(r.constraints.max, Some(Num::F64(100.0)));
 }
 
-// ── Phase ②.4b — literal default (surface only) ─────────────────────────────
+// ── ③.2c — literal and expression defaults ──────────────────────────────────
 
-/// `.default(Int(5))` sets `constraints.default = Some(Int(5))`. Surface only —
-/// the INSERT-path stamp lives in ②.4c and is NOT under test here.
+/// `.default(FilterValue::Int(5))` sets `constraints.default = Some(FilterValue::Int(5))`.
+/// Literal defaults stamp the fast `apply_defaults` path (②.4c behaviour).
 #[test]
 fn rule_builder_default_int() {
-    let r = rule(["x"]).int().default(QueryValue::Int(5)).build();
-    assert_eq!(r.constraints.default, Some(QueryValue::Int(5)));
+    let r = rule(["x"]).int().default(FilterValue::Int(5)).build();
+    assert_eq!(r.constraints.default, Some(FilterValue::Int(5)));
 }
 
-/// `.default(Str(...))` proves the field carries any `QueryValue` variant.
+/// `.default(FilterValue::String(...))` proves the field carries any literal variant.
 #[test]
 fn rule_builder_default_str() {
     let r = rule(["role"])
         .string()
-        .default(QueryValue::Str("guest".to_string()))
+        .default(FilterValue::String("guest".to_string()))
         .build();
     assert_eq!(
         r.constraints.default,
-        Some(QueryValue::Str("guest".to_string()))
+        Some(FilterValue::String("guest".to_string()))
     );
 }
 
@@ -88,4 +88,46 @@ fn rule_builder_default_str() {
 fn rule_builder_default_none_when_unset() {
     let r = rule(["x"]).int().build();
     assert!(r.constraints.default.is_none());
+}
+
+/// Expression-default: a `FnCall` FilterValue routes through the transforms
+/// path (③.2c `ComputedDefault`) rather than the literal defaults path.
+#[test]
+fn rule_builder_default_fn_call_expression() {
+    use shamir_query_types::filter::FnCall;
+    let fv = FilterValue::FnCall {
+        call: FnCall::complex(
+            "strings/upper",
+            vec![FilterValue::String("hello".to_string())],
+        ),
+    };
+    let r = rule(["tag"]).string().default(fv.clone()).build();
+    assert_eq!(r.constraints.default, Some(fv));
+}
+
+/// Literal check: `is_literal_filter_value` correctly classifies scalars.
+#[test]
+fn is_literal_filter_value_scalars() {
+    use crate::validator::schema::schema_validator::is_literal_filter_value;
+    assert!(is_literal_filter_value(&FilterValue::Null));
+    assert!(is_literal_filter_value(&FilterValue::Bool(true)));
+    assert!(is_literal_filter_value(&FilterValue::Int(0)));
+    assert!(is_literal_filter_value(&FilterValue::Float(1.0)));
+    assert!(is_literal_filter_value(&FilterValue::String("x".into())));
+    assert!(is_literal_filter_value(&FilterValue::Binary(vec![0u8])));
+}
+
+/// Expression check: `is_literal_filter_value` returns `false` for expressions.
+#[test]
+fn is_literal_filter_value_expressions() {
+    use crate::validator::schema::schema_validator::is_literal_filter_value;
+    use shamir_query_types::filter::FnCall;
+    let fn_fv = FilterValue::FnCall {
+        call: FnCall::simple("strings/upper"),
+    };
+    assert!(!is_literal_filter_value(&fn_fv));
+    let ref_fv = FilterValue::FieldRef {
+        path: vec!["x".to_string()],
+    };
+    assert!(!is_literal_filter_value(&ref_fv));
 }

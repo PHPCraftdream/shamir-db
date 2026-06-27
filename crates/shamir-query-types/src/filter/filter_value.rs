@@ -157,3 +157,24 @@ impl<T: Into<FilterValue>> From<Vec<T>> for FilterValue {
         FilterValue::Array(v.into_iter().map(|x| x.into()).collect())
     }
 }
+
+impl From<shamir_types::types::value::QueryValue> for FilterValue {
+    /// Convert a `QueryValue` literal into the equivalent `FilterValue`.
+    ///
+    /// Uses the msgpack round-trip: `QueryValue` and `FilterValue` share the
+    /// same untagged-serde wire encoding (literals Null/Bool/Int/F64/Str/Bin
+    /// are byte-identical; containers List/Map/Set also encode identically
+    /// because both types share the `rmp-serde` format). On encode/decode
+    /// failure (which cannot happen for well-formed `QueryValue`) falls back
+    /// to `FilterValue::Null`.
+    ///
+    /// This impl exists so callers that already hold a `QueryValue` literal
+    /// (e.g. via the `mpack!` macro) can pass it directly to the builder's
+    /// `.default(impl Into<FilterValue>)` without an explicit conversion.
+    fn from(qv: shamir_types::types::value::QueryValue) -> Self {
+        rmp_serde::to_vec_named(&qv)
+            .ok()
+            .and_then(|bytes| rmp_serde::from_slice(&bytes).ok())
+            .unwrap_or(FilterValue::Null)
+    }
+}

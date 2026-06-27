@@ -6,6 +6,7 @@
 //! `format` (email/url/uuid/date), and `compare` (cross-field).
 //! Phase C will extend this struct with `foreign_key`, `unique`.
 
+use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
 
 use super::cross_field::CrossFieldCompare;
@@ -52,12 +53,16 @@ pub struct Constraints {
     pub unsigned: bool,
     /// Enumerated allowed values.  A single-element vec is a `const` check.
     pub one_of: Option<Vec<QueryValue>>,
-    /// Literal default value stamped on INSERT for an absent field
-    /// (Phase ②.4b — surface only; the pre-validation stamp on the insert
-    /// path lands in ②.4c).  Constant `QueryValue`; replay-safe by
-    /// construction (the stamped field is present on reload, so the stamp
-    /// never fires twice — see DDL-EVOLUTION-PLAN §②.4a variant B).
-    pub default: Option<QueryValue>,
+    /// Default value (literal or expression) stamped on INSERT for an absent
+    /// field (③.2c: extended from Phase ②.4b literal-only to expression).
+    ///
+    /// Literal variants (Null/Bool/Int/Float/String/Binary) stay on the fast
+    /// `apply_defaults` path (`collect_defaults()` → `QueryValue`); expression
+    /// variants (`$fn` / `$ref` / etc.) are routed through `apply_transforms`
+    /// as `ComputedDefault(expr)` (see `SchemaValidator::transforms()`).
+    /// Replay-safe by construction (the stamped field is present on reload;
+    /// see DDL-EVOLUTION-PLAN §②.4a variant B).
+    pub default: Option<FilterValue>,
     /// Element type for `List` fields (`array_of`).  Only meaningful when
     /// the field's [`TypeTag`] is `List`.
     pub array_of: Option<TypeTag>,
