@@ -13,10 +13,13 @@
 
 > **Это список ОСТАВШЕЙСЯ работы.** Уже выполненное вынесено в `DONE.md`
 > (A1 снят, B1, B3, D1 keyset, Phase D / E6 FK-actions, вся **кампания Phase E**:
-> A3, C1, C2, D2, E3, E4, M5-EXPLAIN, F1–F5; **E.4-followon**: E1 полностью; и
+> A3, C1, C2, D2, E3, E4, M5-EXPLAIN, F1–F5; **E.4-followon**: E1 полностью;
 > **кампания Phase G**: B2 `one_of`, B4 `row_idmsgpack`, C3 e2e-lifecycle, **A2
-> access-enforcement**) и здесь не повторяется. **Все P0/P1 закрыты** — остался
-> только P2/P3 (эволюция языка + DX).
+> access-enforcement**; **кампания ②**: E1-остаток RENAME folder/group/role/db,
+> E6 `ON UPDATE`, E5 unify-uniqueness, E2 литерал-`DEFAULT`; **кампания ③**:
+> computed-`DEFAULT` + server-stamping (transform-фреймворк), TS `litU64`/`bin`,
+> e2e-добивка, hardening) и здесь не повторяется. **Все P0–P3 закрыты** — из
+> research-корпуса open-работы не осталось; живой фронтир — Movement C (репликация).
 
 > Принцип проекта (`docs/roadmap/PLAN.md` §3): OQL/DDL — object-native, не SQL.
 > Поэтому часть «пробелов» зрелых СУБД (JOIN, CTE, window, текстовый фронтенд)
@@ -123,13 +126,16 @@
 ### E2. `DEFAULT`-значения полей 📄 → ✅ **СДЕЛАНО (кампания ②.4)**
 - **Источник:** `completeness-ddl.md` G9.
 - **Было:** поле можно `required`, но движок не подставит значение на insert.
-- **Факт:** ✅ литерал-`DEFAULT` реализован — `default: Option<QueryValue>` в
-  `Constraints`/DTO/билдерах (②.4b) + штамп на INSERT до валидации для
-  ОТСУТСТВУЮЩЕГО поля (②.4c, `apply_defaults`); явное значение (вкл. явный NULL)
-  не перетирается; replay-safe by-construction. Computed-`DEFAULT`
-  (`created_at`/`now()`) — НЕ сделан осознанно: требует mutating/transform-
-  валидаторов → отдельная будущая (A)-мини-кампания. См. `DONE.md`,
-  `DDL-EVOLUTION-PLAN.md §②.4`.
+- **Факт:** ✅ литерал-`DEFAULT` реализован (②.4) **И computed-`DEFAULT` +
+  server-stamping — ✅ СДЕЛАНЫ (кампания ③.2)**. ②.4: `default: Option<QueryValue>`
+  + штамп на INSERT (`apply_defaults`); явное значение (вкл. явный NULL) не
+  перетирается; replay-safe. ③.2: `default` расширен до `Option<FilterValue>`
+  (литерал И выражение `$fn`) — computed-`DEFAULT` через `eval_write_value`;
+  `auto_now`/`auto_now_add` server-stamping `created_at`/`updated_at`; общий
+  декларативный `apply_transforms` (pre-encode, близнец ②.4c); replay-безопасность
+  доказана durable-reopen-тестом (transforms на admission, не на WAL-replay).
+  Бывшая «(A)-мини-кампания mutating-валидаторов» закрыта. См. `DONE.md`
+  (раздел «Кампания ③»), `CAMPAIGN-3-PLAN.md`.
 
 > E3 (`if_exists` на дропах + table-level `cascade`) — ✅ сделано (Phase E.1:
 > `if_exists` на всех drop-ops; Phase E.2: `cascade` на `drop_table`). См. `DONE.md`.
@@ -193,10 +199,12 @@ challenge/response; F5 Rust `one_of` ✅→❌ (B2 ещё открыт). См. `
 | **P2 — эволюция языка** | ✅ нет | E5 unify-uniqueness закрыт (кампания ②.3) |
 | **P3 — DX + досборка** | ✅ нет | B5–B7 (кампания ①), E2 DEFAULT (кампания ②.4) |
 
-**Все P0–P3 закрыты.** Остаток в работе по DDL — только осознанно отложенное:
-**RENAME db** (②.1d, отдельная мини-таска: on-disk каскад + crash-safety) и
-будущая **(A)-мини-кампания** mutating/transform-валидаторов (computed-`DEFAULT`/
-server-stamping `created_at`). Не блокеры.
+**Все P0–P3 закрыты.** **RENAME db** — ✅ сделан (②.1d, чистый каталог-rekey).
+**(A)-мини-кампания** mutating/transform-валидаторов (computed-`DEFAULT`/
+server-stamping) — ✅ сделана (**кампания ③.2**). **Из research-корпуса open-работы
+не осталось.** Осознанно отложенное (отдельные кампании, НЕ блокеры): **Phase H —
+репликация** (`PHASE-H-PLAN.md`, единственный незакрытый charter-пилон «I»),
+AFTER/side-effecting триггеры (G13), perf group-commit.
 
 > Выполненное (A1, A2, B1, B2, B3, B4, C1, C2, C3, D1, Phase D/E6, **вся кампания
 > Phase E**: A3, D2, E3, E4, M5, F1–F5; **E.4-followon**: E1 полностью = F.1/F.2/F.3;

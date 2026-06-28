@@ -6,12 +6,14 @@
 **Method:** opened every cited file, confirmed each load-bearing claim by reading
 the actual type/method/field. Findings cite real `file:line`.
 
-> **Статус-апдейт (point-in-time audit, не переписан построчно):** часть находок
-> ниже уже отработана — см. `DONE.md`. В частности: keyset «engine-ready,
-> language-absent» (R…/H3) — ✅ реализовано; «FK + unique fail-open под
-> autocommit» — ✅ **снято как ложная тревога** (enforced через серверную
-> tx-обёртку; разбор в `META-REVIEW.md` §0). Читать findings ниже с этой
-> поправкой.
+> **Статус-апдейт (point-in-time audit, не переписан построчно):** ВСЕ actionable-
+> находки ниже отработаны — см. `DONE.md`. В частности: keyset «engine-ready,
+> language-absent» (H3) — ✅ реализовано; «FK + unique fail-open под autocommit» —
+> ✅ **снято как ложная тревога** (enforced через серверную tx-обёртку; разбор в
+> `META-REVIEW.md` §0); счётчики ❌/`it()`/folders (Report 1/3/4) — ✅ F1–F5
+> (Phase E.9); Rust `one_of` (B2) — ✅ Phase G.1; `SelectExpr`/`$expr`/`$cond` —
+> `$expr`/`$cond` ✅ (B3), `SelectExpr` ⏸ осознанно отложен (③.3b, движок не
+> исполняет). Читать findings ниже как исторический снимок.
 
 ---
 

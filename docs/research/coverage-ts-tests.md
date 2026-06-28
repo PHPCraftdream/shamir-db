@@ -15,19 +15,26 @@ capabilities reachable through the TS client builders
 
 ---
 
-## ⚠️ Статус (2026-06-26) — основа для кампании ③.1
+## ⚠️ Статус (актуализация после кампаний Phase E / ③) — БОЛЬШИНСТВО ДЫР ЗАКРЫТО
 
-Этот аудит в основном **актуален** (тест-дыры реальны). Свериться с
-`CAMPAIGN-3-PLAN.md`. Деление остатка по actionability:
+Аудит датирован 2026-06-24; с тех пор тест-дыры в основном закрыты — таблицы §2/§3
+ниже читать с этой поправкой (помечены ⚠ «unit only» / «e2e only» места уже
+покрыты). Реальный статус:
 
-- 🟢 **Server-НЕзависимо (берётся первым, ③.1a):** 6 FieldBuilder Phase B/C
-  сеттеров (`scalar`/`oneOf`/`format`/`compare`/`foreignKey`/`unique`) — **ноль
-  unit-тестов** (только server-gated e2e). Добавить wire-shape unit в `ddl.test.ts`
-  → покрытие билдер-слоя без сервера.
-- 🟡 **Server-gated (③.1b, нужен release-бинарь):** e2e для FTS, vector, `call`
-  (P0); `like/ilike/regex`, existence/containment, `aggregateFn`, `func`,
-  `history`-range, `page`-mode, `distinct` (P1); `resume()`, `commitMigration`-
-  success, `dropUser`/`dropRole` (P2/P3).
+- ✅ **6 FieldBuilder Phase B/C сеттеров — unit-тесты ЕСТЬ.** Phase E.9 (`fef73c8`)
+  добавил wire-shape unit на `scalar`/`oneOf`/`format`/`compare`/`foreignKey`/
+  `unique` в `ddl.test.ts` (блок «field() Phase B/C constraint wire-shapes», 116
+  тестов зелёные). Бывшая «ноль unit-тестов» (§3.4) — снята. (③.1a верифицировал,
+  что уже сделано.)
+- ✅ **P0 e2e (FTS / vector / `call`) — ЕСТЬ** (Phase E.8, `3280e96`):
+  `e2e-fts.test.ts`, `e2e-vector.test.ts`, `e2e-call.test.ts`.
+- ✅ **P1 e2e-добивка (③.1b, `2dae54d6`):** +25 server-gated кейсов в
+  `e2e-data.test.ts` — `like/ilike/regex`, `isNull/isNotNull/exists/notExists`,
+  `contains/containsAny/containsAll`, `page`-mode, `distinct`, `select.func`,
+  `aggregateFn`, `history`-range. Плюс почин 4 tsc-долгов (`WriteValue` вместо
+  `Record<string,unknown>` в `e2e-schema-validators`).
+- 🔸 **Остаток (P2/P3, низкий риск):** `resume()` e2e, `commitMigration`-success,
+  `dropUser`/`dropRole` e2e, `chgrp`-семантика — server-gated, не блокеры.
 
 ---
 
@@ -220,11 +227,12 @@ Builder source: `core/builders/{ddl,admin}.ts`.
 | `foreignKey` (Phase C2) | ❌ **not in `ddl.test.ts`** | ✅ "foreign_key: accept/reject/fk_requires_index/autocommit" (4 cases) | **e2e only** ⚠ |
 | `unique` (Phase C3 field constraint) | ❌ **not in `ddl.test.ts`** (the `unique` matches there are all `createIndex({unique})`) | ✅ "unique: accept/duplicate/batch-duplicate/requires_index/autocommit" (5 cases) | **e2e only** ⚠ |
 
-> **Notable asymmetry:** the Phase B/C constraint setters
-> (`scalar/oneOf/format/compare/foreignKey/unique`) have **zero unit tests** —
-> they are exclusively covered by the server-gated e2e suite. If the server
-> binary is absent, they have **no test coverage at all** in a default `vitest`
-> run.
+> **Notable asymmetry — ✅ УСТРАНЕНА (Phase E.9, `fef73c8`).** Бывший «zero unit
+> tests» для Phase B/C сеттеров (`scalar/oneOf/format/compare/foreignKey/unique`)
+> закрыт: `ddl.test.ts` содержит блок «field() Phase B/C constraint wire-shapes»
+> с wire-shape unit на все 6 сеттеров (`toEqual({...})`) + негативный кейс. Теперь
+> билдер-слой покрыт unit-тестами независимо от сервера. ❌-строки таблицы выше —
+> исторический снимок до E.9. (③.1a верифицировал наличие.)
 
 ---
 
@@ -265,6 +273,14 @@ Builder source: `core/builders/{ddl,admin}.ts`.
 ---
 
 ## 6. Prioritized untested / under-tested areas
+
+> ⚠️ **АКТУАЛИЗАЦИЯ:** P0 (1–3: FTS/vector/`call`) — ✅ закрыты Phase E.8. Бóльшая
+> часть P1 (4–10: `aggregateFn`/`func`/`like/ilike/regex`/existence/containment/
+> `history`/`page`/`distinct`) — ✅ закрыта ③.1b (+25 e2e в `e2e-data.test.ts`).
+> Остаются реально открытыми только P2/P3 (11–17): `commitMigration`-success,
+> `dropUser`/`dropRole` e2e, server-gated `resume()`, `durability`/`limits`/
+> `returnAll(false)`/`returnOnly` e2e, `chgrp`-семантика. Список ниже — исходный
+> снимок; читать с этой поправкой.
 
 Ordered by **risk × likelihood-of-regression**.
 

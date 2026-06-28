@@ -28,11 +28,18 @@ All file paths are relative to the repo root. "Wire" = `shamir-query-types`. "Ru
   G6 subscribe `deliverCall` (①.3) · G1 inline `whereEq`/`whereGt`/… +
   `orWhere*`/`whereGroup` (①.3) · G3 typed `Handle`/`RowRef` (①.3) ·
   G4 `tryBuild()` (①.3). Плюс B2 `FieldBuilder::one_of` на Rust-стороне (Phase G.1).
-- 🔸 **ОТКРЫТО (косметика, P2):** G8 `SelectItem::Expression` (wire-only, и Rust, и
-  TS; движок-gated) · G9 `lit_u64` (TS `number` покрывает безопасный диапазон,
-  wire — `i64`) · G10 `bin()`-helper (`Uint8Array` уже в типе, нужен лишь сахар).
+- ✅ **ЗАКРЫТО (кампания ③.3a):** G9 `litU64()` (`bigint|number`→`number`, lossy
+  escape-hatch, msgpack-safe — НЕ `bigint`, т.к. `@msgpack/msgpack` бросает на
+  BigInt) · G10 `bin()` (сахар-нормализатор `Uint8Array|number[]`→`Uint8Array`).
+  Коммит `c7bb487d`.
+- ⏸ **ОТЛОЖЕНО осознанно (③.3b, развилка B):** G8 `SelectItem::Expression`/
+  `SelectExpr` — движок НЕ исполняет (`read_exec.rs:83` reject, `aggregate.rs:663`
+  no-op; парсится, но проекция игнор) → билдер для невыполняемого типа породил бы
+  тихо-игнорируемые запросы. Не строим, пока движок не начнёт исполнять. См.
+  `CAMPAIGN-3-PLAN.md §③.3b`.
 
-**Итог:** TS-билдер ≈ 100% паритета с Rust; остаток — три косметических P2.
+**Итог:** TS-билдер ≈ 100% паритета с Rust; единственный незакрытый пункт
+(`SelectExpr`) — engine-gated и осознанно отложен.
 
 ---
 

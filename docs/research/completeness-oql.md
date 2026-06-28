@@ -35,9 +35,15 @@ terms (does the object language express it?).
   H2 window, H4 set-ops (UNION/…), H5 correlated-subquery, M1 CTE, M4 ROLLUP/CUBE,
   L1-L6 (geo/graph/PIVOT/SQL-verbs) — заменены batch-композицией (`$query`) +
   stored-proc (`CallOp`) + reactive sub-batch. НЕ на роадмапе read-пути.
-- 🔸 **РЕАЛЬНЫЕ кандидаты (roadmap-hardening, не блокеры):** M2 generated/computed
-  columns · M3 FTS ranking/score/highlight · M6 conditional MERGE. См.
-  `CAMPAIGN-3-PLAN.md` §③.3.
+- 🟡 **M2 generated/computed columns — ЧАСТИЧНО закрыт (кампания ③.2).** Появился
+  **write-time computed value**: computed-`DEFAULT` (выражение-default, вычисляемое
+  на insert через `eval_write_value`) + server-stamping `created_at`/`updated_at`
+  (общий `apply_transforms`-проход, см. `DONE.md`). Это покрывает «persisted
+  computed-on-write» кейс. Всё ещё отсутствует: декларативная **generated column**,
+  пересчитываемая на КАЖДОМ write всех полей (а не только absent-default) и virtual
+  (compute-on-read) generated column. См. §2.9.
+- 🔸 **РЕАЛЬНЫЕ кандидаты (roadmap-hardening, не блокеры):** M3 FTS ranking/score/
+  highlight · M6 conditional MERGE · полная generated-column (остаток M2).
 
 Живой фронтир — Movement C (репликация, `PHASE-H-PLAN.md`), не ширина OQL.
 
@@ -342,17 +348,21 @@ For each: **status** (absent / partial / intentional / engine-has-no-surface),
   INSERT/UPDATE/DELETE.
 - **Verdict:** UPDATE has it; INSERT/DELETE returning is asymmetric / weaker.
 
-### 2.9 Computed / generated / persisted columns — **partial (expression only)**
+### 2.9 Computed / generated / persisted columns — **partial → улучшено (кампания ③.2)**
 - **Evidence:** `SelectExpr` (`select_expr.rs`) supports arithmetic
-  expressions in projection (`Add/Sub/Mul/Div`, `Field`, `Literal`). The
-  doc-comment says "future: computed fields". There is **no DDL to declare
-  a stored generated column** (no `generated`/`computed` in `Constraints` or
-  `FieldRule`). Functional indexes (`Computed` filter, `functional` index
-  kind) compute on read, not as a persisted column.
+  expressions in projection (read-time). Functional indexes compute on read.
+  **С кампании ③.2 появилась declarative write-time computation:** `Constraints`
+  теперь несёт `default: Option<FilterValue>` (выражение, вычисляемое на insert —
+  computed-`DEFAULT`) + флаги `auto_now`/`auto_now_add` (server-stamping
+  `updated_at`/`created_at`). Это **persisted-on-write computed value**,
+  декларируемый в schema-DDL и материализуемый общим `apply_transforms`-проходом
+  ДО encode (см. `DONE.md`, раздел «Кампания ③»).
 - **Mature baseline:** SQL generated columns (STORED/VIRTUAL), Mongo
   `$addFields` persistence.
-- **Verdict:** ad-hoc projection expressions exist; declared generated
-  columns do not.
+- **Verdict:** ✅ **computed-on-write** (default-expression + timestamp stamping) —
+  есть. **Остаток (M2):** generated column, пересчитываемая на КАЖДОМ write из
+  ДРУГИХ полей записи (не только absent-fill), и virtual/compute-on-read generated
+  column — пока нет. Read-time projection expressions — есть.
 
 ### 2.10 Type coercion / CAST explicitness — **partial**
 - **Evidence:** the `cast` funclib folder (8 functions) provides explicit
@@ -470,7 +480,7 @@ intentionally out of scope, or adequately covered by a workaround.
 | # | Gap | One-line rationale | Impact |
 |---|-----|--------------------|--------|
 | M1 | **CTEs** (non-recursive + recursive) | No named in-request subquery reuse; recursive graph/tree traversal absent. | Workaround = stored proc / client iteration; loses single-plan optimisation. |
-| M2 | **Generated / computed columns** (DDL) | Projection expressions exist; no persisted/virtual generated column declaration. | Denormalised/precomputed fields must be maintained by app logic or functional index (read-time). |
+| M2 | **Generated / computed columns** (DDL) | 🟡 ЧАСТИЧНО — computed-`DEFAULT` (write-time expression) + `auto_now`/`auto_now_add` stamping ✅ (③.2); остаток — generated column из других полей на каждом write + virtual compute-on-read. | Denormalised computed-on-write покрыт; recompute-from-siblings / virtual — app logic. |
 | M3 | **FTS ranking / score / highlight** | Boolean token FTS is solid; no relevance ranking or snippet return in projection. | Search-result quality / UX below ES/Postgres ts_rank; roadmap hardening item. |
 | M4 | **GROUP BY ROLLUP/CUBE/GROUPING SETS** | Only flat GROUP BY; no multi-dimensional subtotals. | Emulate with N queries in a batch; loses single-scan efficiency. |
 | M5 | **EXPLAIN / dry-run plan** | `QueryStats` is post-hoc; no preview-the-plan-without-executing op. | Hard to tune queries before running on production-sized data. |
