@@ -176,12 +176,37 @@ impl WalSegment {
     /// Replay the segment from the start, returning every intact entry.
     /// Stops at the first torn / corrupt frame (a crash tail) — that is
     /// NOT an error: a partial trailing write is discarded.
+    ///
+    /// A missing file (`NotFound`) AND a Windows delete-pending file
+    /// (`PermissionDenied` / OS error 5) both return `Ok(Vec::new())`:
+    /// this method is called from `SegmentSet::replay` over a sealed-list
+    /// SNAPSHOT, and a concurrent `truncate_below` can unlink one of the
+    /// snapshot's paths between the snapshot capture and our open here.
+    /// That truncation only happens for segments whose `max_version`
+    /// reached the durable watermark — i.e. every entry of that segment is
+    /// already durable in `history`. Skipping the file on replay therefore
+    /// loses no data: the surviving segments cover the still-undurable
+    /// tail, and the deleted one's data lives in history.
+    ///
+    /// On Windows a freshly-unlinked file enters "delete pending" state
+    /// while any handle (including the truncator's own `remove_file`
+    /// in-flight) is still being released; new opens against its path
+    /// return `ERROR_ACCESS_DENIED` (os error 5) instead of `NotFound`,
+    /// so the two error kinds must be treated symmetrically here. This
+    /// mirrors the symmetric tolerance in `SegmentSet::truncate_below`
+    /// (which counts a `PermissionDenied` unlink as reclaimed because a
+    /// concurrent replay may still hold the file open).
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
         let path = self.path.clone();
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
             let mut f = match File::open(&path) {
                 Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
+                {
+                    return Ok(Vec::new())
+                }
                 Err(e) => return Err(DbError::Storage(format!("WalSegment replay open: {e}"))),
             };
             let mut buf = Vec::new();
