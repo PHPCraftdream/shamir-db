@@ -3,6 +3,10 @@
 # Использование: wsl-flame-bench.sh <crate> <bench_name> [criterion_filter] [profile_secs]
 # Пример: wsl-flame-bench.sh shamir-engine tx_pipeline 'tx_overhead/batch_pipeline' 20
 set -u
+# Cargo PATH — на случай non-login shell (bash -c вместо bash -lc).
+[ -r "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+export PATH="$HOME/.cargo/bin:$PATH"
+
 CRATE="${1:?crate}"
 BENCH="${2:?bench name}"
 FILTER="${3:-}"
