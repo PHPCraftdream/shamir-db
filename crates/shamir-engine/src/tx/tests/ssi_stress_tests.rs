@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use serial_test::serial;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
@@ -53,7 +54,15 @@ fn make_repo() -> RepoInstance {
 ///
 /// Looped 24 rounds on a multi_thread runtime so the opposing-order claims are
 /// genuinely scheduled apart across worker threads.
+///
+/// `#[serial]` — under nextest's thread-per-test scheduling this multi_thread
+/// stress test shares its 4 worker threads with sibling tests' tokio tasks.
+/// Bursts of concurrent N-way `tokio::spawn` here can starve the runtime
+/// when other suites are also using their own multi_thread runtimes, making
+/// the per-round "exactly one wins" race window unreliable. Serial-only
+/// against other `#[serial]` tests keeps the timing window stable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn multikey_opposing_order_no_deadlock_conflict_semantics() {
     const ROUNDS: usize = 24;
 
@@ -192,7 +201,11 @@ async fn multikey_opposing_order_no_deadlock_conflict_semantics() {
 /// commit an overlapping write-set (`ok > 1` would be the serialization bug).
 /// "Exactly one always wins" holds for the SINGLE-key storm (repro24) where a
 /// partial-claim mutual abort is impossible.
+///
+/// `#[serial]` — same starvation rationale as the other multi_thread stress
+/// tests in this file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn manykey_storm_exactly_one_wins_no_deadlock() {
     const ROUNDS: usize = 20;
     const N: usize = 8;
@@ -355,7 +368,12 @@ async fn abort_releases_claim_subsequent_writer_succeeds() {
 /// claim the cell and the whole round would abort (ok_count == 0) — wedged
 /// forever. Asserting "exactly one wins" across many sequential rounds on the
 /// SAME repo proves every abort path released its claim.
+/// `#[serial]` — same starvation rationale as the other multi_thread stress
+/// tests in this file. Under full-suite nextest concurrency this test's
+/// 12-way `tokio::spawn` burst (× 20 rounds) flakes when sibling tests'
+/// tasks starve its 4 worker threads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn repeated_storm_aborts_never_strand_claims() {
     const ROUNDS: usize = 20;
     const N: usize = 12;
