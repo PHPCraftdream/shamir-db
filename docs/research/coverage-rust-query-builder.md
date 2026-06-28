@@ -20,13 +20,17 @@
   (#12, ①.1) · `FieldBuilder::one_of()` (B2, Phase G.1) ·
   `Insert::row_idmsgpack` (#30, B4, Phase G.2) · `DbRequest`-envelope (#46-52) —
   **by-design** owned by SDK (①.4, задокументировано в `lib.rs`).
-- 🔸 **ОТКРЫТО (реально):** `SelectItem::Expression`/`SelectExpr` (#8) — wire-тип
-  помечен «future», движок их НЕ исполняет → билдер не нужен, пока движок не
-  начнёт. Косметика: `Query::where_vector_similarity`-метод (свободная функция
-  `filter::vector_similarity` работает, передаётся в `where_()`).
+- ⏸ **ОТЛОЖЕНО осознанно (кампания ③.3b, развилка B):** `SelectItem::Expression`/
+  `SelectExpr` (#8) — подтверждено чтением движка: парсится
+  (`query/read/parser.rs:190`), но **НЕ исполняется** (`table/read_exec.rs:83`
+  reject, `query/read/aggregate.rs:663` no-op). Билдер для невыполняемого типа
+  породил бы тихо-игнорируемые запросы → НЕ строим, пока движок не начнёт исполнять
+  (тогда: сначала engine-evaluation, потом билдер Rust+TS). См. `CAMPAIGN-3-PLAN.md
+  §③.3b`. Косметика: `Query::where_vector_similarity`-метод (свободная функция
+  `filter::vector_similarity` работает через `where_()`).
 
-**Итог:** Rust-билдер покрывает wire-поверхность практически на 100%; остаток —
-один engine-gated пункт (`SelectExpr`) + одна косметика.
+**Итог:** Rust-билдер покрывает wire-поверхность практически на 100%; единственный
+незакрытый пункт (`SelectExpr`) — engine-gated и осознанно отложен.
 
 ## Methodology
 

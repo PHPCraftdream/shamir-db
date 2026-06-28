@@ -298,6 +298,10 @@ fs-move + crash-recovery» оказалась ложной: boot берёт repo
 `path`-поля). Коммиты/тесты/развилки — в `DONE.md`. Закрытые action-items:
 G2/G3/G5/G6/G7/G9/G10/G15 (`ACTION-ITEMS.md`, `completeness-ddl.md`).
 
-**Осталось (осознанно отложено, не блокеры):**
-- **(A)-мини-кампания** — mutating/transform-валидаторы для computed-`DEFAULT` /
-  server-stamping (`created_at`/`updated_at`). Будущая кампания.
+**Преемник — кампания ③ (✅ ВЫПОЛНЕНА):**
+- Бывшая «(A)-мини-кампания» mutating/transform-валидаторов для computed-`DEFAULT`
+  / server-stamping — ✅ **СДЕЛАНА** как **кампания ③** (`CAMPAIGN-3-PLAN.md`):
+  декларативный transform-фреймворк (`apply_transforms`), computed-`DEFAULT`
+  (`default: FilterValue`-выражение), `auto_now`/`auto_now_add` stamping,
+  replay-безопасность доказана. Узкий-(B)-выбор ②.4 естественно вырос в полный
+  transform-проход. См. `DONE.md` (раздел «Кампания ③»).
