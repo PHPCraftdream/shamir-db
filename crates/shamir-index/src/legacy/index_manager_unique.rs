@@ -36,8 +36,26 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(());
         }
-
         let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        self.validate_unique_for_create_with_defs(value, &defs)
+            .await
+    }
+
+    /// Variant of [`validate_unique_for_create`] that accepts pre-collected
+    /// unique-index definitions, avoiding a per-call DashMap iteration when the
+    /// caller already has a batch-scope snapshot.
+    ///
+    /// Use this from batch insert paths where definitions are stable for the
+    /// duration of the batch. Standalone callers should keep using
+    /// [`validate_unique_for_create`].
+    pub async fn validate_unique_for_create_with_defs(
+        &self,
+        value: &(impl RecordRef + ?Sized),
+        defs: &[IndexDefinition],
+    ) -> DbResult<()> {
+        if defs.is_empty() {
+            return Ok(());
+        }
         for def in defs {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
@@ -51,7 +69,6 @@ impl IndexManager {
                 }
             }
         }
-
         Ok(())
     }
 

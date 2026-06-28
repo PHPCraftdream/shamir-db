@@ -728,6 +728,138 @@ async fn test_create_same_unique_index_twice() {
 }
 
 // ============================================================================
+// validate_unique_for_create_with_defs — unit tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_validate_unique_for_create_with_defs_empty_defs_early_exit() {
+    let (_, _, manager) = create_manager();
+
+    // Even if a unique index exists, empty defs slice → Ok immediately.
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    // Seed a record so a real check would fail.
+    let rid = RecordId::new();
+    manager
+        .on_record_created_unique(&rid, &value)
+        .await
+        .unwrap();
+
+    // Empty defs — should return Ok regardless of index state.
+    let result = manager
+        .validate_unique_for_create_with_defs(&value, &[])
+        .await;
+    assert!(
+        result.is_ok(),
+        "empty defs must return Ok, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_validate_unique_for_create_with_defs_single_def_accept() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager
+        .create_unique_index(index_def.clone())
+        .await
+        .unwrap();
+
+    let existing = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    let rid = RecordId::new();
+    manager
+        .on_record_created_unique(&rid, &existing)
+        .await
+        .unwrap();
+
+    // Different value — should pass.
+    let new_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
+    let defs = vec![index_def];
+    let result = manager
+        .validate_unique_for_create_with_defs(&new_value, &defs)
+        .await;
+    assert!(
+        result.is_ok(),
+        "non-duplicate should pass, got: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn test_validate_unique_for_create_with_defs_single_def_reject() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager
+        .create_unique_index(index_def.clone())
+        .await
+        .unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    let rid = RecordId::new();
+    manager
+        .on_record_created_unique(&rid, &value)
+        .await
+        .unwrap();
+
+    // Same value — must reject with DuplicateKey.
+    let defs = vec![index_def];
+    let result = manager
+        .validate_unique_for_create_with_defs(&value, &defs)
+        .await;
+    assert!(result.is_err(), "duplicate should be rejected");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::DuplicateKey(_)
+        ),
+        "expected DuplicateKey error"
+    );
+}
+
+#[tokio::test]
+async fn test_validate_unique_for_create_with_defs_multi_def_trip_on_second() {
+    let (_, _, manager) = create_manager();
+
+    let def1 = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    let def2 = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![2])]);
+    manager.create_unique_index(def1.clone()).await.unwrap();
+    manager.create_unique_index(def2.clone()).await.unwrap();
+
+    // Seed "Alice" in index 1001 and "X" in index 1002.
+    let existing = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Str("X".to_string())),
+    ]);
+    let rid = RecordId::new();
+    manager
+        .on_record_created_unique(&rid, &existing)
+        .await
+        .unwrap();
+
+    // New value has unique field-1 but duplicates field-2 — should trip on def2.
+    let new_value = create_test_value(&[
+        (1, InnerValue::Str("Bob".to_string())),
+        (2, InnerValue::Str("X".to_string())),
+    ]);
+    let defs = vec![def1, def2];
+    let result = manager
+        .validate_unique_for_create_with_defs(&new_value, &defs)
+        .await;
+    assert!(result.is_err(), "should trip on the second def");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::DuplicateKey(_)
+        ),
+        "expected DuplicateKey error"
+    );
+}
+
+// ============================================================================
 // plan_* tests (Stage 1.1.E) — unique index collision
 // ============================================================================
 

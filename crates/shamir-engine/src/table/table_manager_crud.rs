@@ -5,6 +5,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+use crate::index::index_definition::IndexDefinition;
 
 impl TableManager {
     // ---- index2 event hooks (used by crud + replication) ----
@@ -165,16 +166,24 @@ impl TableManager {
         //    unique value would otherwise both pass the persisted
         //    check and silently overwrite each other in step 3.
         if self.index_manager.has_unique_indexes() {
+            // Snapshot unique-index defs ONCE per batch — they are stable for the
+            // duration of insert_many (mutated only by DDL). Eliminates 2×N
+            // DashMap-iter + N×IndexDefinition::clone seen on the hot path
+            // (flamegraph: dashmap::Iter::next 3.2% + lock_shared 0.89%).
+            let unique_defs: Vec<IndexDefinition> =
+                self.index_manager.iter_unique_indexes().collect();
             // Map: (unique_index_name_interned, encoded_values_key)
             // → first index in the batch that claimed it. Cheap
             // bincode-based key avoids fighting `InnerValue` hash
             // requirements (Map keyed by interner ids isn't `Hash`).
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             for (i, v) in values.iter().enumerate() {
-                self.index_manager.validate_unique_for_create(v).await?;
+                self.index_manager
+                    .validate_unique_for_create_with_defs(v, &unique_defs)
+                    .await?;
                 // Now record this row's unique-index claims so the
                 // next iteration sees them.
-                for def in self.index_manager.iter_unique_indexes() {
+                for def in &unique_defs {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
                     {
                         let key = bincode::serialize(&vs)
