@@ -32,6 +32,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serial_test::serial;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
@@ -210,10 +211,14 @@ fn shamirwal_seg_count(repo_dir: &std::path::Path) -> usize {
 /// `durable == visibility` only the active segment (+ O(1) untruncated sealed)
 /// remain. The count must NOT grow with N.
 ///
-/// `current_thread` + a process-unique tempdir keep the global env var
-/// deterministic; nextest runs each test in its own process so the
-/// `set_var`/`remove_var` here cannot race a sibling test.
+/// `current_thread` + a process-unique tempdir keep the per-test scratch
+/// isolated. The `SHAMIR_WAL_SEGMENT_MAX_BYTES` env var is process-global
+/// state — nextest runs tests as threads inside ONE binary process by
+/// default, so a concurrent sibling reading this env at WAL bring-up
+/// would see a stale value and race the `remove_var` here. `#[serial]`
+/// serialises every test that touches process-global env vars.
 #[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn wal_segment_count_bounded_under_drain() {
     const N: usize = 80;
 
