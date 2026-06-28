@@ -3474,20 +3474,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shamir-captrack"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "dashmap",
- "fxhash",
- "indexmap",
- "scc",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "shamir-client"
 version = "0.1.0"
 dependencies = [
