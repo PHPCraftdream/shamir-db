@@ -7,6 +7,8 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use captrack::tvec;
+
 use futures::StreamExt;
 
 use crate::function::builtin_scalars;
@@ -292,7 +294,7 @@ pub(super) fn eval_write_value(
         FilterValue::FnCall { call } => {
             // Args are QueryValue → straight to funclib; result kept as
             // QueryValue. Zero InnerValue, zero round-trip (C6 #80).
-            let mut qv_args = Vec::with_capacity(call.args().len());
+            let mut qv_args = tvec!("engine/write_helpers/fn_call_args", call.args().len());
             for a in call.args() {
                 let qv = eval_write_value(a, literal, scalars)?;
                 qv_args.push(qv);
@@ -397,7 +399,7 @@ impl TableManager {
         // cheaply unit-reachable without manually corrupting the info_store
         // behind the IndexManager's back (requires raw Store + IndexManager
         // cross-layer setup heavier than justified for a guard-scope fix).
-        let mut result = Vec::with_capacity(record_ids.len());
+        let mut result = tvec!("engine/write_helpers/index_lookup_result", record_ids.len());
         let id_vec: Vec<RecordId> = record_ids.into_iter().collect();
         // FINAL-A: use the seam-level get_many (reads from the log when
         // an MvccStore is attached) instead of the raw data_store path.
