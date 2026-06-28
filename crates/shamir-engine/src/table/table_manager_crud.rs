@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use captrack::tvec;
 use shamir_collections::TFxSet;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
@@ -156,7 +157,10 @@ impl TableManager {
         values: &[InnerValue],
     ) -> DbResult<(Vec<RecordId>, u64)> {
         if values.is_empty() {
-            return Ok((Vec::new(), 0));
+            return Ok((
+                tvec!("engine/table_manager_crud/insert_many_ids_empty", 0),
+                0,
+            ));
         }
 
         // 1. Validate unique indexes for every value first. Two
@@ -210,8 +214,14 @@ impl TableManager {
         //    (one transaction = one fsync on backends that override
         //    `insert_many`).
         let (ids, batch_version): (Vec<RecordId>, u64) = if let Some(mvcc) = &self.mvcc_store {
-            let mut ids = Vec::with_capacity(values.len());
-            let mut items = Vec::with_capacity(values.len());
+            let mut ids = tvec!(
+                "engine/table_manager_crud/insert_many_mvcc_ids",
+                values.len()
+            );
+            let mut items = tvec!(
+                "engine/table_manager_crud/insert_many_mvcc_items",
+                values.len()
+            );
             for v in values {
                 let rid = RecordId::new();
                 let bytes = v.to_bytes().map_err(|e| {
@@ -443,13 +453,13 @@ impl TableManager {
     /// Returns `None` for a slot when the key is absent or tombstoned.
     pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(tvec!("engine/table_manager_crud/get_many_empty", 0));
         }
         if let Some(mvcc) = self.mvcc_store_ref() {
             // L3: batched MVCC read — one history.get_many for warm keys.
             let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
             let raw = mvcc.get_current_many(&batch_keys).await?;
-            let mut out = Vec::with_capacity(raw.len());
+            let mut out = tvec!("engine/table_manager_crud/get_many_out", raw.len());
             for slot in raw {
                 match slot {
                     Some(bytes) => {
@@ -490,7 +500,7 @@ impl TableManager {
     /// for the aggregate pipeline.
     pub async fn get_many_bytes(&self, ids: &[RecordId]) -> DbResult<Vec<Option<Bytes>>> {
         if ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(tvec!("engine/table_manager_crud/get_many_bytes_empty", 0));
         }
         if let Some(mvcc) = self.mvcc_store_ref() {
             // L3: batched MVCC read — one history.get_many for warm keys.

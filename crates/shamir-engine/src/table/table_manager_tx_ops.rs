@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use captrack::tvec;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
@@ -54,7 +55,7 @@ impl TableManager {
         rec: &InnerValue,
         tx_id: Option<shamir_tx::TxId>,
     ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
-        let mut all_ops = Vec::new();
+        let mut all_ops = tvec!("engine/table_manager_tx_ops/plan_insert_ops", 0);
         for backend in self.index2_registry.all_backends().await {
             let ops = backend
                 .plan_insert_tx(rid, rec, tx_id)
@@ -99,7 +100,7 @@ impl TableManager {
         new: &InnerValue,
         tx_id: Option<shamir_tx::TxId>,
     ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
-        let mut all_ops = Vec::new();
+        let mut all_ops = tvec!("engine/table_manager_tx_ops/plan_update_ops", 0);
         for backend in self.index2_registry.all_backends().await {
             let ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
@@ -124,7 +125,7 @@ impl TableManager {
     where
         R: RecordRef + Sync,
     {
-        let mut all_ops = Vec::new();
+        let mut all_ops = tvec!("engine/table_manager_tx_ops/plan_update_ops_ref", 0);
         for backend in self.index2_registry.all_backends().await {
             let ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
@@ -151,7 +152,7 @@ impl TableManager {
     where
         R: RecordRef + Sync,
     {
-        let mut all_ops = Vec::new();
+        let mut all_ops = tvec!("engine/table_manager_tx_ops/plan_delete_ops", 0);
         for backend in self.index2_registry.all_backends().await {
             let ops = backend
                 .plan_delete_tx(rid, rec, tx_id)
@@ -326,7 +327,7 @@ impl TableManager {
 
         // L9 fast-path: skip index planning entirely when the table has
         // no indexes. The `has_any_index()` check is O(1).
-        let mut index_ops = Vec::new();
+        let mut index_ops = tvec!("engine/table_manager_tx_ops/insert_tx_index_ops", 0);
         if self.has_any_index() {
             let tx_id = Some(tx.tx_id);
             index_ops = self.plan_insert_ops(rid, value, tx_id).await?;
@@ -379,7 +380,7 @@ impl TableManager {
         tx: &mut shamir_tx::TxContext,
     ) -> DbResult<Vec<RecordId>> {
         if values.is_empty() {
-            return Ok(Vec::new());
+            return Ok(tvec!("engine/table_manager_tx_ops/insert_tx_many_empty", 0));
         }
 
         // 1. Batch-validate unique indexes. Mirrors `insert_many`:
@@ -411,7 +412,10 @@ impl TableManager {
         //    L13: single clock-read for the whole batch; intra-batch
         //    monotonicity via ascending seq in `from_ts_seq`.
         let batch_ts = RecordId::now_micros();
-        let mut ids: Vec<RecordId> = Vec::with_capacity(values.len());
+        let mut ids: Vec<RecordId> = tvec!(
+            "engine/table_manager_tx_ops/insert_tx_many_ids",
+            values.len()
+        );
         for (i, _) in values.iter().enumerate() {
             ids.push(RecordId::from_ts_seq(batch_ts, i as u32));
         }
@@ -447,7 +451,8 @@ impl TableManager {
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
         let token = self.table_token();
-        let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
+        let mut index_ops: Vec<shamir_tx::IndexWriteOp> =
+            tvec!("engine/table_manager_tx_ops/insert_tx_many_index_ops", 0);
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
             //    plan_insert_tx (stateless ops → index_write_set) and
@@ -493,7 +498,10 @@ impl TableManager {
         //    to bytes here (the Live variant was removed in W2c).
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
         let staged_bytes: Vec<Bytes> = {
-            let mut out = Vec::with_capacity(values.len());
+            let mut out = tvec!(
+                "engine/table_manager_tx_ops/insert_tx_many_staged_bytes",
+                values.len()
+            );
             for v in values {
                 out.push(v.to_bytes().map_err(|e| {
                     shamir_storage::error::DbError::Codec(format!(
@@ -538,7 +546,10 @@ impl TableManager {
         tx: &mut shamir_tx::TxContext,
     ) -> DbResult<Vec<RecordId>> {
         if staged.is_empty() {
-            return Ok(Vec::new());
+            return Ok(tvec!(
+                "engine/table_manager_tx_ops/insert_tx_many_bytes_empty",
+                0
+            ));
         }
 
         // Build one RecordView per staged row — the zero-copy lens that feeds
@@ -577,7 +588,10 @@ impl TableManager {
         //    L13: single clock-read for the whole batch; intra-batch
         //    monotonicity via ascending seq in `from_ts_seq`.
         let batch_ts = RecordId::now_micros();
-        let mut ids: Vec<RecordId> = Vec::with_capacity(staged.len());
+        let mut ids: Vec<RecordId> = tvec!(
+            "engine/table_manager_tx_ops/insert_tx_many_bytes_ids",
+            staged.len()
+        );
         for (i, _) in staged.iter().enumerate() {
             ids.push(RecordId::from_ts_seq(batch_ts, i as u32));
         }
@@ -608,7 +622,10 @@ impl TableManager {
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
         let token = self.table_token();
-        let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
+        let mut index_ops: Vec<shamir_tx::IndexWriteOp> = tvec!(
+            "engine/table_manager_tx_ops/insert_tx_many_bytes_index_ops",
+            0
+        );
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
             //    plan_insert_tx (stateless ops → index_write_set) and

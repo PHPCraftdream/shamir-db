@@ -10,6 +10,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use captrack::tvec;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHashMap;
@@ -88,7 +90,8 @@ impl TableManager {
         // to an FxHashMap lookup — 3-5× cheaper for typical short batches with
         // uniform schema.
         let intern_to_base = tx.implicit;
-        let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
+        let mut resolved_values: Vec<Cow<'_, QueryValue>> =
+            tvec!("engine/write_exec/resolved_values", op.values.len());
         // Phase ②.4c — literal-default rules for this table, fetched ONCE per
         // batch. Empty for the common case (no `default` declared) → the
         // `apply_defaults` call below is skipped entirely (fast-skip; the
@@ -114,7 +117,8 @@ impl TableManager {
         // Collected on the base-intern path only: `(field_name, base_id)` for
         // every name genuinely NEW to the base interner this insert. Drained
         // into `tx.interner_deltas` after the immutable-borrow block ends.
-        let new_base_keys: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
+        let new_base_keys: RefCell<Vec<(String, u64)>> =
+            RefCell::new(tvec!("engine/write_exec/new_base_keys", 0));
         // W2d-cutover: build storage Bytes directly via the byte-identical
         // encoder `query_value_to_storage_bytes` (no InnerValue tree).
         let staged: Vec<bytes::Bytes> = {
@@ -154,8 +158,8 @@ impl TableManager {
                 cache.borrow_mut().insert(key.to_string(), ik.clone());
                 Ok(ik)
             };
-            let mut out = Vec::with_capacity(op.values.len());
-            let mut scratch = Vec::new();
+            let mut out = tvec!("engine/write_exec/staged_bytes", op.values.len());
+            let mut scratch = tvec!("engine/write_exec/encode_scratch", 0);
             for value in &op.values {
                 let mut resolved = resolve_computed_record(value, interner)
                     .map_err(shamir_storage::error::DbError::Codec)?;
@@ -248,11 +252,14 @@ impl TableManager {
         // `values` records are inserted first and their IDs appear first in
         // the combined result.
         let idmsgpack_ids: Vec<RecordId> = if op.records_idmsgpack.is_empty() {
-            Vec::new()
+            tvec!("engine/write_exec/idmsgpack_ids_empty", 0)
         } else {
             // Collect validated bytes — validate-before-collect so we never
             // stage any bytes whose keys don't resolve (security invariant).
-            let mut idmsgpack_staged: Vec<Bytes> = Vec::with_capacity(op.records_idmsgpack.len());
+            let mut idmsgpack_staged: Vec<Bytes> = tvec!(
+                "engine/write_exec/idmsgpack_staged",
+                op.records_idmsgpack.len()
+            );
             // Check if any Insert validators are bound; if not, skip the
             // per-row decode. One snapshot covers the whole batch.
             let has_validators = {
@@ -349,7 +356,7 @@ impl TableManager {
             }
             records
         } else {
-            Vec::new()
+            tvec!("engine/write_exec/insert_records_empty", 0)
         };
 
         let affected = all_ids.len() as u64;
@@ -436,7 +443,7 @@ impl TableManager {
                     .collect::<DbResult<Vec<_>>>()?
             } else {
                 let callback = compile_filter(filter, interner);
-                let mut result = Vec::new();
+                let mut result = tvec!("engine/write_exec/update_scan_result", 0);
                 let stream = self.list_stream(batch_size);
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
@@ -477,7 +484,7 @@ impl TableManager {
                 result
             }
         } else {
-            let mut result = Vec::new();
+            let mut result = tvec!("engine/write_exec/update_full_scan_result", 0);
             let stream = self.list_stream(batch_size);
             futures::pin_mut!(stream);
             while let Some(batch_result) = stream.next().await {
@@ -499,7 +506,8 @@ impl TableManager {
         };
 
         let mut affected: u64 = 0;
-        let mut result_records: Vec<InsertedRecord> = Vec::with_capacity(matched.len());
+        let mut result_records: Vec<InsertedRecord> =
+            tvec!("engine/write_exec/update_result_records", matched.len());
         let return_mode = op
             .select
             .as_ref()
@@ -662,7 +670,8 @@ impl TableManager {
                     .collect()
             } else {
                 let callback = compile_filter(&op.where_clause, interner);
-                let mut result: Vec<(RecordId, Option<Bytes>)> = Vec::new();
+                let mut result: Vec<(RecordId, Option<Bytes>)> =
+                    tvec!("engine/write_exec/delete_scan_result", 0);
                 let stream = self.list_stream(batch_size);
                 futures::pin_mut!(stream);
                 while let Some(batch_result) = stream.next().await {
@@ -742,7 +751,7 @@ impl TableManager {
         // existed in this tx's view) contribute to `affected` and to the
         // returned records.
         let mut affected: u64 = 0;
-        let mut removed_with_bytes: Vec<Bytes> = Vec::new();
+        let mut removed_with_bytes: Vec<Bytes> = tvec!("engine/write_exec/removed_with_bytes", 0);
         for (id, maybe_bytes) in to_delete {
             if self.delete_tx(id, Some(&mut *tx)).await? {
                 affected += 1;
@@ -759,7 +768,8 @@ impl TableManager {
         // wrapped as `InsertedRecord { id: None, fields }` so the wire shape
         // matches UPDATE-RETURNING. When `op.select.fields` is set, each row
         // is restricted to the named fields.
-        let mut result_records: Vec<InsertedRecord> = Vec::new();
+        let mut result_records: Vec<InsertedRecord> =
+            tvec!("engine/write_exec/delete_result_records", 0);
         if wants_records {
             let projection = op.select.as_ref().and_then(|s| s.fields.as_deref());
             result_records.reserve(removed_with_bytes.len());
@@ -864,7 +874,7 @@ impl TableManager {
 
             let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
                 Value::Map(map) => {
-                    let mut fields = Vec::with_capacity(map.len());
+                    let mut fields = tvec!("engine/write_exec/set_key_fields", map.len());
                     for (k, v) in map {
                         let key_id = layered.touch_sync(k.as_str());
                         let inner_v = query_value_to_inner_with(v, &intern_fn)
