@@ -23,11 +23,6 @@ shamir-tunables = { path = "../shamir-tunables" }
 shamir-wal = { path = "../shamir-wal" }
 shamir-tx = { path = "../shamir-tx" }
 shamir-index = { path = "../shamir-index" }
-# OSS capacity-telemetry: tvec!/tfxmap!/tdashmap!/... call-site macros with
-# zero overhead off-feature. fxhash feature → CapHasher = FxBuildHasher
-# (workspace ideology, CLAUDE.md §4). Toggle telemetry on for bench runs:
-# `cargo bench -p shamir-engine --features captrack/telemetry`.
-captrack = { path = "../../../captrack", features = ["fxhash"] }
 
 # Async / runtime
 tokio = { version = "1.49.0", features = ["full"] }
