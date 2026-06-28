@@ -264,6 +264,49 @@
 в membuffer на ленивый drain через `dirty.shards_iter()` или вообще на channel-based
 flush queue. Это вторая волна.
 
+---
+
+## 9. After #289 — пересмотр гипотезы об остаточном `Iter::next`
+
+**Прогон:** тот же бенч, 3448 сэмплов. SVG: `.flamegraphs/shamir-engine-tx_pipeline-symbols-post-289.svg`.
+
+**Δ#289** (effekt только #289 поверх #290): практически нулевой.
+- `Iter::next 3.38 → 3.11` (-0.27), `Arc::Drop 1.85 → 1.63` (-0.22),
+  `memcmp 7.54 → 6.91` (-0.63) — слабые улучшения в шуме.
+- `memmove +0.63`, `atomic_load +0.45`, `Weak::Drop +0.34` — встречный шум.
+- Net ≈ 0.
+
+**Объяснение:** в `tx_pipeline` бенче `validator_registry` скорее всего **None**
+(бенч валидаторы вообще не настраивает). Мой fast-skip в `run_validators_qv`
+не достигается — ранний выход уже срабатывает на `validator_registry == None`
+(стр.127). Фикс корректен и нужен (low-risk, инвариант), но **выигрыш будет
+на бенче с `Some(registry)` + пустыми bindings** — типовом prod-сценарии
+пользовательской таблицы без валидаторов. Не вредит — не помогает на этом бенче.
+
+### 9.1 Сюрприз №2 — остаточный `Iter::next` не из membuffer
+
+В trace post-#289 виден `drop_in_place<Option<(Arc<RwLockReadGuard<...>>,
+RawIter<(u64, SharedValue<shamir_index::legacy::index_definition::IndexDefinition>)>)>>`
+0.44% — тип значения `IndexDefinition`, не `Slot`. Значит **остаточный `Iter::next`
+3.11% — НЕ membuffer dirty, а опять shamir-index `DashMap<u64, IndexDefinition>`** (вариант
+`indexes`/`indexes_unique`/`sorted_indexes::indexes`).
+
+**Кандидат #291 пересматривается** — membuffer flush, возможно, всё ещё hot, но
+не главный. **Главный реальный target** — заменить read-mostly DashMap'ы
+`IndexManager::indexes` / `IndexManager::indexes_unique` / `SortedIndexManager::indexes`
+на `ArcSwap<Arc<Vec<IndexDefinition>>>` (как уже сделано для `validator_bindings`).
+
+Расчёт стоимости: каждый `iter()` берёт lock_shared на **всех 16-32 шардах**.
+В бенче ~50 batches × 3 iter-вызова на батч (regular + unique + мой snapshot)
+× 32 шарда = ~4800 lock-acquire/release за 30s → достаточно для 3.11% профиля.
+
+ArcSwap-read = atomic-incr + Arc-clone, **на порядок дешевле**. И index-defs
+read-mostly (мутируются только DDL — `create_index`/`drop_index`), идеальный
+кейс для ArcSwap (как `validator_bindings`).
+
+→ Новая таска **#292** (ArcSwap для index DashMap). Скоуп M (3 DashMap'а в
+`shamir-index`, эхо в caller'ах). Ожидаемый выигрыш ~2-3.5%.
+
 ### 8.2 Не считать фикс провалом
 
 Sample-size относительно мал (3552), индивидуальные символы шумят ±2-3%.
