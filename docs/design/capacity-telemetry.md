@@ -372,6 +372,105 @@ dashmap → scc. Каждая семья — **отдельный коммит**
 
 ---
 
+## 5.5 OSS-generalization (#295) — крейт `captrack` для всех
+
+> Решение: крейт публикуется как самостоятельный OSS (`captrack`), живёт в
+> ОТДЕЛЬНОЙ папке `D:\dev\rust\captrack` (ВНЕ workspace shamir-db, свой git-репо),
+> нейтральное имя, ноль shamir-измов. Мы зависим как
+> `captrack = { path = "../captrack", features = ["fxhash"] }` (Фаза 2 #293).
+> In-workspace `crates/shamir-captrack` (#288) — промежуточный, убирается после
+> готовности external.
+
+**Принцип: крейт = механизм, потребитель = политика.** Три ОРТОГОНАЛЬНЫЕ оси.
+
+### Ось 1 — трекинг on/off
+`feature = "telemetry"` (переименовать из `capacity-telemetry`). Off → голый
+конструктор, zero overhead. (Как сейчас.)
+
+### Ось 2 — хешер: 3 композируемых уровня
+
+**A. Дефолт через `CapHasher`, feature-selected:**
+```toml
+[features]
+default    = []                       # → RandomState (std, DoS-safe OSS-дефолт)
+fxhash     = ["dep:fxhash"]
+ahash      = ["dep:ahash"]
+foldhash   = ["dep:foldhash"]
+rustc-hash = ["dep:rustc-hash"]
+```
+```rust
+#[cfg(not(any(feature="fxhash",feature="ahash",feature="foldhash",feature="rustc-hash")))]
+pub type CapHasher = std::collections::hash_map::RandomState;
+#[cfg(feature="fxhash")] pub type CapHasher = fxhash::FxBuildHasher;
+// ... + compile_error! при >1.
+```
+ВАЖНО для OSS: дефолт **RandomState**, НЕ Fx. Быстрые хешеры — opt-in. Мы у себя
+`features=["fxhash"]`. `fxhash` больше НЕ always-on (убрать в фичу).
+
+**B. Per-call override через `;`-арм:**
+```rust
+tmap!("name", cap)                      // → CapHasher
+tmap!("name", cap; AHasher::default())  // → этот вызов с другим хешером
+```
+Multi-arm в каждом из 7 hash-макросов. `TrackedHashMap<K,V,S>` дженерик по S
+(убрать Fx-хардкод `TrackedFxHashMap` — слить в дженерик; макрос подставляет S).
+
+**C. Произвольный дефолт через генератор `declare_collections!`:**
+```rust
+// в крейте потребителя, ОДИН раз:
+captrack::declare_collections! { hasher = MyExoticHasher, prefix = my }
+// → my_vec!/my_map!/... делегируют к captrack::{tvec!,tmap!}(...; MyExoticHasher)
+```
+
+### Генератор — companion proc-macro `captrack-macros`
+
+⚠ **Stable-Rust реальность:** macro_rules, генерящий macro_rules с
+метапеременными, упирается в dollar-escaping (`$$` не stable). Поэтому генератор
+— **proc-macro** (`captrack-macros`, как `shamir-query-builder-macros` в
+workspace). Он эмитит ТОНКИЕ ДЕЛЕГИРУЮЩИЕ обёртки:
+```rust
+macro_rules! my_map {
+    ($n:literal, $c:expr) => { $crate::tmap!($n, $c; MyExoticHasher::default()) };
+    ($n:literal, $c:expr; $h:expr) => { $crate::tmap!($n, $c; $h) };
+}
+```
+**Почему делегирование, а не регенерация:** cfg-switch telemetry on/off + `#[allow]`
++ Tracked-vs-bare логика живёт ТОЛЬКО в hand-written примитивах `captrack::{tvec!,
+tmap!,...}`. Их две версии (`#[cfg(feature="telemetry")]` / `not`) скомпилированы
+В captrack → отражают telemetry-фичу САМОГО captrack (через feature-unification).
+Если бы генератор регенерировал cfg в scope потребителя — `#[cfg(feature="telemetry")]`
+там резолвился бы против фич ПОТРЕБИТЕЛЯ, не captrack → баг. Делегирование это
+обходит by-construction. Генератор первоклассен (даёт произвольный дефолт +
+prefix), примитивы несут сложную логику. Чисто.
+
+### Ось 3 — запрет: политика потребителя
+
+Запрет **не принадлежит крейту** (`clippy.toml` не транзитивен). Крейт:
+1. **Макросы ban-agnostic** — каждое раскрытие в `#[allow(clippy::disallowed_methods,
+   clippy::disallowed_types)]` → переживает любой запрет (полный/частичный/нет).
+2. **Шипит `clippy.toml.example`** (+ README-секция) со списком всех голых
+   конструкторов. Потребитель копирует целиком (полный запрет) / подмножество
+   (частичный) / ничего (только телеметрия).
+
+### Матрица покрытия
+
+| Кейс | Решение |
+|---|---|
+| Полный запрет | весь `clippy.toml.example` |
+| Частичный запрет | подмножество |
+| Полная замена хешера (популярный) | `features=["ahash"]` |
+| Полная замена хешера (произвольный) | `declare_collections!{hasher=Mine}` |
+| Частичная замена | `tmap!("n",c; h)` |
+| Только телеметрия, без дисциплины | юзать макросы, не трогать clippy |
+| Прод без телеметрии | `default-features=false` → голые конструкторы |
+
+### OSS-обвес
+README (примеры всех уровней), `clippy.toml.example`, `CHANGELOG.md`,
+`LICENSE` (MIT OR Apache-2.0), doc-комменты с `# Examples`. `dump` — за `std`
+(на будущее `no_std`-registry — опц.).
+
+---
+
 ## 6. Открытые вопросы (на будущее)
 
 - **Histogram `final_len` (p50/p95/p99)** — добавить в v2, если peak окажется
