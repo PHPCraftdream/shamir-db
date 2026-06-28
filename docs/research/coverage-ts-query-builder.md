@@ -18,6 +18,24 @@ All file paths are relative to the repo root. "Wire" = `shamir-query-types`. "Ru
 
 ---
 
+## ⚠️ Статус актуализации (после кампании ① Builder parity — 2026-06-26)
+
+Аудит датирован 2025-06-24 и **устарел**: все P0/P1-gaps закрыты кампанией ①
+(Builder parity & DX). Свериться с `DONE.md`. Реальный статус:
+
+- ✅ **ЗАКРЫТО (кампания ①):** G7 interner DDL → `internerDump`/`internerTouch`
+  (①.2) · G5 `Doc`/computed-write → `WriteValue`/`ComputedExpr` (①.5) ·
+  G6 subscribe `deliverCall` (①.3) · G1 inline `whereEq`/`whereGt`/… +
+  `orWhere*`/`whereGroup` (①.3) · G3 typed `Handle`/`RowRef` (①.3) ·
+  G4 `tryBuild()` (①.3). Плюс B2 `FieldBuilder::one_of` на Rust-стороне (Phase G.1).
+- 🔸 **ОТКРЫТО (косметика, P2):** G8 `SelectItem::Expression` (wire-only, и Rust, и
+  TS; движок-gated) · G9 `lit_u64` (TS `number` покрывает безопасный диапазон,
+  wire — `i64`) · G10 `bin()`-helper (`Uint8Array` уже в типе, нужен лишь сахар).
+
+**Итог:** TS-билдер ≈ 100% паритета с Rust; остаток — три косметических P2.
+
+---
+
 ## 1. OQL Coverage (Read / Filter / Value / Select)
 
 ### 1.1 ReadQuery — `query.ts`

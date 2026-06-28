@@ -7,6 +7,27 @@
 **Source of truth:** `crates/shamir-query-types/src/` (wire DTOs) + `crates/shamir-query-types/src/batch/batch_op.rs` (BatchOp dispatch enum)
 **Under audit:** `crates/shamir-query-builder/src/`
 
+---
+
+## ⚠️ Статус актуализации (после кампаний ①/Phase G — 2026-06-26)
+
+Аудит датирован 2025-06-24 и **устарел**: почти все ❌/🟡 закрыты. Свериться с
+`DONE.md`. Таблицы ниже оставлены как исторический снимок; реальный статус:
+
+- ✅ **ЗАКРЫТО:** `$expr`/`$cond` (#26/#27, B3) · `interner_epochs`/`result_encoding`
+  (#36/#37, B1) · `FnCall::Simple` → `val::func_simple` (#25, ①.1) ·
+  `res::function_folder` (#41/#9, ①.1) · `FieldBuilder::set()`/`null_type()`
+  (#12, ①.1) · `FieldBuilder::one_of()` (B2, Phase G.1) ·
+  `Insert::row_idmsgpack` (#30, B4, Phase G.2) · `DbRequest`-envelope (#46-52) —
+  **by-design** owned by SDK (①.4, задокументировано в `lib.rs`).
+- 🔸 **ОТКРЫТО (реально):** `SelectItem::Expression`/`SelectExpr` (#8) — wire-тип
+  помечен «future», движок их НЕ исполняет → билдер не нужен, пока движок не
+  начнёт. Косметика: `Query::where_vector_similarity`-метод (свободная функция
+  `filter::vector_similarity` работает, передаётся в `where_()`).
+
+**Итог:** Rust-билдер покрывает wire-поверхность практически на 100%; остаток —
+один engine-gated пункт (`SelectExpr`) + одна косметика.
+
 ## Methodology
 
 Every variant of the `BatchOp` enum (the single dispatch surface for all

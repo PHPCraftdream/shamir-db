@@ -15,6 +15,22 @@ capabilities reachable through the TS client builders
 
 ---
 
+## ⚠️ Статус (2026-06-26) — основа для кампании ③.1
+
+Этот аудит в основном **актуален** (тест-дыры реальны). Свериться с
+`CAMPAIGN-3-PLAN.md`. Деление остатка по actionability:
+
+- 🟢 **Server-НЕзависимо (берётся первым, ③.1a):** 6 FieldBuilder Phase B/C
+  сеттеров (`scalar`/`oneOf`/`format`/`compare`/`foreignKey`/`unique`) — **ноль
+  unit-тестов** (только server-gated e2e). Добавить wire-shape unit в `ddl.test.ts`
+  → покрытие билдер-слоя без сервера.
+- 🟡 **Server-gated (③.1b, нужен release-бинарь):** e2e для FTS, vector, `call`
+  (P0); `like/ilike/regex`, existence/containment, `aggregateFn`, `func`,
+  `history`-range, `page`-mode, `distinct` (P1); `resume()`, `commitMigration`-
+  success, `dropUser`/`dropRole` (P2/P3).
+
+---
+
 ## 1. Test inventory (what exists)
 
 ### 1.1 Builder unit tests — `core/builders/__tests__/` (NO server)
