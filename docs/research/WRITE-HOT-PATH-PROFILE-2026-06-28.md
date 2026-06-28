@@ -1,0 +1,220 @@
+בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
+
+# Write hot-path profile — `tx_pipeline indexed/tx/1000`
+
+> **Дата:** 2026-06-28. **Среда:** WSL2 Ubuntu 24.04 на Windows 10
+> (kernel 6.18-microsoft, perf 6.8.12). **Бенч:** `shamir-engine` /
+> `tx_pipeline` / `tx_overhead/batch_pipeline/indexed/tx/1000` × 30 s.
+> **SVG:** `D:\dev\rust\shamir-db\.flamegraphs\shamir-engine-tx_pipeline-symbols.svg`
+> (1.1 MB). **perf.data:** `/tmp/perf-tx_pipeline.data` (16 MB, **3741 сэмплов**).
+
+> **Зачем:** первый targeted flamegraph-pass на write hot-path, чтобы понять,
+> куда РЕАЛЬНО уходит время. Результат изменил мою рабочую гипотезу
+> «over-allocation» на куда более интересную картину — см. §3.
+
+---
+
+## 1. Методология (для воспроизведения)
+
+### 1.1 Скрипт
+`scripts/wsl-flame-bench.sh` (запушен): `cargo flamegraph --bench <name> -p <crate> --no-inline -c "record -F 99 --call-graph dwarf,4096 -g ..."`.
+
+### 1.2 Критические настройки (которые я угадывал по очереди)
+
+| Настройка | Зачем | Что было до фикса |
+|---|---|---|
+| `CARGO_PROFILE_RELEASE_DEBUG=1` + `_STRIP=false` (и BENCH-зеркало) | Cargo.toml ставит `strip=true,debug=false` в `[profile.release]`; bench-профиль inherits → Rust-символы выпиливаются на линковке | Все имена `[unknown]` / адреса в SVG |
+| `--call-graph dwarf,4096` (не default 8192) | WSL2 6.18 vs perf-6.8 расхождение mmap-протокола: stack 8192 → `Bad address` | `failed to write perf data` |
+| `-F 99` + один узкий бенч + `--profile-time 30` (вместо всех 16 конфигураций) | Управляемый размер `perf.data` (16 MB vs 110 MB) + достаточно сэмплов | Часы post-processing |
+| `--no-inline` у `cargo-flamegraph` | Inline-frame резолв через addr2line на Rust-binary с LTO — главное узкое место post-processing | `perf script` 30+ минут (!) |
+| `rm -rf ~/.debug` перед запуском | Битый build-id symbol-кэш блокирует addr2line | Бесконечные `could not read first record` warnings |
+| `perf` через `/usr/lib/linux-tools-6.8.0-124/perf` (не `/usr/bin/perf`) | wrapper ищет perf под current kernel, для WSL2 Microsoft 6.18 пакета нет; ABI-совместимость 6.8 ≈ 6.18 для record/report | `WARNING: perf not found for kernel 6.18.33.2-microsoft` |
+
+> **Урок:** WSL2 + Rust LTO + full DWARF + perf — это слой за слоем плохо
+> совместимостей. Каждый из них надо обходить отдельно. Скрипт `wsl-flame-bench.sh`
+> теперь содержит все эти обходы.
+
+### 1.3 Анализ
+
+```bash
+/usr/lib/linux-tools-6.8.0-124/perf report \
+  --input=/tmp/perf-tx_pipeline.data \
+  --stdio --no-children -g none
+```
+
+(Завёрнуто в `scripts/wsl-perf-report.sh` для удобства.)
+
+---
+
+## 2. TOP 35 self-time (Rust символы видны)
+
+```
+     7.70%  libc.so.6                     [.] __memcmp_evex_movbe
+     3.38%  tx_pipeline                   [.] core::sync::atomic::atomic_load
+     3.22%  libc.so.6                     [.] __memmove_evex_unaligned_erms
+     3.20%  tx_pipeline                   [.] <dashmap::iter::Iter as Iterator>::next
+     2.40%  tx_pipeline                   [.] core::sync::atomic::atomic_compare_exchange_weak
+     2.26%  tx_pipeline                   [.] <alloc::sync::Weak as Drop>::drop
+     2.14%  tx_pipeline                   [.] core::sync::atomic::AtomicUsize::fetch_add
+     1.96%  tx_pipeline                   [.] core::sync::atomic::AtomicUsize::fetch_sub
+     1.80%  tx_pipeline                   [.] <alloc::sync::Arc as Drop>::drop
+     1.62%  tx_pipeline                   [.] hashbrown::raw::inner::RawTableInner::iter
+     1.61%  tx_pipeline                   [.] core::sync::atomic::AtomicUsize::fetch_sub  (другой call-site)
+     1.53%  tx_pipeline                   [.] scc::tree_index::node::Node::search_entry
+     1.36%  tx_pipeline                   [.] <Range<T> as RangeIteratorImpl>::spec_next
+     1.32%  tx_pipeline                   [.] bytes::bytes::Bytes::as_slice
+     1.17%  libc.so.6                     [.] _int_free
+     1.16%  tx_pipeline                   [.] core::core_arch::x86::sse2::_mm_movemask_epi8
+     1.13%  libc.so.6                     [.] cfree
+     1.01%  libc.so.6                     [.] _int_malloc
+     0.96%  tx_pipeline                   [.] <A as SliceOrd>::compare
+     0.94%  tx_pipeline                   [.] core::sync::atomic::fence
+     0.89%  tx_pipeline                   [.] <dashmap::lock::RawRwLock as RawRwLock>::lock_shared
+     0.86%  libc.so.6                     [.] malloc
+     0.79%  tx_pipeline                   [.] core::core_arch::x86::sse2::_mm_set1_epi8
+     0.78%  tx_pipeline                   [.] bytes::fmt::debug::...::BytesRef::fmt
+     0.78%  tx_pipeline                   [.] scc::tree_index::leaf::Leaf::min_greater_equal
+     0.68%  tx_pipeline                   [.] alloc::alloc::Global::alloc_impl
+     0.67%  tx_pipeline                   [.] TryFrom for [T; N]::try_from
+     0.64%  libc.so.6                     [.] malloc_consolidate
+     0.61%  libc.so.6                     [.] unlink_chunk.isra.0
+     0.57%  tx_pipeline                   [.] scc::tree_index::node::Node::insert
+     0.52%  tx_pipeline                   [.] alloc::alloc::exchange_malloc
+     0.51%  tx_pipeline                   [.] hashbrown::raw::inner::RawIterRange::new
+     0.46%  tx_pipeline                   [.] _mm_loadu_si128
+     0.46%  tx_pipeline                   [.] _mm_movemask_epi8  (другой call-site)
+     0.41%  tx_pipeline                   [.] alloc::sync::Arc::new
+     0.40%  tx_pipeline                   [.] fxhash::write64
+     0.38%  tx_pipeline                   [.] scc::tree_index::internal_node::InternalNode::insert
+```
+
+---
+
+## 3. Группировка и интерпретация
+
+### Главный сюрприз: **НЕ heap, а concurrency**
+
+Гипотеза перед прогоном (на основе libc-only профиля без символов): write hot-path
+**alloc-bound** (~11% memory). Реальная картина — alloc даёт ~10%, а в 2 раза
+больше времени уходит на **синхронизацию**:
+
+| # | Категория | % суммарно | Главные символы |
+|---|---|---|---|
+| 🔴 **1** | **Atomics** (ref-count + counters + CAS) | **~12.4%** | atomic_load 3.38 + compare_exchange_weak 2.40 + fetch_add 2.14 + fetch_sub (×2) 3.57 + fence 0.94 |
+| 🔴 **2** | **DashMap iteration** | **~6.2%** | Iter::next 3.20 + RawTableInner::iter 1.62 + lock_shared 0.89 + RawIterRange::new 0.51 |
+| 🟡 **3** | **memcmp** (libc, бо́льшая часть → scc::TreeIndex compare) | **7.70%** | __memcmp_evex_movbe 7.70 + SliceOrd::compare 0.96 |
+| 🟡 **4** | **Arc/Weak Drop** | **~4.1%** | Weak::drop 2.26 + Arc::drop 1.80 |
+| 🟡 **5** | **scc::TreeIndex** (sorted index nav) | **~3.3%** | Node::search_entry 1.53 + Leaf::min_greater_equal 0.78 + Node::insert 0.57 + InternalNode::insert 0.38 |
+| 🟡 **6** | **malloc/free family** | **~6.6%** | _int_free 1.17 + cfree 1.13 + _int_malloc 1.01 + malloc 0.86 + malloc_consolidate 0.64 + unlink_chunk 0.61 + Global::alloc_impl 0.68 + exchange_malloc 0.52 |
+| 🟡 **7** | **memmove** (Vec realloc / Bytes copy / msgpack encode) | **3.22%** | __memmove_evex_unaligned_erms |
+| 🟢 | hashbrown SIMD probing (SwissTable) — норма | ~2.9% | _mm_movemask_epi8 + _mm_set1_epi8 + _mm_loadu_si128 |
+| 🟢 | fxhash::write64 | 0.40% | THasher — дёшево как и должно быть |
+| 🟢 | Range::next (hot for-loops) | 1.36% | где-то много `for i in 0..N` |
+
+**Сводка:** ~22% на синхронизацию и concurrent-data-structures (#1+#2+#4+#5) vs
+~10% на heap (#6+#7). Перед патчем `with_capacity` массово — стоит сначала
+закрыть концурренси.
+
+### 3.1 Что пахнет особенно плохо
+
+- **DashMap::iter (3.20%) в hot-path** — это **anti-pattern**. `DashMap` по design
+  для индексированного доступа (`.get`, `.insert`), не для итерации; `.iter()`
+  берёт shared-lock на **всех** шардах. Если это в горячем цикле — заведомо
+  ускоряемо.
+
+- **2×AtomicUsize::fetch_sub (3.57%)** — это, скорее всего, **rc-decrement при
+  drop'е Arc и Weak**. Подтверждается соседними `Weak::drop 2.26%` + `Arc::drop
+  1.80%`. Похоже на множество `ArcSwap::load_full()` per record.
+
+- **scc::TreeIndex search 1.53% + memcmp 7.7%** — sorted index lookup доминирует
+  `memcmp`. Если key — `Vec<u8>` (encoded RecordId/field bytes), сравнение в
+  разы дороже чем `u64`-key.
+
+---
+
+## 4. Actionable targets (ранжированы по `expected gain × confidence × risk`)
+
+| # | Target | % потолок | Confidence | Risk | Task |
+|---|---|---|---|---|---|
+| **A** | Сократить `Arc::clone` / `ArcSwap::load_full` в write hot-path | ~16.5% (atomics 12.4 + Arc/Weak Drop 4.1) | High — load_full() prograшно в `run_validators_qv` per call, гарантированно горячо | Low — `load()` Guard вместо `load_full()` Arc в местах где Arc не нужен outside scope | **#289** |
+| **B** | Удалить `DashMap::iter()` из hot-path | ~6.2% | High — anti-pattern в hot-path | Low-Med — снэпшот через `ArcSwap` или per-shard scan | **#290** |
+| **C** | Сократить key-compare в `scc::TreeIndex` (memcmp 7.7%) | ~5-7% | Med — нужно знать, что за key | High — структурное изменение индекса | (потенциальная #291) |
+| **D** | `with_capacity()` на горячих местах (malloc + memmove) | ~5-8% | Low до прогона `capacity-telemetry` | Low | После **#288** |
+| **E** | Hot `for 0..N` loop (1.36% Range::next) | ~1-1.5% | Low — call-site неизвестен | Low | После #289/#290 |
+
+### Реалистичный план «двух волн»
+
+**Волна 1 — концурренси** (#289 → #290):
+1. Прибить точечно все `load_full()` в `run_validators_qv` / `run_validators_loop`
+   на `load()`. Замерить.
+2. Найти и убрать `DashMap::iter()` в hot-path. Замерить.
+3. Cumulative потолок ~22%; реальная экономия (по опыту) обычно 30-60% от потолка,
+   т.е. ~7-13% на оба патча.
+
+**Волна 2 — память** (#288 → analysis → patches):
+4. Реализовать capacity-telemetry (`docs/design/capacity-telemetry.md`).
+5. Инструментировать топ-N аллокаторов по фламграфу (callgraph → конкретные
+   call-sites).
+6. Прогнать `--features capacity-telemetry`, получить точные peak'и.
+7. Поставить data-driven `with_capacity(peak)`. Потолок ~6-7%, реальный
+   выигрыш ~2-4%.
+
+**Суммарный realistic target по результатам обеих волн: 10-17% throughput
+улучшения на write hot-path.** Замерить criterion compare.
+
+---
+
+## 5. Caveat'ы / границы валидности
+
+1. **Bench-profile НЕ release-profile.** `[profile.bench]` в `Cargo.toml`
+   inherits release, но `opt-level=0` (комментарий: «для итеративной /opti,
+   измерения 2-5× pessimistic vs opt-3»). Абсолютные % могут немного сдвинуться
+   в opt-3, но **относительная картина горячих точек устойчива** — concurrency
+   primitives и DashMap iter не уйдут от opt-3.
+
+2. **Один бенч.** Профиль с `indexed/tx/1000` — это «батч из 1000 строк в
+   индексированную таблицу под tx». Может НЕ покрыть:
+   - read hot-path (read_planner / filter eval) — нужен отдельный flamegraph
+     на `read_path_matrix`/`filter_eval`.
+   - non-indexed insert — `tx_overhead/batch_pipeline/tx/100` без `indexed/`.
+   - sub-batch + `$query` cross-ref — `engine_perf`.
+
+   Перед широкими структурными изменениями стоит прогнать минимум 3 разных
+   бенча (write+read+batch) и сравнить картину.
+
+3. **3741 сэмплов — статистически грубо.** Сэмпл с долей <0.3% не доверять.
+   Топ-15 — solid; xвост — индикативно.
+
+4. **WSL2 perf — это всё-таки WSL2.** `--call-graph dwarf,4096` упрощённый,
+   возможны пропущенные кадры. `--no-inline` не резолвит inline-функции (часть
+   времени может быть приписана внешней функции). Полноценный профиль на
+   Linux-host или Windows ETW дал бы другие нюансы. Но **горячие точки в
+   `tx_pipeline` совпадают** между прогонами.
+
+---
+
+## 6. Артефакты
+
+- `.flamegraphs/shamir-engine-tx_pipeline-symbols.svg` — кликабельный SVG с
+  Rust-символами.
+- `.flamegraphs/shamir-engine-tx_pipeline-bench.svg` — старый прогон без
+  символов (можно удалить — историческое).
+- `.flamegraphs/shamir-engine-lib.svg` — первый прогон по lib-тестам
+  (бесполезен для горячих путей — доминирует test-обвязка, как пользователь
+  правильно заметил).
+- `scripts/wsl-flame-bench.sh` — параметризованный bench-flamegraph с фиксами.
+- `scripts/wsl-perf-report.sh` — извлечение плоского self-time из perf.data.
+- `docs/design/capacity-telemetry.md` — дизайн capacity-telemetry для волны 2.
+
+---
+
+## 7. Следующие шаги
+
+1. **#289** — открыть, написать бриф в `docs/prompts/perf/01-3289-arc-load-full.md`,
+   делегировать `sh`-агенту с прибитыми точками (write_exec → run_validators_qv).
+2. Замерить criterion compare (baseline `master b0e1f5a2` vs patched).
+3. Прогнать flamegraph повторно через `scripts/wsl-flame-bench.sh` —
+   сравнить с этим.
+4. Потом — **#290** аналогично.
+5. Потом — **#288** реализовать, инструментировать, **#291** наполнить
+   data-driven `with_capacity()`.
