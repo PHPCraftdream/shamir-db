@@ -210,11 +210,64 @@
 
 ## 7. Следующие шаги
 
-1. **#289** — открыть, написать бриф в `docs/prompts/perf/01-3289-arc-load-full.md`,
-   делегировать `sh`-агенту с прибитыми точками (write_exec → run_validators_qv).
-2. Замерить criterion compare (baseline `master b0e1f5a2` vs patched).
-3. Прогнать flamegraph повторно через `scripts/wsl-flame-bench.sh` —
-   сравнить с этим.
-4. Потом — **#290** аналогично.
-5. Потом — **#288** реализовать, инструментировать, **#291** наполнить
-   data-driven `with_capacity()`.
+1. ✅ **#290** — реализован коммитом `c463eb3b` (snapshot unique-defs раз на батч,
+   устраняет 2×N DashMap-iter). Post-fix flamegraph — см. §8 ниже.
+2. **#289** — `validator_bindings.load_full()` per-record; AtomicUsize-mirror
+   для fast-path при пустых bindings.
+3. Полный criterion compare (baseline vs after-both-fixes) после #289.
+4. Потом — **#288** реализовать, инструментировать, наполнить data-driven
+   `with_capacity()`.
+
+---
+
+## 8. After #290 — сравнение профилей (2026-06-28)
+
+**Прогон:** `tx_overhead/batch_pipeline/indexed/tx/1000`, 30s, 3552 сэмплов
+(до фикса 3741). SVG: `.flamegraphs/shamir-engine-tx_pipeline-symbols-post-290.svg`.
+
+| Symbol | До #290 | После #290 | Δ | Заметка |
+|---|---|---|---|---|
+| **Заметно упало:** | | | | |
+| `core::sync::atomic::atomic_load` (главный call-site) | 3.38% | 2.13% | **−1.25** | + другой site +0.48 = net −0.77% |
+| `Weak::drop` | 2.26% | 1.82% | **−0.44** | меньше Arc-clone в hot path |
+| `AtomicUsize::fetch_add` | 2.14% | 1.57% | **−0.57** | rc-increment'ов на def-clone |
+| **memmove** | 3.22% | 2.82% | **−0.40** | Vec realloc меньше |
+| **malloc/free family** (cum) | ~6.7% | ~5.6% | **−1.1** | def.paths.clone() убраны |
+| `scc::Node::search_entry` | 1.53% | 1.30% | −0.23 | |
+| **Не сдвинулось / сюрприз:** | | | | |
+| `dashmap::Iter::next` | 3.20% | **3.38%** | +0.18 | ⚠ ДРУГОЙ источник DashMap-iter |
+| `dashmap::lock_shared` | 0.89% | 1.05% | +0.16 | вслед за Iter::next |
+| `memcmp` (libc) | 7.70% | 7.54% | ~ | scc::TreeIndex compare |
+| `Arc::drop` | 1.80% | 1.85% | ~ | |
+| `fetch_sub` (×2 sites) | 3.57% | 3.69% | ~ | |
+
+**Cumulative подвинулось: ~−3.8% (net heap + atomics).** Wall-clock criterion
+не мерял (требует ещё одного полного прогона); будет после #289.
+
+### 8.1 Сюрприз — `dashmap::Iter::next` не упал
+
+Мой фикс точно убрал 2×N DashMap-iter в unique-path (доказано чтением кода
++ зелёным гейтом). Но `Iter::next` остался на 3.38% → **есть другой DashMap,
+итерируемый в hot path**, который доминирует. Скоринг кандидатов после грепа:
+
+- `crates/shamir-storage/src/storage_membuffer.rs:350` — `state.dirty.iter().take(batch_size)`
+  в `flush_dirty_batch` — **главный подозреваемый**. `dirty: DashMap<RecordKey, Slot>`
+  собирается во время writes, периодически flush'ится в background. Под нагрузкой
+  insert 1000 строк × несколько итераций бенча — flush работает интенсивно.
+- `crates/shamir-index/src/legacy/index_manager.rs:430` — `for def in self.indexes.iter()`
+  в `plan_records_created_batch` — **раз на батч**, должно быть дёшево.
+  В принципе ОК.
+- `crates/shamir-storage/src/storage_in_memory.rs:54` — `self.stores.iter()` —
+  DDL-уровень, не hot.
+
+**Кандидат №1 для следующей таски (после #289):** заменить `dirty.iter().take(batch_size)`
+в membuffer на ленивый drain через `dirty.shards_iter()` или вообще на channel-based
+flush queue. Это вторая волна.
+
+### 8.2 Не считать фикс провалом
+
+Sample-size относительно мал (3552), индивидуальные символы шумят ±2-3%.
+Cumulative shift в правильную сторону по 6 категориям — реальный сигнал. И главное —
+**#290 был обязательным шагом** (правильный фикс anti-pattern'а), даже если в
+конкретном бенче доля unique-iter была меньше, чем доля membuffer-iter. На бенче
+без membuffer (или с большим batch_size flush'а) выигрыш был бы больший.
