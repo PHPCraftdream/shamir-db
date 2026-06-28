@@ -1,6 +1,7 @@
 pub mod and_range_extraction_tests;
 pub mod apply_transforms_tests;
 pub mod asof_read_tests;
+pub mod bindings_len_tests;
 pub mod buffer_config_tests;
 pub mod concurrent_tests;
 pub mod covering_read_tests;
