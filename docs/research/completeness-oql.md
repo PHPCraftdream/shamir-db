@@ -27,6 +27,22 @@ terms (does the object language express it?).
 
 ---
 
+## ⚠️ Статус актуализации (2026-06-26)
+
+- ✅ **ЗАКРЫТО:** H3 keyset/cursor (Pagination::After, D1) · M5 EXPLAIN (Phase E.7)
+  · M7 RETURNING-симметрия (Phase E.5). См. `DONE.md`.
+- ⛔ **INTENTIONALLY OUT OF SCOPE (НЕ работа, object-native by design):** H1 JOIN,
+  H2 window, H4 set-ops (UNION/…), H5 correlated-subquery, M1 CTE, M4 ROLLUP/CUBE,
+  L1-L6 (geo/graph/PIVOT/SQL-verbs) — заменены batch-композицией (`$query`) +
+  stored-proc (`CallOp`) + reactive sub-batch. НЕ на роадмапе read-пути.
+- 🔸 **РЕАЛЬНЫЕ кандидаты (roadmap-hardening, не блокеры):** M2 generated/computed
+  columns · M3 FTS ranking/score/highlight · M6 conditional MERGE. См.
+  `CAMPAIGN-3-PLAN.md` §③.3.
+
+Живой фронтир — Movement C (репликация, `PHASE-H-PLAN.md`), не ширина OQL.
+
+---
+
 ## 1. What OQL HAS — feature inventory
 
 ### 1.1 Read pipeline (`ReadQuery`)
