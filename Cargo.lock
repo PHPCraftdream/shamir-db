@@ -576,6 +576,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c53ba0f290bfc610084c05582d9c5d421662128fc69f4bf236707af6fd321b9"
 
 [[package]]
+name = "captrack"
+version = "0.1.0"
+dependencies = [
+ "captrack-macros",
+ "fxhash",
+]
+
+[[package]]
+name = "captrack-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3583,6 +3600,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
+ "captrack",
  "criterion",
  "dashmap",
  "dhat",
