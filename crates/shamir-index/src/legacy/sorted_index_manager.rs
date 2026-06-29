@@ -22,8 +22,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
-use dashmap::DashMap;
 use futures::StreamExt;
 use smallvec::SmallVec;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
@@ -38,18 +38,42 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
 use shamir_types::record_view::RecordRef;
 use shamir_types::record_view::ScalarRef;
-use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-/// Manages a set of sorted indexes for one table. The set itself is
-/// kept in memory (`DashMap`) and persisted to a single system
-/// record key under `RecordId::system("sorted_indexes")` so we can
-/// reload on restart.
+/// Manages a set of sorted indexes for one table.
+///
+/// # Storage
+///
+/// Definitions live in `Arc<ArcSwap<Vec<SortedIndexDefinition>>>` — a
+/// read-mostly RCU-style snapshot. Reads (`iter_indexes`/`is_empty`/
+/// `find_by_*`/`has_covering_indexes`) are lock-free against an
+/// `Arc<Vec<...>>` snapshot; writes (`register`/`drop_index`/
+/// `rename_definition`/`intern_included_paths`) copy-on-write via
+/// `ArcSwap::rcu` (CAS-loop safe against concurrent writers).
+///
+/// Replaces the previous sharded `DashMap` whose per-shard read-locks
+/// fired on every `plan_record_*` (singular insert path) and every
+/// batch — mirrors the refactor that `IndexInfo` got in #292.
+///
+/// # Persistence
+///
+/// Persisted as a single system record under
+/// `RecordId::system("sorted_indexes")` so we can reload on restart.
+///
+/// # Cardinality assumption
+///
+/// Typical workloads have ≤ ~10 sorted indexes per table — linear scan
+/// over the Vec is cache-friendly and beats DashMap shard locks; matches
+/// #292's profile of IndexInfo.
 pub struct SortedIndexManager {
     info_store: Arc<dyn Store>,
-    /// `name_interned → definition`
-    indexes: Arc<DashMap<u64, SortedIndexDefinition, THasher>>,
+    /// Read-mostly RCU snapshot of `Vec<SortedIndexDefinition>`.
+    /// The outer `Arc` lets every clone of `SortedIndexManager` share
+    /// the same `ArcSwap`, so a write through one clone is visible to
+    /// the others — same sharing semantics as the previous
+    /// `Arc<DashMap<...>>` field.
+    indexes: Arc<ArcSwap<Vec<SortedIndexDefinition>>>,
 }
 
 impl Clone for SortedIndexManager {
@@ -66,7 +90,7 @@ impl SortedIndexManager {
     pub async fn new(info_store: Arc<dyn Store>) -> DbResult<Self> {
         let m = Self {
             info_store,
-            indexes: Arc::new(DashMap::with_hasher(THasher::default())),
+            indexes: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
         m.load().await?;
         Ok(m)
@@ -74,7 +98,7 @@ impl SortedIndexManager {
 
     /// True if at least one sorted index exists.
     pub fn has_indexes(&self) -> bool {
-        !self.indexes.is_empty()
+        !self.indexes.load().is_empty()
     }
 
     /// True if at least one sorted index has non-empty `included_fields`
@@ -82,42 +106,76 @@ impl SortedIndexManager {
     /// initialization on open when no covering projections are needed.
     pub fn has_covering_indexes(&self) -> bool {
         self.indexes
+            .load()
             .iter()
-            .any(|e| !e.value().included_fields.is_empty())
+            .any(|d| !d.included_fields.is_empty())
     }
 
     /// Iterate over all sorted-index definitions.
     pub fn iter_indexes(&self) -> Vec<SortedIndexDefinition> {
-        self.indexes.iter().map(|e| e.value().clone()).collect()
+        // Snapshot the current Arc<Vec<...>> and clone its contents.
+        // Callers consume by-value; for hot-path planners that just
+        // need a borrow, see future `snapshot()` accessor.
+        (**self.indexes.load()).clone()
     }
 
     /// Look up a definition whose `field_path` matches.
     pub fn find_by_field(&self, field_path: &[u64]) -> Option<SortedIndexDefinition> {
         self.indexes
+            .load()
             .iter()
-            .find(|e| e.value().field_path == field_path)
-            .map(|e| e.value().clone())
+            .find(|d| d.field_path == field_path)
+            .cloned()
     }
 
     /// Look up a definition by its interned name id.
     /// Used by the index-only read path (slice A3) to check
     /// whether the scanned index is a covering index.
     pub fn find_by_name_interned(&self, name_interned: u64) -> Option<SortedIndexDefinition> {
-        self.indexes.get(&name_interned).map(|e| e.value().clone())
+        self.indexes
+            .load()
+            .iter()
+            .find(|d| d.name_interned == name_interned)
+            .cloned()
     }
 
-    /// Register a new sorted index. Persists the updated definitions
-    /// blob, but does NOT backfill — the caller scans the table and
-    /// calls `insert_entry` for each existing record.
+    /// Register a new sorted index (copy-on-write under a CAS loop).
+    /// Persists the updated definitions blob, but does NOT backfill —
+    /// the caller scans the table and calls `insert_entry` for each
+    /// existing record.
+    ///
+    /// Last-write-wins matches the previous `DashMap::insert` semantics:
+    /// if a definition with the same `name_interned` exists, it is
+    /// replaced in-place; otherwise appended.
     pub async fn register(&self, def: SortedIndexDefinition) -> DbResult<()> {
-        self.indexes.insert(def.name_interned, def);
+        self.indexes.rcu(|cur| {
+            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            match new_vec
+                .iter()
+                .position(|d| d.name_interned == def.name_interned)
+            {
+                Some(pos) => new_vec[pos] = def.clone(),
+                None => new_vec.push(def.clone()),
+            }
+            new_vec
+        });
         self.persist_defs().await
     }
 
     /// Drop a sorted index definition AND every entry written under
     /// it. O(I) where I is the size of the index.
     pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
-        let existed = self.indexes.remove(&name_interned).is_some();
+        let mut existed = false;
+        self.indexes.rcu(|cur| {
+            let initial_len = cur.len();
+            let new_vec: Vec<SortedIndexDefinition> = cur
+                .iter()
+                .filter(|d| d.name_interned != name_interned)
+                .cloned()
+                .collect();
+            existed = new_vec.len() != initial_len;
+            new_vec
+        });
         if !existed {
             return Ok(false);
         }
@@ -148,21 +206,27 @@ impl SortedIndexManager {
     /// re-save the definitions blob.
     ///
     /// Note: `drop_index` would delete the physical entries we just moved, so
-    /// we bypass it and manipulate the `indexes` map directly.
+    /// we bypass it and manipulate the `indexes` snapshot directly via `rcu`.
     pub async fn rename_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
-        let old_def = self
-            .indexes
-            .get(&old_id)
-            .map(|e| e.value().clone())
-            .ok_or_else(|| {
-                shamir_storage::error::DbError::Internal(
-                    "sorted index definition disappeared mid-rename".to_string(),
-                )
-            })?;
-        self.indexes.remove(&old_id);
-        let mut new_def = old_def;
-        new_def.name_interned = new_id;
-        self.indexes.insert(new_id, new_def);
+        let mut not_found = false;
+        self.indexes.rcu(|cur| {
+            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            match new_vec.iter().position(|d| d.name_interned == old_id) {
+                Some(pos) => {
+                    new_vec[pos].name_interned = new_id;
+                    not_found = false;
+                }
+                None => {
+                    not_found = true;
+                }
+            }
+            new_vec
+        });
+        if not_found {
+            return Err(shamir_storage::error::DbError::Internal(
+                "sorted index definition disappeared mid-rename".to_string(),
+            ));
+        }
         self.persist_defs().await
     }
 
@@ -179,11 +243,16 @@ impl SortedIndexManager {
     /// Unknown strings are silently skipped (they produce an empty inner vec
     /// for that path, which `build_covering_projection` will treat as absent).
     pub fn intern_included_paths(&self, interner: &Interner) {
-        let keys: Vec<u64> = self.indexes.iter().map(|e| e.key().to_owned()).collect();
-        for key in keys {
-            self.indexes.alter(&key, |_, mut def| {
+        // Single COW pass: clone the current snapshot, mutate each def
+        // in-place, store the new Arc. Replaces the previous per-key
+        // DashMap::alter loop. Off hot path (called after register with
+        // interner OR after load on bootstrap) so the one-shot Vec clone
+        // is acceptable.
+        self.indexes.rcu(|cur| {
+            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            for def in new_vec.iter_mut() {
                 if def.included_fields.is_empty() {
-                    return def;
+                    continue;
                 }
                 def.included_fields_interned = def
                     .included_fields
@@ -197,9 +266,9 @@ impl SortedIndexManager {
                             .collect::<Vec<u64>>()
                     })
                     .collect();
-                def
-            });
-        }
+            }
+            new_vec
+        });
     }
 
     // ============================================================================
@@ -213,7 +282,7 @@ impl SortedIndexManager {
         record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.is_empty() {
+        if self.indexes.load().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -246,7 +315,7 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
-        if self.indexes.is_empty() {
+        if self.indexes.load().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -275,7 +344,7 @@ impl SortedIndexManager {
         new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.is_empty() {
+        if self.indexes.load().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -331,7 +400,7 @@ impl SortedIndexManager {
         record_id: &RecordId,
         record: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.is_empty() {
+        if self.indexes.load().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -405,7 +474,7 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
-        if self.indexes.is_empty() {
+        if self.indexes.load().is_empty() {
             return Ok(());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -856,9 +925,16 @@ impl SortedIndexManager {
                     v1s.into_iter().map(SortedIndexDefinition::from).collect()
                 }
             };
+        // Last-write-wins dedup by name_interned (matches the previous
+        // DashMap::insert loop, on disk Vec is already deduped via
+        // persist_defs / iter_indexes but we defensively dedup here too).
+        let mut deduped: std::collections::BTreeMap<u64, SortedIndexDefinition> =
+            std::collections::BTreeMap::new();
         for d in defs {
-            self.indexes.insert(d.name_interned, d);
+            deduped.insert(d.name_interned, d);
         }
+        let new_vec: Vec<SortedIndexDefinition> = deduped.into_values().collect();
+        self.indexes.store(Arc::new(new_vec));
         Ok(())
     }
 }
