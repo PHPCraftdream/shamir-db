@@ -511,3 +511,93 @@ bench и ROI скромный. #305 — есть bench, но нужен проф
 sorted-вариант в tx_pipeline; **#305 — только после flamegraph** с РЕАЛЬНЫМ
 inner, начав с дешёвого is_empty()-fix. Ни один не блокирует основную
 кампанию; оба — «вторая волна» точечных шлифовок.
+
+---
+
+## 12. #305 closed by profile — drain НЕ hot path
+
+**Дата:** 2026-06-29. Практический профиль (WSL perf, dwarf,4096 stack,
+99Hz × 15s, 5265 samples). SVG: `.flamegraphs/membuffer-pump-frequent-flush-2026-06-29.svg`.
+
+**Bench:** `membuffer_pump/insert_single/frequent_flush` + `get_single/frequent_flush`
+(flush_interval_ms=10, flush_batch_size=64 — самый агрессивный drain-режим;
+in-memory inner для чистоты атрибуции).
+
+### 12.1 Drain-симоволы в self-time
+
+| Symbol | self-time |
+|---|---|
+| `drain_once` (наш предполагаемый hot spot) | **0.07%** |
+| `dashmap::_remove_if` (CAS-cleanup) | 0.14% |
+| `dashmap::RawRwLock::lock_shared` | 0.11% |
+| `dashmap::DashMap::insert` | 0.07% |
+| `dashmap::_entry` | 0.08% |
+| **Σ всё drain + DashMap** | **~0.5%** |
+
+Для сравнения: #292 (IndexInfo DashMap) был **3.11%** на tx_pipeline →
+**#305 в ~30 раз меньше**. Полностью в шуме измерения.
+
+### 12.2 Где реально время
+
+| Категория | ~self-time |
+|---|---|
+| `memmove`/`memcmp` libc (Bytes copy/compare) | ~10% |
+| `Arc::hash` + `AtomicUsize::fetch_sub` + `atomic_load` + sip-hash | ~12-15% |
+| malloc/free/consolidate | ~5% |
+| moka cache (`cht::map::bucket::*`, `scc::tree_index`) | ~5-10% |
+| tokio scheduler / Range-iter / адаптеры | ~5% |
+
+Доминанта — **moka cache + Arc/Bytes hash-операции на каждый write/get**,
+не drain. Это естественная цена hashmap-операций под этой нагрузкой;
+снижать её — другая задача (заменить moka на что-то легче, или убрать
+Arc-обёртку вокруг ключа), и она НЕ относится к `dirty.iter().take()`.
+
+### 12.3 Что насчёт sled-inner (прод-сценарий)?
+
+В §11.2 предполагалось: «в проде I/O доминирует над iter». Это **усиливает**
+вывод #12.1, не ослабляет. С sled/fjall inner:
+- `set_many` в drain становится ещё дороже (batched write + потенциальный
+  fsync на rotation сегмента).
+- Соотношение drain-iter / set_many сдвигается ЕЩЁ дальше от drain-iter.
+
+Доп. measurement с sled-inner не выполнен, но направление однозначно:
+если в самом «выгодном» для #305 сценарии (in-memory inner, frequent_flush)
+drain-iter = 0.07%, в проде он будет ещё меньше.
+
+### 12.4 Cheap is_empty-fix — был unsafe, остаётся unsafe
+
+Анализ §11.2: `dirty.is_empty()` на line 344 серилизуется shard read-locks
+с in-flight `dirty.insert` от writer'а. Замена на `dirty_nonempty.load(Acquire)`
+не даёт этой синхронизации → foreground `drain_all` может выйти, пока
+writer держит lock между `store(true)` и `insert(key, slot)` → потерянная
+запись в `flush()` API. Constraint «многопоточная работа не должна
+замедлиться» исключает этот fix. И ROI оказался бы 0.07% при идеальной
+замене — не стоит риска.
+
+### 12.5 Решение
+
+**#305 закрывается как ложный кандидат — зеркало #291.** Профиль не
+подтверждает membuffer drain как hot path даже в самом агрессивном
+flush-режиме (10ms interval, in-memory inner — самый «дешёвый» inner,
+максимизирующий относительную долю iter).
+
+Реальный hot path membuffer'а — moka cache + Arc-hash/refcount — **другая
+задача**, за рамками #305. Если в будущем понадобится — отдельный профиль
++ /opti цикл, начиная с подозрений на moka, а не на DashMap.
+
+### 12.6 Итоговый счёт перф-кампании ②
+
+| Задача | Результат |
+|---|---|
+| #289 validator_bindings AtomicUsize mirror | landed, neutral на этом бенче (бенч без валидаторов) |
+| #290 unique-index snapshot per batch | landed, −3.8% cum |
+| #292 IndexInfo DashMap → ArcSwap | landed, **−38.84% / 1.63×** на tx_pipeline |
+| #303 Windows WAL TOCTOU race | landed (correctness fix) |
+| #304 SortedIndexManager DashMap → ArcSwap | landed, multi-thread **−13.09% / +15% thrpt** |
+| #291 membuffer iter (false candidate) | closed by static analysis (бенч не на пути) |
+| #305 membuffer drain FIFO (false candidate) | closed by profile (0.07% self-time) |
+
+Главные победы — #292 и #304 (оба ArcSwap для read-mostly registries);
+оба сошлись на одной форме фикса, которую теперь стоит держать как
+workspace-конвенцию (см. CLAUDE.md §3 «scc/DashMap for concurrent maps» →
+дописать «ArcSwap<Vec<...>> для read-mostly с редкими mutations»).
