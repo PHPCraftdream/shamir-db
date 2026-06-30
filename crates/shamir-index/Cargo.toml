@@ -37,8 +37,9 @@ log = "0.4"
 rust-stemmers = "1.2"
 
 # Concurrency
-scc      = "2.2"
-arc-swap = "1.7"
+scc        = "2.2"
+arc-swap   = "1.7"
+shamir-numa = { path = "../shamir-numa" }
 
 # Vector index
 hnsw_rs = "0.3"
