@@ -19,13 +19,11 @@
 //!   Store trait (next).
 //! - Composite sorted index over multiple columns.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
-
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::StreamExt;
 use smallvec::SmallVec;
+use std::collections::BTreeSet;
+use std::sync::Arc;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
 // module continue to compile unchanged after the type moved to its own file.
 pub use crate::legacy::sorted_index_definition::SortedIndexDefinition;
@@ -45,16 +43,20 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 ///
 /// # Storage
 ///
-/// Definitions live in `Arc<ArcSwap<Vec<SortedIndexDefinition>>>` — a
-/// read-mostly RCU-style snapshot. Reads (`iter_indexes`/`is_empty`/
-/// `find_by_*`/`has_covering_indexes`) are lock-free against an
-/// `Arc<Vec<...>>` snapshot; writes (`register`/`drop_index`/
-/// `rename_definition`/`intern_included_paths`) copy-on-write via
-/// `ArcSwap::rcu` (CAS-loop safe against concurrent writers).
+/// Definitions live in a `NodeReplicated<Vec<SortedIndexDefinition>>` — a
+/// NUMA-aware, read-mostly RCU-style snapshot. Reads (`iter_indexes`/
+/// `has_indexes`/`find_by_*`/`has_covering_indexes`) are lock-free against
+/// the calling thread's node-local `Arc<Vec<...>>` replica; writes
+/// (`register`/`drop_index`/`rename_definition`/`intern_included_paths`)
+/// copy-on-write via `NodeReplicated::rcu` and mirror to all per-node
+/// replicas. On single-socket machines (dev, Windows, CI) there is exactly
+/// one replica, giving identical performance to a bare `ArcSwap`. On
+/// multi-socket NUMA machines each node reads its own replica without
+/// crossing a socket interconnect.
 ///
 /// Replaces the previous sharded `DashMap` whose per-shard read-locks
 /// fired on every `plan_record_*` (singular insert path) and every
-/// batch — mirrors the refactor that `IndexInfo` got in #292.
+/// batch — mirrors the refactor that `IndexInfo` got in N3.
 ///
 /// # Persistence
 ///
@@ -65,22 +67,26 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 ///
 /// Typical workloads have ≤ ~10 sorted indexes per table — linear scan
 /// over the Vec is cache-friendly and beats DashMap shard locks; matches
-/// #292's profile of IndexInfo.
+/// N3's profile of IndexInfo.
 pub struct SortedIndexManager {
     info_store: Arc<dyn Store>,
-    /// Read-mostly RCU snapshot of `Vec<SortedIndexDefinition>`.
-    /// The outer `Arc` lets every clone of `SortedIndexManager` share
-    /// the same `ArcSwap`, so a write through one clone is visible to
-    /// the others — same sharing semantics as the previous
-    /// `Arc<DashMap<...>>` field.
-    indexes: Arc<ArcSwap<Vec<SortedIndexDefinition>>>,
+    /// NUMA-aware RCU snapshot of `Vec<SortedIndexDefinition>`.
+    /// Each NUMA node owns its own cache-padded replica so reads never
+    /// cross a socket interconnect. Writes copy-on-write on node 0 and
+    /// mirror to all other nodes.
+    indexes: shamir_numa::NodeReplicated<Vec<SortedIndexDefinition>>,
 }
 
 impl Clone for SortedIndexManager {
     fn clone(&self) -> Self {
+        // NodeReplicated is not Clone (owns per-node resources). Build a fresh
+        // instance from the current node-local snapshot: take a Vec clone and
+        // hand it to a new NodeReplicated. Subsequent writes through either
+        // clone COW-replace their own replicas independently.
+        let snap = Arc::clone(&*self.indexes.load_local());
         Self {
             info_store: Arc::clone(&self.info_store),
-            indexes: Arc::clone(&self.indexes),
+            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), (*snap).clone()),
         }
     }
 }
@@ -90,7 +96,7 @@ impl SortedIndexManager {
     pub async fn new(info_store: Arc<dyn Store>) -> DbResult<Self> {
         let m = Self {
             info_store,
-            indexes: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), Vec::new()),
         };
         m.load().await?;
         Ok(m)
@@ -98,7 +104,7 @@ impl SortedIndexManager {
 
     /// True if at least one sorted index exists.
     pub fn has_indexes(&self) -> bool {
-        !self.indexes.load().is_empty()
+        !self.indexes.load_local().is_empty()
     }
 
     /// True if at least one sorted index has non-empty `included_fields`
@@ -106,23 +112,24 @@ impl SortedIndexManager {
     /// initialization on open when no covering projections are needed.
     pub fn has_covering_indexes(&self) -> bool {
         self.indexes
-            .load()
+            .load_local()
             .iter()
             .any(|d| !d.included_fields.is_empty())
     }
 
     /// Iterate over all sorted-index definitions.
     pub fn iter_indexes(&self) -> Vec<SortedIndexDefinition> {
-        // Snapshot the current Arc<Vec<...>> and clone its contents.
+        // Snapshot the current node-local Arc<Vec<...>> and clone its contents.
+        // load_local() → Guard<Arc<T>>; *guard → Arc<T>; **guard → Vec<...>.
         // Callers consume by-value; for hot-path planners that just
         // need a borrow, see future `snapshot()` accessor.
-        (**self.indexes.load()).clone()
+        (**self.indexes.load_local()).clone()
     }
 
     /// Look up a definition whose `field_path` matches.
     pub fn find_by_field(&self, field_path: &[u64]) -> Option<SortedIndexDefinition> {
         self.indexes
-            .load()
+            .load_local()
             .iter()
             .find(|d| d.field_path == field_path)
             .cloned()
@@ -133,7 +140,7 @@ impl SortedIndexManager {
     /// whether the scanned index is a covering index.
     pub fn find_by_name_interned(&self, name_interned: u64) -> Option<SortedIndexDefinition> {
         self.indexes
-            .load()
+            .load_local()
             .iter()
             .find(|d| d.name_interned == name_interned)
             .cloned()
@@ -149,7 +156,7 @@ impl SortedIndexManager {
     /// replaced in-place; otherwise appended.
     pub async fn register(&self, def: SortedIndexDefinition) -> DbResult<()> {
         self.indexes.rcu(|cur| {
-            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            let mut new_vec: Vec<SortedIndexDefinition> = (*cur).clone();
             match new_vec
                 .iter()
                 .position(|d| d.name_interned == def.name_interned)
@@ -210,7 +217,7 @@ impl SortedIndexManager {
     pub async fn rename_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
         let mut not_found = false;
         self.indexes.rcu(|cur| {
-            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            let mut new_vec: Vec<SortedIndexDefinition> = (*cur).clone();
             match new_vec.iter().position(|d| d.name_interned == old_id) {
                 Some(pos) => {
                     new_vec[pos].name_interned = new_id;
@@ -249,7 +256,7 @@ impl SortedIndexManager {
         // interner OR after load on bootstrap) so the one-shot Vec clone
         // is acceptable.
         self.indexes.rcu(|cur| {
-            let mut new_vec: Vec<SortedIndexDefinition> = (**cur).clone();
+            let mut new_vec: Vec<SortedIndexDefinition> = (*cur).clone();
             for def in new_vec.iter_mut() {
                 if def.included_fields.is_empty() {
                     continue;
@@ -282,7 +289,7 @@ impl SortedIndexManager {
         record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.load().is_empty() {
+        if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -315,7 +322,7 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
-        if self.indexes.load().is_empty() {
+        if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -344,7 +351,7 @@ impl SortedIndexManager {
         new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.load().is_empty() {
+        if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -400,7 +407,7 @@ impl SortedIndexManager {
         record_id: &RecordId,
         record: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
-        if self.indexes.load().is_empty() {
+        if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -474,7 +481,7 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
-        if self.indexes.load().is_empty() {
+        if self.indexes.load_local().is_empty() {
             return Ok(());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
@@ -934,7 +941,7 @@ impl SortedIndexManager {
             deduped.insert(d.name_interned, d);
         }
         let new_vec: Vec<SortedIndexDefinition> = deduped.into_values().collect();
-        self.indexes.store(Arc::new(new_vec));
+        self.indexes.store(new_vec);
         Ok(())
     }
 }
