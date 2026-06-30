@@ -14,7 +14,7 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};

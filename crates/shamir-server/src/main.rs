@@ -5,8 +5,23 @@
 //! provider, init tracing, hand the [`Config`] to the launcher, then wait
 //! for SIGINT/SIGTERM.
 
+// Native-Rust global allocator. Production-tuned `LargeCacheConfig`:
+//   - 2 GiB per-shard budget — caps RSS while accommodating burst 1 MB
+//     msgpack frames
+//   - 512 MiB headroom — anti-thrash floor on steady-state QueryValues
+//   - 500 ms decay interval + 25 % rate — release large buffers briskly
+//     after queries complete
+//   - Lazy mode — event-driven, no background thread (we already run a
+//     full tokio runtime)
+const ALLOCATOR_CONFIG: sefer_alloc::LargeCacheConfig = sefer_alloc::LargeCacheConfig::new()
+    .budget_bytes(2 * 1024 * 1024 * 1024)
+    .headroom_bytes(512 * 1024 * 1024)
+    .decay_interval_ms(500)
+    .decay_rate_percent(25)
+    .mode(sefer_alloc::LargeCacheMode::Lazy);
+
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(ALLOCATOR_CONFIG);
 
 use std::path::PathBuf;
 

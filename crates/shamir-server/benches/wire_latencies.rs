@@ -62,7 +62,7 @@ use zeroize::Zeroizing;
 mod common;
 
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 
 // ---------------------------------------------------------------------------
 // Fixtures (mirror tests/interactive_tx_e2e.rs)
