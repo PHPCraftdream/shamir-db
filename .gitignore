@@ -1,6 +1,8 @@
 /target
 .idea
+.flamegraphs
 /test_data/
+/captrack-pgo-runs/
 /crates/shamir-db/test_data/
 # Match test_data anywhere in the workspace (each crate's tests
 # materialise their own fixture dirs).
