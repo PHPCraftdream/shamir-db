@@ -1,0 +1,22 @@
+[package]
+name = "shamir-numa"
+version = "0.1.0"
+edition = "2021"
+description = "NUMA topology abstraction + per-node replicated read-mostly state for S.H.A.M.I.R."
+
+[lints]
+workspace = true
+
+[dependencies]
+# Single-writer-many-reader RCU cell — the same primitive proven in the
+# #292 / #304 ArcSwap migrations. NodeReplicated keeps one ArcSwap per node.
+arc-swap = "1.7"
+# Library error enum (AffinityError).
+thiserror = "2.0"
+
+# NOTE: the real `LinuxTopology` (/sys probe + sched_setaffinity) lands in
+# Фаза 1b and brings a `[target.'cfg(target_os = "linux")'.dependencies] libc`
+# entry. It is intentionally absent here — Фаза 1 ships only the
+# platform-independent skeleton (trait + mock + fallback + NodeReplicated)
+# so every line is verifiable on the Windows dev host and the mock tests
+# ride the existing cross-OS `cargo test --workspace --lib` CI matrix.

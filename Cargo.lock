@@ -3678,6 +3678,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-numa"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "shamir-query-builder"
 version = "0.1.0"
 dependencies = [

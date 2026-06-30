@@ -29,14 +29,14 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 
 `Cargo.toml` declares `members = ["crates/*"]` and excludes `shamir-client-node`
 (napi-rs binding, MSVC-only on Windows — built separately). The default
-workspace ships **21 crates**:
+workspace ships **22 crates**:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
 `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-transport-tcp`, `shamir-transport-ws`,
 `shamir-client`, `shamir-sdk`, `shamir-sdk-macros`, `shamir-tunables`,
-`shamir-wasm-host`, `shamir-index`.
+`shamir-wasm-host`, `shamir-index`, `shamir-numa`.
 
 Prefer `--workspace` flags over per-crate invocations.
 
