@@ -36,3 +36,4 @@ server-cert.pem
 crates/shamir-client-node/target/
 crates/shamir-client-node/Cargo.lock
 devrust.cargo-target-bench/
+.cargo-target-bench/

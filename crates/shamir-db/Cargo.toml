@@ -61,6 +61,10 @@ serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
 wat         = "1.226"
+# Native-Rust global allocator used in benches for parity with
+# shamir-server bin / benches. See `crates/shamir-server/Cargo.toml` for
+# the strategic rationale.
+sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"] }
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-query-types   = { path = "../shamir-query-types" }
 # CAS sequenced-write e2e: canonical record hash shared by the validator and

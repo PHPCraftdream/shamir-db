@@ -19,6 +19,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+
+#[global_allocator]
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
@@ -237,6 +240,25 @@ fn gen_user_wide(i: usize) -> QueryValue {
 // --------------------------------------------------------------------------
 // Setup helpers
 // --------------------------------------------------------------------------
+
+/// Run an async setup future on a worker thread with an 8 MiB stack. Bench
+/// fixtures (`seeded`, `seed_users`, `create_*_index`) generate deep async
+/// state machines that, under `profile.bench` (opt-level=0), overflow the
+/// ~1 MiB Windows main-thread stack — see `docs/perf/sefer-alloc-rollout-…`.
+/// All bench-setup `rt.block_on(...)` calls should route through this helper.
+fn block_on_setup<F>(rt: &Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let handle = rt.handle().clone();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || handle.block_on(fut))
+        .expect("spawn fat-stack setup thread")
+        .join()
+        .expect("setup thread panicked")
+}
 
 async fn fresh_db() -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
@@ -602,7 +624,7 @@ fn bench_set_existing_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("set_existing_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         let target = format!("u{:08}", n - 1);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -626,7 +648,7 @@ fn bench_set_existing_with_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("set_existing_with_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, true));
+        let shamir = block_on_setup(&rt, seeded(n, true));
         let target = format!("u{:08}", n - 1);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -649,7 +671,7 @@ fn bench_read_by_id_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_by_id_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -668,7 +690,7 @@ fn bench_read_by_id_with_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_by_id_with_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, true));
+        let shamir = block_on_setup(&rt, seeded(n, true));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -689,7 +711,7 @@ fn bench_read_by_city_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_by_city_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -733,7 +755,7 @@ fn bench_update_by_id_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_by_id_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -752,7 +774,7 @@ fn bench_update_by_id_with_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_by_id_with_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, true));
+        let shamir = block_on_setup(&rt, seeded(n, true));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -819,7 +841,7 @@ fn bench_complex_filter(c: &mut Criterion) {
     let mut group = c.benchmark_group("complex_filter");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -839,7 +861,7 @@ fn bench_order_limit(c: &mut Criterion) {
     let mut group = c.benchmark_group("order_limit_top10");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -860,7 +882,7 @@ fn bench_count_all_no_filter(c: &mut Criterion) {
     let mut group = c.benchmark_group("count_all_no_filter");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -881,7 +903,7 @@ fn bench_count_with_filter_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("count_with_filter_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -925,7 +947,7 @@ fn bench_min_max_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("min_max_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -969,7 +991,7 @@ fn bench_min_only_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("min_only_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -1126,7 +1148,7 @@ fn bench_range_query_no_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("range_query_no_index");
 
     for &n in sweep_sizes() {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -1937,7 +1959,7 @@ fn bench_batch_multi_read(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_multi_read_8");
 
     for &n in &[1_000usize, 10_000] {
-        let shamir = rt.block_on(seeded(n, false));
+        let shamir = block_on_setup(&rt, seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
@@ -1975,7 +1997,7 @@ fn bench_nested_batch(c: &mut Criterion) {
     const SCORE: i64 = 42;
 
     let rt = Runtime::new().unwrap();
-    let shamir = rt.block_on(seeded(N, false));
+    let shamir = block_on_setup(&rt, seeded(N, false));
 
     // ── flat request ───────────────────────────────────────────────
     // op1: read user by id
@@ -2243,7 +2265,7 @@ fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
 
 fn bench_group_by_sum_e2e(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    let shamir = rt.block_on(seeded(1000, false));
+    let shamir = block_on_setup(&rt, seeded(1000, false));
 
     let mut b_sum = Batch::new();
     b_sum.id(1).query(
@@ -2317,7 +2339,7 @@ fn bench_changefeed_overhead(c: &mut Criterion) {
     //     emit_nontx_changefeed does try_send; with 0 receivers it still
     //     serialises the event into Arc but the send is a no-op.
     {
-        let shamir = rt.block_on(seeded(100, false));
+        let shamir = block_on_setup(&rt, seeded(100, false));
         group.bench_function("no_subscribers", |b| {
             let shamir = Arc::clone(&shamir);
             let req = req_insert.clone();
@@ -2336,7 +2358,7 @@ fn bench_changefeed_overhead(c: &mut Criterion) {
     //     the channel will lag after the ring fills; that's intentional
     //     — we measure the send-side cost, not the recv side.
     {
-        let shamir = rt.block_on(seeded(100, false));
+        let shamir = block_on_setup(&rt, seeded(100, false));
         // subscribe_changelog returns None when the repo does not exist;
         // if it returns None here the bench still runs but measures the
         // no-subscriber path.
@@ -2385,7 +2407,7 @@ fn bench_validator_overhead(c: &mut Criterion) {
     // (a) no_validators — default state, run_validators checks an
     //     empty binding list and returns immediately.
     {
-        let shamir = rt.block_on(seeded(100, false));
+        let shamir = block_on_setup(&rt, seeded(100, false));
         group.bench_function("no_validators", |b| {
             let shamir = Arc::clone(&shamir);
             let req = req_insert.clone();
