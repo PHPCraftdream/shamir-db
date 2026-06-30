@@ -28,11 +28,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p shamir-numa --lib --locked
 
-  # Tier 3 — QEMU NUMA emulation. SKELETON / opt-in: boots a 2-node guest so
-  # the real LinuxTopology (Фаза 1b) can exercise the `/sys` + sched_setaffinity
-  # path on emulated multi-socket hardware. Gated behind a commit-message flag
-  # so it never runs (and never reddens) by default; wire the boot harness
-  # (scripts/ci-qemu-numa-test.sh) when LinuxTopology lands.
+  # Tier 3 — QEMU NUMA emulation (smoke level, opt-in). Boots a 2-node QEMU
+  # guest and confirms the kernel sees both NUMA nodes via serial-console
+  # discovery messages. Full cargo-test-inside-guest is gated by KVM
+  # availability — see scripts/ci-qemu-numa-test.sh header for the path to
+  # full integration. Opt-in via `[numa-qemu]` flag in commit message so it
+  # never runs (and never reddens) by default.
   tier3-qemu:
     name: numa tier3 qemu emulation (opt-in)
     runs-on: ubuntu-latest
@@ -42,10 +43,5 @@ jobs:
       - name: Install QEMU + numactl
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
       - name: Boot 2-node QEMU and run Linux integration tests
-        run: |
-          echo "Tier-3 QEMU NUMA harness is a Фаза 1b deliverable."
-          echo "Planned: qemu-system-x86_64 -smp 4,sockets=2 \\"
-          echo "  -numa node,cpus=0-1,nodeid=0 -numa node,cpus=2-3,nodeid=1 ..."
-          echo "then: cargo test -p shamir-numa --test linux_topology"
-          # Intentionally a no-op until the harness script exists; gated off by
-          # default so it cannot fail the build.
+        timeout-minutes: 30
+        run: bash scripts/ci-qemu-numa-test.sh
