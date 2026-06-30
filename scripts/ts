@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ts — run a command and prepend each output line with `[HH:MM:SS +Δs] `.
+#
+# Usage:
+#   ./scripts/ts <cmd> [args...]                          # to stdout
+#   ./scripts/ts <cmd> [args...] > log                    # capture to file
+#   ./scripts/ts ./scripts/test.sh -p shamir-db
+#   ./scripts/ts cargo bench -p shamir-db --bench engine_perf -- ...
+#
+# Format per line:
+#   [14:23:47 +3.2s] Benchmarking bulk_insert/100: Collecting 10 samples
+#                ^^^^^^ delta-since-previous-line — "hang detector"
+#
+# stdout+stderr are merged so timestamps stay monotonic. Exit code of the
+# wrapped command is preserved (NOT the perl filter's).
+set -uo pipefail
+
+if [ $# -eq 0 ]; then
+  echo "usage: $0 <cmd> [args...]" >&2
+  exit 2
+fi
+
+"$@" 2>&1 | perl -ne '
+BEGIN {
+    use POSIX qw(strftime);
+    use Time::HiRes qw(time);
+    $| = 1;
+    $prev = time;
+}
+my $now = time;
+my $delta = $now - $prev;
+$prev = $now;
+my $ts = strftime("%H:%M:%S", localtime(int($now)));
+printf("[%s +%.1fs] %s", $ts, $delta, $_);
+'
+exit "${PIPESTATUS[0]}"
