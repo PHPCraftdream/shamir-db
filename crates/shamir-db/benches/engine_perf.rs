@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-#[global_allocator]
-static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
+include!("bench_allocator.rs");
+
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;

@@ -18,6 +18,19 @@ default = ["all-backends"]
 all-backends = ["fjall"]
 fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
 
+# ── Bench allocator switch ────────────────────────────────────────
+# Exactly ONE of these may be active at a time. Without any — system
+# default (Windows HeapAlloc / glibc malloc). Each bench file uses
+# cfg(feature) to pick the #[global_allocator] static.
+#
+#   cargo bench -p shamir-db --features bench-sefer          # sefer defaults
+#   cargo bench -p shamir-db --features bench-sefer-tuned    # sefer + LargeCacheConfig
+#   cargo bench -p shamir-db --features bench-mimalloc       # mimalloc
+#   cargo bench -p shamir-db                                 # system
+bench-sefer       = ["dep:sefer-alloc"]
+bench-sefer-tuned = ["dep:sefer-alloc"]
+bench-mimalloc    = ["dep:mimalloc"]
+
 [dependencies]
 # Foundation crates re-exported under `shamir_db::*` so callers stay
 # stable. The split is purely organisational; nothing about the public
@@ -53,6 +66,10 @@ rustls       = "0.23"
 tokio-rustls = "0.26"
 rcgen        = "0.13"
 
+# Bench allocator options (optional — gated by bench-sefer / bench-mimalloc features).
+sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"], optional = true }
+mimalloc    = { version = "0.1", default-features = false, optional = true }
+
 [dev-dependencies]
 bytes       = "1"
 tempfile    = "3.10.1"
@@ -60,10 +77,6 @@ serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
 wat         = "1.226"
-# Native-Rust global allocator used in benches for parity with
-# shamir-server bin / benches. See `crates/shamir-server/Cargo.toml` for
-# the strategic rationale.
-sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"] }
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-query-types   = { path = "../shamir-query-types" }
 # CAS sequenced-write e2e: canonical record hash shared by the validator and
