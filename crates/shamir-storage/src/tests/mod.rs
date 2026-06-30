@@ -6,5 +6,3 @@ pub mod storage_membuffer_tests;
 
 #[cfg(feature = "fjall")]
 pub mod storage_fjall_tests;
-#[cfg(feature = "sled")]
-pub mod storage_sled_tests;

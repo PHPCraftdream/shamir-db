@@ -8,7 +8,7 @@
 //! setup per criterion iter on top of the actual commit work).
 //!
 //! Axes:
-//!   - **Backend:** fjall / sled / in_memory
+//!   - **Backend:** fjall / in_memory
 //!     (durability OFF or default on each — our WAL is the single owner).
 //!   - **Concurrency:** {8, 32, 128} writers.
 //!   - **Batch size:** {1, 10, 100} rows per commit — single-row is worst case,
@@ -48,7 +48,6 @@ async fn make_repo(backend: &str) -> (RepoInstance, Option<tempfile::TempDir>) {
     let factory = match backend {
         "in_memory" => BoxRepoFactory::in_memory(),
         "fjall" => BoxRepoFactory::fjall_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
-        "sled" => BoxRepoFactory::sled_raw(tempdir.as_ref().unwrap().path().to_path_buf()),
         other => panic!("unknown backend: {}", other),
     };
     let repo = RepoInstance::from_factory(
@@ -126,7 +125,7 @@ fn bench_backend_matrix(c: &mut Criterion) {
     bu::tune_tiered(&mut group, 50, 5, 3, 120);
 
     // 3 backends × 3 concurrency × 3 batch sizes = 27 cells.
-    let backends: &[&'static str] = &["in_memory", "fjall", "sled"];
+    let backends: &[&'static str] = &["in_memory", "fjall"];
     let writers_levels: &[usize] = &[8, 32, 128];
     let batch_sizes: &[usize] = &[1, 10, 100];
 

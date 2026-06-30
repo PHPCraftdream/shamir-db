@@ -8,7 +8,7 @@
 //!   scaling across 1 vs N tables.
 //! - `bench_provider_overhead` — stub vs real VersionProvider for
 //!   SSI read-set validation; delta = MvccStore lookup overhead.
-//! - `bench_commit_phase5c_indexed_sled` — tx commit Phase 5c writing
+//! - `bench_commit_phase5c_indexed_fjall` — tx commit Phase 5c writing
 //!   N postings to a sled-backed indexed table; exposes the
 //!   batched-vs-per-key info_store apply cost.
 
@@ -447,24 +447,23 @@ fn bench_provider_overhead(c: &mut Criterion) {
     group.finish();
 }
 
-/// Phase 5c (`apply_index_ops_at_commit`) on a sled-backed repo with a
+/// Phase 5c (`apply_index_ops_at_commit`) on a fjall-backed repo with a
 /// table that has a non-unique regular index on `city` — exposes the
 /// per-key vs batched info_store write cost. Each iter:
-///   * provisions a fresh tempdir + sled-backed RepoInstance,
+///   * provisions a fresh tempdir + fjall-backed RepoInstance,
 ///   * creates a `by_city` index on `city`,
 ///   * runs ONE transactional `BatchRequest` that inserts `n` rows.
 ///
 /// At commit the tx pipeline drains `index_write_set` through
 /// `apply_index_ops_at_commit` → `info_store.transact(...)`. On the
-/// unbatched code path each `SetPosting` was one `Store::set` (one
-/// `sled::Tree::insert`); after batching it is one
-/// `Store::transact` (one `sled::Batch::apply_batch`) → one fsync.
-fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
+/// unbatched code path each `SetPosting` was one `Store::set`;
+/// after batching it is one `Store::transact` → one fsync.
+fn bench_commit_phase5c_indexed_fjall(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
-    let mut group = c.benchmark_group("commit_tx/phase5c_indexed_sled");
+    let mut group = c.benchmark_group("commit_tx/phase5c_indexed_fjall");
     bu::tune_tiered(&mut group, 10, 15, 3, 60);
 
     for &n in &[100usize, 1000usize] {
@@ -626,7 +625,7 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
             );
         }
 
-        // Sled backend — Phase 5c does a real (batched) transact + fsync
+        // Fjall backend — Phase 5c does a real (batched) transact + fsync
         // per call; the absolute sync→async delta is largest here.
         for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
             let label = match visibility {
@@ -634,7 +633,7 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
                 CommitVisibility::AsyncIndex => "async",
             };
             group.bench_with_input(
-                BenchmarkId::new(format!("sled_{}", label), n),
+                BenchmarkId::new(format!("fjall_{}", label), n),
                 &n,
                 |b, &n| {
                     b.to_async(&rt).iter_custom(|iters| async move {
@@ -891,7 +890,7 @@ criterion_group!(
     bench_batch_insert_pipeline,
     bench_commit_tx_phase_breakdown,
     bench_provider_overhead,
-    bench_commit_phase5c_indexed_sled,
+    bench_commit_phase5c_indexed_fjall,
     bench_async_commit_index_heavy,
     bench_read_scan,
 );

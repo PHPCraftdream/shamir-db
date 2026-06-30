@@ -5,7 +5,7 @@
 //!
 //! These exercise `RepoInstance::recover_v2_inflight` — the exact entry
 //! point wired into the `shamir-db` bootstrap (`ShamirDb::init` /
-//! `ShamirDb::add_repo`) — over a disk-backed (sled tempdir) repo so a
+//! `ShamirDb::add_repo`) — over a disk-backed (tempdir) repo so a
 //! "restart" (drop + reopen over the same path) observes the same
 //! persisted state a real process restart would, including the file WAL
 //! segment. (F5e: the single WAL write path uses a per-instance `Mem` sink
@@ -29,9 +29,9 @@ fn rid(n: u8) -> RecordId {
     RecordId(a)
 }
 
-/// Open (or reopen) a disk-backed sled repo at `path`, retrying on
-/// Windows where sled releases its file lock lazily after `drop`.
-async fn open_sled(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+/// Open (or reopen) a disk-backed repo at `path`, retrying on
+/// Windows where the backend releases its file lock lazily after `drop`.
+async fn open_disk(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
@@ -48,7 +48,7 @@ async fn open_sled(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoI
             }
         }
     }
-    panic!("open_sled({name:?}) failed after 10 retries: {last_err:?}");
+    panic!("open_disk({name:?}) failed after 10 retries: {last_err:?}");
 }
 
 /// Append a durable inflight V2 `Put` entry (NO data_store update)
@@ -64,7 +64,7 @@ async fn seed_inflight_put(
     body: bytes::Bytes,
     commit_version: u64,
 ) {
-    let seed = open_sled("r", path.to_path_buf(), vec![TableConfig::new(table)]).await;
+    let seed = open_disk("r", path.to_path_buf(), vec![TableConfig::new(table)]).await;
     let wal = seed.repo_wal().await.unwrap();
     let entry = WalEntryV2::new(
         wal.fresh_txn_id(),
@@ -98,7 +98,7 @@ async fn recovery_wired_into_open_replays_inflight() {
     seed_inflight_put(&path, "t", record, body, 10).await;
 
     // === SIMULATED RESTART: fresh RepoInstance over the same storage ===
-    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     // Sanity: the inflight entry survived the "restart".
     let wal = repo.repo_wal().await.unwrap();
@@ -148,7 +148,7 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
     // Persist a stale marker = 7 directly (a clean commit that landed
     // before the crashed one), WITHOUT constructing any gate.
     {
-        let seed = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+        let seed = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
         let info = seed.tx_info_store().await.unwrap();
         save_last_committed(&info, 7).await.unwrap();
     }
@@ -160,7 +160,7 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
     seed_inflight_put(&path, "t", record, body, 10).await;
 
     // === SIMULATED RESTART ===
-    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 1);
@@ -196,7 +196,7 @@ async fn recovery_rebuilds_completion_prefix() {
     }
 
     // === SIMULATED RESTART ===
-    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 3);
@@ -232,7 +232,7 @@ async fn recovered_floor_survives_a_second_restart() {
 
     // First restart: recover (replays the entry, persists the floor).
     {
-        let repo1 = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+        let repo1 = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
         assert_eq!(repo1.recover_v2_inflight().await.unwrap(), 1);
         drop(repo1);
     }
@@ -240,7 +240,7 @@ async fn recovered_floor_survives_a_second_restart() {
     // Second restart: the gate floor must be above the recovered
     // commit_version — sourced from the persisted marker and/or the
     // replayed segment entry.
-    let repo2 = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = open_disk("r", path.clone(), vec![TableConfig::new("t")]).await;
     repo2.recover_v2_inflight().await.unwrap();
 
     let gate = repo2.tx_gate().await.unwrap();

@@ -1,7 +1,6 @@
 use crate::repo::repo_types::BoxRepo;
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
 use std::sync::Arc;
 
@@ -21,29 +20,6 @@ async fn test_box_repo_in_memory() {
 fn test_box_repo_from_in_memory() {
     let repo: BoxRepo = Arc::new(InMemoryRepo::new()).into();
     assert!(matches!(repo, BoxRepo::InMemory(_)));
-}
-
-// ============================================================================
-// Sled tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_box_repo_sled() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let sled_repo = SledRepo::new(temp_dir.path()).unwrap();
-    let repo = BoxRepo::Sled(Arc::new(sled_repo));
-
-    let _store = repo.store_get("test_table").await.unwrap();
-    let stores = repo.stores_list().await.unwrap();
-    assert!(stores.contains(&"test_table".to_string()));
-}
-
-#[test]
-fn test_box_repo_from_sled() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let sled_repo = SledRepo::new(temp_dir.path()).unwrap();
-    let repo: BoxRepo = Arc::new(sled_repo).into();
-    assert!(matches!(repo, BoxRepo::Sled(_)));
 }
 
 // ============================================================================
