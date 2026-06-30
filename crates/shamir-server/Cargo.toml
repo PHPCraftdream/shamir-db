@@ -94,7 +94,7 @@ tempfile = "3"
 # micro-benches mimalloc still leads (db_handler/ping_inprocess +22%);
 # strategic parity-or-better on long-running RSS-bounded production
 # workloads is the target — measured separately.
-sefer-alloc = { version = "0.2.0", features = ["production"] }
+sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"] }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —

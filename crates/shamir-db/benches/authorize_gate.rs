@@ -9,6 +9,9 @@
 //!   cargo bench -p shamir-db -- 'authorize'
 
 use criterion::{criterion_group, criterion_main, Criterion};
+
+#[global_allocator]
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 use tokio::runtime::Runtime;
 
 use shamir_db::access::{Action, Actor, ResourcePath};

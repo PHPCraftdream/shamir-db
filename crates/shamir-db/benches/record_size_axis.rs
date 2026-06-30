@@ -42,6 +42,9 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+
+#[global_allocator]
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;

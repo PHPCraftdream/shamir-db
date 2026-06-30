@@ -70,4 +70,13 @@ incremental = true
 # For "final" / publishable absolute numbers, run explicitly with the
 # release profile:
 #   cargo bench -p shamir-db --profile=release
-opt-level = 0
+#
+# **opt-level=1, not 0** — opt-0 generates async fn state machines so large
+# (no variable-lifetime collapse across await points) that deeply-chained
+# bench setup (`fresh_db → seed_users → create_index` + heavier query
+# planner paths) overflows the ~1 MiB Windows main-thread stack. opt-1
+# enables the lightest mir-opts that collapse those state machines back
+# under the limit, at ~2× the build time of opt-0 (still ~2.5× faster
+# than opt-3). Documented in docs/perf/sefer-alloc-rollout-2026-06-30.md
+# under "Stack overflow в engine_perf".
+opt-level = 1
