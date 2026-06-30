@@ -87,11 +87,14 @@ scc = "2.2"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
-# Global allocator. mimalloc is ~2× on allocation-heavy hot paths
-# (msgpack encode/decode, QueryValue trees, Vec<QueryValue>) vs
-# the platform default. Bench measurement: db_handler/ping_inprocess
-# 578 ns -> 294 ns (-44%, p=0.00).
-mimalloc = { version = "0.1", default-features = false }
+# Global allocator. Native-Rust sefer-alloc 0.2.0 with `production` feature
+# (alloc-global + alloc-xthread + alloc-decommit). Chosen strategically
+# over mimalloc: pure-Rust safety guarantees, big wins on large allocations
+# expected to compound with captrack instrumentation. On short in-process
+# micro-benches mimalloc still leads (db_handler/ping_inprocess +22%);
+# strategic parity-or-better on long-running RSS-bounded production
+# workloads is the target — measured separately.
+sefer-alloc = { version = "0.2.0", features = ["production"] }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —

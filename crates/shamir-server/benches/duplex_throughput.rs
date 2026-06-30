@@ -38,7 +38,7 @@ use shamir_server::framer::{Framer, TcpFramer};
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
 
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
 
 // ---------------------------------------------------------------------------
 // Stub handler — 1 ms latency per request (simulates IO-bound work).
