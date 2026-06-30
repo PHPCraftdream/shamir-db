@@ -1,0 +1,51 @@
+name: numa
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Tier 1 — DI-mock unit tests. Platform-independent (no real NUMA syscalls),
+  # so they pass on every runner. This is the gating signal for the
+  # shamir-numa crate; the main ci.yml `--workspace --lib` matrix also covers
+  # it, but a dedicated job keeps the NUMA signal legible.
+  tier1-mock:
+    name: numa tier1 mock (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p shamir-numa --lib --locked
+
+  # Tier 3 — QEMU NUMA emulation. SKELETON / opt-in: boots a 2-node guest so
+  # the real LinuxTopology (Фаза 1b) can exercise the `/sys` + sched_setaffinity
+  # path on emulated multi-socket hardware. Gated behind a commit-message flag
+  # so it never runs (and never reddens) by default; wire the boot harness
+  # (scripts/ci-qemu-numa-test.sh) when LinuxTopology lands.
+  tier3-qemu:
+    name: numa tier3 qemu emulation (opt-in)
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, '[numa-qemu]')
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install QEMU + numactl
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
+      - name: Boot 2-node QEMU and run Linux integration tests
+        run: |
+          echo "Tier-3 QEMU NUMA harness is a Фаза 1b deliverable."
+          echo "Planned: qemu-system-x86_64 -smp 4,sockets=2 \\"
+          echo "  -numa node,cpus=0-1,nodeid=0 -numa node,cpus=2-3,nodeid=1 ..."
+          echo "then: cargo test -p shamir-numa --test linux_topology"
+          # Intentionally a no-op until the harness script exists; gated off by
+          # default so it cannot fail the build.
