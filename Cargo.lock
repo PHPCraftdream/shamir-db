@@ -3682,6 +3682,7 @@ name = "shamir-numa"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "libc",
  "thiserror 2.0.18",
 ]
 

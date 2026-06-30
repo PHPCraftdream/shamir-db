@@ -44,6 +44,8 @@ mod cpulist;
 mod detect;
 mod error;
 mod fallback;
+#[cfg(target_os = "linux")]
+mod linux;
 mod mock;
 mod node;
 mod node_replicated;
@@ -54,6 +56,8 @@ pub use cpulist::parse_cpulist;
 pub use detect::detect;
 pub use error::AffinityError;
 pub use fallback::FallbackSingleNodeTopology;
+#[cfg(target_os = "linux")]
+pub use linux::LinuxTopology;
 pub use mock::MockTopology;
 pub use node::{CpuId, NodeId};
 pub use node_replicated::NodeReplicated;
