@@ -10,8 +10,8 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-#[global_allocator]
-static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
+include!("bench_allocator.rs");
+
 use tokio::runtime::Runtime;
 
 use shamir_db::access::{Action, Actor, ResourcePath};
