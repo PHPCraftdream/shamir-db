@@ -6,7 +6,7 @@ use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
-use shamir_storage::storage_sled::SledRepo;
+use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::types::Repo;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -21,7 +21,7 @@ async fn create_test_table() -> (
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_db");
-    let repo = Arc::new(SledRepo::new(path).unwrap());
+    let repo = Arc::new(FjallRepo::new(path).unwrap());
     let table_name = "users";
 
     let data_store = repo.store_get(table_name.to_string()).await.unwrap();

@@ -6,7 +6,7 @@ use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
-use shamir_storage::storage_sled::SledRepo;
+use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::types::Repo;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -41,7 +41,7 @@ async fn test_interner_persistence_after_restart() {
     let table_name = "users";
 
     // === First session: write data ===
-    let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let repo1 = Arc::new(FjallRepo::new(path.clone()).unwrap());
     let data_store1 = repo1.store_get(table_name.to_string()).await.unwrap();
     let info_store1: Arc<dyn shamir_storage::types::Store> = repo1
         .store_get(format!("__info__{}", table_name))
@@ -104,7 +104,7 @@ async fn test_interner_persistence_after_restart() {
     drop(interner1);
 
     // === Second session: reopen and verify ===
-    let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let repo2 = Arc::new(FjallRepo::new(path.clone()).unwrap());
     let data_store2 = repo2.store_get(table_name.to_string()).await.unwrap();
     let info_store2: Arc<dyn shamir_storage::types::Store> = repo2
         .store_get(format!("__info__{}", table_name))
@@ -185,7 +185,7 @@ async fn test_counter_persistence_after_restart() {
     let table_name = "counter_test";
 
     // === First session: insert records ===
-    let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let repo1 = Arc::new(FjallRepo::new(path.clone()).unwrap());
     let data_store1 = repo1.store_get(table_name.to_string()).await.unwrap();
     let info_store1: Arc<dyn shamir_storage::types::Store> = repo1
         .store_get(format!("__info__{}", table_name))
@@ -220,7 +220,7 @@ async fn test_counter_persistence_after_restart() {
     drop(interner1);
 
     // === Second session: reopen and verify ===
-    let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let repo2 = Arc::new(FjallRepo::new(path.clone()).unwrap());
     let data_store2 = repo2.store_get(table_name.to_string()).await.unwrap();
     let info_store2: Arc<dyn shamir_storage::types::Store> = repo2
         .store_get(format!("__info__{}", table_name))
@@ -261,7 +261,7 @@ async fn test_counter_persistence_after_restart() {
     drop(interner2);
 
     // === Third session: verify final state ===
-    let repo3 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let repo3 = Arc::new(FjallRepo::new(path.clone()).unwrap());
     let data_store3 = repo3.store_get(table_name.to_string()).await.unwrap();
     let info_store3: Arc<dyn shamir_storage::types::Store> = repo3
         .store_get(format!("__info__{}", table_name))
@@ -291,7 +291,7 @@ async fn test_counter_matches_actual_record_count() {
     let path = dir.path().join("test_counter_accuracy_db");
     let table_name = "accuracy_test";
 
-    let repo = Arc::new(SledRepo::new(path).unwrap());
+    let repo = Arc::new(FjallRepo::new(path).unwrap());
     let data_store = repo.store_get(table_name.to_string()).await.unwrap();
     let info_store: Arc<dyn shamir_storage::types::Store> = repo
         .store_get(format!("__info__{}", table_name))

@@ -13,10 +13,10 @@ use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
-/// Retry helper for reopening a sled-backed repo on Windows, where sled's
+/// Retry helper for reopening a disk-backed repo on Windows, where the
 /// file lock is released lazily after `drop`. On non-Windows platforms this
 /// almost always succeeds on the first attempt.
-async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
@@ -34,7 +34,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
         }
     }
     panic!(
-        "reopen_sled_repo({name:?}) failed after 10 retries: {:?}",
+        "reopen_disk_repo({name:?}) failed after 10 retries: {:?}",
         last_err
     );
 }
@@ -380,7 +380,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     //     it to the data_store — exactly the on-disk shape a crash
     //     mid-commit_tx leaves behind. ===
     {
-        let repo1 = reopen_sled_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
+        let repo1 = reopen_disk_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
         let _tbl1 = repo1.get_table("t").await.unwrap();
 
         let wal = repo1.repo_wal().await.unwrap();
@@ -427,7 +427,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     }
 
     // === Phase C: reopen a fresh instance over the SAME tempdir. ===
-    let repo2 = reopen_sled_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
     repo2.get_table("t").await.unwrap();
 
     // Sanity: repo2's WAL sees the inflight entry from before.
@@ -658,7 +658,7 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     // === Phase C: reopen a fresh instance over the SAME tempdir. ===
     // Use the retry helper: on Windows, sled releases its file lock lazily
     // after drop, so the reopen can occasionally fail on the first attempt.
-    let repo2 = reopen_sled_repo("f3", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("f3", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     // === Phase D: recovery replays the file WAL. ===
@@ -741,7 +741,7 @@ async fn f4b_nontx_insert_crash_recovery() {
     }
 
     // === Phase C: reopen a fresh instance over the SAME tempdir. ===
-    let repo2 = reopen_sled_repo("f4b", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("f4b", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     // === Phase D: recovery replays the file WAL. ===
@@ -836,7 +836,7 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
 
     // === Phase C: reopen over the SAME tempdir; the field name is NOT yet
     //     known to the freshly-built interner. ===
-    let repo2 = reopen_sled_repo("c5", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("c5", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
     {
         let interner = tbl2.interner().get().await.unwrap();
@@ -931,7 +931,7 @@ async fn f3_file_wal_replay_is_idempotent() {
     // === Phase B: reopen over the same tempdir. ===
     // Use the retry helper: on Windows, sled releases its file lock lazily
     // after drop, so the reopen can occasionally fail on the first attempt.
-    let repo2 = reopen_sled_repo("f3_idem", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("f3_idem", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     // === Phase C: run recovery TWICE on the same open instance. ===

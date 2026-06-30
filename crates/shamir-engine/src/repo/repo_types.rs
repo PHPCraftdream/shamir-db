@@ -12,8 +12,7 @@ use shamir_storage::storage_cached::{CachedStore, WriteMode};
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
-#[cfg(feature = "sled")]
-use shamir_storage::storage_sled::SledRepo;
+
 use shamir_storage::types::{Repo, Store};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,8 +21,6 @@ use tokio::task;
 #[derive(Clone)]
 pub enum BoxRepo {
     InMemory(Arc<InMemoryRepo>),
-    #[cfg(feature = "sled")]
-    Sled(Arc<SledRepo>),
     #[cfg(feature = "fjall")]
     Fjall(Arc<FjallRepo>),
     /// Bounded LRU + write-back wrapper. See `MemBufferStore`.
@@ -55,8 +52,6 @@ impl Repo for BoxRepo {
     {
         match self {
             BoxRepo::InMemory(repo) => repo.store_get(name).await,
-            #[cfg(feature = "sled")]
-            BoxRepo::Sled(repo) => repo.store_get(name).await,
             #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.store_get(name).await,
             BoxRepo::MemBuffer(c) => {
@@ -77,8 +72,6 @@ impl Repo for BoxRepo {
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
         match self {
             BoxRepo::InMemory(repo) => repo.store_delete(name).await,
-            #[cfg(feature = "sled")]
-            BoxRepo::Sled(repo) => repo.store_delete(name).await,
             #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.store_delete(name).await,
             BoxRepo::MemBuffer(c) => c.inner.store_delete(name).await,
@@ -89,8 +82,6 @@ impl Repo for BoxRepo {
     async fn stores_list(&self) -> DbResult<Vec<String>> {
         match self {
             BoxRepo::InMemory(repo) => repo.stores_list().await,
-            #[cfg(feature = "sled")]
-            BoxRepo::Sled(repo) => repo.stores_list().await,
             #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.stores_list().await,
             BoxRepo::MemBuffer(c) => c.inner.stores_list().await,
@@ -102,13 +93,6 @@ impl Repo for BoxRepo {
 impl From<Arc<InMemoryRepo>> for BoxRepo {
     fn from(repo: Arc<InMemoryRepo>) -> Self {
         BoxRepo::InMemory(repo)
-    }
-}
-
-#[cfg(feature = "sled")]
-impl From<Arc<SledRepo>> for BoxRepo {
-    fn from(repo: Arc<SledRepo>) -> Self {
-        BoxRepo::Sled(repo)
     }
 }
 
@@ -145,23 +129,6 @@ impl RepoFactory for InMemoryRepoFactory {
     }
 }
 
-#[cfg(feature = "sled")]
-pub struct SledRepoFactory {
-    pub path: PathBuf,
-}
-
-#[cfg(feature = "sled")]
-#[async_trait::async_trait]
-impl RepoFactory for SledRepoFactory {
-    async fn create(&self) -> DbResult<BoxRepo> {
-        let path = self.path.clone();
-        let repo = task::spawn_blocking(move || SledRepo::new(path))
-            .await
-            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))??;
-        Ok(BoxRepo::Sled(Arc::new(repo)))
-    }
-}
-
 #[cfg(feature = "fjall")]
 pub struct FjallRepoFactory {
     pub path: PathBuf,
@@ -186,8 +153,6 @@ impl RepoFactory for FjallRepoFactory {
 /// Type-erased factory that can create any repo type
 pub enum BoxRepoFactory {
     InMemory(InMemoryRepoFactory),
-    #[cfg(feature = "sled")]
-    Sled(SledRepoFactory),
     #[cfg(feature = "fjall")]
     Fjall(FjallRepoFactory),
     /// MemBuffer wrapper factory.
@@ -252,12 +217,6 @@ impl BoxRepoFactory {
         BoxRepoFactory::InMemory(InMemoryRepoFactory)
     }
 
-    /// Sled, MemBuffer-wrapped by default.
-    #[cfg(feature = "sled")]
-    pub fn sled(path: impl Into<PathBuf>) -> Self {
-        Self::wrapped(BoxRepoFactory::Sled(SledRepoFactory { path: path.into() }))
-    }
-
     /// Fjall, MemBuffer-wrapped by default.
     #[cfg(feature = "fjall")]
     pub fn fjall(path: impl Into<PathBuf>) -> Self {
@@ -270,12 +229,6 @@ impl BoxRepoFactory {
     //
     // For tooling and tests that need bit-for-bit on-disk semantics
     // (no buffering window). NOT recommended for application code.
-
-    /// Raw sled, no MemBuffer. Every write is durable on return.
-    #[cfg(feature = "sled")]
-    pub fn sled_raw(path: impl Into<PathBuf>) -> Self {
-        BoxRepoFactory::Sled(SledRepoFactory { path: path.into() })
-    }
 
     /// Raw fjall, no MemBuffer.
     #[cfg(feature = "fjall")]
@@ -295,8 +248,8 @@ impl BoxRepoFactory {
     /// background tasks. Best for small hot datasets where the
     /// working set fits in RAM.
     ///
-    /// Composable with `membuffer`: `cached(sled(path))` gives
-    /// `Cached → MemBuffer → sled`.
+    /// Composable with `membuffer`: `cached(fjall(path))` gives
+    /// `Cached → MemBuffer → fjall`.
     pub fn cached(inner: BoxRepoFactory, mode: WriteMode) -> Self {
         BoxRepoFactory::Cached(Box::new(CachedRepoFactory { inner, mode }))
     }
@@ -312,8 +265,6 @@ impl BoxRepoFactory {
     pub fn backing_dir(&self) -> Option<PathBuf> {
         match self {
             BoxRepoFactory::InMemory(_) => None,
-            #[cfg(feature = "sled")]
-            BoxRepoFactory::Sled(f) => Some(f.path.clone()),
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => Some(f.path.clone()),
             BoxRepoFactory::MemBuffer(f) => f.inner.backing_dir(),
@@ -327,8 +278,6 @@ impl RepoFactory for BoxRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
         match self {
             BoxRepoFactory::InMemory(f) => f.create().await,
-            #[cfg(feature = "sled")]
-            BoxRepoFactory::Sled(f) => f.create().await,
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => f.create().await,
             BoxRepoFactory::MemBuffer(f) => {
@@ -353,8 +302,6 @@ impl Clone for BoxRepoFactory {
     fn clone(&self) -> Self {
         match self {
             BoxRepoFactory::InMemory(_) => BoxRepoFactory::in_memory(),
-            #[cfg(feature = "sled")]
-            BoxRepoFactory::Sled(f) => BoxRepoFactory::sled(f.path.clone()),
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => BoxRepoFactory::fjall(f.path.clone()),
             BoxRepoFactory::MemBuffer(f) => {

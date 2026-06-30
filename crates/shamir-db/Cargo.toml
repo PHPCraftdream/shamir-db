@@ -15,8 +15,7 @@ license = "MIT OR Apache-2.0"
 # shamir-engine — needed because the facade's own re-exports go through
 # engine's BoxRepoFactory which is gated by engine's own features.
 default = ["all-backends"]
-all-backends = ["sled", "fjall"]
-sled   = ["shamir-storage/sled",   "shamir-engine/sled"]
+all-backends = ["fjall"]
 fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
 
 [dependencies]

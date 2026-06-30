@@ -1,13 +1,11 @@
 //! Phase 2 — Backend-matrix drain-throughput bench.
 //!
 //! Measures sustained ack-throughput of a RepoInstance under N concurrent
-//! committers, parametrised by backend (fjall, sled). Durability is
+//! committers, parametrised by backend (fjall). Durability is
 //! NOT owned by the backend in our architecture (the WAL is the single
 //! durable owner), so each backend runs with its cheapest persist mode:
 //!
 //!   - **fjall:** `PersistMode::Buffered` (set in storage_fjall by default).
-//!   - **sled:**  default open (flush_every_ms not forced to None here;
-//!     kept as sanity baseline).
 //!
 //! Concurrency levels: {8, 32, 128} writers on a single shared table.
 //!
@@ -45,20 +43,6 @@ async fn make_fjall_repo() -> (RepoInstance, tempfile::TempDir) {
     )
     .await
     .expect("RepoInstance::from_factory (fjall)");
-    repo.get_table("tbl_0").await.expect("get_table tbl_0");
-    (repo, tempdir)
-}
-
-async fn make_sled_repo() -> (RepoInstance, tempfile::TempDir) {
-    let tempdir = tempfile::TempDir::new().expect("tempdir");
-    let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
-    let repo = RepoInstance::from_factory(
-        "bench".into(),
-        factory,
-        vec![TableConfig::new("tbl_0".to_string())],
-    )
-    .await
-    .expect("RepoInstance::from_factory (sled)");
     repo.get_table("tbl_0").await.expect("get_table tbl_0");
     (repo, tempdir)
 }
@@ -126,7 +110,6 @@ fn bench_drain_throughput(c: &mut Criterion) {
 
     for &writers in concurrency_levels {
         bench_backend(&mut group, "fjall", writers, make_fjall_repo);
-        bench_backend(&mut group, "sled", writers, make_sled_repo);
     }
 
     group.finish();

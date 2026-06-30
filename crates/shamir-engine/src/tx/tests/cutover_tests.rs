@@ -34,8 +34,8 @@ fn make_repo() -> RepoInstance {
     RepoInstance::new("cutover".into(), BoxRepo::InMemory(repo), Vec::new())
 }
 
-/// Reopen a sled-backed repo, tolerating Windows' lazy file-lock release.
-async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+/// Reopen a disk-backed repo, tolerating Windows' lazy file-lock release.
+async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _ in 0..10 {
         match RepoInstance::from_factory(
@@ -52,7 +52,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
             }
         }
     }
-    panic!("reopen_sled_repo({name:?}) failed after 10 retries: {last_err:?}");
+    panic!("reopen_disk_repo({name:?}) failed after 10 retries: {last_err:?}");
 }
 
 /// (3-overlay) Right after commit the durable watermark LAGS visibility, but
@@ -201,7 +201,7 @@ async fn reopen_recovery_without_drain_reconstructs_history() {
     }
 
     // Reopen + recover: recovery replays the inflight WAL entry into history.
-    let repo2 = reopen_sled_repo("cutover_reopen", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("cutover_reopen", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     let recovered = repo2.recover_v2_inflight().await.unwrap();

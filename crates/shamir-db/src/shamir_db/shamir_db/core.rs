@@ -546,8 +546,6 @@ impl ShamirDb {
         // re-attach the repo.
         match engine {
             "in_memory" => Some(BoxRepoFactory::in_memory()),
-            #[cfg(feature = "sled")]
-            "sled" => path.map(BoxRepoFactory::sled),
             #[cfg(feature = "fjall")]
             "fjall" => path.map(BoxRepoFactory::fjall),
             _ => None,
@@ -557,8 +555,6 @@ impl ShamirDb {
     pub(super) fn extract_storage_type(factory: &BoxRepoFactory) -> String {
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",
-            #[cfg(feature = "sled")]
-            BoxRepoFactory::Sled(_) => "sled",
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(_) => "fjall",
             // The buffer layer doesn't have an identity of its own
@@ -573,8 +569,6 @@ impl ShamirDb {
     pub(super) fn extract_path(factory: &BoxRepoFactory) -> Option<String> {
         match factory {
             BoxRepoFactory::InMemory(_) => None,
-            #[cfg(feature = "sled")]
-            BoxRepoFactory::Sled(f) => Some(f.path.to_string_lossy().to_string()),
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => Some(f.path.to_string_lossy().to_string()),
             BoxRepoFactory::MemBuffer(f) => Self::extract_path(&f.inner),

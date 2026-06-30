@@ -239,34 +239,12 @@ fn bench_in_memory(c: &mut Criterion) {
 // Disk backends (feature-gated)
 // ────────────────────────────────────────────────────────────────────
 
-#[cfg(feature = "sled")]
-fn make_sled_store(dir: &std::path::Path) -> Arc<dyn Store> {
-    use shamir_storage::types::Repo;
-    let repo = shamir_storage::storage_sled::SledRepo::new(dir.join("sled")).unwrap();
-    let rt = rt();
-    rt.block_on(repo.store_get("bench")).unwrap()
-}
-
 #[cfg(feature = "fjall")]
 fn make_fjall_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_fjall::FjallRepo::new(dir.join("fjall")).unwrap();
     let rt = rt();
     rt.block_on(repo.store_get("bench")).unwrap()
-}
-
-/// Sled bench — includes the prefix_scan 50k cell (Op A.2 before/after target).
-#[cfg(feature = "sled")]
-fn bench_sled(c: &mut Criterion) {
-    let dir = tempfile::TempDir::new().unwrap();
-    let store: Arc<dyn Store> = make_sled_store(dir.path());
-    let name = "sled";
-    bench_insert(c, name, Arc::clone(&store));
-    bench_get(c, name, Arc::clone(&store));
-    bench_scan(c, name, Arc::clone(&store));
-    bench_set_many(c, name, Arc::clone(&store));
-    // Op A.2 benchmark: prefix_scan on 50k shared-prefix records.
-    bench_prefix_scan(c, name, store);
 }
 
 /// Fjall bench — includes the prefix_scan 50k cell (Op A before/after target).
@@ -328,8 +306,6 @@ fn bench_all_backends(c: &mut Criterion) {
     bench_in_memory(c);
     bench_cached_in_memory(c);
     bench_membuffer_in_memory(c);
-    #[cfg(feature = "sled")]
-    bench_sled(c);
     #[cfg(feature = "fjall")]
     bench_fjall(c);
 }

@@ -53,7 +53,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let path = tempdir.path().to_path_buf();
 
-    async fn open_sled(path: &std::path::Path) -> RepoInstance {
+    async fn open_disk(path: &std::path::Path) -> RepoInstance {
         let mut last_err = None;
         for _attempt in 0..10 {
             match RepoInstance::from_factory(
@@ -70,7 +70,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
                 }
             }
         }
-        panic!("open_sled failed after 10 retries: {last_err:?}");
+        panic!("open_disk failed after 10 retries: {last_err:?}");
     }
 
     // Seed a high inflight txn_id WITHOUT committing, as a crash between commit
@@ -79,7 +79,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
     // survives in the file segment).
     const HIGH_TXN_ID: u64 = 5_000;
     {
-        let seed = open_sled(&path).await;
+        let seed = open_disk(&path).await;
         let wal = seed.repo_wal().await.unwrap();
         let entry = WalEntryV2::new(
             HIGH_TXN_ID,
@@ -101,7 +101,7 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
     }
 
     // === SIMULATED RESTART: fresh RepoInstance over the same path ===
-    let repo = open_sled(&path).await;
+    let repo = open_disk(&path).await;
 
     // The inflight entry survived the "restart".
     let wal = repo.repo_wal().await.unwrap();

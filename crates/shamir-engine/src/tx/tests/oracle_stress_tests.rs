@@ -331,9 +331,9 @@ fn rid(n: u8) -> RecordId {
     RecordId(a)
 }
 
-/// Open (or reopen) a disk-backed sled repo, retrying on Windows where
-/// sled releases its file lock lazily after `drop`.
-async fn open_sled(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInstance {
+/// Open (or reopen) a disk-backed repo, retrying on Windows where
+/// the backend releases its file lock lazily after `drop`.
+async fn open_disk(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
@@ -350,7 +350,7 @@ async fn open_sled(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInst
             }
         }
     }
-    panic!("open_sled failed after 10 retries: {last_err:?}");
+    panic!("open_disk failed after 10 retries: {last_err:?}");
 }
 
 /// Append a durable inflight V2 `Put` to the file WAL (F5e: the file
@@ -364,7 +364,7 @@ async fn seed_inflight_put(
     body: bytes::Bytes,
     commit_version: u64,
 ) {
-    let seed = open_sled(path, vec![TableConfig::new(table)]).await;
+    let seed = open_disk(path, vec![TableConfig::new(table)]).await;
     let wal = seed.repo_wal().await.unwrap();
     let entry = WalEntryV2::new(
         wal.fresh_txn_id(),
@@ -398,7 +398,7 @@ async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
     }
 
     // Simulated restart.
-    let repo = open_sled(&path, vec![TableConfig::new("t")]).await;
+    let repo = open_disk(&path, vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, N as usize);
@@ -475,7 +475,7 @@ async fn oracle_stress_recovery_gap_in_versions() {
         seed_inflight_put(&path, "t", record, body, v).await;
     }
 
-    let repo = open_sled(&path, vec![TableConfig::new("t")]).await;
+    let repo = open_disk(&path, vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 4, "4 durable WAL entries must be replayed");

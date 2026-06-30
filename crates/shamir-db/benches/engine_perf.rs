@@ -92,151 +92,6 @@ fn gen_user(i: usize) -> QueryValue {
     QueryValue::Map(m)
 }
 
-/// Wide record generator — same core fields as `gen_user` PLUS ~20 extra
-/// string/numeric fields. Total payload is ~5-10x larger than a narrow
-/// record. Used to isolate "decode K wide records after index-lookup" cost
-/// and to determine whether a covering index (Opt O) would yield a
-/// significant additional win beyond the current index+get_many path.
-///
-/// Extra fields:
-///   bio          — ~200-char free-text string
-///   field_00..15 — alternating string/number extras
-///   notes        — ~100-char string
-///   priority     — integer 0..9
-///   department   — one of 8 strings
-fn gen_user_wide(i: usize) -> QueryValue {
-    const DEPARTMENTS: &[&str] = &[
-        "Engineering",
-        "Marketing",
-        "Sales",
-        "Support",
-        "Finance",
-        "Legal",
-        "HR",
-        "Operations",
-    ];
-    // ~200-char bio constructed from a repeating pattern seeded by i.
-    let bio = format!(
-        "User {} biography: works in the {} department. \
-         Joined in {}. Specialises in area {}. \
-         Contact via user{}@{} for further details.",
-        i,
-        DEPARTMENTS[i % DEPARTMENTS.len()],
-        2000 + (i % 24),
-        i % 17,
-        i,
-        DOMAINS[i % DOMAINS.len()],
-    );
-    let notes = format!(
-        "Internal note #{}: last reviewed by manager {} on day {}.",
-        i,
-        FIRST_NAMES[i % FIRST_NAMES.len()],
-        i % 365,
-    );
-    let mut m = new_map();
-    m.insert("id".into(), QueryValue::from(format!("u{:08}", i)));
-    m.insert(
-        "name".into(),
-        QueryValue::from(format!(
-            "{} {}",
-            FIRST_NAMES[i % FIRST_NAMES.len()],
-            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
-        )),
-    );
-    m.insert(
-        "email".into(),
-        QueryValue::from(format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()])),
-    );
-    m.insert("age".into(), QueryValue::from(18 + ((i * 37) % 60) as i64));
-    m.insert("city".into(), QueryValue::from(CITIES[i % CITIES.len()]));
-    m.insert("score".into(), QueryValue::from(((i * 7919) % 1000) as i64));
-    m.insert("active".into(), QueryValue::Bool(!i.is_multiple_of(3)));
-    m.insert(
-        "created_at_ns".into(),
-        QueryValue::from(1_700_000_000_000_000_000_i64 + (i as i64 * 60_000_000_000)),
-    );
-    m.insert(
-        "tags".into(),
-        QueryValue::List(vec![
-            QueryValue::from(format!("tag_{}", i % 10)),
-            QueryValue::from(format!("tag_{}", (i / 10) % 7)),
-        ]),
-    );
-    // --- extra wide fields ---
-    m.insert("bio".into(), QueryValue::from(bio));
-    m.insert("notes".into(), QueryValue::from(notes));
-    m.insert(
-        "department".into(),
-        QueryValue::from(DEPARTMENTS[i % DEPARTMENTS.len()]),
-    );
-    m.insert("priority".into(), QueryValue::from((i % 10) as i64));
-    m.insert(
-        "field_00".into(),
-        QueryValue::from(format!("extra_str_field_zero_{}", i)),
-    );
-    m.insert(
-        "field_01".into(),
-        QueryValue::from(((i * 3) % 10_000) as i64),
-    );
-    m.insert(
-        "field_02".into(),
-        QueryValue::from(format!("extra_str_field_two_{}", i * 2)),
-    );
-    m.insert(
-        "field_03".into(),
-        QueryValue::from(((i * 5) % 10_000) as i64),
-    );
-    m.insert(
-        "field_04".into(),
-        QueryValue::from(format!("extra_str_field_four_{}", i)),
-    );
-    m.insert(
-        "field_05".into(),
-        QueryValue::from(((i * 7) % 10_000) as i64),
-    );
-    m.insert(
-        "field_06".into(),
-        QueryValue::from(format!("extra_str_field_six_{}", i)),
-    );
-    m.insert(
-        "field_07".into(),
-        QueryValue::from(((i * 11) % 10_000) as i64),
-    );
-    m.insert(
-        "field_08".into(),
-        QueryValue::from(format!("extra_str_field_eight_{}", i)),
-    );
-    m.insert(
-        "field_09".into(),
-        QueryValue::from(((i * 13) % 10_000) as i64),
-    );
-    m.insert(
-        "field_10".into(),
-        QueryValue::from(format!("extra_str_field_ten_{}", i)),
-    );
-    m.insert(
-        "field_11".into(),
-        QueryValue::from(((i * 17) % 10_000) as i64),
-    );
-    m.insert(
-        "field_12".into(),
-        QueryValue::from(format!("extra_str_field_twelve_{}", i)),
-    );
-    m.insert(
-        "field_13".into(),
-        QueryValue::from(((i * 19) % 10_000) as i64),
-    );
-    m.insert(
-        "field_14".into(),
-        QueryValue::from(format!("extra_str_field_fourteen_{}", i)),
-    );
-    m.insert(
-        "field_15".into(),
-        QueryValue::from(((i * 23) % 10_000) as i64),
-    );
-    QueryValue::Map(m)
-}
-
 // --------------------------------------------------------------------------
 // Setup helpers
 // --------------------------------------------------------------------------
@@ -269,14 +124,6 @@ async fn fresh_db() -> Arc<ShamirDb> {
     shamir
 }
 
-/// Same as `fresh_db()` but the repo is backed by a sled on-disk
-/// store at `path`. Caller must keep the corresponding `TempDir`
-/// alive at least as long as the returned `ShamirDb` (sled holds
-/// the directory open).
-async fn fresh_db_sled(path: &std::path::Path) -> Arc<ShamirDb> {
-    fresh_db_with(BoxRepoFactory::sled(path.to_path_buf())).await
-}
-
 async fn fresh_db_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
     fresh_db_with(BoxRepoFactory::fjall(path.to_path_buf())).await
 }
@@ -296,15 +143,6 @@ async fn fresh_db_membuffer_in_memory() -> Arc<ShamirDb> {
     use shamir_storage::storage_membuffer::MemBufferConfig;
     fresh_db_with(BoxRepoFactory::membuffer(
         BoxRepoFactory::in_memory(),
-        MemBufferConfig::default(),
-    ))
-    .await
-}
-
-async fn fresh_db_membuffer_sled(path: &std::path::Path) -> Arc<ShamirDb> {
-    use shamir_storage::storage_membuffer::MemBufferConfig;
-    fresh_db_with(BoxRepoFactory::membuffer(
-        BoxRepoFactory::sled(path.to_path_buf()),
         MemBufferConfig::default(),
     ))
     .await
@@ -339,30 +177,6 @@ async fn create_sorted_index(shamir: &ShamirDb, table: &str, index_name: &str, f
 }
 
 /// Like `create_sorted_index` but also sets `include: [[include_field]]` so
-/// the index stores the projected value inline. A query that SELECTs only the
-/// included fields can be answered entirely from the index (A3 covering path)
-/// without fetching or decoding the full record.
-async fn create_covering_sorted_index(
-    shamir: &ShamirDb,
-    table: &str,
-    index_name: &str,
-    field: &str,
-    include_field: &str,
-) {
-    let idx = ddl::create_index(index_name, table)
-        .field(field)
-        .sorted()
-        .include([vec![include_field.to_string()]])
-        .build();
-    let mut b = Batch::new();
-    b.id("idx").create_index("i", idx);
-    let req = b.build();
-    shamir
-        .execute("bench", &req)
-        .await
-        .expect("create covering index");
-}
-
 async fn create_index_inner(
     shamir: &ShamirDb,
     table: &str,
@@ -514,16 +328,6 @@ fn req_range_age() -> BatchRequest {
     let mut b = Batch::new();
     b.id("r")
         .query("r", Query::from("users").where_between("age", 30, 35));
-    b.build()
-}
-
-/// Narrow range — ~1.6 % selectivity (one age value out of 60). Shows
-/// where sorted-index wins really matter: when most records are
-/// filtered out, avoiding the per-record load dominates.
-fn req_range_age_narrow() -> BatchRequest {
-    let mut b = Batch::new();
-    b.id("r")
-        .query("r", Query::from("users").where_between("age", 30, 30));
     b.build()
 }
 
@@ -1030,37 +834,6 @@ fn bench_min_only_with_index(c: &mut Criterion) {
     group.finish();
 }
 
-/// Same DESC ORDER BY LIMIT 10 path, but on a SLED-backed repo.
-/// Exercises sled's native `iter_range_stream_reverse` cursor —
-/// O(log N + K) — vs the default in-memory impl which collects
-/// forward and reverses in memory (O(N)).
-fn bench_order_limit_desc_with_sorted_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("order_limit_top10_desc_sorted_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users(&s, n).await;
-            create_sorted_index(&s, "users", "by_score", "score").await;
-            s
-        });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_with_order_limit();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
 /// `order_by score DESC + LIMIT 10` with a SORTED index on `score`.
 /// Hits the reverse-iter fast path — `lookup_last_k(index, 10)`
 /// using `Store::iter_range_stream_reverse` instead of full scan
@@ -1195,38 +968,6 @@ fn bench_range_query_with_index(c: &mut Criterion) {
 // of what the sorted-index work actually buys in production.
 // --------------------------------------------------------------------------
 
-/// Bulk insert on sled — exercises the write-path of a real disk
-/// backend. Sample counts kept low (each iter creates a fresh
-/// tempdir and does N inserts on a disk-backed tree, which is slow
-/// when every write fsyncs).
-fn bench_bulk_insert_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("bulk_insert_sled");
-    group.sample_size(bu::sample_size(10));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(8)));
-
-    for &count in bulk_sweep() {
-        group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let tempdir = tempfile::TempDir::new().expect("tempdir");
-                    let shamir = fresh_db_sled(tempdir.path()).await;
-                    let req = req_bulk_insert(0, count);
-                    let start = Instant::now();
-                    shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
-                    drop(shamir);
-                    drop(tempdir);
-                }
-                total
-            });
-        });
-    }
-    group.finish();
-}
-
 /// Same `bulk_insert` for every disk backend. Used as a parity
 /// check — each backend should converge to a similar
 /// "amortised-fsync, no per-write commit" cost. Sample counts kept
@@ -1267,11 +1008,6 @@ bench_bulk_insert_for_backend!(bench_bulk_insert_fjall, "bulk_insert_fjall", fre
 // MemBuffer-wrapped variants. Same backends, same numbers as raw
 // for the passthrough proxy phase.
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_sled,
-    "bulk_insert_membuffer_sled",
-    fresh_db_membuffer_sled
-);
-bench_bulk_insert_for_backend!(
     bench_bulk_insert_membuffer_fjall,
     "bulk_insert_membuffer_fjall",
     fresh_db_membuffer_fjall
@@ -1301,374 +1037,6 @@ fn bench_bulk_insert_membuffer_in_memory(c: &mut Criterion) {
     group.finish();
 }
 
-/// Same as `bulk_insert_sled` but with a regular index on the
-/// `city` field (cardinality 8 → high-fanout posting lists).
-/// Exposes the cost of index posting-list updates per insert.
-fn bench_bulk_insert_with_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("bulk_insert_with_index_sled");
-    group.sample_size(bu::sample_size(10));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(10)));
-
-    for &count in bulk_sweep() {
-        group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let tempdir = tempfile::TempDir::new().expect("tempdir");
-                    let shamir = fresh_db_sled(tempdir.path()).await;
-                    create_index(&shamir, "users", "by_city", "city", false).await;
-                    let req = req_bulk_insert(0, count);
-                    let start = Instant::now();
-                    shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
-                    drop(shamir);
-                    drop(tempdir);
-                }
-                total
-            });
-        });
-    }
-    group.finish();
-}
-
-fn bench_range_query_no_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_no_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users(&s, n).await;
-            s
-        });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        // Drop shamir before tempdir so sled releases the directory.
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-fn bench_range_query_with_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_with_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users(&s, n).await;
-            create_sorted_index(&s, "users", "by_age", "age").await;
-            s
-        });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-/// Narrow range on sled — shows where sorted-index gives the biggest
-/// payoff: low selectivity means we avoid most per-record loads.
-fn bench_range_query_narrow_no_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_narrow_no_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users(&s, n).await;
-            s
-        });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age_narrow();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_narrow_with_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users(&s, n).await;
-            create_sorted_index(&s, "users", "by_age", "age").await;
-            s
-        });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age_narrow();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Wide-record range query — covering-index decision benchmark
-//
-// Purpose: isolate "decode K wide records after index-lookup" cost
-// so we can decide whether a covering index (Opt O) is worth
-// implementing. A covering index would avoid fetching/decoding full
-// records for narrow projections (e.g. SELECT age only).
-//
-// Two companion groups:
-//   range_query_wide_narrow_no_index_sled  — full table scan on wide records
-//   range_query_wide_narrow_with_index_sled — sorted index on age, narrow range
-//
-// The query uses age=30 (between 30..30, ~1.6% selectivity). The
-// SELECT clause requests only ["age"] (narrow projection). This is
-// the best-case for a covering index; if decoding is still a large
-// share of total time even with the index, Opt O is worth pursuing.
-//
-// NOTE: if the engine does not currently push the narrow projection
-// down to the storage layer, it will still decode all fields — which
-// is exactly the upper-bound on covering-index benefit we want to measure.
-// ═══════════════════════════════════════════════════════════════════
-
-/// Narrow projection on wide records: SELECT age WHERE age BETWEEN 30 AND 30.
-/// Only ~1.6% of records match. The narrow select is the ideal covering-index
-/// target; without covering index the engine decodes all fields regardless.
-fn req_range_age_narrow_wide() -> BatchRequest {
-    let mut b = Batch::new();
-    b.id("r").query(
-        "r",
-        Query::from("users")
-            .where_between("age", 30, 30)
-            .select([select::field("age")]),
-    );
-    b.build()
-}
-
-/// Full projection on wide records (no select clause): WHERE age BETWEEN 30 AND 30.
-/// Used as the baseline that covering index would improve upon.
-fn req_range_age_narrow_wide_full() -> BatchRequest {
-    let mut b = Batch::new();
-    b.id("r")
-        .query("r", Query::from("users").where_between("age", 30, 30));
-    b.build()
-}
-
-/// Wide-record range query WITHOUT index. Full table scan decoding all
-/// wide records (~30 fields each). Establishes the ceiling cost of
-/// decode on a wide schema. Compare to _with_index to see index savings.
-fn bench_range_query_wide_narrow_no_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_wide_narrow_no_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users_wide(&s, n).await;
-            s
-        });
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                // Full projection — engine decodes every field of every wide record.
-                let req = req_range_age_narrow_wide_full();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-/// Wide-record range query WITH sorted index on age + narrow SELECT ["age"].
-/// Index prunes the scan to ~1.6% of records; the engine then fetches and
-/// decodes only the matched records (still full wide records at the storage
-/// layer — no covering index yet). Time here = index-lookup cost + decode
-/// cost of ~N*0.016 wide records. If this is still large relative to the
-/// no-index baseline, the "decode K wide records" term dominates and a
-/// covering index (Opt O) would yield a meaningful further win.
-fn bench_range_query_wide_narrow_with_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_wide_narrow_with_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users_wide(&s, n).await;
-            create_sorted_index(&s, "users", "by_age", "age").await;
-            s
-        });
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                // Narrow SELECT ["age"] — what covering index would make O(1) decode.
-                let req = req_range_age_narrow_wide();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-/// Wide-record range query WITH a **covering** sorted index on age + narrow
-/// SELECT ["age"]. The index stores the `age` value inline (`include: [["age"]]`),
-/// so the engine can answer the query entirely from the index entry without
-/// fetching or decoding the full wide record (A3 covering index-only path).
-/// Compare against `bench_range_query_wide_narrow_with_index_sled` (non-covering)
-/// to isolate the decode-wide-record cost that Opt O is designed to eliminate.
-fn bench_range_query_wide_narrow_with_covering_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_wide_narrow_with_covering_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users_wide(&s, n).await;
-            create_covering_sorted_index(&s, "users", "by_age_cov", "age", "age").await;
-            s
-        });
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                // Narrow SELECT ["age"] — covered by the index; A3 serves it index-only.
-                let req = req_range_age_narrow_wide();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-/// High-K narrow projection: SELECT age WHERE age BETWEEN 18 AND 77.
-/// `age = 18 + (i*37)%60` ∈ [18,77], so this matches ~100% of rows. This
-/// is the regime where a covering index should pay off: the result set is
-/// large, every matched record is wide, but only `age` is projected — so
-/// avoiding the fetch+decode of the full record for every row is a big win.
-fn req_range_age_highk_wide() -> BatchRequest {
-    let mut b = Batch::new();
-    b.id("r").query(
-        "r",
-        Query::from("users")
-            .where_between("age", 18, 77)
-            .select([select::field("age")]),
-    );
-    b.build()
-}
-
-/// High-K, NON-covering sorted index on age + narrow SELECT ["age"]. The
-/// range matches ~all rows, so the engine fetches and fully decodes every
-/// wide record just to project `age". Baseline for the covering comparison.
-fn bench_range_query_wide_highk_with_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_wide_highk_with_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users_wide(&s, n).await;
-            create_sorted_index(&s, "users", "by_age", "age").await;
-            s
-        });
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age_highk_wide();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
-/// High-K, COVERING sorted index on age include age + narrow SELECT ["age"].
-/// The range matches ~all rows; A3 serves each from the index posting's
-/// projection without fetching/decoding the wide record. Compare against
-/// `bench_range_query_wide_highk_with_index_sled` to quantify the covering
-/// win in its intended large-result-set / narrow-projection regime.
-fn bench_range_query_wide_highk_with_covering_index_sled(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_wide_highk_with_covering_index_sled");
-
-    for &n in sweep_sizes() {
-        let tempdir = tempfile::TempDir::new().expect("tempdir");
-        let shamir = rt.block_on(async {
-            let s = fresh_db_sled(tempdir.path()).await;
-            seed_users_wide(&s, n).await;
-            create_covering_sorted_index(&s, "users", "by_age_cov", "age", "age").await;
-            s
-        });
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age_highk_wide();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-        drop(shamir);
-        drop(tempdir);
-    }
-    group.finish();
-}
-
 /// Steady-state throughput: 10 000 inserts in one batch into a
 /// fresh MemBuffer-wrapped DB. Long enough that the flusher
 /// engages and the LRU is well past its warmup. Contrast with
@@ -1690,23 +1058,6 @@ fn bench_steady_state_insert(c: &mut Criterion) {
                 shamir.execute("bench", &req).await.unwrap();
                 total += start.elapsed();
                 drop(shamir);
-            }
-            total
-        });
-    });
-
-    group.bench_function("membuffer_sled", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let tempdir = tempfile::TempDir::new().expect("tempdir");
-                let shamir = fresh_db_membuffer_sled(tempdir.path()).await;
-                let req = req_bulk_insert(0, 10_000);
-                let start = Instant::now();
-                shamir.execute("bench", &req).await.unwrap();
-                total += start.elapsed();
-                drop(shamir);
-                drop(tempdir);
             }
             total
         });
@@ -2126,24 +1477,11 @@ criterion_group! {
     bench_order_limit_with_index,
     bench_order_limit_asc_with_sorted_index,
     bench_order_limit_desc_with_sorted_index,
-    bench_order_limit_desc_with_sorted_index_sled,
     bench_range_query_no_index,
     bench_range_query_with_index,
-    bench_bulk_insert_sled,
     bench_bulk_insert_fjall,
     bench_bulk_insert_membuffer_in_memory,
-    bench_bulk_insert_membuffer_sled,
     bench_bulk_insert_membuffer_fjall,
-    bench_bulk_insert_with_index_sled,
-    bench_range_query_no_index_sled,
-    bench_range_query_with_index_sled,
-    bench_range_query_narrow_no_index_sled,
-    bench_range_query_narrow_with_index_sled,
-    bench_range_query_wide_narrow_no_index_sled,
-    bench_range_query_wide_narrow_with_index_sled,
-    bench_range_query_wide_narrow_with_covering_index_sled,
-    bench_range_query_wide_highk_with_index_sled,
-    bench_range_query_wide_highk_with_covering_index_sled,
     bench_batch_multi_read,
     bench_cache_hit_get,
     bench_steady_state_insert,
@@ -2487,23 +1825,6 @@ async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
         let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user).collect();
-        let mut b = Batch::new();
-        b.id(chunk_start)
-            .insert("s", write::insert(table).rows(values));
-        let req = b.build();
-        shamir.execute("bench", &req).await.unwrap();
-    }
-}
-
-/// Seed `n` **wide** records (gen_user_wide) into `table` in chunks of 50.
-async fn seed_users_wide(shamir: &ShamirDb, n: usize) {
-    seed_users_wide_inner(shamir, n, "users").await;
-}
-
-async fn seed_users_wide_inner(shamir: &ShamirDb, n: usize, table: &str) {
-    for chunk_start in (0..n).step_by(50) {
-        let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user_wide).collect();
         let mut b = Batch::new();
         b.id(chunk_start)
             .insert("s", write::insert(table).rows(values));

@@ -21,8 +21,6 @@ pub mod types;
 
 #[cfg(feature = "fjall")]
 pub mod storage_fjall;
-#[cfg(feature = "sled")]
-pub mod storage_sled;
 
 #[cfg(test)]
 mod tests;

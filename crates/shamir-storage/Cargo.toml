@@ -12,14 +12,13 @@ license = "MIT OR Apache-2.0"
 default = ["all-backends"]
 
 # Convenience meta-feature: enables every concrete backend.
-all-backends = ["sled", "fjall"]
+all-backends = ["fjall"]
 
 # Per-backend features. Each one toggles its `dep:<crate>` so the
 # corresponding storage engine + the `storage_*` module + the matching
 # `BoxRepo` / `BoxRepoFactory` variant only compile when asked for.
 # The in-memory backend is always available — it has no extra deps and
 # is required by tests across the workspace.
-sled   = ["dep:sled"]
 fjall  = ["dep:fjall"]
 
 [dependencies]
@@ -31,7 +30,6 @@ shamir-tunables    = { path = "../shamir-tunables" }
 # Backends — `optional = true` makes each one pulled in only when the
 # matching feature is enabled.
 fjall    = { version = "3.0.1",  optional = true }
-sled     = { version = "0.34.7", optional = true }
 
 # Async / runtime helpers used by the trait surface and a few backends
 tokio = { version = "1.49.0", features = ["full"] }

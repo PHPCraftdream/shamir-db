@@ -46,9 +46,9 @@ fn make_mem_repo() -> RepoInstance {
     RepoInstance::new("f6b".into(), BoxRepo::InMemory(repo), Vec::new())
 }
 
-/// Retry-reopen a sled-backed repo (Windows releases sled's file lock lazily
+/// Retry-reopen a disk-backed repo (Windows releases file locks lazily
 /// after `drop`). Mirrors the helper in `recovery_tests.rs`.
-async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+async fn reopen_disk_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
     let mut last_err = None;
     for _attempt in 0..10 {
         match RepoInstance::from_factory(
@@ -65,7 +65,7 @@ async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -
             }
         }
     }
-    panic!("reopen_sled_repo({name:?}) failed after 10 retries: {last_err:?}");
+    panic!("reopen_disk_repo({name:?}) failed after 10 retries: {last_err:?}");
 }
 
 /// Commit N records → N WAL entries inflight. `drain_all` lands every value in
@@ -229,7 +229,7 @@ async fn wal_segment_count_bounded_under_drain() {
     // `repo_wal` OnceCell initialises (it reads this env at first use).
     std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1024");
 
-    let repo = reopen_sled_repo("growth", repo_dir.clone(), vec![TableConfig::new("t")]).await;
+    let repo = reopen_disk_repo("growth", repo_dir.clone(), vec![TableConfig::new("t")]).await;
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
     let drainer = Drainer::new();
@@ -293,7 +293,7 @@ async fn reopen_after_truncation_recovers_all() {
 
     let mut rids = Vec::with_capacity(N);
     {
-        let repo = reopen_sled_repo("trunc", path.clone(), vec![TableConfig::new("t")]).await;
+        let repo = reopen_disk_repo("trunc", path.clone(), vec![TableConfig::new("t")]).await;
         let tbl = repo.get_table("t").await.unwrap();
         let gate = repo.tx_gate().await.unwrap();
         let wal = repo.repo_wal().await.unwrap();
@@ -333,7 +333,7 @@ async fn reopen_after_truncation_recovers_all() {
 
     // Reopen over the same dir: the WAL is (near-)empty after truncation, yet
     // every value is recovered from `history`.
-    let repo2 = reopen_sled_repo("trunc", path.clone(), vec![TableConfig::new("t")]).await;
+    let repo2 = reopen_disk_repo("trunc", path.clone(), vec![TableConfig::new("t")]).await;
     repo2.recover_v2_inflight().await.unwrap();
     let tbl2 = repo2.get_table("t").await.unwrap();
     for (i, rid) in rids.iter().enumerate() {

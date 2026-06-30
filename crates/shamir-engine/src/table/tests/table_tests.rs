@@ -7,7 +7,7 @@ use crate::table::tests::stream_utils::collect_list_stream;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::Table;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::storage_sled::SledRepo;
+use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::types::Repo;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -22,7 +22,7 @@ async fn create_test_table() -> DbResult<(
 )> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("test_db");
-    let repo = Arc::new(SledRepo::new(path)?);
+    let repo = Arc::new(FjallRepo::new(path)?);
 
     let data_store = repo.store_get("__data__users".to_string()).await?;
     let info_store = repo.store_get("__info__users".to_string()).await?;
