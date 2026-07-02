@@ -62,7 +62,7 @@ impl VectorBackend {
     /// plan's documented behaviour.
     fn extract_vec(&self, rec: &dyn RecordRef) -> Option<Vec<f32>> {
         let ipath = self.ipath();
-        let mut v: Vec<f32> = Vec::new();
+        let mut v: Vec<f32> = Vec::with_capacity(4);
         let mut bad = false;
         let is_seq = rec.any_seq_elem(&ipath, &mut |sr| {
             match sr {

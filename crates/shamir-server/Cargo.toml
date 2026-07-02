@@ -87,14 +87,15 @@ scc = "2.2"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
-# Global allocator. Native-Rust sefer-alloc 0.2.0 with `production` feature
-# (alloc-global + alloc-xthread + alloc-decommit). Chosen strategically
-# over mimalloc: pure-Rust safety guarantees, big wins on large allocations
-# expected to compound with captrack instrumentation. On short in-process
-# micro-benches mimalloc still leads (db_handler/ping_inprocess +22%);
-# strategic parity-or-better on long-running RSS-bounded production
-# workloads is the target — measured separately.
-sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"] }
+# Global allocator. Native-Rust sefer-alloc 0.2.1 with `production` feature
+# (alloc-global + alloc-xthread + alloc-decommit). Chosen strategically over
+# mimalloc: pure-Rust safety guarantees. Measured on release builds
+# (opt-level=1 and opt-level=3): sefer-alloc is 17-22x faster than mimalloc
+# on alloc-heavy setup workloads (engine_perf --test, 103 variants) — see
+# docs/perf/sefer-alloc-rollout-2026-06-30.md. The earlier "mimalloc leads
+# +22% on db_handler_rps" note was measured at opt-level=0 (debug) and does
+# not hold at release opt levels.
+sefer-alloc = { version = "0.2.1", features = ["production"] }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —
@@ -104,6 +105,7 @@ axum = { version = "0.7", default-features = false, features = ["http1", "tokio"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 metrics-process = "2"
+captrack = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = "0.4"

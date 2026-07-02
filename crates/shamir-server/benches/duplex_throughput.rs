@@ -162,9 +162,9 @@ fn build_frames(n: u32) -> Vec<Vec<u8>> {
                 req: b"ping".to_vec(),
             };
             let msgpack = env.to_msgpack().unwrap();
-            let mut frame = Vec::new();
+            let mut frame = Vec::with_capacity(64);
             rt.block_on(async {
-                let mut scratch = Vec::new();
+                let mut scratch = Vec::with_capacity(64);
                 write_frame_into(&mut frame, &msgpack, &mut scratch)
                     .await
                     .unwrap();

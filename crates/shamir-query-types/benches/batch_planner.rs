@@ -57,6 +57,16 @@ fn make_batch(n: usize, chain: bool) -> BatchRequest {
 
 fn bench_planner(c: &mut Criterion) {
     let limits = BatchLimits::default();
+    // `chain(n)` builds a linear dependency chain of depth n-1 (q0 -> q1 ->
+    // ... -> q(n-1)); the largest tested n is 20, i.e. depth 19, which
+    // exceeds BatchLimits::default().max_dependency_depth (10, a DoS guard —
+    // see batch_limits.rs). This bench exists to measure deep-chain planning
+    // cost specifically, so raise the depth ceiling for planning instead of
+    // shrinking the tested chain length.
+    let chain_limits = BatchLimits {
+        max_dependency_depth: 25,
+        ..BatchLimits::default()
+    };
 
     let mut group = c.benchmark_group("batch_planner");
     for n in [5, 10, 20, 50] {
@@ -67,7 +77,7 @@ fn bench_planner(c: &mut Criterion) {
         if n <= 20 {
             group.bench_with_input(BenchmarkId::new("chain", n), &n, |b, &n| {
                 let batch = make_batch(n, true);
-                b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
+                b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &chain_limits).unwrap()));
             });
         }
     }

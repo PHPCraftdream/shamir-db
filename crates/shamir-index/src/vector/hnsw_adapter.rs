@@ -239,7 +239,7 @@ impl VectorAdapter for HnswAdapter {
                 metric: self.metric,
             };
             // Snapshot (internal, vector) pairs — the index is tiny here.
-            let mut pairs: Vec<(usize, Vec<f32>)> = Vec::new();
+            let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
             self.vectors.scan(|i, v| pairs.push((*i, v.clone())));
             let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
             for (internal, v) in pairs {

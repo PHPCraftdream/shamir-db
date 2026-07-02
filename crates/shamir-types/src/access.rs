@@ -480,7 +480,7 @@ impl ResourcePath {
     /// Ancestor containers, nearest first, up to and including `Root`
     /// (excludes `self`). The gate requires `Execute` (traverse) on each.
     pub fn ancestors(&self) -> Vec<ResourcePath> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(4);
         let mut cur = self.parent();
         while let Some(p) = cur {
             cur = p.parent();

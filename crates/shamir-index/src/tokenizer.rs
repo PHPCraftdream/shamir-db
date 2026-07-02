@@ -272,7 +272,7 @@ impl FullTokenizer {
 
 impl Tokenizer for FullTokenizer {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(4);
         for word in text.split_whitespace() {
             let lowered: Cow<'a, str> = if word
                 .bytes()

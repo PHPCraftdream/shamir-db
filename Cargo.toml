@@ -13,6 +13,9 @@ resolver = "2"
 # so the `crates/*` glob doesn't try to load it as a workspace member.
 exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
+[workspace.dependencies]
+captrack = { path = "D:/dev/rust/captrack", features = ["telemetry"] }
+
 [workspace.lints.clippy]
 absolute_paths = "warn"
 disallowed_methods = "warn"

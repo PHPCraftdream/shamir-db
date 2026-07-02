@@ -21,10 +21,20 @@ use shamir_db::shamir_db::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("benchdb").await;
+    // `create_db`/`add_repo` (System-owned) now persist ResourceMeta::owned_enforced
+    // (owner-only 0o700, "Strategy A") rather than the old open 0o777 default, so a
+    // non-System actor is denied on every ancestor by default. This bench exists to
+    // measure the *authorized* non-System traversal path (see module docs), so stamp
+    // User(42) as owner via the `_as` variants — that makes it PermClass::Owner with
+    // full rwx on db/repo/table, matching what `user_traverse_*` intends to exercise.
+    let bench_user = Actor::User(42);
+    shamir.create_db_as("benchdb", bench_user.clone()).await;
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("records"));
-    shamir.add_repo("benchdb", config).await.unwrap();
+    shamir
+        .add_repo_as("benchdb", config, bench_user)
+        .await
+        .unwrap();
     shamir
 }
 

@@ -341,7 +341,7 @@ impl Store for FjallStore {
                     };
                     let upper: Bound<Vec<u8>> = Bound::Unbounded;
 
-                    let mut items = Vec::new();
+                    let mut items = Vec::with_capacity(256);
                     let mut last_batch_key: Option<Vec<u8>> = None;
 
                     for guard in keyspace_clone.range((lower, upper)).take(batch_size) {
@@ -404,7 +404,7 @@ impl Store for FjallStore {
                     };
                     let upper: Bound<Vec<u8>> = Bound::Unbounded;
 
-                    let mut items = Vec::new();
+                    let mut items = Vec::with_capacity(256);
                     let mut last_batch_key: Option<Vec<u8>> = None;
 
                     // Range-seek + prefix boundary: take up to batch_size entries
