@@ -200,7 +200,7 @@ pub fn canonical_bytes<K>(value: &Value<K>) -> Vec<u8>
 where
     K: Eq + Hash + Ord + Clone + Serialize + std::fmt::Debug,
 {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(128);
     encode(value, &mut out, true);
     out
 }

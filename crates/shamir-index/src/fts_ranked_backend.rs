@@ -96,7 +96,7 @@ impl FtsRankedBackend {
     ) -> Result<Vec<(RecordId, FtsPostingValue)>, IndexError> {
         let prefix = self.prefix_for_token(th);
         let mut stream = self.store.scan_prefix_stream(Bytes::from(prefix), 1024);
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(16);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
             for (key_bytes, val_bytes) in batch {

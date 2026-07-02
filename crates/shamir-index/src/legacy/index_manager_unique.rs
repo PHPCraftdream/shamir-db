@@ -138,7 +138,7 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Vec::new();
         }
-        let mut keys = Vec::new();
+        let mut keys = Vec::with_capacity(4);
         for def in self.indexes_unique.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
@@ -341,7 +341,7 @@ impl IndexManager {
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_unique_index_from_records.
         let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
-        let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut records: Vec<(RecordId, InnerValue)> = Vec::with_capacity(4);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key_bytes, value_bytes) in batch {
@@ -375,7 +375,7 @@ impl IndexManager {
         let name_interned = index_def.name_interned;
         // Collect (record_id, index_key_bytes) for duplicate detection and bulk write.
         let mut key_counts: TMap<Bytes, usize> = new_map();
-        let mut entries: Vec<(RecordId, Bytes)> = Vec::new();
+        let mut entries: Vec<(RecordId, Bytes)> = Vec::with_capacity(16);
 
         for (record_id, value) in &records {
             if let Some(irk) =
@@ -625,7 +625,7 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(1024);
         for def in self.indexes_unique.iter() {
             for (rid, value) in items.clone() {
                 if let Some(irk) =

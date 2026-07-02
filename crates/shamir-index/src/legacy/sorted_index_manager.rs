@@ -293,7 +293,7 @@ impl SortedIndexManager {
             return Ok(Vec::new());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(4);
         for def in &defs {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
@@ -1086,7 +1086,7 @@ fn extract_and_encode(
     let Some(sr) = rec.scalar_at(&ipath) else {
         return Ok(None);
     };
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(16);
     match sr {
         ScalarRef::Null => sort_codec::encode_null(&mut buf),
         ScalarRef::Bool(b) => sort_codec::encode_bool(&mut buf, b),

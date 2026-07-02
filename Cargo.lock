@@ -84,6 +84,8 @@ dependencies = [
 [[package]]
 name = "aligned-vmem"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f149bbfaa5000cd123408c88a9770a0260b0951561c6e34fd968e7dcd55cf779"
 
 [[package]]
 name = "allocator-api2"
@@ -572,6 +574,32 @@ name = "byteview"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c53ba0f290bfc610084c05582d9c5d421662128fc69f4bf236707af6fd321b9"
+
+[[package]]
+name = "captrack"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "captrack-macros",
+ "ctor",
+ "dashmap",
+ "fastrand",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "scc",
+ "serde",
+ "serde_json",
+ "smallvec",
+]
+
+[[package]]
+name = "captrack-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
 
 [[package]]
 name = "cast"
@@ -1090,6 +1118,16 @@ dependencies = [
  "generic-array",
  "rand_core 0.6.4",
  "typenum",
+]
+
+[[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -3261,6 +3299,8 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 [[package]]
 name = "sefer-alloc"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe17c281742b7d6e0a37289e784195c7a34996a46d8f06193e1baf3ae115eda4"
 dependencies = [
  "aligned-vmem",
  "sefer-region",
@@ -3269,6 +3309,8 @@ dependencies = [
 [[package]]
 name = "sefer-region"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b017b215913f35e944b248a361221826ccbee6c0655b3dd9fb96bf28ef43f47c"
 dependencies = [
  "slotmap",
 ]
@@ -3509,6 +3551,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "captrack",
  "criterion",
  "dashmap",
  "fxhash",
@@ -3718,6 +3761,7 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
+ "captrack",
  "clap",
  "criterion",
  "dashmap",

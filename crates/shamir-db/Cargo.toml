@@ -67,8 +67,9 @@ tokio-rustls = "0.26"
 rcgen        = "0.13"
 
 # Bench allocator options (optional — gated by bench-sefer / bench-mimalloc features).
-sefer-alloc = { path = "D:/dev/rust/sefer-alloc", version = "0.2.0", features = ["production"], optional = true }
+sefer-alloc = { version = "0.2.1", features = ["production"], optional = true }
 mimalloc    = { version = "0.1", default-features = false, optional = true }
+captrack = { workspace = true }
 
 [dev-dependencies]
 bytes       = "1"

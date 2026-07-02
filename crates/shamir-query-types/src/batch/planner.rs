@@ -495,7 +495,7 @@ impl BatchPlanner {
             .filter_map(|(&k, &v)| if v == 0 { Some(k) } else { None })
             .collect();
 
-        let mut stages: Vec<Vec<String>> = Vec::new();
+        let mut stages: Vec<Vec<String>> = Vec::with_capacity(8);
 
         while !queue.is_empty() {
             // Collect the current wave, sort by original insertion order.

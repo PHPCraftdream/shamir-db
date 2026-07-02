@@ -356,7 +356,7 @@ impl MemBufferStore {
         }
 
         let mut sets: Vec<(RecordKey, Bytes)> = Vec::with_capacity(snapshots.len());
-        let mut removes: Vec<RecordKey> = Vec::new();
+        let mut removes: Vec<RecordKey> = Vec::with_capacity(4);
         for (k, slot) in &snapshots {
             match slot {
                 Slot::Live(v) => sets.push((k.clone(), v.clone())),

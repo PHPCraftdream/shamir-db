@@ -214,7 +214,7 @@ impl IndexManager {
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_index_from_records.
         let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
-        let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut records: Vec<(RecordId, InnerValue)> = Vec::with_capacity(128);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key_bytes, value_bytes) in batch {
@@ -246,8 +246,8 @@ impl IndexManager {
         let name_interned = index_def.name_interned;
         let mut count = 0usize;
 
-        let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
-        let mut cache_index_keys: Vec<Bytes> = Vec::new();
+        let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(131072);
+        let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(131072);
         for (record_id, value) in &records {
             if let Some(irk) =
                 build_index_key_from_record(false, name_interned, value, &index_def.paths)
@@ -376,7 +376,7 @@ impl IndexManager {
             return Ok(Vec::new());
         }
 
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
             if let Some(irk) =
                 build_index_key_from_record(false, def.name_interned, value, &def.paths)
@@ -426,7 +426,7 @@ impl IndexManager {
             return Ok(Vec::new());
         }
 
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(1024);
         for def in self.indexes.iter() {
             for (rid, value) in items.clone() {
                 if let Some(irk) =
@@ -480,7 +480,7 @@ impl IndexManager {
             return Ok(Vec::new());
         }
 
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
             let old_key =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths);
@@ -553,7 +553,7 @@ impl IndexManager {
             return Ok(Vec::new());
         }
 
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
             if let Some(irk) =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths)

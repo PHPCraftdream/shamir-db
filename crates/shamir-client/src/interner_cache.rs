@@ -130,7 +130,7 @@ impl FieldMap {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(4);
         let mut seen = TFxSet::default();
         for name in input {
             if seen.insert(name) && self.id_of(name).is_none() {

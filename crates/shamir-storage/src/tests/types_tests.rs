@@ -20,7 +20,7 @@ type RecordStream =
 /// WARNING: Only use in tests! Can consume all memory on large datasets.
 #[deprecated(since = "0.1.0", note = "FOR TESTS ONLY.")]
 pub async fn collect_stream(stream: RecordStream) -> DbResult<Vec<(RecordKey, Bytes)>> {
-    let mut all_records = Vec::new();
+    let mut all_records = Vec::with_capacity(128);
     let mut stream = stream;
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
