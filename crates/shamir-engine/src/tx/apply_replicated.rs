@@ -143,10 +143,11 @@ pub async fn apply_replicated(
     // the same function the leader used to resolve its own tokens — so a
     // leader's `RecordChange.table` resolves to the same `per_table_mvcc`
     // entry on the follower.
-    let mut by_table: shamir_collections::TFxMap<u64, Vec<KvOp>> =
+    // Group by table NAME (not token): the name is needed to force the
+    // per-table MvccStore attach below, and it uniquely determines the token.
+    let mut by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
         shamir_collections::TFxMap::default();
     for change in &event.changes {
-        let token = table_token_for(&change.table);
         let op = match change.op {
             ChangeOp::Put => {
                 let Some(value) = change.value.as_ref() else {
@@ -160,11 +161,11 @@ pub async fn apply_replicated(
             }
             ChangeOp::Delete => KvOp::Remove(change.key.clone()),
         };
-        by_table.entry(token).or_default().push(op);
+        by_table.entry(change.table.clone()).or_default().push(op);
     }
 
     let mut any_failed: Option<(u64, DbError)> = None;
-    for (token, ops) in by_table {
+    for (table_name, ops) in by_table {
         if any_failed.is_some() {
             // Stop on the first failure — a partial apply leaves the
             // follower with a prefix of the event's changes. The caller
@@ -172,11 +173,26 @@ pub async fn apply_replicated(
             // idempotently (last-write-wins at the data layer).
             break;
         }
+        let token = table_token_for(&table_name);
+        // Force the per-table MvccStore to ATTACH before we look it up.
+        // `create_table_context` (reached via `get_table`) is what registers
+        // the `per_table_mvcc` entry, and once attached ALL reads/writes for
+        // this table route through the version-log (`history`), never through
+        // `__data__`. A follower that applies replication BEFORE ever serving
+        // a read has no attachment yet; without this the write would take the
+        // base-store fallback and be invisible to a later MVCC read (the
+        // divergence R1-d had to work around with a throwaway SELECT).
+        // `get_table` is a no-op when the context already exists (OnceCell).
+        // NotFound = the table is not configured on this follower (dropped /
+        // never created) — fall through to the base-store branch, which warns
+        // and skips.
+        let _ = repo.get_table(&table_name).await;
         // Resolve the MvccStore the SAME way `apply_data_batch` /
         // `replay_v2_op` do: look up the per-table entry the
         // `RepoInstance` registers when the `TableManager` is
-        // instantiated. A missing entry means the table is unattached
-        // (system/test, no MVCC) — fall back to the direct base store.
+        // instantiated. A missing entry means the table is genuinely
+        // unattached (system/test, no MVCC) — fall back to the direct
+        // base store.
         let mvcc_found = repo
             .per_table_mvcc()
             .read_async(&token, |_, mvcc| std::sync::Arc::clone(mvcc))

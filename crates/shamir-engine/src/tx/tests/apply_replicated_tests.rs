@@ -241,3 +241,36 @@ async fn downstream_changefeed_reemit() {
     // The leader version 7 is NOT the downstream key.
     assert_ne!(rebroadcast.commit_version, event.commit_version);
 }
+
+// ── Test 6: apply before any read is MVCC-visible (MVCC-attach ordering) ──
+
+/// Regression for the MVCC-attach ordering risk surfaced by R1-d: a
+/// follower that applies a replicated event BEFORE ever serving a read had
+/// no per-table `MvccStore` attached, so `apply_replicated` took the
+/// base-store fallback and the write was invisible to a later MVCC read.
+/// `apply_replicated` now forces the attach (via `get_table`) before
+/// writing, so the record is visible even when apply is the very first
+/// touch of the table — NO prior `get_table` here on purpose.
+#[tokio::test]
+async fn apply_before_any_read_is_mvcc_visible() {
+    let follower = follower_repo();
+
+    // Apply FIRST — the follower has never read `items`, so its MvccStore
+    // is not yet attached at the top of apply_replicated.
+    let event = put_event("fresh", rid(3), 1);
+    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    assert!(
+        matches!(outcome, ApplyOutcome::Applied { .. }),
+        "apply on a fresh follower should succeed"
+    );
+
+    // Now read back through the MVCC path — the value must be visible
+    // (before the fix this returned NotFound because the write went to the
+    // base store while the read routes through `history`).
+    let follower_tbl = follower.get_table("items").await.unwrap();
+    let got = follower_tbl.get(rid(3)).await.unwrap();
+    assert!(
+        matches!(got, InnerValue::Str(ref s) if s == "fresh"),
+        "apply-before-read must be MVCC-visible: got {got:?}"
+    );
+}
