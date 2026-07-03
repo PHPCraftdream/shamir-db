@@ -12,3 +12,7 @@ pub use shamir_query_types::admin::{
     RemoveSchemaRuleOp, RenameDbOp, RenameGroupOp, RenameRepoOp, ResourceRef, SetBufferConfigOp,
     SetTableSchemaOp,
 };
+pub use shamir_query_types::admin::{
+    AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
+    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ReplStream, SubAction,
+};
