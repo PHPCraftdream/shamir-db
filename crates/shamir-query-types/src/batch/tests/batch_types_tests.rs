@@ -800,3 +800,187 @@ fn batch_request_result_encoding_id_roundtrip_via_msgpack() {
         "result_encoding must survive a msgpack round-trip"
     );
 }
+
+// ========================================================================
+// BatchOp::is_write() — follower read-only gate classification (PR1)
+// ========================================================================
+//
+// is_write() is the symmetric counterpart of is_admin(): it classifies
+// whether an op mutates data or persistent server state. See the doc on
+// `BatchOp::is_write` for the full rationale. These tests pin the
+// classification of representative variants so a future re-classification
+// is a conscious decision, not a silent regression.
+
+/// Build a minimal `BatchRequest` carrying a single `QueryEntry` whose `op`
+/// is `inner`. Used by the sub-batch recursion tests.
+fn single_query_batch(alias: &str, inner: BatchOp) -> BatchRequest {
+    let mut queries: TMap<String, QueryEntry> = TMap::default();
+    queries.insert(
+        alias.to_string(),
+        QueryEntry {
+            op: inner,
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    BatchRequest {
+        id: QueryValue::Int(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
+    }
+}
+
+#[test]
+fn is_write_read_is_false() {
+    let op = roundtrip_op(mpack!({"from": "users"}));
+    assert!(matches!(op, BatchOp::Read(_)));
+    assert!(!op.is_write());
+}
+
+#[test]
+fn is_write_insert_is_true() {
+    let op = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    assert!(matches!(op, BatchOp::Insert(_)));
+    assert!(op.is_write());
+}
+
+#[test]
+fn is_write_set_is_true() {
+    let op = roundtrip_op(mpack!({"set": "users", "key": {"id": 1_i64}, "value": {"name": "x"}}));
+    assert!(matches!(op, BatchOp::Set(_)));
+    assert!(op.is_write());
+}
+
+#[test]
+fn is_write_delete_is_true() {
+    let op = roundtrip_op(mpack!({
+        "delete_from": "users",
+        "where": {"op": "eq", "field": "id", "value": 1_i64}
+    }));
+    assert!(matches!(op, BatchOp::Delete(_)));
+    assert!(op.is_write());
+}
+
+#[test]
+fn is_write_create_user_is_true() {
+    let op = roundtrip_op(mpack!({"create_user": "alice", "password": "s3cr3t"}));
+    assert!(matches!(op, BatchOp::CreateUser(_)));
+    assert!(op.is_write());
+}
+
+#[test]
+fn is_write_describe_table_is_false() {
+    let op = roundtrip_op(mpack!({"describe_table": "users", "repo": "main"}));
+    assert!(matches!(op, BatchOp::DescribeTable(_)));
+    assert!(!op.is_write());
+}
+
+#[test]
+fn is_write_call_is_true() {
+    // WASM stored-procedure invocation is conservatively a write: a host
+    // function may mutate state.
+    let op = roundtrip_op(mpack!({"call": "my_proc", "repo": "main"}));
+    assert!(matches!(op, BatchOp::Call(_)));
+    assert!(op.is_write());
+}
+
+#[test]
+fn is_write_read_only_admin_introspection_is_false() {
+    // Spot-check the read-only admin/introspection variants.
+    let list = roundtrip_op(mpack!({"list": "databases"}));
+    assert!(matches!(list, BatchOp::List(_)));
+    assert!(!list.is_write());
+
+    let get_buf = roundtrip_op(mpack!({"get_buffer_config": "users", "repo": "main"}));
+    assert!(matches!(get_buf, BatchOp::GetBufferConfig(_)));
+    assert!(!get_buf.is_write());
+
+    let mig_status = roundtrip_op(mpack!({"migration_status": "m1"}));
+    assert!(matches!(mig_status, BatchOp::MigrationStatus(_)));
+    assert!(!mig_status.is_write());
+}
+
+#[test]
+fn is_write_subbatch_with_only_reads_is_false() {
+    let inner_read = roundtrip_op(mpack!({"from": "users"}));
+    let sub = SubBatchOp {
+        batch: single_query_batch("r", inner_read),
+        bind: TMap::default(),
+    };
+    let op = BatchOp::Batch(sub);
+    assert!(
+        !op.is_write(),
+        "sub-batch of pure reads must not be a write"
+    );
+}
+
+#[test]
+fn is_write_subbatch_with_read_and_insert_is_true() {
+    let inner_read = roundtrip_op(mpack!({"from": "users"}));
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let mut queries: TMap<String, QueryEntry> = TMap::default();
+    queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: inner_read,
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    queries.insert(
+        "i".to_string(),
+        QueryEntry {
+            op: inner_insert,
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    let batch = BatchRequest {
+        id: QueryValue::Int(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: TMap::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let op = BatchOp::Batch(SubBatchOp {
+        batch,
+        bind: TMap::default(),
+    });
+    assert!(
+        op.is_write(),
+        "sub-batch containing a write op must be a write"
+    );
+}
+
+#[test]
+fn is_write_nested_subbatch_depth_2_is_true() {
+    // Depth-2 nesting: outer sub-batch wraps an inner sub-batch that
+    // contains an Insert. The recursion must reach down two levels.
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let inner_batch = BatchOp::Batch(SubBatchOp {
+        batch: single_query_batch("i", inner_insert),
+        bind: TMap::default(),
+    });
+    let outer = BatchOp::Batch(SubBatchOp {
+        batch: single_query_batch("nested", inner_batch),
+        bind: TMap::default(),
+    });
+    assert!(
+        outer.is_write(),
+        "nested sub-batch (depth 2) with a write at the leaf must be a write"
+    );
+}

@@ -472,6 +472,114 @@ impl BatchOp {
                 | BatchOp::Batch(_)
         )
     }
+
+    /// Returns true if this operation mutates data or persistent server state.
+    ///
+    /// This is the gate used by read-only follower nodes (REPLICATION §4.3)
+    /// to reject writes: any op that is *not* a pure read/introspection is
+    /// classified as a write. `Call` (WASM stored-procedure invocation) is
+    /// conservatively treated as a write, since a host function may mutate
+    /// state.
+    ///
+    /// Unlike [`is_admin`](Self::is_admin) (which uses `matches!`), this is
+    /// an **exhaustive `match` with no wildcard arm** — adding a new
+    /// `BatchOp` variant will break compilation here and force the author
+    /// to explicitly classify it as read or write.
+    pub fn is_write(&self) -> bool {
+        match self {
+            // ----- pure reads / introspection (write = false) -------------
+            BatchOp::Read(_) => false,
+            BatchOp::List(_) => false,
+            BatchOp::GetBufferConfig(_) => false,
+            BatchOp::MigrationStatus(_) => false,
+            BatchOp::AccessTree(_) => false,
+            BatchOp::ListValidators(_) => false,
+            BatchOp::GetTableSchema(_) => false,
+            BatchOp::DescribeTable(_) => false,
+            BatchOp::InternerDump(_) => false,
+            BatchOp::ChangesSince(_) => false,
+            BatchOp::Subscribe(_) => false,
+            BatchOp::Unsubscribe(_) => false,
+
+            // ----- data mutations ----------------------------------------
+            BatchOp::Insert(_) => true,
+            BatchOp::Update(_) => true,
+            BatchOp::Set(_) => true,
+            BatchOp::Delete(_) => true,
+
+            // ----- DDL (catalog / schema / index) ------------------------
+            BatchOp::CreateDb(_) => true,
+            BatchOp::DropDb(_) => true,
+            BatchOp::CreateRepo(_) => true,
+            BatchOp::DropRepo(_) => true,
+            BatchOp::RenameRepo(_) => true,
+            BatchOp::RenameDb(_) => true,
+            BatchOp::CreateTable(_) => true,
+            BatchOp::DropTable(_) => true,
+            BatchOp::RenameTable(_) => true,
+            BatchOp::CreateIndex(_) => true,
+            BatchOp::DropIndex(_) => true,
+            BatchOp::RenameIndex(_) => true,
+            BatchOp::SetBufferConfig(_) => true,
+            BatchOp::AlterBufferConfig(_) => true,
+
+            // ----- migrations (engine swap) ------------------------------
+            BatchOp::StartMigration(_) => true,
+            BatchOp::CommitMigration(_) => true,
+            BatchOp::RollbackMigration(_) => true,
+
+            // ----- auth mutations ----------------------------------------
+            BatchOp::CreateUser(_) => true,
+            BatchOp::DropUser(_) => true,
+            BatchOp::CreateRole(_) => true,
+            BatchOp::DropRole(_) => true,
+            BatchOp::RenameRole(_) => true,
+            BatchOp::GrantRole(_) => true,
+            BatchOp::RevokeRole(_) => true,
+
+            // ----- access-control DDL ------------------------------------
+            BatchOp::Chmod(_) => true,
+            BatchOp::Chown(_) => true,
+            BatchOp::Chgrp(_) => true,
+            BatchOp::CreateGroup(_) => true,
+            BatchOp::DropGroup(_) => true,
+            BatchOp::RenameGroup(_) => true,
+            BatchOp::AddGroupMember(_) => true,
+            BatchOp::RemoveGroupMember(_) => true,
+
+            // ----- function / validator DDL ------------------------------
+            BatchOp::CreateFunction(_) => true,
+            BatchOp::DropFunction(_) => true,
+            BatchOp::RenameFunction(_) => true,
+            BatchOp::CreateValidator(_) => true,
+            BatchOp::DropValidator(_) => true,
+            BatchOp::RenameValidator(_) => true,
+            BatchOp::BindValidator(_) => true,
+            BatchOp::UnbindValidator(_) => true,
+
+            // ----- declarative schema DDL --------------------------------
+            BatchOp::SetTableSchema(_) => true,
+            BatchOp::AddSchemaRule(_) => true,
+            BatchOp::RemoveSchemaRule(_) => true,
+
+            // ----- function-folder DDL -----------------------------------
+            BatchOp::CreateFunctionFolder(_) => true,
+            BatchOp::RenameFunctionFolder(_) => true,
+
+            // ----- interner / temporal mutations -------------------------
+            BatchOp::InternerTouch(_) => true,
+            BatchOp::PurgeHistory(_) => true,
+            BatchOp::SetRetention(_) => true,
+
+            // ----- stored procedures -------------------------------------
+            // Conservative: a WASM host function may mutate state.
+            BatchOp::Call(_) => true,
+
+            // ----- nested sub-batch --------------------------------------
+            // Recursive: write if ANY nested op is a write.
+            BatchOp::Batch(sub) => sub.batch.queries.values().any(|qe| qe.op.is_write()),
+        }
+    }
 }
 
 impl From<ReadQuery> for BatchOp {
