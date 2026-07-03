@@ -74,19 +74,32 @@ pub struct SortedIndexManager {
     /// Each NUMA node owns its own cache-padded replica so reads never
     /// cross a socket interconnect. Writes copy-on-write on node 0 and
     /// mirror to all other nodes.
-    indexes: shamir_numa::NodeReplicated<Vec<SortedIndexDefinition>>,
+    ///
+    /// **Shared across clones via `Arc`.** `TableManager` (and hence this
+    /// manager) is cloned on every `get_table()` — the DDL path
+    /// (`create_sorted_index*` → `register`) and the read path
+    /// (`iter_indexes`) each hold their own `TableManager` clone. A
+    /// per-clone `NodeReplicated` (the previous design) desynced: a
+    /// `register` on the DDL clone COW-updated only that clone's replicas,
+    /// so the next read clone (snapshotted from the OnceCell primary, whose
+    /// replicas were never touched) saw zero indexes. Wrapping in `Arc`
+    /// makes every clone observe the same `NodeReplicated`, so any clone's
+    /// `register`/`drop_index`/`rename`/`intern_included_paths` is visible
+    /// to every other clone — mirroring how the sibling `IndexManager`
+    /// shares its `Arc<IndexInfo>` and how `TableManager` shares
+    /// `bindings_len`/`validator_bindings` through `Arc`.
+    indexes: Arc<shamir_numa::NodeReplicated<Vec<SortedIndexDefinition>>>,
 }
 
 impl Clone for SortedIndexManager {
     fn clone(&self) -> Self {
-        // NodeReplicated is not Clone (owns per-node resources). Build a fresh
-        // instance from the current node-local snapshot: take a Vec clone and
-        // hand it to a new NodeReplicated. Subsequent writes through either
-        // clone COW-replace their own replicas independently.
-        let snap = Arc::clone(&*self.indexes.load_local());
+        // Share the SAME NodeReplicated across clones so a register/drop on
+        // any clone is visible to every other clone (see the field doc for
+        // the read-after-write desync this prevents). A snapshot-copy here
+        // would silently drop DDL-registered indexes from later read clones.
         Self {
             info_store: Arc::clone(&self.info_store),
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), (*snap).clone()),
+            indexes: Arc::clone(&self.indexes),
         }
     }
 }
@@ -96,7 +109,10 @@ impl SortedIndexManager {
     pub async fn new(info_store: Arc<dyn Store>) -> DbResult<Self> {
         let m = Self {
             info_store,
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), Vec::new()),
+            indexes: Arc::new(shamir_numa::NodeReplicated::new(
+                shamir_numa::detect(),
+                Vec::new(),
+            )),
         };
         m.load().await?;
         Ok(m)
