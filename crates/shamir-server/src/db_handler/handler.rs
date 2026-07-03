@@ -148,6 +148,11 @@ pub struct ShamirDbHandler {
     /// (they must go to the leader). Default `ReadWrite`; until R1 this
     /// is always `ReadWrite` so behaviour is unchanged.
     pub(super) node_mode: NodeMode,
+    /// Leader epoch for VR-style fencing (REPLICATION §5.2). Every
+    /// `ReplResponse` carries this value so followers can detect a
+    /// regression (stale leader). Default `1`; persistence + bump-on-
+    /// promote land in R3.
+    pub(super) leader_epoch: u64,
     /// Phase B — registry of open interactive (multi-call) transactions,
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
@@ -165,6 +170,7 @@ impl ShamirDbHandler {
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
             node_mode: NodeMode::default(),
+            leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -178,6 +184,7 @@ impl ShamirDbHandler {
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
             node_mode: NodeMode::default(),
+            leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -206,6 +213,15 @@ impl ShamirDbHandler {
     /// Default is `ReadWrite`.
     pub fn with_node_mode(mut self, mode: NodeMode) -> Self {
         self.node_mode = mode;
+        self
+    }
+
+    /// Set the leader epoch for VR-style replication fencing (§5.2).
+    /// Every `ReplResponse` carries this value; followers track the max
+    /// epoch seen and reject a regression. Default `1`. Persistence and
+    /// bump-on-promote are R3; for now this is a static field.
+    pub fn with_leader_epoch(mut self, epoch: u64) -> Self {
+        self.leader_epoch = epoch;
         self
     }
 
@@ -272,14 +288,11 @@ impl RequestHandler for ShamirDbHandler {
                 DbRequest::TxRollback { db, tx_handle } => {
                     self.tx_rollback(session, &db, tx_handle).await
                 }
-                // R0-a: replication wire-types are defined but the leader-side
-                // handler lands in a later phase. Reject with a protocol error
-                // so the variant is exhaustively covered and the connection
-                // stays well-defined if a follower sends one early.
-                DbRequest::Repl(_) => DbResponse::Error {
-                    code: "not_supported".into(),
-                    message: "replication endpoint not yet implemented".into(),
-                },
+                // REPLICATION §5 — privileged pull-API (R0-b).
+                // Role + per-repo authorisation enforced inside `handle_repl`.
+                DbRequest::Repl(repl_req) => {
+                    DbResponse::Repl(self.handle_repl(session, repl_req).await)
+                }
             };
 
             rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
