@@ -8,5 +8,5 @@ mod tx_handlers;
 mod tests;
 
 pub use admin::AdminGlue;
-pub use config::{QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
+pub use config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 pub use handler::{DbRequest, DbResponse, ShamirDbHandler};

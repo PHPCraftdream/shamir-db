@@ -85,7 +85,7 @@ pub use shamir_query_types::wire::{DbRequest, DbResponse};
 use crate::tx_registry::TxRegistry;
 
 use super::admin::{check_destructive_hmacs, create_scram_user, AdminGlue};
-use super::config::{QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
+use super::config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
@@ -144,6 +144,10 @@ pub struct ShamirDbHandler {
     pub(super) query_limits: QueryLimitsCap,
     /// Server-side hard cap on per-interactive-tx staged bytes.
     pub(super) tx_limits: TxLimitsCap,
+    /// Read/write mode of this node. `ReadOnly` rejects client writes
+    /// (they must go to the leader). Default `ReadWrite`; until R1 this
+    /// is always `ReadWrite` so behaviour is unchanged.
+    pub(super) node_mode: NodeMode,
     /// Phase B — registry of open interactive (multi-call) transactions,
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
@@ -160,6 +164,7 @@ impl ShamirDbHandler {
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
+            node_mode: NodeMode::default(),
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -172,6 +177,7 @@ impl ShamirDbHandler {
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
+            node_mode: NodeMode::default(),
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -192,6 +198,14 @@ impl ShamirDbHandler {
     /// Set the per-interactive-tx staging byte cap.
     pub fn with_tx_limits(mut self, tx_limits: TxLimitsCap) -> Self {
         self.tx_limits = tx_limits;
+        self
+    }
+
+    /// Set the node read/write mode. A `ReadOnly` node rejects client
+    /// writes at the [`Self::execute`] gate (before they reach the engine).
+    /// Default is `ReadWrite`.
+    pub fn with_node_mode(mut self, mode: NodeMode) -> Self {
+        self.node_mode = mode;
         self
     }
 
@@ -309,6 +323,26 @@ impl ShamirDbHandler {
                     return DbResponse::Error {
                         code: "permission_denied".into(),
                         message: format!("query '{}' requires superuser (admin/auth op)", alias),
+                    };
+                }
+            }
+        }
+
+        // Read-only replica gate. A `ReadOnly` node rejects any client write
+        // — client writes must go to the leader. Read/introspection ops pass
+        // through. `is_write()` is exhaustive, so any new `BatchOp` variant
+        // is automatically classified and the author must decide read vs
+        // write. This is a no-op when `node_mode == ReadWrite` (the default).
+        // R1: include leader_addr for client redirect.
+        if self.node_mode == NodeMode::ReadOnly {
+            for (alias, entry) in &batch.queries {
+                if entry.op.is_write() {
+                    return DbResponse::Error {
+                        code: "read_only_replica".into(),
+                        message: format!(
+                            "query '{}' is a write; this node is a read-only replica",
+                            alias
+                        ),
                     };
                 }
             }
