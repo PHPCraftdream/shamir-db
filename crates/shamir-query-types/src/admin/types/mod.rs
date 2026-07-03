@@ -8,6 +8,7 @@ pub mod index_ops;
 pub mod interner_ops;
 pub mod list_ops;
 pub mod migration_ops;
+pub mod repl_ops;
 pub mod repo_ops;
 pub mod retention;
 pub mod schema_ops;
@@ -28,6 +29,12 @@ pub use interner_ops::{InternerDumpOp, InternerTouchOp};
 pub use list_ops::ListOp;
 pub use migration_ops::{
     CommitMigrationOp, MigrationStatusOp, RollbackMigrationOp, StartMigrationOp,
+};
+pub use repl_ops::{
+    AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
+    DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ListPublicationsOp,
+    ListSubscriptionsOp, ReplDirection, ReplMode, ReplScope, ReplStream, ReplicationStatusOp,
+    SubAction,
 };
 pub use repo_ops::{CreateRepoOp, DropRepoOp, RenameDbOp, RenameRepoOp};
 pub use retention::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention, SetRetentionOp};
