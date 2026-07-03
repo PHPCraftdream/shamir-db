@@ -1,6 +1,7 @@
 mod admin;
 mod config;
 mod handler;
+mod repl_handler;
 mod subscribe_handler;
 mod tx_handlers;
 
