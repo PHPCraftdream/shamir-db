@@ -96,6 +96,60 @@ pub struct Config {
     /// to default loopback `127.0.0.1:9090`. Set `addr = ""` to disable.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// Optional follower-replication settings. When the whole `replication`
+    /// block is omitted the field is `None` — the `SubscriptionSupervisor`
+    /// still boots (so a subscription added at runtime is picked up), but a
+    /// subscription that needs to reach an upstream cannot connect until
+    /// replicator credentials are configured. Omitting the block MUST NOT
+    /// break existing configs (that is why the field is optional).
+    #[serde(default)]
+    pub replication: Option<ReplicationConfig>,
+}
+
+/// Follower-side replication settings.
+///
+/// Minimal for 386-c: a single `replicator` account (username + password)
+/// used to authenticate every outbound upstream connection, plus an optional
+/// stable `node_id` advertised in `ReplHello` (§5.2). When `node_id` is
+/// omitted the boot path derives one from the machine hostname (falling back
+/// to a random id), so followers still have a stable-enough identity.
+///
+/// TODO(386-c): a per-subscription credential store (keyed by the
+/// subscription's `upstream`) replaces this single shared account — the
+/// current shape only supports one leader identity for all subscriptions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplicationConfig {
+    /// Stable follower identity advertised to leaders. When omitted the boot
+    /// path derives one from the hostname.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Username of the `replicator`-role account used to authenticate every
+    /// outbound upstream connection.
+    #[serde(default)]
+    pub replicator_user: Option<String>,
+    /// Password for [`Self::replicator_user`]. Without it (and a user) the
+    /// wire source cannot connect — reconcile logs and skips.
+    #[serde(default)]
+    pub replicator_password: Option<String>,
+    /// SNI hostname to present to the upstream's TLS layer. Defaults to
+    /// `localhost` (matching the self-signed cert the server generates).
+    #[serde(default = "default_repl_server_name")]
+    pub server_name: String,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            node_id: None,
+            replicator_user: None,
+            replicator_password: None,
+            server_name: default_repl_server_name(),
+        }
+    }
+}
+
+fn default_repl_server_name() -> String {
+    "localhost".to_string()
 }
 
 /// Observability HTTP server (`/healthz`, `/readyz`, `/metrics`, `/info`).

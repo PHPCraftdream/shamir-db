@@ -335,6 +335,38 @@ impl ServerLauncher {
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete;
 
+        // 5b. Follower-replication supervisor (386-c). Constructed here where
+        //     `shamir: Arc<ShamirDb>` is available. It is NOT reconciled yet —
+        //     the initial `reconcile()` runs AFTER all listeners are bound
+        //     (step 10b) so a follower does not dial an upstream before this
+        //     server is itself ready to serve. The prod factory builds a
+        //     `WireReplSource` (TLS+SCRAM) per subscription; when no replicator
+        //     credentials are configured the factory is a no-op stub and any
+        //     `active` subscription is logged-and-skipped by reconcile.
+        let repl_cfg = config.replication.clone().unwrap_or_default();
+        let node_id = repl_cfg.node_id.clone().unwrap_or_else(default_node_id);
+        let repl_factory = crate::replication::build_prod_factory(
+            repl_cfg.replicator_user.clone(),
+            repl_cfg.replicator_password.clone(),
+            repl_cfg.server_name.clone(),
+        )
+        .unwrap_or_else(|| {
+            // No creds → a stub factory that yields a never-connecting source.
+            // reconcile() still runs (idempotent, no-op for empty catalogues);
+            // a subscription with a real upstream simply cannot progress until
+            // credentials are configured. This keeps boot working with the
+            // default `replication = None`.
+            Arc::new(|_: &crate::replication::Subscription| {
+                Arc::new(crate::replication::prod_factory::NoopReplSource)
+                    as Arc<dyn crate::replication::ReplSource>
+            })
+        });
+        let supervisor = Arc::new(crate::replication::SubscriptionSupervisor::new(
+            shamir.clone(),
+            repl_factory,
+            node_id,
+        ));
+
         // Phase B Stage 6 — background reaper for interactive txs that
         // outlive their idle TTL or absolute deadline. Shares the root
         // shutdown token: `ServerHandle::shutdown` cancels it once and this
@@ -625,6 +657,35 @@ impl ServerLauncher {
             Some(handle)
         };
 
+        // 10b. Now that every listener is bound, converge the follower loops
+        //      to the declarative `system/subscriptions` catalogue and spawn a
+        //      periodic reconcile-tick so a subscription added/paused/dropped
+        //      at runtime is picked up without a restart. §5.6: the tick runs
+        //      on its own task and never blocks the server.
+        //
+        //      TODO(386-c): replace the fixed-interval tick with an
+        //      event-driven watch on the `system` repo changelog (table
+        //      `subscriptions`) → `supervisor.notify_changed()` on each event.
+        supervisor.reconcile().await;
+        let repl_supervisor_task = {
+            let sup = supervisor.clone();
+            let token = shutdown_token.clone();
+            let handle = tokio::spawn(async move {
+                let mut tick = tokio::time::interval(REPL_RECONCILE_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First tick fires immediately; skip it (we just reconciled).
+                tick.tick().await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => break,
+                        _ = tick.tick() => sup.reconcile().await,
+                    }
+                }
+            });
+            crate::server::server_handle::ReplSupervisorTask { handle }
+        };
+
         Ok(ServerHandle {
             bound_addrs,
             listener_tasks,
@@ -635,6 +696,8 @@ impl ServerLauncher {
             observability,
             meta_snapshot_task,
             interactive_tx_reaper,
+            repl_supervisor: supervisor,
+            repl_supervisor_task: Some(repl_supervisor_task),
             shamir,
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
@@ -914,6 +977,30 @@ async fn accept_loop_ws_browser(
             }
         }
     }
+}
+
+/// How often the follower supervisor re-reads the subscription catalogue and
+/// converges its running loops. Event-driven convergence is future work (see
+/// the TODO at the tick spawn site); until then this bounds the staleness of
+/// a subscription change to at most one interval.
+const REPL_RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Derive a stable-enough follower `node_id` when none is configured: the
+/// machine hostname (from `COMPUTERNAME` on Windows / `HOSTNAME` elsewhere),
+/// falling back to a boot-nanos-derived id. Advertised in `ReplHello` (§5.2).
+///
+/// No new dependency is pulled for hostname resolution — the env var is the
+/// portable minimal path; a config `node_id` is the recommended production
+/// setting anyway (this is only the unconfigured fallback).
+fn default_node_id() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let nanos = UnixNanos::now().as_u64();
+            format!("follower-{nanos:016x}")
+        })
 }
 
 fn kdf_from_config(c: &crate::config::KdfConfig) -> KdfParams {

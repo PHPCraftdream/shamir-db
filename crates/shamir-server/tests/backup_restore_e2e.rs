@@ -135,6 +135,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
         observability: ObservabilityConfig {
             addr: String::new(),
         },
+        replication: None,
     }
 }
 

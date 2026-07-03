@@ -71,6 +71,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
         },
+        replication: None,
     }
 }
 
