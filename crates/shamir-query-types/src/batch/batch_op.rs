@@ -5,16 +5,18 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, BindValidatorOp,
-    ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
-    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreateRepoOp,
-    CreateTableOp, CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp,
-    DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp,
-    InternerDumpOp, InternerTouchOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
+    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterSubscriptionOp,
+    BindValidatorOp, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
+    CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreatePublicationOp,
+    CreateReplicationProfileOp, CreateRepoOp, CreateSubscriptionOp, CreateTableOp,
+    CreateValidatorOp, DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
+    DropPublicationOp, DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp,
+    DropValidatorOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
+    ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
-    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp, StartMigrationOp,
-    UnbindValidatorOp,
+    ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
+    StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RenameRoleOp, RevokeRoleOp,
@@ -149,6 +151,24 @@ pub enum BatchOp {
 
     /// Cancel an active subscription.
     Unsubscribe(UnsubscribeOp),
+
+    // Replication DDL — publication/subscription model (REPLICATION.md §5.5).
+    // These are pure wire/serde DTOs: classification lives here, execution is
+    // a separate concern (R1-loop integration). Mutating ops (create/drop/
+    // alter) are write-classified; the list/status ops are read-only.
+    CreateReplicationProfile(CreateReplicationProfileOp),
+    DropReplicationProfile(DropReplicationProfileOp),
+    CreatePublication(CreatePublicationOp),
+    DropPublication(DropPublicationOp),
+    CreateSubscription(CreateSubscriptionOp),
+    DropSubscription(DropSubscriptionOp),
+    AlterSubscription(AlterSubscriptionOp),
+    /// List all publications defined on this node (read-only).
+    ListPublications(ListPublicationsOp),
+    /// List all subscriptions defined on this node (read-only).
+    ListSubscriptions(ListSubscriptionsOp),
+    /// Inspect runtime replication status (read-only).
+    ReplicationStatus(ReplicationStatusOp),
 }
 
 impl Serialize for BatchOp {
@@ -220,6 +240,16 @@ impl Serialize for BatchOp {
             BatchOp::Batch(op) => op.serialize(serializer),
             BatchOp::Subscribe(op) => op.serialize(serializer),
             BatchOp::Unsubscribe(op) => op.serialize(serializer),
+            BatchOp::CreateReplicationProfile(op) => op.serialize(serializer),
+            BatchOp::DropReplicationProfile(op) => op.serialize(serializer),
+            BatchOp::CreatePublication(op) => op.serialize(serializer),
+            BatchOp::DropPublication(op) => op.serialize(serializer),
+            BatchOp::CreateSubscription(op) => op.serialize(serializer),
+            BatchOp::DropSubscription(op) => op.serialize(serializer),
+            BatchOp::AlterSubscription(op) => op.serialize(serializer),
+            BatchOp::ListPublications(op) => op.serialize(serializer),
+            BatchOp::ListSubscriptions(op) => op.serialize(serializer),
+            BatchOp::ReplicationStatus(op) => op.serialize(serializer),
         }
     }
 }
@@ -377,6 +407,26 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<SetRetentionOp, _>(&bytes).map(BatchOp::SetRetention)
         } else if has("changes_since") {
             qv_to::<ChangesSinceOp, _>(&bytes).map(BatchOp::ChangesSince)
+        } else if has("create_replication_profile") {
+            qv_to::<CreateReplicationProfileOp, _>(&bytes).map(BatchOp::CreateReplicationProfile)
+        } else if has("drop_replication_profile") {
+            qv_to::<DropReplicationProfileOp, _>(&bytes).map(BatchOp::DropReplicationProfile)
+        } else if has("create_publication") {
+            qv_to::<CreatePublicationOp, _>(&bytes).map(BatchOp::CreatePublication)
+        } else if has("drop_publication") {
+            qv_to::<DropPublicationOp, _>(&bytes).map(BatchOp::DropPublication)
+        } else if has("create_subscription") {
+            qv_to::<CreateSubscriptionOp, _>(&bytes).map(BatchOp::CreateSubscription)
+        } else if has("drop_subscription") {
+            qv_to::<DropSubscriptionOp, _>(&bytes).map(BatchOp::DropSubscription)
+        } else if has("alter_subscription") {
+            qv_to::<AlterSubscriptionOp, _>(&bytes).map(BatchOp::AlterSubscription)
+        } else if has("list_publications") {
+            qv_to::<ListPublicationsOp, _>(&bytes).map(BatchOp::ListPublications)
+        } else if has("list_subscriptions") {
+            qv_to::<ListSubscriptionsOp, _>(&bytes).map(BatchOp::ListSubscriptions)
+        } else if has("replication_status") {
+            qv_to::<ReplicationStatusOp, _>(&bytes).map(BatchOp::ReplicationStatus)
         } else if has("call") {
             qv_to::<CallOp, _>(&bytes).map(BatchOp::Call)
         } else if has("batch") {
@@ -470,6 +520,16 @@ impl BatchOp {
                 | BatchOp::SetRetention(_)
                 | BatchOp::ChangesSince(_)
                 | BatchOp::Batch(_)
+                | BatchOp::CreateReplicationProfile(_)
+                | BatchOp::DropReplicationProfile(_)
+                | BatchOp::CreatePublication(_)
+                | BatchOp::DropPublication(_)
+                | BatchOp::CreateSubscription(_)
+                | BatchOp::DropSubscription(_)
+                | BatchOp::AlterSubscription(_)
+                | BatchOp::ListPublications(_)
+                | BatchOp::ListSubscriptions(_)
+                | BatchOp::ReplicationStatus(_)
         )
     }
 
@@ -500,6 +560,9 @@ impl BatchOp {
             BatchOp::ChangesSince(_) => false,
             BatchOp::Subscribe(_) => false,
             BatchOp::Unsubscribe(_) => false,
+            BatchOp::ListPublications(_) => false,
+            BatchOp::ListSubscriptions(_) => false,
+            BatchOp::ReplicationStatus(_) => false,
 
             // ----- data mutations ----------------------------------------
             BatchOp::Insert(_) => true,
@@ -570,6 +633,18 @@ impl BatchOp {
             BatchOp::InternerTouch(_) => true,
             BatchOp::PurgeHistory(_) => true,
             BatchOp::SetRetention(_) => true,
+
+            // ----- replication DDL (REPLICATION.md §5.5) ------------------
+            // Mutating ops: create/drop/alter — they change the system-store
+            // catalog (profiles / publications / subscriptions) and thus the
+            // persistent cluster topology.
+            BatchOp::CreateReplicationProfile(_) => true,
+            BatchOp::DropReplicationProfile(_) => true,
+            BatchOp::CreatePublication(_) => true,
+            BatchOp::DropPublication(_) => true,
+            BatchOp::CreateSubscription(_) => true,
+            BatchOp::DropSubscription(_) => true,
+            BatchOp::AlterSubscription(_) => true,
 
             // ----- stored procedures -------------------------------------
             // Conservative: a WASM host function may mutate state.

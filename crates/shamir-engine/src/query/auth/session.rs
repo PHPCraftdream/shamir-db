@@ -543,6 +543,23 @@ impl SessionPermissions {
             // Subscriptions — read-level access; actual table checks happen
             // when the subscription is activated.
             BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => (Action::Read, Resource::Global),
+
+            // Replication DDL (REPLICATION.md §5.5) — admin-cluster surface.
+            // Execution is a separate R1-loop concern; here we only classify
+            // for authorization. Mutating repl-DDL (create/drop/alter) is a
+            // global Alter; the read-only introspection ops (list/status)
+            // are a global Read — same split the rest of the admin surface
+            // uses (e.g. ListValidators vs BindValidator).
+            BatchOp::CreateReplicationProfile(_)
+            | BatchOp::DropReplicationProfile(_)
+            | BatchOp::CreatePublication(_)
+            | BatchOp::DropPublication(_)
+            | BatchOp::CreateSubscription(_)
+            | BatchOp::DropSubscription(_)
+            | BatchOp::AlterSubscription(_) => (Action::Alter, Resource::Global),
+            BatchOp::ListPublications(_)
+            | BatchOp::ListSubscriptions(_)
+            | BatchOp::ReplicationStatus(_) => (Action::Read, Resource::Global),
         }
     }
 }

@@ -3,6 +3,7 @@ use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::admin::{GroupRef, ResourceRef};
+use crate::admin::{ReplDirection, ReplMode, SubAction};
 use crate::batch::{
     BatchLimits, BatchOp, BatchRequest, BatchResponse, InternerDelta, QueryEntry, ResultEncoding,
     SubBatchOp, TransactionInfo,
@@ -983,4 +984,275 @@ fn is_write_nested_subbatch_depth_2_is_true() {
         outer.is_write(),
         "nested sub-batch (depth 2) with a write at the leaf must be a write"
     );
+}
+
+// ========================================================================
+// Replication DDL ops — BatchOp dispatch / serde / classification
+// (REPLICATION.md §5.5, REPLICATION-CLIENT-SURFACE.md §2-3)
+// ========================================================================
+//
+// These tests pin the wire discriminator of each repl-DDL op, the serde
+// round-trip of the nested enums (ReplDirection / ReplMode / SubAction),
+// and the is_admin / is_write classification of all 10 new BatchOp
+// variants. list_publications / list_subscriptions / replication_status
+// are read-only introspection (is_write == false); the create/drop/alter
+// ops are write-classified.
+
+#[test]
+fn create_replication_profile_serde_and_classify() {
+    let op = roundtrip_op(mpack!({
+        "create_replication_profile": "cluster",
+        "streams": [
+            {
+                "scope": {"db": "app", "repo": "main", "table": "users"},
+                "direction": "pull",
+                "mode": "read_only"
+            },
+            {
+                // db-only scope — repo/table omitted.
+                "scope": {"db": "system"},
+                "direction": "both",
+                "mode": "read_write"
+            }
+        ]
+    }));
+    match &op {
+        BatchOp::CreateReplicationProfile(c) => {
+            assert_eq!(c.create_replication_profile, "cluster");
+            assert_eq!(c.streams.len(), 2);
+            // First stream — full scope + Pull + ReadOnly.
+            let s0 = &c.streams[0];
+            assert_eq!(s0.scope.db, "app");
+            assert_eq!(s0.scope.repo.as_deref(), Some("main"));
+            assert_eq!(s0.scope.table.as_deref(), Some("users"));
+            assert_eq!(s0.direction, ReplDirection::Pull);
+            assert_eq!(s0.mode, ReplMode::ReadOnly);
+            // Second stream — db-only scope + Both + ReadWrite.
+            let s1 = &c.streams[1];
+            assert_eq!(s1.scope.db, "system");
+            assert!(s1.scope.repo.is_none());
+            assert!(s1.scope.table.is_none());
+            assert_eq!(s1.direction, ReplDirection::Both);
+            assert_eq!(s1.mode, ReplMode::ReadWrite);
+        }
+        _ => panic!("expected CreateReplicationProfile"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write(), "create_replication_profile mutates catalog");
+    assert!(op.table_ref().is_none());
+}
+
+#[test]
+fn drop_replication_profile_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"drop_replication_profile": "cluster"}));
+    match &op {
+        BatchOp::DropReplicationProfile(d) => {
+            assert_eq!(d.drop_replication_profile, "cluster");
+        }
+        _ => panic!("expected DropReplicationProfile"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn create_publication_serde_and_classify() {
+    let op = roundtrip_op(mpack!({
+        "create_publication": "pub_app",
+        "scopes": [
+            {"db": "app", "repo": "main"},
+            {"db": "system", "repo": "system", "table": "users"}
+        ]
+    }));
+    match &op {
+        BatchOp::CreatePublication(c) => {
+            assert_eq!(c.create_publication, "pub_app");
+            assert_eq!(c.scopes.len(), 2);
+            assert_eq!(c.scopes[0].db, "app");
+            assert_eq!(c.scopes[0].repo.as_deref(), Some("main"));
+            assert!(c.scopes[0].table.is_none());
+            assert_eq!(c.scopes[1].db, "system");
+            assert_eq!(c.scopes[1].table.as_deref(), Some("users"));
+        }
+        _ => panic!("expected CreatePublication"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn drop_publication_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"drop_publication": "pub_app"}));
+    match &op {
+        BatchOp::DropPublication(d) => assert_eq!(d.drop_publication, "pub_app"),
+        _ => panic!("expected DropPublication"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn create_subscription_serde_and_classify() {
+    let op = roundtrip_op(mpack!({
+        "create_subscription": "sub1",
+        "upstream": "tls://leader.cluster:7432",
+        "publication": "pub_app",
+        "profile": "cluster"
+    }));
+    match &op {
+        BatchOp::CreateSubscription(c) => {
+            assert_eq!(c.create_subscription, "sub1");
+            assert_eq!(c.upstream, "tls://leader.cluster:7432");
+            assert_eq!(c.publication, "pub_app");
+            assert_eq!(c.profile, "cluster");
+        }
+        _ => panic!("expected CreateSubscription"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn drop_subscription_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"drop_subscription": "sub1"}));
+    match &op {
+        BatchOp::DropSubscription(d) => assert_eq!(d.drop_subscription, "sub1"),
+        _ => panic!("expected DropSubscription"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn alter_subscription_pause_serde_and_classify() {
+    let op = roundtrip_op(mpack!({
+        "alter_subscription": "sub1",
+        "action": "pause"
+    }));
+    match &op {
+        BatchOp::AlterSubscription(a) => {
+            assert_eq!(a.alter_subscription, "sub1");
+            assert_eq!(a.action, SubAction::Pause);
+        }
+        _ => panic!("expected AlterSubscription"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn alter_subscription_set_profile_roundtrips_payload() {
+    let op = roundtrip_op(mpack!({
+        "alter_subscription": "sub2",
+        "action": {"set_profile": "edge"}
+    }));
+    match &op {
+        BatchOp::AlterSubscription(a) => {
+            assert_eq!(a.alter_subscription, "sub2");
+            assert_eq!(a.action, SubAction::SetProfile("edge".to_string()));
+        }
+        _ => panic!("expected AlterSubscription"),
+    }
+    assert!(op.is_admin());
+    assert!(op.is_write());
+}
+
+#[test]
+fn alter_subscription_resume_roundtrips_payload() {
+    let op = roundtrip_op(mpack!({
+        "alter_subscription": "sub3",
+        "action": "resume"
+    }));
+    match &op {
+        BatchOp::AlterSubscription(a) => assert_eq!(a.action, SubAction::Resume),
+        _ => panic!("expected AlterSubscription"),
+    }
+}
+
+#[test]
+fn list_publications_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"list_publications": true}));
+    assert!(matches!(op, BatchOp::ListPublications(_)));
+    assert!(op.is_admin());
+    assert!(
+        !op.is_write(),
+        "list_publications is read-only introspection"
+    );
+}
+
+#[test]
+fn list_subscriptions_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"list_subscriptions": true}));
+    assert!(matches!(op, BatchOp::ListSubscriptions(_)));
+    assert!(op.is_admin());
+    assert!(!op.is_write());
+}
+
+#[test]
+fn replication_status_serde_and_classify() {
+    let op = roundtrip_op(mpack!({"replication_status": true}));
+    assert!(matches!(op, BatchOp::ReplicationStatus(_)));
+    assert!(op.is_admin());
+    assert!(
+        !op.is_write(),
+        "replication_status is read-only introspection"
+    );
+}
+
+/// Pin the snake_case wire shape of the nested enums so a future rename is
+/// a conscious decision, not a silent break.
+#[test]
+fn repl_nested_enums_wire_shape() {
+    // ReplDirection
+    let bytes = rmp_serde::to_vec_named(&ReplDirection::Pull).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("pull"));
+    let bytes = rmp_serde::to_vec_named(&ReplDirection::Push).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("push"));
+    let bytes = rmp_serde::to_vec_named(&ReplDirection::Both).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("both"));
+
+    // ReplMode
+    let bytes = rmp_serde::to_vec_named(&ReplMode::ReadOnly).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("read_only"));
+    let bytes = rmp_serde::to_vec_named(&ReplMode::ReadWrite).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("read_write"));
+
+    // SubAction — unit variants render as bare strings; the SetProfile
+    // payload renders as a single-key map.
+    let bytes = rmp_serde::to_vec_named(&SubAction::Pause).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("pause"));
+    let bytes = rmp_serde::to_vec_named(&SubAction::Resume).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(qv.as_str(), Some("resume"));
+    let bytes = rmp_serde::to_vec_named(&SubAction::SetProfile("p".to_string())).unwrap();
+    let qv: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(
+        qv.get("set_profile").and_then(QueryValue::as_str),
+        Some("p")
+    );
+}
+
+/// `ReplDirection` / `ReplMode` default to the R1 values (Pull / ReadOnly).
+/// A stream declared without explicit direction/mode must deserialize to
+/// those defaults.
+#[test]
+fn repl_stream_defaults_to_pull_readonly() {
+    let op = roundtrip_op(mpack!({
+        "create_replication_profile": "defaults",
+        "streams": [{"scope": {"db": "app"}}]
+    }));
+    match &op {
+        BatchOp::CreateReplicationProfile(c) => {
+            let s = &c.streams[0];
+            assert_eq!(s.direction, ReplDirection::Pull);
+            assert_eq!(s.mode, ReplMode::ReadOnly);
+        }
+        _ => panic!("expected CreateReplicationProfile"),
+    }
 }
