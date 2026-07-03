@@ -60,7 +60,20 @@ pub struct TableManager {
     /// for an `ArcSwap::load_full()` Arc-clone. Updated atomically in
     /// `add_validator_binding`/`remove_validator_binding` after the ArcSwap
     /// store (Release ordering — pairs with Acquire in the fast-skip load).
-    pub(super) bindings_len: std::sync::atomic::AtomicUsize,
+    ///
+    /// **Shared across clones via `Arc`** — `TableManager` is cloned
+    /// value-by-`get_table().cloned()` on every consumer (DDL bind path
+    /// AND the write path each get their own copy). A per-instance
+    /// `AtomicUsize` would desync: `add_validator_binding` on a bind-path
+    /// clone would bump only that clone's counter, while the next
+    /// write-path clone (snapshotted from the OnceCell primary, whose
+    /// counter was never bumped) still sees 0 → fast-skip → validators
+    /// silently never fire. Wrapping in `Arc` makes all clones observe the
+    /// same single counter, restoring the intended invariant that any
+    /// clone's `add`/`remove` is visible to every other clone's fast-skip
+    /// load. This mirrors how `validator_bindings` itself stays shared
+    /// through `Arc<ArcSwap<..>>`.
+    pub(super) bindings_len: Arc<std::sync::atomic::AtomicUsize>,
     /// Handle to the global validator registry (S3). `None` for system
     /// tables / tests that don't need validation. The S3 write path
     /// reads this to resolve `ValidatorBinding.validator_id` to a
@@ -102,7 +115,6 @@ pub(super) const AUTO_VERIFY_EVERY_N_WRITES: u64 = 1024;
 
 impl Clone for TableManager {
     fn clone(&self) -> Self {
-        use std::sync::atomic::Ordering;
         Self {
             name: self.name.clone(),
             table: Arc::clone(&self.table),
@@ -118,11 +130,12 @@ impl Clone for TableManager {
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
-            // Mirror the current bindings_len value so the clone always
-            // reflects the same fast-skip state as the original.
-            bindings_len: std::sync::atomic::AtomicUsize::new(
-                self.bindings_len.load(Ordering::Acquire),
-            ),
+            // Clone shares the SAME Arc<AtomicUsize> so any clone's
+            // add/remove_validator_binding (which stores Release) is visible
+            // to every clone's fast-skip load (Acquire). A snapshot-copy
+            // here would desync the primary from bind-path clones (see the
+            // field doc on `bindings_len` for the regression this caused).
+            bindings_len: Arc::clone(&self.bindings_len),
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
             scalar_resolver: Arc::clone(&self.scalar_resolver),
@@ -181,7 +194,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
-            bindings_len: std::sync::atomic::AtomicUsize::new(initial_bindings_len),
+            bindings_len: Arc::new(std::sync::atomic::AtomicUsize::new(initial_bindings_len)),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
@@ -321,7 +334,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            bindings_len: std::sync::atomic::AtomicUsize::new(0),
+            bindings_len: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             validator_registry: None,
             changefeed: None,
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
