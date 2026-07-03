@@ -20,8 +20,8 @@ use tokio::sync::oneshot;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit::{maybe_crash, release_pessimistic_locks, TxError};
-use crate::tx::commit_phases::promote_vectors;
-use crate::tx::materialize::{materialize, post_publish_cleanup};
+use crate::tx::finalize::finalize_sync_post_publish;
+use crate::tx::materialize::materialize;
 use crate::tx::pre_commit::pre_commit_locked_validate;
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
@@ -397,17 +397,15 @@ pub(super) async fn run_leader(
             g.disarm();
         }
         drop(work.cell_guards);
-        let mat = post_publish_cleanup(post_publish, repo, gate).await;
-        if mat == MaterializationState::Deferred {
-            repo.tx_metrics().on_tx_materialization_deferred();
-        }
-        // D2 P1d-2b CUTOVER: inline `gate.mark_durable` removed — the ack-path
-        // wrote only the overlay; durability + WAL truncation are the drainer's
-        // job now. Wake it after each survivor publishes so the batch's tail
-        // drains promptly.
-        repo.drainer().wake();
-        repo.emit_changefeed_event(work.changefeed_event).await;
-        promote_vectors(&work.tx, repo, work.commit_version).await;
+        let mat = finalize_sync_post_publish(
+            &work.tx,
+            post_publish,
+            work.changefeed_event,
+            repo,
+            gate,
+            work.commit_version,
+        )
+        .await;
 
         if work.is_leader {
             leader_version = work.commit_version;
@@ -492,15 +490,15 @@ async fn run_single_tx(
     }
     drop(cell_guards);
 
-    let materialization = post_publish_cleanup(post_publish, repo, gate).await;
-    if materialization == MaterializationState::Deferred {
-        repo.tx_metrics().on_tx_materialization_deferred();
-    }
-    // D2 P1d-2b CUTOVER: inline `gate.mark_durable` removed — durability + WAL
-    // truncation moved to the background drainer. Wake it after publish.
-    repo.drainer().wake();
-    repo.emit_changefeed_event(changefeed_event).await;
-    promote_vectors(&tx, repo, commit_version).await;
+    let materialization = finalize_sync_post_publish(
+        &tx,
+        post_publish,
+        changefeed_event,
+        repo,
+        gate,
+        commit_version,
+    )
+    .await;
 
     Ok(TxOutcome {
         tx_id: tx.tx_id.0,
