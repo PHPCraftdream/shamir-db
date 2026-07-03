@@ -17,6 +17,7 @@
 pub use shamir_query_types::admin::Retention;
 pub use shamir_query_types::admin::{BufferConfigDto as BufConfig, BufferConfigPatch as BufPatch};
 pub use shamir_query_types::admin::{GroupRef, ResourceRef};
+pub use shamir_query_types::admin::{ReplDirection, ReplMode, ReplScope, ReplStream, SubAction};
 pub use shamir_query_types::WriteOp;
 
 // ============================================================================
@@ -47,6 +48,7 @@ mod rename_db;
 mod rename_index;
 mod rename_repo;
 mod rename_table;
+mod replication;
 mod retention;
 mod schema;
 mod validator;
@@ -72,6 +74,7 @@ pub use rename_db::*;
 pub use rename_index::*;
 pub use rename_repo::*;
 pub use rename_table::*;
+pub use replication::*;
 pub use retention::*;
 pub use schema::*;
 pub use validator::*;
