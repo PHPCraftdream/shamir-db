@@ -38,6 +38,15 @@ impl SessionPermissions {
             roles,
         }
     }
+
+    /// Returns true if this session holds the named role.
+    ///
+    /// Used by privileged gates that key off a specific role rather than the
+    /// blanket `is_superuser` flag — e.g. `require_role(session,
+    /// "replicator")` for the replication pull-API (REPLICATION §5.4, PR2).
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
 }
 
 /// Pending `changePassword` challenge state (spec §12.5).
