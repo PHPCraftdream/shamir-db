@@ -9,8 +9,10 @@
 //! without one depending on the other.
 
 pub mod db_message;
+pub mod repl;
 
 #[cfg(test)]
 mod tests;
 
 pub use db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+pub use repl::{ReplRepoInfo, ReplRequest, ReplResponse};
