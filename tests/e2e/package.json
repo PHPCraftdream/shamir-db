@@ -10,6 +10,7 @@
     "test": "node e2e.test.js"
   },
   "dependencies": {
+    "@msgpack/msgpack": "^3.0.0",
     "shamir-client": "file:../../crates/shamir-client-node"
   }
 }

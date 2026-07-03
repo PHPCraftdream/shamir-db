@@ -40,6 +40,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use shamir_client as core;
+use shamir_query_types::wire::repl::ReplRequest;
 
 // --------------------------------------------------------------------------
 // Connect options — JS sees a plain object with camelCase fields.
@@ -205,6 +206,25 @@ impl ShamirClient {
         let response = client.execute(&db, batch_req).await.map_err(to_napi)?;
         let bytes = rmp_serde::to_vec_named(&response)
             .map_err(|e| Error::from_reason(format!("encode response: {e}")))?;
+        Ok(Buffer::from(bytes))
+    }
+
+    /// Privileged replication pull-API (REPLICATION §5). Takes a msgpack
+    /// `ReplRequest` Buffer, returns a msgpack `ReplResponse` Buffer. The
+    /// session must hold the `replicator` role (or be superuser).
+    #[napi]
+    pub async fn repl(&self, req: Buffer) -> Result<Buffer> {
+        // FFI boundary — raw serde is the sanctioned exception (CLAUDE.md):
+        // we deserialize a request that ARRIVED as bytes, not construct a query.
+        let repl_req: ReplRequest = rmp_serde::from_slice(&req[..])
+            .map_err(|e| Error::from_reason(format!("invalid repl payload: {e}")))?;
+        let guard = self.inner.lock().await;
+        let client = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("client closed"))?;
+        let resp = client.repl(repl_req).await.map_err(to_napi)?;
+        let bytes = rmp_serde::to_vec_named(&resp)
+            .map_err(|e| Error::from_reason(format!("encode repl response: {e}")))?;
         Ok(Buffer::from(bytes))
     }
 

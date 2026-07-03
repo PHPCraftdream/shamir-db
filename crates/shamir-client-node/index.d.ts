@@ -67,6 +67,14 @@ export class ShamirClient {
   execute(db: string, batch: object): Promise<object>;
 
   /**
+   * Privileged replication pull-API (REPLICATION §5). Takes a msgpack-
+   * encoded `ReplRequest` Buffer, returns a msgpack-encoded
+   * `ReplResponse` Buffer. The session must hold the `replicator` role
+   * (or be superuser).
+   */
+  repl(req: Buffer): Promise<Buffer>;
+
+  /**
    * Create a new SCRAM-authenticatable user. Requires the current
    * session to belong to a superuser. Returns the stable 16-byte
    * `user_id` as a Buffer.
