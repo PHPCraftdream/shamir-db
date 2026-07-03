@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::batch::{BatchRequest, BatchResponse, TransactionInfo};
+use crate::wire::repl::{ReplRequest, ReplResponse};
 
 /// Current query-language version. Bumped when the on-the-wire
 /// `BatchRequest` schema changes incompatibly. The server keeps a
@@ -111,6 +112,12 @@ pub enum DbRequest {
         /// The handle to roll back.
         tx_handle: u64,
     },
+    /// Privileged replication request (leader-facing). Carries the
+    /// independently-versioned replication sub-protocol (REPLICATION §5,
+    /// PR5) — keeps the client `DbRequest` surface flat while letting
+    /// replication evolve without bumping the query-language version.
+    /// R0: only `Hello` + `Pull` (§5.3).
+    Repl(ReplRequest),
 }
 
 /// Application-layer DB response.
@@ -172,4 +179,8 @@ pub enum DbResponse {
         /// The handle that was rolled back.
         tx_handle: u64,
     },
+    /// Privileged replication reply (mirrors [`DbRequest::Repl`]). The
+    /// nested [`ReplResponse`] carries `leader_epoch` on every variant for
+    /// VR-style fencing (§5.2).
+    Repl(ReplResponse),
 }

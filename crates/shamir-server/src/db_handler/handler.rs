@@ -272,6 +272,14 @@ impl RequestHandler for ShamirDbHandler {
                 DbRequest::TxRollback { db, tx_handle } => {
                     self.tx_rollback(session, &db, tx_handle).await
                 }
+                // R0-a: replication wire-types are defined but the leader-side
+                // handler lands in a later phase. Reject with a protocol error
+                // so the variant is exhaustively covered and the connection
+                // stays well-defined if a follower sends one early.
+                DbRequest::Repl(_) => DbResponse::Error {
+                    code: "not_supported".into(),
+                    message: "replication endpoint not yet implemented".into(),
+                },
             };
 
             rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
