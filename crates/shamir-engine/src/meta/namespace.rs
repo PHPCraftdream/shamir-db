@@ -50,6 +50,16 @@ pub enum MetaKey {
     /// Per-table validator bindings (`PersistedValidators`).
     /// Stored in the info-twin alongside `Indexes`.
     Validators,
+
+    /// Durable per-(db,repo) follower replication bookmark (`u64 BE` body).
+    ///
+    /// The highest LEADER `commit_version` applied on this follower repo.
+    /// Stored in the per-repo `__tx__` info-store via the same envelope
+    /// mechanism as `LastCommittedVersion` / `NextTxId`. R1-b's
+    /// [`crate::meta::repl_bookmark`] reads/writes it; the follower feeds it
+    /// back into [`crate::tx::apply_replicated`] as `applied_watermark` for
+    /// O(1) idempotent re-delivery gating.
+    ReplicationBookmark,
 }
 
 impl MetaKey {
@@ -70,6 +80,7 @@ impl MetaKey {
             MetaKey::LastCommittedVersion => "_t.lcv",
             MetaKey::NextTxId => "_t.nti",
             MetaKey::Validators => "_m.val",
+            MetaKey::ReplicationBookmark => "_t.rbm",
         }
     }
 
