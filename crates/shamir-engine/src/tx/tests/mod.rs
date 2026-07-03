@@ -1,4 +1,5 @@
 pub mod acceptance_tests;
+pub mod apply_replicated_tests;
 pub mod backpressure_gc_tests;
 pub mod commit_async_visibility_tests;
 pub mod commit_phase5_defer_tests;

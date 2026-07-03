@@ -751,6 +751,33 @@ impl RepoInstance {
         crate::tx::commit_tx(tx, self).await
     }
 
+    /// cancel-safe: NO — multi-step state mutation (local version
+    /// allocation + per-table raw writes + changefeed emit). The raw-apply
+    /// primitive itself (`MvccStore::apply_committed_ops`) is last-write-
+    /// wins idempotent, so a re-delivery of the same event after a crash
+    /// converges as long as the caller does NOT advance its
+    /// `applied_watermark` past an event that did not return
+    /// [`ApplyOutcome::Applied`].
+    ///
+    /// R1-a — apply a single leader-emitted [`ChangelogEvent`] to this
+    /// follower repo as a trusted raw write. Wrapper around
+    /// [`crate::tx::apply_replicated`]. See its docs for the version-
+    /// allocation model, idempotency contract, and finalize-tail reuse
+    /// rationale.
+    ///
+    /// `applied_watermark` is the highest leader `commit_version` the
+    /// caller has durably recorded as applied (R1-b owns the durable
+    /// bookmark). The method performs an O(1) comparison and short-
+    /// circuits to [`ApplyOutcome::Skipped`] without touching the store
+    /// when `event.commit_version <= applied_watermark`.
+    pub async fn apply_replicated(
+        &self,
+        event: &shamir_tx::ChangelogEvent,
+        applied_watermark: u64,
+    ) -> DbResult<crate::tx::ApplyOutcome> {
+        crate::tx::apply_replicated(self, event, applied_watermark).await
+    }
+
     /// Run a single non-tx write as an implicit single-op BATCH transaction.
     ///
     /// F4b-1 keystone of "everything is a transaction": instead of taking the
