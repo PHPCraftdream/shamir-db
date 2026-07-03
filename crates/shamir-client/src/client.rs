@@ -38,6 +38,7 @@ use shamir_transport_tcp::framing::{
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
+use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::error::ClientError;
@@ -746,6 +747,25 @@ impl Client {
             DbResponse::UserCreated { user_id, .. } => Ok(user_id),
             other => Err(ClientError::Protocol(format!(
                 "expected UserCreated, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Replication pull-API (REPLICATION §5.1/§5.2/§5.4). Sends a
+    /// [`DbRequest::Repl`] carrying a [`ReplRequest`] (`Hello` or `Pull`) and
+    /// returns the matched [`ReplResponse`].
+    ///
+    /// This is the thin wire entry point used by the wire-side
+    /// `ReplSource` implementation (R1-c) and by external CDC consumers that
+    /// speak the privileged replication protocol. The caller must hold a
+    /// session with the `replicator` role (or be a superuser) — the server
+    /// enforces this inside `handle_repl` and returns
+    /// `ReplResponse::Error { code: "bad_role" }` otherwise.
+    pub async fn repl(&self, req: ReplRequest) -> Result<ReplResponse, ClientError> {
+        match self.roundtrip(&DbRequest::Repl(req)).await? {
+            DbResponse::Repl(r) => Ok(r),
+            other => Err(ClientError::Protocol(format!(
+                "expected Repl, got {other:?}"
             ))),
         }
     }
