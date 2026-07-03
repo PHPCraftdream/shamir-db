@@ -100,6 +100,20 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::PurgeHistory(_) => self.handle_purge_history(op).await,
             op @ BatchOp::ChangesSince(_) => self.handle_changes_since(op).await,
 
+            // ── Replication DDL (386-a) ────────────────────────────────
+            BatchOp::CreateReplicationProfile(op) => {
+                self.handle_create_replication_profile(op).await
+            }
+            BatchOp::DropReplicationProfile(op) => self.handle_drop_replication_profile(op).await,
+            BatchOp::CreatePublication(op) => self.handle_create_publication(op).await,
+            BatchOp::DropPublication(op) => self.handle_drop_publication(op).await,
+            BatchOp::CreateSubscription(op) => self.handle_create_subscription(op).await,
+            BatchOp::DropSubscription(op) => self.handle_drop_subscription(op).await,
+            BatchOp::AlterSubscription(op) => self.handle_alter_subscription(op).await,
+            BatchOp::ListPublications(_) => self.handle_list_publications().await,
+            BatchOp::ListSubscriptions(_) => self.handle_list_subscriptions().await,
+            BatchOp::ReplicationStatus(_) => self.handle_replication_status().await,
+
             // ── Interner (Stage 5d) ────────────────────────────────────
             op @ BatchOp::InternerDump(_) => self.handle_interner_dump(op).await,
             op @ BatchOp::InternerTouch(_) => self.handle_interner_touch(op).await,

@@ -42,6 +42,16 @@ const TABLE_VALIDATORS: &str = "validators";
 /// (e.g. `"reports/daily"`). Key is the slash-joined path. Persists
 /// ResourceMeta (owner/group/mode) so folder ACLs survive a restart (#118).
 const TABLE_FUNCTION_FOLDERS: &str = "function_folders";
+/// Replication profile catalogue: one record per named profile. Keyed by
+/// `name`; carries the profile's `streams` bundle (386-a).
+const TABLE_REPLICATION_PROFILES: &str = "replication_profiles";
+/// Publication catalogue: one record per publication. Keyed by `name`;
+/// carries the published `scopes` (386-a).
+const TABLE_PUBLICATIONS: &str = "publications";
+/// Subscription catalogue: one record per subscription. Keyed by `name`;
+/// carries `upstream`/`publication`/`profile`/`state` (386-a). The follower
+/// pull-loop that consumes these is 386-b.
+const TABLE_SUBSCRIPTIONS: &str = "subscriptions";
 
 /// Configuration for the system store.
 #[derive(Clone)]
@@ -94,7 +104,10 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_FUNCTIONS))
             .add_table(TableConfig::new(TABLE_GROUPS))
             .add_table(TableConfig::new(TABLE_VALIDATORS))
-            .add_table(TableConfig::new(TABLE_FUNCTION_FOLDERS));
+            .add_table(TableConfig::new(TABLE_FUNCTION_FOLDERS))
+            .add_table(TableConfig::new(TABLE_REPLICATION_PROFILES))
+            .add_table(TableConfig::new(TABLE_PUBLICATIONS))
+            .add_table(TableConfig::new(TABLE_SUBSCRIPTIONS));
 
         db.add_repo(repo_config).await?;
 
@@ -492,6 +505,25 @@ impl SystemStore {
     /// Get the roles table manager.
     pub async fn roles_table(&self) -> DbResult<TableManager> {
         self.table(TABLE_ROLES).await
+    }
+
+    // ========================================================================
+    // Replication catalogue (386-a) — profiles / publications / subscriptions
+    // ========================================================================
+
+    /// Get the replication-profiles table manager.
+    pub async fn replication_profiles_table(&self) -> DbResult<TableManager> {
+        self.table(TABLE_REPLICATION_PROFILES).await
+    }
+
+    /// Get the publications table manager.
+    pub async fn publications_table(&self) -> DbResult<TableManager> {
+        self.table(TABLE_PUBLICATIONS).await
+    }
+
+    /// Get the subscriptions table manager.
+    pub async fn subscriptions_table(&self) -> DbResult<TableManager> {
+        self.table(TABLE_SUBSCRIPTIONS).await
     }
 
     // ========================================================================

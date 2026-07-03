@@ -32,6 +32,7 @@ mod admin_function;
 mod admin_interner;
 mod admin_list;
 mod admin_migration;
+mod admin_replication;
 mod admin_retention;
 mod admin_schema;
 mod admin_table_index;
