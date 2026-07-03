@@ -3,3 +3,4 @@ mod audit_chain_tests;
 mod durable_counters_tests;
 mod lockout_tests;
 mod rate_limit_tests;
+mod session_tests;
