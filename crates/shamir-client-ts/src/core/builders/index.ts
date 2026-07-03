@@ -37,6 +37,7 @@ export {
   // Use `ddl.field(...)` or import directly from './ddl.js'.
 } from './ddl.js';
 export * from './admin.js';
+export * from './replication.js';
 export { principalId } from '../principal-id.js';
 export * from './query.js';
 export * from './call.js';

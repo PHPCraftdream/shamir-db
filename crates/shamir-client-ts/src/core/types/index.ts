@@ -99,8 +99,7 @@ export type {
 } from './ddl.js';
 
 export type {
-  ResourceRef,
-  GroupRef,
+  ResourceRef,  GroupRef,
   Resource,
   Action,
   Effect,
@@ -123,6 +122,25 @@ export type {
   RenameRoleOp,
   AdminOp,
 } from './admin.js';
+
+export type {
+  ReplScope,
+  ReplDirection,
+  ReplMode,
+  ReplStream,
+  SubAction,
+  CreateReplicationProfileOp,
+  DropReplicationProfileOp,
+  CreatePublicationOp,
+  DropPublicationOp,
+  CreateSubscriptionOp,
+  DropSubscriptionOp,
+  AlterSubscriptionOp,
+  ListPublicationsOp,
+  ListSubscriptionsOp,
+  ReplicationStatusOp,
+  ReplicationOp,
+} from './replication.js';
 
 export type {
   CallOp,
