@@ -20,5 +20,11 @@ shamir-types = { path = "../shamir-types", default-features = false }
 serde = { version = "1.0.217", features = ["derive"] }
 rmp-serde = "1"
 
+[dev-dependencies]
+# Used by the cross-language repl-DDL fixture regression test
+# (`tests/repl_ddl_msgpack.rs`) to read the canonical JSON fixture that the
+# TS client in #376 will also consume.
+serde_json = "1"
+
 [lints]
 workspace = true
