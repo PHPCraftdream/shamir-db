@@ -19,11 +19,13 @@ pub mod error;
 pub mod follower_loop;
 pub mod in_process;
 pub mod source;
+pub mod supervisor;
 pub mod wire_source;
 
 pub use error::ReplError;
 pub use follower_loop::{run_follower_loop, FollowerLoopConfig};
 pub use source::ReplSource;
+pub use supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
 pub use wire_source::WireReplSource;
 
 #[cfg(test)]
