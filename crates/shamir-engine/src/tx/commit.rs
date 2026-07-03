@@ -9,6 +9,7 @@ use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
     apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
 };
+use crate::tx::finalize::finalize_sync_post_publish;
 use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
@@ -601,7 +602,7 @@ async fn commit_tx_lockfree(
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
 ) -> Result<TxOutcome, TxError> {
-    use crate::tx::materialize::{materialize, post_publish_cleanup};
+    use crate::tx::materialize::materialize;
     use crate::tx::pre_commit::pre_commit_locked_validate;
 
     // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
@@ -679,19 +680,15 @@ async fn commit_tx_lockfree(
         g.disarm();
     }
     drop(cell_guards);
-    let materialization = post_publish_cleanup(post_publish, repo, gate).await;
-    if materialization == MaterializationState::Deferred {
-        repo.tx_metrics().on_tx_materialization_deferred();
-    }
-    // D2 P1d-2b CUTOVER: the inline `gate.mark_durable(commit_version)` is
-    // GONE. The ack-path no longer writes `history` (only the overlay), so the
-    // value is NOT durable at this point — it is durable only after the
-    // background drainer replays the WAL entry into `history`. The DRAINER now
-    // owns both `mark_durable` and the WAL truncation. We only WAKE it here,
-    // after the version is published (visibility), so it drains promptly.
-    repo.drainer().wake();
-    repo.emit_changefeed_event(changefeed_event).await;
-    crate::tx::commit_phases::promote_vectors(&tx, repo, commit_version).await;
+    let materialization = finalize_sync_post_publish(
+        &tx,
+        post_publish,
+        changefeed_event,
+        repo,
+        gate,
+        commit_version,
+    )
+    .await;
 
     Ok(TxOutcome {
         tx_id: tx_id_u64,
