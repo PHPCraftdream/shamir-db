@@ -66,6 +66,8 @@ zeroize = "1.7"
 
 # Errors / logging
 thiserror = "2.0"
+# async trait — ReplSource abstraction for the follower pull-loop (R1-c).
+async-trait = "0.1.81"
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
