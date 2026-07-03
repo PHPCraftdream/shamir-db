@@ -778,6 +778,48 @@ impl RepoInstance {
         crate::tx::apply_replicated(self, event, applied_watermark).await
     }
 
+    /// R1-b — read the durable per-(db,repo) follower replication bookmark.
+    ///
+    /// Returns the highest LEADER `commit_version` this follower has
+    /// durably recorded as applied on this repo. Returns `0` on a fresh
+    /// repo (the marker has never been written). The value is what the
+    /// follower feeds back into
+    /// [`apply_replicated`](Self::apply_replicated) as
+    /// `applied_watermark` for O(1) idempotent re-delivery gating.
+    ///
+    /// Stored in the repo's `__tx__` info-store under
+    /// [`MetaKey::ReplicationBookmark`](crate::meta::MetaKey::ReplicationBookmark)
+    /// via the same envelope codec as `LastCommittedVersion` / `NextTxId`.
+    /// See `crate::meta::repl_bookmark` for the codec rationale and the
+    /// separate-marker rationale (leader-version space ≠ local-version
+    /// space).
+    pub async fn replication_bookmark(&self) -> DbResult<u64> {
+        let info_store = self.tx_info_store().await?;
+        crate::meta::repl_bookmark::load_replication_bookmark(&info_store).await
+    }
+
+    /// R1-b — monotonically advance the durable replication bookmark.
+    ///
+    /// Persists `version` as the new high-water mark ONLY if `version` is
+    /// strictly greater than the currently-persisted bookmark; otherwise
+    /// this is a no-op (returns `Ok(())`). The compare-then-swap guards
+    /// against an out-of-order delivery rewinding the bookmark: e.g. after
+    /// advancing to 5, a late-arriving event at leader-version 3 is rejected
+    /// and the bookmark stays at 5.
+    ///
+    /// Callers should typically advance to the leader `commit_version` of
+    /// the event returned as [`crate::tx::ApplyOutcome::Applied`] by
+    /// [`apply_replicated`](Self::apply_replicated). On error the bookmark
+    /// is unchanged (the persist is atomic at the store level).
+    pub async fn advance_replication_bookmark(&self, version: u64) -> DbResult<()> {
+        let info_store = self.tx_info_store().await?;
+        let current = crate::meta::repl_bookmark::load_replication_bookmark(&info_store).await?;
+        if version > current {
+            crate::meta::repl_bookmark::save_replication_bookmark(&info_store, version).await?;
+        }
+        Ok(())
+    }
+
     /// Run a single non-tx write as an implicit single-op BATCH transaction.
     ///
     /// F4b-1 keystone of "everything is a transaction": instead of taking the
