@@ -19,6 +19,13 @@ pub(super) struct MetaSnapshotTask {
     pub(super) handle: JoinHandle<()>,
 }
 
+/// Handle for the periodic follower-replication reconcile-tick task (386-c).
+/// Stopped via the shared root `shutdown_token`; the `JoinHandle` is awaited
+/// on shutdown so the task drops its `Arc<SubscriptionSupervisor>` reference.
+pub struct ReplSupervisorTask {
+    pub(super) handle: JoinHandle<()>,
+}
+
 /// Owner of the runtime state of a launched server.
 pub struct ServerHandle {
     /// Addresses the server actually bound, in the same order as
@@ -55,6 +62,14 @@ pub struct ServerHandle {
     /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
     /// task drops and any lingering open txs are dropped (RAII abort).
     pub(super) interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
+    /// Follower-replication supervisor (386-c). Held here so its follower
+    /// loops survive past boot (dropping it would kill every loop). On
+    /// shutdown `stop_all()` cancels every running loop before the tasks are
+    /// joined.
+    pub(super) repl_supervisor: Arc<crate::replication::SubscriptionSupervisor>,
+    /// Periodic reconcile-tick task driving [`Self::repl_supervisor`]. Cancelled
+    /// by the root `shutdown_token` and joined on shutdown.
+    pub(super) repl_supervisor_task: Option<ReplSupervisorTask>,
     /// ShamirDb reference — needed on shutdown to drain all repo
     /// MemBuffers to durable backing, closing the ~500 ms buffered-
     /// commit loss window on graceful stop.
@@ -86,6 +101,15 @@ impl ServerHandle {
         // 2. Wait for accept loops to finish.
         for task in self.listener_tasks {
             let _ = task.await;
+        }
+        // 2b. Stop the follower-replication supervisor: cancel every running
+        //     follower loop, then join the reconcile-tick task (already told
+        //     to stop by the root `shutdown_token.cancel()` above) so it drops
+        //     its supervisor reference. Done after the accept loops stop (no
+        //     new subscription rows can arrive) and before flush.
+        self.repl_supervisor.stop_all().await;
+        if let Some(task) = self.repl_supervisor_task {
+            let _ = task.handle.await;
         }
         // 3. Drain the audit chain + scheduler.
         self.audit_appender.shutdown().await;

@@ -54,6 +54,7 @@ fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
         observability: ObservabilityConfig {
             addr: obs_addr.into(),
         },
+        replication: None,
     }
 }
 

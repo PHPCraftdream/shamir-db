@@ -63,6 +63,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
         observability: ObservabilityConfig {
             addr: String::new(),
         },
+        replication: None,
     }
 }
 

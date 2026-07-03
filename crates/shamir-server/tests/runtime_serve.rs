@@ -55,6 +55,7 @@ fn make_test_config(temp: &TempDir) -> Config {
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
         },
+        replication: None,
     }
 }
 
