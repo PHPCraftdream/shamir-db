@@ -37,6 +37,20 @@ impl QueryLimitsCap {
     };
 }
 
+/// Read/write mode of this node. A replica follower runs `ReadOnly` and
+/// rejects client writes (they must go to the leader). Default `ReadWrite`.
+///
+/// The gate lives in [`ShamirDbHandler::execute`](super::handler::ShamirDbHandler::execute):
+/// when `ReadOnly`, any batch entry whose [`BatchOp`](shamir_query_types::batch::BatchOp)
+/// returns `true` from `is_write()` is rejected with `code = "read_only_replica"`
+/// before reaching the engine. Reads (SELECT, introspection) pass through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeMode {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
 /// Server-side hard cap on per-interactive-tx staged bytes. Checked on
 /// each `TxExecute`; over-budget aborts the tx with `tx_too_large`.
 /// Default 64 MiB; tests use [`Self::UNLIMITED`].
