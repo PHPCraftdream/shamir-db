@@ -156,10 +156,29 @@ verbatim-запрет git-мутаций), TDD red-first, гейт = `fmt --chec
 - **5.2 Квантованный граф + rescoring + DDL** — `Hnsw<i8,_>` + f32 для rescoring; `quantization` в `VectorConfig`+DDL+билдеры+parity. Строго opt-in.
 - **5.3 Снапшот v2 + миграция + компакция-aware + бенч** — format bump; v1@quant→rebuild+warn; RSS/QPS/recall f32 vs sq8.
 
-### P6 — вне кампании (дизайн сохранён на будущее)
-Hybrid RRF разблокирован (FTS в коде), но в этот объём не входит. Дизайн на
-будущее: **6.1** RRF-комбайнер — чистая функция над двумя `Ranked`,
-`score=Σ1/(60+rank)`, юнит детерминизм/tie-breaking; **6.2** `HybridSearch` op +
+### V6 — клиентская поверхность полного стека (~2–3 д)
+
+Сквозное требование кампании: **доработки включают ВСЕ уровни** — unit-тесты,
+OQL, Query Builders (Rust+TS), e2e-тесты, e2e TypeScript-тесты, бенчмарки.
+Листы фич несут свои уровни сами (V1.1/V3.1/V5.2 — wire+билдеры+parity);
+эта фаза добирает то, что размазано:
+
+- **6.1 Node e2e `tests/e2e/tests/18-vectors.test.js`** — полный чёрный ящик
+  по образцу 16/17: DDL vector-индекса (dim/metric/quantization), insert,
+  top-k, порядок, filtered ANN, per-query ef_search/oversample. Требует
+  MSVC-хост для прогона (как 17-й).
+- **6.2 TS e2e расширение `e2e-vector.test.ts`** — с toy dim=4 на 128/768D,
+  все метрики {Cosine,L2,Dot}, efSearch/oversample, filtered ANN,
+  quantization; + vitest-юниты новых билдеров, где не добавили листы фич.
+- **6.3 OQL-поверхность + guide** — сверка OQL-форм векторных фич (+ парсер-
+  юниты, если есть текстовый синтаксис), `docs/guide/06-search.md`
+  (ef_search, oversample, filtered, quantization, персистентность/компакция).
+  Примеры в доках — builder-only.
+
+### Hybrid RRF — вне кампании (дизайн сохранён на будущее)
+Hybrid разблокирован (FTS в коде), но в этот объём не входит. Дизайн на
+будущее: RRF-комбайнер — чистая функция над двумя `Ranked`,
+`score=Σ1/(60+rank)`, юнит детерминизм/tie-breaking; `HybridSearch` op +
 билдеры + executor (`tokio::join!` над vector+FTS, деградация до одного).
 
 ---
