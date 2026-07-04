@@ -27,7 +27,18 @@ const DEFAULT_PORT = 13742;
 const ADMIN_USER = 'admin';
 const ADMIN_PASSWORD = 'correct horse battery staple';
 
-function writeKtavConfig(dir, host, port) {
+function writeKtavConfig(dir, host, port, { replication } = {}) {
+  const replicationBlock = replication
+    ? `
+replication: {
+    node_id: ${replication.nodeId}
+    replicator_user: ${replication.replicatorUser}
+    replicator_password: ${replication.replicatorPassword}
+    server_name: ${replication.serverName || 'localhost'}
+}
+`
+    : '';
+
   const cfg = `
 data_dir: ${dir.replace(/\\/g, '/')}
 
@@ -81,7 +92,7 @@ audit: {
 observability: {
     addr: 127.0.0.1:0
 }
-`.trim();
+${replicationBlock}`.trim();
 
   const configPath = path.join(dir, 'server.ktav');
   fs.writeFileSync(configPath, cfg);
@@ -91,8 +102,20 @@ observability: {
 /**
  * Start a server. Returns `{ host, port, user, password, stop, logs }`.
  * `stop()` is async — kills the subprocess and removes the tempdir.
+ *
+ * `replication` (optional) — follower-side `[replication]` ktav block
+ * (`crates/shamir-server/src/config.rs::ReplicationConfig`):
+ *   { nodeId, replicatorUser, replicatorPassword, serverName }
+ * `replicatorUser`/`replicatorPassword` MUST be the credentials of a
+ * `replicator`-role account already created on the leader (see
+ * `startServerWithReplication` below, and 16-replication.test.js Scenario 1
+ * for how that account + OPEN access path is set up).
  */
-async function startServer({ host = DEFAULT_HOST, port = DEFAULT_PORT } = {}) {
+async function startServer({
+  host = DEFAULT_HOST,
+  port = DEFAULT_PORT,
+  replication,
+} = {}) {
   if (!fs.existsSync(SERVER_BIN)) {
     throw new Error(
       `Server binary not found at ${SERVER_BIN}.\n` +
@@ -101,7 +124,7 @@ async function startServer({ host = DEFAULT_HOST, port = DEFAULT_PORT } = {}) {
   }
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-e2e-'));
-  const configPath = writeKtavConfig(dataDir, host, port);
+  const configPath = writeKtavConfig(dataDir, host, port, { replication });
 
   const child = spawn(
     SERVER_BIN,
@@ -173,4 +196,56 @@ async function startServer({ host = DEFAULT_HOST, port = DEFAULT_PORT } = {}) {
   };
 }
 
-module.exports = { startServer, ADMIN_USER, ADMIN_PASSWORD };
+/**
+ * Convenience wrapper: start a FOLLOWER server whose ktav config carries a
+ * `[replication]` block pointing at an already-running leader's replicator
+ * account (task #388 — two-server convergence e2e).
+ *
+ * The caller is responsible for creating the `replicator`-role user on the
+ * leader (and the OPEN access path it needs) BEFORE calling this, and for
+ * issuing the `create_replication_profile`/`create_subscription` admin batch
+ * against the returned follower's own client afterwards — this helper only
+ * spawns the process with the right ktav `[replication]` block.
+ *
+ * `replicatorUser`/`replicatorPassword` — credentials of the `replicator`
+ * role account already created on the LEADER (see 16-replication.test.js
+ * Scenario 1: `createScramUser(user, pw, ['replicator'])` + OPEN db/repo/
+ * table access so the non-superuser replicator session can read).
+ *
+ * Returns the same `{ host, port, user, password, stop, logs }` shape as
+ * `startServer` (the `user`/`password` here are still the FOLLOWER's own
+ * bootstrap admin — used to run DDL locally, e.g. creating the matching
+ * schema + the replication_profile/subscription).
+ */
+async function startServerWithReplication({
+  host = DEFAULT_HOST,
+  port = DEFAULT_PORT + 1,
+  nodeId = 'follower-1',
+  replicatorUser,
+  replicatorPassword,
+  serverName = 'localhost',
+} = {}) {
+  if (!replicatorUser || !replicatorPassword) {
+    throw new Error(
+      'startServerWithReplication requires replicatorUser + replicatorPassword ' +
+        '(credentials of a replicator-role account already created on the leader).'
+    );
+  }
+  return startServer({
+    host,
+    port,
+    replication: {
+      nodeId,
+      replicatorUser,
+      replicatorPassword,
+      serverName,
+    },
+  });
+}
+
+module.exports = {
+  startServer,
+  startServerWithReplication,
+  ADMIN_USER,
+  ADMIN_PASSWORD,
+};
