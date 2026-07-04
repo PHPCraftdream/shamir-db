@@ -6,6 +6,20 @@
 # committed.
 * text=auto eol=lf
 
+# Source — LF-canonical across the workspace (Rust, shell, JS/TS, web, SQL).
+*.rs    text eol=lf
+*.sh    text eol=lf
+*.js    text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.jsx   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.sql   text eol=lf
+*.txt   text eol=lf
+
 # Lockfiles and configs that some tools still write CRLF on Windows —
 # normalised to LF by git on commit.
 *.toml  text eol=lf
@@ -15,13 +29,26 @@
 *.yaml  text eol=lf
 *.md    text eol=lf
 
+# Extensionless dotfiles / repo metadata — force LF explicitly so no
+# tool re-introduces CRLF (this is what triggered the warnings).
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+.git-blame-ignore-revs text eol=lf
+
 # Generated / minified web bundles — leave bytes alone.
 *.min.js binary
 *.min.css binary
 
-# Binary fixtures, snapshots, certificates — never touch.
-*.png binary
-*.jpg binary
-*.pdf binary
+# Binary fixtures, snapshots, certificates, native artefacts — never touch.
+*.png  binary
+*.jpg  binary
+*.pdf  binary
 *.snap binary
-*.der binary
+*.der  binary
+*.node binary
+*.wasm binary
+*.gz   binary
+*.zip  binary
+*.ico  binary
+*.woff  binary
+*.woff2 binary
