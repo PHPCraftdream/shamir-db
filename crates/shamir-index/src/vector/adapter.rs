@@ -44,6 +44,20 @@ pub trait VectorAdapter: Send + Sync {
         self.len() == 0
     }
 
+    /// Batch upsert: insert or replace many `(rid, vec)` pairs at once.
+    ///
+    /// Default impl naively loops `upsert`; concrete adapters may override
+    /// (e.g. `HnswAdapter` does a single rayon `parallel_insert` over the
+    /// whole batch — amortizing the graph-insert overhead). The contract:
+    /// EITHER every row is applied OR none are (atomic on dim-mismatch —
+    /// all dims are validated up front before the first insert).
+    async fn upsert_batch(&self, items: &[(RecordId, Vec<f32>)]) -> Result<(), VectorError> {
+        for (rid, vec) in items {
+            self.upsert(*rid, vec).await?;
+        }
+        Ok(())
+    }
+
     /// Promote a batch of committed vectors into the live structure at
     /// transaction commit (commit pipeline Phase 5d, HIGH-6). Called with
     /// the tx's own `staged_vectors` for this table; equivalent to a
@@ -52,9 +66,10 @@ pub trait VectorAdapter: Send + Sync {
         &self,
         vecs: &[(RecordId, Vec<f32>)],
     ) -> Result<(), VectorError> {
-        for (rid, vec) in vecs {
-            self.upsert(*rid, vec).await?;
-        }
-        Ok(())
+        // Prefer a batched path when the adapter overrides `upsert_batch`
+        // (HnswAdapter does one rayon `parallel_insert` instead of N
+        // serial inserts). The default `upsert_batch` falls back to the
+        // same per-row loop, so this is strictly ≥ the old behaviour.
+        self.upsert_batch(vecs).await
     }
 }

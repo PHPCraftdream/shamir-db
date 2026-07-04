@@ -244,6 +244,14 @@ impl IndexBackend for VectorBackend {
     }
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
+        // Batch size = 1000: large enough that a single HnswAdapter
+        // `upsert_batch` call drives a rayon `parallel_insert` over ~1k
+        // vectors (well past the ~`1000 * num_threads` sweet spot the
+        // hnsw_rs docstring recommends for parallel_insert efficiency),
+        // yet bounded so a single batch's owned-Vec materialisation stays
+        // in the low-MB range (1000 × 4-byte × dim). The store stream
+        // already paginates at this granularity, so we hand each page
+        // straight to the adapter as one batch.
         let batch_size = 1000usize;
         let mut stream = source.iter_stream(batch_size);
         while let Some(batch_res) = stream.next().await {
@@ -261,10 +269,13 @@ impl IndexBackend for VectorBackend {
                     items.push((rid, v));
                 }
             }
-            for chunk in items.chunks(64) {
-                for (rid, v) in chunk {
-                    self.adapter.upsert(*rid, v).await.map_err(ve)?;
-                }
+            // One batched upsert per store page: HnswAdapter overrides
+            // `upsert_batch` → single rayon parallel_insert over the page
+            // (was N serial inserts in 64-wide inner chunks). The default
+            // `upsert_batch` (BruteForceAdapter etc.) falls back to a
+            // per-row loop, so the call is correct for every adapter.
+            if !items.is_empty() {
+                self.adapter.upsert_batch(&items).await.map_err(ve)?;
             }
         }
         Ok(())
