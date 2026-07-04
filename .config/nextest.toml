@@ -20,6 +20,20 @@
 # Verify with: cargo nextest --version
 # When upgrading nextest, confirm $NEXTEST is still set before merging.
 
+[test-groups]
+# functions_lifecycle.rs compiles WASM modules via cranelift
+# (create_from_source / compile_or_skip) in nearly every test — CPU-bound,
+# not I/O-bound. Under full nextest parallelism (dozens of binaries running
+# at once, all cores saturated) these compilations starve for CPU and blow
+# past the 30s/6 slow-timeout, surfacing as SLOW/TIMEOUT that look like
+# deadlocks but aren't (see #380 — confirmed NOT ACL-drift). Dev boxes here
+# have 16 logical cores; max-threads = 4 keeps a few WASM compiles running
+# concurrently (faster than full serialization) while leaving the bulk of
+# cores free for the rest of the workspace's test binaries, and empirically
+# stays under the kill threshold. Tune down (e.g. 2) if SLOW/TIMEOUT still
+# appears under load; tune up if cores are idle and it's slower than needed.
+wasm-heavy = { max-threads = 4 }
+
 [profile.default]
 # Print every test result as it completes, with the binary name.
 # This is the single most important feature: a stalled run shows the
@@ -53,3 +67,14 @@ slow-timeout = { period = "120s", terminate-after = 2 }  # ~99 s legit, kill at 
 [[profile.default.overrides]]
 filter = "package(shamir-connect) and test(/.*scram.*/)"
 slow-timeout = { period = "10s", terminate-after = 6 }   # Argon2-bound; kill at 60 s.
+
+# Whole functions_lifecycle binary compiles WASM (cranelift, CPU-bound) in
+# nearly every test — throttle its parallelism via the wasm-heavy group
+# instead of masking CPU starvation with a bigger global slow-timeout.
+[[profile.default.overrides]]
+filter = "package(shamir-db) and binary(functions_lifecycle)"
+test-group = "wasm-heavy"
+
+[[profile.ci.overrides]]
+filter = "package(shamir-db) and binary(functions_lifecycle)"
+test-group = "wasm-heavy"
