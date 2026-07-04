@@ -42,7 +42,13 @@ arc-swap   = "1.7"
 shamir-numa = { path = "../shamir-numa" }
 
 # Vector index
-hnsw_rs = "0.3"
+# Pinned to an exact patch: hnsw_rs does NOT guarantee dump-format
+# stability across patches, and phase P2 (snapshots) round-trips dumps
+# through this exact version. A caret/minor bound would silently let a
+# resolver pick 0.3.5+ and break our persisted graph files.
+hnsw_rs = "=0.3.4"
+# CRC32 for snapshot integrity (phase P2). Same version the WAL crate uses.
+crc32fast = "1"
 
 [dev-dependencies]
 tempfile = "3.10.1"

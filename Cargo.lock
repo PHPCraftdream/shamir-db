@@ -3658,6 +3658,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
+ "crc32fast",
  "dashmap",
  "futures",
  "fxhash",
