@@ -104,6 +104,7 @@ scope_args() {
         @types)    echo "-p shamir-types -p shamir-collections" ;;
         @storage)  echo "-p shamir-storage -p shamir-wal" ;;
         @server)   echo "-p shamir-server -p shamir-connect" ;;
+        @vector)   echo "-p shamir-index -p shamir-engine" ;;
         @e2e)      echo "-p shamir-db -p shamir-server" ;;
         @all)      echo "" ;;  # nextest default = workspace
         @*)

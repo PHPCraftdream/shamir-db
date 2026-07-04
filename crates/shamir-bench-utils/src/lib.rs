@@ -34,6 +34,8 @@ use criterion::BenchmarkGroup;
 #[cfg(feature = "peak_mem")]
 pub mod peak_mem;
 
+pub mod vector_data;
+
 /// Минимальный sample_size, который criterion принимает (hardcoded в 0.5.x).
 const MIN_SAMPLES: usize = 10;
 
