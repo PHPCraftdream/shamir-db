@@ -204,6 +204,105 @@ impl VectorAdapter for HnswAdapter {
         Ok(())
     }
 
+    /// Batch upsert with a single rayon `parallel_insert`.
+    ///
+    /// **Atomic dim validation:** every row's dimension is checked UP FRONT,
+    /// before ANY mutation. A single mismatched row yields `Err(DimMismatch)`
+    /// and leaves the graph untouched.
+    ///
+    /// **D12 across a batch:** we claim the rid slot per row through the same
+    /// `entry_async` protocol as single `upsert` — the slot is the
+    /// serialization point. Two concurrent operations (batch ↔ batch, or
+    /// batch ↔ single) racing on the SAME rid both go through the rid's
+    /// bucket entry: the loser observes the winner's freshly-published
+    /// internal as "old" and tombstones it. Within THIS batch, a duplicate
+    /// rid is handled by re-entering the same entry: the earlier row's
+    /// just-published internal becomes the "old" of the later row and is
+    /// tombstoned — last write wins, no orphan live node.
+    ///
+    /// All CPU-bound graph work (the `parallel_insert` over the collected
+    /// new internals) runs in ONE `spawn_blocking` after every entry guard
+    /// has been released — we never hold an scc entry across `.await`.
+    async fn upsert_batch(&self, items: &[(RecordId, Vec<f32>)]) -> Result<(), VectorError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        // Atomic dim validation: fail before touching anything.
+        for (_, v) in items {
+            if v.len() as u32 != self.dim {
+                return Err(VectorError::DimMismatch {
+                    expected: self.dim,
+                    got: v.len() as u32,
+                });
+            }
+        }
+
+        // Phase 1: per-rid slot claim (D12-safe). Collect:
+        //   insert_rows: (internal, rid, owned_vec) — rows to insert into the
+        //                graph; the owned Vecs move through spawn_blocking and
+        //                on into `vectors` in Phase 3 (one clone total per row,
+        //                matching single `upsert`).
+        //   replaced    : old internals superseded by this batch (to drop
+        //                from `vectors` so brute-force never scans stale data)
+        let mut insert_rows: Vec<(usize, RecordId, Vec<f32>)> = Vec::with_capacity(items.len());
+        let mut replaced: Vec<usize> = Vec::with_capacity(items.len());
+        for (rid, vec) in items {
+            let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+            {
+                use scc::hash_map::Entry::{Occupied, Vacant};
+                match self.rid_to_internal.entry_async(*rid).await {
+                    Occupied(mut occ) => {
+                        let old_internal = *occ.get();
+                        // Tombstone the previous (or concurrently-serialised /
+                        // earlier-in-this-batch) internal. Same rationale as
+                        // single `upsert`: the transition is atomic per rid
+                        // while the entry is held.
+                        let _ = self.deleted.insert(old_internal, ());
+                        *occ.get_mut() = internal;
+                        replaced.push(old_internal);
+                    }
+                    Vacant(vac) => {
+                        vac.insert_entry(internal);
+                    }
+                }
+            } // scc entry guard dropped — NOT held across the await below.
+            insert_rows.push((internal, *rid, vec.clone()));
+        }
+
+        // Phase 2: ONE spawn_blocking for the whole batch — rayon
+        // parallelizes the graph inserts across cores. `parallel_insert`
+        // takes `&[(&Vec<T>, usize)]`; we move the OWNED rows into the
+        // closure, build the borrowed slice INSIDE (so the borrows never
+        // cross the `'static` boundary), and RETURN the owned rows so Phase 3
+        // moves each Vec straight into `vectors` — no second clone.
+        let hnsw = Arc::clone(&self.hnsw);
+        let insert_rows = tokio::task::spawn_blocking(move || {
+            let batch: Vec<(&Vec<f32>, usize)> =
+                insert_rows.iter().map(|(i, _rid, v)| (v, *i)).collect();
+            hnsw.parallel_insert(&batch);
+            insert_rows
+        })
+        .await
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        // Phase 3: publish the per-internal bookkeeping (vectors map +
+        // rid_map) and drop superseded vectors. Each map op is independent
+        // and ordered so `vectors` removal of `old` cannot race a freshly
+        // reused `internal` (internals are monotonic from `next_id`, so a
+        // brand-new internal never aliases a tombstoned old one).
+        //
+        // `into_iter` moves each owned Vec straight into `vectors` — the only
+        // clone of a row's vector is the Phase-1 `vec.clone()` above.
+        for (internal, rid, vec) in insert_rows.into_iter() {
+            let _ = self.vectors.insert_async(internal, vec).await;
+            let _ = self.rid_map.insert_async(internal, rid).await;
+        }
+        for old in replaced {
+            let _ = self.vectors.remove_async(&old).await;
+        }
+        Ok(())
+    }
+
     async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
             let _ = self.deleted.insert_async(internal, ()).await;

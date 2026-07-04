@@ -283,3 +283,57 @@ async fn rebuild_from_store() {
         _ => panic!("expected Ranked"),
     }
 }
+
+/// V0.2: rebuild must populate the graph with ALL records from the store
+/// via the batched `upsert_batch` path (single rayon parallel_insert per
+/// store page). We write M records into the store and assert the rebuilt
+/// adapter's `len()` equals M — proving no record was dropped by the batch
+/// pipeline.
+#[tokio::test]
+async fn rebuild_from_store_batched_all_records_present() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // M records — large enough to be meaningful, small enough to stay fast.
+    let m = 150usize;
+    let mut rids = Vec::with_capacity(m);
+    for j in 0..m {
+        let rid = RecordId::new();
+        let rec = make_rec(&i, &[(j as f64) * 0.01, 1.0 - (j as f64) * 0.01, 0.5]);
+        store
+            .set(rid.to_bytes(), rec.to_bytes().unwrap())
+            .await
+            .unwrap();
+        rids.push(rid);
+    }
+
+    // A backend backed by HnswAdapter (so `upsert_batch` overrides with a
+    // single parallel_insert). The adapter is reachable via the public
+    // `adapter` field.
+    let backend = make_backend(&i);
+    backend.rebuild(Arc::clone(&store)).await.unwrap();
+
+    // Every record's vector must be in the graph. `adapter.len()` counts
+    // live (non-tombstoned) internals — equals M when no record was
+    // dropped or double-counted.
+    assert_eq!(
+        backend.adapter.len(),
+        m,
+        "rebuild must load all {m} records into the graph via the batch path"
+    );
+
+    // Sanity: searching near the first record finds it among the top-k.
+    let result = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![0.0, 1.0, 0.5],
+            k: 10,
+        })
+        .await
+        .unwrap();
+    match result {
+        IndexResult::Ranked(ranked) => {
+            assert!(!ranked.is_empty(), "rebuild graph must be searchable");
+        }
+        _ => panic!("expected Ranked"),
+    }
+}

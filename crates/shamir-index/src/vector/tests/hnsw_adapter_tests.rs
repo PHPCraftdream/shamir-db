@@ -560,3 +560,298 @@ async fn non_tx_search_unchanged_after_refactor() {
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, rid(1));
 }
+
+// ============================================================================
+// V0.2 — upsert_batch (parallel_insert, batched rebuild)
+// ============================================================================
+
+/// Batch of N → `len() == N` AND search surfaces the inserted points.
+/// On a small graph (≤ BRUTE_FORCE_MAX) search is exact brute-force so we
+/// can assert recall deterministically; a larger batch (300 > 256) forces
+/// the HNSW path and we assert recall ≥ a soft floor vs brute-force, mirroring
+/// `recall_at_10_on_1k_vectors`.
+#[tokio::test]
+async fn upsert_batch_inserts_all_and_search_finds_them() {
+    let dim = 4usize;
+
+    // (a) Small batch (50 ≤ 256): exact brute-force search path.
+    {
+        let n = 50usize;
+        let adapter = HnswAdapter::new(
+            dim as u32,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: n + 10,
+                ..Default::default()
+            },
+        );
+        let mut batch: Vec<(RecordId, Vec<f32>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut a = [0u8; 16];
+            a[15] = i as u8;
+            batch.push((RecordId(a), random_vec(dim, i as u64 + 1)));
+        }
+        adapter.upsert_batch(&batch).await.unwrap();
+        assert_eq!(adapter.len(), n, "len must equal batch size after insert");
+
+        // Exact path: querying the first inserted vector returns it as top-1.
+        let q = batch[0].1.clone();
+        let results = adapter.search(&q, 1, None).await.unwrap();
+        assert_eq!(
+            results[0].0, batch[0].0,
+            "brute-force path must find the exact nearest"
+        );
+    }
+
+    // (b) Larger batch (300 > 256): HNSW path, recall vs brute-force ≥ 0.5.
+    {
+        let n = 300usize;
+        let adapter = HnswAdapter::new(
+            dim as u32,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: n + 100,
+                ef_construction: 400,
+                ef_search: 400,
+                ..Default::default()
+            },
+        );
+        let mut batch: Vec<(RecordId, Vec<f32>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut a = [0u8; 16];
+            a[14] = (i >> 8) as u8;
+            a[15] = (i & 0xFF) as u8;
+            batch.push((RecordId(a), random_vec(dim, i as u64 * 7 + 3)));
+        }
+        adapter.upsert_batch(&batch).await.unwrap();
+        assert_eq!(adapter.len(), n, "len must equal batch size after insert");
+
+        // Recall vs brute-force ground-truth top-10 for a held-out query.
+        let query = random_vec(dim, 9999);
+        let mut dists: Vec<(RecordId, f32)> = batch
+            .iter()
+            .map(|(r, v)| {
+                let d: f32 = query
+                    .iter()
+                    .zip(v.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f32>()
+                    .sqrt();
+                (*r, d)
+            })
+            .collect();
+        dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let gt_top10: TFxSet<RecordId> = dists.iter().take(10).map(|(r, _)| *r).collect();
+
+        let hnsw_results = adapter.search(&query, 10, None).await.unwrap();
+        let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
+        let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
+        assert!(
+            recall >= 0.5,
+            "batch-inserted HNSW recall@10 = {recall:.2} — expected >= 0.50"
+        );
+    }
+}
+
+/// Dim mismatch in the middle of a batch → Err AND nothing applied
+/// (atomicity of validation). We assert `len()` is unchanged and no rid
+/// is findable.
+#[tokio::test]
+async fn upsert_batch_dim_mismatch_is_atomic() {
+    let dim = 3u32;
+    let adapter = HnswAdapter::new(dim, VectorMetric::L2, HnswConfig::default());
+
+    // Batch where row index 2 has the wrong dim.
+    let mut batch: Vec<(RecordId, Vec<f32>)> = Vec::new();
+    let mut a = [0u8; 16];
+    a[15] = 1;
+    batch.push((RecordId(a), vec![1.0, 0.0, 0.0]));
+    let mut b = [0u8; 16];
+    b[15] = 2;
+    batch.push((RecordId(b), vec![0.0, 1.0, 0.0]));
+    let mut c = [0u8; 16];
+    c[15] = 3;
+    // WRONG dim (2 instead of 3) — should abort the whole batch.
+    batch.push((RecordId(c), vec![1.0, 1.0]));
+
+    let len_before = adapter.len();
+    let err = adapter.upsert_batch(&batch).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            VectorError::DimMismatch {
+                expected: 3,
+                got: 2
+            }
+        ),
+        "expected DimMismatch, got {err:?}"
+    );
+    assert_eq!(
+        adapter.len(),
+        len_before,
+        "len must be unchanged after atomic-abort batch"
+    );
+    // None of the batch rids should be findable.
+    let results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+    assert!(
+        results.is_empty(),
+        "no row from the aborted batch must be in the graph; got {results:?}"
+    );
+}
+
+/// D12 regression for the batch path: a concurrent `upsert_batch` and
+/// `upsert` of the SAME rid must leave the rid mapped to exactly ONE live
+/// internal — never two. Mirrors `upsert_same_rid_concurrent_no_duplicate`
+/// but exercises the batch ↔ single interleaving.
+#[tokio::test]
+#[serial_test::serial]
+async fn upsert_batch_concurrent_with_upsert_no_duplicate() {
+    use std::sync::Arc as StdArc;
+    use tokio::sync::Barrier;
+
+    let dim = 4usize;
+    for iter in 0..40u64 {
+        let adapter = StdArc::new(HnswAdapter::new(
+            dim as u32,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 1000,
+                ..Default::default()
+            },
+        ));
+
+        // Non-degenerate filler graph so search recall over survivors is
+        // reliable (same rationale as the single-upsert D12 test).
+        for j in 0..12u8 {
+            adapter
+                .upsert(rid(10 + j), &random_vec(dim, iter * 100 + j as u64))
+                .await
+                .unwrap();
+        }
+
+        let target = rid(1);
+        // Batch side: target plus a few unrelated rids.
+        let batch_vec_a = vec![1.0f32, 0.0, 0.0, 0.0];
+        let batch: Vec<(RecordId, Vec<f32>)> = vec![
+            (rid(2), random_vec(dim, iter * 7 + 1)),
+            (rid(3), random_vec(dim, iter * 7 + 2)),
+            (target, batch_vec_a.clone()),
+        ];
+        // Single-upsert side: same target, different vec.
+        let single_vec_b = vec![0.0f32, 1.0, 0.0, 0.0];
+
+        let barrier = StdArc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+
+        // Task 1: batch upsert.
+        {
+            let a = StdArc::clone(&adapter);
+            let b = StdArc::clone(&barrier);
+            let batch = batch.clone();
+            handles.push(tokio::spawn(async move {
+                b.wait().await;
+                a.upsert_batch(&batch).await.unwrap();
+            }));
+        }
+        // Task 2: single upsert of the contended rid.
+        {
+            let a = StdArc::clone(&adapter);
+            let b = StdArc::clone(&barrier);
+            let v = single_vec_b.clone();
+            handles.push(tokio::spawn(async move {
+                b.wait().await;
+                a.upsert(target, &v).await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // (a) Direct state invariant: exactly one live internal for target.
+        let mut live_internals = 0usize;
+        adapter
+            .rid_map
+            .scan_async(|internal, mapped_rid| {
+                if *mapped_rid == target && !adapter.deleted.contains(internal) {
+                    live_internals += 1;
+                }
+            })
+            .await;
+        assert_eq!(
+            live_internals, 1,
+            "iter {iter}: rid must map to exactly ONE live internal after \
+             batch↔single concurrent upsert; found {live_internals} (D12 batch race)"
+        );
+
+        // (b) End-to-end: target appears at most once in search.
+        for q in [&batch_vec_a, &single_vec_b] {
+            let results = adapter.search(q, 16, None).await.unwrap();
+            let occurrences = results.iter().filter(|(r, _)| *r == target).count();
+            assert!(
+                occurrences <= 1,
+                "iter {iter}: rid surfaced {occurrences} times in search — \
+                 duplicate live graph node (D12 batch); results={results:?}"
+            );
+        }
+    }
+}
+
+/// D12 WITHIN a single batch: the SAME rid appearing twice in one
+/// `upsert_batch` must resolve to the LAST occurrence (last-write-wins),
+/// leave exactly one live internal, and surface only the later vector. This
+/// is the intra-batch duplicate sub-case the batch↔single test does not cover.
+#[tokio::test]
+#[serial_test::serial]
+async fn upsert_batch_duplicate_rid_within_batch_last_wins() {
+    let dim = 4usize;
+    let adapter = HnswAdapter::new(
+        dim as u32,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 100,
+            ..Default::default()
+        },
+    );
+
+    let target = rid(1);
+    let vec_first = vec![1.0f32, 0.0, 0.0, 0.0];
+    let vec_last = vec![0.0f32, 1.0, 0.0, 0.0];
+    // Same rid twice (first, then last) plus one unrelated row.
+    let batch: Vec<(RecordId, Vec<f32>)> = vec![
+        (target, vec_first.clone()),
+        (rid(2), random_vec(dim, 42)),
+        (target, vec_last.clone()),
+    ];
+    adapter.upsert_batch(&batch).await.unwrap();
+
+    // Two DISTINCT rids → len 2: the duplicate collapses to one live node
+    // (the first internal is tombstoned).
+    assert_eq!(
+        adapter.len(),
+        2,
+        "duplicate rid within a batch must collapse to one live node"
+    );
+
+    // Exactly one live internal maps to target.
+    let mut live = 0usize;
+    adapter
+        .rid_map
+        .scan_async(|internal, mapped| {
+            if *mapped == target && !adapter.deleted.contains(internal) {
+                live += 1;
+            }
+        })
+        .await;
+    assert_eq!(
+        live, 1,
+        "duplicate rid within a batch must leave exactly one live internal"
+    );
+
+    // Last write wins: querying the LATER vector returns target as top-1, and
+    // the earlier vector is tombstoned (removed from the brute-force scan).
+    let results = adapter.search(&vec_last, 1, None).await.unwrap();
+    assert_eq!(
+        results[0].0, target,
+        "the later vector of a duplicated rid must be the surviving one"
+    );
+}
