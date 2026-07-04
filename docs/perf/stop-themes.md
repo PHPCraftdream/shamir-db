@@ -1,6 +1,6 @@
 # STOP-темы оптимизаций — отложенные структурные изменения
 
-Темы из `opt_crush/SUMMARY.md` и `remaining-optimizations-plan.md`,
+Темы из `docs/audits/SUMMARY.md` и `remaining-optimizations-plan.md`,
 которые были честно остановлены при попытке реализации. Каждая запись
 содержит: причину блока, какой prerequisite/refactor нужен для разблока,
 и оценку scope.

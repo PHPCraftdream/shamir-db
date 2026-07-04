@@ -33,6 +33,9 @@ examples/*/Cargo.lock
 
 # local dev artifacts
 server-cert.pem
+# Per-run test-capture scratch (CLAUDE.md: `./scripts/test.sh > run.log`).
+# Never tracked — agents freely overwrite/delete it.
+/run.log
 crates/shamir-client-node/target/
 crates/shamir-client-node/Cargo.lock
 devrust.cargo-target-bench/
