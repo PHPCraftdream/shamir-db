@@ -48,7 +48,7 @@ fn has_neon() -> bool {
 }
 
 #[inline]
-pub(super) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if has_avx512f() {
@@ -75,7 +75,7 @@ pub(super) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 }
 
 #[inline]
-pub(super) fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if has_avx512f() {

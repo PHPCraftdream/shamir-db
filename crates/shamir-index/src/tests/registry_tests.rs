@@ -12,6 +12,9 @@ struct DummyBackend(IndexDescriptor);
 
 #[async_trait]
 impl IndexBackend for DummyBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn descriptor(&self) -> &IndexDescriptor {
         &self.0
     }

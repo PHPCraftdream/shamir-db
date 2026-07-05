@@ -132,6 +132,13 @@ impl VectorBackend {
         }
     }
 
+    /// Get a clone of the adapter Arc for async use across await points.
+    /// V3.2: used by the engine to access `HnswAdapter::search_prefilter` /
+    /// `search_cofilter` via `adapter.as_hnsw_adapter()`.
+    pub fn adapter_arc(&self) -> Arc<dyn VectorAdapter> {
+        Arc::clone(&self.adapter.load_full().adapter)
+    }
+
     /// Lower the background-snapshot threshold so a test can cross it without
     /// appending the production default (10k) vectors. Test-only.
     #[cfg(test)]
@@ -207,6 +214,10 @@ fn ve(e: VectorError) -> IndexError {
 
 #[async_trait]
 impl IndexBackend for VectorBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }

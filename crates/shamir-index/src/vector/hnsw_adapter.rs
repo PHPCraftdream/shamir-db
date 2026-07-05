@@ -240,6 +240,154 @@ impl HnswAdapter {
     }
 }
 
+/// Co-filter ef-overscan multiplier. `search_filter` can return < knbn under
+/// tight filters (layer-0-only application + post-hoc drop). We compensate by
+/// requesting `ef = max(ef_base, k * CO_FILTER_EF_MULTIPLIER)` so the graph
+/// traversal explores enough candidates to fill the result.
+///
+/// 8× empirically covers 90%+ of cases where the allow-set is 1–5% of the
+/// dataset (validated in the overscan contract test). Combined with the retry
+/// widening in the engine, this ensures recall is not catastrophically degraded.
+pub const CO_FILTER_EF_MULTIPLIER: u32 = 8;
+
+/// Threshold: if the candidate set (from secondary index) has at most this many
+/// RIDs, the pre-filter path (exact SIMD brute-force over the candidates) is
+/// chosen. Above this threshold, co-filter (HNSW search_filter) is preferred.
+///
+/// 4096 is the sweet spot: exact SIMD over 4096 128-d vectors takes ~0.5 ms
+/// (AVX2), which is competitive with a single HNSW search_filter call. Above
+/// 4096 the linear scan becomes the bottleneck; below it, the graph overhead
+/// (per-hop distance computations, cache misses) outweighs the brute-force.
+pub const PRE_FILTER_MAX_CANDIDATES: usize = 4096;
+
+/// Upper selectivity bound for co-filter. If the allow-set exceeds this
+/// fraction of the total dataset, post-filter (V3.1 oversample-retry) is
+/// preferred — co-filter gains diminish when most points pass the filter
+/// anyway, and the ef-overscan cost is wasted.
+pub const CO_FILTER_MAX_SELECTIVITY: f64 = 0.20;
+
+impl HnswAdapter {
+    /// **Pre-filter path** (V3.2): exact SIMD top-k scoring over a small
+    /// candidate set of RIDs known to pass the residual predicate.
+    ///
+    /// The caller provides RIDs that passed the secondary index lookup. This
+    /// method resolves them to internal IDs, retrieves their vectors, scores
+    /// each against `query` using the SIMD kernels, and returns the top-k by
+    /// distance (ascending). Result is EXACT (no approximation).
+    ///
+    /// Returns `Ok(vec![])` if none of the candidate RIDs have vectors.
+    pub async fn search_prefilter(
+        &self,
+        query: &[f32],
+        k: u32,
+        candidates: &[RecordId],
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        if query.len() as u32 != self.dim {
+            return Err(VectorError::DimMismatch {
+                expected: self.dim,
+                got: query.len() as u32,
+            });
+        }
+        let k = if k == 0 {
+            return Ok(vec![]);
+        } else {
+            k.min(MAX_TOPK)
+        };
+
+        let dist = ShamirDist {
+            metric: self.metric,
+        };
+
+        let mut scored: Vec<(RecordId, f32)> = Vec::with_capacity(candidates.len());
+        for &rid in candidates {
+            let internal = match self.rid_to_internal.read_async(&rid, |_, v| *v).await {
+                Some(i) => i,
+                None => continue,
+            };
+            if self.deleted.contains_async(&internal).await {
+                continue;
+            }
+            let vec_opt = self.vectors.read_async(&internal, |_, v| v.clone()).await;
+            if let Some(v) = vec_opt {
+                let d = dist.eval(query, &v);
+                scored.push((rid, d));
+            }
+        }
+
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k as usize);
+        Ok(scored)
+    }
+
+    /// **Co-filter path** (V3.2): HNSW `search_filter` with an allow-set of
+    /// internal IDs derived from the candidate RIDs.
+    ///
+    /// Uses a closure-based `FilterT` (no sorting required). Applies generous
+    /// ef-overscan ([`CO_FILTER_EF_MULTIPLIER`]) to compensate for the
+    /// `search_filter` under-return behaviour documented in the V0.0 spike.
+    pub async fn search_cofilter(
+        &self,
+        query: &[f32],
+        k: u32,
+        ef_search_override: Option<u32>,
+        candidates: &[RecordId],
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        if query.len() as u32 != self.dim {
+            return Err(VectorError::DimMismatch {
+                expected: self.dim,
+                got: query.len() as u32,
+            });
+        }
+        let k = if k == 0 {
+            return Ok(vec![]);
+        } else {
+            k.min(MAX_TOPK)
+        };
+
+        // Build allow-set of internal IDs from the candidate RIDs.
+        let mut allow_set = shamir_collections::TFxSet::<usize>::with_hasher(THasher::default());
+        for &rid in candidates {
+            if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
+                if !self.deleted.contains_async(&internal).await {
+                    allow_set.insert(internal);
+                }
+            }
+        }
+
+        if allow_set.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // ef-overscan: generous to compensate search_filter under-return.
+        let ef_base = match ef_search_override {
+            Some(v) => (v.min(MAX_EF_SEARCH) as usize).max(k as usize),
+            None => self.ef_search,
+        };
+        let ef = ef_base.max((k as usize) * CO_FILTER_EF_MULTIPLIER as usize);
+
+        let hnsw = Arc::clone(&self.hnsw);
+        let query_owned = query.to_vec();
+        let knbn = k as usize;
+
+        let neighbors = tokio::task::spawn_blocking(move || {
+            let pred = |id: &usize| allow_set.contains(id);
+            hnsw.search_filter(&query_owned, knbn, ef, Some(&pred))
+        })
+        .await
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
+        for n in neighbors {
+            if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                out.push((rid, n.distance));
+            }
+        }
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(k as usize);
+        Ok(out)
+    }
+}
+
 #[async_trait]
 impl VectorAdapter for HnswAdapter {
     async fn upsert(&self, rid: RecordId, vec: &[f32]) -> Result<(), VectorError> {

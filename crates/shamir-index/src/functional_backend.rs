@@ -175,6 +175,10 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
 
 #[async_trait]
 impl IndexBackend for FunctionalBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }

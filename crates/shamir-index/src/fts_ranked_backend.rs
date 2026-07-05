@@ -119,6 +119,10 @@ impl FtsRankedBackend {
 
 #[async_trait]
 impl IndexBackend for FtsRankedBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }

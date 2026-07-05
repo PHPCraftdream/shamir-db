@@ -34,6 +34,9 @@ impl MockBackend {
 
 #[async_trait]
 impl IndexBackend for MockBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }
