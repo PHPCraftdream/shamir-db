@@ -1,6 +1,14 @@
-// Native-binding loader. Resolves the prebuilt `.node` artefact for
-// the current platform/arch/abi triple. Built artefacts follow the
-// napi-rs naming convention: `shamir-client.<platform>-<arch>[-abi].node`.
+// Native-binding loader + msgpack glue.
+//
+// Resolves the prebuilt `.node` artefact for the current platform/arch/abi
+// triple. Built artefacts follow the napi-rs naming convention:
+// `shamir-client.<platform>-<arch>[-abi].node`.
+//
+// The native `execute` / `repl` methods take and return MessagePack-encoded
+// `Buffer`s (since the serde_json elimination refactor — see commit
+// f19d593d). This loader wraps the native class so that JS callers can pass
+// plain objects (the documented contract in `lib.rs` lines 19–22) and receive
+// plain objects back: we encode on the way in, decode on the way out.
 //
 // Today only `win32-x64-msvc` is built locally (see rust-toolchain.toml);
 // add more triples here as we publish prebuilt binaries for other hosts.
@@ -8,6 +16,7 @@
 'use strict';
 
 const { platform, arch } = process;
+const { encode, decode } = require('@msgpack/msgpack');
 
 function loadNative() {
   const candidates = [];
@@ -44,4 +53,17 @@ function loadNative() {
   );
 }
 
-module.exports = loadNative();
+const native = loadNative();
+
+// Wrap the native ShamirClient so `execute` accepts a plain JS object and
+// returns a plain JS object (msgpack encode/decode happens here). `repl`
+// already takes/returns Buffers in test 16, so we leave it untouched.
+class ShamirClient extends native.ShamirClient {
+  async execute(db, batchObj) {
+    const buf = Buffer.from(encode(batchObj));
+    const resp = await super.execute(db, buf);
+    return decode(new Uint8Array(resp));
+  }
+}
+
+module.exports = { ...native, ShamirClient };
