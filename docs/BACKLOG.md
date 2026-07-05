@@ -102,3 +102,4 @@ id** (минтит и персистит). Клиент берёт только 
 | #72 | INSERT…RETURNING + ResultEncoding::Id | small | low |
 | #82 | DX value-API над QueryValue (процедуры) | large | medium |
 | #100 | TS/napi client-side interner | large | high (разгрузка сервера) |
+| — | WAL `truncate_below`: Windows `PermissionDenied` на `remove_file` учитывается как reclaimed, файл висит untracked до следующего `SegmentSet::open` (утечка сегментов в долгоживущем процессе при конкурентном replay). Найдено при #422. | small | medium |
