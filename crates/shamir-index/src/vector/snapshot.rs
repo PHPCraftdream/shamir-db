@@ -1,0 +1,733 @@
+//! Snapshot codec for the persisted HNSW graph (P2 — V2.1).
+//!
+//! This module gives `HnswAdapter` an isolated, unit-testable dump/load
+//! round-trip against any `Store`. It is the FIRST P2 slice: ONLY the codec —
+//! startup integration (#401) and the incremental delta-log / generation flip
+//! (#402) are out of scope and land in later sheets.
+//!
+//! ## Layout in the info_store
+//!
+//! All keys live under the caller-supplied `keyspace` (e.g. `__info__<table>`
+//! or a dedicated vector-keyspace); the codec prefixes every record it writes
+//! with `<keyspace>.`. Three kinds of records are emitted for generation `N`:
+//!
+//! * **Chunks** — the `hnsw_rs` dump files (`.hnsw.graph`, `.hnsw.data`) sliced
+//!   into ~1 MiB pieces, written as raw bytes under
+//!   `<keyspace>.g<N>.graph.KKKK` / `<keyspace>.g<N>.data.KKKK` where `KKKK`
+//!   is a 6-digit zero-padded chunk index. Each chunk carries its own crc32 in
+//!   the [`ChunkHeader`] (checksums-everywhere pillar): a bit-flip in any
+//!   chunk surfaces as [`SnapshotError::Corrupt`] at load, not as a silent
+//!   graph corruption.
+//! * **Sidecar** — `<keyspace>.g<N>.sidecar` (MetaEnvelope-wrapped, bincode):
+//!   everything the graph dump itself does NOT carry — the adapter's maps
+//!   (`rid_map`, `rid_to_internal`, `tombstones`, `vectors`), the build
+//!   parameters, and the cross-section crc32. `RESERVED` fields
+//!   (`quantization`) are `Option`s left `None` until P5.
+//! * **Manifest** — `<keyspace>.manifest` (MetaEnvelope-wrapped): the single
+//!   source of truth for "which generation is live". Points at `gen N`, the
+//!   chunk counts, and the basename `hnsw_rs::file_dump` actually used (it can
+//!   be uniquified by the loader when a name collision is detected, so we MUST
+//!   record the returned name — see `DumpInit::get_basename`).
+//!
+//! ## Lifetime: how `Hnsw<'static>` is produced from a load
+//!
+//! `hnsw_rs::HnswIo::load_hnsw_with_dist<'b, 'a>` ties `'a: 'b` where `'a` is
+//! the borrow of the `HnswIo` loader. To hand the reloaded graph to long-lived
+//! storage as `Arc<Hnsw<'static, ...>>` (the shape `HnswAdapter` already uses),
+//! the loader itself must outlive every reference the graph hands out — i.e.
+//! it must be `'static`. `Box::leak(Box::new(HnswIo))` is the sanctioned
+//! boot-only pattern (mirrors the V0.0 contract-test
+//! `leaked_loader_yields_static_hnsw`): the loader is tiny and lives for the
+//! process; the dump files are the durable artefact. A leaked `HnswIo` per
+//! snapshot is acceptable ONLY because snapshots are loaded once at boot (a
+//! handful per shard). It is NOT a per-request pattern.
+//!
+//! ## Pillars honoured
+//!
+//! * `spawn_blocking` for every CPU/IO-bound step (`file_dump`, file read,
+//!   file write on load) — never block the async executor on disk I/O.
+//! * `Store::transact` for the atomic chunk + sidecar + manifest write — the
+//!   dump is observable as a single all-or-nothing batch on backends that
+//!   override `transact`, and as per-op sequential on the default impl.
+//! * crc32 on every chunk + a cross-section crc32 in the sidecar
+//!   (checksums-everywhere).
+
+use crate::kind::VectorMetric;
+use crate::meta_envelope::MetaEnvelope;
+use crate::vector::hnsw_adapter::{HnswAdapter, ShamirDist};
+use bytes::Bytes;
+use hnsw_rs::api::AnnT;
+use hnsw_rs::hnsw::Hnsw;
+use hnsw_rs::hnswio::HnswIo;
+use serde::{Deserialize, Serialize};
+use shamir_storage::error::DbError;
+use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_types::types::common::THasher;
+use shamir_types::types::record_id::RecordId;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Arc;
+use thiserror::Error;
+
+/// Target chunk size. ~1 MiB keeps each store record comfortably under the
+/// memtable page size of every backend we ship (redb/sled/fjall all default
+/// to multi-MiB pages) while bounding the per-chunk crc32 cost to a single
+/// scan over 1 MiB.
+const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
+
+/// Format version stamped into the sidecar and manifest. Bumped only on a
+/// breaking layout change. The envelope ALSO carries a version (for the
+/// outer wrapper); this one is the inner snapshot-layout version.
+pub(crate) const SNAPSHOT_FORMAT_VERSION: u16 = 1;
+
+/// The `hnsw_rs` crate version this codec understands. Pinned to the exact
+/// patch in `Cargo.toml` (the pin comment there explains why). `hnsw_rs`
+/// does NOT export its version as a const, so we hard-code it here and
+/// assert parity at load time — a dump written by a different `hnsw_rs`
+/// version is refused with `VersionMismatch` rather than handed to a
+/// loader that may panic on an unknown on-disk format.
+pub(crate) const HNSW_RS_VERSION: &str = "0.3.4";
+
+/// Default basename passed to `hnsw_rs::file_dump`. The loader records the
+/// ACTUAL basename (which `DumpInit` may uniquify on collision) in the
+/// manifest; this constant is only the seed.
+const DUMP_BASENAME_SEED: &str = "shamir";
+
+/// 6-digit zero-padded decimal chunk index. 10^6 chunks × 1 MiB = 1 TiB per
+/// dump file — comfortably past any realistic graph size, and the zero-padding
+/// makes lexicographic key order == numeric order (so a prefix scan walks
+/// chunks in order without a comparator).
+const CHUNK_IDX_WIDTH: usize = 6;
+
+/// Keyspace tag layout. `<keyspace>` is caller-supplied (the engine will pass
+/// the vector index's own keyspace). All records the codec writes live under
+/// `<keyspace>.g<N>.{graph|data}.KKKK`, `<keyspace>.g<N>.sidecar`, and
+/// `<keyspace>.manifest`.
+fn chunk_key(keyspace: &str, gen: u32, section: &str, idx: usize) -> RecordKey {
+    // `<keyspace>.g<N>.<section>.KKKKKK`
+    Bytes::from(format!(
+        "{ks}.g{gen}.{section}.{idx:0width$}",
+        ks = keyspace,
+        gen = gen,
+        section = section,
+        idx = idx,
+        width = CHUNK_IDX_WIDTH,
+    ))
+}
+
+fn sidecar_key(keyspace: &str, gen: u32) -> RecordKey {
+    Bytes::from(format!("{ks}.g{gen}.sidecar", ks = keyspace))
+}
+
+fn manifest_key(keyspace: &str) -> RecordKey {
+    Bytes::from(format!("{ks}.manifest", ks = keyspace))
+}
+
+// `pub(crate)` test-only accessors — the codec owns the keyspace layout, so
+// the snapshot tests ask it for the exact keys they need to mutate (corrupt
+// a chunk, tamper with the sidecar). These are NOT part of the public API.
+
+#[cfg(test)]
+pub(crate) fn chunk_key_for_test(keyspace: &str, gen: u32, section: &str, idx: usize) -> RecordKey {
+    chunk_key(keyspace, gen, section, idx)
+}
+
+#[cfg(test)]
+pub(crate) fn sidecar_key_for_test(keyspace: &str, gen: u32) -> RecordKey {
+    sidecar_key(keyspace, gen)
+}
+
+// ============================================================================
+// On-wire types (bincode inside a MetaEnvelope)
+// ============================================================================
+
+/// crc32-checked chunk payload.
+///
+/// `bytes` is the raw file slice; `crc32` is `crc32fast::hash(&bytes)`. Load
+/// verifies each chunk independently so a single bit-flip fails fast with the
+/// exact chunk index in the error, rather than corrupting the whole load.
+#[derive(Clone, Serialize, Deserialize)]
+struct ChunkHeader {
+    idx: u32,
+    crc32: u32,
+    bytes: Vec<u8>,
+}
+
+/// Sidecar — everything the `hnsw_rs` graph dump does NOT carry.
+///
+/// Reserved-for-P5 fields are `Option`s left `None` so the layout is stable
+/// when quantization lands.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SnapshotSidecar {
+    /// Inner snapshot-layout version (`SNAPSHOT_FORMAT_VERSION`).
+    pub format_version: u16,
+    pub dim: u32,
+    pub metric: VectorMetric,
+    pub ef_search: usize,
+    /// HNSW build parameters (read off the live graph via `Hnsw::get_*`).
+    pub m: u8,
+    pub max_layer: usize,
+    pub ef_construction: usize,
+    /// `next_id` counter — restored verbatim so post-load upserts do not
+    /// collide with existing internals.
+    pub next_id: usize,
+    /// `internal -> RecordId` forward map.
+    pub rid_map: Vec<(usize, RecordId)>,
+    /// `RecordId -> internal` reverse map.
+    pub rid_to_internal: Vec<(RecordId, usize)>,
+    /// Tombstoned internals (soft-deleted graph nodes still referenced by
+    /// the loaded graph; search filters them out).
+    pub tombstones: Vec<usize>,
+    /// `internal -> raw vector`. Kept so the small-index exact brute-force
+    /// path (see `BRUTE_FORCE_MAX`) works immediately after load without a
+    /// re-scan.
+    pub vectors: Vec<(usize, Vec<f32>)>,
+    /// `hnsw_rs` crate version that produced the dump. Loaded into the
+    /// adapter only for diagnostics today; a future bump can refuse to load
+    /// a foreign version by comparing against the build-time constant.
+    pub hnsw_rs_version: String,
+    /// RESERVED (P5 quantization). Always `None` in V2.1.
+    pub quantization: Option<Vec<u8>>,
+    /// crc32 over the concatenation `[graph_file_bytes, data_file_bytes]` —
+    /// a cross-section integrity check independent of the per-chunk crc32s.
+    pub sections_crc32: u32,
+    /// Total byte length of the `.hnsw.graph` file (sum of `graph` chunks).
+    pub graph_len: u64,
+    /// Total byte length of the `.hnsw.data` file (sum of `data` chunks).
+    pub data_len: u64,
+}
+
+/// Manifest — points at the active generation.
+///
+/// `gen` is the snapshot generation index. V2.1 always writes a single
+/// generation (`gen = 0`); the generation-flip protocol (#402) will bump it
+/// on each new snapshot and atomically flip the manifest to the new gen once
+/// the chunks + sidecar are durable.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SnapshotManifest {
+    /// Inner snapshot-layout version.
+    pub format_version: u16,
+    /// Active generation index.
+    pub gen: u32,
+    /// Number of chunks the `.hnsw.graph` file was sliced into.
+    pub graph_chunks: u32,
+    /// Number of chunks the `.hnsw.data` file was sliced into.
+    pub data_chunks: u32,
+    /// Basename `hnsw_rs::file_dump` ACTUALLY used for this dump. `DumpInit`
+    /// can uniquify the basename on a name collision, so we MUST store the
+    /// returned name — the load path rebuilds the temp files under this name.
+    pub basename: String,
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+/// All snapshot codec failures. `Corrupt` is the crc32 mismatch;
+/// `VersionMismatch` is either the envelope version or the inner snapshot
+/// layout version disagreeing with what this build understands.
+#[derive(Debug, Error)]
+pub enum SnapshotError {
+    #[error("snapshot corrupt: {0}")]
+    Corrupt(String),
+    #[error("snapshot version mismatch: {0}")]
+    VersionMismatch(String),
+    #[error("snapshot I/O error: {0}")]
+    Io(String),
+    #[error("snapshot serde error: {0}")]
+    Serde(String),
+    #[error("snapshot backend error: {0}")]
+    Backend(String),
+    #[error("snapshot not found (no manifest for keyspace)")]
+    NotFound,
+}
+
+impl From<std::io::Error> for SnapshotError {
+    fn from(e: std::io::Error) -> Self {
+        SnapshotError::Io(e.to_string())
+    }
+}
+
+impl From<DbError> for SnapshotError {
+    fn from(e: DbError) -> Self {
+        match e {
+            DbError::NotFound(_) => SnapshotError::NotFound,
+            other => SnapshotError::Backend(other.to_string()),
+        }
+    }
+}
+
+impl From<bincode::Error> for SnapshotError {
+    fn from(e: bincode::Error) -> Self {
+        SnapshotError::Serde(e.to_string())
+    }
+}
+
+// ============================================================================
+// Dump path
+// ============================================================================
+
+/// Dump the adapter's live HNSW graph + sidecar + manifest into `store` under
+/// `keyspace`. Overwrites any existing snapshot (the generation-flip protocol
+/// of #402 will make this incremental; for V2.1 a single full dump is fine).
+///
+/// CPU/IO-bound work (file_dump, file reads) runs under `spawn_blocking`.
+/// The chunk + sidecar + manifest write is a single `transact` so backends
+/// that override `transact` expose the dump atomically.
+pub async fn dump_snapshot(
+    adapter: &HnswAdapter,
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+) -> Result<(), SnapshotError> {
+    dump_snapshot_with_gen(adapter, store, keyspace, 0).await
+}
+
+/// Same as [`dump_snapshot`] but lets the caller pick the generation index.
+/// The generation flip in #402 will call this with the next gen; V2.1's
+/// `dump_snapshot` always uses `0`.
+pub async fn dump_snapshot_with_gen(
+    adapter: &HnswAdapter,
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    gen: u32,
+) -> Result<(), SnapshotError> {
+    // ---- 1. file_dump in a TempDir (CPU/IO) ------------------------------
+    //
+    // `file_dump` is a TRAIT method — only callable after `use AnnT`.
+    let hnsw = Arc::clone(adapter.hnsw_handle());
+    let dump_dir = tempfile::tempdir()?;
+    let dump_dir_path: PathBuf = dump_dir.path().to_path_buf();
+    let basename_seed = DUMP_BASENAME_SEED.to_string();
+    let basename = tokio::task::spawn_blocking(move || {
+        hnsw.file_dump(&dump_dir_path, &basename_seed)
+            .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump failed: {e}")))
+    })
+    .await
+    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+    // ---- 2. read both dump files, slice into chunks, compute crc32s -------
+    let graph_path = dump_dir.path().join(format!("{basename}.hnsw.graph"));
+    let data_path = dump_dir.path().join(format!("{basename}.hnsw.data"));
+    let graph_path_b = graph_path.clone();
+    let data_path_b = data_path.clone();
+    let (graph_bytes, data_bytes) = tokio::task::spawn_blocking(move || {
+        let g = std::fs::read(&graph_path_b)?;
+        let d = std::fs::read(&data_path_b)?;
+        Ok::<_, SnapshotError>((g, d))
+    })
+    .await
+    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+    // Build the KvOp batch. We accumulate every chunk + the sidecar + the
+    // manifest and apply them under ONE `transact` so the dump is observable
+    // as a single all-or-nothing batch on backends that override `transact`.
+    let mut ops: Vec<KvOp> = Vec::new();
+
+    let (graph_chunks, data_chunks) = (
+        slice_into_chunk_ops(&graph_bytes, keyspace, gen, "graph", &mut ops),
+        slice_into_chunk_ops(&data_bytes, keyspace, gen, "data", &mut ops),
+    );
+
+    // ---- 3. build the sidecar --------------------------------------------
+    //
+    // Read adapter state via the pub(crate) accessors + cursor scans. The
+    // cursors run synchronously here — they touch a snapshot of the live
+    // scc HashMaps; concurrent upserts can race, but P2 dumps are an
+    // explicit, infrequent, caller-driven action (the engine will gate them
+    // behind a quiesce in #402), not a hot-path concern.
+    let mut rid_map: Vec<(usize, RecordId)> = Vec::new();
+    adapter.for_each_rid_map(|internal, rid| rid_map.push((internal, rid)));
+
+    let mut rid_to_internal: Vec<(RecordId, usize)> = Vec::new();
+    adapter.for_each_rid_to_internal(|rid, internal| rid_to_internal.push((rid, internal)));
+
+    let mut tombstones: Vec<usize> = Vec::new();
+    adapter.for_each_deleted(|internal| tombstones.push(internal));
+
+    let mut vectors: Vec<(usize, Vec<f32>)> = Vec::new();
+    adapter.for_each_vector(|internal, v| vectors.push((internal, v.to_vec())));
+
+    // Cross-section crc32: hash both concatenated file byte streams. This is
+    // independent of the per-chunk crc32s, so a chunk-key-swap (graph chunk
+    // mis-attributed to data or vice versa) is caught here even if both
+    // chunks' own crcs are valid.
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&graph_bytes);
+    hasher.update(&data_bytes);
+    let sections_crc32 = hasher.finalize();
+
+    let hnsw_handle = adapter.hnsw_handle();
+    let sidecar = SnapshotSidecar {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        dim: adapter.dim_field(),
+        metric: adapter.metric_field(),
+        ef_search: adapter.ef_search_field(),
+        m: hnsw_handle.get_max_nb_connection(),
+        max_layer: hnsw_handle.get_max_level(),
+        ef_construction: hnsw_handle.get_ef_construction(),
+        next_id: adapter.next_id_value(),
+        rid_map,
+        rid_to_internal,
+        tombstones,
+        vectors,
+        hnsw_rs_version: HNSW_RS_VERSION.to_string(),
+        quantization: None,
+        sections_crc32,
+        graph_len: graph_bytes.len() as u64,
+        data_len: data_bytes.len() as u64,
+    };
+    let sidecar_env = MetaEnvelope::new(sidecar);
+    let sidecar_bytes = sidecar_env
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    ops.push(KvOp::Set(
+        sidecar_key(keyspace, gen),
+        Bytes::from(sidecar_bytes),
+    ));
+
+    // ---- 4. build the manifest -------------------------------------------
+    let manifest = SnapshotManifest {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        gen,
+        graph_chunks,
+        data_chunks,
+        basename: basename.clone(),
+    };
+    let manifest_env = MetaEnvelope::new(manifest);
+    let manifest_bytes = manifest_env
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+
+    // Wipe any PRIOR generation's chunks first so a load can never mix
+    // generations. For V2.1 there is only gen 0; the generation flip in
+    // #402 will keep the old gen alive until the new one is verified.
+    // We do this as a separate pass (not part of the main `transact`)
+    // because we don't know the prior gen's chunk counts here without
+    // reading its manifest; leaving stale chunks is harmless for V2.1
+    // since the manifest points unambiguously at the new gen.
+    ops.push(KvOp::Set(
+        manifest_key(keyspace),
+        Bytes::from(manifest_bytes),
+    ));
+
+    // ---- 5. atomic write -------------------------------------------------
+    store.transact(ops).await?;
+    Ok(())
+}
+
+/// Slice `bytes` into ~`CHUNK_SIZE` chunks; push a `Set` op per chunk into
+/// `ops` and return the chunk count. Each chunk carries its own crc32 in a
+/// [`ChunkHeader`].
+fn slice_into_chunk_ops(
+    bytes: &[u8],
+    keyspace: &str,
+    gen: u32,
+    section: &str,
+    ops: &mut Vec<KvOp>,
+) -> u32 {
+    if bytes.is_empty() {
+        // An empty file still gets a single zero-length chunk so the load
+        // path's "read N chunks" loop has exactly N=N_manifest entries to
+        // fetch (no off-by-one for the empty case).
+        let header = ChunkHeader {
+            idx: 0,
+            crc32: crc32fast::hash(&[]),
+            bytes: Vec::new(),
+        };
+        let encoded = bincode::serialize(&header).expect("chunk header serializable");
+        ops.push(KvOp::Set(
+            chunk_key(keyspace, gen, section, 0),
+            Bytes::from(encoded),
+        ));
+        return 1;
+    }
+    let mut idx = 0u32;
+    for chunk in bytes.chunks(CHUNK_SIZE) {
+        let crc = crc32fast::hash(chunk);
+        let header = ChunkHeader {
+            idx,
+            crc32: crc,
+            bytes: chunk.to_vec(),
+        };
+        let encoded = bincode::serialize(&header).expect("chunk header serializable");
+        ops.push(KvOp::Set(
+            chunk_key(keyspace, gen, section, idx as usize),
+            Bytes::from(encoded),
+        ));
+        idx += 1;
+    }
+    idx
+}
+
+// ============================================================================
+// Load path
+// ============================================================================
+
+/// Map a `MetaEnvelope::open` failure to the right snapshot error. An
+/// unsupported format version is a genuine `VersionMismatch`; bad magic or a
+/// decode failure means the manifest/sidecar bytes themselves are corrupt
+/// (they carry no crc of their own, unlike the chunk bodies).
+fn map_meta_err(e: crate::meta_envelope::MetaError) -> SnapshotError {
+    use crate::meta_envelope::MetaError;
+    match e {
+        MetaError::UnsupportedVersion(v) => {
+            SnapshotError::VersionMismatch(format!("envelope version {v} unsupported"))
+        }
+        other => SnapshotError::Corrupt(format!("envelope decode: {other}")),
+    }
+}
+
+/// Load the snapshot stored under `keyspace` and rebuild a working
+/// `HnswAdapter`. Reads manifest → chunks (with per-chunk crc verify) →
+/// sidecar (with cross-section crc verify) → temp files → `HnswIo` →
+/// `Box::leak` → `Hnsw<'static>` → `HnswAdapter::from_parts`.
+pub async fn load_snapshot(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+) -> Result<HnswAdapter, SnapshotError> {
+    // ---- 1. manifest -----------------------------------------------------
+    let manifest_bytes = store.get(manifest_key(keyspace)).await?;
+    let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).map_err(map_meta_err)?;
+    if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
+        return Err(SnapshotError::VersionMismatch(format!(
+            "snapshot format version {} does not match supported {}",
+            manifest.format_version, SNAPSHOT_FORMAT_VERSION
+        )));
+    }
+    let gen = manifest.gen;
+
+    // ---- 2. sidecar ------------------------------------------------------
+    let sidecar_bytes = store.get(sidecar_key(keyspace, gen)).await?;
+    let sidecar: SnapshotSidecar = MetaEnvelope::open(&sidecar_bytes).map_err(map_meta_err)?;
+    if sidecar.format_version != SNAPSHOT_FORMAT_VERSION {
+        return Err(SnapshotError::VersionMismatch(format!(
+            "sidecar format version {} does not match supported {}",
+            sidecar.format_version, SNAPSHOT_FORMAT_VERSION
+        )));
+    }
+
+    // ---- 3. fetch + verify + reassemble both files -----------------------
+    //
+    // The chunk keys for a given (gen, section) are sequential 0..N — we
+    // build them from the manifest's chunk count, fetch them via `get_many`
+    // (a single vectored read on backends that override it), and verify each
+    // crc before stitching. We do NOT use `scan_prefix_stream` here because
+    // that would also pick up chunks of OTHER generations sharing the
+    // keyspace (gen-flip #402); the manifest is the single source of truth
+    // for which chunks belong to the active gen.
+    let mut graph_chunk_keys: Vec<RecordKey> = Vec::with_capacity(manifest.graph_chunks as usize);
+    for i in 0..manifest.graph_chunks as usize {
+        graph_chunk_keys.push(chunk_key(keyspace, gen, "graph", i));
+    }
+    let mut data_chunk_keys: Vec<RecordKey> = Vec::with_capacity(manifest.data_chunks as usize);
+    for i in 0..manifest.data_chunks as usize {
+        data_chunk_keys.push(chunk_key(keyspace, gen, "data", i));
+    }
+
+    let graph_vals = store.get_many(graph_chunk_keys).await?;
+    let data_vals = store.get_many(data_chunk_keys).await?;
+
+    let graph_bytes = reassemble_and_verify(&graph_vals, "graph")?;
+    let data_bytes = reassemble_and_verify(&data_vals, "data")?;
+
+    // Cross-section crc32 verify (independent of the per-chunk checks).
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&graph_bytes);
+    hasher.update(&data_bytes);
+    if hasher.finalize() != sidecar.sections_crc32 {
+        return Err(SnapshotError::Corrupt(
+            "cross-section crc32 mismatch".to_string(),
+        ));
+    }
+    if graph_bytes.len() as u64 != sidecar.graph_len {
+        return Err(SnapshotError::Corrupt(format!(
+            "graph length mismatch: expected {}, got {}",
+            sidecar.graph_len,
+            graph_bytes.len()
+        )));
+    }
+    if data_bytes.len() as u64 != sidecar.data_len {
+        return Err(SnapshotError::Corrupt(format!(
+            "data length mismatch: expected {}, got {}",
+            sidecar.data_len,
+            data_bytes.len()
+        )));
+    }
+
+    // ---- 4. write temp files, Box::leak HnswIo, load graph (CPU/IO) ------
+    let load_dir = tempfile::tempdir()?;
+    let graph_path = load_dir
+        .path()
+        .join(format!("{}.hnsw.graph", manifest.basename));
+    let data_path = load_dir
+        .path()
+        .join(format!("{}.hnsw.data", manifest.basename));
+    let basename = manifest.basename.clone();
+    let dist = ShamirDist {
+        metric: sidecar.metric,
+    };
+    let dim = sidecar.dim;
+    let metric = sidecar.metric;
+    let ef_search = sidecar.ef_search;
+    let m = sidecar.m;
+    let max_layer = sidecar.max_layer;
+    let ef_construction = sidecar.ef_construction;
+    let hnsw_rs_version = sidecar.hnsw_rs_version.clone();
+    let next_id = sidecar.next_id;
+    let rid_map_pairs = sidecar.rid_map.clone();
+    let rid_to_internal_pairs = sidecar.rid_to_internal.clone();
+    let tombstones = sidecar.tombstones.clone();
+    let vectors_pairs = sidecar.vectors.clone();
+
+    // Verify the dump came from a compatible `hnsw_rs` BEFORE we hand it to
+    // the loader — `load_hnsw_with_dist` will panic on an unknown format.
+    // `hnsw_rs` does not export its version as a const, so we compare the
+    // sidecar-stamped version against our build-time pin.
+    if hnsw_rs_version != HNSW_RS_VERSION {
+        return Err(SnapshotError::VersionMismatch(format!(
+            "dump produced by hnsw_rs {}, but this build pins {}",
+            hnsw_rs_version, HNSW_RS_VERSION
+        )));
+    }
+
+    let hnsw: Arc<Hnsw<'static, f32, ShamirDist>> = tokio::task::spawn_blocking(move || {
+        // Write the reassembled bytes to the temp files. `file_dump` writes
+        // both files with `create+truncate+write`, so we mirror that.
+        let mut gf = std::fs::File::create(&graph_path)?;
+        gf.write_all(&graph_bytes)?;
+        gf.flush()?;
+        let mut df = std::fs::File::create(&data_path)?;
+        df.write_all(&data_bytes)?;
+        df.flush()?;
+        drop(gf);
+        drop(df);
+
+        // Boot-only, intentional leak: `load_hnsw_with_dist<'b,'a>` ties
+        // `'a: 'b` where `'a` is the borrow of the `HnswIo` loader. To hand
+        // the reloaded graph to long-lived storage as `Arc<Hnsw<'static,...>>`
+        // (the shape HnswAdapter already uses), the loader must be `'static`.
+        // We leak exactly ONE `HnswIo` per snapshot load; the loader is tiny
+        // (~tens of bytes) and lives for the process. The dump files are the
+        // durable artefact — the leak does NOT grow across snapshots, only
+        // across shard count. Mirrors the V0.0 contract test
+        // `leaked_loader_yields_static_hnsw`.
+        //
+        // MUST STAY NON-MMAP. `HnswIo::new` defaults to `datamap: false`, so
+        // `load_hnsw_with_dist` reads the graph fully INTO MEMORY — the returned
+        // `Hnsw` borrows the leaked `HnswIo` struct, NOT the on-disk files. That
+        // is why it is safe for `load_dir` (this TempDir) to drop when the
+        // closure returns: the files are already resident. If anyone enables
+        // mmap (`set_mmap(true)`) here, the graph would borrow the deleted temp
+        // files → UAF; `load_dir` would then have to be leaked too.
+        let leaked_io: &'static HnswIo =
+            Box::leak(Box::new(HnswIo::new(load_dir.path(), &basename)));
+        let hnsw: Hnsw<'static, f32, ShamirDist> = leaked_io
+            .load_hnsw_with_dist(dist)
+            .map_err(|e| SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist failed: {e}")))?;
+        Ok::<_, SnapshotError>(Arc::new(hnsw))
+    })
+    .await
+    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+    // Sanity: the loaded graph retained every point the sidecar claims, and
+    // the build params match what we persisted. (`m` and `max_layer` are
+    // advisory — `get_*` reads them off the loaded structure.)
+    debug_assert_build_params(&hnsw, m, max_layer, ef_construction);
+
+    // ---- 5. rebuild the adapter maps -------------------------------------
+    let cap = rid_map_pairs.len().max(64);
+    let rid_map = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
+    let rid_to_internal = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
+    let vectors = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
+    let deleted = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
+    for (internal, rid) in rid_map_pairs {
+        let _ = rid_map.insert(internal, rid);
+    }
+    for (rid, internal) in rid_to_internal_pairs {
+        let _ = rid_to_internal.insert(rid, internal);
+    }
+    for (internal, v) in vectors_pairs {
+        let _ = vectors.insert(internal, v);
+    }
+    for internal in tombstones {
+        let _ = deleted.insert(internal, ());
+    }
+
+    let adapter = HnswAdapter::from_parts(
+        dim,
+        metric,
+        ef_search,
+        hnsw,
+        rid_map,
+        rid_to_internal,
+        vectors,
+        deleted,
+        next_id,
+    );
+    Ok(adapter)
+}
+
+/// Decode each chunk header, verify its crc32, and concatenate the raw bytes
+/// back into the original file. Returns `Corrupt` on the first mismatch with
+/// the chunk index in the message.
+fn reassemble_and_verify(
+    vals: &[Option<Bytes>],
+    section: &'static str,
+) -> Result<Vec<u8>, SnapshotError> {
+    let mut out = Vec::new();
+    for (i, opt) in vals.iter().enumerate() {
+        let bytes = opt
+            .clone()
+            .ok_or_else(|| SnapshotError::Corrupt(format!("missing {section} chunk {i}")))?;
+        let header: ChunkHeader = bincode::deserialize(&bytes)
+            .map_err(|e| SnapshotError::Corrupt(format!("{section} chunk {i} decode: {e}")))?;
+        if header.idx as usize != i {
+            return Err(SnapshotError::Corrupt(format!(
+                "{section} chunk idx mismatch: expected {i}, got {}",
+                header.idx
+            )));
+        }
+        let actual = crc32fast::hash(&header.bytes);
+        if actual != header.crc32 {
+            return Err(SnapshotError::Corrupt(format!(
+                "{section} chunk {i} crc32 mismatch: expected {}, got {}",
+                header.crc32, actual
+            )));
+        }
+        out.extend_from_slice(&header.bytes);
+    }
+    Ok(out)
+}
+
+/// Debug-only build-param sanity check. `get_*` on the loaded graph reads
+/// the persisted structure; a mismatch would mean our sidecar lied about the
+/// build params (a codec bug, not a corrupt-graph case — the per-chunk and
+/// cross-section crcs already vouched for byte fidelity).
+#[cfg(debug_assertions)]
+fn debug_assert_build_params(
+    hnsw: &Hnsw<'static, f32, ShamirDist>,
+    m: u8,
+    max_layer: usize,
+    ef_construction: usize,
+) {
+    debug_assert_eq!(hnsw.get_max_nb_connection(), m, "sidecar m mismatch");
+    debug_assert_eq!(
+        hnsw.get_max_level(),
+        max_layer,
+        "sidecar max_layer mismatch"
+    );
+    debug_assert_eq!(
+        hnsw.get_ef_construction(),
+        ef_construction,
+        "sidecar ef_construction mismatch"
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_assert_build_params(
+    _hnsw: &Hnsw<'static, f32, ShamirDist>,
+    _m: u8,
+    _max_layer: usize,
+    _ef_construction: usize,
+) {
+}

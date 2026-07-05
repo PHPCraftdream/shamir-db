@@ -142,6 +142,95 @@ impl HnswAdapter {
             next_id: AtomicUsize::new(0),
         }
     }
+
+    // ----------------------------------------------------------------------
+    // Snapshot codec accessors (`pub(crate)` — used by `snapshot.rs` only)
+    // ----------------------------------------------------------------------
+    //
+    // The codec needs read access to the adapter's internal maps + Hnsw handle
+    // to serialise a snapshot, and write access (`from_parts`) to rebuild one
+    // from a loaded graph. Both are `pub(crate)`: the codec lives in the same
+    // crate, and there is no reason for an external caller to touch these.
+
+    pub(crate) fn dim_field(&self) -> u32 {
+        self.dim
+    }
+
+    pub(crate) fn metric_field(&self) -> VectorMetric {
+        self.metric
+    }
+
+    pub(crate) fn ef_search_field(&self) -> usize {
+        self.ef_search
+    }
+
+    pub(crate) fn hnsw_handle(&self) -> &Arc<Hnsw<'static, f32, ShamirDist>> {
+        &self.hnsw
+    }
+
+    pub(crate) fn next_id_value(&self) -> usize {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
+    /// Iterate `(internal -> rid)` pairs for snapshot serialisation. Borrows
+    /// each entry read-only under the scc cursor; the closure must not block.
+    pub(crate) fn for_each_rid_map<F: FnMut(usize, RecordId)>(&self, mut f: F) {
+        self.rid_map.scan(|internal, rid| {
+            f(*internal, *rid);
+        });
+    }
+
+    /// Iterate `(rid -> internal)` pairs for snapshot serialisation.
+    pub(crate) fn for_each_rid_to_internal<F: FnMut(RecordId, usize)>(&self, mut f: F) {
+        self.rid_to_internal.scan(|rid, internal| {
+            f(*rid, *internal);
+        });
+    }
+
+    /// Iterate the tombstone (`deleted`) internals for snapshot serialisation.
+    pub(crate) fn for_each_deleted<F: FnMut(usize)>(&self, mut f: F) {
+        self.deleted.scan(|internal, ()| {
+            f(*internal);
+        });
+    }
+
+    /// Iterate `(internal -> vector)` pairs for snapshot serialisation.
+    pub(crate) fn for_each_vector<F: FnMut(usize, &[f32])>(&self, mut f: F) {
+        self.vectors.scan(|internal, vec| {
+            f(*internal, vec);
+        });
+    }
+
+    /// Reconstruct an adapter from snapshot parts. Used by `snapshot::load`.
+    ///
+    /// `hnsw` is an `Arc<Hnsw<'static, ...>>` obtained from `load_hnsw_with_dist`
+    /// via a `Box::leak`'d `HnswIo` loader (see `snapshot::load` — the leak is
+    /// boot-only, one loader per shard, and the dump files are the durable
+    /// artefact). The maps and `next_id` are rebuilt from the sidecar.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        dim: u32,
+        metric: VectorMetric,
+        ef_search: usize,
+        hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
+        rid_map: scc::HashMap<usize, RecordId, THasher>,
+        rid_to_internal: scc::HashMap<RecordId, usize, THasher>,
+        vectors: scc::HashMap<usize, Vec<f32>, THasher>,
+        deleted: scc::HashMap<usize, (), THasher>,
+        next_id: usize,
+    ) -> Self {
+        Self {
+            dim,
+            metric,
+            ef_search,
+            hnsw,
+            rid_map,
+            rid_to_internal,
+            vectors,
+            deleted,
+            next_id: AtomicUsize::new(next_id),
+        }
+    }
 }
 
 #[async_trait]

@@ -49,9 +49,12 @@ shamir-numa = { path = "../shamir-numa" }
 hnsw_rs = "=0.3.4"
 # CRC32 for snapshot integrity (phase P2). Same version the WAL crate uses.
 crc32fast = "1"
+# `tempfile::TempDir` for the snapshot codec's dump/load scratch space
+# (phase P2). The codec lives on the production path (real graph dumps at
+# runtime), so this is a regular — not dev-only — dependency.
+tempfile = "3.10.1"
 
 [dev-dependencies]
-tempfile = "3.10.1"
 serial_test = "3.3.1"
 shamir-storage = { path = "../shamir-storage" }
 rust_decimal = { version = "1.40.0", features = ["serde"] }
