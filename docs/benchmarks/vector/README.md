@@ -7,6 +7,7 @@ the V0.4 `vector_report` recall/RSS tool).
 ## Reports
 
 - `2026-07-05-filtered-ann.md` — Pre/co/post-filter selectivity crossover bench (V3.3).
+- `2026-07-05-bulk-compaction.md` — Bulk-load (serial vs batch) + rebuild-aside compaction cost bench (V4.3).
 
 ## File naming
 
