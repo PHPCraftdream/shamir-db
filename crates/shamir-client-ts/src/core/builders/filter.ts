@@ -174,8 +174,9 @@ export function fts(
  *
  * * `efSearch` — per-query HNSW exploration width. Higher = better recall,
  *   higher latency. Clamped server-side to `MAX_EF_SEARCH` (10_000).
- * * `oversample` — reserved for P3 (#404): candidate-widening multiplier.
- *   Accepted on the wire, threaded to the adapter, NOT yet consumed.
+ * * `oversample` — candidate-widening multiplier on the filtered-ANN path
+ *   (default 2.0, clamped to ≥1.0 server-side); a bare vector_similarity
+ *   accepts it but does not consume it.
  */
 export interface VectorSimilarityOpts {
   efSearch?: number;
@@ -195,7 +196,7 @@ export interface VectorSimilarityOpts {
  * skipped by `@msgpack/msgpack` and the Rust `skip_serializing_if`).
  *
  * `ef_search` is clamped server-side to `MAX_EF_SEARCH` (10_000).
- * `oversample` is accepted but not yet consumed (P3 #404).
+ * `oversample` widens the candidate pool on the filtered-ANN path (#404).
  */
 export function vectorSimilarity(
   field: string | string[],
@@ -233,7 +234,7 @@ export function vs(
 export interface VectorSimilarityBuilder {
   /** Set per-query HNSW `ef_search` (exploration width). */
   efSearch(ef: number): VectorSimilarityBuilder;
-  /** Set per-query `oversample` (reserved P3 #404 — accepted, not yet consumed). */
+  /** Set per-query `oversample` (candidate widening on the filtered-ANN path). */
   oversample(f: number): VectorSimilarityBuilder;
   /** Finalize → plain `Filter`. */
   build(): Filter;
