@@ -57,6 +57,7 @@ fn vector_index_op(dim: u32) -> CreateIndexOp {
         functional_args: None,
         vector_dim: Some(dim),
         vector_metric: Some("cosine".into()),
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     }

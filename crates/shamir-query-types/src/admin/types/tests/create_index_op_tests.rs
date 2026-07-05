@@ -33,6 +33,7 @@ fn create_index_op_include_round_trip() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: vec![vec!["email".to_string()], vec!["name".to_string()]],
         if_not_exists: false,
     };
@@ -68,6 +69,7 @@ fn functional_args_msgpack_round_trip() {
         functional_args: Some(vec![mpack!(10), mpack!("base")]),
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -99,6 +101,7 @@ fn functional_args_msgpack_round_trip() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -135,6 +138,7 @@ fn create_index_op_no_include_omitted() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -156,4 +160,93 @@ fn create_index_op_no_include_omitted() {
     });
     let parsed: CreateIndexOp = from_qv(old_qv);
     assert!(parsed.include.is_empty());
+}
+
+// =========================================================================
+// V5.2 (#411) — vector_quantization wire back-compat
+// =========================================================================
+
+/// Old payload WITHOUT `vector_quantization` (pre-#411 client) must parse
+/// to `None` — the legacy unquantized f32 path, bit-for-bit.
+#[test]
+fn vector_quantization_absent_parses_to_none() {
+    let old_qv = mpack!({
+        "create_index": "vec_idx",
+        "table": "docs",
+        "fields": [["embedding"]],
+        "index_type": "vector",
+        "vector_dim": 128,
+        "vector_metric": "cosine",
+        "repo": "main"
+    });
+    let parsed: CreateIndexOp = from_qv(old_qv);
+    assert!(
+        parsed.vector_quantization.is_none(),
+        "pre-#411 payload should parse vector_quantization to None"
+    );
+}
+
+/// `vector_quantization: "sq8"` round-trips through msgpack and appears in
+/// the serialized output.
+#[test]
+fn vector_quantization_sq8_round_trip() {
+    let op = CreateIndexOp {
+        create_index: "vec_idx".to_string(),
+        table: "docs".to_string(),
+        fields: vec![vec!["embedding".to_string()]],
+        unique: false,
+        sorted: false,
+        repo: "main".to_string(),
+        index_type: Some("vector".to_string()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: None,
+        functional_args: None,
+        vector_dim: Some(128),
+        vector_metric: Some("cosine".to_string()),
+        vector_quantization: Some("sq8".to_string()),
+        include: Vec::new(),
+        if_not_exists: false,
+    };
+
+    let qv = to_qv(&op);
+    assert_eq!(
+        qv.get("vector_quantization"),
+        Some(&mpack!("sq8")),
+        "vector_quantization must appear in serialized output"
+    );
+
+    let back: CreateIndexOp = from_qv(qv);
+    assert_eq!(back.vector_quantization.as_deref(), Some("sq8"));
+    assert_eq!(back, op);
+}
+
+/// `vector_quantization` absent → NOT in serialized output
+/// (skip_serializing_if = "Option::is_none").
+#[test]
+fn vector_quantization_none_omitted_from_output() {
+    let op = CreateIndexOp {
+        create_index: "vec_idx".to_string(),
+        table: "docs".to_string(),
+        fields: vec![vec!["embedding".to_string()]],
+        unique: false,
+        sorted: false,
+        repo: "main".to_string(),
+        index_type: Some("vector".to_string()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: None,
+        functional_args: None,
+        vector_dim: Some(128),
+        vector_metric: Some("cosine".to_string()),
+        vector_quantization: None,
+        include: Vec::new(),
+        if_not_exists: false,
+    };
+
+    let qv = to_qv(&op);
+    assert!(
+        qv.get("vector_quantization").is_none(),
+        "vector_quantization must be absent when None, got: {qv:?}"
+    );
 }

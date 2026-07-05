@@ -164,6 +164,13 @@ impl TableManager {
                     Some("dot") => VectorMetric::Dot,
                     _ => VectorMetric::Cosine,
                 };
+                // V5.2 (#411) — opt-in SQ8 quantization. `op.vector_quantization`
+                // is a wire string ("sq8"); `None` (old messages, or omitted)
+                // → unquantized f32 path, bit-for-bit identical to pre-#411.
+                let quantization = op
+                    .vector_quantization
+                    .as_deref()
+                    .and_then(VectorQuantization::from_dsl);
                 let kind = IndexKind::Vector(Box::new(VectorConfig {
                     dim,
                     metric,
@@ -171,6 +178,7 @@ impl TableManager {
                         ef_construct: 200,
                         m: 16,
                     },
+                    quantization,
                 }));
                 let desc = IndexDescriptor::new(
                     id,
@@ -179,17 +187,20 @@ impl TableManager {
                     interned_paths.clone(),
                     kind.clone(),
                 );
-                let adapter = Arc::new(crate::index2::vector::hnsw_adapter::HnswAdapter::new(
-                    dim,
-                    metric,
-                    crate::index2::vector::hnsw_adapter::HnswConfig {
-                        max_elements: 100_000,
-                        m: 16,
-                        ef_construction: 200,
-                        ef_search: 50,
-                        ..Default::default()
-                    },
-                ));
+                let adapter = Arc::new(
+                    crate::index2::vector::hnsw_adapter::HnswAdapter::new_with_quantization(
+                        dim,
+                        metric,
+                        crate::index2::vector::hnsw_adapter::HnswConfig {
+                            max_elements: 100_000,
+                            m: 16,
+                            ef_construction: 200,
+                            ef_search: 50,
+                            ..Default::default()
+                        },
+                        quantization,
+                    ),
+                );
                 let backend: Arc<dyn IndexBackend> = Arc::new(
                     crate::index2::vector::VectorBackend::new(desc, first_path, adapter),
                 );

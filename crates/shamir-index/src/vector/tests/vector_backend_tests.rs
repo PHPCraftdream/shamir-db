@@ -42,6 +42,7 @@ fn make_backend(interner: &Interner) -> VectorBackend {
                 ef_construct: 200,
                 m: 16,
             },
+            quantization: None,
         })),
     );
     let adapter = Arc::new(BruteForceAdapter::new(3, VectorMetric::Cosine));
@@ -167,6 +168,7 @@ async fn lookup_tx_some_includes_staged_vector() {
                 ef_construct: 200,
                 m: 16,
             },
+            quantization: None,
         })),
     );
     let adapter: Arc<dyn VectorAdapter> = Arc::new(HnswAdapter::new(

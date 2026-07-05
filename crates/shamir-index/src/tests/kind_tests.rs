@@ -1,4 +1,6 @@
-use crate::kind::{IndexKind, StemLanguage, VectorBackendRef, VectorConfig, VectorMetric};
+use crate::kind::{
+    IndexKind, StemLanguage, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
+};
 
 #[test]
 fn serde_round_trip_btree() {
@@ -17,6 +19,7 @@ fn serde_round_trip_vector() {
             ef_construct: 200,
             m: 16,
         },
+        quantization: None,
     }));
     let bytes = bincode::serialize(&k).unwrap();
     let got: IndexKind = bincode::deserialize(&bytes).unwrap();
@@ -24,6 +27,95 @@ fn serde_round_trip_vector() {
         IndexKind::Vector(c) => assert_eq!(c.dim, 384),
         _ => panic!("wrong variant"),
     }
+}
+
+// ----- V5.2 (#411) VectorQuantization -----
+
+#[test]
+fn vector_quantization_from_dsl() {
+    assert_eq!(
+        VectorQuantization::from_dsl("sq8"),
+        Some(VectorQuantization::Sq8)
+    );
+    assert_eq!(
+        VectorQuantization::from_dsl("SQ8"),
+        Some(VectorQuantization::Sq8)
+    );
+    assert_eq!(
+        VectorQuantization::from_dsl("Sq8"),
+        Some(VectorQuantization::Sq8)
+    );
+    assert_eq!(VectorQuantization::from_dsl("pq"), None);
+    assert_eq!(VectorQuantization::from_dsl(""), None);
+}
+
+#[test]
+fn vector_quantization_sq8_ordinal_zero() {
+    // Bincode ordinal stability: Sq8 MUST remain ordinal 0 (append-only).
+    let bytes = bincode::serialize(&VectorQuantization::Sq8).unwrap();
+    let ordinal: u32 = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(ordinal, 0, "Sq8 must remain ordinal 0");
+}
+
+#[test]
+fn serde_round_trip_vector_with_sq8() {
+    // NOTE: `VectorConfig.quantization` is `#[serde(skip)]` (see the struct
+    // doc) — bincode does NOT persist the quantization mode in #411. The
+    // round-trip therefore yields `None`; the mode is carried by the WIRE
+    // op (`CreateIndexOp.vector_quantization`) and threaded into the
+    // adapter at create time, NOT by the persisted IndexDescriptor.
+    // Snapshot codec for quantization is #412.
+    let k = IndexKind::Vector(Box::new(VectorConfig {
+        dim: 128,
+        metric: VectorMetric::Cosine,
+        backend: VectorBackendRef::InProcessHnsw {
+            ef_construct: 200,
+            m: 16,
+        },
+        quantization: Some(VectorQuantization::Sq8),
+    }));
+    let bytes = bincode::serialize(&k).unwrap();
+    let got: IndexKind = bincode::deserialize(&bytes).unwrap();
+    match got {
+        IndexKind::Vector(c) => {
+            assert_eq!(c.dim, 128);
+            // #[serde(skip)] → quantization is NOT persisted; round-trip
+            // yields None. This is by design (see VectorConfig doc).
+            assert_eq!(c.quantization, None);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+/// DDL round-trip: the wire string `"sq8"` parses through `from_dsl` into
+/// `VectorConfig.quantization == Some(Sq8)`, and `None`/unknown → `None`
+/// (legacy f32 path). This mirrors what `table_manager_index_mgmt.rs`
+/// does at create-index time.
+#[test]
+fn ddl_roundtrip_sq8_into_vector_config() {
+    let q = VectorQuantization::from_dsl("sq8");
+    let cfg = VectorConfig {
+        dim: 128,
+        metric: VectorMetric::Cosine,
+        backend: VectorBackendRef::InProcessHnsw {
+            ef_construct: 200,
+            m: 16,
+        },
+        quantization: q,
+    };
+    assert_eq!(cfg.quantization, Some(VectorQuantization::Sq8));
+
+    // Unknown / None → None (legacy f32 path).
+    let cfg_none = VectorConfig {
+        dim: 128,
+        metric: VectorMetric::Cosine,
+        backend: VectorBackendRef::InProcessHnsw {
+            ef_construct: 200,
+            m: 16,
+        },
+        quantization: VectorQuantization::from_dsl("unknown"),
+    };
+    assert!(cfg_none.quantization.is_none());
 }
 
 // ----- StemLanguage ordinal stability -----

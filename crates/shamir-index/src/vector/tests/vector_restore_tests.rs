@@ -111,6 +111,7 @@ fn make_backend(interner: &Interner, id: u32, dim: u32, metric: VectorMetric) ->
                 ef_construct: 200,
                 m: 16,
             },
+            quantization: None,
         })),
     );
     let adapter: Arc<dyn VectorAdapter> = Arc::new(HnswAdapter::new(

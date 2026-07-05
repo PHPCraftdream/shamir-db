@@ -62,6 +62,13 @@ pub struct CreateIndexOp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<String>,
 
+    /// Vector quantization (V5.2 #411): "sq8" for SQ8 scalar quantization
+    /// (deferred fit at 256 vectors, then a u8-code HNSW graph with
+    /// dequant-rescore). `None` / omitted / unrecognised → unquantized
+    /// f32 HNSW path, bit-for-bit identical to pre-#411.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_quantization: Option<String>,
+
     /// Covering index: extra fields whose values are stored directly in the
     /// index entry so a covered range query is served from the index alone
     /// (no data-store fetch). Only meaningful for `sorted` indexes.

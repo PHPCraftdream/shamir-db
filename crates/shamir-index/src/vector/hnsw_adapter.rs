@@ -8,14 +8,16 @@
 //! compensate for filtered-out tombstones.
 
 use super::adapter::{SearchOpts, VectorAdapter, VectorError};
+use super::quantized_dist::{rescore_f32, ShamirDistU8};
 use super::simd::{dot_product, l2_squared};
-use crate::kind::VectorMetric;
+use super::sq8::Sq8Quantizer;
+use crate::kind::{VectorMetric, VectorQuantization};
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Maximum allowed top-k value. Untrusted `k` near `u32::MAX` would drive
@@ -77,7 +79,14 @@ impl Distance<f32> for ShamirDist {
                 if na < 1e-9 || nb < 1e-9 {
                     return 1.0;
                 }
-                1.0 - dot / (na * nb)
+                // `.max(0.0)`: Cauchy-Schwarz gives `dot <= na*nb` so the
+                // distance is >= 0 mathematically, but f32/FMA rounding in the
+                // separately-computed `dot` and `na*nb` can yield a tiny
+                // negative — which trips hnsw_rs's strict non-negative-distance
+                // assertion. Clamping only ever corrects that rounding artifact
+                // (a negative cosine distance is never legitimate); all valid
+                // values pass through unchanged. Mirrors the `Dot` arm below.
+                (1.0 - dot / (na * nb)).max(0.0)
             }
             VectorMetric::Dot => {
                 // HNSW requires non-negative distances. For normalized
@@ -91,6 +100,7 @@ impl Distance<f32> for ShamirDist {
     }
 }
 
+#[derive(Clone)]
 pub struct HnswConfig {
     pub max_elements: usize,
     pub m: usize,
@@ -115,12 +125,19 @@ pub struct HnswAdapter {
     dim: u32,
     metric: VectorMetric,
     ef_search: usize,
+    /// Opt-in quantization mode. `None` → the adapter never builds a u8
+    /// graph and the entire pipeline is the legacy f32 path, bit-for-bit.
+    quantization: Option<VectorQuantization>,
     hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
     pub(crate) rid_map: scc::HashMap<usize, RecordId, THasher>,
     rid_to_internal: scc::HashMap<RecordId, usize, THasher>,
     /// Raw vectors retained (keyed by internal id) so a small index can be
     /// searched EXACTLY by brute force — see [`BRUTE_FORCE_MAX`]. Tombstoned
     /// entries are removed here on replace/delete.
+    ///
+    /// In the quantized path this map holds f32 vectors ONLY pre-fit; once
+    /// [`Self::is_fitted`] flips true the post-fit inserts go to
+    /// [`Self::vectors_u8`] and this map is drained.
     vectors: scc::HashMap<usize, Vec<f32>, THasher>,
     pub(crate) deleted: scc::HashMap<usize, (), THasher>,
     deleted_count: AtomicUsize,
@@ -130,10 +147,81 @@ pub struct HnswAdapter {
     /// Populated by double-write deletes; consulted by `backfill_if_absent`
     /// and Step4b reconcile to prevent ghost resurrection.
     pub(crate) compaction_deleted_rids: Option<Arc<scc::HashMap<RecordId, (), THasher>>>,
+
+    // === V5.2 (#411) — quantized (SQ8) u8-graph path ===
+    //
+    // All of these stay `None`/empty when `quantization` is `None` (the
+    // legacy f32 path). When `quantization == Some(Sq8)`, the adapter runs
+    // f32-only below [`FIT_THRESHOLD`] (256, == [`BRUTE_FORCE_MAX`]) and
+    // crosses to the u8 graph at the first upsert that reaches the
+    // threshold — see [`Self::try_fit_and_rebuild`].
+    //
+    // Concurrency of the fit transition: a single-flight guard
+    // (`fit_in_flight`) ensures exactly ONE caller performs the rebuild;
+    // concurrent upserts that arrive during the rebuild continue to append
+    // to the f32 buffer, and after the atomic swap the fitter re-inserts
+    // any internals that were added after it snapshotted the buffer (the
+    // "delta re-insert" strategy from #408). No mutation is lost.
+    //
+    // `is_fitted` is the publish flag: once `true`, every search and every
+    // insert goes through the u8 graph. Relaxed `is_fitted` loads are
+    // sufficient because the `ArcSwapOption` store of `hnsw_u8` provides the
+    // happens-before edge (Release on store, Acquire on `load_full`). We use
+    // `ArcSwapOption` — NOT `std::sync::Mutex` — because although the WRITE
+    // (fit) is a one-shot low-frequency transition, the READ
+    // (`hnsw_u8_handle` on every quantized search) is a hot path: a mutex
+    // there would serialise all concurrent quantized searches. `load_full`
+    // is wait-free (an Arc clone, never a Guard held across `.await`).
+    hnsw_u8: arc_swap::ArcSwapOption<Hnsw<'static, u8, ShamirDistU8>>,
+    /// SQ8 codes keyed by internal id. Populated at fit and on every
+    /// post-fit insert. The u8 graph ALSO stores its own `Vec<u8>` per
+    /// DataPoint, so this map is technically redundant with the graph's
+    /// internal copy — BUT the graph does not expose a `get_vector(id)`
+    /// accessor, so we keep the authoritative codes here for rescore and
+    /// `collect_live_vectors`. This is the 4×-memory win: u8 codes (dim
+    /// bytes) vs f32 vectors (4·dim bytes).
+    vectors_u8: scc::HashMap<usize, Vec<u8>, THasher>,
+    /// Frozen quantizer params. `None` until fit; `Some(Arc::new(q))`
+    /// after fit (read-only for the lifetime of the adapter).
+    quantizer: std::sync::OnceLock<Arc<Sq8Quantizer>>,
+    /// Publish flag: `true` once the u8 graph is live. See the struct doc
+    /// for the memory-ordering argument.
+    is_fitted: AtomicBool,
+    /// Single-flight guard: the FIRST caller to CAS this `true` performs
+    /// the fit+rebuild; every other concurrent caller skips straight to
+    /// the f32 path (their internals are re-inserted by the fitter's
+    /// delta pass after the swap).
+    fit_in_flight: AtomicBool,
 }
+
+/// At or above this live-element count a `quantization == Some(Sq8)`
+/// adapter fits the SQ8 quantizer and builds the u8 graph. Deliberately
+/// equal to [`BRUTE_FORCE_MAX`]: below the threshold the exact brute-force
+/// path over f32 vectors is cheaper than a graph traversal AND 100%
+/// recall, so quantizing earlier would only lose accuracy for no gain.
+const FIT_THRESHOLD: usize = BRUTE_FORCE_MAX;
 
 impl HnswAdapter {
     pub fn new(dim: u32, metric: VectorMetric, config: HnswConfig) -> Self {
+        Self::new_with_quantization(dim, metric, config, None)
+    }
+
+    /// V5.2 (#411) — construct an adapter with an opt-in quantization mode.
+    ///
+    /// `quantization == None` is bit-for-bit identical to [`Self::new`] —
+    /// the u8-graph fields stay `None`/empty forever and every code path
+    /// is the legacy f32 pipeline.
+    ///
+    /// `quantization == Some(Sq8)` enables deferred SQ8 quantization: the
+    /// adapter runs f32 below [`FIT_THRESHOLD`] and crosses to a u8 graph
+    /// at the threshold — see [`Self::try_fit_and_rebuild`] and the struct
+    /// doc on `HnswAdapter`.
+    pub fn new_with_quantization(
+        dim: u32,
+        metric: VectorMetric,
+        config: HnswConfig,
+        quantization: Option<VectorQuantization>,
+    ) -> Self {
         let dist = ShamirDist { metric };
         let hnsw = Hnsw::new(
             config.m,
@@ -147,6 +235,7 @@ impl HnswAdapter {
             dim,
             metric,
             ef_search: config.ef_search,
+            quantization,
             hnsw: Arc::new(hnsw),
             rid_map: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             rid_to_internal: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
@@ -155,6 +244,11 @@ impl HnswAdapter {
             deleted_count: AtomicUsize::new(0),
             next_id: AtomicUsize::new(0),
             compaction_deleted_rids: None,
+            hnsw_u8: arc_swap::ArcSwapOption::empty(),
+            vectors_u8: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
+            quantizer: std::sync::OnceLock::new(),
+            is_fitted: AtomicBool::new(false),
+            fit_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -228,6 +322,12 @@ impl HnswAdapter {
     /// via a `Box::leak`'d `HnswIo` loader (see `snapshot::load` — the leak is
     /// boot-only, one loader per shard, and the dump files are the durable
     /// artefact). The maps and `next_id` are rebuilt from the sidecar.
+    ///
+    /// V5.2 (#411): snapshot codec always loads the f32 path here — the
+    /// quantized snapshot (u8 graph + quantizer params) is #412. A
+    /// quantization-enabled adapter loaded this way starts un-fitted and
+    /// will re-fit at the threshold on the next upserts, which is correct
+    /// (the f32 vectors are all present in the sidecar).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         dim: u32,
@@ -246,6 +346,7 @@ impl HnswAdapter {
             dim,
             metric,
             ef_search,
+            quantization: None,
             hnsw,
             rid_map,
             rid_to_internal,
@@ -254,6 +355,11 @@ impl HnswAdapter {
             deleted_count: AtomicUsize::new(deleted_cnt),
             next_id: AtomicUsize::new(next_id),
             compaction_deleted_rids: None,
+            hnsw_u8: arc_swap::ArcSwapOption::empty(),
+            vectors_u8: scc::HashMap::with_hasher(THasher::default()),
+            quantizer: std::sync::OnceLock::new(),
+            is_fitted: AtomicBool::new(false),
+            fit_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -290,14 +396,31 @@ impl HnswAdapter {
 
     /// V4.2 (#408) — Collect all live (non-tombstoned) (rid, vector) pairs.
     /// O(N) scan — called once per compaction, NOT on hot path.
+    ///
+    /// V5.2 (#411) — post-fit: returns DEQUANTIZED f32 vectors (the codes
+    /// in `vectors_u8` are dequantized through the frozen quantizer). The
+    /// compaction rebuild target is always an unquantized adapter (the
+    /// compaction path does not preserve quantization in #411 — a
+    /// quantization-aware compaction is #412), so returning f32 vectors
+    /// is correct: the target adapter re-fits at its own threshold.
     pub(crate) fn collect_live_vectors(&self) -> Vec<(RecordId, Vec<f32>)> {
         let mut result: Vec<(RecordId, Vec<f32>)> = Vec::new();
+        // Post-fit: dequantize codes. Pre-fit/unquantized: f32 buffer.
+        let quantizer = if self.is_quantized() {
+            self.quantizer.get().cloned()
+        } else {
+            None
+        };
         self.rid_to_internal.scan(|rid, internal| {
             // Skip tombstoned internals
             if self.deleted.contains(internal) {
                 return;
             }
-            if let Some(vec) = self.vectors.read(internal, |_, v| v.clone()) {
+            if let Some(q) = quantizer.as_ref() {
+                if let Some(codes) = self.vectors_u8.read(internal, |_, c| c.clone()) {
+                    result.push((*rid, q.dequantize(&codes)));
+                }
+            } else if let Some(vec) = self.vectors.read(internal, |_, v| v.clone()) {
                 result.push((*rid, vec));
             }
         });
@@ -377,6 +500,341 @@ impl HnswAdapter {
             Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
         adapter
     }
+
+    // ===================================================================
+    // V5.2 (#411) — SQ8 quantized u8-graph path.
+    //
+    // The adapter holds TWO graphs in Option slots: the legacy f32 graph
+    // (`hnsw`) which is always present, and a u8 graph (`hnsw_u8`) which
+    // is built once at the fit threshold. The `is_fitted` atomic is the
+    // publish flag; once `true`, every insert and every search goes through
+    // the u8 graph + rescore. See the struct doc on `HnswAdapter` for the
+    // concurrency argument.
+    // ===================================================================
+
+    /// `true` when the adapter has crossed the fit threshold and the u8
+    /// graph is live. `false` for unquantized adapters (always f32) and
+    /// for quantized adapters below the threshold.
+    pub(crate) fn is_quantized(&self) -> bool {
+        self.is_fitted.load(Ordering::Acquire)
+    }
+
+    /// The opt-in quantization mode the adapter was constructed with.
+    /// `None` = legacy f32 path, bit-for-bit.
+    #[allow(dead_code)] // API for #412 snapshot codec
+    pub(crate) fn quantization_mode(&self) -> Option<VectorQuantization> {
+        self.quantization
+    }
+
+    /// Read-only handle to the frozen quantizer, if fitted. `None` for
+    /// unquantized adapters and pre-fit quantized adapters. Used by the
+    /// snapshot codec (#412) and introspection.
+    #[allow(dead_code)] // API for #412 snapshot codec
+    pub(crate) fn quantizer(&self) -> Option<&Arc<Sq8Quantizer>> {
+        self.quantizer.get()
+    }
+
+    /// Read-only handle to the u8 graph, if fitted.
+    #[allow(dead_code)] // API for #412 snapshot codec
+    pub(crate) fn hnsw_u8_handle(&self) -> Option<Arc<Hnsw<'static, u8, ShamirDistU8>>> {
+        self.hnsw_u8.load_full()
+    }
+
+    /// Iterate `(internal -> u8 codes)` pairs for snapshot serialisation
+    /// (#412). No-op for unquantized / pre-fit adapters.
+    #[allow(dead_code)] // API for #412 snapshot codec
+    pub(crate) fn for_each_vector_u8<F: FnMut(usize, &[u8])>(&self, mut f: F) {
+        if !self.is_quantized() {
+            return;
+        }
+        self.vectors_u8.scan(|internal, codes| {
+            f(*internal, codes);
+        });
+    }
+
+    /// Quantize an f32 vector to u8 codes using the frozen quantizer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the adapter is not fitted (callers must gate on
+    /// [`Self::is_quantized`]).
+    fn quantize(&self, vec: &[f32]) -> Vec<u8> {
+        let q = self.quantizer.get().expect("quantize called before fit");
+        q.quantize(vec)
+    }
+
+    /// `true` when the adapter should run the u8 graph path. Equivalent to
+    /// `is_quantized()` but inlined for the hot search/insert branches.
+    #[inline]
+    fn quantized_active(&self) -> bool {
+        // ACQUIRE (required): the fit publishes `hnsw_u8.store(Some)` (Release
+        // via ArcSwapOption) BEFORE `is_fitted.store(true, Release)`. A reader
+        // that observes `is_fitted == true` then does `hnsw_u8.load_full()`
+        // and `.expect`s a live graph — so seeing `true` MUST happens-after the
+        // graph store. Only an Acquire load of `is_fitted` establishes that
+        // edge (Acquire-load synchronizes-with the Release-store, ordering all
+        // of the fit thread's prior writes — incl. the graph store — before the
+        // reader's subsequent `load_full`). A Relaxed load here is a data race:
+        // it let a concurrent upsert observe `is_fitted == true` while
+        // `hnsw_u8` still read `None`, panicking the `expect`
+        // (`concurrent_upsert_across_threshold_no_loss` under nextest load).
+        // A false negative (stale `false`) only routes ONE request through the
+        // still-live f32 path — harmless. false→true flips exactly once.
+        self.is_fitted.load(Ordering::Acquire) && self.quantization.is_some()
+    }
+
+    /// Try to fit the SQ8 quantizer and build the u8 graph.
+    ///
+    /// Triggered by `upsert`/`upsert_batch` when the live-element count
+    /// crosses [`FIT_THRESHOLD`] AND `quantization == Some(Sq8)`.
+    ///
+    /// # Concurrency (class #408 — no lost mutation)
+    ///
+    /// A single-flight guard ([`Self::fit_in_flight`]) ensures exactly
+    /// ONE caller performs the rebuild. The rebuild proceeds in three
+    /// phases, ALL inside ONE `spawn_blocking` so no `.await` holds a
+    /// guard:
+    ///
+    ///  1. **Snapshot** the f32 buffer under a brief scc read-cursor,
+    ///     recording the set of live internals seen.
+    ///  2. **Fit + build**: fit `Sq8Quantizer` on the snapshot, quantize
+    ///     each f32 vector, and `parallel_insert` the codes into a fresh
+    ///     `Hnsw<'static, u8, ShamirDistU8>`.
+    ///  3. **Delta re-insert**: any upsert that arrived BETWEEN the
+    ///     snapshot and the mutex-publish of the new graph added its f32
+    ///     vector to the buffer (the upsert path always appends to the
+    ///     buffer before checking `is_fitted`). We scan the buffer again
+    ///     and quantize+insert any internal NOT already in the u8 graph.
+    ///     This closes the race: no f32 vector added during the rebuild
+    ///     is lost.
+    ///
+    /// The publish (step 3's completion) sets `is_fitted = true` with
+    /// `Release` ordering, which pairs with the `Acquire` in
+    /// [`Self::is_quantized`]. After publish, every subsequent upsert
+    /// goes through the post-fit path (quantize + insert into the u8
+    /// graph directly).
+    ///
+    /// Returns `Ok(())` if the fit completed OR if another caller was
+    /// already fitting (the single-flight loser). Errors only on graph
+    /// build failure (a `spawn_blocking` panic).
+    async fn try_fit_and_rebuild(&self) -> Result<(), VectorError> {
+        // Only quantization-enabled adapters ever fit.
+        if self.quantization.is_none() {
+            return Ok(());
+        }
+        // Single-flight: the first caller to CAS false→true wins.
+        if self
+            .fit_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(()); // another caller is fitting
+        }
+
+        // Drop-guard: no matter how we exit, clear the flag so a later
+        // threshold crossing (e.g. after a mass delete + re-insert) can
+        // fit again. (In #411 fit is one-shot — once fitted, the flag
+        // stays true — but the guard is defensive.)
+        struct FitGuard<'a>(&'a AtomicBool);
+        impl Drop for FitGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _guard = FitGuard(&self.fit_in_flight);
+
+        // Snapshot the f32 buffer (internal, vec) pairs. We read under a
+        // plain scc scan — no entry guard held across the await below.
+        let mut snapshot: Vec<(usize, Vec<f32>)> = Vec::new();
+        self.vectors.scan(|internal, vec| {
+            // Skip tombstoned internals — their codes must NOT enter the
+            // u8 graph (a tombstoned internal is never resurrectated:
+            // next_id is monotonic, so a brand-new internal never aliases
+            // a tombstoned one).
+            if !self.deleted.contains(internal) {
+                snapshot.push((*internal, vec.clone()));
+            }
+        });
+        // The snapshot is empty or below threshold → nothing to fit yet
+        // (the threshold check is the caller's responsibility, but we
+        // defend in depth).
+        if snapshot.len() < FIT_THRESHOLD {
+            return Ok(());
+        }
+
+        let dim = self.dim as usize;
+        let metric = self.metric;
+        let ef_construction = self.ef_search.max(64);
+        let m = 16usize;
+        let max_layer = 16usize;
+
+        // Phase 1+2: fit + build, all in ONE spawn_blocking.
+        let training: Vec<Vec<f32>> = snapshot.iter().map(|(_, v)| v.clone()).collect();
+        let hnsw_f32 = Arc::clone(&self.hnsw); // keep the f32 graph alive
+        let _ = hnsw_f32; // not actually used in the closure, just retain
+
+        let quantizer_arc = Arc::new(Sq8Quantizer::fit(&training, dim));
+        let dist = ShamirDistU8::new(Arc::clone(&quantizer_arc), metric);
+
+        // Build the codes map (internal -> codes) for the snapshot.
+        let codes_map: Vec<(usize, Vec<u8>)> = snapshot
+            .iter()
+            .map(|(internal, vec)| (*internal, quantizer_arc.quantize(vec)))
+            .collect();
+
+        let codes_map_for_build = codes_map.clone();
+        let dist_for_build = dist.clone();
+        let (hnsw_u8, build_result): (
+            Arc<Hnsw<'static, u8, ShamirDistU8>>,
+            Result<(), VectorError>,
+        ) = {
+            let result = tokio::task::spawn_blocking(move || {
+                let hnsw = Hnsw::<u8, ShamirDistU8>::new(
+                    m,
+                    codes_map_for_build.len().max(1000) + 1000,
+                    max_layer,
+                    ef_construction,
+                    dist_for_build,
+                );
+                let batch: Vec<(&Vec<u8>, usize)> = codes_map_for_build
+                    .iter()
+                    .map(|(internal, codes)| (codes, *internal))
+                    .collect();
+                hnsw.parallel_insert(&batch);
+                Arc::new(hnsw)
+            })
+            .await;
+            match result {
+                Ok(h) => (h, Ok(())),
+                Err(e) => {
+                    return Err(VectorError::Internal(format!(
+                        "fit spawn_blocking join error: {e}"
+                    )))
+                }
+            }
+        };
+        build_result?;
+
+        // Phase 3: delta re-insert. Collect any internals that arrived
+        // during the build (they're in `vectors` but not in our snapshot).
+        // We scan the f32 buffer again and insert the ones we missed.
+        let snapshot_ids: shamir_collections::TFxSet<usize> =
+            snapshot.iter().map(|(i, _)| *i).collect();
+        let mut delta_codes: Vec<(usize, Vec<u8>)> = Vec::new();
+        self.vectors.scan(|internal, vec| {
+            if !snapshot_ids.contains(internal) && !self.deleted.contains(internal) {
+                delta_codes.push((*internal, quantizer_arc.quantize(vec)));
+            }
+        });
+
+        // Publish: swap the u8 graph under the mutex, populate vectors_u8,
+        // set the quantizer, flip is_fitted. The mutex provides the
+        // happens-before edge for readers of hnsw_u8_handle.
+        {
+            let hnsw_u8_for_delta = Arc::clone(&hnsw_u8);
+            if !delta_codes.is_empty() {
+                let delta_codes_for_insert = delta_codes.clone();
+                tokio::task::spawn_blocking(move || {
+                    let batch: Vec<(&Vec<u8>, usize)> = delta_codes_for_insert
+                        .iter()
+                        .map(|(internal, codes)| (codes, *internal))
+                        .collect();
+                    hnsw_u8_for_delta.parallel_insert(&batch);
+                })
+                .await
+                .map_err(|e| VectorError::Internal(format!("delta insert join error: {e}")))?;
+            }
+        }
+
+        // Populate vectors_u8 with ALL codes (snapshot + delta).
+        for (internal, codes) in codes_map.into_iter().chain(delta_codes.into_iter()) {
+            let _ = self.vectors_u8.insert(internal, codes);
+        }
+
+        // === PUBLISH FIRST (before drain) ===
+        // Set quantizer, hnsw_u8, and is_fitted BEFORE draining `vectors`.
+        // After this point, any new upsert sees `quantized_active() == true`
+        // and goes directly to the u8 path — never touching `vectors`.
+        // This closes the loss window: no new f32 inserts land in `vectors`
+        // after the flag flip, so the drain cannot destroy un-migrated data.
+        let _ = self.quantizer.set(Arc::clone(&quantizer_arc));
+        self.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
+        // Release pairs with the Acquire in quantized_active() / is_quantized().
+        self.is_fitted.store(true, Ordering::Release);
+
+        // === FINAL CATCH-UP pass (post-publish, pre-drain) ===
+        // Any f32-path upsert that inserted into `vectors` AFTER our delta
+        // scan (Phase 3) but BEFORE the is_fitted flip is now stranded: the
+        // vector is in `vectors` but not in the u8 graph. The self-migration
+        // re-check in the upsert path handles vectors inserted AFTER the
+        // flip, but vectors inserted between delta-scan and flip need this
+        // catch-up. We collect all internals in `vectors` not yet in
+        // `vectors_u8` and migrate them.
+        let mut catchup_codes: Vec<(usize, Vec<u8>)> = Vec::new();
+        self.vectors.scan(|internal, vec| {
+            if !self.deleted.contains(internal) && !self.vectors_u8.contains(internal) {
+                catchup_codes.push((*internal, quantizer_arc.quantize(vec)));
+            }
+        });
+        if !catchup_codes.is_empty() {
+            // Insert catch-up codes into vectors_u8
+            for (internal, codes) in &catchup_codes {
+                let _ = self.vectors_u8.insert(*internal, codes.clone());
+            }
+            // Insert into u8 graph
+            let hnsw_u8_catchup = Arc::clone(&hnsw_u8);
+            let catchup_for_insert = catchup_codes;
+            tokio::task::spawn_blocking(move || {
+                let batch: Vec<(&Vec<u8>, usize)> = catchup_for_insert
+                    .iter()
+                    .map(|(internal, codes)| (codes, *internal))
+                    .collect();
+                hnsw_u8_catchup.parallel_insert(&batch);
+            })
+            .await
+            .map_err(|e| VectorError::Internal(format!("catchup insert join error: {e}")))?;
+        }
+
+        // === SAFE DRAIN: only remove internals that are in vectors_u8 ===
+        // This guarantees we never drop a vector that hasn't been migrated.
+        let mut internals_to_drop: Vec<usize> = Vec::new();
+        self.vectors.scan(|internal, _| {
+            if self.vectors_u8.contains(internal) {
+                internals_to_drop.push(*internal);
+            }
+        });
+        for internal in internals_to_drop {
+            let _ = self.vectors.remove(&internal);
+        }
+
+        Ok(())
+    }
+
+    /// Internal: post-fit insert path. Quantizes the vector and inserts
+    /// the codes into the u8 graph + vectors_u8. Does NOT touch the f32
+    /// buffer (post-fit the f32 buffer is empty and stays empty).
+    ///
+    /// Returns the codes (for the caller to publish into vectors_u8) on
+    /// success. The caller owns the vectors_u8 insert (so it can batch).
+    async fn quantize_and_insert_u8(
+        &self,
+        internal: usize,
+        vec: &[f32],
+    ) -> Result<Vec<u8>, VectorError> {
+        let codes = self.quantize(vec);
+        let hnsw_u8 = self
+            .hnsw_u8_handle()
+            .ok_or_else(|| VectorError::Internal("u8 graph not fitted".into()))?;
+        let codes_for_insert = codes.clone();
+        // graph insert is CPU-bound (rayon) → spawn_blocking. The codes
+        // are tiny (dim bytes) so the clone is cheap.
+        tokio::task::spawn_blocking(move || {
+            hnsw_u8.insert((&codes_for_insert, internal));
+        })
+        .await
+        .map_err(|e| VectorError::Internal(format!("u8 insert join error: {e}")))?;
+        Ok(codes)
+    }
 }
 
 /// Co-filter ef-overscan multiplier. `search_filter` can return < knbn under
@@ -437,6 +895,20 @@ impl HnswAdapter {
             metric: self.metric,
         };
 
+        // V5.2 (#411) — post-fit: candidate vectors are u8 codes; dequant +
+        // exact f32 distance for scoring. Pre-fit/unquantized: f32 vectors
+        // straight from the buffer.
+        let quantized = self.quantized_active();
+        let quantizer = if quantized {
+            Some(
+                self.quantizer
+                    .get()
+                    .expect("quantized_active but quantizer unset"),
+            )
+        } else {
+            None
+        };
+
         let mut scored: Vec<(RecordId, f32)> = Vec::with_capacity(candidates.len());
         for &rid in candidates {
             let internal = match self.rid_to_internal.read_async(&rid, |_, v| *v).await {
@@ -446,10 +918,22 @@ impl HnswAdapter {
             if self.deleted.contains_async(&internal).await {
                 continue;
             }
-            let vec_opt = self.vectors.read_async(&internal, |_, v| v.clone()).await;
-            if let Some(v) = vec_opt {
-                let d = dist.eval(query, &v);
-                scored.push((rid, d));
+            if let Some(q) = quantizer {
+                // Post-fit: read codes, dequant + exact rescore.
+                let codes_opt = self
+                    .vectors_u8
+                    .read_async(&internal, |_, c| c.clone())
+                    .await;
+                if let Some(codes) = codes_opt {
+                    let d = rescore_f32(self.metric, q, query, &codes);
+                    scored.push((rid, d));
+                }
+            } else {
+                let vec_opt = self.vectors.read_async(&internal, |_, v| v.clone()).await;
+                if let Some(v) = vec_opt {
+                    let d = dist.eval(query, &v);
+                    scored.push((rid, d));
+                }
             }
         }
 
@@ -503,6 +987,40 @@ impl HnswAdapter {
             None => self.ef_search,
         };
         let ef = ef_base.max((k as usize) * CO_FILTER_EF_MULTIPLIER as usize);
+
+        // V5.2 (#411) — post-fit: co-filter on the u8 graph, then rescore.
+        // Pre-fit/unquantized: co-filter on the f32 graph as before.
+        if self.quantized_active() {
+            let quantizer = self
+                .quantizer
+                .get()
+                .expect("quantized_active but quantizer unset");
+            let hnsw_u8 = self
+                .hnsw_u8_handle()
+                .expect("quantized_active but u8 graph unset");
+            let query_codes = quantizer.quantize(query);
+            let knbn = k as usize;
+            let neighbors = tokio::task::spawn_blocking(move || {
+                let pred = |id: &usize| allow_set.contains(id);
+                hnsw_u8.search_filter(&query_codes, knbn, ef, Some(&pred))
+            })
+            .await
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
+            for n in neighbors {
+                let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+                if let Some(codes) = codes_opt {
+                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                        let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                        out.push((rid, exact));
+                    }
+                }
+            }
+            out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            out.truncate(k as usize);
+            return Ok(out);
+        }
 
         let hnsw = Arc::clone(&self.hnsw);
         let query_owned = query.to_vec();
@@ -578,6 +1096,20 @@ impl VectorAdapter for HnswAdapter {
             }
         } // scc entry guard dropped here — NOT held across the await below.
 
+        // V5.2 (#411) — quantized post-fit path: quantize + insert into
+        // the u8 graph. Pre-fit (or unquantized) falls through to the
+        // f32 path below, which also appends to the f32 buffer so the
+        // fitter can snapshot it at the threshold.
+        if self.quantized_active() {
+            let codes = self.quantize_and_insert_u8(internal, vec).await?;
+            let _ = self.vectors_u8.insert_async(internal, codes).await;
+            if let Some(old) = replaced {
+                let _ = self.vectors_u8.remove_async(&old).await;
+            }
+            let _ = self.rid_map.insert_async(internal, rid).await;
+            return Ok(());
+        }
+
         let hnsw = Arc::clone(&self.hnsw);
         let vec_owned = vec.to_vec();
         // Retain a copy for the exact brute-force path before the vector is
@@ -590,13 +1122,46 @@ impl VectorAdapter for HnswAdapter {
         .map_err(|e| VectorError::Internal(e.to_string()))?;
         // `internal` is freshly allocated (monotonic `next_id`) so this never
         // collides — the insert always lands.
-        let _ = self.vectors.insert_async(internal, vec_for_store).await;
+        let _ = self
+            .vectors
+            .insert_async(internal, vec_for_store.clone())
+            .await;
         if let Some(old) = replaced {
             // Drop the superseded vector so brute-force never scans stale data
             // and memory stays bounded under upsert churn.
             let _ = self.vectors.remove_async(&old).await;
         }
         let _ = self.rid_map.insert_async(internal, rid).await;
+
+        // V5.2 (#411) — self-migration re-check: if `is_fitted` flipped
+        // true between our initial `quantized_active()` check and now, our
+        // vector is in `vectors` but might not be caught by the fitter's
+        // catch-up pass (race window). Migrate it to the u8 graph
+        // idempotently. This closes the last interleaving gap.
+        if self.quantization.is_some()
+            && self.is_fitted.load(Ordering::Acquire)
+            && !self.vectors_u8.contains(&internal)
+        {
+            let codes = self
+                .quantize_and_insert_u8(internal, &vec_for_store)
+                .await?;
+            let _ = self.vectors_u8.insert_async(internal, codes).await;
+            // Now safe to remove from f32 buffer.
+            let _ = self.vectors.remove_async(&internal).await;
+            return Ok(());
+        }
+
+        // V5.2 (#411) — deferred fit trigger. Only quantization-enabled
+        // adapters fit, and only once (the is_fitted flag + single-flight
+        // guard make this idempotent). The check is AFTER the f32 insert
+        // so the just-upserted vector is in the buffer the fitter will
+        // snapshot.
+        if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
+            // Best-effort: a fit failure is logged but does not fail the
+            // upsert — the adapter continues on the f32 path, which is
+            // always correct (just slower and 4× the memory).
+            let _ = self.try_fit_and_rebuild().await;
+        }
         Ok(())
     }
 
@@ -667,6 +1232,40 @@ impl VectorAdapter for HnswAdapter {
             insert_rows.push((internal, *rid, vec.clone()));
         }
 
+        // V5.2 (#411) — quantized post-fit path: quantize the batch and
+        // insert codes into the u8 graph in ONE parallel_insert. Pre-fit
+        // (or unquantized) falls through to the f32 path below.
+        if self.quantized_active() {
+            let quantizer = self
+                .quantizer
+                .get()
+                .expect("quantized_active but quantizer unset");
+            let hnsw_u8 = self
+                .hnsw_u8_handle()
+                .expect("quantized_active but u8 graph unset");
+            // Quantize all rows (O(dim·N) scalar — cheap vs the graph insert).
+            let code_rows: Vec<(usize, RecordId, Vec<u8>)> = insert_rows
+                .iter()
+                .map(|(internal, rid, vec)| (*internal, *rid, quantizer.quantize(vec)))
+                .collect();
+            let code_rows = tokio::task::spawn_blocking(move || {
+                let batch: Vec<(&Vec<u8>, usize)> =
+                    code_rows.iter().map(|(i, _, c)| (c, *i)).collect();
+                hnsw_u8.parallel_insert(&batch);
+                code_rows
+            })
+            .await
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+            for (internal, rid, codes) in code_rows {
+                let _ = self.vectors_u8.insert_async(internal, codes).await;
+                let _ = self.rid_map.insert_async(internal, rid).await;
+            }
+            for old in replaced {
+                let _ = self.vectors_u8.remove_async(&old).await;
+            }
+            return Ok(());
+        }
+
         // Phase 2: ONE spawn_blocking for the whole batch — rayon
         // parallelizes the graph inserts across cores. `parallel_insert`
         // takes `&[(&Vec<T>, usize)]`; we move the OWNED rows into the
@@ -692,11 +1291,29 @@ impl VectorAdapter for HnswAdapter {
         // `into_iter` moves each owned Vec straight into `vectors` — the only
         // clone of a row's vector is the Phase-1 `vec.clone()` above.
         for (internal, rid, vec) in insert_rows.into_iter() {
-            let _ = self.vectors.insert_async(internal, vec).await;
+            let _ = self.vectors.insert_async(internal, vec.clone()).await;
             let _ = self.rid_map.insert_async(internal, rid).await;
+
+            // V5.2 (#411) — self-migration re-check for batch f32 path.
+            // Same logic as single upsert: if is_fitted flipped during our
+            // batch, migrate each vector to u8 idempotently.
+            if self.quantization.is_some()
+                && self.is_fitted.load(Ordering::Acquire)
+                && !self.vectors_u8.contains(&internal)
+            {
+                let codes = self.quantize_and_insert_u8(internal, &vec).await?;
+                let _ = self.vectors_u8.insert_async(internal, codes).await;
+                let _ = self.vectors.remove_async(&internal).await;
+            }
         }
         for old in replaced {
             let _ = self.vectors.remove_async(&old).await;
+        }
+
+        // V5.2 (#411) — deferred fit trigger (same rationale as single
+        // `upsert`). Checked AFTER the f32 inserts land in the buffer.
+        if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
+            let _ = self.try_fit_and_rebuild().await;
         }
         Ok(())
     }
@@ -708,6 +1325,12 @@ impl VectorAdapter for HnswAdapter {
             }
             let _ = self.rid_to_internal.remove_async(&rid).await;
             let _ = self.vectors.remove_async(&internal).await;
+            // V5.2 (#411) — also drop codes from the u8 buffer post-fit.
+            // The graph node stays (hnsw_rs has no delete) but search
+            // filters tombstoned internals, so it's invisible.
+            if self.quantized_active() {
+                let _ = self.vectors_u8.remove_async(&internal).await;
+            }
         }
         Ok(())
     }
@@ -753,7 +1376,53 @@ impl VectorAdapter for HnswAdapter {
 
         // Small index → EXACT brute-force (deterministic, correct); large
         // index → approximate HNSW graph. See [`BRUTE_FORCE_MAX`].
-        let mut results: Vec<(RecordId, f32)> = if self.len() <= BRUTE_FORCE_MAX {
+        let mut results: Vec<(RecordId, f32)> = if self.quantized_active() {
+            // V5.2 (#411) — post-fit quantized search: traversal on the u8
+            // graph (cheap integer distance) with overscan `2k+10`, then
+            // dequant-rescore each candidate with the EXACT f32 distance to
+            // the original (unquantized) query.
+            let quantizer = self
+                .quantizer
+                .get()
+                .expect("quantized_active but quantizer unset");
+            let hnsw_u8 = self
+                .hnsw_u8_handle()
+                .expect("quantized_active but u8 graph unset");
+            // Quantize the query for the graph traversal. The original f32
+            // query is retained for the rescore.
+            let query_codes = quantizer.quantize(query);
+            // Quantized traversal navigates on lossy integer distance, so the
+            // candidate pool handed to the exact-f32 rescore must be generous
+            // — a tight `2k+10` pool leaves the true top-k un-recovered and
+            // pushes recall below the ≤2%-drop DoD. `16k+64` (capped at
+            // MAX_TOPK) gives the rescore a wide net; `ef` is raised to at
+            // least the overscan so the graph actually explores that many.
+            let overscan = ((k as usize) * 16 + 64).min(MAX_TOPK as usize);
+            let ef_q = ef.max(overscan);
+            let neighbors =
+                tokio::task::spawn_blocking(move || hnsw_u8.search(&query_codes, overscan, ef_q))
+                    .await
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+            // Rescore each non-tombstoned candidate with the exact f32
+            // distance to the original query. `rescore_f32` dequantizes
+            // the candidate codes and applies the SAME metric convention
+            // as ShamirDist, so distances are directly comparable.
+            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
+            for n in neighbors {
+                if self.deleted.contains_async(&n.d_id).await {
+                    continue;
+                }
+                let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+                if let Some(codes) = codes_opt {
+                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                        let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                        out.push((rid, exact));
+                    }
+                }
+            }
+            out
+        } else if self.len() <= BRUTE_FORCE_MAX {
             let dist = ShamirDist {
                 metric: self.metric,
             };

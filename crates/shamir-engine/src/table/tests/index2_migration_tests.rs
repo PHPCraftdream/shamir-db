@@ -68,6 +68,7 @@ async fn migrate_index2_fts() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -150,6 +151,7 @@ async fn migrate_index2_functional() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -230,6 +232,7 @@ async fn migrate_index2_vector() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };

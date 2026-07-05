@@ -50,6 +50,7 @@ async fn vector_index_survives_reopen() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
@@ -226,6 +227,7 @@ async fn fts_ranked_index_survives_reopen() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };

@@ -114,6 +114,7 @@ fn fts_index_op() -> CreateIndexOp {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     }

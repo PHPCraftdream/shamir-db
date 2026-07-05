@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod brute_force;
 pub mod hnsw_adapter;
+pub mod quantized_dist;
 pub mod simd;
 pub mod snapshot;
 pub mod sq8;
