@@ -244,7 +244,8 @@ pub fn vector_similarity_ef(
 }
 
 /// Top-k vector similarity with both `ef_search` and `oversample`.
-/// `oversample` is accepted but not yet consumed (P3 #404).
+/// `oversample` is consumed at the ENGINE level (P3 / V3.1): the engine
+/// requests `k′ = k × oversample` candidates and applies post-filtering.
 pub fn vector_similarity_opts(
     field: impl IntoFieldPath,
     query: Vec<f32>,

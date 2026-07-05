@@ -151,8 +151,11 @@ pub enum Filter {
     /// V1.1 additive fields (both optional, omitted on the wire when `None`):
     /// * `ef_search` — per-query HNSW exploration width. `None` = adapter
     ///   build-time default. Clamped server-side to `MAX_EF_SEARCH`.
-    /// * `oversample` — reserved for P3 (#404): candidate-widening multiplier.
-    ///   Accepted on the wire, threaded to the adapter, NOT yet consumed.
+    /// * `oversample` — P3 / V3.1 (leaf 3.1): candidate-widening multiplier
+    ///   for filtered ANN. Consumed at the ENGINE level: the engine requests
+    ///   `k′ = k × oversample` candidates, applies the residual predicate,
+    ///   and retries with a doubled `k′` (up to `MAX_TOPK`) when fewer than
+    ///   `k` survive. Default (when `None`) is 2×. Clamped to ≥1×.
     VectorSimilarity {
         #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,

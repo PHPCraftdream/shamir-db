@@ -22,11 +22,15 @@ pub enum VectorError {
 /// * `ef_search` — the HNSW `ef` exploration-width at query time. Higher =
 ///   better recall, higher latency. When `Some`, it overrides the adapter's
 ///   `HnswConfig::ef_search`; clamped to `MAX_EF_SEARCH` before use.
-/// * `oversample` — reserved for P3 (#404): a multiplier that widens the
-///   candidate set before reranking/truncation. Accepted on the wire and
-///   threaded through `IndexQuery::Vector` so the `search` signature is stable,
-///   but NO backend consumes it yet. Stored here so a single struct covers the
-///   whole per-query surface.
+/// * `oversample` — P3 / V3.1 (leaf 3.1): a multiplier that widens the
+///   candidate set before post-filtering. **Consumed at the ENGINE level**
+///   (`read_filtered_vector_scan`): the engine requests `k′ = k × oversample`
+///   candidates from the adapter, applies the residual predicate, and retries
+///   with a doubled `k′` (up to `MAX_TOPK`) when fewer than `k` survive. The
+///   adapter itself does NOT interpret `oversample` — it simply returns the
+///   `k` (or `k′`) candidates requested. Stored here so a single struct covers
+///   the whole per-query surface and the engine can thread it into the
+///   `IndexQuery::Vector` without a separate channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SearchOpts {
     pub ef_search: Option<u32>,
@@ -76,7 +80,9 @@ pub trait VectorAdapter: Send + Sync {
     /// `opts` carries per-query tuning knobs (`ef_search`, `oversample`).
     /// `Default` (`None` on both) preserves the pre-V1.1 behaviour (the
     /// adapter's build-time default). BruteForce ignores `ef_search` (exact
-    /// search has no width knob) and `oversample` is not yet wired (P3 #404).
+    /// search has no width knob). `oversample` is consumed by the ENGINE
+    /// (P3 / V3.1) — the engine requests `k′ = k × oversample` candidates,
+    /// so the adapter sees a widened `k` and returns that many results.
     async fn search(
         &self,
         query: &[f32],

@@ -501,4 +501,67 @@ impl TableManager {
             self.table.data_store().get_many(keys).await
         }
     }
+
+    /// tx-aware vectored byte-level read for the filtered-ANN path (V3.1).
+    ///
+    /// Falls through to [`get_many_bytes`] when `tx` is `None`. When `tx` is
+    /// `Some`, resolves each id against the tx's staging store FIRST (so
+    /// staged inserts are visible as bytes), then the committed data store.
+    /// A staged `Remove` yields `None` (the record is gone from this tx's
+    /// view). This mirrors the `StagingStore::get` read-through contract but
+    /// in vectored form.
+    pub(crate) async fn get_many_bytes_tx(
+        &self,
+        ids: &[RecordId],
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Vec<Option<Bytes>>> {
+        // Fast path: no tx → plain vectored read.
+        let tx = match tx {
+            None => return self.get_many_bytes(ids).await,
+            Some(t) => t,
+        };
+        let token = self.table_token();
+        // Resolve the per-table staging store. When absent, this tx has no
+        // staged writes for this table → plain vectored read.
+        let staging_opt = tx.write_set.get(&token);
+        match staging_opt {
+            None => self.get_many_bytes(ids).await,
+            Some(staging) => {
+                // For each id: check staging first, then fall through to the
+                // committed store. The staging probe is sync (TMap lookup),
+                // so we batch the committed-store fallback into one get_many.
+                let mut out: Vec<Option<Bytes>> = Vec::with_capacity(ids.len());
+                let mut fallback_idxs: Vec<usize> = Vec::new();
+                let mut fallback_keys: Vec<Bytes> = Vec::new();
+                for (i, id) in ids.iter().enumerate() {
+                    let key = id.to_bytes();
+                    match staging.staged_op(&key) {
+                        Some(shamir_tx::staging_store::StagedKind::Set(b)) => {
+                            out.push(Some(b));
+                        }
+                        Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                            out.push(None);
+                        }
+                        None => {
+                            out.push(None); // placeholder; resolved below
+                            fallback_idxs.push(i);
+                            fallback_keys.push(key);
+                        }
+                    }
+                }
+                // Batch-resolve the non-staged ids from the committed store.
+                if !fallback_keys.is_empty() {
+                    let committed = if let Some(mvcc) = self.mvcc_store_ref() {
+                        mvcc.get_current_many(&fallback_keys).await?
+                    } else {
+                        self.table.data_store().get_many(fallback_keys).await?
+                    };
+                    for (slot, bytes) in fallback_idxs.into_iter().zip(committed.into_iter()) {
+                        out[slot] = bytes;
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
 }

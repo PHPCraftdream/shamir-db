@@ -20,7 +20,14 @@ use std::sync::Arc;
 
 /// Maximum allowed top-k value. Untrusted `k` near `u32::MAX` would drive
 /// `overscan*2+10` and `Vec::with_capacity(k+16)` to multi-GB allocation.
-const MAX_TOPK: u32 = 10_000;
+///
+/// P3 / V3.1: `pub` so the engine-side filtered-ANN retry loop
+/// (`read_filtered_vector_scan`) can clamp its widening `k′ = k × oversample`
+/// against the same bound the adapter enforces internally. Without a shared
+/// cap the retry could request `k′` far above what the adapter accepts, the
+/// adapter would silently truncate, and the retry would loop forever
+/// (post-filter always < k because the adapter never returned k′ candidates).
+pub const MAX_TOPK: u32 = 10_000;
 
 /// Maximum allowed per-query `ef_search` value. Untrusted `ef` near
 /// `u32::MAX` would drive `hnsw.search(query, overscan, ef)` to explore an
@@ -437,8 +444,14 @@ impl VectorAdapter for HnswAdapter {
         // rejection) keeps untrusted input from crashing the worker — a huge
         // ef behaves like MAX_EF_SEARCH for recall but can't hold the rayon
         // pool indefinitely.
-        // TODO(#404): `opts.oversample` is accepted on the wire and threaded
-        // here but NOT yet consumed — the rerank/widen semantics land in P3.
+        //
+        // P3 / V3.1: `opts.oversample` is consumed at the ENGINE level
+        // (`read_filtered_vector_scan` requests `k′ = k × oversample`
+        // candidates from this adapter, applies the residual predicate, and
+        // retries with a widened `k′`). The adapter itself does NOT interpret
+        // `oversample` — it returns the `k` it is asked for. We accept the
+        // field so the engine can thread it through `IndexQuery::Vector`
+        // without a separate channel.
         let _ = opts.oversample;
         let ef = match opts.ef_search {
             Some(v) => (v.min(MAX_EF_SEARCH) as usize).max(k as usize),

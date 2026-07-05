@@ -1,5 +1,6 @@
 pub mod buffer_config;
 pub mod doctor;
+mod filtered_vector;
 pub mod interner_manager;
 pub mod persistable;
 mod read_exec;
