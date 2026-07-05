@@ -188,6 +188,10 @@ required-features = ["fjall"]
 name = "filtered_vector_search"
 harness = false
 
+[[bench]]
+name = "vector_bulk_compaction"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
