@@ -4,6 +4,10 @@ Canonical home for **vector-index benchmark reports** — the artefacts produced
 `scripts/bench-vector.sh` (which drives both the V0.3 criterion latency bench and
 the V0.4 `vector_report` recall/RSS tool).
 
+## Reports
+
+- `2026-07-05-filtered-ann.md` — Pre/co/post-filter selectivity crossover bench (V3.3).
+
 ## File naming
 
 `<YYYY-MM-DD>-baseline.md` — one file per dated baseline run. The date is UTC
