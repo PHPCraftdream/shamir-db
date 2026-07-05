@@ -389,32 +389,49 @@ pub async fn dump_snapshot_with_gen(
 ) -> Result<(), SnapshotError> {
     // ---- 1. file_dump the f32 graph in a TempDir (CPU/IO) ----------------
     //
-    // The f32 graph is ALWAYS dumped — it is the fallback path and the
-    // pre-quantization structure. `file_dump` is a TRAIT method — only
-    // callable after `use AnnT`.
-    let hnsw = Arc::clone(adapter.hnsw_handle());
-    let dump_dir = tempfile::tempdir()?;
-    let dump_dir_path: PathBuf = dump_dir.path().to_path_buf();
-    let basename_seed = DUMP_BASENAME_SEED.to_string();
-    let basename = tokio::task::spawn_blocking(move || {
-        hnsw.file_dump(&dump_dir_path, &basename_seed)
-            .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump failed: {e}")))
-    })
-    .await
-    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+    // The f32 graph is dumped UNLESS the adapter is a fitted quantized one
+    // (#418): such an adapter has DROPPED its f32 graph post-fit (the u8
+    // graph + `vectors_u8` codes are the authoritative post-fit state, and
+    // retaining the f32 graph would defeat SQ8's 4× memory win). For a
+    // fitted quantized adapter we emit ZERO-length graph/data sections; the
+    // load path (`load_snapshot`) recognises a quantized sidecar +
+    // `qgraph_chunks > 0` and assembles the adapter via
+    // `from_parts_with_quantization`, which drops the throwaway f32 graph
+    // immediately.
+    //
+    // `file_dump` is a TRAIT method — only callable after `use AnnT`.
+    let (graph_bytes, data_bytes, basename): (Vec<u8>, Vec<u8>, String) =
+        if let Some(hnsw) = adapter.hnsw_load() {
+            let dump_dir = tempfile::tempdir()?;
+            let dump_dir_path: PathBuf = dump_dir.path().to_path_buf();
+            let basename_seed = DUMP_BASENAME_SEED.to_string();
+            let basename = tokio::task::spawn_blocking(move || {
+                hnsw.file_dump(&dump_dir_path, &basename_seed)
+                    .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump failed: {e}")))
+            })
+            .await
+            .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
 
-    // ---- 2. read both dump files, slice into chunks, compute crc32s -------
-    let graph_path = dump_dir.path().join(format!("{basename}.hnsw.graph"));
-    let data_path = dump_dir.path().join(format!("{basename}.hnsw.data"));
-    let graph_path_b = graph_path.clone();
-    let data_path_b = data_path.clone();
-    let (graph_bytes, data_bytes) = tokio::task::spawn_blocking(move || {
-        let g = std::fs::read(&graph_path_b)?;
-        let d = std::fs::read(&data_path_b)?;
-        Ok::<_, SnapshotError>((g, d))
-    })
-    .await
-    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+            // ---- 2. read both dump files, slice into chunks, compute crcs --
+            let graph_path = dump_dir.path().join(format!("{basename}.hnsw.graph"));
+            let data_path = dump_dir.path().join(format!("{basename}.hnsw.data"));
+            let graph_path_b = graph_path.clone();
+            let data_path_b = data_path.clone();
+            let (g, d) = tokio::task::spawn_blocking(move || {
+                let g = std::fs::read(&graph_path_b)?;
+                let d = std::fs::read(&data_path_b)?;
+                Ok::<_, SnapshotError>((g, d))
+            })
+            .await
+            .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+            (g, d, basename)
+        } else {
+            // #418 — fitted quantized adapter: f32 graph dropped. Emit empty
+            // graph/data sections (basename is a placeholder; no files read).
+            // The load path keys off the quantized sidecar + `qgraph_chunks
+            // > 0` and skips the f32 load entirely.
+            (Vec::new(), Vec::new(), DUMP_BASENAME_SEED.to_string())
+        };
 
     // Build the KvOp batch. We accumulate every chunk + the sidecar + the
     // manifest and apply them under ONE `transact` so the dump is observable
@@ -449,11 +466,15 @@ pub async fn dump_snapshot_with_gen(
             .ok_or_else(|| SnapshotError::Backend("fitted adapter has no quantizer".into()))?;
         // Build a QuantMeta from the frozen quantizer.
         let meta = QuantMeta::from_quantizer(q);
-        // Dump the u8 graph into the SAME TempDir under a distinct basename.
+        // Dump the u8 graph into its OWN TempDir (#418 — the f32 dump_dir is
+        // no longer always created: a fitted quantized adapter skips the f32
+        // dump, so we cannot reuse its TempDir). The TempDir is dropped after
+        // the files are read into memory below.
         let hnsw_u8 = adapter
             .hnsw_u8_handle()
             .ok_or_else(|| SnapshotError::Backend("fitted adapter has no u8 graph".into()))?;
-        let dump_dir_path_q: PathBuf = dump_dir.path().to_path_buf();
+        let dump_dir_q = tempfile::tempdir()?;
+        let dump_dir_path_q: PathBuf = dump_dir_q.path().to_path_buf();
         let basename_seed_q = format!("{}q", DUMP_BASENAME_SEED);
         let hnsw_u8_for_dump = Arc::clone(&hnsw_u8);
         let qbasename = tokio::task::spawn_blocking(move || {
@@ -464,8 +485,8 @@ pub async fn dump_snapshot_with_gen(
         .await
         .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
 
-        let qgraph_path = dump_dir.path().join(format!("{qbasename}.hnsw.graph"));
-        let qdata_path = dump_dir.path().join(format!("{qbasename}.hnsw.data"));
+        let qgraph_path = dump_dir_q.path().join(format!("{qbasename}.hnsw.graph"));
+        let qdata_path = dump_dir_q.path().join(format!("{qbasename}.hnsw.data"));
         let qgraph_path_b = qgraph_path.clone();
         let qdata_path_b = qdata_path.clone();
         let (qgraph_bytes, qdata_bytes) = tokio::task::spawn_blocking(move || {
@@ -534,15 +555,22 @@ pub async fn dump_snapshot_with_gen(
         None => None,
     };
 
-    let hnsw_handle = adapter.hnsw_handle();
+    // #418 — build params come from whichever graph is resident: the f32
+    // graph (non-quant / pre-fit) or, when it has been dropped post-fit, the
+    // u8 graph (m/max_layer/ef_construction are identical across the two —
+    // both built from the same HnswConfig). `None` only if BOTH are absent,
+    // an invariant violation surfaced as a snapshot error.
+    let (m, max_layer, ef_construction) = adapter
+        .build_params()
+        .ok_or_else(|| SnapshotError::Backend("no graph resident (neither f32 nor u8)".into()))?;
     let sidecar = SnapshotSidecar {
         format_version: SNAPSHOT_FORMAT_VERSION,
         dim: adapter.dim_field(),
         metric: adapter.metric_field(),
         ef_search: adapter.ef_search_field(),
-        m: hnsw_handle.get_max_nb_connection(),
-        max_layer: hnsw_handle.get_max_level(),
-        ef_construction: hnsw_handle.get_ef_construction(),
+        m,
+        max_layer,
+        ef_construction,
         next_id: adapter.next_id_value(),
         rid_map,
         rid_to_internal,
@@ -831,13 +859,15 @@ pub async fn load_snapshot(
     }
 
     // ---- 4. write temp files, Box::leak HnswIo, load f32 graph (CPU/IO) --
+    //
+    // #418 — for a quantized snapshot (`quant_meta.is_some()`) the dump path
+    // emitted ZERO-length f32 sections (the fitted adapter had dropped its
+    // f32 graph post-fit). We skip the f32 file load entirely and substitute
+    // a throwaway empty `Hnsw::new(...)` stub: `from_parts_with_quantization`
+    // drops it immediately on assembly, so its contents are irrelevant — it
+    // exists only to satisfy the function's `Arc<Hnsw<f32>>` parameter shape.
+    // A non-quant snapshot always has real f32 bytes and loads as before.
     let load_dir = tempfile::tempdir()?;
-    let graph_path = load_dir
-        .path()
-        .join(format!("{}.hnsw.graph", manifest.basename));
-    let data_path = load_dir
-        .path()
-        .join(format!("{}.hnsw.data", manifest.basename));
     let basename = manifest.basename.clone();
     let dist = ShamirDist {
         metric: sidecar.metric,
@@ -867,49 +897,63 @@ pub async fn load_snapshot(
         )));
     }
 
-    let hnsw: Arc<Hnsw<'static, f32, ShamirDist>> = tokio::task::spawn_blocking(move || {
-        // Write the reassembled bytes to the temp files. `file_dump` writes
-        // both files with `create+truncate+write`, so we mirror that.
-        let mut gf = std::fs::File::create(&graph_path)?;
-        gf.write_all(&graph_bytes)?;
-        gf.flush()?;
-        let mut df = std::fs::File::create(&data_path)?;
-        df.write_all(&data_bytes)?;
-        df.flush()?;
-        drop(gf);
-        drop(df);
+    let hnsw: Arc<Hnsw<'static, f32, ShamirDist>> = if quant_meta.is_some() {
+        // #418 — quantized snapshot: no f32 graph on disk. Build a tiny empty
+        // stub (capacity 1) — `from_parts_with_quantization` drops it on
+        // assembly, so the size is irrelevant; we just need the right shape.
+        Arc::new(Hnsw::new(m as usize, 1, max_layer, ef_construction, dist))
+    } else {
+        let graph_path = load_dir.path().join(format!("{basename}.hnsw.graph"));
+        let data_path = load_dir.path().join(format!("{basename}.hnsw.data"));
+        tokio::task::spawn_blocking(move || {
+            // Write the reassembled bytes to the temp files. `file_dump` writes
+            // both files with `create+truncate+write`, so we mirror that.
+            let mut gf = std::fs::File::create(&graph_path)?;
+            gf.write_all(&graph_bytes)?;
+            gf.flush()?;
+            let mut df = std::fs::File::create(&data_path)?;
+            df.write_all(&data_bytes)?;
+            df.flush()?;
+            drop(gf);
+            drop(df);
 
-        // Boot-only, intentional leak: `load_hnsw_with_dist<'b,'a>` ties
-        // `'a: 'b` where `'a` is the borrow of the `HnswIo` loader. To hand
-        // the reloaded graph to long-lived storage as `Arc<Hnsw<'static,...>>`
-        // (the shape HnswAdapter already uses), the loader must be `'static`.
-        // We leak exactly ONE `HnswIo` per snapshot load; the loader is tiny
-        // (~tens of bytes) and lives for the process. The dump files are the
-        // durable artefact — the leak does NOT grow across snapshots, only
-        // across shard count. Mirrors the V0.0 contract test
-        // `leaked_loader_yields_static_hnsw`.
-        //
-        // MUST STAY NON-MMAP. `HnswIo::new` defaults to `datamap: false`, so
-        // `load_hnsw_with_dist` reads the graph fully INTO MEMORY — the returned
-        // `Hnsw` borrows the leaked `HnswIo` struct, NOT the on-disk files. That
-        // is why it is safe for `load_dir` (this TempDir) to drop when the
-        // closure returns: the files are already resident. If anyone enables
-        // mmap (`set_mmap(true)`) here, the graph would borrow the deleted temp
-        // files → UAF; `load_dir` would then have to be leaked too.
-        let leaked_io: &'static HnswIo =
-            Box::leak(Box::new(HnswIo::new(load_dir.path(), &basename)));
-        let hnsw: Hnsw<'static, f32, ShamirDist> = leaked_io
-            .load_hnsw_with_dist(dist)
-            .map_err(|e| SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist failed: {e}")))?;
-        Ok::<_, SnapshotError>(Arc::new(hnsw))
-    })
-    .await
-    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+            // Boot-only, intentional leak: `load_hnsw_with_dist<'b,'a>` ties
+            // `'a: 'b` where `'a` is the borrow of the `HnswIo` loader. To hand
+            // the reloaded graph to long-lived storage as `Arc<Hnsw<'static,...>>`
+            // (the shape HnswAdapter already uses), the loader must be `'static`.
+            // We leak exactly ONE `HnswIo` per snapshot load; the loader is tiny
+            // (~tens of bytes) and lives for the process. The dump files are the
+            // durable artefact — the leak does NOT grow across snapshots, only
+            // across shard count. Mirrors the V0.0 contract test
+            // `leaked_loader_yields_static_hnsw`.
+            //
+            // MUST STAY NON-MMAP. `HnswIo::new` defaults to `datamap: false`, so
+            // `load_hnsw_with_dist` reads the graph fully INTO MEMORY — the
+            // returned `Hnsw` borrows the leaked `HnswIo` struct, NOT the
+            // on-disk files. That is why it is safe for `load_dir` (this
+            // TempDir) to drop when the closure returns: the files are already
+            // resident. If anyone enables mmap (`set_mmap(true)`) here, the
+            // graph would borrow the deleted temp files → UAF; `load_dir`
+            // would then have to be leaked too.
+            let leaked_io: &'static HnswIo =
+                Box::leak(Box::new(HnswIo::new(load_dir.path(), &basename)));
+            let hnsw: Hnsw<'static, f32, ShamirDist> =
+                leaked_io.load_hnsw_with_dist(dist).map_err(|e| {
+                    SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist failed: {e}"))
+                })?;
+            Ok::<_, SnapshotError>(Arc::new(hnsw))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??
+    };
 
     // Sanity: the loaded graph retained every point the sidecar claims, and
     // the build params match what we persisted. (`m` and `max_layer` are
-    // advisory — `get_*` reads them off the loaded structure.)
-    debug_assert_build_params(&hnsw, m, max_layer, ef_construction);
+    // advisory — `get_*` reads them off the loaded structure.) Skipped for a
+    // quant stub (#418): the stub is empty by design.
+    if quant_meta.is_none() {
+        debug_assert_build_params(&hnsw, m, max_layer, ef_construction);
+    }
 
     // ---- 4b. V5.3 (#412): load the u8 graph (if quantized) ---------------
     //

@@ -12,6 +12,7 @@ use super::quantized_dist::{rescore_f32, ShamirDistU8};
 use super::simd::{dot_product, l2_squared};
 use super::sq8::Sq8Quantizer;
 use crate::kind::{VectorMetric, VectorQuantization};
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
@@ -128,7 +129,35 @@ pub struct HnswAdapter {
     /// Opt-in quantization mode. `None` → the adapter never builds a u8
     /// graph and the entire pipeline is the legacy f32 path, bit-for-bit.
     quantization: Option<VectorQuantization>,
-    hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
+    /// The legacy f32 graph. Carried in an [`ArcSwapOption`] (NOT a plain
+    /// `Arc`) so a quantized adapter can **drop** it after fit, freeing the
+    /// ~4·dim·N bytes of f32 vectors that `hnsw_rs` retains internally —
+    /// this is the whole point of SQ8 quantization (#418).
+    ///
+    /// # Lifetimes / `Option`
+    /// - **Unquantized adapter** (`quantization == None`): the f32 graph is
+    ///   installed at construction and NEVER cleared — every code path is
+    ///   the legacy f32 pipeline, and [`Self::hnsw_load`] returns `Some`
+    ///   for the lifetime of the adapter.
+    /// - **Quantized adapter, pre-fit**: installed at construction; the f32
+    ///   buffer + graph are the active search path.
+    /// - **Quantized adapter, post-fit**: cleared via [`Self::drop_f32_graph`]
+    ///   once the u8 graph + codes + catch-up drain are fully published. At
+    ///   that point every search/upsert is gated through `quantized_active()`
+    ///   and the f32 graph is unobservable. All f32-path call sites are
+    ///   reached only when `!quantized_active()`, so `hnsw_load()` returning
+    ///   `None` there is an invariant violation, surfaced as an error (NOT a
+    ///   panic on the normal path) — see each site's justification.
+    ///
+    /// # RCU drop — no UAF
+    ///
+    /// `store(None)` is a Release store; in-flight readers that already did
+    /// `load_full()` hold their own `Arc` clone and finish their graph
+    /// traversal against the now-private copy. `Arc::strong_count` reaching 0
+    /// frees the graph after the last reader drops its clone. No reader
+    /// observes a dangling pointer. Mirrors the same lock-free RCU pattern
+    /// already used for `hnsw_u8` (the load counterpart of this same slot).
+    hnsw: ArcSwapOption<Hnsw<'static, f32, ShamirDist>>,
     pub(crate) rid_map: scc::HashMap<usize, RecordId, THasher>,
     rid_to_internal: scc::HashMap<RecordId, usize, THasher>,
     /// Raw vectors retained (keyed by internal id) so a small index can be
@@ -236,7 +265,7 @@ impl HnswAdapter {
             metric,
             ef_search: config.ef_search,
             quantization,
-            hnsw: Arc::new(hnsw),
+            hnsw: ArcSwapOption::new(Some(Arc::new(hnsw))),
             rid_map: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             rid_to_internal: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             vectors: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
@@ -273,8 +302,52 @@ impl HnswAdapter {
         self.ef_search
     }
 
-    pub(crate) fn hnsw_handle(&self) -> &Arc<Hnsw<'static, f32, ShamirDist>> {
-        &self.hnsw
+    /// #418 — RCU load of the f32 graph: returns a private `Arc` clone (or
+    /// `None` if a quantized adapter has dropped it post-fit). Callers on the
+    /// f32 search/insert path do `load_full()` once and hold the Arc for the
+    /// duration of the graph op; the Arc keeps the graph alive even if a
+    /// concurrent fit does `store(None)` — RCU, no UAF (see the `hnsw` field
+    /// doc).
+    pub(crate) fn hnsw_load(&self) -> Option<Arc<Hnsw<'static, f32, ShamirDist>>> {
+        self.hnsw.load_full()
+    }
+
+    /// #418 — `true` iff the f32 graph is currently resident. Used by the
+    /// memory-regression test to deterministically assert that a fitted
+    /// quantized adapter HAS dropped its f32 graph (and an unquantized /
+    /// pre-fit adapter has NOT). This is a stronger, deterministic check than
+    /// a flaky RSS sample — see task #418.
+    #[allow(dead_code)] // API for #418 memory-regression test
+    pub(crate) fn f32_graph_present(&self) -> bool {
+        self.hnsw.load_full().is_some()
+    }
+
+    /// Build parameters for the snapshot sidecar. Prefers the f32 graph (the
+    /// legacy source), falls back to the u8 graph when the f32 graph has been
+    /// dropped post-fit (#418) — `m`/`max_layer`/`ef_construction` are
+    /// identical across the two graphs (both built from the same `HnswConfig`
+    /// at fit time).
+    ///
+    /// Returns `(m: u8, max_layer: usize, ef_construction: usize)` matching
+    /// the `SnapshotSidecar` field types. `None` only if BOTH graphs are
+    /// absent — an invariant violation (an adapter always has at least one
+    /// graph); callers treat `None` as a snapshot error.
+    pub(crate) fn build_params(&self) -> Option<(u8, usize, usize)> {
+        if let Some(h) = self.hnsw.load_full() {
+            return Some((
+                h.get_max_nb_connection(),
+                h.get_max_level(),
+                h.get_ef_construction(),
+            ));
+        }
+        if let Some(h) = self.hnsw_u8.load_full() {
+            return Some((
+                h.get_max_nb_connection(),
+                h.get_max_level(),
+                h.get_ef_construction(),
+            ));
+        }
+        None
     }
 
     pub(crate) fn next_id_value(&self) -> usize {
@@ -347,7 +420,7 @@ impl HnswAdapter {
             metric,
             ef_search,
             quantization: None,
-            hnsw,
+            hnsw: ArcSwapOption::new(Some(hnsw)),
             rid_map,
             rid_to_internal,
             vectors,
@@ -378,6 +451,14 @@ impl HnswAdapter {
     ///
     /// `quantization` is set to `Some(Sq8)` so [`quantized_active`](Self::quantized_active)
     /// returns `true` (it gates on `is_fitted && quantization.is_some()`).
+    ///
+    /// #418 — the `hnsw` (f32) parameter is ACCEPTED for back-compat with the
+    /// snapshot codec signature but is DROPPED immediately: a fitted quantized
+    /// adapter never reads the f32 graph post-fit (every search/insert is
+    /// gated through `quantized_active()`), so retaining it would defeat the
+    /// whole purpose of SQ8 (#412 found SQ8 RSS > f32 RSS for exactly this
+    /// reason — the f32 graph stayed resident on top of the u8 graph). We
+    /// install `None` here, identical to the in-memory post-fit state.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts_with_quantization(
         dim: u32,
@@ -393,6 +474,8 @@ impl HnswAdapter {
         quantizer: Arc<Sq8Quantizer>,
         vectors_u8: scc::HashMap<usize, Vec<u8>, THasher>,
     ) -> Self {
+        // Drop the f32 graph immediately — see the doc comment above.
+        drop(hnsw);
         #[allow(clippy::disallowed_methods)] // O(N) ack: one-time seed at snapshot load
         let deleted_cnt = deleted.len();
         Self {
@@ -403,7 +486,9 @@ impl HnswAdapter {
             // (which gates on `is_fitted && quantization.is_some()`) returns
             // true once `is_fitted` is flipped below.
             quantization: Some(VectorQuantization::Sq8),
-            hnsw,
+            // #418 — f32 graph freed on load: a fitted quantized adapter never
+            // reads it. `ArcSwapOption::empty()` == `None`.
+            hnsw: ArcSwapOption::empty(),
             rid_map,
             rid_to_internal,
             vectors,
@@ -520,8 +605,15 @@ impl HnswAdapter {
                     let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
                     vac.insert_entry(internal);
 
-                    // Insert into graph
-                    let hnsw = Arc::clone(&self.hnsw);
+                    // Insert into graph. backfill runs on a compaction target
+                    // (always a non-quant adapter), so the f32 graph is always
+                    // present; None here is an invariant violation surfaced as
+                    // an error, not a normal-path panic.
+                    let hnsw = self.hnsw.load_full().ok_or_else(|| {
+                        VectorError::Internal(
+                            "backfill_if_absent: f32 graph absent on compaction target".into(),
+                        )
+                    })?;
                     let vec_owned = vec.clone();
                     tokio::task::spawn_blocking(move || {
                         hnsw.insert((&vec_owned, internal));
@@ -735,8 +827,12 @@ impl HnswAdapter {
 
         // Phase 1+2: fit + build, all in ONE spawn_blocking.
         let training: Vec<Vec<f32>> = snapshot.iter().map(|(_, v)| v.clone()).collect();
-        let hnsw_f32 = Arc::clone(&self.hnsw); // keep the f32 graph alive
-        let _ = hnsw_f32; // not actually used in the closure, just retain
+        // #418 — the f32 graph is NO LONGER retained here. The pre-#418 code
+        // held an explicit `Arc::clone(&self.hnsw)` "to keep the f32 graph
+        // alive", which was exactly the bug that defeated SQ8's memory win
+        // (the graph stayed resident for the adapter's lifetime). We now drop
+        // it post-fit (see `drop_f32_graph` below) — the snapshot already
+        // captured everything the u8 graph needs.
 
         let quantizer_arc = Arc::new(Sq8Quantizer::fit(&training, dim));
         let dist = ShamirDistU8::new(Arc::clone(&quantizer_arc), metric);
@@ -874,6 +970,36 @@ impl HnswAdapter {
 
             tokio::task::yield_now().await;
         }
+
+        // === #418 — DROP THE F32 GRAPH ===
+        //
+        // At this point the post-fit path is FULLY published and converged:
+        //  - `hnsw_u8` is live under the ArcSwapOption (Release store above).
+        //  - `is_fitted == true` (Release store above) → every NEW search /
+        //    upsert / delete is gated through `quantized_active()` and reads
+        //    the u8 graph. No NEW caller can reach the f32 graph.
+        //  - The catch-up loop above drained `vectors`: every pre-flip
+        //    in-flight upsert has either landed in `vectors_u8` or been
+        //    tombstoned. The f32 buffer is empty.
+        //  - `vectors_u8` holds every live code; `collect_live_vectors`
+        //    dequantizes from it (NOT from the f32 graph); the v2 snapshot
+        //    dumps the u8 graph. The f32 graph is unobservable to every
+        //    post-fit code path.
+        //
+        // `store(None)` is a Release store. Any in-flight pre-fit SEARCH that
+        // already did `hnsw.load_full()` holds its own `Arc` clone and
+        // finishes its traversal against the now-private graph; the `Arc`'s
+        // refcount reaches 0 only after the last such reader drops its clone
+        // — RCU, no UAF. (A pre-fit search that has NOT yet loaded sees
+        // `is_fitted == true` on its next `quantized_active()` check and
+        // routes through the u8 graph instead — the gate makes the f32 graph
+        // unobservable to readers that have not already snapshotted it.)
+        //
+        // Unquantized adapters NEVER reach here (`try_fit_and_rebuild` returns
+        // early when `quantization.is_none()`), so the f32 graph of a
+        // non-quant adapter is retained for its full lifetime — bit-for-bit
+        // back-compat.
+        self.hnsw.store(None);
 
         Ok(())
     }
@@ -1090,7 +1216,19 @@ impl HnswAdapter {
             return Ok(out);
         }
 
-        let hnsw = Arc::clone(&self.hnsw);
+        // #418 — f32 co-filter path. Reached ONLY when `!quantized_active()`
+        // (the quantized branch returned above). In that state the f32 graph
+        // is always present (unquantized adapters never drop it; quantized
+        // adapters drop it only post-fit, which IS `quantized_active()`).
+        // `None` here is an invariant violation; we surface it as an empty
+        // result rather than panic — a transient None under no observable
+        // state is unreachable, but defensive empty is safer on a read path.
+        let hnsw = match self.hnsw.load_full() {
+            Some(h) => h,
+            None => {
+                return Ok(vec![]);
+            }
+        };
         let query_owned = query.to_vec();
         let knbn = k as usize;
 
@@ -1178,7 +1316,13 @@ impl VectorAdapter for HnswAdapter {
             return Ok(());
         }
 
-        let hnsw = Arc::clone(&self.hnsw);
+        // #418 — f32 insert path. Reached ONLY when `!quantized_active()`
+        // (the quantized branch above returned early). f32 graph is always
+        // present in that state; None is an invariant violation → error
+        // (NOT panic — upsert must propagate failure cleanly).
+        let hnsw = self.hnsw.load_full().ok_or_else(|| {
+            VectorError::Internal("upsert: f32 graph absent on non-quantized path".into())
+        })?;
         let vec_owned = vec.to_vec();
         // Retain a copy for the exact brute-force path before the vector is
         // moved into the (CPU-bound) graph insert.
@@ -1336,7 +1480,12 @@ impl VectorAdapter for HnswAdapter {
         // closure, build the borrowed slice INSIDE (so the borrows never
         // cross the `'static` boundary), and RETURN the owned rows so Phase 3
         // moves each Vec straight into `vectors` — no second clone.
-        let hnsw = Arc::clone(&self.hnsw);
+        // #418 — f32 batch-insert path. Reached ONLY when `!quantized_active()`
+        // (the quantized branch above returned early). f32 graph is always
+        // present in that state; None is an invariant violation → error.
+        let hnsw = self.hnsw.load_full().ok_or_else(|| {
+            VectorError::Internal("upsert_batch: f32 graph absent on non-quantized path".into())
+        })?;
         let insert_rows = tokio::task::spawn_blocking(move || {
             let batch: Vec<(&Vec<f32>, usize)> =
                 insert_rows.iter().map(|(i, _rid, v)| (v, *i)).collect();
@@ -1533,8 +1682,16 @@ impl VectorAdapter for HnswAdapter {
             }
             out
         } else {
-            // Search committed graph (approximate).
-            let hnsw = Arc::clone(&self.hnsw);
+            // Search committed f32 graph (approximate). Reached ONLY when
+            // `!quantized_active()` AND `len() > BRUTE_FORCE_MAX` — in that
+            // state the f32 graph is always present. #418: None here is an
+            // invariant violation; defensive empty result on a read path.
+            let hnsw = match self.hnsw.load_full() {
+                Some(h) => h,
+                None => {
+                    return Ok(vec![]);
+                }
+            };
             let overscan = (k as usize) * 2 + 10;
             let query_owned = query.to_vec();
             let neighbors =
