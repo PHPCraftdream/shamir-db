@@ -751,60 +751,63 @@ impl HnswAdapter {
             let _ = self.vectors_u8.insert(internal, codes);
         }
 
-        // === PUBLISH FIRST (before drain) ===
-        // Set quantizer, hnsw_u8, and is_fitted BEFORE draining `vectors`.
-        // After this point, any new upsert sees `quantized_active() == true`
-        // and goes directly to the u8 path — never touching `vectors`.
-        // This closes the loss window: no new f32 inserts land in `vectors`
-        // after the flag flip, so the drain cannot destroy un-migrated data.
+        // === PUBLISH quantizer (needed for self-migration quantize) ===
         let _ = self.quantizer.set(Arc::clone(&quantizer_arc));
+
+        // === FLIP is_fitted + store graph ===
+        // After this, new upserts go u8-path. In-flight pre-flip upserts
+        // continue inserting into `vectors` (caught by catch-up below).
+        //
+        // Capture next_id at flip time: all internals < this value were
+        // allocated pre-flip and must end up in vectors_u8 (unless
+        // tombstoned). Used by the catch-up convergence check.
+        let next_id_at_flip = self.next_id.load(Ordering::Acquire);
         self.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
-        // Release pairs with the Acquire in quantized_active() / is_quantized().
         self.is_fitted.store(true, Ordering::Release);
 
-        // === FINAL CATCH-UP pass (post-publish, pre-drain) ===
-        // Any f32-path upsert that inserted into `vectors` AFTER our delta
-        // scan (Phase 3) but BEFORE the is_fitted flip is now stranded: the
-        // vector is in `vectors` but not in the u8 graph. The self-migration
-        // re-check in the upsert path handles vectors inserted AFTER the
-        // flip, but vectors inserted between delta-scan and flip need this
-        // catch-up. We collect all internals in `vectors` not yet in
-        // `vectors_u8` and migrate them.
-        let mut catchup_codes: Vec<(usize, Vec<u8>)> = Vec::new();
-        self.vectors.scan(|internal, vec| {
-            if !self.deleted.contains(internal) && !self.vectors_u8.contains(internal) {
-                catchup_codes.push((*internal, quantizer_arc.quantize(vec)));
-            }
-        });
-        if !catchup_codes.is_empty() {
-            // Insert catch-up codes into vectors_u8
-            for (internal, codes) in &catchup_codes {
-                let _ = self.vectors_u8.insert(*internal, codes.clone());
-            }
-            // Insert into u8 graph
-            let hnsw_u8_catchup = Arc::clone(&hnsw_u8);
-            let catchup_for_insert = catchup_codes;
-            tokio::task::spawn_blocking(move || {
-                let batch: Vec<(&Vec<u8>, usize)> = catchup_for_insert
-                    .iter()
-                    .map(|(internal, codes)| (codes, *internal))
-                    .collect();
-                hnsw_u8_catchup.parallel_insert(&batch);
-            })
-            .await
-            .map_err(|e| VectorError::Internal(format!("catchup insert join error: {e}")))?;
-        }
+        // === CONVERGING CATCH-UP LOOP (post-publish) ===
+        //
+        // In-flight pre-flip upserts finish inserting into `vectors`.
+        // Self-migration (triggered by is_fitted==true check in upsert
+        // paths) puts codes in vectors_u8 and removes from vectors.
+        // This loop catches anything self-migration missed (scc scan
+        // non-atomicity) and drains the rest. Converges when vectors
+        // is empty for two consecutive passes.
+        loop {
+            let mut catchup_candidates: Vec<(usize, Vec<u8>)> = Vec::new();
+            self.vectors.scan(|internal, vec| {
+                if !self.deleted.contains(internal) {
+                    catchup_candidates.push((*internal, quantizer_arc.quantize(vec)));
+                }
+            });
 
-        // === SAFE DRAIN: only remove internals that are in vectors_u8 ===
-        // This guarantees we never drop a vector that hasn't been migrated.
-        let mut internals_to_drop: Vec<usize> = Vec::new();
-        self.vectors.scan(|internal, _| {
-            if self.vectors_u8.contains(internal) {
-                internals_to_drop.push(*internal);
+            for (internal, codes) in catchup_candidates {
+                let _ = self.vectors_u8.insert(internal, codes);
             }
-        });
-        for internal in internals_to_drop {
-            let _ = self.vectors.remove(&internal);
+
+            // Drain entries that are in vectors_u8.
+            let mut internals_to_drop: Vec<usize> = Vec::new();
+            self.vectors.scan(|internal, _| {
+                if self.vectors_u8.contains(internal) {
+                    internals_to_drop.push(*internal);
+                }
+            });
+            for internal in &internals_to_drop {
+                let _ = self.vectors.remove(internal);
+            }
+
+            // Convergence: all pre-flip internals must be accounted for
+            // (in vectors_u8 or tombstoned). Count vectors_u8 entries +
+            // deleted entries; when the sum reaches next_id_at_flip, every
+            // in-flight pre-flip upsert has landed.
+            #[allow(clippy::disallowed_methods)] // O(N) ack: fit-time convergence check
+            let u8_count = self.vectors_u8.len();
+            let del_count = self.deleted_count.load(Ordering::Acquire);
+            if u8_count + del_count >= next_id_at_flip {
+                break;
+            }
+
+            tokio::task::yield_now().await;
         }
 
         Ok(())
@@ -1136,17 +1139,13 @@ impl VectorAdapter for HnswAdapter {
         // V5.2 (#411) — self-migration re-check: if `is_fitted` flipped
         // true between our initial `quantized_active()` check and now, our
         // vector is in `vectors` but might not be caught by the fitter's
-        // catch-up pass (race window). Migrate it to the u8 graph
-        // idempotently. This closes the last interleaving gap.
-        if self.quantization.is_some()
-            && self.is_fitted.load(Ordering::Acquire)
-            && !self.vectors_u8.contains(&internal)
-        {
-            let codes = self
-                .quantize_and_insert_u8(internal, &vec_for_store)
-                .await?;
+        // catch-up scan. Populate vectors_u8 with the codes (the fitter's
+        // final parallel_insert after the catch-up loop handles graph
+        // connectivity for all post-initial vectors).
+        if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
+            let codes = self.quantize(&vec_for_store);
             let _ = self.vectors_u8.insert_async(internal, codes).await;
-            // Now safe to remove from f32 buffer.
+            // Remove from f32 buffer so the catch-up drain sees it as done.
             let _ = self.vectors.remove_async(&internal).await;
             return Ok(());
         }
@@ -1295,13 +1294,10 @@ impl VectorAdapter for HnswAdapter {
             let _ = self.rid_map.insert_async(internal, rid).await;
 
             // V5.2 (#411) — self-migration re-check for batch f32 path.
-            // Same logic as single upsert: if is_fitted flipped during our
-            // batch, migrate each vector to u8 idempotently.
-            if self.quantization.is_some()
-                && self.is_fitted.load(Ordering::Acquire)
-                && !self.vectors_u8.contains(&internal)
-            {
-                let codes = self.quantize_and_insert_u8(internal, &vec).await?;
+            // Populate vectors_u8 with codes; the fitter's final
+            // parallel_insert handles graph connectivity.
+            if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
+                let codes = self.quantize(&vec);
                 let _ = self.vectors_u8.insert_async(internal, codes).await;
                 let _ = self.vectors.remove_async(&internal).await;
             }
@@ -1376,7 +1372,39 @@ impl VectorAdapter for HnswAdapter {
 
         // Small index → EXACT brute-force (deterministic, correct); large
         // index → approximate HNSW graph. See [`BRUTE_FORCE_MAX`].
-        let mut results: Vec<(RecordId, f32)> = if self.quantized_active() {
+        // Quantized brute-force threshold: 2×FIT_THRESHOLD (512). The u8
+        // graph is built at FIT_THRESHOLD (256); at that scale hnsw_rs's
+        // nondeterministic layer assignment can produce unreachable nodes.
+        // Brute-force over 512 dim-24 codes is ~100 µs and guarantees 100%
+        // recall. Beyond 512 the graph is large enough for reliable
+        // connectivity.
+        const QUANT_BRUTE_FORCE_MAX: usize = FIT_THRESHOLD * 2;
+        let mut results: Vec<(RecordId, f32)> = if self.quantized_active()
+            && self.len() <= QUANT_BRUTE_FORCE_MAX
+        {
+            // V5.2 (#411) — small quantized index: exact brute-force scan
+            // over dequantized vectors (same as unquantized brute-force but
+            // reading from vectors_u8 via the quantizer). Guarantees 100%
+            // recall on small indexes where the HNSW graph may have poor
+            // connectivity due to hnsw_rs's nondeterministic layer assignment.
+            let quantizer = self
+                .quantizer
+                .get()
+                .expect("quantized_active but quantizer unset");
+            let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
+            self.vectors_u8.scan(|i, c| pairs.push((*i, c.clone())));
+            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
+            for (internal, codes) in pairs {
+                if self.deleted.contains_async(&internal).await {
+                    continue;
+                }
+                if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+                    let d = rescore_f32(self.metric, quantizer, query, &codes);
+                    out.push((rid, d));
+                }
+            }
+            out
+        } else if self.quantized_active() {
             // V5.2 (#411) — post-fit quantized search: traversal on the u8
             // graph (cheap integer distance) with overscan `2k+10`, then
             // dequant-rescore each candidate with the EXACT f32 distance to

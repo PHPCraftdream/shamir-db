@@ -17,6 +17,7 @@
 use crate::kind::{VectorMetric, VectorQuantization};
 use crate::vector::adapter::{SearchOpts, VectorAdapter};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
@@ -286,30 +287,134 @@ async fn concurrent_upsert_across_threshold_no_loss() {
     // The adapter MUST have fitted (400 > 256).
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
-    // Every upserted rid must be retrievable in a top-k search that
-    // includes the vector itself as the query. We search for each vector
-    // with k=1 and assert the top-1 is the vector itself (distance 0).
-    // If a vector was lost during the fit transition, its rid will NOT
-    // appear as its own nearest neighbour.
+    // Every upserted rid must be RETRIEVABLE — this test verifies no vector
+    // was LOST during the fit transition (class #408), NOT recall. On a lossy
+    // SQ8 graph a strict k=1 self-query conflates the two: a correctly-migrated
+    // vector can still fail to rank #1 for its own (quantized) query,
+    // especially under the timing jitter of concurrent fit-crossing inserts.
+    // We therefore self-query with a GENEROUS k+ef: a vector that is actually
+    // present self-retrieves within the top-k with overwhelming probability,
+    // while a genuinely LOST vector never appears at any k. This discriminates
+    // loss (the invariant under test) from quantization recall-miss (expected).
+    // ef high enough to explore the whole 400-point graph, so a PRESENT
+    // vector self-retrieves with ~certainty — any miss is then a genuine LOSS,
+    // not a navigation artifact. This makes the no-loss invariant essentially
+    // deterministic (missing must be 0).
     let opts = SearchOpts {
-        ef_search: Some(256),
+        ef_search: Some(512),
         oversample: None,
     };
     let mut missing = 0usize;
     for (i, v) in data.iter().enumerate() {
-        let res = adapter.search(v, 1, opts, None).await.unwrap();
-        if res.is_empty() || res[0].0 != rid(i as u64) {
+        let res = adapter.search(v, 10, opts, None).await.unwrap();
+        if !res.iter().any(|(r, _)| *r == rid(i as u64)) {
             missing += 1;
         }
     }
-    // Allow a tiny tolerance for HNSW approximation on self-query (a point
-    // can very occasionally fail to retrieve itself at ef=256 on a 400-pt
-    // graph), but the VAST majority must self-retrieve.
-    assert!(
-        missing < data.len() / 20,
-        "{missing} vectors lost during concurrent fit transition (expected < {})",
-        data.len() / 20
+    assert_eq!(
+        missing, 0,
+        "{missing} vectors LOST during concurrent fit transition (must be 0 \
+         — with full-graph ef every present vector self-retrieves)"
     );
+}
+
+/// Regression test: concurrent upserts across the fit threshold must NOT
+/// produce duplicate rids in search results. Before the atomic-claim fix,
+/// both the fit catch-up AND the upsert self-migration could graph-insert
+/// the same internal, causing the same rid to appear twice in top-k.
+#[tokio::test]
+async fn concurrent_upsert_across_threshold_no_duplicate_rids() {
+    let dim = 24u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 8 tasks × 50 vectors = 400, crossing 256 threshold mid-flight.
+    let data = clustered(400, dim as usize, 16, 0.2, 0xDEADBEEF);
+    let n_tasks = 8usize;
+    let per_task = data.len() / n_tasks;
+
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        let chunk: Vec<(RecordId, Vec<f32>)> = data[t * per_task..(t + 1) * per_task]
+            .iter()
+            .enumerate()
+            .map(|(j, v)| (rid((t * per_task + j) as u64), v.clone()))
+            .collect();
+        handles.push(tokio::spawn(async move {
+            adapter.upsert_batch(&chunk).await.expect("upsert_batch");
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    assert!(adapter.is_quantized(), "adapter did not fit under load");
+
+    // Search with large k — if a rid appears twice, it means a duplicate
+    // graph node exists.
+    let opts = SearchOpts {
+        ef_search: Some(256),
+        oversample: None,
+    };
+    let query = &data[0];
+    let results = adapter.search(query, 100, opts, None).await.unwrap();
+    let mut seen = shamir_collections::TFxSet::<RecordId>::with_hasher(THasher::default());
+    for (rid, _) in &results {
+        assert!(
+            seen.insert(*rid),
+            "duplicate rid {rid:?} in search results — graph has duplicate node"
+        );
+    }
+}
+
+// =========================================================================
+// Cosine metric: quantized graph builds without panic (negative-distance
+// clamp regression — ShamirDist/ShamirDistU8 .max(0.0) guard).
+// =========================================================================
+
+#[tokio::test]
+async fn cosine_quantized_graph_no_panic() {
+    let dim = 32u32;
+    let adapter = HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::Cosine,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    );
+    // Insert 300 vectors (crosses fit threshold of 256).
+    let data = clustered(300, dim as usize, 8, 0.3, 0xC0517E);
+    let items: Vec<(RecordId, Vec<f32>)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (rid(i as u64), v.clone()))
+        .collect();
+    adapter.upsert_batch(&items).await.unwrap();
+    assert!(adapter.is_quantized(), "adapter did not fit");
+
+    // Search must not panic (the clamp prevents negative distances).
+    let opts = SearchOpts {
+        ef_search: Some(128),
+        oversample: None,
+    };
+    let res = adapter.search(&data[0], 10, opts, None).await.unwrap();
+    assert!(!res.is_empty(), "search returned no results");
 }
 
 // =========================================================================
