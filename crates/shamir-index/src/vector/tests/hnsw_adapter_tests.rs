@@ -1135,3 +1135,169 @@ async fn oversample_accepted_but_ignored_at_adapter_level() {
     assert_eq!(with_oversample.len(), without.len());
     assert_eq!(with_oversample[0].0, without[0].0);
 }
+
+// ---------------------------------------------------------------------------
+// V4.1 — deleted_count mirror tests
+// ---------------------------------------------------------------------------
+
+fn make_adapter(max: usize) -> HnswAdapter {
+    HnswAdapter::new(
+        4,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: max,
+            ..Default::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn len_is_o1_correct_after_churn() {
+    let adapter = make_adapter(200);
+    let dim = 4;
+
+    // Insert 10 fresh rids via single upsert
+    for i in 0u8..10 {
+        adapter
+            .upsert(rid(i), &random_vec(dim, i as u64))
+            .await
+            .unwrap();
+    }
+    assert_eq!(adapter.len(), 10);
+    assert_eq!(adapter.deleted_count(), 0);
+
+    // Replace 5 of them (single upsert path) — live count unchanged
+    for i in 0u8..5 {
+        adapter
+            .upsert(rid(i), &random_vec(dim, 100 + i as u64))
+            .await
+            .unwrap();
+    }
+    assert_eq!(adapter.len(), 10);
+    assert_eq!(adapter.deleted_count(), 5);
+
+    // Delete 3
+    for i in 5u8..8 {
+        adapter.delete(rid(i)).await.unwrap();
+    }
+    assert_eq!(adapter.len(), 7);
+    assert_eq!(adapter.deleted_count(), 8);
+
+    // Now test upsert_batch path: insert 4 new + replace 2 existing
+    let batch: Vec<(RecordId, Vec<f32>)> = (0u8..6)
+        .map(|i| (rid(i), random_vec(dim, 200 + i as u64)))
+        .collect();
+    adapter.upsert_batch(&batch).await.unwrap();
+    // 2 of those rids (0..5 minus deleted 5,6,7 = 0,1,2,3,4 live; batch has 0..6)
+    // rids 0..5 are replacements (5 tombstones), rid 5 was deleted so insert_async
+    // won't find it in rid_to_internal -> fresh insert.
+    // Wait — rid 5 was deleted above, so rid_to_internal no longer has it.
+    // Existing live before batch: 0,1,2,3,4,8,9 (7 live)
+    // Batch rids: 0,1,2,3,4,5 — 5 are replacements (0-4), 1 is new insert (5)
+    // After: live = 7 - 0 + 1 = 8, deleted_count = 8 + 5 = 13
+    assert_eq!(adapter.len(), 8);
+    assert_eq!(adapter.deleted_count(), 13);
+}
+
+#[tokio::test]
+async fn deleted_ratio_tracks_tombstones() {
+    let adapter = make_adapter(100);
+    assert_eq!(adapter.deleted_ratio(), 0.0);
+
+    // Insert 4 vectors
+    for i in 0u8..4 {
+        adapter
+            .upsert(rid(i), &random_vec(4, i as u64))
+            .await
+            .unwrap();
+    }
+    // next_id=4, deleted=0 -> ratio=0.0
+    assert_eq!(adapter.deleted_ratio(), 0.0);
+
+    // Replace 2 -> next_id=6, deleted=2 -> ratio=2/6
+    for i in 0u8..2 {
+        adapter
+            .upsert(rid(i), &random_vec(4, 50 + i as u64))
+            .await
+            .unwrap();
+    }
+    let expected = 2.0 / 6.0;
+    assert!((adapter.deleted_ratio() - expected).abs() < 1e-10);
+}
+
+#[tokio::test]
+async fn deleted_count_mirror_matches_map_len() {
+    let adapter = make_adapter(100);
+
+    for i in 0u8..8 {
+        adapter
+            .upsert(rid(i), &random_vec(4, i as u64))
+            .await
+            .unwrap();
+    }
+    // Replace some
+    for i in 0u8..3 {
+        adapter
+            .upsert(rid(i), &random_vec(4, 80 + i as u64))
+            .await
+            .unwrap();
+    }
+    // Delete some
+    for i in 5u8..7 {
+        adapter.delete(rid(i)).await.unwrap();
+    }
+
+    #[allow(clippy::disallowed_methods)] // O(N) ack: test-only mirror invariant check
+    let map_len = adapter.deleted.len();
+    assert_eq!(adapter.deleted_count(), map_len);
+}
+
+#[tokio::test]
+async fn from_parts_seeds_deleted_count() {
+    use shamir_types::types::common::THasher;
+    use std::sync::Arc;
+
+    let dim = 4u32;
+    let metric = VectorMetric::L2;
+    let config = HnswConfig {
+        max_elements: 100,
+        ..Default::default()
+    };
+    let dist = ShamirDist { metric };
+    let hnsw = Arc::new(hnsw_rs::hnsw::Hnsw::new(
+        config.m,
+        config.max_elements,
+        config.max_layer,
+        config.ef_construction,
+        dist,
+    ));
+
+    let rid_map: scc::HashMap<usize, RecordId, THasher> =
+        scc::HashMap::with_hasher(THasher::default());
+    let rid_to_internal: scc::HashMap<RecordId, usize, THasher> =
+        scc::HashMap::with_hasher(THasher::default());
+    let vectors: scc::HashMap<usize, Vec<f32>, THasher> =
+        scc::HashMap::with_hasher(THasher::default());
+    let deleted: scc::HashMap<usize, (), THasher> = scc::HashMap::with_hasher(THasher::default());
+
+    // Seed 5 tombstones
+    for i in 0..5usize {
+        let _ = deleted.insert(i, ());
+    }
+
+    let adapter = HnswAdapter::from_parts(
+        dim,
+        metric,
+        config.ef_search,
+        hnsw,
+        rid_map,
+        rid_to_internal,
+        vectors,
+        deleted,
+        10, // next_id
+    );
+
+    assert_eq!(adapter.deleted_count(), 5);
+    assert_eq!(adapter.live_count(), 5); // 10 - 5
+    assert_eq!(adapter.len(), 5);
+}
