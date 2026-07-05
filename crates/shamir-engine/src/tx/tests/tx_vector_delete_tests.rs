@@ -504,3 +504,112 @@ async fn tx_update_removing_embedding_tombstones_old_vector() {
         poll_vector_hits(&backend, vec![1.0, 0.0, 0.0]).await
     );
 }
+
+/// #420 — loss of the SECOND sequential tx vector promote.
+///
+/// tx1: insert vector A ([1,0,0]) + commit → A is searchable.
+/// tx2: insert vector B ([0,1,0]) + commit → B is searchable with the
+/// CORRECT vector (a search for B's own vector must return B as the top
+/// hit, with cosine distance ~0 / score ~1.0). A must STILL be searchable
+/// afterwards.
+///
+/// Before the fix, the second Phase 5d promote landed a WRONG/empty vector
+/// for B in the live graph: B appeared in the search results but with
+/// cosine distance 1.0 (score 0.0) for its OWN query — i.e. the graph node
+/// carried an unrelated (or zero) embedding. The staging buffer was
+/// correct (`staged_vectors` held `[0,1,0]`), so the loss happened inside
+/// the adapter's promote path. This is a silent data-loss bug on the plain
+/// insert path.
+#[tokio::test]
+#[serial_test::serial]
+async fn sequential_tx_vector_promotes_both_searchable() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op()).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let name_id = field_id(&tbl, "vec_idx").await;
+    let backend = tbl
+        .index2_registry()
+        .get_by_name(name_id)
+        .await
+        .expect("vec_idx must be registered");
+
+    // tx1: insert vector A and commit.
+    let (mut tx1, guard1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_a = tbl
+        .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx1))
+        .await
+        .unwrap();
+    repo.commit_tx(tx1).await.unwrap();
+    drop(guard1);
+
+    // A must be searchable (sanity — the first promote is the known-good
+    // path).
+    let hits_a = poll_vector_hits(&backend, vec![1.0, 0.0, 0.0]).await;
+    let a_entry = hits_a
+        .iter()
+        .find(|(r, _)| *r == rid_a)
+        .unwrap_or_else(|| panic!("rid_a must be searchable after tx1; got hits {:?}", hits_a));
+    // Cosine distance between A and its own query must be ~0.
+    assert!(
+        a_entry.1.abs() < 1e-5,
+        "rid_a must match its own query with cosine distance ~0; got {}",
+        a_entry.1
+    );
+
+    // tx2: insert vector B and commit — a SECOND, SEQUENTIAL promote into
+    // the live graph.
+    let (mut tx2, guard2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_b = tbl
+        .insert_tx(&vec_record(emb_id, &[0.0, 1.0, 0.0]), Some(&mut tx2))
+        .await
+        .unwrap();
+    repo.commit_tx(tx2).await.unwrap();
+    drop(guard2);
+
+    // B must be searchable, and a search for B's OWN vector must return B
+    // as the TOP hit with cosine distance ~0 (score ~1.0). Before the fix,
+    // the second promote landed a wrong embedding for B in the live graph:
+    // B surfaced in search but at cosine distance ~1.0 to its own query
+    // (the graph node carried the wrong vector).
+    let hits_b = poll_vector_hits(&backend, vec![0.0, 1.0, 0.0]).await;
+    let top = hits_b.first().unwrap_or_else(|| {
+        panic!(
+            "search for B's vector must return at least one hit; got {:?}",
+            hits_b
+        )
+    });
+    assert!(
+        top.1.abs() < 1e-5,
+        "#420: the TOP hit for B's own vector must have cosine distance ~0 \
+         (score ~1.0); the second promote must land the CORRECT vector, not a \
+         distorted/empty one. top hit = {:?}; full hits = {:?}",
+        top,
+        hits_b
+    );
+    // B specifically must be present AND must match its own query with
+    // cosine distance ~0 (its graph node must carry [0,1,0]).
+    let b_entry = hits_b.iter().find(|(r, _)| *r == rid_b).unwrap_or_else(|| {
+        panic!(
+            "#420: rid_b must surface in its own search; got hits {:?}",
+            hits_b
+        )
+    });
+    assert!(
+        b_entry.1.abs() < 1e-5,
+        "#420: rid_b must match its OWN vector with cosine distance ~0; got \
+         {} — the second promote landed a wrong/empty embedding for rid_b in \
+         the live graph (staging was correct)",
+        b_entry.1
+    );
+
+    // A must STILL be searchable (its promote is unrelated to B's).
+    let hits_a2 = poll_vector_hits(&backend, vec![1.0, 0.0, 0.0]).await;
+    assert!(
+        hits_a2.iter().any(|(r, _)| *r == rid_a),
+        "rid_a must still be searchable after tx2's promote; got hits {:?}",
+        hits_a2
+    );
+}
