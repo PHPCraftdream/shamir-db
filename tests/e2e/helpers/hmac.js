@@ -50,10 +50,21 @@ function sign(client, canonical) {
   return crypto.createHmac('sha256', key).update(canonical).digest('hex');
 }
 
-/** Build a `drop_db` op with HMAC attached. */
-function drop_db_op(client, dbName) {
+/** Build a `drop_db` op with HMAC attached.
+ *
+ *  `opts.cascade` (default `false`) — when `true`, sets `cascade: true` on
+ *  the wire op so the server recursively removes the db's repos+tables
+ *  before dropping it (see `admin_db_repo.rs::handle_drop_db`). The
+ *  canonical HMAC input for `drop_db` is `b"drop_db\0<db>"` — `cascade`
+ *  is NOT part of the signed bytes (see `hmac.rs::canonical_drop_db`),
+ *  so the same tag is valid for both the cascading and non-cascading
+ *  forms. */
+function drop_db_op(client, dbName, opts = {}) {
+  const cascade = !!opts.cascade;
   const canonical = joinNullBytes(['drop_db', dbName]);
-  return { drop_db: dbName, hmac: sign(client, canonical) };
+  const op = { drop_db: dbName, hmac: sign(client, canonical) };
+  if (cascade) op.cascade = true;
+  return op;
 }
 
 /** Build a `drop_repo` op with HMAC attached.

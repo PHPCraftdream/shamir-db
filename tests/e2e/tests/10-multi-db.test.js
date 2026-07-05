@@ -50,14 +50,41 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
   });
 
   test('drop A leaves B intact', async () => {
+    // The db `dbA` still owns its `main` repo — a plain `drop_db` is now
+    // rejected with `still_referenced` (referential-integrity guard added in
+    // the replication campaign; see `admin_db_repo.rs::handle_drop_db` and
+    // `ddl_wire_e2e/error_codes.rs::error_code_still_referenced_drop_db`).
+    // Cascade the drop so the repo+table are removed recursively first.
     await client.execute('default', {
       id: 'rm-a',
-      queries: { d: hmac.drop_db_op(client, dbA) },
+      queries: { d: hmac.drop_db_op(client, dbA, { cascade: true }) },
     });
     const resp = await client.execute(dbB, {
       id: 'b-still',
       queries: { all: { from: 't' } },
     });
     assertEq(resp.results.all.records.length, 1);
+  });
+
+  test('drop_db without cascade on a db with repos → still_referenced', async () => {
+    // New referential-integrity contract (replication campaign): dropping a
+    // db that still owns repositories without `cascade: true` is rejected
+    // with code `still_referenced`. Pin it here so the contract is covered
+    // on the Node side alongside the Rust suite.
+    const victim = await fixtures.setupDb(client, 'iso_ref', ['t']);
+    let err = null;
+    try {
+      await client.execute('default', {
+        id: 'rm-ref',
+        queries: { d: hmac.drop_db_op(client, victim) },
+      });
+    } catch (e) {
+      err = e;
+    }
+    assert(err, 'expected drop_db without cascade to fail with still_referenced');
+    assert(
+      /still_referenced/.test(err.message || ''),
+      `expected still_referenced, got: ${err.message}`
+    );
   });
 };

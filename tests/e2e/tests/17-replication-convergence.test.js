@@ -61,7 +61,12 @@ const CONVERGENCE_TIMEOUT_MS = 30_000;
 const CONVERGENCE_POLL_MS = 500;
 
 module.exports = async function ({ client: leaderClient, server: leaderServer, test, assert, assertEq }) {
-  const db = 'app';
+  // Use a file-unique db name (NOT the literal 'app') so this file's
+  // schema setup doesn't collide with 16-replication.test.js, which runs
+  // first against the SAME shared leader server and also creates 'app'.
+  // Both nodes (leader + follower) use the same name because apply_replicated
+  // writes into a pre-existing table of identical identity.
+  const db = 'appconv';
   const repo = 'main';
   const table = 'items';
 
