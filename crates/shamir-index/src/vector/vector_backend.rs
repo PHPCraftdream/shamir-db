@@ -405,7 +405,19 @@ impl IndexBackend for VectorBackend {
         Ok(Vec::new())
     }
 
-    /// tx-aware delete planning (HIGH-6). See [`plan_insert_tx`].
+    /// tx-aware delete planning (HIGH-6, gap#1). See [`plan_insert_tx`].
+    ///
+    /// `tx_id == Some` → no-op here: the live HNSW graph is left
+    /// untouched. The executor stages the rid-to-delete tx-locally via
+    /// [`TxContext::stage_vector_delete`] (the delete mirror of the insert
+    /// staging wired in the table manager's delete path), so a dropped
+    /// (rolled-back) tx leaves no ghost on the live graph (RAII). At
+    /// commit (Phase 5d) the staged delete is promoted into the live
+    /// graph (`adapter.delete`) AND the durable delta log
+    /// (`DeltaOp::Delete`).
+    ///
+    /// `tx_id == None` → forwards to [`plan_delete`] (immediate commit to
+    /// the live graph).
     async fn plan_delete_tx(
         &self,
         rid: RecordId,
@@ -483,6 +495,40 @@ impl IndexBackend for VectorBackend {
         // V4.2: double-write to compaction target
         if let Some(target) = self.compaction_target.load_full() {
             let _ = target.adapter.apply_committed_vectors(vecs).await;
+        }
+        Ok(())
+    }
+
+    /// HIGH-6 / gap#1: promote the tx's staged vector deletes for this
+    /// table into the live HNSW graph at commit — tombstone each rid via
+    /// the adapter's `delete`. Mirrors [`apply_staged_vectors`] for the
+    /// delete side. The durable `DeltaOp::Delete` is written separately by
+    /// [`append_vector_delta`] (the delta chunk is the durable echo of an
+    /// already-applied in-memory mutation — see `DeltaOp::Delete` contract
+    /// in `snapshot.rs`), so this method is graph-side ONLY.
+    ///
+    /// V4.2 (#408): double-write to compaction target with the SAME
+    /// ghost-race guard ordering as `plan_delete` — record
+    /// `compaction_deleted_rids` BEFORE `target.adapter.delete(rid)` so a
+    /// concurrent `backfill_if_absent` cannot re-introduce a permanent
+    /// ghost (see the rationale in `plan_update`).
+    async fn apply_staged_vector_deletes(&self, deleted: &[RecordId]) -> Result<(), IndexError> {
+        for &rid in deleted {
+            self.adapter
+                .load_full()
+                .adapter
+                .delete(rid)
+                .await
+                .map_err(ve)?;
+            // V4.2: double-write delete with guard ordering.
+            if let Some(target) = self.compaction_target.load_full() {
+                if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                        let _ = del_rids.insert_async(rid, ()).await;
+                    }
+                }
+                let _ = target.adapter.delete(rid).await;
+            }
         }
         Ok(())
     }

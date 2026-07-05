@@ -235,6 +235,18 @@ pub trait IndexBackend: Send + Sync {
         Ok(())
     }
 
+    /// Promote the tx's staged vector deletes for this table into the
+    /// live structure at commit (commit pipeline Phase 5d, gap#1 / HIGH-6).
+    /// `deleted` is the tx's `staged_vector_deletes` slice for the owning
+    /// table. Default no-op — only `VectorBackend` overrides it to
+    /// tombstone the HNSW graph (and double-write the compaction target).
+    /// Abort needs no counterpart: a dropped tx discards
+    /// `staged_vector_deletes` by RAII, so the live graph is never touched
+    /// until commit (no ghost).
+    async fn apply_staged_vector_deletes(&self, _deleted: &[RecordId]) -> Result<(), IndexError> {
+        Ok(())
+    }
+
     /// Restore in-memory state from persisted artefacts at table open.
     ///
     /// This is the **startup-restore** seam (V2.2 / #401). The default

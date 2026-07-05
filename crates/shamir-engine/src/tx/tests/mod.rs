@@ -25,3 +25,4 @@ pub mod ssi_phantom_tests;
 pub mod ssi_stress_tests;
 pub mod ssi_unique_serialization_tests;
 pub mod truncation_tests;
+pub mod tx_vector_delete_tests;
