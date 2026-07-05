@@ -184,6 +184,10 @@ name = "drain_cost_vs_depth"
 harness = false
 required-features = ["fjall"]
 
+[[bench]]
+name = "filtered_vector_search"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
