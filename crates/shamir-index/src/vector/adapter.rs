@@ -13,7 +13,6 @@ pub enum VectorError {
     #[error("adapter error: {0}")]
     Internal(String),
 }
-
 /// Per-query tuning knobs for approximate vector search (HNSW).
 ///
 /// Both fields are `Option` so that `None` (the default) means "use the
@@ -119,5 +118,20 @@ pub trait VectorAdapter: Send + Sync {
         // serial inserts). The default `upsert_batch` falls back to the
         // same per-row loop, so this is strictly ≥ the old behaviour.
         self.upsert_batch(vecs).await
+    }
+
+    /// Downcast to `HnswAdapter`, if this adapter IS one. Used by the V2.3
+    /// (#402) background snapshot trigger: `VectorBackend` holds an
+    /// `Arc<dyn VectorAdapter>` and needs to call `dump_snapshot_with_gen`,
+    /// which takes a `&HnswAdapter` (the concrete type the snapshot codec
+    /// reads its maps off). Returns `None` for `BruteForceAdapter` and any
+    /// future non-HNSW adapter — those have no persisted snapshot and the
+    /// snapshot trigger is a no-op for them.
+    ///
+    /// This is a trait-method downcast rather than `Any` because the
+    /// concrete `HnswAdapter` is known at compile time and a method is
+    /// cheaper (no `TypeId` dance) and self-documenting.
+    fn as_hnsw_adapter(&self) -> Option<&super::hnsw_adapter::HnswAdapter> {
+        None
     }
 }

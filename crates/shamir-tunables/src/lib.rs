@@ -104,4 +104,23 @@ pub mod instance_defaults {
     /// pressure. Higher = more RAM headroom before braking; lower = tighter
     /// overlay bound at the cost of earlier latency under bursts.
     pub const MAX_UNDRAINED_VERSIONS: u64 = 10_000;
+
+    /// V2.3 (#402) — number of accumulated vector mutations (upserts +
+    /// deletes) since the last full HNSW snapshot that triggers a background
+    /// generation-flip snapshot.
+    ///
+    /// Between snapshots, every commit Phase 5d appends a `DeltaOp` chunk to
+    /// the info store (one cheap `Store::set`). The on-restart replay walks
+    /// every chunk past the manifest's `delta_applied_upto`. Once the live
+    /// counter crosses this threshold, a single-flight `tokio::spawn` task
+    /// dumps a fresh generation, atomically flips the manifest, and prunes the
+    /// superseded gen + played delta chunks. The threshold bounds BOTH the
+    /// restart-replay cost AND the orphan-chunk footprint.
+    ///
+    /// 10_000 default: small enough that restart-replay stays sub-second on
+    /// any disk backend (one prefix scan + N `get`s), large enough that the
+    /// background snapshot (a `file_dump` + chunk write) runs ~once per
+    /// meaningful batch on a steady-write workload rather than continuously.
+    /// `SHAMIR_VECTOR_SNAPSHOT_DELTA_THRESHOLD` overrides at startup.
+    pub const VECTOR_SNAPSHOT_DELTA_THRESHOLD: u64 = 10_000;
 }

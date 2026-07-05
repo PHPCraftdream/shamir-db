@@ -302,8 +302,7 @@ async fn restore_on_open_no_snapshot_falls_back_to_rebuild() {
         "rebuild must populate the graph from the data store"
     );
     // Every returned rid must be one we inserted.
-    let inserted: shamir_collections::TFxSet<RecordId> =
-        items.iter().map(|(r, _)| *r).collect();
+    let inserted: shamir_collections::TFxSet<RecordId> = items.iter().map(|(r, _)| *r).collect();
     for r in &top {
         assert!(
             inserted.contains(r),
