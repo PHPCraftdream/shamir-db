@@ -433,8 +433,27 @@ pub(crate) async fn apply_vector_batch(
             // `deleted` is empty here: the tx path's vector deletes go
             // through `plan_delete` (non-tx) or are not promoted (tx);
             // neither is staged in `staged_vectors`, so there is no delete
-            // batch to append at Phase 5d. A future sheet may wire tx-path
-            // vector deletes through here.
+            // batch to append at Phase 5d.
+            //
+            // gap#1 (V2.4 — DEFERRED): wiring tx-path vector deletes here is
+            // an explicit follow-up. The `TxContext` has no `staged_deletes`
+            // field for vectors today; a tx that deletes a row backed by a
+            // vector index routes through `plan_delete_tx` → `index_write_set`
+            // (RemovePosting-style ops), NOT through the HNSW promote path.
+            // Threading the deleted rids for vector-backed tables into this
+            // call requires (a) collecting them from the tx write_set /
+            // index_write_set, (b) filtering to tables whose backends are
+            // `VectorBackend`, and (c) ensuring the graph-side delete already
+            // ran (the delta chunk is the durable echo of an in-memory
+            // mutation — see DeltaOp::Delete contract in snapshot.rs). That
+            // is a multi-layer wiring job the P2-closing sheet chose not to
+            // risk. The MECHANISM is proven:
+            // `delta_log_tests::append_vector_delta_with_deleted_slice_persists_and_replays_delete`
+            // pins that `append_vector_delta(.., deleted=[rid])` writes a
+            // `DeltaOp::Delete` that is replayed on restart. When gap#1
+            // variant-A lands, replace the `&[]` below with the collected
+            // deleted-rid slice. See VECTOR_PRODUCTION_EXECUTION.md (P2
+            // follow-ups).
             backend
                 .append_vector_delta(&info_store, vecs, &[])
                 .await

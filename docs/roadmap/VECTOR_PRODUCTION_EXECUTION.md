@@ -200,6 +200,40 @@ R4 — dev-dep для RSS (`memory-stats`). R5 — delta-log = двойная з
 
 ---
 
+## P2 follow-ups (отложено из V2.4)
+
+- **gap#1 — tx-committed vector deletes НЕ применяются к HNSW-графу — KNOWN
+  DURABILITY+CORRECTNESS LIMITATION (задача #416).** Это НЕ косметический
+  «deferred»: ревью V2.4 установило точную границу. `VectorBackend::
+  plan_delete_tx` при `tx_id==Some` — **no-op**, и промоут-пути для delete нет
+  (`staged_vector` стейджит только insert). Значит tx-committed удаление записи
+  с vector-индексом вообще НЕ доходит до графа: ghost-вектор виден в ANN-поиске
+  И ДО рестарта (живой граф не тумбстонит), И после (в delta нет `DeltaOp::
+  Delete`). Vector search возвращает `RecordId` удалённой записи. Это
+  **PRE-EXISTING HIGH-6 ограничение** (не регресс кампании — tx-путь векторных
+  удалений никогда не был проведён), которое P2-персистентность лишь вскрыла.
+  Отложено как приоритетная задача **#416** (проводка + graph-delete + delta),
+  не как follow-up. Механизм delta доказан тестом; чинить вместе с V4.1/#407
+  (batch promote path) или отдельно. Детали ниже:
+- **gap#1 механика — tx-path vector deletes.** Лист V2.3 оставил проводку
+  tx-удалений вектора в delta-log пустой: `commit_phases::apply_vector_batch`
+  передаёт `deleted = &[]` в `append_vector_delta`. Причина: в `TxContext`
+  нет `staged_deletes`-поля для векторов; tx-удаления строки с vector-индексом
+  идут через `plan_delete_tx` → `index_write_set` (RemovePosting-style), а не
+  через HNSW-promote-путь. Полноценная проводка вариант-A требует: собрать
+  удалённые rid из tx write_set/index_write_set, отфильтровать таблицы с
+  `VectorBackend`, убедиться что graph-side delete уже отработал (delta-чанк —
+  durable-эхо in-memory мутации, см. контракт `DeltaOp::Delete` в
+  `snapshot.rs`). Это многослойная работа, которую P2-закрывающий лист
+  обоснованно не рискнул сделать. **Механизм доказан** unit-тестом
+  `delta_log_tests::append_vector_delta_with_deleted_slice_persists_and_replays_delete`
+  (фиксирует, что `append_vector_delta(.., deleted=[rid])` пишет
+  `DeltaOp::Delete`, применяемый при restart). Когда вариант-A.land-нет,
+  заменить `&[]` в `commit_phases.rs` на собранный slice. Явный комментарий
+  с roadmap-ссылкой стоит в `commit_phases.rs` у самого вызова.
+
+---
+
 ## Verification
 
 - Каждый лист: `./scripts/test.sh @vector` (+`--full`/`@oracle`/`@e2e` где указано),

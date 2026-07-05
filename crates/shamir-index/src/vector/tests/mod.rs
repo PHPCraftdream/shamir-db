@@ -1,4 +1,5 @@
 pub mod brute_force_tests;
+pub mod crash_recovery_tests;
 pub mod delta_log_tests;
 pub mod hnsw_adapter_tests;
 pub mod hnsw_rs_contract_tests;
