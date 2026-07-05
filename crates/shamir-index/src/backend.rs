@@ -281,4 +281,58 @@ pub trait IndexBackend: Send + Sync {
     /// (which captured a builtins-only resolver) can be retroactively
     /// updated to see user-registered scalars. Default: no-op.
     fn update_scalar_resolver(&self, _resolver: &shamir_funclib::scalar_resolver::ScalarResolver) {}
+
+    /// V2.3 (#402) — append a delta-log chunk capturing the vector mutations
+    /// the executor just promoted into the live structure (commit Phase 5d).
+    ///
+    /// Called by `apply_vector_batch` IMMEDIATELY AFTER the in-memory promote
+    /// succeeded (the chunk is the durable echo of an already-applied
+    /// mutation). The default no-op covers every backend that has no
+    /// incremental durability story (FTS / functional / btree / brute-force);
+    /// only `VectorBackend` overrides this to write a delta chunk into its
+    /// snapshot keyspace. `info_store` is the table's info store — the SAME
+    /// store the snapshot lives in — passed by the caller because Phase 5d
+    /// resolves it from the table handle and the backend does not own one.
+    ///
+    /// `vecs` are the vectors just promoted (translated to `Upsert` ops); a
+    /// tx that deleted a vector-backed row passes the deletion through
+    /// `deleted` (translated to `Delete` ops). A tx with no vector rows
+    /// passes both empty — the backend skips the chunk write.
+    ///
+    /// §5.6 — synchronous in Phase 5d: a delta chunk is ONE `Store::set`
+    /// (one memtable insert on every backend we ship). That is cheap enough
+    /// to run on the commit-ack path without blocking the ack; the
+    /// alternative (background append) would split the durable delta from
+    /// the in-memory promote, re-opening the very loss window the delta-log
+    /// exists to close. The §5.6 "don't block the ack" rule is honoured by
+    /// the BACKGROUND SNAPSHOT trigger (`trigger_snapshot_check`), not by
+    /// this synchronous append.
+    async fn append_vector_delta(
+        &self,
+        _info_store: &Arc<dyn Store>,
+        _vecs: &[(RecordId, Vec<f32>)],
+        _deleted: &[RecordId],
+    ) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// V2.3 (#402) — check whether the accumulated delta-log mutations have
+    /// crossed the snapshot threshold and, if so, kick off a single-flight
+    /// background snapshot (dump + generation flip + prune). Called by the
+    /// executor at the tail of Phase 5d, AFTER `append_vector_delta`.
+    ///
+    /// The default no-op covers every backend without a snapshot path.
+    /// `VectorBackend` overrides this with the AtomicU64 counter +
+    /// AtomicBool single-flight dance described in the V2.3 brief: the
+    /// counter is bumped by the delta size; a `fetch_add` that crosses the
+    /// threshold spawns a `tokio::task` that runs the dump + flip + prune
+    /// OUTSIDE the commit-ack path (§5.6 — the snapshot must NOT block the
+    /// ack). The spawned task is single-flight: a second crossing while the
+    /// first is in flight is a no-op (the counter keeps climbing and the
+    /// next ack will re-arm once the in-flight task clears the flag).
+    ///
+    /// `info_store` is the table's info store (same as
+    /// `append_vector_delta`); passed by the caller because the backend
+    /// does not own a table handle.
+    fn trigger_snapshot_check(&self, _info_store: &Arc<dyn Store>) {}
 }

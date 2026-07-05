@@ -513,4 +513,11 @@ impl VectorAdapter for HnswAdapter {
     fn len(&self) -> usize {
         self.next_id.load(Ordering::Relaxed) - self.deleted.len()
     }
+
+    /// V2.3 (#402) — `HnswAdapter` IS the snapshot-able adapter. The
+    /// background snapshot trigger in `VectorBackend` uses this to recover
+    /// the concrete type for `dump_snapshot_with_gen`.
+    fn as_hnsw_adapter(&self) -> Option<&HnswAdapter> {
+        Some(self)
+    }
 }

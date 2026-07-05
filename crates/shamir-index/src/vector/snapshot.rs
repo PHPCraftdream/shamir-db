@@ -54,8 +54,10 @@
 
 use crate::kind::VectorMetric;
 use crate::meta_envelope::MetaEnvelope;
+use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::{HnswAdapter, ShamirDist};
 use bytes::Bytes;
+use futures::StreamExt;
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
@@ -200,9 +202,19 @@ pub struct SnapshotSidecar {
 /// Manifest — points at the active generation.
 ///
 /// `gen` is the snapshot generation index. V2.1 always writes a single
-/// generation (`gen = 0`); the generation-flip protocol (#402) will bump it
-/// on each new snapshot and atomically flip the manifest to the new gen once
+/// generation (`gen = 0`); the generation-flip protocol (#402) bumps it on
+/// each new snapshot and atomically flips the manifest to the new gen once
 /// the chunks + sidecar are durable.
+///
+/// `delta_applied_upto` (V2.3 / #402) records the number of delta chunks the
+/// snapshot already accounts for: the snapshot was taken from a graph that
+/// had absorbed delta chunks `0..delta_applied_upto` (i.e. chunks with index
+/// `< delta_applied_upto`). On restart the replay therefore walks only chunks
+/// with index `>= delta_applied_upto`, and a generation flip (which writes a
+/// fresh snapshot over a fully-rebuilt graph) sets this to the current
+/// `next_delta_idx` (so every chunk written so far is absorbed + pruned).
+/// A `0` value means "no delta has been absorbed" — either a fresh V2.1
+/// snapshot, or a V2.3 snapshot taken before any delta chunks existed.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SnapshotManifest {
     /// Inner snapshot-layout version.
@@ -217,6 +229,11 @@ pub struct SnapshotManifest {
     /// can uniquify the basename on a name collision, so we MUST store the
     /// returned name — the load path rebuilds the temp files under this name.
     pub basename: String,
+    /// Number of delta chunks absorbed into the snapshot's graph (V2.3 / #402).
+    /// On restart, replay walks only chunks with index `>= delta_applied_upto`.
+    /// `0` = no delta absorbed yet (fresh snapshot). Set to `next_delta_idx`
+    /// by a generation flip so every chunk written so far is absorbed + pruned.
+    pub delta_applied_upto: u64,
 }
 
 // ============================================================================
@@ -392,6 +409,10 @@ pub async fn dump_snapshot_with_gen(
         graph_chunks,
         data_chunks,
         basename: basename.clone(),
+        // V2.1 dumps (gen 0, no delta log in play) carry `delta_applied_upto
+        // = 0`. The generation-flip path (`flip_generation`) overrides this
+        // with the index of the last delta chunk it just absorbed + pruned.
+        delta_applied_upto: 0,
     };
     let manifest_env = MetaEnvelope::new(manifest);
     let manifest_bytes = manifest_env
@@ -477,6 +498,27 @@ fn map_meta_err(e: crate::meta_envelope::MetaError) -> SnapshotError {
     }
 }
 
+/// Read + decode the manifest for `keyspace`. Returns `NotFound` when no
+/// snapshot exists (the manifest key is absent). Used by the V2.3 delta-
+/// replay path (`restore_on_open` reads the manifest to learn
+/// `delta_applied_upto` BEFORE loading the snapshot) and by the background
+/// snapshot flip (`run_background_snapshot` reads the current gen + chunk
+/// counts to drive the prune).
+pub async fn read_manifest(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+) -> Result<SnapshotManifest, SnapshotError> {
+    let manifest_bytes = store.get(manifest_key(keyspace)).await?;
+    let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).map_err(map_meta_err)?;
+    if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
+        return Err(SnapshotError::VersionMismatch(format!(
+            "snapshot format version {} does not match supported {}",
+            manifest.format_version, SNAPSHOT_FORMAT_VERSION
+        )));
+    }
+    Ok(manifest)
+}
+
 /// Load the snapshot stored under `keyspace` and rebuild a working
 /// `HnswAdapter`. Reads manifest → chunks (with per-chunk crc verify) →
 /// sidecar (with cross-section crc verify) → temp files → `HnswIo` →
@@ -486,14 +528,7 @@ pub async fn load_snapshot(
     keyspace: &str,
 ) -> Result<HnswAdapter, SnapshotError> {
     // ---- 1. manifest -----------------------------------------------------
-    let manifest_bytes = store.get(manifest_key(keyspace)).await?;
-    let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).map_err(map_meta_err)?;
-    if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
-        return Err(SnapshotError::VersionMismatch(format!(
-            "snapshot format version {} does not match supported {}",
-            manifest.format_version, SNAPSHOT_FORMAT_VERSION
-        )));
-    }
+    let manifest = read_manifest(store, keyspace).await?;
     let gen = manifest.gen;
 
     // ---- 2. sidecar ------------------------------------------------------
@@ -697,6 +732,261 @@ fn reassemble_and_verify(
         out.extend_from_slice(&header.bytes);
     }
     Ok(out)
+}
+
+// ============================================================================
+// Delta-log (V2.3 / #402)
+// ============================================================================
+//
+// Between full snapshots, every Phase 5d promote appends a `DeltaOp` chunk to
+// the info store. The chunk is a `Vec<DeltaOp>` bincode'd inside a
+// `MetaEnvelope`, written under a monotonic zero-padded key
+// `<keyspace>.delta.NNNNNNNNNN`. On restart, after `load_snapshot` rebuilds
+// the base graph, the replay walks every chunk with index >
+// `manifest.delta_applied_upto` and applies each `DeltaOp` to the freshly-
+// loaded adapter. The HWM pattern mirrors `InternerManager` (last_chunk_idx
+// in-memory + scan on boot); the atomic generation flip (below) prunes
+// superseded chunks as part of the same `Store::transact` that publishes the
+// new manifest.
+
+/// Width of the decimal zero-padded delta-chunk index in the keyspace key.
+/// 10 digits = 10^10 chunks. At one chunk per commit-Phase-5d (each carrying
+/// up to a tx's worth of vector mutations) that is ~300 years of commits at
+/// 1k commits/sec, well past any realistic working set; the zero-padding
+/// keeps lexicographic key order == numeric order, so a prefix scan walks
+/// chunks in append order without a comparator.
+const DELTA_CHUNK_IDX_WIDTH: usize = 10;
+
+/// One vector mutation captured by the delta-log. Phase 5d translates the
+/// tx's `staged_vectors` slice into `Upsert` ops and (on a tx that deleted a
+/// vector-backed row) emits `Delete`. Each op is applied to the live graph
+/// BEFORE the chunk is appended (the chunk is the durable echo of an
+/// already-applied in-memory mutation), so the in-graph and on-disk states
+/// never diverge in a way that loses data: a crash between the in-memory
+/// apply and the chunk append drops the chunk, and the next restart sees a
+/// graph without that mutation (acceptable — the mutation was never durable).
+/// A crash AFTER the chunk append but BEFORE the next snapshot sees the
+/// mutation replayed on restart.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum DeltaOp {
+    /// Insert or replace `rid`'s vector.
+    Upsert(RecordId, Vec<f32>),
+    /// Soft-delete `rid`.
+    Delete(RecordId),
+}
+
+/// Build the keyspace key for delta chunk `idx`. `<keyspace>.delta.NNNNNNNNNN`.
+fn delta_chunk_key(keyspace: &str, idx: u64) -> RecordKey {
+    Bytes::from(format!(
+        "{ks}.delta.{idx:0width$}",
+        ks = keyspace,
+        idx = idx,
+        width = DELTA_CHUNK_IDX_WIDTH,
+    ))
+}
+
+/// Prefix used by `scan_prefix_stream` to enumerate every delta chunk in a
+/// keyspace (across all generations — the manifest's `delta_applied_upto`
+/// filters which ones to apply). `<keyspace>.delta.`
+fn delta_scan_prefix(keyspace: &str) -> RecordKey {
+    Bytes::from(format!("{ks}.delta.", ks = keyspace))
+}
+
+/// Append a delta chunk (`Vec<DeltaOp>`) to the info store under `keyspace`
+/// at index `idx`. The caller (the snapshot coordinator inside
+/// `VectorBackend`) owns the monotonic `idx` — typically the in-memory HWM
+/// counter. The chunk is a single `Store::set` (one memtable insert on every
+/// backend we ship): cheap enough to run synchronously inside commit Phase 5d
+/// without stalling the ack (§5.6 — see the rationale on
+/// `apply_staged_vectors`).
+pub async fn append_delta(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    idx: u64,
+    ops: &[DeltaOp],
+) -> Result<(), SnapshotError> {
+    if ops.is_empty() {
+        // An empty promote (no vector rows in this tx) writes nothing. This
+        // keeps the chunk stream dense — every chunk corresponds to a real
+        // mutation — and lets the replay short-circuit on an absent chunk
+        // without a "decode empty envelope" special case.
+        return Ok(());
+    }
+    let env = MetaEnvelope::new(ops.to_vec());
+    let bytes = env
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    store
+        .set(delta_chunk_key(keyspace, idx), Bytes::from(bytes))
+        .await?;
+    Ok(())
+}
+
+/// Decode a delta chunk's bytes into its `Vec<DeltaOp>`. Shared by the
+/// restart-replay path and the tests.
+fn decode_delta_chunk(bytes: &[u8]) -> Result<Vec<DeltaOp>, SnapshotError> {
+    MetaEnvelope::<Vec<DeltaOp>>::open(bytes).map_err(map_meta_err)
+}
+
+/// Replay every delta chunk with index strictly greater than
+/// `delta_applied_upto` against the live `adapter`. Used by
+/// `VectorBackend::restore_on_open` after a successful `load_snapshot`: the
+/// base graph reflects the snapshot's generation, and the delta chunks carry
+/// every mutation committed since that snapshot was taken.
+///
+/// Walks the keyspace via `scan_prefix_stream` (lexicographic key order ==
+/// numeric chunk order thanks to the zero-padding). Each chunk's ops are
+/// applied via `VectorAdapter::upsert` / `delete` — the same path Phase 5d
+/// uses, so the replayed graph is byte-for-byte equivalent to the live graph
+/// that produced the chunks. A chunk with index ≤ `delta_applied_upto` is
+/// skipped (it was already absorbed into the snapshot's graph).
+pub async fn replay_delta(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    delta_applied_upto: u64,
+    adapter: &HnswAdapter,
+) -> Result<u64, SnapshotError> {
+    use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+    let prefix = delta_scan_prefix(keyspace);
+    let mut stream = store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+    let mut highest_seen: u64 = delta_applied_upto;
+    while let Some(batch_res) = stream.next().await {
+        let batch: Vec<(Bytes, Bytes)> = batch_res?;
+        for (key, val) in batch {
+            // Parse the trailing decimal index off the key. The key layout
+            // is `<keyspace>.delta.NNNNNNNNNN`; the chunk index is the
+            // suffix after the LAST `.`. A malformed key (no trailing
+            // decimal) is skipped — it cannot have been written by
+            // `append_delta`, so it is not ours.
+            let key_bytes: &[u8] = key.as_ref();
+            let key_str = std::str::from_utf8(key_bytes)
+                .map_err(|e| SnapshotError::Corrupt(format!("delta key not utf8: {e}")))?;
+            let idx_str = key_str.rsplit('.').next().ok_or_else(|| {
+                SnapshotError::Corrupt(format!("delta key missing index: {key_str}"))
+            })?;
+            let idx: u64 = idx_str
+                .parse()
+                .map_err(|e| SnapshotError::Corrupt(format!("delta key index parse: {e}")))?;
+            if idx < delta_applied_upto {
+                // Already absorbed into the snapshot's base graph. We use
+                // `<` (strictly-less-than) because `delta_applied_upto`
+                // counts the number of absorbed chunks: a value of N means
+                // chunks 0..N (indices 0..N-1) were absorbed, so chunk N is
+                // the first to replay.
+                continue;
+            }
+            let ops = decode_delta_chunk(&val)?;
+            for op in ops {
+                match op {
+                    DeltaOp::Upsert(rid, vec) => {
+                        adapter
+                            .upsert(rid, &vec)
+                            .await
+                            .map_err(|e| SnapshotError::Backend(format!("delta upsert: {e}")))?;
+                    }
+                    DeltaOp::Delete(rid) => {
+                        adapter
+                            .delete(rid)
+                            .await
+                            .map_err(|e| SnapshotError::Backend(format!("delta delete: {e}")))?;
+                    }
+                }
+            }
+            if idx > highest_seen {
+                highest_seen = idx;
+            }
+        }
+    }
+    Ok(highest_seen)
+}
+
+/// Atomically flip the manifest to a new generation, prune the superseded
+/// generation's chunks, and prune every delta chunk with index ≤
+/// `new_delta_applied_upto`. The whole flip is ONE `Store::transact` so a
+/// backend that overrides `transact` exposes the new generation + the prune
+/// as a single all-or-nothing batch.
+///
+/// Crash-safety: a crash between this call and a later one is benign. If the
+/// flip landed but the prune of orphan chunks from a PREVIOUS flip did not
+/// (the `transact` covers THIS flip's prune; an earlier flip's prune may
+/// have been interrupted), the orphans sit harmlessly in the store — the
+/// manifest points unambiguously at the new gen, and the next
+/// `dump_snapshot_with_gen` run prunes them idempotently.
+pub async fn flip_generation(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    old_gen: u32,
+    old_graph_chunks: u32,
+    old_data_chunks: u32,
+    new_manifest: SnapshotManifest,
+    new_delta_applied_upto: u64,
+) -> Result<(), SnapshotError> {
+    let mut ops: Vec<KvOp> = Vec::new();
+
+    // Prune the OLD generation's chunks + sidecar. The manifest's chunk
+    // counts tell us exactly how many keys to remove — no scan needed.
+    for i in 0..old_graph_chunks as usize {
+        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "graph", i)));
+    }
+    for i in 0..old_data_chunks as usize {
+        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "data", i)));
+    }
+    ops.push(KvOp::Remove(sidecar_key(keyspace, old_gen)));
+
+    // Prune every delta chunk absorbed by the new snapshot (indices
+    // `0..new_delta_applied_upto`, exclusive). `delta_applied_upto` counts
+    // the absorbed chunks, so chunk `delta_applied_upto - 1` is the last one
+    // absorbed; chunk `delta_applied_upto` survives (it was written AFTER
+    // the snapshot captured its HWM). Chunks in this range that were never
+    // written (an empty promote) are a no-op `KvOp::Remove` on every backend.
+    for idx in 0..new_delta_applied_upto {
+        ops.push(KvOp::Remove(delta_chunk_key(keyspace, idx)));
+    }
+
+    // Publish the new manifest — the generation flip itself.
+    let manifest_env = MetaEnvelope::new(new_manifest);
+    let manifest_bytes = manifest_env
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    ops.push(KvOp::Set(
+        manifest_key(keyspace),
+        Bytes::from(manifest_bytes),
+    ));
+
+    store.transact(ops).await?;
+    Ok(())
+}
+
+/// Scan the keyspace for the highest delta-chunk index currently present.
+/// Used by `restore_on_open` to seed the in-memory HWM after a restart so
+/// the next `append_delta` does not collide with an existing chunk. Returns
+/// `0` when no delta chunks exist.
+pub async fn highest_delta_index(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+) -> Result<u64, SnapshotError> {
+    use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+    let prefix = delta_scan_prefix(keyspace);
+    let mut stream = store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+    let mut highest: u64 = 0;
+    while let Some(batch_res) = stream.next().await {
+        let batch: Vec<(Bytes, Bytes)> = batch_res?;
+        for (key, _val) in batch {
+            let key_bytes: &[u8] = key.as_ref();
+            let key_str = match std::str::from_utf8(key_bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(idx_str) = key_str.rsplit('.').next() {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    if idx > highest {
+                        highest = idx;
+                    }
+                }
+            }
+        }
+    }
+    Ok(highest)
 }
 
 /// Debug-only build-param sanity check. `get_*` on the loaded graph reads

@@ -418,10 +418,28 @@ pub(crate) async fn apply_vector_batch(
     }
 
     if let Some(tbl) = repo.table_by_token(token).await? {
+        let info_store = tbl.info_store().clone();
         for backend in tbl.index2_registry().all_backends().await {
             backend.apply_staged_vectors(vecs).await.map_err(|e| {
                 DbError::Internal(format!("hnsw apply_staged_vectors at commit: {e}"))
             })?;
+            // V2.3 (#402) — durable delta-log append + snapshot trigger. The
+            // delta chunk captures the vectors just promoted so a restart
+            // replays them over the base snapshot. The append is ONE
+            // `Store::set` (§5.6 — cheap, runs on the ack path). The
+            // snapshot trigger is a `tokio::spawn` when the threshold is
+            // crossed (§5.6 — the dump itself is off the ack path).
+            //
+            // `deleted` is empty here: the tx path's vector deletes go
+            // through `plan_delete` (non-tx) or are not promoted (tx);
+            // neither is staged in `staged_vectors`, so there is no delete
+            // batch to append at Phase 5d. A future sheet may wire tx-path
+            // vector deletes through here.
+            backend
+                .append_vector_delta(&info_store, vecs, &[])
+                .await
+                .map_err(|e| DbError::Internal(format!("delta append at commit: {e}")))?;
+            backend.trigger_snapshot_check(&info_store);
         }
     }
     Ok(())

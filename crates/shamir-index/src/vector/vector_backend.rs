@@ -4,7 +4,7 @@
 //! for similarity search. Returns `IndexResult::Ranked`.
 
 use super::adapter::{VectorAdapter, VectorError};
-use super::snapshot::{self, SnapshotError};
+use super::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::write_ops::IndexWriteOp;
@@ -12,12 +12,13 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
+use shamir_tunables::instance_defaults::VECTOR_SNAPSHOT_DELTA_THRESHOLD;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Keyspace prefix every vector-snapshot record lives under in the info
@@ -72,6 +73,45 @@ pub struct VectorBackend {
     /// load. Exposed via [`rebuild_count`] so tests can prove the snapshot
     /// path was taken.
     full_rebuild_count: AtomicU64,
+    /// V2.3 (#402) — number of vector mutations (upserts + deletes) appended
+    /// to the delta-log since the last successful generation flip. Bumped by
+    /// `append_vector_delta` (Phase 5d) and reset to 0 by the background
+    /// snapshot task after a flip lands. Compared against the tunable
+    /// threshold to decide whether to spawn the dump + flip + prune.
+    /// Relaxed ordering is sufficient: a missed threshold crossing on one
+    /// ack is harmless (the next ack re-checks); the only invariant is
+    /// monotonic growth between flips, which `fetch_add` guarantees.
+    ///
+    /// `Arc`-shared so the single-flight background snapshot task can reset
+    /// it after a successful flip without holding a borrow on the backend
+    /// (the task is `'static`, and an inline `AtomicU64` cannot move into
+    /// a spawned task).
+    delta_count: Arc<AtomicU64>,
+    /// V2.3 (#402) — single-flight guard for the background snapshot task.
+    /// `compare_exchange(false, true)` on the threshold crossing arms the
+    /// guard; the spawned task clears it (`store(false)`) on completion
+    /// (success OR failure). A second crossing while the first task is in
+    /// flight is a no-op — the counter keeps climbing and the next ack
+    /// re-arms once the in-flight task clears the flag.
+    ///
+    /// `Arc`-shared for the same reason as `delta_count`.
+    snapshot_in_flight: Arc<AtomicBool>,
+    /// V2.3 (#402) — monotonic index of the next delta chunk to write.
+    /// Seeded by `restore_on_open` from `highest_delta_index` so a restart
+    /// does not collide with existing chunks; bumped by
+    /// `append_vector_delta` on every chunk write. Touched only on the
+    /// commit-ack path (Phase 5d is serial per tx) so a plain `fetch_add`
+    /// is correct without a lock.
+    ///
+    /// `Arc`-shared so the background snapshot task can read it to compute
+    /// the `delta_applied_upto` for the new manifest.
+    next_delta_idx: Arc<AtomicU64>,
+    /// Delta-count threshold that arms a background snapshot. Defaults to the
+    /// production tunable `VECTOR_SNAPSHOT_DELTA_THRESHOLD`; overridable in
+    /// tests (via `set_snapshot_threshold_for_test`) so the full
+    /// trigger → spawn → `run_background_snapshot` path can be exercised
+    /// deterministically without appending 10k real vectors.
+    snapshot_threshold: AtomicU64,
 }
 
 impl VectorBackend {
@@ -85,7 +125,26 @@ impl VectorBackend {
             field_path,
             adapter: Arc::new(ArcSwap::from(Arc::new(AdapterSlot { adapter }))),
             full_rebuild_count: AtomicU64::new(0),
+            delta_count: Arc::new(AtomicU64::new(0)),
+            snapshot_in_flight: Arc::new(AtomicBool::new(false)),
+            next_delta_idx: Arc::new(AtomicU64::new(0)),
+            snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
         }
+    }
+
+    /// Lower the background-snapshot threshold so a test can cross it without
+    /// appending the production default (10k) vectors. Test-only.
+    #[cfg(test)]
+    pub(crate) fn set_snapshot_threshold_for_test(&self, threshold: u64) {
+        self.snapshot_threshold
+            .store(threshold, Ordering::Release);
+    }
+
+    /// Read the single-flight guard flag. Test-only — used to prove the flag is
+    /// cleared after a background snapshot completes (drop-guard reset).
+    #[cfg(test)]
+    pub(crate) fn snapshot_in_flight_for_test(&self) -> bool {
+        self.snapshot_in_flight.load(Ordering::Acquire)
     }
 
     /// Snapshot keyspace for this backend's index: `__vec_snap__<id>`.
@@ -200,7 +259,12 @@ impl IndexBackend for VectorBackend {
                 .await
                 .map_err(ve)?;
         } else {
-            self.adapter.load_full().adapter.delete(rid).await.map_err(ve)?;
+            self.adapter
+                .load_full()
+                .adapter
+                .delete(rid)
+                .await
+                .map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -210,7 +274,12 @@ impl IndexBackend for VectorBackend {
         rid: RecordId,
         _rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        self.adapter.load_full().adapter.delete(rid).await.map_err(ve)?;
+        self.adapter
+            .load_full()
+            .adapter
+            .delete(rid)
+            .await
+            .map_err(ve)?;
         Ok(Vec::new())
     }
 
@@ -376,6 +445,7 @@ impl IndexBackend for VectorBackend {
     }
 
     /// V2.2 / #401 — startup restore with snapshot-first, rebuild-fallback.
+    /// V2.3 / #402 — the snapshot-hit branch ALSO replays the delta-log.
     ///
     /// Three branches:
     /// 1. **`Ok(adapter)`** — the snapshot loaded cleanly. We swap the
@@ -383,6 +453,12 @@ impl IndexBackend for VectorBackend {
     ///    the empty placeholder adapter that `build_index2_backend_*`
     ///    constructed. NO data-store scan runs, so
     ///    [`rebuild_count`] stays at 0. This is the O(load) fast path.
+    ///    **V2.3:** after the swap, we replay every delta chunk with index
+    ///    > `manifest.delta_applied_upto` against the freshly-loaded adapter
+    ///    so the graph reflects every mutation committed since the snapshot
+    ///    was taken. The in-memory HWM (`next_delta_idx`) is seeded from the
+    ///    highest chunk index in the store so the next `append_delta` does
+    ///    not collide.
     /// 2. **`Err(NotFound)`** — no snapshot exists for this keyspace (a
     ///    fresh index, or the first open after the feature shipped). Fall
     ///    back to the legacy full-scan [`rebuild`] against the data store.
@@ -408,15 +484,74 @@ impl IndexBackend for VectorBackend {
         data_store: Arc<dyn Store>,
     ) -> Result<(), IndexError> {
         let keyspace = self.snapshot_keyspace();
+        // Read the manifest UP FRONT so we know `delta_applied_upto` for the
+        // replay even if `load_snapshot` later swaps the adapter in. A
+        // missing manifest is the `NotFound` branch — same as load_snapshot.
+        let manifest_opt: Option<SnapshotManifest> = match snapshot::read_manifest(
+            &info_store,
+            &keyspace,
+        )
+        .await
+        {
+            Ok(m) => Some(m),
+            Err(SnapshotError::NotFound) => None,
+            Err(e) => {
+                // A corrupt manifest is treated the same as a corrupt
+                // snapshot below: warn + fall back to a full rebuild.
+                log::warn!(
+                        "vector manifest read failed for index {} (keyspace {}): {} — falling back to full rebuild",
+                        self.descriptor.name,
+                        keyspace,
+                        e
+                    );
+                None
+            }
+        };
         match snapshot::load_snapshot(&info_store, &keyspace).await {
             Ok(loaded) => {
                 // O(load) fast path: hand the rebuilt adapter to the live
                 // backend. `ArcSwap::store` is wait-free; a concurrent query
                 // grabbing `load()` either sees the old empty adapter or the
                 // new one — never a torn state.
+                let adapter_arc: Arc<dyn VectorAdapter> = Arc::new(loaded);
                 self.adapter.store(Arc::new(AdapterSlot {
-                    adapter: Arc::new(loaded),
+                    adapter: Arc::clone(&adapter_arc),
                 }));
+
+                // V2.3: replay delta chunks past the snapshot's base. The
+                // `delta_applied_upto` comes from the manifest we just read
+                // (load_snapshot validated it but does not return it).
+                if let Some(manifest) = manifest_opt {
+                    let delta_upto = manifest.delta_applied_upto;
+                    if let Some(hnsw) = adapter_arc.as_hnsw_adapter() {
+                        if let Err(e) =
+                            snapshot::replay_delta(&info_store, &keyspace, delta_upto, hnsw).await
+                        {
+                            // A delta-replay failure is recoverable: the base
+                            // graph is intact, only the post-snapshot
+                            // mutations were lost. Warn and continue — the
+                            // next snapshot flip will capture a fresh base.
+                            log::warn!(
+                                "vector delta replay failed for index {} (keyspace {}): {} — \
+                                 base snapshot loaded, post-snapshot mutations may be missing \
+                                 until the next snapshot",
+                                self.descriptor.name,
+                                keyspace,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Seed the in-memory delta HWM so the next `append_delta`
+                // does not collide with an existing chunk. `highest_delta_index`
+                // returns 0 when no chunks exist (fresh snapshot).
+                let hwm = snapshot::highest_delta_index(&info_store, &keyspace)
+                    .await
+                    .unwrap_or(0);
+                self.next_delta_idx
+                    .store(hwm.saturating_add(1), Ordering::Release);
+
                 Ok(())
             }
             Err(SnapshotError::NotFound) => {
@@ -450,4 +585,214 @@ impl IndexBackend for VectorBackend {
         // Full impl would iterate all rids and delete.
         Ok(())
     }
+
+    /// V2.3 (#402) — append a delta-log chunk capturing the vectors just
+    /// promoted into the live graph, then bump the mutation counter.
+    ///
+    /// See [`IndexBackend::append_vector_delta`] for the contract. The chunk
+    /// is written at the monotonic `next_delta_idx` (one `Store::set`); the
+    /// HWM is bumped AFTER the write lands so a crash between the write and
+    /// the bump leaves a duplicate-index chunk on the next attempt (which
+    // `Store::set` overwrites — last-writer-wins on the chunk key, and the
+    // ops are idempotent under replay because upsert/delete are
+    // last-write-wins on the adapter).
+    async fn append_vector_delta(
+        &self,
+        info_store: &Arc<dyn Store>,
+        vecs: &[(RecordId, Vec<f32>)],
+        deleted: &[RecordId],
+    ) -> Result<(), IndexError> {
+        // Build the chunk. An empty promote (no vecs, no deletes) writes
+        // nothing — keeps the chunk stream dense.
+        if vecs.is_empty() && deleted.is_empty() {
+            return Ok(());
+        }
+        let mut ops: Vec<snapshot::DeltaOp> = Vec::with_capacity(vecs.len() + deleted.len());
+        for (rid, vec) in vecs {
+            ops.push(snapshot::DeltaOp::Upsert(*rid, vec.clone()));
+        }
+        for rid in deleted {
+            ops.push(snapshot::DeltaOp::Delete(*rid));
+        }
+        let keyspace = self.snapshot_keyspace();
+        let idx = self.next_delta_idx.fetch_add(1, Ordering::AcqRel);
+        snapshot::append_delta(info_store, &keyspace, idx, &ops)
+            .await
+            .map_err(|e| IndexError::Backend(format!("delta append: {e}")))?;
+        // Bump the mutation counter by the number of ops in this chunk. The
+        // background snapshot trigger reads this counter to decide when to
+        // flip the generation.
+        self.delta_count
+            .fetch_add(ops.len() as u64, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// V2.3 (#402) — check the delta counter against the threshold and, if
+    /// crossed, spawn a single-flight background snapshot task.
+    ///
+    /// See [`IndexBackend::trigger_snapshot_check`] for the contract. The
+    /// task is a `tokio::spawn` (NOT awaited) so the commit-ack path returns
+    /// immediately (§5.6). The single-flight `AtomicBool` prevents two
+    /// concurrent dumps from racing on the same keyspace.
+    fn trigger_snapshot_check(&self, info_store: &Arc<dyn Store>) {
+        let count = self.delta_count.load(Ordering::Acquire);
+        if count < self.snapshot_threshold.load(Ordering::Acquire) {
+            return;
+        }
+        // Single-flight: a crossing while a dump is already running is a
+        // no-op. The counter keeps climbing and the next ack re-arms once
+        // the in-flight task clears the flag.
+        if self
+            .snapshot_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        // Capture the CURRENT adapter (an `Arc<dyn VectorAdapter>` inside an
+        // `AdapterSlot`) by cloning the slot's Arc. The spawned task holds
+        // this Arc for the duration of the dump; a concurrent
+        // `restore_on_open` swap would install a NEW slot, but the task's
+        // dump reflects the adapter state at capture time — correct, because
+        // the dump is a point-in-time snapshot of the graph.
+        let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);
+        // The background snapshot needs the concrete HnswAdapter. If the
+        // current adapter is not an HnswAdapter (BruteForce, future external
+        // adapters), there is no snapshot to take — clear the flag and
+        // return without spawning.
+        if adapter_arc.as_hnsw_adapter().is_none() {
+            self.snapshot_in_flight.store(false, Ordering::Release);
+            return;
+        }
+        let keyspace = self.snapshot_keyspace();
+        let info_store = Arc::clone(info_store);
+        let next_delta_idx = Arc::clone(&self.next_delta_idx);
+        let delta_count = Arc::clone(&self.delta_count);
+        // Move the flag into a drop-guard so it is cleared on EVERY exit of the
+        // task — normal return, `Err`, OR panic (unwind still runs `Drop`). A
+        // bare `store(false)` at the end would be skipped on panic, leaving the
+        // flag stuck `true` forever → snapshots silently disabled for the life
+        // of the process and the delta-log growing unbounded.
+        let flight_guard = SnapshotFlightGuard(Arc::clone(&self.snapshot_in_flight));
+        tokio::spawn(async move {
+            let _flight_guard = flight_guard; // cleared on drop (incl. unwind)
+            let res =
+                run_background_snapshot(&info_store, &keyspace, &adapter_arc, &next_delta_idx)
+                    .await;
+            match res {
+                Ok(()) => {
+                    // Reset the mutation counter — the new snapshot absorbed
+                    // every chunk up to the current HWM.
+                    delta_count.store(0, Ordering::Release);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "vector background snapshot failed for keyspace {}: {} — \
+                         will retry on the next threshold crossing",
+                        keyspace,
+                        e
+                    );
+                }
+            }
+        });
+    }
+}
+
+/// Resets the single-flight `snapshot_in_flight` flag on drop, so the flag is
+/// cleared whether the background snapshot task returns `Ok`, returns `Err`, or
+/// **panics** (unwinding still runs `Drop`). Without this, a panic inside the
+/// dump would leak the flag as `true` permanently and disable all future
+/// snapshots for the process (pillar: a guard must never stick).
+struct SnapshotFlightGuard(Arc<AtomicBool>);
+
+impl Drop for SnapshotFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// V2.3 (#402) — the body of the single-flight background snapshot task.
+///
+/// Reads the current manifest to learn the active gen + its chunk counts,
+/// dumps a fresh generation (`gen+1`) from the live adapter, then atomically
+/// flips the manifest to the new gen and prunes the old gen's chunks + every
+/// delta chunk the new snapshot absorbed (index ≤ current HWM). The whole
+/// flip is ONE `Store::transact` so a backend that overrides `transact`
+/// exposes the new generation + the prune as a single all-or-nothing batch.
+///
+/// `adapter_arc` is the `Arc<dyn VectorAdapter>` captured at trigger time;
+/// we downcast to `&HnswAdapter` inside (the Arc outlives the dump). The
+/// `dump_snapshot_with_gen` call runs `file_dump` under `spawn_blocking`, so
+/// no borrow is held across the flip's `transact`.
+async fn run_background_snapshot(
+    info_store: &Arc<dyn Store>,
+    keyspace: &str,
+    adapter_arc: &Arc<dyn VectorAdapter>,
+    next_delta_idx: &AtomicU64,
+) -> Result<(), SnapshotError> {
+    // The caller guaranteed the adapter is an HnswAdapter (checked before
+    // spawn). Downcast once; hold the borrow for the dump below.
+    let hnsw = adapter_arc
+        .as_hnsw_adapter()
+        .ok_or_else(|| SnapshotError::Backend("background snapshot on non-HnswAdapter".into()))?;
+
+    // Read the current manifest to learn the active gen + chunk counts. A
+    // missing manifest means no snapshot exists yet — we dump gen 1 and the
+    // flip's "old gen" prune is a no-op (old_gen=0, 0 chunks).
+    let (old_gen, old_graph_chunks, old_data_chunks): (u32, u32, u32) =
+        match snapshot::read_manifest(info_store, keyspace).await {
+            Ok(m) => (m.gen, m.graph_chunks, m.data_chunks),
+            Err(SnapshotError::NotFound) => (0, 0, 0),
+            Err(e) => return Err(e),
+        };
+    let new_gen = old_gen.wrapping_add(1);
+
+    // The new snapshot absorbs every delta chunk written so far (indices
+    // `0..next_delta_idx`). We capture the HWM BEFORE the dump so concurrent
+    // Phase 5d appends (which bump `next_delta_idx`) land in chunks that
+    // survive the flip's prune and are replayed on the next restart.
+    // `delta_applied_upto` = number of absorbed chunks = `next_delta_idx`.
+    let new_delta_applied_upto = next_delta_idx.load(Ordering::Acquire);
+
+    // Dump the new generation. `dump_snapshot_with_gen` writes the chunks +
+    // sidecar + a manifest for `new_gen` (with `delta_applied_upto = 0`). The
+    // manifest it writes is at the single `manifest_key` slot — so it
+    // OVERWRITES the old manifest. That is fine: `flip_generation` below
+    // rewrites the manifest with the correct `delta_applied_upto` in the same
+    // atomic batch as the prune, so a reader between the dump and the flip
+    // sees `new_gen` with `delta_applied_upto = 0` (replays every delta —
+    // correct, just slower on restart) and a reader after the flip sees the
+    // final state. A crash between the dump and the flip leaves `new_gen`
+    // published with `delta_applied_upto = 0`: the next restart loads
+    // `new_gen` and replays every delta chunk (including the ones the dump
+    // already absorbed) — idempotent under replay (upsert/delete are
+    // last-write-wins), so no corruption, just redundant work.
+    snapshot::dump_snapshot_with_gen(hnsw, info_store, keyspace, new_gen).await?;
+
+    // Re-read the manifest dump_snapshot_with_gen just wrote to recover the
+    // real chunk counts + basename (we don't duplicate the chunk-counting
+    // logic here). Then patch in the correct `delta_applied_upto`.
+    let written = snapshot::read_manifest(info_store, keyspace).await?;
+    let final_manifest = SnapshotManifest {
+        format_version: written.format_version,
+        gen: written.gen,
+        graph_chunks: written.graph_chunks,
+        data_chunks: written.data_chunks,
+        basename: written.basename,
+        delta_applied_upto: new_delta_applied_upto,
+    };
+
+    // Atomic flip + prune. The old gen's chunks + sidecar are removed, every
+    // delta chunk ≤ new_delta_applied_upto is removed, and the new manifest
+    // is published — all in ONE transact.
+    snapshot::flip_generation(
+        info_store,
+        keyspace,
+        old_gen,
+        old_graph_chunks,
+        old_data_chunks,
+        final_manifest,
+        new_delta_applied_upto,
+    )
+    .await
 }
