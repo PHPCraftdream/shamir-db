@@ -176,7 +176,11 @@ pub fn clustered_vectors(
     // point). For the degenerate n == 0 case we still emit all k_clusters
     // centroids so dim() and the (k, σ) params stay recoverable from the
     // artefact.
-    let k_eff = if n == 0 { k_clusters } else { k_clusters.min(n) };
+    let k_eff = if n == 0 {
+        k_clusters
+    } else {
+        k_clusters.min(n)
+    };
 
     let mut rng = Lcg::new(seed);
 

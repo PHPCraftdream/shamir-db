@@ -163,7 +163,11 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
     let rss_baseline = rss_now();
 
     // ---- Build f32 adapter, sample RSS, compute recall, then DROP it -----
-    let f32_adapter = Arc::new(HnswAdapter::new(DIM as u32, VectorMetric::Cosine, cfg.clone()));
+    let f32_adapter = Arc::new(HnswAdapter::new(
+        DIM as u32,
+        VectorMetric::Cosine,
+        cfg.clone(),
+    ));
     rt.block_on(f32_adapter.upsert_batch(&batch)).unwrap();
     let rss_f32 = rss_now();
     // Footprint of the f32 adapter ALONE = RSS now - baseline. (Allocator
@@ -247,13 +251,17 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
 
     // Rebuild the f32 adapter for the criterion search bench (it was dropped
     // above for an isolated sq8 RSS sample). The sq8 adapter is reused.
-    let f32_adapter = Arc::new(HnswAdapter::new(DIM as u32, VectorMetric::Cosine, HnswConfig {
-        max_elements: 10_000,
-        m: 16,
-        max_layer: 16,
-        ef_construction: 200,
-        ef_search: 128,
-    }));
+    let f32_adapter = Arc::new(HnswAdapter::new(
+        DIM as u32,
+        VectorMetric::Cosine,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 128,
+        },
+    ));
     rt.block_on(f32_adapter.upsert_batch(&batch)).unwrap();
 
     (f32_adapter, sq8_adapter)
@@ -269,7 +277,10 @@ fn bench_quantization(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     // A fixed query (same lineage as the dataset, distinct seed).
-    let query: Vec<f32> = clustered(1, DIM, K_CLUSTERS, SIGMA, SEED + 1).into_iter().next().unwrap();
+    let query: Vec<f32> = clustered(1, DIM, K_CLUSTERS, SIGMA, SEED + 1)
+        .into_iter()
+        .next()
+        .unwrap();
     let opts = SearchOpts::with_ef_search(256);
 
     group.bench_function("f32_search", |b| {
