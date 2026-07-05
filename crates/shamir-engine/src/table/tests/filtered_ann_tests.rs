@@ -517,3 +517,110 @@ async fn tx_staged_vector_visible_and_filtered() {
         tags.len()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C1 regression: partial index coverage must NOT skip unindexed predicates
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a record `{embedding: [f32...], tag: &str, price: f64}`.
+fn vec_record_with_price(
+    emb_key: u64,
+    vec: &[f32],
+    tag_key: u64,
+    tag: &str,
+    price_key: u64,
+    price: f64,
+) -> InnerValue {
+    let mut m = new_map_wc(3);
+    m.insert(
+        InternerKey::new(emb_key),
+        InnerValue::List(vec.iter().map(|f| InnerValue::F64(*f as f64)).collect()),
+    );
+    m.insert(InternerKey::new(tag_key), InnerValue::Str(tag.into()));
+    m.insert(InternerKey::new(price_key), InnerValue::F64(price));
+    InnerValue::Map(m)
+}
+
+/// C1 regression: a filtered-ANN query with `And(VectorSimilarity, Eq(tag),
+/// Gt(price, 100))` where only `tag` is indexed must NOT return records with
+/// price <= 100. Before the fix, the fast-path (pre-filter/co-filter) would
+/// use the btree index on `tag` to get candidate RIDs but silently skip the
+/// unindexed `Gt(price, 100)` predicate, returning wrong results.
+#[tokio::test]
+#[serial_test::serial]
+async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op(4)).await.unwrap();
+    // Legacy btree index on "tag" only — "price" is NOT indexed.
+    tbl.create_index("tag_idx", &["tag"]).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let tag_id = field_id(&tbl, "tag").await;
+    let price_id = field_id(&tbl, "price").await;
+
+    // Insert records: all tag="electronics", varying prices.
+    // Vectors are all near [1,0,0,0] so they all rank high.
+    let base_vec = [1.0f32, 0.0, 0.0, 0.0];
+    let mut rng = Pcg(7777);
+    for i in 0..20u32 {
+        let mut v = base_vec;
+        for slot in &mut v[1..] {
+            *slot = (rng.next() - 0.5) * 0.02;
+        }
+        // 10 records with price=50 (should be EXCLUDED by price>100)
+        // 10 records with price=200 (should PASS)
+        let price = if i < 10 { 50.0 } else { 200.0 };
+        tbl.insert(&vec_record_with_price(
+            emb_id,
+            &v,
+            tag_id,
+            "electronics",
+            price_id,
+            price,
+        ))
+        .await
+        .unwrap();
+    }
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Query: top-5 closest AND tag="electronics" AND price > 100.
+    // The btree on "tag" covers the Eq but NOT the Gt(price, 100).
+    let k = 5u32;
+    let result = tbl
+        .read(
+            &ReadQuery::new("vecs").filter(qf::and(vec![
+                qf::vector_similarity("embedding", vec![1.0, 0.0, 0.0, 0.0], k),
+                qf::eq("tag", "electronics"),
+                qf::gt("price", 100.0f64),
+            ])),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    // All returned records MUST have price > 100.
+    use shamir_types::types::value::QueryValue;
+    for rec in &result.records {
+        let price_val = match rec.get_value("price") {
+            Some(QueryValue::F64(v)) => *v,
+            Some(QueryValue::Int(v)) => *v as f64,
+            other => panic!("price field must be numeric; got {other:?}"),
+        };
+        assert!(
+            price_val > 100.0,
+            "C1 regression: returned record with price={price_val} which violates \
+             the unindexed predicate price>100"
+        );
+    }
+    // Should return 5 results (there are 10 records with price=200).
+    assert_eq!(
+        result.records.len(),
+        k as usize,
+        "should find k results matching all predicates"
+    );
+}

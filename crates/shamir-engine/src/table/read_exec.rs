@@ -1296,7 +1296,118 @@ impl TableManager {
         let table_token = self.table_token();
         let staged = tx.and_then(|t| t.staged_vectors_for(table_token));
 
-        // Adaptive oversample-retry loop.
+        // ── V3.2 cost-based path selection ──────────────────────────────
+        // Try to resolve the residual predicate against a secondary index to
+        // get a candidate RID set. If successful, pick pre-filter or co-filter
+        // based on cardinality; otherwise fall through to post-filter (V3.1).
+        if let Some(ref residual) = fvq.residual {
+            use crate::index2::vector::hnsw_adapter::{
+                CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES,
+            };
+            use crate::index2::vector::vector_backend::VectorBackend;
+            use crate::index2::vector::VectorAdapter as _;
+
+            // Attempt to resolve candidate RIDs from secondary index (btree/functional).
+            // IMPORTANT (C1): only enter fast-path when the index FULLY covers the
+            // residual predicate. A partial cover (superset of matching RIDs) would
+            // skip uncovered conjuncts and return wrong results.
+            let candidate_rids: Option<Vec<RecordId>> = {
+                // Try index2 path first (functional/fts/btree).
+                // `try_plan_index2` only matches single-predicate shapes (Eq on
+                // functional, FTS, bare Vector) — never multi-conjunct And. So a
+                // successful Set result implies full coverage of the residual.
+                let idx2_result = self.try_plan_index2(residual, interner).await;
+                match idx2_result {
+                    Some(IndexResult::Set(set)) => Some(set.into_iter().collect()),
+                    _ => {
+                        // Try legacy btree index scan. Only use when the index
+                        // FULLY covers the residual (no leftover predicate).
+                        if let Some((idx_name, lookup_sets, leftover)) =
+                            self.try_plan_index_scan(residual, interner)
+                        {
+                            if leftover.is_some() {
+                                // Partial coverage — uncovered conjuncts remain.
+                                // Cannot use fast-path; fall through to post-filter.
+                                None
+                            } else {
+                                let mut rids = Vec::new();
+                                for values in &lookup_sets {
+                                    if let Ok(ids) = self
+                                        .index_manager_ref()
+                                        .lookup_by_index(idx_name, values)
+                                        .await
+                                    {
+                                        rids.extend(ids);
+                                    }
+                                }
+                                if rids.is_empty() {
+                                    None
+                                } else {
+                                    Some(rids)
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+
+            if let Some(candidates) = candidate_rids {
+                let n_candidates = candidates.len();
+
+                // Downcast the vector backend to access HnswAdapter.
+                let vb_opt = backend.as_any().downcast_ref::<VectorBackend>();
+                if let Some(vb) = vb_opt {
+                    let adapter_arc = vb.adapter_arc();
+                    if let Some(hnsw) = adapter_arc.as_hnsw_adapter() {
+                        let total_live = hnsw.len();
+                        let selectivity = if total_live > 0 {
+                            n_candidates as f64 / total_live as f64
+                        } else {
+                            1.0
+                        };
+
+                        if n_candidates <= PRE_FILTER_MAX_CANDIDATES {
+                            // PRE-FILTER: exact SIMD scoring over small candidate set.
+                            let ranked = hnsw
+                                .search_prefilter(&fvq.query, k, &candidates)
+                                .await
+                                .map_err(|e| DbError::Internal(e.to_string()))?;
+                            return self
+                                .build_filtered_vector_result(
+                                    query,
+                                    interner,
+                                    tx,
+                                    start,
+                                    &ranked,
+                                    "pre_filter",
+                                )
+                                .await;
+                        } else if selectivity <= CO_FILTER_MAX_SELECTIVITY {
+                            // CO-FILTER: HNSW search_filter with allow-set.
+                            let ranked = hnsw
+                                .search_cofilter(&fvq.query, k, fvq.ef_search, &candidates)
+                                .await
+                                .map_err(|e| DbError::Internal(e.to_string()))?;
+                            return self
+                                .build_filtered_vector_result(
+                                    query,
+                                    interner,
+                                    tx,
+                                    start,
+                                    &ranked,
+                                    "co_filter",
+                                )
+                                .await;
+                        }
+                        // else: selectivity too high → fall through to post-filter
+                    }
+                }
+            }
+        }
+
+        // Adaptive oversample-retry loop (POST-FILTER, V3.1).
         let mut k_prime = (((k as f32) * oversample).ceil() as u32)
             .max(k) // never below k
             .min(MAX_TOPK);
@@ -1488,6 +1599,66 @@ impl TableManager {
             )
             .await
         }
+    }
+
+    /// Build a `QueryResult` from pre-filter / co-filter ranked output.
+    ///
+    /// V3.2: shared helper for pre-filter and co-filter paths. Takes the
+    /// ranked `(RecordId, f32)` pairs, resolves them to record bytes,
+    /// projects, and returns the QueryResult with the given `index_tag`.
+    async fn build_filtered_vector_result(
+        &self,
+        query: &ReadQuery,
+        interner: &Interner,
+        tx: Option<&shamir_tx::TxContext>,
+        start: Instant,
+        ranked: &[(RecordId, f32)],
+        index_tag: &str,
+    ) -> DbResult<QueryResult> {
+        let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
+        let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
+        let proj = exec::SelectProjection::new(&query.select, interner);
+        let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
+        for maybe_bytes in raw_records.iter() {
+            let bytes = match maybe_bytes {
+                Some(b) => b,
+                None => continue,
+            };
+            let qv = match shamir_types::record_view::RecordView::new(bytes) {
+                Ok(view) => proj.project_value(&view, interner),
+                Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                    Ok(iv) => {
+                        match shamir_types::codecs::interned::inner_value_to_query_value(
+                            &iv, interner,
+                        ) {
+                            Ok(q) => q,
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(_) => continue,
+                },
+            };
+            records.push(QueryRecord::Direct(qv));
+        }
+        let returned = records.len() as u64;
+        let scanned = ranked.len() as u64;
+        let elapsed = start.elapsed();
+        Ok(QueryResult {
+            records,
+            stats: Some(QueryStats {
+                index_used: Some(index_tag.into()),
+                records_scanned: scanned,
+                records_returned: returned,
+                execution_time_us: elapsed.as_micros() as u64,
+            }),
+            pagination: if query.pagination.is_none() {
+                None
+            } else {
+                Some(PaginationInfo::compute(&query.pagination, Some(returned)))
+            },
+            value: None,
+            explain: None,
+        })
     }
 
     /// Build an [`ExplainPlan`] by running only the planner decision tree

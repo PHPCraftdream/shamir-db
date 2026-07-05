@@ -114,6 +114,10 @@ impl FtsBackend {
 
 #[async_trait]
 impl IndexBackend for FtsBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }

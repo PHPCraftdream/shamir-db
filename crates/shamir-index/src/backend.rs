@@ -11,6 +11,7 @@ use shamir_storage::types::Store;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use smallvec::SmallVec;
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -67,6 +68,10 @@ pub enum IndexError {
 #[async_trait]
 pub trait IndexBackend: Send + Sync {
     fn descriptor(&self) -> &IndexDescriptor;
+
+    /// Downcast to concrete type for specialised access (e.g. VectorBackend
+    /// pre-filter / co-filter paths in V3.2). Each impl returns `self` erased.
+    fn as_any(&self) -> &dyn Any;
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError>;
 
