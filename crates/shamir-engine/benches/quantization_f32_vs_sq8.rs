@@ -136,6 +136,13 @@ fn recall_at_k(truth: &[RecordId], cand: &[RecordId]) -> f32 {
 /// Build BOTH adapters on the same batch, sample RSS after each build,
 /// compute recall@10 over a fixed query set, and print a one-line summary.
 /// The criterion bench below measures only the search latency (QPS).
+///
+/// #418 — RSS is now sampled PER-ADAPTER in isolation: we build f32, sample
+/// its RSS, compute recall, DROP the f32 adapter, then build sq8 and sample
+/// its RSS. This isolates each adapter's footprint (the pre-#418 code kept
+/// both resident, so `rss_sq8` included the f32 graph and masked SQ8's
+/// memory win). Both adapters are returned for the criterion search bench
+/// (rebuilt after sampling — see `rebuild_for_bench`).
 fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<HnswAdapter>) {
     let data = clustered(N, DIM, K_CLUSTERS, SIGMA, SEED);
     let batch: Vec<(RecordId, Vec<f32>)> = data
@@ -152,12 +159,46 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
         ef_search: 128,
     };
 
-    // Build the f32 adapter (ground truth).
+    // ---- RSS baseline (process footprint before any adapter) ------------
+    let rss_baseline = rss_now();
+
+    // ---- Build f32 adapter, sample RSS, compute recall, then DROP it -----
     let f32_adapter = Arc::new(HnswAdapter::new(DIM as u32, VectorMetric::Cosine, cfg.clone()));
     rt.block_on(f32_adapter.upsert_batch(&batch)).unwrap();
     let rss_f32 = rss_now();
+    // Footprint of the f32 adapter ALONE = RSS now - baseline. (Allocator
+    // fragmentation may leave some slack, but this is the closest OS-level
+    // measurement available without a dedicated allocator hook.)
+    let fp_f32 = rss_f32.saturating_sub(rss_baseline);
 
-    // Build the SQ8 adapter (test).
+    // recall@10 over a fixed query set (first 100 vectors of the dataset).
+    // Computed here (before the sq8 build) so we can DROP the f32 adapter
+    // for an isolated sq8 RSS sample.
+    let opts = SearchOpts {
+        ef_search: Some(256),
+        oversample: None,
+    };
+    let n_queries = 100usize;
+    // Stash the ground-truth top-k per query so recall can be recomputed
+    // against the sq8 adapter after the f32 adapter is dropped.
+    let truth_rids_per_q: Vec<Vec<RecordId>> = data
+        .iter()
+        .take(n_queries)
+        .map(|q| {
+            rt.block_on(f32_adapter.search(q, TOP_K, opts, None))
+                .unwrap()
+                .iter()
+                .map(|(r, _)| *r)
+                .collect()
+        })
+        .collect();
+
+    // DROP the f32 adapter so the sq8 RSS sample is not contaminated by
+    // its f32 graph. The Arc is the only strong reference (the criterion
+    // bench rebuilds fresh adapters below).
+    drop(f32_adapter);
+
+    // ---- Build sq8 adapter, sample RSS, compute recall ------------------
     let sq8_adapter = Arc::new(HnswAdapter::new_with_quantization(
         DIM as u32,
         VectorMetric::Cosine,
@@ -175,41 +216,45 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
         "SQ8 adapter did not accept the full batch"
     );
     let rss_sq8 = rss_now();
+    // Footprint of the sq8 adapter ALONE = RSS now - f32 baseline. The f32
+    // graph of THIS adapter was dropped post-fit (#418), so this measures
+    // only the u8 graph + codes + overhead.
+    let fp_sq8 = rss_sq8.saturating_sub(rss_f32);
 
-    // recall@10 over a fixed query set (first 100 vectors of the dataset).
-    let opts = SearchOpts {
-        ef_search: Some(256),
-        oversample: None,
-    };
     let mut total_recall = 0.0f32;
-    let n_queries = 100usize;
-    for q in data.iter().take(n_queries) {
-        let truth = rt
-            .block_on(f32_adapter.search(q, TOP_K, opts, None))
-            .unwrap();
+    for (i, q) in data.iter().take(n_queries).enumerate() {
         let cand = rt
             .block_on(sq8_adapter.search(q, TOP_K, opts, None))
             .unwrap();
-        let truth_rids: Vec<RecordId> = truth.iter().map(|(r, _)| *r).collect();
         let cand_rids: Vec<RecordId> = cand.iter().map(|(r, _)| *r).collect();
-        total_recall += recall_at_k(&truth_rids, &cand_rids);
+        total_recall += recall_at_k(&truth_rids_per_q[i], &cand_rids);
     }
     let avg_recall = total_recall / n_queries as f32;
 
-    // RSS delta: the f32 → sq8 transition should DROP memory (u8 codes vs f32).
-    // The absolute RSS numbers include the whole process (criterion, tokio,
-    // the f32 graph which stays resident), so the DELTA is the meaningful
-    // figure. A negative delta means sq8 used LESS memory than f32.
-    let rss_delta = rss_sq8 as i64 - rss_f32 as i64;
-    let ratio = if rss_f32 > 0 {
-        rss_sq8 as f64 / rss_f32 as f64
+    // #418 — the per-adapter footprints are the meaningful comparison.
+    // SQ8 should be noticeably SMALLER than f32 (u8 codes = dim bytes vs
+    // f32 vectors = 4·dim bytes; target ~¼, plus graph-structure overhead).
+    let fp_delta = fp_sq8 as i64 - fp_f32 as i64;
+    let ratio = if fp_f32 > 0 {
+        fp_sq8 as f64 / fp_f32 as f64
     } else {
         0.0
     };
     println!(
-        "[quant-bench] n={N} dim={DIM} metric=cosine | RSS f32={rss_f32} bytes, sq8={rss_sq8} bytes \
-         (Δ={rss_delta}, ratio={ratio:.3}) | recall@{TOP_K} sq8-vs-f32 = {avg_recall:.4}"
+        "[quant-bench] n={N} dim={DIM} metric=cosine | footprint f32={fp_f32} bytes, sq8={fp_sq8} bytes \
+         (Δ={fp_delta}, ratio={ratio:.3}) | recall@{TOP_K} sq8-vs-f32 = {avg_recall:.4}"
     );
+
+    // Rebuild the f32 adapter for the criterion search bench (it was dropped
+    // above for an isolated sq8 RSS sample). The sq8 adapter is reused.
+    let f32_adapter = Arc::new(HnswAdapter::new(DIM as u32, VectorMetric::Cosine, HnswConfig {
+        max_elements: 10_000,
+        m: 16,
+        max_layer: 16,
+        ef_construction: 200,
+        ef_search: 128,
+    }));
+    rt.block_on(f32_adapter.upsert_batch(&batch)).unwrap();
 
     (f32_adapter, sq8_adapter)
 }

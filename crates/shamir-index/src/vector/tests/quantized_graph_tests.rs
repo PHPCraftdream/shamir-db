@@ -143,12 +143,25 @@ async fn fit_transition_at_threshold() {
         adapter.upsert(rid(i as u64), v).await.unwrap();
     }
     assert!(!adapter.is_quantized(), "adapter fitted below threshold");
+    // #418 — pre-fit, the f32 graph is still resident.
+    assert!(
+        adapter.f32_graph_present(),
+        "f32 graph must be resident pre-fit"
+    );
 
     // Cross the threshold — the 256th upsert triggers fit.
     adapter.upsert(rid(255), &data[255]).await.unwrap();
     assert!(adapter.is_quantized(), "adapter did not fit at threshold");
     assert!(adapter.quantizer().is_some());
     assert!(adapter.hnsw_u8_handle().is_some());
+    // #418 — post-fit, the f32 graph is DROPPED (the whole point of SQ8:
+    // freeing the 4·dim·N bytes the f32 graph retains). This is the
+    // deterministic memory-regression check — stronger than a flaky RSS
+    // sample.
+    assert!(
+        !adapter.f32_graph_present(),
+        "f32 graph must be dropped post-fit (SQ8 memory win)"
+    );
 
     // Post-fit: vectors_u8 is populated; vectors (f32 buffer) is drained.
     // The live count is 256 (255 + the 256th). We can't read vectors_u8
@@ -512,5 +525,100 @@ async fn upsert_replace_on_quantized_index() {
         res.iter().any(|(r, _)| *r == rid(10)),
         "replaced rid(10) not retrievable for its new vector; got {:?}",
         res.iter().map(|(r, _)| *r).collect::<Vec<_>>()
+    );
+}
+
+// =========================================================================
+// #418 — memory regression: f32 graph is freed post-fit (SQ8 memory win)
+// =========================================================================
+//
+// The #412 bench found SQ8 RSS > f32 RSS because the f32 graph stayed
+// resident on top of the u8 graph. #418 drops the f32 graph post-fit. This
+// test asserts the drop deterministically via `f32_graph_present()` — a
+// stronger check than a flaky RSS sample — and covers three regimes:
+//  1. non-quant adapter: f32 graph NEVER dropped (back-compat).
+//  2. quant adapter pre-fit: f32 graph resident.
+//  3. quant adapter post-fit: f32 graph DROPPED; search still works.
+
+#[tokio::test]
+async fn f32_graph_present_non_quant_never_drops() {
+    // A non-quant adapter never drops its f32 graph — bit-for-bit back-compat
+    // with the pre-#418 legacy path.
+    let dim = 8u32;
+    let adapter = HnswAdapter::new(dim, VectorMetric::L2, HnswConfig::default());
+    for i in 0..10u64 {
+        let v: Vec<f32> = (0..dim).map(|j| (i + j as u64) as f32).collect();
+        adapter.upsert(rid(i), &v).await.unwrap();
+    }
+    assert!(
+        adapter.f32_graph_present(),
+        "non-quant adapter must retain its f32 graph forever"
+    );
+    // Search still works on the f32 path.
+    let q: Vec<f32> = (0..dim).map(|j| j as f32).collect();
+    let res = adapter
+        .search(&q, 3, SearchOpts::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(res.len(), 3);
+}
+
+#[tokio::test]
+async fn f32_graph_dropped_after_fit_and_search_survives() {
+    // Quant adapter: f32 graph dropped post-fit, but search/upsert/delete
+    // continue to work through the u8 path. This is the core #418 regression:
+    // the drop must NOT break the post-fit path, and must NOT cause UAF under
+    // the in-flight readers that held a `load_full()` Arc.
+    let dim = 24u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::Cosine,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // Cross the threshold → fit fires → f32 graph dropped.
+    let data = clustered(300, dim as usize, 12, 0.2, 0x418418);
+    let items: Vec<(RecordId, Vec<f32>)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (rid(i as u64), v.clone()))
+        .collect();
+    adapter.upsert_batch(&items).await.unwrap();
+    assert!(adapter.is_quantized(), "adapter did not fit");
+    assert!(
+        !adapter.f32_graph_present(),
+        "f32 graph must be dropped post-fit"
+    );
+
+    // Post-fit search works (u8 graph + rescore path).
+    let q = &data[0];
+    let res = adapter
+        .search(q, 5, SearchOpts::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(res.len(), 5);
+    // Query's own rid (0) must be in the top-5.
+    assert!(
+        res.iter().any(|(r, _)| *r == rid(0)),
+        "query's own rid missing from post-fit top-5"
+    );
+
+    // Post-fit upsert works (goes to the u8 path; f32 graph absent).
+    let new_vec: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.05).collect();
+    adapter.upsert(rid(10_000), &new_vec).await.unwrap();
+    // Post-fit delete works (drops codes from vectors_u8).
+    adapter.delete(rid(0)).await.unwrap();
+
+    // The f32 graph stays dropped across all these ops.
+    assert!(
+        !adapter.f32_graph_present(),
+        "f32 graph must stay dropped across post-fit ops"
     );
 }
