@@ -76,6 +76,14 @@ security: {
         auth_init_timeout_ms: 5000
         max_active_connections: 100
     }
+    # The default per-subnet auth_init rate limit is 10/s (spec §8). Every
+    # connection in this harness dials 127.0.0.1 — one subnet — so a burst of
+    # logins (admin + per-file SCRAM users + the 16/17 replication sessions)
+    # drains the token bucket and the server rejects the next dial with a TLS
+    # CloseNotify, surfacing client-side as "read challenge: io: early eof".
+    # The Rust e2e suites set this to 1000 (permission_e2e.rs, repl_pull_e2e.rs,
+    # max_connections.rs) for the same reason; mirror them here.
+    auth_init_rate_per_second: 1000
     query_limits: {
         max_result_size_bytes:    10485760
         max_execution_time_secs:  10

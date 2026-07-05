@@ -76,13 +76,42 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
   });
 
   test('drop_db with correct hmac succeeds', async () => {
+    // `setupDb` always creates a `main` repo, so the db is non-empty and
+    // `drop_db` now requires `cascade: true` (referential-integrity guard
+    // added in the replication campaign — see
+    // `admin_db_repo.rs::handle_drop_db` /
+    // `ddl_wire_e2e/error_codes.rs::error_code_still_referenced_drop_db`).
+    // The HMAC canonical input is `b"drop_db\0<db>"`; `cascade` is not part
+    // of the signed bytes, so the tag is the same.
     const victim = await fixtures.setupDb(client, 'hmac_ok_db', []);
     const resp = await client.execute('default', {
       id: 1,
-      queries: { d: hmac.drop_db_op(client, victim) },
+      queries: { d: hmac.drop_db_op(client, victim, { cascade: true }) },
     });
     const row = resp.results.d.records[0];
     assertEq(row.dropped, victim);
+  });
+
+  test('drop_db without cascade on a db with repos → still_referenced', async () => {
+    // Pin the new referential-integrity contract: a db that still owns a
+    // repo cannot be dropped without `cascade`. The HMAC is valid (correct
+    // tag), so this proves the `still_referenced` guard fires AFTER the
+    // HMAC gate — i.e. it is a business rule, not an auth failure.
+    const victim = await fixtures.setupDb(client, 'hmac_ref', []);
+    let err = null;
+    try {
+      await client.execute('default', {
+        id: 1,
+        queries: { d: hmac.drop_db_op(client, victim) },
+      });
+    } catch (e) {
+      err = e;
+    }
+    assert(err, 'expected drop_db without cascade to fail with still_referenced');
+    assert(
+      /still_referenced/.test(err.message || ''),
+      `expected still_referenced, got: ${err.message}`
+    );
   });
 
   test('drop_index with correct hmac succeeds', async () => {
