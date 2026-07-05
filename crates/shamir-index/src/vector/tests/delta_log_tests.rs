@@ -749,3 +749,111 @@ async fn threshold_crossing_spawns_background_snapshot_and_clears_flag() {
         "single-flight flag must be cleared after the background snapshot completes"
     );
 }
+
+// ----------------------------------------------------------------------------
+// 7. gap#1 (V2.4) — append_vector_delta with a non-empty `deleted` slice
+//    writes a DeltaOp::Delete that is applied on restart.
+//
+//    The tx path in commit_phases.rs currently passes `deleted = &[]` (the
+//    tx-path vector-delete wiring is deferred — see the comment at
+//    commit_phases.rs:~433 and VECTOR_PRODUCTION_EXECUTION.md). This test
+//    pins the CONTRACT: the moment the engine threads deleted rids into
+//    `append_vector_delta`, the delete reaches the delta-log and is replayed.
+//    It is the regression guard for gap#1's variant-B deferral.
+// ----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn append_vector_delta_with_deleted_slice_persists_and_replays_delete() {
+    let i = Interner::new();
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let id: u32 = 60;
+    let keyspace = format!("__vec_snap__{}", id);
+
+    // Base snapshot with rid(1) + rid(2).
+    let adapter = build_adapter(DIM, VectorMetric::L2);
+    adapter
+        .upsert(rid(1), &lcg_vec(DIM as usize, 1))
+        .await
+        .unwrap();
+    adapter
+        .upsert(rid(2), &lcg_vec(DIM as usize, 2))
+        .await
+        .unwrap();
+    snapshot::dump_snapshot(&adapter, &info_store, &keyspace)
+        .await
+        .unwrap();
+
+    // Restore the base so the backend owns the graph + has a delta HWM.
+    let backend = make_backend(&i, id, DIM, VectorMetric::L2);
+    backend
+        .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.rebuild_count(),
+        0,
+        "base snapshot must load cleanly"
+    );
+
+    // Append a delta chunk that DELETES rid(1) via the public surface. This
+    // is the exact call the tx path WOULD make once gap#1 variant-A lands —
+    // passing the deleted rids as the third argument instead of `&[]`.
+    let deleted = vec![rid(1)];
+    backend
+        .append_vector_delta(&info_store, &[], &deleted)
+        .await
+        .unwrap();
+
+    // A delta chunk must exist at the HWM-seeded index. `restore_on_open`
+    // seeds `next_delta_idx` to `highest_delta_index + 1`; with no prior
+    // chunks the HWM is 0, so the first append lands at index 1 (NOT 0 —
+    // the HWM pattern reserves 0 as "no chunks" sentinel, mirroring the
+    // InternerManager HWM convention).
+    let chunk_idx = snapshot::highest_delta_index(&info_store, &keyspace)
+        .await
+        .unwrap();
+    assert_eq!(
+        chunk_idx, 1,
+        "exactly one delta chunk (at index 1) must exist after the append"
+    );
+    let chunk_key = format!("{}.delta.{:010}", keyspace, chunk_idx);
+    let chunk_bytes = info_store.get(chunk_key.into()).await.unwrap();
+    let ops: Vec<DeltaOp> = MetaEnvelope::open(&chunk_bytes).unwrap();
+    assert_eq!(
+        ops.len(),
+        1,
+        "exactly one DeltaOp must be written for one deleted rid"
+    );
+    assert!(
+        matches!(ops[0], DeltaOp::Delete(r) if r == rid(1)),
+        "the DeltaOp must be Delete(rid(1))"
+    );
+
+    // Restart — base snapshot + replay the delete delta.
+    let restarted = make_backend(&i, id, DIM, VectorMetric::L2);
+    restarted
+        .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted.rebuild_count(),
+        0,
+        "restart after a delta-replay must still not trigger a full rebuild"
+    );
+
+    // rid(2) survives; rid(1) is gone (its exact-vector query returns only
+    // the surviving neighbour).
+    let q_near_2 = lcg_vec(DIM as usize, 2);
+    let top = topk_ids(&restarted, &q_near_2, 5).await;
+    assert!(
+        !top.contains(&rid(1)),
+        "deleted rid(1) must NOT surface after restart — the DeltaOp::Delete \
+         was replayed"
+    );
+    assert!(
+        top.contains(&rid(2)),
+        "rid(2) must survive the delta replay"
+    );
+}
