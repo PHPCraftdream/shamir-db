@@ -10,6 +10,7 @@
 
 use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, TransportKind};
+use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,7 +84,7 @@ impl core::fmt::Debug for Session {
             .field("transport_kind", &self.transport_kind)
             .field("binding_mode", &self.binding_mode)
             .field("channel_binding_at_auth", &"<REDACTED:32>")
-            .field("pending_changepw_challenge", &"<Mutex>")
+            .field("pending_changepw_challenge", &"<ArcSwapOption>")
             .finish()
     }
 }
@@ -128,7 +129,12 @@ pub struct Session {
     /// `changePassword` for `auth_message_cp` and by future ticket bindings.
     pub channel_binding_at_auth: [u8; 32],
     /// In-flight changePassword challenge state.
-    pub pending_changepw_challenge: parking_lot::Mutex<Option<PendingChangePwChallenge>>,
+    ///
+    /// Lock-free: `ArcSwapOption` over `Arc<PendingChangePwChallenge>`.
+    /// Issue replaces any prior challenge (`store(Some(...))`); consume is a
+    /// single atomic `swap(None)` so exactly one caller observes a non-empty
+    /// slot — the §12.5 double-submit guard with no TOCTOU window.
+    pub pending_changepw_challenge: ArcSwapOption<PendingChangePwChallenge>,
 }
 
 impl Session {
@@ -154,7 +160,7 @@ impl Session {
             transport_kind,
             binding_mode,
             channel_binding_at_auth,
-            pending_changepw_challenge: parking_lot::Mutex::new(None),
+            pending_changepw_challenge: ArcSwapOption::const_empty(),
         }
     }
 

@@ -16,6 +16,7 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
 use crate::common::username::NormalizedUsername;
 use crate::server::session::{PendingChangePwChallenge, Session, SessionStore};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Server-issued challenge view (`challenge_cp`).
@@ -73,7 +74,13 @@ pub fn start_change_password_challenge(
         client_nonce_cp,
         issued_at_ns: now_ns,
     };
-    *session.pending_changepw_challenge.lock() = Some(pending);
+    // Lock-free issue: a second `changePasswordChallenge` overwrites any prior
+    // pending state (single-in-flight per session, spec §12.5). arc-swap's
+    // `store` uses AcqRel-equivalent fences internally, so the
+    // fully-constructed challenge is visible to the consuming `swap`.
+    session
+        .pending_changepw_challenge
+        .store(Some(Arc::new(pending)));
 
     ChangePwChallengeView {
         server_nonce_cp,
@@ -124,8 +131,13 @@ pub fn verify_change_password_request_with_sid(
     current_kdf_params: KdfParams,
     now_ns: u64,
 ) -> Result<ChangePwApply> {
-    let pending = session.pending_changepw_challenge.lock().take();
-    let pending = pending.ok_or(Error::AuthFailed)?;
+    // Atomic consume: `swap(None)` is the §12.5 single-submit guard.
+    // Exactly one concurrent caller observes a non-empty slot (CAS inside the
+    // swap); all others get an empty `Guard` → `AuthFailed`. No TOCTOU window
+    // — the load and the clear are one atomic step (cf. the prior lock+take).
+    // The `Guard` pins the slot; we deref through it to the `Option<Arc<_>>`.
+    let pending_guard = session.pending_changepw_challenge.swap(None);
+    let pending: &PendingChangePwChallenge = pending_guard.as_deref().ok_or(Error::AuthFailed)?;
     if now_ns - pending.issued_at_ns > CHANGEPW_CHALLENGE_TTL_NS {
         return Err(Error::AuthFailed);
     }
