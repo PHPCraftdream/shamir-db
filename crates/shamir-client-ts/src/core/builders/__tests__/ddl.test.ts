@@ -137,6 +137,8 @@ describe('createIndex', () => {
     expect(op).not.toHaveProperty('fts_language');
     expect(op).not.toHaveProperty('functional_op');
     expect(op).not.toHaveProperty('vector_dim');
+    expect(op).not.toHaveProperty('vector_metric');
+    expect(op).not.toHaveProperty('vector_quantization');
     expect(op).not.toHaveProperty('include');
     expect(op).not.toHaveProperty('if_not_exists');
   });
@@ -154,6 +156,34 @@ describe('createIndex', () => {
     expect(op.vector_metric).toBe('cosine');
     expect(op.include).toEqual([['metadata']]);
     expect(op.if_not_exists).toBe(true);
+    // V5.2 #411 — absent when not opted-in (wire back-compat).
+    expect(op).not.toHaveProperty('vector_quantization');
+  });
+
+  // ── V5.2 #411 — vector quantization (SQ8) ───────────────────────────
+
+  it('vector_quantization "sq8" lands on the op (dim+metric+quantization together)', () => {
+    const op = ddl.createIndex('vidx_q', 'docs', [['embedding']], {
+      index_type: 'vector',
+      vector_dim: 256,
+      vector_metric: 'cosine',
+      vector_quantization: 'sq8',
+    });
+    expect(op.vector_quantization).toBe('sq8');
+    // Full vector trio is present together.
+    expect(op.vector_dim).toBe(256);
+    expect(op.vector_metric).toBe('cosine');
+  });
+
+  it('vector_quantization omitted (undefined, not null) when not set', () => {
+    const op = ddl.createIndex('vidx_plain', 'docs', [['embedding']], {
+      index_type: 'vector',
+      vector_dim: 128,
+      vector_metric: 'l2',
+    });
+    expect(op).not.toHaveProperty('vector_quantization');
+    // Strict undefined, never null — serde skip_serializing_if parity.
+    expect((op as unknown as Record<string, unknown>).vector_quantization).toBeUndefined();
   });
 
   it('omits empty include array', () => {

@@ -271,6 +271,17 @@ export interface CreateIndexOp {
   functional_args?: WireValue[];
   vector_dim?: number;
   vector_metric?: string;
+  /**
+   * V5.2 #411 — vector quantization method. `"sq8"` → SQ8 scalar quantization
+   * (deferred fit at 256 vectors, then a u8-code HNSW graph with
+   * dequant-rescore). Omitted / unrecognised → unquantized f32 HNSW path,
+   * bit-for-bit identical to pre-#411.
+   *
+   * Mirrors Rust `CreateIndexOp::vector_quantization: Option<String>`
+   * (`#[serde(default, skip_serializing_if = "Option::is_none")]`) — absent
+   * from the wire when unset (back-compat).
+   */
+  vector_quantization?: string;
   include?: string[][];
   if_not_exists?: true;
 }

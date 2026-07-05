@@ -166,6 +166,8 @@ export function createIndex(
     functional_args?: import('../types/write.js').WireValue[];
     vector_dim?: number;
     vector_metric?: string;
+    /** V5.2 #411 — `"sq8"` enables SQ8 scalar quantization. Opt-in. */
+    vector_quantization?: string;
     include?: string[][];
     if_not_exists?: boolean;
   },
@@ -190,6 +192,8 @@ export function createIndex(
   if (opts?.vector_dim !== undefined) op.vector_dim = opts.vector_dim;
   if (opts?.vector_metric !== undefined)
     op.vector_metric = opts.vector_metric;
+  if (opts?.vector_quantization !== undefined)
+    op.vector_quantization = opts.vector_quantization;
   if (opts?.include !== undefined && opts.include.length > 0)
     op.include = opts.include;
   if (opts?.if_not_exists) op.if_not_exists = true;
