@@ -1106,10 +1106,12 @@ async fn ef_search_above_cap_clamps_to_cap() {
     assert_eq!(above_cap.len(), at_cap.len());
 }
 
-/// `oversample` is accepted in SearchOpts but NOT consumed (P3 #404).
-/// Passing it must NOT error and must behave identically to `None`.
+/// `oversample` is accepted in SearchOpts but NOT consumed by the adapter
+/// directly (P3 / V3.1: the ENGINE consumes it — it requests `k′` candidates
+/// and applies post-filtering). Passing it to the adapter must NOT error and
+/// must behave identically to `None` at the adapter level.
 #[tokio::test]
-async fn oversample_accepted_but_ignored() {
+async fn oversample_accepted_but_ignored_at_adapter_level() {
     let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
     adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
     adapter.upsert(rid(2), &[0.0, 1.0]).await.unwrap();

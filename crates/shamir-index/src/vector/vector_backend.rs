@@ -136,8 +136,7 @@ impl VectorBackend {
     /// appending the production default (10k) vectors. Test-only.
     #[cfg(test)]
     pub(crate) fn set_snapshot_threshold_for_test(&self, threshold: u64) {
-        self.snapshot_threshold
-            .store(threshold, Ordering::Release);
+        self.snapshot_threshold.store(threshold, Ordering::Release);
     }
 
     /// Read the single-flight guard flag. Test-only — used to prove the flag is

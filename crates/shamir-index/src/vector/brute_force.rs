@@ -267,10 +267,11 @@ impl VectorAdapter for BruteForceAdapter {
         staged: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         // BruteForce is EXACT KNN — there is no `ef` width knob (the
-        // traversal visits every vector). `opts.ef_search` and
-        // `opts.oversample` are accepted for API uniformity but are no-ops
-        // here. (oversample semantics land in P3 #404; ef_search is
-        // inherently approximate-search-only.)
+        // traversal visits every vector). `opts.ef_search` is accepted for
+        // API uniformity but is a no-op (ef_search is inherently
+        // approximate-search-only). `opts.oversample` is consumed at the
+        // ENGINE level (P3 / V3.1): the engine requests `k′ = k × oversample`
+        // candidates, so BruteForce sees a widened `k` and returns that many.
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,

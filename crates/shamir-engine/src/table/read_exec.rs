@@ -317,6 +317,18 @@ impl TableManager {
             }
         }
 
+        // ── V3.1: filtered ANN — And([VectorSimilarity, ...residual]) ──
+        // Recognise the filtered-vector pattern BEFORE the generic index2
+        // path so we can run ANN-with-oversample + post-filter. Falls
+        // through to the legacy paths when the shape doesn't match.
+        if let Some(ref filter) = query.r#where {
+            if let Some(fvq) = super::filtered_vector::try_extract_filtered_vector_query(filter) {
+                return self
+                    .read_filtered_vector_scan(query, ctx, interner, &fvq, tx, start)
+                    .await;
+            }
+        }
+
         // ── index2: FTS / Functional / Vector accelerated path ─────
         if let Some(ref filter) = query.r#where {
             if let Some(result) = self.try_plan_index2(filter, interner).await {
@@ -1201,6 +1213,283 @@ impl TableManager {
         })
     }
 
+    /// V3.1 / P3 leaf 3.1 — filtered ANN execution path.
+    ///
+    /// Recognised shape: `And([VectorSimilarity{field,query,k,ef,oversample},
+    /// ...residual-predicates])`. The planner compiled it into a
+    /// [`FilteredVectorQuery`] (vector half + residual filter).
+    ///
+    /// Algorithm (post-filter with adaptive oversample-retry):
+    /// 1. Resolve the oversample multiplier (`None` → 2× default, clamped ≥1×).
+    /// 2. Compute `k′ = min(k × oversample, MAX_TOPK)`.
+    /// 3. Loop:
+    /// - a. ANN search for k′ candidates (tx-aware via `lookup_tx` so
+    ///   in-tx staged vectors are visible).
+    /// - b. Materialise candidate records and apply the residual predicate.
+    /// - c. If ≥ k survivors → truncate to k, done.
+    /// - d. If < k survivors AND k′ < MAX_TOPK → double k′ (clamped to
+    ///   MAX_TOPK), retry.
+    /// - e. If < k survivors AND k′ == MAX_TOPK → return what we have
+    ///   (even if < k; the filter is too selective to fill k from the
+    ///   available candidates).
+    ///
+    /// The result preserves ANN ranking order (nearest-first) among the
+    /// survivors, which matches the bare-VectorSimilarity path's contract.
+    ///
+    /// Gate: this is a plain-SELECT path only (no GROUP BY / aggregates /
+    /// DISTINCT / ORDER BY). Those clauses would require in-memory
+    /// post-processing over the full survivor set and are left to the
+    /// legacy paths — if a query carries them, the planner does NOT
+    /// recognise the filtered-vector shape (the caller checks `fvq` shape
+    /// but this method further gates on the query structure and falls
+    /// through to `read_collecting` when needed).
+    #[allow(clippy::too_many_arguments)]
+    async fn read_filtered_vector_scan(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        fvq: &super::filtered_vector::FilteredVectorQuery,
+        tx: Option<&shamir_tx::TxContext>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        use crate::index2::backend::{IndexQuery, IndexResult};
+        use crate::index2::vector::hnsw_adapter::MAX_TOPK;
+        use crate::index2::vector::SearchOpts;
+
+        // Resolve the vector backend by field path + "vector" kind.
+        let field_path = crate::query::filter::eval::intern_field_path(&fvq.field, interner);
+        let backend = match &field_path {
+            Some(fp) => {
+                self.index2_registry()
+                    .find_by_field_and_kind(fp, "vector")
+                    .await
+            }
+            None => None,
+        };
+        let backend = match backend {
+            Some(b) => b,
+            None => {
+                // No vector index on this field — fall through to the legacy
+                // full-scan path (VectorSimilarity compiles to FilterNode::True,
+                // so the scan returns residual-matched rows unranked). This is
+                // the pre-V3.1 behaviour for a filtered-vector query without
+                // an index.
+                return self
+                    .read_fallback_no_vector_index(query, ctx, interner, tx, start)
+                    .await;
+            }
+        };
+
+        // Compile the residual predicate once (reused across retry iterations).
+        let residual_cb: Option<FilterNode> =
+            fvq.residual.as_ref().map(|f| compile_filter(f, interner));
+
+        let k = fvq.k;
+        let oversample = super::filtered_vector::resolve_oversample(fvq.oversample);
+        let opts = SearchOpts {
+            ef_search: fvq.ef_search,
+            oversample: Some(oversample),
+        };
+
+        // Resolve staged vectors for tx-aware search.
+        let table_token = self.table_token();
+        let staged = tx.and_then(|t| t.staged_vectors_for(table_token));
+
+        // Adaptive oversample-retry loop.
+        let mut k_prime = (((k as f32) * oversample).ceil() as u32)
+            .max(k) // never below k
+            .min(MAX_TOPK);
+        let mut last_ranked: Vec<(RecordId, f32)>;
+        // Survivors carry their already-resolved record bytes so the projection
+        // below reuses them instead of re-fetching — the residual pass has
+        // already read every candidate through `get_many_bytes_tx` (order is
+        // ANN rank order, preserved by the byte fetch).
+        let mut last_survivors: Vec<bytes::Bytes>;
+
+        loop {
+            let result = backend
+                .lookup_tx(
+                    table_token,
+                    IndexQuery::Vector {
+                        vec: fvq.query.clone(),
+                        k: k_prime,
+                        opts,
+                    },
+                    tx,
+                    staged,
+                )
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+            last_ranked = match result {
+                IndexResult::Ranked(r) => r,
+                IndexResult::Set(_) => {
+                    // Vector backend returns Ranked; a Set is a contract
+                    // violation. Fall back rather than panic.
+                    return self
+                        .read_fallback_no_vector_index(query, ctx, interner, tx, start)
+                        .await;
+                }
+            };
+
+            // Materialise candidate records and apply residual filter.
+            // For tx-aware reads, staged records live in the tx's staging
+            // store (write_set), NOT in the committed data store — so we
+            // must read-through the staging store to resolve them.
+            let candidates = last_ranked.len();
+            let rids: Vec<RecordId> = last_ranked.iter().map(|(r, _)| *r).collect();
+            let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
+            last_survivors = Vec::with_capacity(candidates);
+
+            for maybe_bytes in raw_records.iter() {
+                let bytes = match maybe_bytes {
+                    Some(b) => b,
+                    None => continue, // deleted/tombstoned — skip
+                };
+                let passes = match &residual_cb {
+                    Some(cb) => {
+                        // Evaluate the residual predicate on the record.
+                        match shamir_types::record_view::RecordView::new(bytes) {
+                            Ok(view) => cb.matches(&view, ctx),
+                            Err(_) => continue, // malformed — skip
+                        }
+                    }
+                    None => true,
+                };
+                if passes {
+                    last_survivors.push(bytes.clone());
+                }
+            }
+
+            // Got enough? Truncate to k and done.
+            if last_survivors.len() >= k as usize {
+                last_survivors.truncate(k as usize);
+                break;
+            }
+
+            // Backend returned fewer candidates than we asked for → the HNSW
+            // graph is exhausted; widening k′ cannot surface more. Stop with
+            // what we have rather than spin identical lookups up to the cap.
+            if candidates < k_prime as usize {
+                break;
+            }
+
+            // Not enough. Can we widen k′?
+            if k_prime >= MAX_TOPK {
+                // Exhausted the cap — return what we have (< k).
+                break;
+            }
+
+            // Double k′, clamp to MAX_TOPK, retry.
+            k_prime = k_prime.saturating_mul(2).min(MAX_TOPK);
+        }
+
+        // Project survivors into query records — bytes already resolved in the
+        // loop, so no second round-trip to the store/staging.
+        let proj = exec::SelectProjection::new(&query.select, interner);
+        let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
+        for bytes in &last_survivors {
+            let qv = match shamir_types::record_view::RecordView::new(bytes) {
+                Ok(view) => proj.project_value(&view, interner),
+                Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                    Ok(iv) => match shamir_types::codecs::interned::inner_value_to_query_value(
+                        &iv, interner,
+                    ) {
+                        Ok(q) => q,
+                        Err(_) => continue,
+                    },
+                    Err(_) => continue,
+                },
+            };
+            records.push(QueryRecord::Direct(qv));
+        }
+
+        let returned = records.len() as u64;
+        let scanned = last_ranked.len() as u64;
+        let elapsed = start.elapsed();
+
+        Ok(QueryResult {
+            records,
+            stats: Some(QueryStats {
+                index_used: Some("filtered_vector_scan".into()),
+                records_scanned: scanned,
+                records_returned: returned,
+                execution_time_us: elapsed.as_micros() as u64,
+            }),
+            pagination: if query.pagination.is_none() {
+                None
+            } else {
+                Some(PaginationInfo::compute(&query.pagination, Some(returned)))
+            },
+            value: None,
+            explain: None,
+        })
+    }
+
+    /// Fallback for a filtered-vector query that has NO vector index on the
+    /// field. Routes to `read_collecting` / `read_streaming` so the residual
+    /// predicates are still applied (VectorSimilarity compiles to
+    /// `FilterNode::True` → all rows pass the vector conjunct, only the
+    /// residual matters). This preserves pre-V3.1 behaviour.
+    async fn read_fallback_no_vector_index(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        tx: Option<&shamir_tx::TxContext>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let batch_size = shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+        let filter_cb: Option<Arc<FilterNode>> = query
+            .r#where
+            .as_ref()
+            .map(|f| Arc::new(compile_filter(f, interner)));
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+        let has_order = query.order_by.is_some();
+        let has_distinct = query.select.distinct;
+        let needs_full_collect = has_group_by || has_agg || has_order || has_distinct;
+        if needs_full_collect {
+            self.read_collecting(
+                query,
+                ctx,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                batch_size,
+                start,
+                tx,
+            )
+            .await
+        } else if query.count_total {
+            self.read_counting(
+                query,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                ctx,
+                batch_size,
+                start,
+                tx,
+            )
+            .await
+        } else {
+            self.read_streaming(
+                query,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                ctx,
+                batch_size,
+                start,
+                tx,
+                ResultEncoding::Name,
+            )
+            .await
+        }
+    }
+
     /// Build an [`ExplainPlan`] by running only the planner decision tree
     /// (the same cascade as `read_impl`) but without materialising any rows.
     fn build_explain_plan(&self, query: &ReadQuery, interner: &Interner) -> ExplainPlan {
@@ -1236,6 +1525,17 @@ impl TableManager {
                         };
                     }
                 }
+            }
+        }
+
+        // 1b. V3.1: filtered ANN (And[VectorSimilarity, ...residual]).
+        if let Some(ref filter) = query.r#where {
+            if super::filtered_vector::try_extract_filtered_vector_query(filter).is_some() {
+                return ExplainPlan {
+                    plan_type: PlanType::Index2,
+                    index_used: Some("filtered_vector_scan".into()),
+                    estimated_rows: None,
+                };
             }
         }
 
