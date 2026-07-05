@@ -5,6 +5,8 @@ pub mod crash_recovery_tests;
 pub mod delta_log_tests;
 pub mod hnsw_adapter_tests;
 pub mod hnsw_rs_contract_tests;
+pub mod quantized_dist_tests;
+pub mod quantized_graph_tests;
 pub mod simd_tests;
 pub mod snapshot_tests;
 pub mod sq8_tests;

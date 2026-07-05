@@ -1,0 +1,198 @@
+//! Quantized distance function for `Hnsw<'static, u8, ShamirDistU8>`.
+//!
+//! One primary export: [`ShamirDistU8`] — a [`Distance<u8>`] implementation
+//! that scores pairs of SQ8-quantized code vectors using the frozen
+//! [`Sq8Quantizer`] parameters (per-dimension `min_i`/`scale_i`).
+//!
+//! ## Why a custom distance?
+//!
+//! `hnsw_rs`'s built-in `DistL2`/`DistL1` for `u8` compute an *integer* L1/L2
+//! with uniform per-dimension weight 1. SQ8 codes decode to
+//! `x_i ≈ min_i + q_i · s_i`, where `s_i` varies per dimension — so the
+//! *true* distance on the dequantized vectors has per-dimension `s_i²`
+//! weights that the built-in distances ignore. [`ShamirDistU8`] applies them.
+//!
+//! ## `eval` correctness (per-metric)
+//!
+//! Let `x_i = min_i + qx_i·s_i`, `y_i = min_i + qy_i·s_i` be the exact
+//! dequantized values of two code vectors. Then:
+//!
+//! * **L2** — [`Sq8Quantizer::approx_l2_sq`] computes
+//!   `Σ_i s_i²·(qx_i − qy_i)² = Σ_i (x_i − y_i)²` exactly on the dequantized
+//!   vectors (the `min_i` cancels). We return `sqrt(...)` to match the
+//!   convention of the f32 [`ShamirDist`](super::hnsw_adapter::ShamirDist)
+//!   (which also takes `sqrt` of `l2_squared`).
+//! * **Dot** — [`Sq8Quantizer::approx_dot`] expands
+//!   `x·y = Σ min_i² + Σ min_i·s_i·(qx_i + qy_i) + Σ s_i²·qx_i·qy_i`,
+//!   which is exactly `Σ x_i·y_i` on the dequantized vectors. We return
+//!   `1 − dot` (clamped to `≥ 0`) to preserve HNSW's non-negative-distance
+//!   invariant and the search ordering (callers normalize for `Dot`).
+//! * **Cosine** — same as Dot but normalized by the dequantized vector
+//!   norms `||x||·||y||`. We compute `1 − dot/(||x||·||y||)` with
+//!   `||x||² = Σ x_i²` derived from the codes (no retained f32).
+//!
+//! In all three cases the value returned is **exactly** the corresponding
+//! f32 distance on the *dequantized* code vectors — the only approximation
+//! is SQ8 quantization itself (half a step per dimension, bounded by
+//! `scale_i/2`). See the unit tests in `tests/quantized_dist_tests.rs`.
+//!
+//! ## Concurrency
+//!
+//! [`ShamirDistU8`] holds an `Arc<Sq8Quantizer>`; `hnsw_rs` clones the
+//! `Distance` for rayon thread-locals, and `Arc::clone` is cheap. The
+//! quantizer params are frozen at fit time and never mutated thereafter,
+//! so `eval` is deterministic and lock-free.
+
+use crate::kind::VectorMetric;
+use crate::vector::simd::{dot_product, l2_squared};
+use crate::vector::sq8::Sq8Quantizer;
+use hnsw_rs::anndists::dist::distances::Distance;
+use std::sync::Arc;
+
+/// Quantized distance function holding frozen SQ8 quantizer params.
+///
+/// `eval(&[u8], &[u8]) -> f32` computes the per-metric distance on two SQ8
+/// code vectors, expanding them through the frozen `min_i`/`scale_i` to
+/// match the f32 distance on the dequantized vectors exactly (see the module
+/// doc for the per-metric proofs).
+#[derive(Clone)]
+pub struct ShamirDistU8 {
+    /// Frozen quantizer parameters — shared (via `Arc`) with the adapter
+    /// and every rayon thread-local clone of this distance.
+    params: Arc<Sq8Quantizer>,
+    metric: VectorMetric,
+}
+
+impl ShamirDistU8 {
+    /// Build a distance function from frozen quantizer params + metric.
+    ///
+    /// `params` are produced by [`Sq8Quantizer::fit`] at fit time and are
+    /// read-only for the lifetime of this distance (and every clone).
+    pub fn new(params: Arc<Sq8Quantizer>, metric: VectorMetric) -> Self {
+        Self { params, metric }
+    }
+
+    /// Read-only access to the frozen quantizer (for introspection / snapshot).
+    pub fn quantizer(&self) -> &Arc<Sq8Quantizer> {
+        &self.params
+    }
+
+    /// The metric this distance scores under.
+    pub fn metric(&self) -> VectorMetric {
+        self.metric
+    }
+
+    /// Squared L2 norm of the dequantized vector for a code vector:
+    /// `||x||² = Σ (min_i + q_i·s_i)²`. Used by the Cosine metric.
+    ///
+    /// This is `O(dim)` per call; for hot-path Cosine the adapter may
+    /// precompute and cache norms per internal-id at insert time.
+    fn dequant_norm_sq(&self, q: &[u8]) -> f32 {
+        debug_assert_eq!(q.len(), self.params.dim());
+        let mins = self.params.mins();
+        let scales = self.params.scales();
+        let mut acc = 0.0f32;
+        // Indexes three parallel slices (mins, scales, q) by the same i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..self.params.dim() {
+            let x = mins[i] + (q[i] as f32) * scales[i];
+            acc += x * x;
+        }
+        acc
+    }
+}
+
+impl Distance<u8> for ShamirDistU8 {
+    fn eval(&self, a: &[u8], b: &[u8]) -> f32 {
+        match self.metric {
+            // L2: sqrt(Σ s_i²·(a_i − b_i)²) == sqrt(Σ (x_i − y_i)²) on the
+            // dequantized vectors (min_i cancels). Matches ShamirDist::L2
+            // which also returns sqrt(l2_squared).
+            VectorMetric::L2 => self.params.approx_l2_sq(a, b).sqrt(),
+
+            // Dot: 1 − (x·y), clamped to ≥ 0. HNSW requires non-negative
+            // distances; for normalized inputs dot ∈ [−1, 1] → dist ∈ [0, 2].
+            // Matches ShamirDist::Dot semantics.
+            VectorMetric::Dot => {
+                let dot = self.params.approx_dot(a, b);
+                (1.0 - dot).max(0.0)
+            }
+
+            // Cosine: 1 − (x·y)/(||x||·||y||). Norms computed on the
+            // dequantized vectors from the codes (no retained f32). Matches
+            // ShamirDist::Cosine, including the near-zero-norm guard.
+            //
+            // The result is clamped to ≥ 0: SQ8 quantization noise can make
+            // `approx_dot` exceed `||x||·||y||` on some code pairs (the
+            // integer core Σ qx_i·qy_i is exact, but the s_i²/min_i/s_i
+            // expansion introduces rounding), yielding a slightly-negative
+            // cosine distance. HNSW requires non-negative distances
+            // (`hnsw_rs` asserts `c.dist_to_ref <= 0` for candidates, which
+            // are stored as `-eval`; a negative eval flips the sign and
+            // trips the assertion). The clamp preserves the search
+            // ordering (the true cosine distance is in [0, 2]).
+            VectorMetric::Cosine => {
+                let dot = self.params.approx_dot(a, b);
+                let na_sq = self.dequant_norm_sq(a);
+                let nb_sq = self.dequant_norm_sq(b);
+                if na_sq < 1e-18 || nb_sq < 1e-18 {
+                    return 1.0;
+                }
+                let denom = (na_sq * nb_sq).sqrt();
+                (1.0 - dot / denom).max(0.0)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rescoring: dequantize codes and score with the EXACT f32 distance.
+// ---------------------------------------------------------------------------
+//
+// The graph traversal returns `overscan = 2k+10` candidates ranked by the
+// *approximate* code distance. The adapter then rescores each candidate by
+// dequantizing its codes and computing the *exact* f32 distance to the
+// original (unquantized) query. This recovers the ~2% recall the approximate
+// code distance loses, at a cost of O(dim·(2k+10)) — negligible for k=10,
+// dim=128 (~6 µs of SIMD f32 work).
+//
+// We route the rescore through the SAME SIMD kernels (`dot_product` /
+// `l2_squared`) and the SAME metric convention (`sqrt` for L2,
+// `1 − dot` for Dot, `1 − dot/(||x||·||y||)` for Cosine) as the f32
+// `ShamirDist`, so a rescored candidate's distance is directly comparable
+// to an f32-path distance. The unit tests pin this equality.
+
+/// Exact f32 distance between a query vector and a dequantized code vector,
+/// using the SAME metric convention as [`ShamirDist`](super::hnsw_adapter::ShamirDist).
+///
+/// Used by the rescoring path after a quantized graph traversal. The query
+/// is the original f32 vector from the client; `codes` are dequantized
+/// through `params` before scoring.
+///
+/// # Panics
+///
+/// Panics if `query.len() != params.dim()` or `codes.len() != params.dim()`.
+pub fn rescore_f32(
+    metric: VectorMetric,
+    params: &Sq8Quantizer,
+    query: &[f32],
+    codes: &[u8],
+) -> f32 {
+    let dequant = params.dequantize(codes);
+    match metric {
+        VectorMetric::L2 => l2_squared(query, &dequant).sqrt(),
+        VectorMetric::Dot => {
+            let dot = dot_product(query, &dequant);
+            (1.0 - dot).max(0.0)
+        }
+        VectorMetric::Cosine => {
+            let dot = dot_product(query, &dequant);
+            let na_sq = dot_product(query, query);
+            let nb_sq = dot_product(&dequant, &dequant);
+            if na_sq < 1e-18 || nb_sq < 1e-18 {
+                return 1.0;
+            }
+            (1.0 - dot / (na_sq * nb_sq).sqrt()).max(0.0)
+        }
+    }
+}

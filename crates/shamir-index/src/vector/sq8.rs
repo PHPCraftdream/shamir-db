@@ -238,6 +238,75 @@ impl Sq8Quantizer {
         acc
     }
 
+    /// Approximate squared-L2 distance of two code vectors.
+    ///
+    /// Expands `x_i ≈ min_i + qx_i·s_i`, `y_i ≈ min_i + qy_i·s_i`:
+    ///
+    /// ```text
+    ///   ||x − y||² = Σ_i ( (min_i + qx_i·s_i) − (min_i + qy_i·s_i) )²
+    ///              = Σ_i s_i² · (qx_i − qy_i)²
+    /// ```
+    ///
+    /// The `min_i` term cancels (it appears with the same sign in both
+    /// vectors), so the L2 distance on dequantized vectors reduces to a
+    /// per-dimension weighted sum of **integer** squared code differences.
+    /// The `s_i²` weights are per-dimension and CANNOT be factored out of
+    /// the sum, so we accumulate `s_i² · (qx_i − qy_i)²` per-dimension in
+    /// f32. The integer core `(qx_i − qy_i)²` is computed exactly in `i32`
+    /// (u8 − u8 ∈ [−255, 255], squared ∈ [0, 65025], no overflow).
+    ///
+    /// This is the L2 analogue of [`Self::approx_dot`]; the bilinear term
+    /// is replaced by a squared-difference term, and there are no linear or
+    /// constant terms (they cancel).
+    ///
+    /// # Proof `eval == exact L2 on dequantized vectors`
+    ///
+    /// Let `x_i = min_i + qx_i·s_i`, `y_i = min_i + qy_i·s_i` (the exact
+    /// dequantized values). Then:
+    ///
+    /// ```text
+    ///   Σ (x_i − y_i)² = Σ (qx_i·s_i − qy_i·s_i)² = Σ s_i²·(qx_i − qy_i)²
+    /// ```
+    ///
+    /// which is exactly what this function computes. The only approximation
+    /// vs the *original* (pre-quantization) f32 vectors is the quantization
+    /// itself (`x_i ≈ v_i` within half a step); on the *dequantized* codes
+    /// the L2 is exact.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either code vector's length differs from `self.dim`.
+    pub fn approx_l2_sq(&self, qx: &[u8], qy: &[u8]) -> f32 {
+        assert_eq!(
+            qx.len(),
+            self.dim,
+            "Sq8Quantizer::approx_l2_sq: qx len {} != dim {}",
+            qx.len(),
+            self.dim
+        );
+        assert_eq!(
+            qy.len(),
+            self.dim,
+            "Sq8Quantizer::approx_l2_sq: qy len {} != dim {}",
+            qy.len(),
+            self.dim
+        );
+
+        let mut acc = 0.0f32;
+        // Indexes three parallel slices (scales, qx, qy) by the same i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..self.dim {
+            // Integer difference in i32: u8 − u8 can be negative.
+            let diff = (qx[i] as i32) - (qy[i] as i32);
+            let s = self.scales[i];
+            // s² · diff² accumulated in f32. diff² ≤ 65025 fits in i32
+            // exactly; the multiply by s² (f32) promotes to f32.
+            let diff_sq = (diff * diff) as f32;
+            acc += s * s * diff_sq;
+        }
+        acc
+    }
+
     /// Per-dimension lower bounds (training minima). Read-only access for
     /// serialization / introspection (integration in #411).
     #[inline]

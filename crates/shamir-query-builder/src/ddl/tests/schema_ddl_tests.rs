@@ -216,6 +216,23 @@ fn create_index_vector() {
     assert_eq!(j["index_type"], "vector");
     assert_eq!(j["vector_dim"], 128);
     assert_eq!(j["vector_metric"], "cosine");
+    // No quantization → field absent (back-compat with pre-#411 clients).
+    assert!(j.get("vector_quantization").is_none());
+}
+
+/// V5.2 (#411) — `.vector_quantization("sq8")` builder method produces a
+/// wire op with the field set.
+#[test]
+fn create_index_vector_with_sq8_quantization() {
+    let op = ddl::create_index("embed_idx", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .vector_dim(128)
+        .vector_metric("cosine")
+        .vector_quantization("sq8")
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["vector_quantization"], "sq8");
 }
 
 #[test]

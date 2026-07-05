@@ -81,6 +81,7 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        vector_quantization: None,
         include: Vec::new(),
         if_not_exists: false,
     };
