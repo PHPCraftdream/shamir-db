@@ -79,6 +79,11 @@ tempfile = "3.10.1"
 serial_test = "3.3.1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
+# RSS sampling for the `vector_report` example (V0.4). Reads the OS
+# resident-set size (procfs on Linux, mach_task_basic_info on macOS,
+# GetProcessMemoryInfo on Windows) — order-of-magnitude only, never a
+# precise allocation profile (use `peak_mem` / `dhat` for that).
+memory-stats = "1.2"
 # Constructing `Value::Dec` / `Value::Big` in the round-trip identity test
 # (validator/query_value_conv_tests.rs). Same versions as shamir-types.
 rust_decimal = { version = "1.40.0", features = ["serde"] }
