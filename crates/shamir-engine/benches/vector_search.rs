@@ -179,7 +179,11 @@ fn bench_cell(
         b.to_async(rt).iter(move || {
             let hnsw = Arc::clone(&hnsw);
             let q = q.clone();
-            async move { hnsw.search(&q, TOP_K, SearchOpts::default(), None).await.unwrap() }
+            async move {
+                hnsw.search(&q, TOP_K, SearchOpts::default(), None)
+                    .await
+                    .unwrap()
+            }
         });
     });
 
@@ -190,7 +194,11 @@ fn bench_cell(
             b.to_async(rt).iter(move || {
                 let bf = Arc::clone(&bf);
                 let q = q.clone();
-                async move { bf.search(&q, TOP_K, SearchOpts::default(), None).await.unwrap() }
+                async move {
+                    bf.search(&q, TOP_K, SearchOpts::default(), None)
+                        .await
+                        .unwrap()
+                }
             });
         });
     }

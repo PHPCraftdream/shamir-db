@@ -13,8 +13,7 @@ use crate::meta_envelope::MetaEnvelope;
 use crate::vector::adapter::{SearchOpts, VectorAdapter};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::vector::snapshot::{
-    self, load_snapshot, SnapshotError, SnapshotSidecar, HNSW_RS_VERSION,
-    SNAPSHOT_FORMAT_VERSION,
+    self, load_snapshot, SnapshotError, SnapshotSidecar, HNSW_RS_VERSION, SNAPSHOT_FORMAT_VERSION,
 };
 use bytes::Bytes;
 use shamir_collections::TFxSet;
@@ -446,4 +445,3 @@ async fn rid_map_and_next_id_restored() {
 // special-casing the graph-section to skip `file_dump` entirely and
 // re-seed an empty `Hnsw::new` at load — added complexity for a case the
 // engine never drives. Leave it out of V2.1; revisit if #401 needs it.
-

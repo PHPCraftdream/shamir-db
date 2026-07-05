@@ -230,6 +230,49 @@ pub trait IndexBackend: Send + Sync {
         Ok(())
     }
 
+    /// Restore in-memory state from persisted artefacts at table open.
+    ///
+    /// This is the **startup-restore** seam (V2.2 / #401). The default
+    /// implementation falls back to a full data-store scan via [`rebuild`],
+    /// which is correct for every backend that derives its state purely from
+    /// the data store (Functional, FTS, Btree). Backends that persist a
+    /// dedicated snapshot — currently only `VectorBackend`, which dumps its
+    /// HNSW graph into the info store under a snapshot keyspace — override
+    /// this to try the snapshot FIRST and only fall back to [`rebuild`] when
+    /// the snapshot is absent or corrupt. See `VectorBackend::restore_on_open`
+    /// for the 3-branch fallback contract.
+    ///
+    /// `info_store` carries metadata (index descriptors, AND vector
+    /// snapshots); `data_store` carries the user rows a full-rebuild scan
+    /// reads. The two MAY be the same physical store on simple setups.
+    ///
+    /// Returns `Ok(())` once the backend is query-ready, by whichever path
+    /// succeeded. The caller (`TableManager::open`) logs a warning on
+    /// `Err` but does NOT abort the open — a half-initialised index is
+    /// preferable to a failed table open (the snapshot/rebuild may succeed
+    /// on a later retry).
+    async fn restore_on_open(
+        &self,
+        _info_store: Arc<dyn Store>,
+        data_store: Arc<dyn Store>,
+    ) -> Result<(), IndexError> {
+        self.rebuild(data_store).await
+    }
+
+    /// Number of times this backend has fallen back to a FULL rebuild scan
+    /// since it was constructed (V2.2 / #401 instrumentation). A successful
+    /// snapshot load on open does NOT increment this counter; every
+    /// full-scan rebuild (no snapshot, corrupt snapshot, version mismatch)
+    /// does. The default `0` applies to backends with no snapshot path
+    /// (FTS / functional / btree): they always `rebuild` on open, and this
+    /// counter is simply not consulted for them.
+    ///
+    /// Exposed primarily for tests proving "the snapshot was used, no scan
+    /// happened" (see `vector_restore_tests`).
+    fn rebuild_count(&self) -> u64 {
+        0
+    }
+
     /// Push an updated scalar resolver into backends that evaluate scalar
     /// expressions (e.g. `FunctionalBackend` with `IndexExpr::Scalar`).
     ///
