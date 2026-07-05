@@ -322,6 +322,22 @@ async fn bounded_segment_count_under_append_truncate_loop() {
         // Everything committed so far is "durable" → truncate below the top.
         set.truncate_below(v).await.unwrap();
 
+        // DETERMINISTIC core of the bounded invariant (independent of FS
+        // directory-cache timing): after truncate_below(v) with v = the
+        // highest commit_version appended so far, NO tracked sealed segment
+        // is still reclaimable at v — every sealed segment whose
+        // max_version <= v was claimed for deletion in this pass. The
+        // active segment is never reclaimable by construction (I3), so a
+        // `true` here would mean a sealed segment survived truncation it
+        // should not have → unbounded disk growth. This assertion does not
+        // touch the filesystem, so it cannot flake on NTFS metadata lag.
+        assert!(
+            !set.has_truncatable(v),
+            "at iter {k} (v={v}) a tracked sealed segment is still reclaimable \
+             after truncate_below(v) — truncation is leaking sealed segments \
+             (unbounded disk-growth vector)"
+        );
+
         let post = seg_file_count(dir.path());
         if post > max_post_trunc {
             max_post_trunc = post;
