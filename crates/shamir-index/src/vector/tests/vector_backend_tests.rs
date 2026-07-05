@@ -183,6 +183,8 @@ async fn lookup_tx_some_includes_staged_vector() {
     let committed_rid = RecordId::new();
     backend
         .adapter
+        .load()
+        .adapter
         .upsert(committed_rid, &[1.0, 0.0, 0.0])
         .await
         .unwrap();
@@ -324,7 +326,7 @@ async fn rebuild_from_store_batched_all_records_present() {
     // live (non-tombstoned) internals — equals M when no record was
     // dropped or double-counted.
     assert_eq!(
-        backend.adapter.len(),
+        backend.adapter.load().adapter.len(),
         m,
         "rebuild must load all {m} records into the graph via the batch path"
     );

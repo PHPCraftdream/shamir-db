@@ -242,16 +242,23 @@ impl TableManager {
             }
         }
 
-        // Rebuild in-memory state from persisted data.
-        // Vector backends lose their HNSW graph; FTS ranked backends
-        // lose BM25 doc_count/sum_doc_len counters; others are no-op.
+        // Restore in-memory state from persisted data.
+        //
+        // Each backend restores itself via `restore_on_open`: most
+        // backends (Functional, FTS, Btree) fall through to the default
+        // which is a full data-store scan `rebuild`. VectorBackend
+        // overrides `restore_on_open` to try its persisted HNSW snapshot
+        // FIRST (V2.2 / #401) and only fall back to a full scan when the
+        // snapshot is absent/corrupt — so a warm restart is O(load), not
+        // O(N-scan).
         {
             let backends = mgr.index2_registry.all_backends().await;
             for b in &backends {
+                let info = Arc::clone(&mgr.info_store);
                 let data = Arc::clone(mgr.table.data_store());
-                if let Err(e) = b.rebuild(data).await {
+                if let Err(e) = b.restore_on_open(info, data).await {
                     log::warn!(
-                        "index2 rebuild failed for index {}: {}",
+                        "index2 restore_on_open failed for index {}: {}",
                         b.descriptor().name,
                         e
                     );
