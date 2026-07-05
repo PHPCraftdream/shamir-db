@@ -518,11 +518,28 @@ async fn run_child_scenario_trunc(path: PathBuf) {
     // abort point the sidecar holds exactly the set of records that are durable
     // (in `history` if already drained, in the synced WAL otherwise). The
     // parent asserts recovery reconstructs EXACTLY that many — true zero loss.
+    // ATOMIC sidecar write (crash-safe): the spawned background drainer task
+    // can fire the `wal_mid_delete` seam → `process::abort()` at ANY instant
+    // — including the middle of this synchronous write. A bare
+    // `File::create` + `write!` + `sync_all` is NOT atomic with respect to a
+    // cross-thread abort: the file can be observed EMPTY (create succeeded,
+    // write/abort raced) or partially flushed, and the parent's
+    // `read_to_string` then yields an unparseable string.
+    //
+    // Write to a unique temp file, fsync it, then `rename` over the target.
+    // `rename` is atomic on every supported OS (POSIX atomic-rename;
+    // MoveFileEx(REPLACE_EXISTING) on Windows), so at every instant the
+    // sidecar path resolves to EITHER the previous complete value OR the new
+    // complete value — never an empty or torn image. The temp-file name is
+    // unique per call (carries the counter) so a concurrent abort cannot
+    // strand a half-written temp that a later call would clobber.
     let write_sidecar = |n: usize| {
         use std::io::Write;
-        let mut f = std::fs::File::create(&sidecar).expect("create sidecar");
-        write!(f, "{n}").expect("write sidecar");
-        f.sync_all().expect("fsync sidecar");
+        let tmp = sidecar.with_extension(format!("tmp.{n}"));
+        let mut f = std::fs::File::create(&tmp).expect("create sidecar temp");
+        write!(f, "{n}").expect("write sidecar temp");
+        f.sync_all().expect("fsync sidecar temp");
+        std::fs::rename(&tmp, &sidecar).expect("rename sidecar into place");
     };
     write_sidecar(0);
 
@@ -586,6 +603,23 @@ fn spawn_child_trunc(phase: &str, repo_path: &Path) -> std::process::ExitStatus 
 /// and return `(recovered_records, durably_committed_at_crash)`. The segment
 /// cap is passed to the REOPENED repo too (it must read the same `.shamirwal/`
 /// segment layout). Zero loss ⟺ the two are equal.
+/// Read the child's durable-commit sidecar oracle. Missing or EMPTY means the
+/// `wal_mid_delete` abort raced ahead of the first atomic `write_sidecar(0)`
+/// rename — zero records were durably committed, so the oracle is `0`.
+/// A present-but-unparseable value is real corruption (impossible after the
+/// atomic temp+rename write) and must panic rather than be silently masked.
+fn read_sidecar_committed(sidecar: &std::path::Path) -> usize {
+    match std::fs::read_to_string(sidecar) {
+        Ok(s) if s.trim().is_empty() => 0,
+        Ok(s) => s
+            .trim()
+            .parse()
+            .expect("sidecar must hold a valid usize (atomic write)"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => panic!("sidecar read failed: {e}"),
+    }
+}
+
 async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
@@ -601,12 +635,18 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
     // Reopen with the SAME tiny cap so `SegmentSet::open` reads the survivors.
     std::env::set_var(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP);
     // The child's sidecar holds the number of records it had DURABLY committed
-    // (WAL-fsync'd) at the instant it died — the zero-loss oracle.
+    // (WAL-fsync'd) at the instant it died — the zero-loss oracle. The write
+    // is atomic (temp + rename), so at every instant the path holds a COMPLETE
+    // value. A missing or EMPTY sidecar means the `wal_mid_delete` abort fired
+    // before the very first `write_sidecar(0)` could rename into place (the
+    // background drainer can cross the truncation boundary on the first
+    // commit) — in which case zero records were durably committed, the oracle
+    // is `0`, and the assertion below (`recovered >= committed`) still holds
+    // because recovery replays whatever survived. A present-but-unparseable
+    // value is a real corruption (impossible after the atomic-write fix) and
+    // must surface rather than be silently masked.
     let sidecar = repo_path.with_extension("childcount");
-    let durably_committed: usize = std::fs::read_to_string(&sidecar)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .expect("child must have written the durable-committed sidecar before dying");
+    let durably_committed = read_sidecar_committed(&sidecar);
 
     let repo = open_repo(&repo_path).await;
     let _replayed = repo.recover_v2_inflight().await.expect("recovery");
@@ -819,6 +859,47 @@ async fn crash_at_post_truncate_recovers_all() {
         "post_truncate: truncated data durable in history (flushed before the \
          unlink, I2) → no durably-committed record lost (recovered {recovered}, \
          durably committed {committed}, max {TRUNC_RECORDS})"
+    );
+}
+
+/// #419 regression — the truncation crash harness's sidecar oracle used to be
+/// read with `read_to_string(...).ok().and_then(parse).expect(...)`. When the
+/// spawned background drainer fired `wal_mid_delete` → `process::abort()` in
+/// the middle of the child's in-place sidecar write (`File::create` then
+/// `write!` then `sync_all` — none atomic), the parent observed an EMPTY or
+/// partially-flushed file: `"".parse::<usize>()` failed, `.ok()` → `None`, and
+/// the `.expect` panicked the parent — a rare flake at crash_recovery.rs:609.
+///
+/// The fix has two halves: (1) `write_sidecar` now uses temp-file + fsync +
+/// atomic `rename` so the sidecar path resolves to a COMPLETE value at every
+/// instant, and (2) the reader treats a missing/empty sidecar as `committed=0`
+/// (the abort raced ahead of the first `write_sidecar(0)`) instead of
+/// panicking. This regression injects the EXACT torn image the old write could
+/// leave (an empty file at the sidecar path) and asserts the reader no longer
+/// panics — it yields `committed=0`, which is a valid (conservative) oracle.
+#[tokio::test]
+async fn regression_419_empty_sidecar_is_not_a_panic() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo.redb");
+    let sidecar = repo_path.with_extension("childcount");
+
+    // Simulate the torn mid-write image: an empty file at the sidecar path
+    // (exactly what `File::create` leaves if `process::abort()` fires before
+    // `write!`/`sync_all`). The old reader would panic on this; the new reader
+    // must return `committed=0`.
+    std::fs::write(&sidecar, "").expect("write empty sidecar");
+    assert_eq!(
+        read_sidecar_committed(&sidecar),
+        0,
+        "an empty/torn sidecar must read as committed=0, never panic the parent"
+    );
+
+    // Missing sidecar (abort before even File::create) — same conservative 0.
+    std::fs::remove_file(&sidecar).expect("remove sidecar");
+    assert_eq!(
+        read_sidecar_committed(&sidecar),
+        0,
+        "a missing sidecar must read as committed=0, never panic the parent"
     );
 }
 
