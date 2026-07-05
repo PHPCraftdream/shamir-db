@@ -205,8 +205,8 @@ impl IndexBackend for VectorBackend {
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
-            IndexQuery::Vector { vec, k } => {
-                let results = self.adapter.search(&vec, k, None).await.map_err(ve)?;
+            IndexQuery::Vector { vec, k, opts } => {
+                let results = self.adapter.search(&vec, k, opts, None).await.map_err(ve)?;
                 Ok(IndexResult::Ranked(results))
             }
             _ => Err(IndexError::Backend(
@@ -223,10 +223,10 @@ impl IndexBackend for VectorBackend {
         staged_vectors: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<IndexResult, IndexError> {
         match query {
-            IndexQuery::Vector { vec, k } => {
+            IndexQuery::Vector { vec, k, opts } => {
                 let results = self
                     .adapter
-                    .search(&vec, k, staged_vectors)
+                    .search(&vec, k, opts, staged_vectors)
                     .await
                     .map_err(ve)?;
                 Ok(IndexResult::Ranked(results))

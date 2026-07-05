@@ -61,7 +61,7 @@ use std::time::Instant;
 use memory_stats::memory_stats;
 use shamir_bench_utils::vector_data::clustered_vectors;
 use shamir_engine::index2::kind::VectorMetric;
-use shamir_engine::index2::vector::adapter::VectorAdapter;
+use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
 use shamir_engine::index2::vector::brute_force::BruteForceAdapter;
 use shamir_engine::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_types::types::record_id::RecordId;
@@ -273,8 +273,14 @@ fn run_cell(
         let mut hits1 = 0usize;
         let mut hits10 = 0usize;
         for q in &queries {
-            let exact = brute.search(q, TOP_K, None).await.expect("brute search");
-            let approx = hnsw.search(q, TOP_K, None).await.expect("hnsw search");
+            let exact = brute
+                .search(q, TOP_K, SearchOpts::default(), None)
+                .await
+                .expect("brute search");
+            let approx = hnsw
+                .search(q, TOP_K, SearchOpts::default(), None)
+                .await
+                .expect("hnsw search");
 
             let exact_rids: Vec<RecordId> = exact.iter().map(|(r, _)| *r).collect();
             let approx_rids: Vec<RecordId> = approx.iter().map(|(r, _)| *r).collect();

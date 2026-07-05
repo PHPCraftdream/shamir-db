@@ -1,6 +1,5 @@
 use crate::kind::VectorMetric;
-use crate::vector::adapter::VectorAdapter;
-use crate::vector::adapter::VectorError;
+use crate::vector::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::vector::brute_force::BruteForceAdapter;
 use shamir_types::types::record_id::RecordId;
 
@@ -20,7 +19,10 @@ async fn cosine_basic() {
     // Wait for actor to process writes.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
+    let results = adapter
+        .search(&[1.0, 0.0, 0.0], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, rid(1)); // exact match = distance 0
     assert!(results[0].1 < 0.01);
@@ -35,7 +37,10 @@ async fn l2_basic() {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let results = adapter.search(&[0.0, 0.0], 2, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results[0].0, rid(1)); // distance 0
     assert_eq!(results[1].0, rid(3)); // distance 1
 }
@@ -50,7 +55,10 @@ async fn dot_product() {
 
     // query = [1, 0], dot with rid(1)=1.0, dot with rid(2)=0.5
     // negated: rid(1)=-1.0 < rid(2)=-0.5 → rid(1) first
-    let results = adapter.search(&[1.0, 0.0], 2, None).await.unwrap();
+    let results = adapter
+        .search(&[1.0, 0.0], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results[0].0, rid(1));
 }
 
@@ -64,7 +72,10 @@ async fn delete_removes_from_search() {
     adapter.delete(rid(1)).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let results = adapter.search(&[0.0, 0.0], 10, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, rid(2));
 }
@@ -91,7 +102,10 @@ async fn upsert_replaces() {
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
     assert_eq!(adapter.len(), 1);
-    let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
+    let results = adapter
+        .search(&[10.0, 10.0], 1, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results[0].0, rid(1));
     assert!(results[0].1 < 0.01);
 }
@@ -103,7 +117,10 @@ async fn huge_k_clamped_no_panic() {
     adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     // k = u32::MAX would previously cause huge allocation
-    let results = adapter.search(&[0.0, 0.0], u32::MAX, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], u32::MAX, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -112,6 +129,9 @@ async fn k_zero_returns_empty() {
     let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
     adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    let results = adapter.search(&[0.0, 0.0], 0, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 0, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert!(results.is_empty());
 }

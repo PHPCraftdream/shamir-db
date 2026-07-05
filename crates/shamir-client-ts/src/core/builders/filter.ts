@@ -169,13 +169,94 @@ export function fts(
 
 // ── Vector similarity ────────────────────────────────────────────────
 
-/** Top-k nearest-neighbor vector similarity search. */
+/**
+ * Per-query tuning options for `vectorSimilarity`.
+ *
+ * * `efSearch` — per-query HNSW exploration width. Higher = better recall,
+ *   higher latency. Clamped server-side to `MAX_EF_SEARCH` (10_000).
+ * * `oversample` — reserved for P3 (#404): candidate-widening multiplier.
+ *   Accepted on the wire, threaded to the adapter, NOT yet consumed.
+ */
+export interface VectorSimilarityOpts {
+  efSearch?: number;
+  oversample?: number;
+}
+
+/**
+ * Top-k nearest-neighbor vector similarity search.
+ *
+ * Pass an optional 4th `opts` argument to tune the per-query recall/latency
+ * trade-off without rebuilding the whole filter:
+ *
+ *   const f = vectorSimilarity('emb', [1,0,0], 10, { efSearch: 400 });
+ *
+ * Omitting `opts` (or passing `{}`) yields the pre-V1.1 wire shape — no
+ * `ef_search` / `oversample` keys emitted (both default to undefined →
+ * skipped by `@msgpack/msgpack` and the Rust `skip_serializing_if`).
+ *
+ * `ef_search` is clamped server-side to `MAX_EF_SEARCH` (10_000).
+ * `oversample` is accepted but not yet consumed (P3 #404).
+ */
 export function vectorSimilarity(
   field: string | string[],
   query: number[],
   k: number,
+  opts?: VectorSimilarityOpts,
 ): Filter {
-  return { op: 'vector_similarity', field: fp(field), query, k };
+  const f: Extract<Filter, { op: 'vector_similarity' }> = {
+    op: 'vector_similarity',
+    field: fp(field),
+    query,
+    k,
+  };
+  if (opts?.efSearch !== undefined) f.ef_search = opts.efSearch;
+  if (opts?.oversample !== undefined) f.oversample = opts.oversample;
+  return f;
+}
+
+/**
+ * Chainable builder variant — returns a thin wrapper with `.efSearch(n)` /
+ * `.oversample(f)` methods for the fluent-call style. Each method returns a
+ * fresh builder (immutable). The final `.build()` yields the plain `Filter`.
+ *
+ *   const f = vs('emb', [1,0,0], 10).efSearch(400).oversample(2).build();
+ */
+export function vs(
+  field: string | string[],
+  query: number[],
+  k: number,
+): VectorSimilarityBuilder {
+  return makeVsBuilder({ op: 'vector_similarity', field: fp(field), query, k });
+}
+
+/** Chainable builder for `vector_similarity` (fluent variant of [`vectorSimilarity`]). */
+export interface VectorSimilarityBuilder {
+  /** Set per-query HNSW `ef_search` (exploration width). */
+  efSearch(ef: number): VectorSimilarityBuilder;
+  /** Set per-query `oversample` (reserved P3 #404 — accepted, not yet consumed). */
+  oversample(f: number): VectorSimilarityBuilder;
+  /** Finalize → plain `Filter`. */
+  build(): Filter;
+}
+
+/**
+ * Install the non-enumerable chain methods on a wire object and return it
+ * as a builder. Each method returns a FRESH builder (immutable).
+ */
+function makeVsBuilder(
+  wire: Extract<Filter, { op: 'vector_similarity' }>,
+): VectorSimilarityBuilder {
+  return {
+    efSearch(ef: number): VectorSimilarityBuilder {
+      return makeVsBuilder({ ...wire, ef_search: ef });
+    },
+    oversample(f: number): VectorSimilarityBuilder {
+      return makeVsBuilder({ ...wire, oversample: f });
+    },
+    build(): Filter {
+      return wire;
+    },
+  };
 }
 
 // ── Computed (functional index) ──────────────────────────────────────

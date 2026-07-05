@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { filter } from '../filter.js';
+import { filter, vs } from '../filter.js';
 
 describe('comparison leaves', () => {
   it('eq normalises a bare field to a path array', () => {
@@ -141,6 +141,62 @@ describe('index-accelerated operators', () => {
       field: ['emb'],
       query: [1, 0, 0.5],
       k: 10,
+    });
+  });
+
+  it('vector_similarity opts.efSearch sets ef_search', () => {
+    const f = filter.vectorSimilarity('emb', [1, 0, 0.5], 10, {
+      efSearch: 400,
+    });
+    expect(f).toEqual({
+      op: 'vector_similarity',
+      field: ['emb'],
+      query: [1, 0, 0.5],
+      k: 10,
+      ef_search: 400,
+    });
+  });
+
+  it('vector_similarity opts.oversample sets oversample', () => {
+    const f = filter.vectorSimilarity('emb', [1, 0, 0.5], 10, {
+      oversample: 2.0,
+    });
+    expect(f).toEqual({
+      op: 'vector_similarity',
+      field: ['emb'],
+      query: [1, 0, 0.5],
+      k: 10,
+      oversample: 2,
+    });
+  });
+
+  it('vector_similarity opts with both efSearch + oversample', () => {
+    const f = filter.vectorSimilarity('emb', [1, 0, 0.5], 10, {
+      efSearch: 400,
+      oversample: 2.0,
+    });
+    expect(f).toEqual({
+      op: 'vector_similarity',
+      field: ['emb'],
+      query: [1, 0, 0.5],
+      k: 10,
+      ef_search: 400,
+      oversample: 2,
+    });
+  });
+
+  it('vs() chain builder .efSearch().oversample().build()', () => {
+    const f = vs('emb', [1, 0, 0.5], 10)
+      .efSearch(400)
+      .oversample(2.0)
+      .build();
+    expect(f).toEqual({
+      op: 'vector_similarity',
+      field: ['emb'],
+      query: [1, 0, 0.5],
+      k: 10,
+      ef_search: 400,
+      oversample: 2,
     });
   });
 

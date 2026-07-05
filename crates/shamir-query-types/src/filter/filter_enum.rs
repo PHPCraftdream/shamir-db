@@ -147,11 +147,21 @@ pub enum Filter {
     },
 
     /// Vector similarity search (top-k nearest neighbors).
+    ///
+    /// V1.1 additive fields (both optional, omitted on the wire when `None`):
+    /// * `ef_search` — per-query HNSW exploration width. `None` = adapter
+    ///   build-time default. Clamped server-side to `MAX_EF_SEARCH`.
+    /// * `oversample` — reserved for P3 (#404): candidate-widening multiplier.
+    ///   Accepted on the wire, threaded to the adapter, NOT yet consumed.
     VectorSimilarity {
         #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         query: Vec<f32>,
         k: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ef_search: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oversample: Option<f32>,
     },
 
     /// Comparison on a computed expression (for functional indexes).

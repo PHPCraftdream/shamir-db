@@ -221,6 +221,43 @@ pub fn vector_similarity(field: impl IntoFieldPath, query: Vec<f32>, k: u32) -> 
         field: fp(field),
         query,
         k,
+        ef_search: None,
+        oversample: None,
+    }
+}
+
+/// Top-k nearest-neighbor vector similarity search with per-query `ef_search`
+/// (HNSW exploration width). See [`Filter::VectorSimilarity::ef_search`].
+pub fn vector_similarity_ef(
+    field: impl IntoFieldPath,
+    query: Vec<f32>,
+    k: u32,
+    ef_search: u32,
+) -> Filter {
+    Filter::VectorSimilarity {
+        field: fp(field),
+        query,
+        k,
+        ef_search: Some(ef_search),
+        oversample: None,
+    }
+}
+
+/// Top-k vector similarity with both `ef_search` and `oversample`.
+/// `oversample` is accepted but not yet consumed (P3 #404).
+pub fn vector_similarity_opts(
+    field: impl IntoFieldPath,
+    query: Vec<f32>,
+    k: u32,
+    ef_search: Option<u32>,
+    oversample: Option<f32>,
+) -> Filter {
+    Filter::VectorSimilarity {
+        field: fp(field),
+        query,
+        k,
+        ef_search,
+        oversample,
     }
 }
 

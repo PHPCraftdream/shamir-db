@@ -101,7 +101,19 @@ export type Filter =
       /** "and" (all tokens must match) or "or" (any). Default: "and". */
       mode?: string;
     }
-  | { op: 'vector_similarity'; field: FieldPath; query: number[]; k: number }
+  | {
+      op: 'vector_similarity';
+      field: FieldPath;
+      query: number[];
+      k: number;
+      /** V1.1: per-query HNSW exploration width. Higher = better recall, higher latency. */
+      ef_search?: number;
+      /**
+       * V1.1: candidate-widening multiplier. Accepted on the wire but
+       * NOT yet consumed server-side (reserved for P3 #404).
+       */
+      oversample?: number;
+    }
   | {
       op: 'computed';
       expr_op: string;

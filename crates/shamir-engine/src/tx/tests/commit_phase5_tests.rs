@@ -195,6 +195,7 @@ async fn committed_tx_hnsw_vector_searchable() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 10,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -220,6 +221,7 @@ async fn committed_tx_hnsw_vector_searchable() {
             .lookup(IndexQuery::Vector {
                 vec: vec![1.0, 0.0, 0.0],
                 k: 10,
+                opts: crate::index2::vector::SearchOpts::default(),
             })
             .await
             .unwrap();
@@ -278,6 +280,7 @@ async fn aborted_tx_hnsw_staged_cleaned() {
                 IndexQuery::Vector {
                     vec: vec![1.0, 0.0, 0.0],
                     k: 10,
+                    opts: crate::index2::vector::SearchOpts::default(),
                 },
                 None,
                 tx.staged_vectors_for(token),
@@ -304,6 +307,7 @@ async fn aborted_tx_hnsw_staged_cleaned() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 10,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -363,6 +367,7 @@ async fn dropped_tx_staged_vectors_freed_via_raii() {
         .lookup(IndexQuery::Vector {
             vec: vec![0.0, 1.0, 0.0],
             k: 10,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -408,6 +413,7 @@ async fn in_tx_search_sees_own_staged_vector() {
             IndexQuery::Vector {
                 vec: vec![1.0, 0.0, 0.0],
                 k: 10,
+                opts: crate::index2::vector::SearchOpts::default(),
             },
             None,
             tx.staged_vectors_for(token),

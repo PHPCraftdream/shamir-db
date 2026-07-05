@@ -7,7 +7,7 @@
 //! Deletion via soft-delete tombstone set; search over-scans ×2 to
 //! compensate for filtered-out tombstones.
 
-use super::adapter::{VectorAdapter, VectorError};
+use super::adapter::{SearchOpts, VectorAdapter, VectorError};
 use super::simd::{dot_product, l2_squared};
 use crate::kind::VectorMetric;
 use async_trait::async_trait;
@@ -21,6 +21,17 @@ use std::sync::Arc;
 /// Maximum allowed top-k value. Untrusted `k` near `u32::MAX` would drive
 /// `overscan*2+10` and `Vec::with_capacity(k+16)` to multi-GB allocation.
 const MAX_TOPK: u32 = 10_000;
+
+/// Maximum allowed per-query `ef_search` value. Untrusted `ef` near
+/// `u32::MAX` would drive `hnsw.search(query, overscan, ef)` to explore an
+/// enormous graph fan-out (CPU-bound `spawn_blocking` holding the rayon pool).
+/// Clamped (NOT rejected) at this cap — a huge `ef` behaves identically to
+/// `MAX_EF_SEARCH` for recall but cannot starve the worker pool.
+///
+/// 10_000 matches `MAX_TOPK`: `ef >= k` is the standard HNSW guidance, so
+/// capping `ef` at the same bound as `k` keeps the knobs consistent. Real
+/// recall gains plateau well below this (typical sweet spots: 50–500).
+pub const MAX_EF_SEARCH: u32 = 10_000;
 
 /// Live-element count at or below which `search` runs an EXACT brute-force
 /// scan instead of the approximate HNSW graph.
@@ -316,6 +327,7 @@ impl VectorAdapter for HnswAdapter {
         &self,
         query: &[f32],
         k: u32,
+        opts: SearchOpts,
         staged: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
@@ -329,6 +341,19 @@ impl VectorAdapter for HnswAdapter {
             return Ok(vec![]);
         } else {
             k.min(MAX_TOPK)
+        };
+
+        // Per-query ef_search override (clamped to MAX_EF_SEARCH). None →
+        // adapter build-time default (HnswConfig::ef_search). A clamp (not a
+        // rejection) keeps untrusted input from crashing the worker — a huge
+        // ef behaves like MAX_EF_SEARCH for recall but can't hold the rayon
+        // pool indefinitely.
+        // TODO(#404): `opts.oversample` is accepted on the wire and threaded
+        // here but NOT yet consumed — the rerank/widen semantics land in P3.
+        let _ = opts.oversample;
+        let ef = match opts.ef_search {
+            Some(v) => (v.min(MAX_EF_SEARCH) as usize).max(k as usize),
+            None => self.ef_search,
         };
 
         // Small index → EXACT brute-force (deterministic, correct); large
@@ -353,7 +378,6 @@ impl VectorAdapter for HnswAdapter {
         } else {
             // Search committed graph (approximate).
             let hnsw = Arc::clone(&self.hnsw);
-            let ef = self.ef_search;
             let overscan = (k as usize) * 2 + 10;
             let query_owned = query.to_vec();
             let neighbors =

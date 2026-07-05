@@ -70,6 +70,7 @@ async fn insert_and_search() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 1,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -100,6 +101,7 @@ async fn delete_excludes_from_search() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 10,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -130,11 +132,13 @@ async fn lookup_tx_none_matches_lookup() {
     let q = IndexQuery::Vector {
         vec: vec![1.0, 0.0, 0.0],
         k: 2,
+        opts: crate::vector::SearchOpts::default(),
     };
     let via_lookup = backend
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 2,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -193,6 +197,7 @@ async fn lookup_tx_some_includes_staged_vector() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 2,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -204,6 +209,7 @@ async fn lookup_tx_some_includes_staged_vector() {
             IndexQuery::Vector {
                 vec: vec![1.0, 0.0, 0.0],
                 k: 2,
+                opts: crate::vector::SearchOpts::default(),
             },
             None,
             Some(&staged),
@@ -272,6 +278,7 @@ async fn rebuild_from_store() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 2,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -327,6 +334,7 @@ async fn rebuild_from_store_batched_all_records_present() {
         .lookup(IndexQuery::Vector {
             vec: vec![0.0, 1.0, 0.5],
             k: 10,
+            opts: crate::vector::SearchOpts::default(),
         })
         .await
         .unwrap();

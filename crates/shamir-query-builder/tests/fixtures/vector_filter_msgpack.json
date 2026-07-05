@@ -1,0 +1,14 @@
+{
+  "_comment": "V1.1 vector_filter msgpack fixture — canonical Filter::VectorSimilarity wire bytes (Rust rmp_serde::to_vec_named). The TS client (@msgpack/msgpack.encode) produces SEMANTICALLY EQUIVALENT bytes (decode-and-compare, not byte-identical). See tests/vector_filter_msgpack.rs.",
+  "_parity_note": "Byte-IDENTICAL parity is not achievable for f32 fields: rmp_serde always emits float32 (0xca prefix) for f32-typed fields, while @msgpack/msgpack emits positive-fixint for integer-valued floats (1.0 → 0x01, 0.0 → 0x00, 2.0 → 0x02) AND float64 (0xcb prefix) for non-integer floats (0.5 → 0xcb…, not 0xca…). So choosing non-integer fixture values would NOT rescue byte-identity either. Both encodings are msgpack-valid and mutually decodable. The TS parity test (vector_filter_parity.test.ts) decodes both sides and deep-compares the decoded objects, proving semantic equality + mutual decodability.",
+  "_key_order_note": "rmp_serde::to_vec_named emits map keys in Rust STRUCT DECLARATION order: op, field, query, k, ef_search, oversample. The Filter enum is #[serde(tag = \"op\", rename_all = \"snake_case\")], so the discriminator 'vector_similarity' is first. skip_serializing_if = Option::is_none means ef_search/oversample keys are ABSENT when None (not null). @msgpack/msgpack.encode preserves JS object insertion order — the TS builder constructs the object in the same order (op, field, query, k, then ef_search/oversample via the opts arg).",
+  "_value_notes": {
+    "float32": "All f32 values are serialized as msgpack float32 (0xca prefix): 1.0=ca3f800000, 0.0=ca00000000, 0.5=ca3f000000, 2.0=ca40000000. rmp_serde serializes f32 as float32 (not float64) because the Rust field type is f32.",
+    "ef_search_400": "cd0190 = uint16 400 (0x0190). msgpack uses the smallest int encoding: values 128-65535 are uint16 (0xcd prefix).",
+    "k_10": "0a = positive fixint 10 (values 0-127 use a single byte).",
+    "map_headers": "84=fixmap4, 85=fixmap5, 86=fixmap6 — the prefix byte encodes the entry count (4/5/6 entries)."
+  },
+  "vector_similarity_bare": "84a26f70b1766563746f725f73696d696c6172697479a56669656c6491a3656d62a5717565727993ca3f800000ca00000000ca3f000000a16b0a",
+  "vector_similarity_ef_search": "85a26f70b1766563746f725f73696d696c6172697479a56669656c6491a3656d62a5717565727993ca3f800000ca00000000ca3f000000a16b0aa965665f736561726368cd0190",
+  "vector_similarity_ef_and_oversample": "86a26f70b1766563746f725f73696d696c6172697479a56669656c6491a3656d62a5717565727993ca3f800000ca00000000ca3f000000a16b0aa965665f736561726368cd0190aa6f76657273616d706c65ca40000000"
+}
