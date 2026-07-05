@@ -22,6 +22,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { encode, decode } from '@msgpack/msgpack';
 import { vectorSimilarity } from '../filter.js';
+import { ddl } from '../ddl.js';
 
 // ── Fixture loader ──────────────────────────────────────────────────
 
@@ -152,5 +153,52 @@ describe('TS↔Rust VectorSimilarity msgpack parity (V1.1)', () => {
     const hex = encodeToHex(f);
     expect(hex).not.toContain('65665f736561726368'); // no "ef_search"
     expect(hex).toContain('6f76657273616d706c65'); // "oversample"
+  });
+});
+
+// ── V5.2 #411 — CreateIndexOp.vector_quantization wire parity ───────
+//
+// The Rust wire contract is `CreateIndexOp::vector_quantization:
+// Option<String>` with `#[serde(default, skip_serializing_if =
+// "Option::is_none")]` (index_ops.rs:65-70). There is no Rust msgpack
+// fixture for DDL ops (the fixture above covers only VectorSimilarity
+// filters), so we assert the documented contract directly: the TS op
+// must (a) carry `vector_quantization` as a string key+value when set,
+// (b) OMIT it entirely when unset (serde skip_serializing_if parity —
+// back-compat with pre-#411 servers), and (c) round-trip through msgpack
+// preserving both properties.
+
+describe('TS↔Rust CreateIndexOp.vector_quantization wire parity (V5.2 #411)', () => {
+  it('sq8 op carries vector_quantization:"sq8" as a string on the wire', () => {
+    const op = ddl.createIndex('vidx_q', 'docs', [['embedding']], {
+      index_type: 'vector',
+      vector_dim: 128,
+      vector_metric: 'cosine',
+      vector_quantization: 'sq8',
+    });
+    const hex = encodeToHex(op);
+    // msgpack key "vector_quantization" (0x766563746f725f7175616e74697a6174696f6e)
+    // must appear, followed by a fixstr value "sq8" (0xa3737138).
+    expect(hex).toContain('766563746f725f7175616e74697a6174696f6e');
+    expect(hex).toContain('a3737138'); // fixstr(3) "sq8"
+    // Round-trip: decoded form preserves key+value.
+    const decoded = decode(encode(op)) as Record<string, unknown>;
+    expect(decoded.vector_quantization).toBe('sq8');
+    expect(typeof decoded.vector_quantization).toBe('string');
+  });
+
+  it('omits vector_quantization key entirely when unset (skip_serializing_if parity)', () => {
+    const op = ddl.createIndex('vidx_plain', 'docs', [['embedding']], {
+      index_type: 'vector',
+      vector_dim: 128,
+      vector_metric: 'cosine',
+    });
+    const hex = encodeToHex(op);
+    // The key must NOT appear anywhere in the encoded bytes.
+    expect(hex).not.toContain('766563746f725f7175616e74697a6174696f6e');
+    // And the decoded object must not have the property (undefined, not null).
+    const decoded = decode(encode(op)) as Record<string, unknown>;
+    expect(decoded).not.toHaveProperty('vector_quantization');
+    expect(decoded.vector_quantization).toBeUndefined();
   });
 });
