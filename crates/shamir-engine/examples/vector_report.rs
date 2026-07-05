@@ -322,7 +322,10 @@ fn print_report(
     println!();
     println!("## Vector baseline — {now}");
     println!();
-    println!("- **Tool**: `cargo run --release --example vector_report` (V0.4)");
+    println!(
+        "- **Tool**: `vector_report` example binary, V0.4 (build with cargo, \
+         run the artefact directly — the perimeter guard blocks `cargo run`)"
+    );
     println!(
         "- **Dataset**: `clustered_vectors` — n={}, dims={dims:?}, k_clusters={}, σ={}, seed={}",
         p.n, p.k_clusters, p.sigma, p.seed

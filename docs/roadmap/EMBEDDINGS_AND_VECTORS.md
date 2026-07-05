@@ -1,6 +1,12 @@
 # Embeddings & Vector Search — Design
 
-Status: **planned, no code yet.** Pre-flight design doc.
+Status: **Layer 0 implemented** (HNSW in-memory + brute-force fallback + SIMD
+dot/l2 + tx-staging via `staged_vectors`); persistence / filtered ANN /
+quantization in progress — see `VECTOR_PRODUCTION_EXECUTION.md` for the
+executing plan and `VECTOR_PRODUCTION_PLAN.md` for the phase outline. This
+remains the **design doc**; the type names below are the design's vocabulary,
+which has since drifted from the code (see "Naming drift" at the end of this
+file). Trust code + `VECTOR_PRODUCTION_EXECUTION.md` as the source of truth.
 
 Companion to `TRANSACTIONS.md` / `TRANSACTIONS_IMPL.md` style — Russian
 conversational explanation up top, formal English design contract
@@ -443,3 +449,28 @@ query).
 **Total: ~3-4 недели сфокусированной работы.** Phase 0 + Phase 1
 (in-memory + persisted HNSW + OpenAI-compatible embedder + auto-embed).
 Quantization, hybrid search, filtered ANN — отдельные спринты.
+
+---
+
+## Naming drift (design vs code — read this if you grep for a type)
+
+The type names used in the Architecture section above are the **design's
+vocabulary**, written before the code landed. The code diverged, and the
+canonical names are now different. **Trust code + `VECTOR_PRODUCTION_EXECUTION.md`
+as the source of truth;** this design doc is retained as the rationale, not as
+a symbol reference.
+
+| Design doc says | Code actually has | Where |
+|---|---|---|
+| `Filter::VectorSearch { field, vector, k, metric }` | `Filter::VectorSimilarity { field, query, k }` (no per-query `metric` override; uses the index's metric) | `crates/shamir-query-types/src/filter/filter_enum.rs` |
+| `CreateVectorIndexOp { create_vector_index, table, field, dim, metric, … }` | `CreateIndexOp { …, index_type: "vector", vector_dim, vector_metric }` — vector is a *variant* of the general create-index op, not a separate op | `crates/shamir-query-types/src/admin`, builder `crates/shamir-query-builder/src/ddl/create_index.rs` (`index_type("vector").vector_dim(..).vector_metric(..)`) |
+| `VectorMetric::{ Cosine, DotProduct, EuclideanL2 }` | `VectorMetric::{ L2, Cosine, Dot }` (the `EuclideanL2` ⇒ `L2` rename; `DotProduct` ⇒ `Dot`) | `crates/shamir-index/src/kind.rs` |
+| `VectorConfig { dim, metric, backend }` ✓ | matches (plus `VectorBackendRef::{ InProcessHnsw, External }`) | `crates/shamir-index/src/kind.rs` |
+| DDL builder `ddl.createIndex(..., { index_type: 'vector', vector_dim, vector_metric })` ✓ | matches (Rust + TS builder already shipped) | `crates/shamir-query-builder`, `crates/shamir-client-ts` |
+| `filter.vectorSimilarity(field, vector, k)` ✓ | matches (TS builder already shipped under that name) | `crates/shamir-client-ts` |
+
+Additionally, `dot` metric is wired at the type level (`VectorMetric::Dot`)
+but the V0.4 `vector_report` baseline omits it: `hnsw_rs` 0.3.4 has no
+`Distance<i8>` Dot path usable for the int8 quantization track (see K1 in
+`VECTOR_PRODUCTION_EXECUTION.md`). The f32 path is unaffected.
+

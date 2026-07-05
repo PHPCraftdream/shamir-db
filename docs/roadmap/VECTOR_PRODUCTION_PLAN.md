@@ -2,6 +2,15 @@
 
 Status: **план работ, код Layer 0 уже в дереве.**
 
+> **⚠ Revised by `VECTOR_PRODUCTION_EXECUTION.md`.** This document is the
+> original 6-phase outline; the executing plan
+> (`VECTOR_PRODUCTION_EXECUTION.md`, разведка 2026-07-04) revises it against
+> the actual code and re-splits it into executable sheets (P0–P5). Where the
+> two disagree, **`VECTOR_PRODUCTION_EXECUTION.md` wins.** The key corrections
+> are summarised in "Поправки K1–K8 (план vs код)" at the end of this file —
+> read that section before trusting any phase boundary or dependency arrow
+> below.
+
 Компаньон к `EMBEDDINGS_AND_VECTORS.md` (дизайн) и
 `FULL_TEXT_SEARCH.md` (пререквизит гибридного поиска). Этот документ —
 пошаговый план доведения векторной подсистемы до production-grade:
@@ -380,3 +389,43 @@ code). Когда FTS Phase 0 появится:
 
 Итого ядро (0–5): **~3–4 недели** сфокусированной работы; фаза 6 —
 после FTS Phase 0.
+
+---
+
+## Поправки K1–K8 (план vs код)
+
+> Разведка 2026-07-04 проверила каждое утверждение этого плана против кода.
+> Полная таблица поправок живёт в
+> **`VECTOR_PRODUCTION_EXECUTION.md` → «Поправки к плану-доку (проверено кодом)»**
+> (K1–K8); этот раздел — краткая выжимка, чтобы старый план не вводил в
+> заблуждение. Не дублирует весь EXECUTION-план — только факты, на которых
+> завязаны фазные границы и зависимости выше.
+
+| # | План утверждал | Код показывает | Влияние на фазы |
+|---|---|---|---|
+| **K1** | «hnsw_rs 0.3 не имеет dump/load, batch, seed» | `Cargo.lock` = **hnsw_rs 0.3.4**. Спайк V0.0 подтвердил: `file_dump` / `HnswIo::load_hnsw_with_dist` / `parallel_insert` / `search_filter` + `FilterT` **есть**; seed API нет; **`Distance<i8>` ОТСУТСТВУЕТ** (только `DistL1`/`DistL2` для u8 — НЕ Dot/Cosine). | Фаза 1 (persist) разблокирована через hnswio-обёртку; фаза 3 (SQ8) идёт через `Hnsw<i8,_>` + L1/L2, не через Dot-int8. Пин `=0.3.4` ради стабильности dump-формата. |
+| **K2** | «Фаза 6 (Hybrid) блокирована: FTS нет кода» | **Устарело.** FTS уже в дереве: `crates/shamir-index/src/{bm25,fts_backend,fts_ranked_backend}.rs`, `Filter::Fts` в query-types. | **P6 (Hybrid RRF) разблокирована.** В текущую кампанию (P0–P5) всё равно не входит, но больше не ждёт FTS Phase 0. |
+| **K6** | «snapshot writer → atomic rename» (фаза 1.2) | Atomic-rename паттерна в движке нет. Есть **chunk-persist** через `InternerManager` (HWM + zero-padded chunks + `MetaEnvelope` SDB2); `Store::transact` атомарно флипает поколение манифеста. | Снапшот HNSW пишется **в info_store chunks**, не отдельным файлом с rename. Это меняет реализацию фазы 1, но не её DoD. |
+| **K8** | (не было) | `HnswAdapter::len()` зовёт `self.deleted.len()` (O(N)) на **каждом** search — это точка выбора brute-vs-graph на hot path. | Скрытый O(N) на hot path. Чинится atomic-зеркалами live/deleted (`AtomicUsize`) в **P4 / EXECUTION лист 4.1 (#407)** — не отдельная фаза, а часть batch-upsert+compaction. |
+| K3 | seed API у hnsw_rs нет | Подтверждено (`hnsw_adapter.rs`). `BRUTE_FORCE_MAX=256` остаётся; recall-тесты статистические на ≥1k запросов. | Без изменений — recall@10 в baseline зафиксирован честно (см. ниже). |
+| K7 | нет checksum в index | `crc32fast` уже в workspace (shamir-wal). | Снапшот использует crc32 (не xxh3) — dep уже есть. |
+
+### Что это значит для recall-чисел baseline
+
+Baseline (фаза 0 / `docs/benchmarks/vector/2026-07-05-baseline.md`) фиксирует
+**recall@10 ≈ 0.55–0.72 при `ef_search=50`** (дефолт индекса). Это **честный
+сигнал**, не дефект: clustered-датасет не льстит recall, а поиск идёт на
+статическом `ef_search=50`. **Per-query `ef_search` (P1 / EXECUTION лист 1.1,
+#399)** — это тот самый рычаг, который поднимет recall на том же графе за счёт
+латентности; baseline служит «до» для этого сравнения. Не трактовать эти числа
+как потолок recall.
+
+### Сдвиг фазных границ (исполнительский план)
+
+Фазы переупорядочены в EXECUTION-плане: `upsert_batch` вытащен в P0 (без него
+100K-ступени baseline не построить); per-query `ef_search` (бывш. фаза 5)
+сдвинут в **P1** — сигнатура `search` расширяется до `SearchOpts` один раз, до
+навешивания персиста и фильтров; квантизация (P5) после компакции (P4), т.к.
+компакция обязана быть quantization-aware. См. диаграмму в
+`VECTOR_PRODUCTION_EXECUTION.md` → «Последовательность фаз (скорректирована)».
+
