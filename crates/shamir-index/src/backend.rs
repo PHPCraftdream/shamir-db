@@ -340,4 +340,8 @@ pub trait IndexBackend: Send + Sync {
     /// `append_vector_delta`); passed by the caller because the backend
     /// does not own a table handle.
     fn trigger_snapshot_check(&self, _info_store: &Arc<dyn Store>) {}
+
+    /// V4.2 (#408) — check whether background compaction should trigger.
+    /// Default no-op; only `VectorBackend` overrides.
+    fn trigger_compaction_check(&self, _info_store: &Arc<dyn Store>) {}
 }

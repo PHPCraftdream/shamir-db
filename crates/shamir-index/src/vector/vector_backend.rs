@@ -4,15 +4,18 @@
 //! for similarity search. Returns `IndexResult::Ranked`.
 
 use super::adapter::{VectorAdapter, VectorError};
+use super::hnsw_adapter::HnswAdapter;
 use super::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::write_ops::IndexWriteOp;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
-use shamir_tunables::instance_defaults::VECTOR_SNAPSHOT_DELTA_THRESHOLD;
+use shamir_tunables::instance_defaults::{
+    VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD, VECTOR_SNAPSHOT_DELTA_THRESHOLD,
+};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::record_id::RecordId;
@@ -112,6 +115,15 @@ pub struct VectorBackend {
     /// trigger → spawn → `run_background_snapshot` path can be exercised
     /// deterministically without appending 10k real vectors.
     snapshot_threshold: AtomicU64,
+    /// V4.2 (#408) — single-flight guard for the background compaction task.
+    compaction_in_flight: Arc<AtomicBool>,
+    /// V4.2 (#408) — double-write target during compaction. None = idle (one
+    /// atomic load ~0 ns). Some = duplicate every mutation here.
+    compaction_target: Arc<ArcSwapOption<AdapterSlot>>,
+    /// V4.2 (#408) — compaction ratio threshold (test-overridable).
+    compaction_ratio_threshold: std::sync::atomic::AtomicU64,
+    /// V4.2 (#408) — compaction min live count (test-overridable).
+    compaction_min_live: std::sync::atomic::AtomicU64,
 }
 
 impl VectorBackend {
@@ -129,6 +141,10 @@ impl VectorBackend {
             snapshot_in_flight: Arc::new(AtomicBool::new(false)),
             next_delta_idx: Arc::new(AtomicU64::new(0)),
             snapshot_threshold: AtomicU64::new(VECTOR_SNAPSHOT_DELTA_THRESHOLD),
+            compaction_in_flight: Arc::new(AtomicBool::new(false)),
+            compaction_target: Arc::new(ArcSwapOption::empty()),
+            compaction_ratio_threshold: AtomicU64::new(VECTOR_COMPACTION_RATIO_THRESHOLD.to_bits()),
+            compaction_min_live: AtomicU64::new(VECTOR_COMPACTION_MIN_LIVE as u64),
         }
     }
 
@@ -151,6 +167,30 @@ impl VectorBackend {
     #[cfg(test)]
     pub(crate) fn snapshot_in_flight_for_test(&self) -> bool {
         self.snapshot_in_flight.load(Ordering::Acquire)
+    }
+
+    /// V4.2 (#408) — lower compaction thresholds for testing.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn set_compaction_thresholds_for_test(&self, ratio: f64, min_live: usize) {
+        self.compaction_ratio_threshold
+            .store(ratio.to_bits(), Ordering::Release);
+        self.compaction_min_live
+            .store(min_live as u64, Ordering::Release);
+    }
+
+    /// V4.2 (#408) — read compaction in-flight flag. Test-only.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn compaction_in_flight_for_test(&self) -> bool {
+        self.compaction_in_flight.load(Ordering::Acquire)
+    }
+
+    /// V4.2 (#408) — access the compaction target for test inspection.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn compaction_target_for_test(&self) -> &Arc<ArcSwapOption<AdapterSlot>> {
+        &self.compaction_target
     }
 
     /// Snapshot keyspace for this backend's index: `__vec_snap__<id>`.
@@ -251,6 +291,10 @@ impl IndexBackend for VectorBackend {
                 .upsert(rid, &v)
                 .await
                 .map_err(ve)?;
+            // V4.2: double-write to compaction target (if active)
+            if let Some(target) = self.compaction_target.load_full() {
+                let _ = target.adapter.upsert(rid, &v).await;
+            }
         }
         Ok(Vec::new())
     }
@@ -268,6 +312,10 @@ impl IndexBackend for VectorBackend {
                 .upsert(rid, &v)
                 .await
                 .map_err(ve)?;
+            // V4.2: double-write
+            if let Some(target) = self.compaction_target.load_full() {
+                let _ = target.adapter.upsert(rid, &v).await;
+            }
         } else {
             self.adapter
                 .load_full()
@@ -275,6 +323,24 @@ impl IndexBackend for VectorBackend {
                 .delete(rid)
                 .await
                 .map_err(ve)?;
+            // V4.2: double-write delete.
+            // ORDER (ghost-race fix): record the rid in `compaction_deleted_rids`
+            // BEFORE `target.adapter.delete(rid)`. If the tombstone were recorded
+            // AFTER the delete, a concurrent `backfill_if_absent` could observe
+            // the rid as absent-and-not-deleted (delete's read_async no-op'd on
+            // the not-yet-inserted slot, del_rids not yet written), insert it
+            // from S0, and Step4b's point-in-time scan would miss the late
+            // del_rids write → permanent ghost. Recording first guarantees
+            // backfill's under-guard re-check of del_rids sees it (→ skip), or,
+            // if backfill inserted first, the following `delete` removes it.
+            if let Some(target) = self.compaction_target.load_full() {
+                if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                    if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                        let _ = del_rids.insert_async(rid, ()).await;
+                    }
+                }
+                let _ = target.adapter.delete(rid).await;
+            }
         }
         Ok(Vec::new())
     }
@@ -290,6 +356,17 @@ impl IndexBackend for VectorBackend {
             .delete(rid)
             .await
             .map_err(ve)?;
+        // V4.2: double-write delete.
+        // ORDER (ghost-race fix): record `compaction_deleted_rids` BEFORE the
+        // `target.adapter.delete(rid)` — see the rationale in `plan_update`.
+        if let Some(target) = self.compaction_target.load_full() {
+            if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                    let _ = del_rids.insert_async(rid, ()).await;
+                }
+            }
+            let _ = target.adapter.delete(rid).await;
+        }
         Ok(Vec::new())
     }
 
@@ -402,7 +479,12 @@ impl IndexBackend for VectorBackend {
             .adapter
             .apply_committed_vectors(vecs)
             .await
-            .map_err(ve)
+            .map_err(ve)?;
+        // V4.2: double-write to compaction target
+        if let Some(target) = self.compaction_target.load_full() {
+            let _ = target.adapter.apply_committed_vectors(vecs).await;
+        }
+        Ok(())
     }
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
@@ -649,6 +731,10 @@ impl IndexBackend for VectorBackend {
         if count < self.snapshot_threshold.load(Ordering::Acquire) {
             return;
         }
+        // V4.2: skip if compaction is in flight (coordination)
+        if self.compaction_in_flight.load(Ordering::Acquire) {
+            return;
+        }
         // Single-flight: a crossing while a dump is already running is a
         // no-op. The counter keeps climbing and the next ack re-arms once
         // the in-flight task clears the flag.
@@ -705,6 +791,10 @@ impl IndexBackend for VectorBackend {
                 }
             }
         });
+    }
+
+    fn trigger_compaction_check(&self, info_store: &Arc<dyn Store>) {
+        VectorBackend::trigger_compaction_check(self, info_store);
     }
 }
 
@@ -805,4 +895,174 @@ async fn run_background_snapshot(
         new_delta_applied_upto,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// V4.2 (#408) — Background HNSW Compaction
+// ---------------------------------------------------------------------------
+
+/// Drop-guard that resets `compaction_in_flight` on Ok/Err/panic.
+struct CompactionFlightGuard(Arc<AtomicBool>);
+
+impl Drop for CompactionFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl VectorBackend {
+    /// V4.2 (#408) — check whether compaction should trigger and spawn it.
+    pub(crate) fn trigger_compaction_check(&self, info_store: &Arc<dyn Store>) {
+        let adapter_arc = Arc::clone(&self.adapter.load_full().adapter);
+        let hnsw = match adapter_arc.as_hnsw_adapter() {
+            Some(h) => h,
+            None => return,
+        };
+
+        let ratio_bits = self.compaction_ratio_threshold.load(Ordering::Acquire);
+        let ratio_threshold = f64::from_bits(ratio_bits);
+        let min_live = self.compaction_min_live.load(Ordering::Acquire) as usize;
+
+        if hnsw.deleted_ratio() < ratio_threshold || hnsw.live_count() < min_live {
+            return;
+        }
+
+        // Coordination: skip if snapshot in flight
+        if self.snapshot_in_flight.load(Ordering::Acquire) {
+            return;
+        }
+
+        // Single-flight
+        if self
+            .compaction_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let adapter_swap = Arc::clone(&self.adapter);
+        let compaction_target = Arc::clone(&self.compaction_target);
+        let compaction_in_flight = Arc::clone(&self.compaction_in_flight);
+        let delta_count = Arc::clone(&self.delta_count);
+        let next_delta_idx = Arc::clone(&self.next_delta_idx);
+        let snapshot_in_flight = Arc::clone(&self.snapshot_in_flight);
+        let info_store = Arc::clone(info_store);
+        let keyspace = self.snapshot_keyspace();
+
+        tokio::spawn(async move {
+            let _flight_guard = CompactionFlightGuard(compaction_in_flight);
+            let res = run_background_compaction(
+                &adapter_swap,
+                &compaction_target,
+                &info_store,
+                &keyspace,
+                &delta_count,
+                &next_delta_idx,
+                &snapshot_in_flight,
+            )
+            .await;
+            if let Err(e) = res {
+                log::warn!(
+                    "vector background compaction failed: {} — will retry on next threshold crossing",
+                    e
+                );
+            }
+        });
+    }
+}
+
+/// V4.2 (#408) — the body of the background compaction task (Steps 1–7).
+async fn run_background_compaction(
+    adapter_swap: &Arc<ArcSwap<AdapterSlot>>,
+    compaction_target: &Arc<ArcSwapOption<AdapterSlot>>,
+    info_store: &Arc<dyn Store>,
+    keyspace: &str,
+    delta_count: &Arc<AtomicU64>,
+    next_delta_idx: &Arc<AtomicU64>,
+    snapshot_in_flight: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    // Step 1: Create empty new adapter
+    let old_slot = adapter_swap.load_full();
+    let old_hnsw = old_slot
+        .adapter
+        .as_hnsw_adapter()
+        .ok_or_else(|| "compaction on non-HnswAdapter".to_string())?;
+
+    let config = old_hnsw.build_config();
+    let dim = old_hnsw.dim_field();
+    let metric = old_hnsw.metric_field();
+    let new_adapter = HnswAdapter::new_compaction_target(dim, metric, config);
+    let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
+
+    // Step 2: Arm double-write
+    compaction_target.store(Some(Arc::new(AdapterSlot {
+        adapter: Arc::clone(&new_adapter_arc),
+    })));
+
+    // Step 3: Collect live-set S0 from OLD adapter
+    let live_pairs = old_hnsw.collect_live_vectors();
+
+    // Step 4a: Backfill S0 into new (INSERT-IF-ABSENT)
+    let new_hnsw = new_adapter_arc
+        .as_hnsw_adapter()
+        .ok_or_else(|| "compaction target not HnswAdapter".to_string())?;
+    new_hnsw
+        .backfill_if_absent(&live_pairs)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Step 4b: Reconcile-deletes (close resurrect race)
+    if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
+        let mut rids_to_delete: Vec<RecordId> = Vec::new();
+        del_rids.scan(|rid, ()| {
+            rids_to_delete.push(*rid);
+        });
+        for rid in rids_to_delete {
+            let _ = new_adapter_arc.delete(rid).await;
+        }
+    }
+
+    // Step 5: Atomic swap (new becomes primary)
+    adapter_swap.store(Arc::new(AdapterSlot {
+        adapter: Arc::clone(&new_adapter_arc),
+    }));
+
+    // Step 6: Clear double-write (AFTER swap — order critical)
+    compaction_target.store(None);
+
+    // Step 7: Force snapshot from new adapter
+    delta_count.store(0, Ordering::Release);
+    // Only trigger if no snapshot already in flight
+    if snapshot_in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let flight_guard = SnapshotFlightGuard(Arc::clone(snapshot_in_flight));
+        let info_store = Arc::clone(info_store);
+        let keyspace = keyspace.to_string();
+        let adapter_for_snap = Arc::clone(&new_adapter_arc);
+        let next_delta_idx = Arc::clone(next_delta_idx);
+        let delta_count = Arc::clone(delta_count);
+        tokio::spawn(async move {
+            let _flight_guard = flight_guard;
+            let res =
+                run_background_snapshot(&info_store, &keyspace, &adapter_for_snap, &next_delta_idx)
+                    .await;
+            match res {
+                Ok(()) => {
+                    delta_count.store(0, Ordering::Release);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "vector post-compaction snapshot failed for keyspace {}: {}",
+                        keyspace,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    Ok(())
 }

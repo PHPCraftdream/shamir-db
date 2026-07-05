@@ -125,6 +125,11 @@ pub struct HnswAdapter {
     pub(crate) deleted: scc::HashMap<usize, (), THasher>,
     deleted_count: AtomicUsize,
     next_id: AtomicUsize,
+    /// V4.2 (#408) — tombstone set keyed by RecordId, present ONLY on a
+    /// compaction-target adapter (Some during compaction, None otherwise).
+    /// Populated by double-write deletes; consulted by `backfill_if_absent`
+    /// and Step4b reconcile to prevent ghost resurrection.
+    pub(crate) compaction_deleted_rids: Option<Arc<scc::HashMap<RecordId, (), THasher>>>,
 }
 
 impl HnswAdapter {
@@ -149,6 +154,7 @@ impl HnswAdapter {
             deleted: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             deleted_count: AtomicUsize::new(0),
             next_id: AtomicUsize::new(0),
+            compaction_deleted_rids: None,
         }
     }
 
@@ -196,6 +202,12 @@ impl HnswAdapter {
         });
     }
 
+    /// Check if a rid exists in the live index (not tombstoned).
+    #[allow(dead_code)] // API for #408 compaction tests
+    pub(crate) fn contains_rid(&self, rid: &RecordId) -> bool {
+        self.rid_to_internal.contains(rid)
+    }
+
     /// Iterate the tombstone (`deleted`) internals for snapshot serialisation.
     pub(crate) fn for_each_deleted<F: FnMut(usize)>(&self, mut f: F) {
         self.deleted.scan(|internal, ()| {
@@ -241,6 +253,7 @@ impl HnswAdapter {
             deleted,
             deleted_count: AtomicUsize::new(deleted_cnt),
             next_id: AtomicUsize::new(next_id),
+            compaction_deleted_rids: None,
         }
     }
 
@@ -267,13 +280,102 @@ impl HnswAdapter {
     }
 
     /// Ratio of tombstoned slots to total allocated ids (0.0 when empty).
-    #[allow(dead_code)] // API for #408 compaction trigger
     pub(crate) fn deleted_ratio(&self) -> f64 {
         let next = self.next_id.load(Ordering::Relaxed);
         if next == 0 {
             return 0.0;
         }
         self.deleted_count.load(Ordering::Relaxed) as f64 / next as f64
+    }
+
+    /// V4.2 (#408) — Collect all live (non-tombstoned) (rid, vector) pairs.
+    /// O(N) scan — called once per compaction, NOT on hot path.
+    pub(crate) fn collect_live_vectors(&self) -> Vec<(RecordId, Vec<f32>)> {
+        let mut result: Vec<(RecordId, Vec<f32>)> = Vec::new();
+        self.rid_to_internal.scan(|rid, internal| {
+            // Skip tombstoned internals
+            if self.deleted.contains(internal) {
+                return;
+            }
+            if let Some(vec) = self.vectors.read(internal, |_, v| v.clone()) {
+                result.push((*rid, vec));
+            }
+        });
+        result
+    }
+
+    /// V4.2 (#408) — Insert (rid, vec) ONLY if rid is absent from
+    /// `rid_to_internal` AND absent from `compaction_deleted_rids`.
+    /// Uses `entry_async` for atomic check-and-insert per rid.
+    pub(crate) async fn backfill_if_absent(
+        &self,
+        items: &[(RecordId, Vec<f32>)],
+    ) -> Result<(), VectorError> {
+        for (rid, vec) in items {
+            // Skip if this rid was deleted via double-write
+            if let Some(ref del_rids) = self.compaction_deleted_rids {
+                if del_rids.contains(rid) {
+                    continue;
+                }
+            }
+            // Atomic check: only insert if absent
+            use scc::hash_map::Entry::{Occupied, Vacant};
+            match self.rid_to_internal.entry_async(*rid).await {
+                Occupied(_) => continue, // double-write already placed a fresher value
+                Vacant(vac) => {
+                    // Re-check deleted_rids under the entry lock to close the race
+                    if let Some(ref del_rids) = self.compaction_deleted_rids {
+                        if del_rids.contains(rid) {
+                            continue;
+                        }
+                    }
+                    let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    vac.insert_entry(internal);
+
+                    // Insert into graph
+                    let hnsw = Arc::clone(&self.hnsw);
+                    let vec_owned = vec.clone();
+                    tokio::task::spawn_blocking(move || {
+                        hnsw.insert((&vec_owned, internal));
+                    })
+                    .await
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+                    let _ = self.vectors.insert_async(internal, vec.clone()).await;
+                    let _ = self.rid_map.insert_async(internal, *rid).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// V4.2 (#408) — Clone the build config for compaction rebuild.
+    pub(crate) fn build_config(&self) -> HnswConfig {
+        HnswConfig {
+            max_elements: self
+                .next_id
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.deleted_count.load(Ordering::Relaxed))
+                .max(1000)
+                + 1000, // 10%+ buffer
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: self.ef_search,
+        }
+    }
+
+    /// V4.2 (#408) — Create a new empty adapter suitable as a compaction target,
+    /// with `compaction_deleted_rids` set to Some.
+    pub(crate) fn new_compaction_target(
+        dim: u32,
+        metric: VectorMetric,
+        config: HnswConfig,
+    ) -> Self {
+        let mut adapter = Self::new(dim, metric, config);
+        adapter.compaction_deleted_rids =
+            Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
+        adapter
     }
 }
 

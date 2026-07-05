@@ -123,4 +123,13 @@ pub mod instance_defaults {
     /// meaningful batch on a steady-write workload rather than continuously.
     /// `SHAMIR_VECTOR_SNAPSHOT_DELTA_THRESHOLD` overrides at startup.
     pub const VECTOR_SNAPSHOT_DELTA_THRESHOLD: u64 = 10_000;
+
+    /// V4.2 (#408) — tombstone ratio threshold above which HNSW compaction
+    /// triggers. When `deleted_count / next_id >= ratio` AND `live_count >=
+    /// VECTOR_COMPACTION_MIN_LIVE`, a background rebuild-aside is spawned.
+    pub const VECTOR_COMPACTION_RATIO_THRESHOLD: f64 = 0.3;
+
+    /// V4.2 (#408) — minimum live vector count to trigger compaction. Tiny
+    /// indexes (< 1000 live) are not worth the rebuild cost.
+    pub const VECTOR_COMPACTION_MIN_LIVE: usize = 1000;
 }
