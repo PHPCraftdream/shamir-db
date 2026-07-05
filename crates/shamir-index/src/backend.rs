@@ -27,7 +27,15 @@ pub enum IndexQuery {
     /// FTS — interned token IDs + combination mode.
     Fts { tokens: Vec<u64>, mode: FtsMode },
     /// Vector similarity (top-k by `kind`'s metric).
-    Vector { vec: Vec<f32>, k: u32 },
+    ///
+    /// `opts` carries per-query knobs (`ef_search`, `oversample`). Both
+    /// default to `None` → adapter build-time default, preserving the
+    /// pre-V1.1 behaviour for call-sites that construct `SearchOpts::default()`.
+    Vector {
+        vec: Vec<f32>,
+        k: u32,
+        opts: crate::vector::SearchOpts,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

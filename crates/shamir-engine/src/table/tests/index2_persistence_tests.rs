@@ -104,6 +104,7 @@ async fn vector_index_survives_reopen() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 2,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
@@ -163,6 +164,7 @@ async fn vector_index_survives_reopen() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 2,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();

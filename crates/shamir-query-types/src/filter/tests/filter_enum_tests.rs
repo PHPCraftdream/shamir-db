@@ -44,9 +44,13 @@ fn vector_similarity_serde_round_trip() {
         field: vec!["emb".to_string()],
         query: vec![1.0, 0.0, 0.5],
         k: 10,
+        ef_search: None,
+        oversample: None,
     };
     match &f {
-        Filter::VectorSimilarity { field, query, k } => {
+        Filter::VectorSimilarity {
+            field, query, k, ..
+        } => {
             assert_eq!(field, &["emb"]);
             assert_eq!(query.len(), 3);
             assert_eq!(*k, 10);
@@ -55,6 +59,89 @@ fn vector_similarity_serde_round_trip() {
     }
     let f2 = roundtrip_filter(&f);
     assert_eq!(f, f2);
+}
+
+/// V1.1 back-compat: a msgpack payload that OMITS `ef_search`/`oversample`
+/// (old client) MUST deserialize with both fields = `None`. The server never
+/// rejects a pre-V1.1 VectorSimilarity filter.
+///
+/// We build the "old" payload by serializing a `VectorSimilarity` with both
+/// `None` fields — `skip_serializing_if = "Option::is_none"` ensures the
+/// produced bytes contain NO `ef_search` / `oversample` keys at all (verified
+/// by `vector_similarity_none_fields_omitted_from_wire`). We then decode those
+/// bytes back, which is exactly the shape a pre-V1.1 client would emit.
+#[test]
+fn vector_similarity_back_compat_old_payload_without_ef_fields() {
+    let bare = Filter::VectorSimilarity {
+        field: vec!["emb".to_string()],
+        query: vec![1.0, 0.0, 0.5],
+        k: 10,
+        ef_search: None,
+        oversample: None,
+    };
+    let old_bytes = rmp_serde::to_vec_named(&bare).unwrap();
+    // Sanity: the bytes must NOT contain the ef_search / oversample keys.
+    let hex: String = old_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    assert!(
+        !hex.contains("65665f736561726368"),
+        "pre-V1.1 payload must omit ef_search key; bytes={hex}"
+    );
+    assert!(
+        !hex.contains("6f76657273616d706c65"),
+        "pre-V1.1 payload must omit oversample key; bytes={hex}"
+    );
+    // Decode back — both fields default to None.
+    let f: Filter = rmp_serde::from_slice(&old_bytes)
+        .expect("old VectorSimilarity payload must deserialize (back-compat)");
+    match f {
+        Filter::VectorSimilarity {
+            ef_search,
+            oversample,
+            ..
+        } => {
+            assert_eq!(ef_search, None, "missing ef_search must default to None");
+            assert_eq!(oversample, None, "missing oversample must default to None");
+        }
+        other => panic!("expected VectorSimilarity, got {other:?}"),
+    }
+}
+
+/// V1.1: full round-trip WITH both new fields set.
+#[test]
+fn vector_similarity_with_ef_and_oversample_round_trip() {
+    let f = Filter::VectorSimilarity {
+        field: vec!["emb".to_string()],
+        query: vec![1.0, 0.0],
+        k: 5,
+        ef_search: Some(400),
+        oversample: Some(2.0),
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let f2: Filter = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(f, f2);
+}
+
+/// V1.1: `skip_serializing_if = "Option::is_none"` means a `None`-field
+/// payload emits ZERO bytes for the field — wire identical to pre-V1.1.
+#[test]
+fn vector_similarity_none_fields_omitted_from_wire() {
+    let f = Filter::VectorSimilarity {
+        field: vec!["v".to_string()],
+        query: vec![0.0],
+        k: 1,
+        ef_search: None,
+        oversample: None,
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    assert!(
+        !hex.contains("65665f736561726368"),
+        "ef_search key must not appear when None; bytes={hex}"
+    );
+    assert!(
+        !hex.contains("6f76657273616d706c65"),
+        "oversample key must not appear when None; bytes={hex}"
+    );
 }
 
 #[test]

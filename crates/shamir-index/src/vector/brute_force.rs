@@ -19,7 +19,7 @@
 //! Search: top-k is computed with a bounded `BinaryHeap` of size k
 //! (O(N log k)) instead of a full sort over all N entries (O(N log N)).
 
-use super::adapter::{VectorAdapter, VectorError};
+use super::adapter::{SearchOpts, VectorAdapter, VectorError};
 use super::simd::{dot_product, l2_squared};
 use crate::kind::VectorMetric;
 use arc_swap::ArcSwap;
@@ -263,8 +263,14 @@ impl VectorAdapter for BruteForceAdapter {
         &self,
         query: &[f32],
         k: u32,
+        _opts: SearchOpts,
         staged: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        // BruteForce is EXACT KNN — there is no `ef` width knob (the
+        // traversal visits every vector). `opts.ef_search` and
+        // `opts.oversample` are accepted for API uniformity but are no-ops
+        // here. (oversample semantics land in P3 #404; ef_search is
+        // inherently approximate-search-only.)
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,

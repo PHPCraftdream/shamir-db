@@ -149,6 +149,7 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 10,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();

@@ -56,7 +56,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use shamir_bench_utils as bu;
 use shamir_bench_utils::vector_data::clustered_vectors;
 use shamir_engine::index2::kind::VectorMetric;
-use shamir_engine::index2::vector::adapter::VectorAdapter;
+use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
 use shamir_engine::index2::vector::brute_force::BruteForceAdapter;
 use shamir_engine::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_types::types::record_id::RecordId;
@@ -179,7 +179,7 @@ fn bench_cell(
         b.to_async(rt).iter(move || {
             let hnsw = Arc::clone(&hnsw);
             let q = q.clone();
-            async move { hnsw.search(&q, TOP_K, None).await.unwrap() }
+            async move { hnsw.search(&q, TOP_K, SearchOpts::default(), None).await.unwrap() }
         });
     });
 
@@ -190,7 +190,7 @@ fn bench_cell(
             b.to_async(rt).iter(move || {
                 let bf = Arc::clone(&bf);
                 let q = q.clone();
-                async move { bf.search(&q, TOP_K, None).await.unwrap() }
+                async move { bf.search(&q, TOP_K, SearchOpts::default(), None).await.unwrap() }
             });
         });
     }

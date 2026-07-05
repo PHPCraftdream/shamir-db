@@ -49,13 +49,24 @@ impl TableManager {
                     .await
                     .ok()
             }
-            Filter::VectorSimilarity { field, query, k } => {
+            Filter::VectorSimilarity {
+                field,
+                query,
+                k,
+                ef_search,
+                oversample,
+            } => {
+                use shamir_index::vector::SearchOpts;
                 let interned = intern_field_path(field, interner)?;
                 let backend = registry.find_by_field_and_kind(&interned, "vector").await?;
                 backend
                     .lookup(IndexQuery::Vector {
                         vec: query.clone(),
                         k: *k,
+                        opts: SearchOpts {
+                            ef_search: *ef_search,
+                            oversample: *oversample,
+                        },
                     })
                     .await
                     .ok()

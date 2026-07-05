@@ -7,7 +7,7 @@ pub mod hnsw_adapter;
 pub(crate) mod simd;
 pub mod vector_backend;
 
-pub use adapter::VectorAdapter;
+pub use adapter::{SearchOpts, VectorAdapter};
 pub use vector_backend::VectorBackend;
 
 #[cfg(test)]

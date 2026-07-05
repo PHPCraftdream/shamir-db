@@ -1,6 +1,6 @@
 use crate::kind::VectorMetric;
-use crate::vector::adapter::{VectorAdapter, VectorError};
-use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist};
+use crate::vector::adapter::{SearchOpts, VectorAdapter, VectorError};
+use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist, MAX_EF_SEARCH};
 use hnsw_rs::prelude::Distance;
 use shamir_collections::TFxSet;
 use shamir_types::types::record_id::RecordId;
@@ -38,7 +38,10 @@ async fn basic_cosine_search() {
     adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
     adapter.upsert(rid(3), &[0.9, 0.1, 0.0]).await.unwrap();
 
-    let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
+    let results = adapter
+        .search(&[1.0, 0.0, 0.0], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, rid(1));
     assert!(results[0].1 < 0.01);
@@ -76,7 +79,10 @@ async fn delete_removes_from_results() {
 
     adapter.delete(rid(0)).await.unwrap();
 
-    let results = adapter.search(&[0.0, 0.0], 10, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
 
     // Contract: the deleted rid must never surface.
     assert!(
@@ -105,7 +111,10 @@ async fn upsert_replaces() {
     adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
     adapter.upsert(rid(1), &[10.0, 10.0]).await.unwrap();
 
-    let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
+    let results = adapter
+        .search(&[10.0, 10.0], 1, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results[0].0, rid(1));
     assert!(results[0].1 < 0.01);
 }
@@ -167,7 +176,10 @@ async fn recall_at_10_on_1k_vectors() {
     dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
     let gt_top10: TFxSet<RecordId> = dists.iter().take(10).map(|(r, _)| *r).collect();
 
-    let hnsw_results = adapter.search(query, 10, None).await.unwrap();
+    let hnsw_results = adapter
+        .search(query, 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
 
     let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
@@ -191,14 +203,20 @@ async fn dim_mismatch_rejected() {
 async fn search_dim_mismatch_rejected() {
     let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
     adapter.upsert(rid(1), &[1.0, 2.0, 3.0]).await.unwrap();
-    let err = adapter.search(&[1.0, 2.0], 1, None).await.unwrap_err();
+    let err = adapter
+        .search(&[1.0, 2.0], 1, SearchOpts::default(), None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, VectorError::DimMismatch { .. }));
 }
 
 #[tokio::test]
 async fn empty_index_returns_empty() {
     let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-    let results = adapter.search(&[0.0, 0.0], 5, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 5, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert!(results.is_empty());
 }
 
@@ -246,7 +264,10 @@ async fn k_larger_than_dataset() {
     // k > dataset size returns every vector. The index is tiny, so search
     // runs the exact brute-force path (see `BRUTE_FORCE_MAX`) — fully
     // deterministic, no polling needed.
-    let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 100, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2, "search must return both inserted vectors");
 }
 
@@ -256,7 +277,10 @@ async fn huge_k_clamped_no_panic() {
     adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
     adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
     // k = u32::MAX would previously cause huge allocation
-    let results = adapter.search(&[0.0, 0.0], u32::MAX, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], u32::MAX, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -264,7 +288,10 @@ async fn huge_k_clamped_no_panic() {
 async fn k_zero_returns_empty() {
     let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
     adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-    let results = adapter.search(&[0.0, 0.0], 0, None).await.unwrap();
+    let results = adapter
+        .search(&[0.0, 0.0], 0, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert!(results.is_empty());
 }
 
@@ -295,7 +322,7 @@ async fn concurrent_searches_lock_free() {
         let a = std::sync::Arc::clone(&adapter);
         handles.push(tokio::spawn(async move {
             let q = random_vec(dim as usize, s + 100);
-            a.search(&q, 10, None).await.unwrap()
+            a.search(&q, 10, SearchOpts::default(), None).await.unwrap()
         }));
     }
     for h in handles {
@@ -330,7 +357,10 @@ async fn search_merges_staged_slice() {
     let staged = vec![(rid(2), vec![0.9, 0.1, 0.0])];
 
     // Without the staged slice: only the committed vector.
-    let committed_only = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+    let committed_only = adapter
+        .search(&[1.0, 0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     let committed_rids: TFxSet<_> = committed_only.iter().map(|(r, _)| *r).collect();
     assert!(committed_rids.contains(&rid(1)));
     assert!(
@@ -340,7 +370,7 @@ async fn search_merges_staged_slice() {
 
     // With the staged slice: both surface.
     let merged = adapter
-        .search(&[1.0, 0.0, 0.0], 10, Some(&staged))
+        .search(&[1.0, 0.0, 0.0], 10, SearchOpts::default(), Some(&staged))
         .await
         .unwrap();
     let merged_rids: TFxSet<_> = merged.iter().map(|(r, _)| *r).collect();
@@ -363,7 +393,10 @@ async fn apply_committed_vectors_inserts_all_into_graph() {
     );
 
     // Before apply — search finds nothing.
-    let before = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+    let before = adapter
+        .search(&[1.0, 0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(before.len(), 0, "graph empty before apply");
 
     // Apply a committed batch (what commit Phase 5d feeds in).
@@ -375,7 +408,10 @@ async fn apply_committed_vectors_inserts_all_into_graph() {
     adapter.apply_committed_vectors(&batch).await.unwrap();
 
     // After apply — the closest vector (rid 1 = the query) is findable.
-    let after = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+    let after = adapter
+        .search(&[1.0, 0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert!(
         !after.is_empty(),
         "graph must hold committed vectors after apply"
@@ -406,7 +442,10 @@ async fn apply_committed_vectors_handles_replace() {
 
     // A committed vector at [1,0,0].
     adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
-    let before = adapter.search(&[1.0, 0.0, 0.0], 1, None).await.unwrap();
+    let before = adapter
+        .search(&[1.0, 0.0, 0.0], 1, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(before[0].0, rid(1));
 
     // Apply a committed batch that replaces rid(1) with a new vector.
@@ -416,7 +455,10 @@ async fn apply_committed_vectors_handles_replace() {
         .unwrap();
 
     // Search for [0,1,0] -> should find rid(1) (updated position).
-    let after = adapter.search(&[0.0, 1.0, 0.0], 1, None).await.unwrap();
+    let after = adapter
+        .search(&[0.0, 1.0, 0.0], 1, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(after[0].0, rid(1));
     assert!(after[0].1 < 0.01, "should be very close to [0,1,0]");
 }
@@ -428,7 +470,10 @@ async fn many_upserts_same_rid() {
         adapter.upsert(rid(1), &[i as f32, 0.0]).await.unwrap();
     }
     // Only latest visible
-    let results = adapter.search(&[9.0, 0.0], 10, None).await.unwrap();
+    let results = adapter
+        .search(&[9.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     let matching: Vec<_> = results.iter().filter(|(r, _)| *r == rid(1)).collect();
     assert_eq!(
         matching.len(),
@@ -530,7 +575,10 @@ async fn upsert_same_rid_concurrent_no_duplicate() {
         //     near either staged vector. (Recall may legitimately miss it
         //     on a tiny random graph, but it must never appear twice.)
         for q in [&vec_a, &vec_b] {
-            let results = adapter.search(q, 16, None).await.unwrap();
+            let results = adapter
+                .search(q, 16, SearchOpts::default(), None)
+                .await
+                .unwrap();
             let occurrences = results.iter().filter(|(r, _)| *r == target).count();
             assert!(
                 occurrences <= 1,
@@ -556,7 +604,10 @@ async fn non_tx_search_unchanged_after_refactor() {
     adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
     adapter.upsert(rid(3), &[0.9, 0.1, 0.0]).await.unwrap();
 
-    let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
+    let results = adapter
+        .search(&[1.0, 0.0, 0.0], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, rid(1));
 }
@@ -596,7 +647,10 @@ async fn upsert_batch_inserts_all_and_search_finds_them() {
 
         // Exact path: querying the first inserted vector returns it as top-1.
         let q = batch[0].1.clone();
-        let results = adapter.search(&q, 1, None).await.unwrap();
+        let results = adapter
+            .search(&q, 1, SearchOpts::default(), None)
+            .await
+            .unwrap();
         assert_eq!(
             results[0].0, batch[0].0,
             "brute-force path must find the exact nearest"
@@ -643,7 +697,10 @@ async fn upsert_batch_inserts_all_and_search_finds_them() {
         dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         let gt_top10: TFxSet<RecordId> = dists.iter().take(10).map(|(r, _)| *r).collect();
 
-        let hnsw_results = adapter.search(&query, 10, None).await.unwrap();
+        let hnsw_results = adapter
+            .search(&query, 10, SearchOpts::default(), None)
+            .await
+            .unwrap();
         let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
         let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
         assert!(
@@ -692,7 +749,10 @@ async fn upsert_batch_dim_mismatch_is_atomic() {
         "len must be unchanged after atomic-abort batch"
     );
     // None of the batch rids should be findable.
-    let results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+    let results = adapter
+        .search(&[1.0, 0.0, 0.0], 10, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert!(
         results.is_empty(),
         "no row from the aborted batch must be in the graph; got {results:?}"
@@ -785,7 +845,10 @@ async fn upsert_batch_concurrent_with_upsert_no_duplicate() {
 
         // (b) End-to-end: target appears at most once in search.
         for q in [&batch_vec_a, &single_vec_b] {
-            let results = adapter.search(q, 16, None).await.unwrap();
+            let results = adapter
+                .search(q, 16, SearchOpts::default(), None)
+                .await
+                .unwrap();
             let occurrences = results.iter().filter(|(r, _)| *r == target).count();
             assert!(
                 occurrences <= 1,
@@ -849,9 +912,224 @@ async fn upsert_batch_duplicate_rid_within_batch_last_wins() {
 
     // Last write wins: querying the LATER vector returns target as top-1, and
     // the earlier vector is tombstoned (removed from the brute-force scan).
-    let results = adapter.search(&vec_last, 1, None).await.unwrap();
+    let results = adapter
+        .search(&vec_last, 1, SearchOpts::default(), None)
+        .await
+        .unwrap();
     assert_eq!(
         results[0].0, target,
         "the later vector of a duplicated rid must be the surviving one"
     );
+}
+
+// ============================================================================
+// V1.1 — per-query ef_search (SearchOpts)
+// ============================================================================
+
+/// Per-query `ef_search` raises recall monotonically (statistical, not strict):
+/// on a 1k-vector HNSW graph, `ef_search = 400` yields recall@10 ≥
+/// `ef_search = 16`. We assert the non-strict inequality `recall_high ≥
+/// recall_low` — a strict `>` would be flaky given the unseedable layer RNG.
+///
+/// Ground truth is brute-force exact top-10 over the inserted set.
+#[tokio::test]
+async fn ef_search_higher_yields_at_least_as_good_recall() {
+    let dim = 8usize;
+    let n = 1000usize; // > BRUTE_FORCE_MAX → HNSW path
+
+    // Build a shared graph ONCE with a generous build-time ef so the graph
+    // is well-connected; recall differences come from the per-query ef only.
+    let adapter = HnswAdapter::new(
+        dim as u32,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: n + 100,
+            ef_construction: 400,
+            ef_search: 400, // build-time default (overridden per-query below)
+            ..Default::default()
+        },
+    );
+    let mut vecs: Vec<(RecordId, Vec<f32>)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut a = [0u8; 16];
+        a[12] = (i >> 24) as u8;
+        a[13] = (i >> 16) as u8;
+        a[14] = (i >> 8) as u8;
+        a[15] = (i & 0xFF) as u8;
+        let v = random_vec(dim, i as u64 * 31 + 7);
+        vecs.push((RecordId(a), v));
+    }
+    adapter.upsert_batch(&vecs).await.unwrap();
+    assert_eq!(adapter.len(), n);
+
+    // Held-out query (NOT one of the inserted vectors) for ground truth.
+    let query = random_vec(dim, 55555);
+
+    // Brute-force ground-truth top-10.
+    let mut dists: Vec<(RecordId, f32)> = vecs
+        .iter()
+        .map(|(r, v)| {
+            let d: f32 = query
+                .iter()
+                .zip(v.iter())
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
+            (*r, d)
+        })
+        .collect();
+    dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let gt: TFxSet<RecordId> = dists.iter().take(10).map(|(r, _)| *r).collect();
+
+    // Low ef → lower recall.
+    let r_low = adapter
+        .search(&query, 10, SearchOpts::with_ef_search(16), None)
+        .await
+        .unwrap();
+    let recall_low = gt
+        .iter()
+        .filter(|r| r_low.iter().any(|(rr, _)| rr == *r))
+        .count() as f64
+        / 10.0;
+
+    // High ef → higher recall (non-strict).
+    let r_high = adapter
+        .search(&query, 10, SearchOpts::with_ef_search(400), None)
+        .await
+        .unwrap();
+    let recall_high = gt
+        .iter()
+        .filter(|r| r_high.iter().any(|(rr, _)| rr == *r))
+        .count() as f64
+        / 10.0;
+
+    // Non-strict monotonicity: higher ef ≥ lower ef. A strict > would be flaky.
+    assert!(
+        recall_high >= recall_low,
+        "ef=400 recall={recall_high:.2} should be >= ef=16 recall={recall_low:.2}"
+    );
+    // Sanity: ef=400 should give reasonable recall on a 1k graph.
+    assert!(recall_high >= 0.5, "ef=400 recall={recall_high:.2} < 0.50");
+}
+
+/// `ef_search = None` (default SearchOpts) uses the adapter's build-time
+/// `HnswConfig::ef_search` (=50 default), NOT a zero. We verify by checking
+/// that the default SearchOpts search returns the same result count as an
+/// explicit ef=50 search.
+#[tokio::test]
+async fn ef_search_none_uses_build_time_default() {
+    let adapter = HnswAdapter::new(
+        2,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10,
+            ef_search: 50,
+            ..Default::default()
+        },
+    );
+    adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
+    adapter.upsert(rid(2), &[0.0, 1.0]).await.unwrap();
+
+    let r_default = adapter
+        .search(&[0.9, 0.1], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
+    let r_explicit = adapter
+        .search(&[0.9, 0.1], 2, SearchOpts::with_ef_search(50), None)
+        .await
+        .unwrap();
+    assert_eq!(r_default.len(), r_explicit.len());
+}
+
+/// `ef_search = u32::MAX` must NOT panic — it is clamped to `MAX_EF_SEARCH`
+/// (10_000) before being passed to `hnsw.search`. A huge ef behaves
+/// identically to `MAX_EF_SEARCH` for recall but cannot starve the worker.
+#[tokio::test]
+async fn ef_search_u32_max_clamped_not_panicked() {
+    let adapter = HnswAdapter::new(
+        2,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10,
+            ..Default::default()
+        },
+    );
+    adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
+    adapter.upsert(rid(2), &[0.0, 1.0]).await.unwrap();
+
+    // u32::MAX would overflow the overscan/ef arithmetic if not clamped.
+    let results = adapter
+        .search(&[1.0, 0.0], 1, SearchOpts::with_ef_search(u32::MAX), None)
+        .await
+        .expect("ef_search = u32::MAX must be clamped, not panic");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, rid(1));
+}
+
+/// `ef_search` clamped above `MAX_EF_SEARCH` behaves identically to
+/// `MAX_EF_SEARCH`. The adapter's internal clamp is
+/// `ef.min(MAX_EF_SEARCH).max(k)`.
+#[tokio::test]
+async fn ef_search_above_cap_clamps_to_cap() {
+    // On a graph large enough to hit the HNSW path (> BRUTE_FORCE_MAX), a
+    // per-query ef of MAX_EF_SEARCH+1 must not panic and must return results.
+    let dim = 4usize;
+    let n = 300usize; // > BRUTE_FORCE_MAX
+    let adapter = HnswAdapter::new(
+        dim as u32,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: n + 100,
+            ef_construction: 400,
+            ..Default::default()
+        },
+    );
+    let mut batch: Vec<(RecordId, Vec<f32>)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut a = [0u8; 16];
+        a[14] = (i >> 8) as u8;
+        a[15] = (i & 0xFF) as u8;
+        batch.push((RecordId(a), random_vec(dim, i as u64 * 7 + 3)));
+    }
+    adapter.upsert_batch(&batch).await.unwrap();
+
+    let q = random_vec(dim, 12345);
+    let above_cap = adapter
+        .search(&q, 10, SearchOpts::with_ef_search(MAX_EF_SEARCH + 1), None)
+        .await
+        .expect("ef above MAX_EF_SEARCH must clamp, not panic");
+    let at_cap = adapter
+        .search(&q, 10, SearchOpts::with_ef_search(MAX_EF_SEARCH), None)
+        .await
+        .unwrap();
+    // Same recall (both clamp to MAX_EF_SEARCH internally).
+    assert_eq!(above_cap.len(), at_cap.len());
+}
+
+/// `oversample` is accepted in SearchOpts but NOT consumed (P3 #404).
+/// Passing it must NOT error and must behave identically to `None`.
+#[tokio::test]
+async fn oversample_accepted_but_ignored() {
+    let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+    adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
+    adapter.upsert(rid(2), &[0.0, 1.0]).await.unwrap();
+
+    let with_oversample = adapter
+        .search(
+            &[0.7, 0.3],
+            2,
+            SearchOpts {
+                ef_search: None,
+                oversample: Some(3.0),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let without = adapter
+        .search(&[0.7, 0.3], 2, SearchOpts::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(with_oversample.len(), without.len());
+    assert_eq!(with_oversample[0].0, without[0].0);
 }

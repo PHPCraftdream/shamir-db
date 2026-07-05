@@ -271,6 +271,7 @@ async fn migrate_index2_vector() {
         .lookup(IndexQuery::Vector {
             vec: vec![1.0, 0.0, 0.0],
             k: 3,
+            opts: crate::index2::vector::SearchOpts::default(),
         })
         .await
         .unwrap();
