@@ -28,6 +28,9 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform"
   },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0"
+  },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0"
   }
