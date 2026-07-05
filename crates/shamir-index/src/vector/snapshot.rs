@@ -56,6 +56,8 @@ use crate::kind::VectorMetric;
 use crate::meta_envelope::MetaEnvelope;
 use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::{HnswAdapter, ShamirDist};
+use crate::vector::quantized_dist::ShamirDistU8;
+use crate::vector::sq8::Sq8Quantizer;
 use bytes::Bytes;
 use futures::StreamExt;
 use hnsw_rs::api::AnnT;
@@ -77,10 +79,35 @@ use thiserror::Error;
 /// scan over 1 MiB.
 const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
 
+// Re-export QuantMeta so callers (and tests) can reach it as
+// `crate::vector::snapshot::QuantMeta` — the snapshot codec owns the
+// quantization-on-wire contract.
+pub use crate::vector::quant_meta::QuantMeta;
+
 /// Format version stamped into the sidecar and manifest. Bumped only on a
 /// breaking layout change. The envelope ALSO carries a version (for the
 /// outer wrapper); this one is the inner snapshot-layout version.
-pub(crate) const SNAPSHOT_FORMAT_VERSION: u16 = 1;
+///
+/// V5.3 (#412): bumped 1 → 2. A v2 sidecar MAY carry a `quantization:
+/// Some(bincode(QuantMeta))` field; the u8 graph (if quantized) is stored
+/// as additional chunks under the same generation. A v2 sidecar with
+/// `quantization == None` is semantically equivalent to a v1 snapshot
+/// (non-quantized f32 path). The load path accepts BOTH v1 and v2
+/// (back-compat — see [`SNAPSHOT_SUPPORTED_VERSIONS`]).
+pub(crate) const SNAPSHOT_FORMAT_VERSION: u16 = 2;
+
+/// Snapshot format versions this build can load. V5.3 (#412) accepts both
+/// v1 (the original f32-only codec) and v2 (the quantization-aware codec).
+/// A dump from a future v3 is refused with `VersionMismatch`. A v1 dump
+/// loads on a v2 build via the back-compat path: no quantization meta is
+/// present, so the adapter is constructed un-fitted (f32-only) — exactly
+/// the pre-#412 behaviour.
+pub(crate) const SNAPSHOT_SUPPORTED_VERSIONS: &[u16] = &[1, 2];
+
+/// The V5.3 (#412) marker stamped into `QuantMeta::method` for the SQ8
+/// quantizer. A future method (PQ, BQ) would use a different string and a
+/// different load branch.
+pub(crate) const QUANT_METHOD_SQ8: &str = "sq8";
 
 /// The `hnsw_rs` crate version this codec understands. Pinned to the exact
 /// patch in `Cargo.toml` (the pin comment there explains why). `hnsw_rs`
@@ -100,6 +127,22 @@ const DUMP_BASENAME_SEED: &str = "shamir";
 /// makes lexicographic key order == numeric order (so a prefix scan walks
 /// chunks in order without a comparator).
 const CHUNK_IDX_WIDTH: usize = 6;
+
+/// V5.3 (#412) — Carrier for the quantized-dump manifest fields produced by
+/// the u8-graph dump branch of [`dump_snapshot_with_gen`]. Stashed in a local
+/// so the manifest writer below can populate `qgraph_chunks`/`qdata_chunks`/
+/// `qbasename` without re-reading the sidecar.
+struct QuantDumpInfo {
+    /// The `QuantMeta` to be bincode-encoded into the sidecar's
+    /// `quantization` field.
+    meta: QuantMeta,
+    /// Basename returned by `file_dump` for the u8 graph.
+    qbasename: String,
+    /// Number of chunks the `.hnsw.graph` (u8) file was sliced into.
+    qgraph_chunks: u32,
+    /// Number of chunks the `.hnsw.data` (u8) file was sliced into.
+    qdata_chunks: u32,
+}
 
 /// Keyspace tag layout. `<keyspace>` is caller-supplied (the engine will pass
 /// the vector index's own keyspace). All records the codec writes live under
@@ -189,7 +232,18 @@ pub struct SnapshotSidecar {
     /// a foreign version by comparing against the build-time constant.
     pub hnsw_rs_version: String,
     /// RESERVED (P5 quantization). Always `None` in V2.1.
+    ///
+    /// V5.3 (#412): `Some(bincode(QuantMeta))` for a quantized v2 snapshot;
+    /// `None` for a non-quantized (or v1) snapshot.
+    #[serde(default)]
     pub quantization: Option<Vec<u8>>,
+    /// V5.3 (#412): `internal -> u8 codes` for a fitted quantized adapter.
+    /// Empty for a non-quantized snapshot. The u8 graph dump carries its own
+    /// copy of the codes inside `Point<T>` DataPoints, but the graph does
+    /// NOT expose a `get_vector(id)` accessor — so this map is the
+    /// authoritative source for rescore + brute-force on load.
+    #[serde(default)]
+    pub vectors_u8: Vec<(usize, Vec<u8>)>,
     /// crc32 over the concatenation `[graph_file_bytes, data_file_bytes]` —
     /// a cross-section integrity check independent of the per-chunk crc32s.
     pub sections_crc32: u32,
@@ -215,6 +269,11 @@ pub struct SnapshotSidecar {
 /// `next_delta_idx` (so every chunk written so far is absorbed + pruned).
 /// A `0` value means "no delta has been absorbed" — either a fresh V2.1
 /// snapshot, or a V2.3 snapshot taken before any delta chunks existed.
+///
+/// V5.3 (#412): `qgraph_chunks`/`qdata_chunks` carry the chunk counts for the
+/// quantized u8 graph dump. They are `0` for a non-quantized snapshot (the
+/// `qgraph`/`qdata` sections are absent). For a quantized v2 snapshot they
+/// point at the `<keyspace>.g<N>.{qgraph|qdata}.KKKK` chunks.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SnapshotManifest {
     /// Inner snapshot-layout version.
@@ -225,10 +284,23 @@ pub struct SnapshotManifest {
     pub graph_chunks: u32,
     /// Number of chunks the `.hnsw.data` file was sliced into.
     pub data_chunks: u32,
+    /// V5.3 (#412): number of chunks the quantized `.hnsw.graph` (u8) file
+    /// was sliced into. `0` for a non-quantized snapshot.
+    #[serde(default)]
+    pub qgraph_chunks: u32,
+    /// V5.3 (#412): number of chunks the quantized `.hnsw.data` (u8) file
+    /// was sliced into. `0` for a non-quantized snapshot.
+    #[serde(default)]
+    pub qdata_chunks: u32,
     /// Basename `hnsw_rs::file_dump` ACTUALLY used for this dump. `DumpInit`
     /// can uniquify the basename on a name collision, so we MUST store the
     /// returned name — the load path rebuilds the temp files under this name.
     pub basename: String,
+    /// V5.3 (#412): basename used for the quantized u8 graph dump (when
+    /// `qgraph_chunks > 0`). Stored separately because `DumpInit` may
+    /// uniquify it independently of the f32 basename.
+    #[serde(default)]
+    pub qbasename: String,
     /// Number of delta chunks absorbed into the snapshot's graph (V2.3 / #402).
     /// On restart, replay walks only chunks with index `>= delta_applied_upto`.
     /// `0` = no delta absorbed yet (fresh snapshot). Set to `next_delta_idx`
@@ -302,15 +374,24 @@ pub async fn dump_snapshot(
 /// Same as [`dump_snapshot`] but lets the caller pick the generation index.
 /// The generation flip in #402 will call this with the next gen; V2.1's
 /// `dump_snapshot` always uses `0`.
+///
+/// V5.3 (#412): For a fitted quantized adapter (`adapter.is_quantized()`),
+/// this dumps the u8 graph into a SECOND pair of chunk sections
+/// (`qgraph`/`qdata`) under the same generation AND stamps the quantizer
+/// params into the sidecar (`quantization = Some(bincode(QuantMeta))`). For
+/// a non-quantized adapter, the dump is identical to the pre-#412 codec
+/// (only `graph`/`data` sections, `quantization = None`).
 pub async fn dump_snapshot_with_gen(
     adapter: &HnswAdapter,
     store: &Arc<dyn Store>,
     keyspace: &str,
     gen: u32,
 ) -> Result<(), SnapshotError> {
-    // ---- 1. file_dump in a TempDir (CPU/IO) ------------------------------
+    // ---- 1. file_dump the f32 graph in a TempDir (CPU/IO) ----------------
     //
-    // `file_dump` is a TRAIT method — only callable after `use AnnT`.
+    // The f32 graph is ALWAYS dumped — it is the fallback path and the
+    // pre-quantization structure. `file_dump` is a TRAIT method — only
+    // callable after `use AnnT`.
     let hnsw = Arc::clone(adapter.hnsw_handle());
     let dump_dir = tempfile::tempdir()?;
     let dump_dir_path: PathBuf = dump_dir.path().to_path_buf();
@@ -345,6 +426,77 @@ pub async fn dump_snapshot_with_gen(
         slice_into_chunk_ops(&data_bytes, keyspace, gen, "data", &mut ops),
     );
 
+    // Cross-section crc32 over the f32 sections (graph + data). For a
+    // quantized dump the u8 sections get their OWN cross-section crc carried
+    // in `QuantMeta`-adjacent fields (we extend the sidecar crc to cover all
+    // sections — see below).
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&graph_bytes);
+    hasher.update(&data_bytes);
+
+    // ---- 2b. V5.3 (#412): dump the u8 graph for a fitted adapter ---------
+    //
+    // For a quantized adapter we file_dump the u8 graph into a SECOND pair
+    // of sections (`qgraph`/`qdata`) under a distinct basename. The sidecar
+    // carries the quantizer params so load can reconstruct ShamirDistU8 and
+    // the u8 graph together.
+    //
+    // `quant_dump` carries the manifest-side fields (chunk counts + basename)
+    // out of the branch so the manifest writer below can populate them.
+    let quant_dump: Option<QuantDumpInfo> = if adapter.is_quantized() {
+        let q = adapter
+            .quantizer()
+            .ok_or_else(|| SnapshotError::Backend("fitted adapter has no quantizer".into()))?;
+        // Build a QuantMeta from the frozen quantizer.
+        let meta = QuantMeta::from_quantizer(q);
+        // Dump the u8 graph into the SAME TempDir under a distinct basename.
+        let hnsw_u8 = adapter
+            .hnsw_u8_handle()
+            .ok_or_else(|| SnapshotError::Backend("fitted adapter has no u8 graph".into()))?;
+        let dump_dir_path_q: PathBuf = dump_dir.path().to_path_buf();
+        let basename_seed_q = format!("{}q", DUMP_BASENAME_SEED);
+        let hnsw_u8_for_dump = Arc::clone(&hnsw_u8);
+        let qbasename = tokio::task::spawn_blocking(move || {
+            hnsw_u8_for_dump
+                .file_dump(&dump_dir_path_q, &basename_seed_q)
+                .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump (u8) failed: {e}")))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+        let qgraph_path = dump_dir.path().join(format!("{qbasename}.hnsw.graph"));
+        let qdata_path = dump_dir.path().join(format!("{qbasename}.hnsw.data"));
+        let qgraph_path_b = qgraph_path.clone();
+        let qdata_path_b = qdata_path.clone();
+        let (qgraph_bytes, qdata_bytes) = tokio::task::spawn_blocking(move || {
+            let g = std::fs::read(&qgraph_path_b)?;
+            let d = std::fs::read(&qdata_path_b)?;
+            Ok::<_, SnapshotError>((g, d))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+        // Slice + crc the u8 sections.
+        let (qgraph_chunks, qdata_chunks) = (
+            slice_into_chunk_ops(&qgraph_bytes, keyspace, gen, "qgraph", &mut ops),
+            slice_into_chunk_ops(&qdata_bytes, keyspace, gen, "qdata", &mut ops),
+        );
+
+        // Extend the cross-section crc32 over the u8 sections too, so a
+        // section-key-swap (qgraph chunk mis-attributed to graph) is caught.
+        hasher.update(&qgraph_bytes);
+        hasher.update(&qdata_bytes);
+
+        Some(QuantDumpInfo {
+            meta,
+            qbasename,
+            qgraph_chunks,
+            qdata_chunks,
+        })
+    } else {
+        None
+    };
+
     // ---- 3. build the sidecar --------------------------------------------
     //
     // Read adapter state via the pub(crate) accessors + cursor scans. The
@@ -364,14 +516,23 @@ pub async fn dump_snapshot_with_gen(
     let mut vectors: Vec<(usize, Vec<f32>)> = Vec::new();
     adapter.for_each_vector(|internal, v| vectors.push((internal, v.to_vec())));
 
-    // Cross-section crc32: hash both concatenated file byte streams. This is
-    // independent of the per-chunk crc32s, so a chunk-key-swap (graph chunk
-    // mis-attributed to data or vice versa) is caught here even if both
-    // chunks' own crcs are valid.
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&graph_bytes);
-    hasher.update(&data_bytes);
+    // V5.3 (#412): for a fitted adapter, also serialise the u8 codes
+    // (`vectors_u8`) into the sidecar. The u8 graph dump carries its own
+    // copy of the codes inside `Point<T>` DataPoints, but the graph does
+    // NOT expose a `get_vector(id)` accessor — so the sidecar's `vectors_u8`
+    // is the authoritative source for rescore + brute-force on load.
+    let mut vectors_u8: Vec<(usize, Vec<u8>)> = Vec::new();
+    if adapter.is_quantized() {
+        adapter.for_each_vector_u8(|internal, codes| vectors_u8.push((internal, codes.to_vec())));
+    }
+
     let sections_crc32 = hasher.finalize();
+
+    // Encode the quantization sidecar blob (if any).
+    let quantization_blob: Option<Vec<u8>> = match &quant_dump {
+        Some(info) => Some(bincode::serialize(&info.meta)?),
+        None => None,
+    };
 
     let hnsw_handle = adapter.hnsw_handle();
     let sidecar = SnapshotSidecar {
@@ -388,10 +549,12 @@ pub async fn dump_snapshot_with_gen(
         tombstones,
         vectors,
         hnsw_rs_version: HNSW_RS_VERSION.to_string(),
-        quantization: None,
+        quantization: quantization_blob,
         sections_crc32,
         graph_len: graph_bytes.len() as u64,
         data_len: data_bytes.len() as u64,
+        // V5.3 (#412): carry the u8 codes for the quantized path.
+        vectors_u8,
     };
     let sidecar_env = MetaEnvelope::new(sidecar);
     let sidecar_bytes = sidecar_env
@@ -403,12 +566,27 @@ pub async fn dump_snapshot_with_gen(
     ));
 
     // ---- 4. build the manifest -------------------------------------------
+    //
+    // V5.3 (#412): populate `qgraph_chunks`/`qdata_chunks`/`qbasename` for a
+    // quantized dump (extracted from the `QuantDumpInfo` stashed by the dump
+    // branch).
+    let (qgraph_chunks, qdata_chunks, qbasename) = match &quant_dump {
+        Some(info) => (
+            info.qgraph_chunks,
+            info.qdata_chunks,
+            info.qbasename.clone(),
+        ),
+        None => (0u32, 0u32, String::new()),
+    };
     let manifest = SnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
         gen,
         graph_chunks,
         data_chunks,
+        qgraph_chunks,
+        qdata_chunks,
         basename: basename.clone(),
+        qbasename,
         // V2.1 dumps (gen 0, no delta log in play) carry `delta_applied_upto
         // = 0`. The generation-flip path (`flip_generation`) overrides this
         // with the index of the last delta chunk it just absorbed + pruned.
@@ -504,16 +682,20 @@ fn map_meta_err(e: crate::meta_envelope::MetaError) -> SnapshotError {
 /// `delta_applied_upto` BEFORE loading the snapshot) and by the background
 /// snapshot flip (`run_background_snapshot` reads the current gen + chunk
 /// counts to drive the prune).
+///
+/// V5.3 (#412): accepts both v1 and v2 manifests (see
+/// [`SNAPSHOT_SUPPORTED_VERSIONS`]). A v3+ manifest is refused with
+/// `VersionMismatch`.
 pub async fn read_manifest(
     store: &Arc<dyn Store>,
     keyspace: &str,
 ) -> Result<SnapshotManifest, SnapshotError> {
     let manifest_bytes = store.get(manifest_key(keyspace)).await?;
     let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).map_err(map_meta_err)?;
-    if manifest.format_version != SNAPSHOT_FORMAT_VERSION {
+    if !SNAPSHOT_SUPPORTED_VERSIONS.contains(&manifest.format_version) {
         return Err(SnapshotError::VersionMismatch(format!(
-            "snapshot format version {} does not match supported {}",
-            manifest.format_version, SNAPSHOT_FORMAT_VERSION
+            "snapshot format version {} not in supported set {:?}",
+            manifest.format_version, SNAPSHOT_SUPPORTED_VERSIONS
         )));
     }
     Ok(manifest)
@@ -523,6 +705,21 @@ pub async fn read_manifest(
 /// `HnswAdapter`. Reads manifest → chunks (with per-chunk crc verify) →
 /// sidecar (with cross-section crc verify) → temp files → `HnswIo` →
 /// `Box::leak` → `Hnsw<'static>` → `HnswAdapter::from_parts`.
+///
+/// V5.3 (#412): for a quantized v2 snapshot (`sidecar.quantization.is_some()`
+/// AND `manifest.qgraph_chunks > 0`), this ALSO:
+///  * decodes the `QuantMeta` from `sidecar.quantization` and reconstructs
+///    the [`Sq8Quantizer`];
+///  * fetches + verifies the `qgraph`/`qdata` chunks, writes them to temp
+///    files, and reloads the u8 graph via `HnswIo::load_hnsw_with_dist` with
+///    a fresh [`ShamirDistU8`] built from the reconstructed quantizer;
+///  * assembles the adapter via [`HnswAdapter::from_parts_with_quantization`]
+///    so `is_fitted == true`, the u8 graph + quantizer + `vectors_u8` are
+///    all live, and post-load search goes the quantized path.
+///
+/// Accepts both v1 and v2 sidecars (back-compat). A v1 sidecar has
+/// `quantization == None` and no qgraph sections → the load is identical to
+/// the pre-#412 path.
 pub async fn load_snapshot(
     store: &Arc<dyn Store>,
     keyspace: &str,
@@ -534,14 +731,14 @@ pub async fn load_snapshot(
     // ---- 2. sidecar ------------------------------------------------------
     let sidecar_bytes = store.get(sidecar_key(keyspace, gen)).await?;
     let sidecar: SnapshotSidecar = MetaEnvelope::open(&sidecar_bytes).map_err(map_meta_err)?;
-    if sidecar.format_version != SNAPSHOT_FORMAT_VERSION {
+    if !SNAPSHOT_SUPPORTED_VERSIONS.contains(&sidecar.format_version) {
         return Err(SnapshotError::VersionMismatch(format!(
-            "sidecar format version {} does not match supported {}",
-            sidecar.format_version, SNAPSHOT_FORMAT_VERSION
+            "sidecar format version {} not in supported set {:?}",
+            sidecar.format_version, SNAPSHOT_SUPPORTED_VERSIONS
         )));
     }
 
-    // ---- 3. fetch + verify + reassemble both files -----------------------
+    // ---- 3. fetch + verify + reassemble both f32 files -------------------
     //
     // The chunk keys for a given (gen, section) are sequential 0..N — we
     // build them from the manifest's chunk count, fetch them via `get_many`
@@ -569,11 +766,6 @@ pub async fn load_snapshot(
     let mut hasher = crc32fast::Hasher::new();
     hasher.update(&graph_bytes);
     hasher.update(&data_bytes);
-    if hasher.finalize() != sidecar.sections_crc32 {
-        return Err(SnapshotError::Corrupt(
-            "cross-section crc32 mismatch".to_string(),
-        ));
-    }
     if graph_bytes.len() as u64 != sidecar.graph_len {
         return Err(SnapshotError::Corrupt(format!(
             "graph length mismatch: expected {}, got {}",
@@ -589,7 +781,56 @@ pub async fn load_snapshot(
         )));
     }
 
-    // ---- 4. write temp files, Box::leak HnswIo, load graph (CPU/IO) ------
+    // ---- 3b. V5.3 (#412): fetch + verify the u8 graph sections -----------
+    //
+    // For a quantized snapshot the qgraph/qdata chunks are present. We
+    // reassemble + crc them here, then extend the cross-section crc32 to
+    // cover them (the dump path hashed all four sections together).
+    let quant_meta: Option<QuantMeta> = match &sidecar.quantization {
+        Some(blob) => {
+            let meta: QuantMeta = bincode::deserialize(blob)?;
+            // Refuse an unknown method — we only know "sq8" today.
+            if meta.method != QUANT_METHOD_SQ8 {
+                return Err(SnapshotError::VersionMismatch(format!(
+                    "unknown quantization method {} (supported: {})",
+                    meta.method, QUANT_METHOD_SQ8
+                )));
+            }
+            Some(meta)
+        }
+        None => None,
+    };
+
+    let (qgraph_bytes, qdata_bytes) = if manifest.qgraph_chunks > 0 {
+        let mut qgraph_keys: Vec<RecordKey> = Vec::with_capacity(manifest.qgraph_chunks as usize);
+        for i in 0..manifest.qgraph_chunks as usize {
+            qgraph_keys.push(chunk_key(keyspace, gen, "qgraph", i));
+        }
+        let mut qdata_keys: Vec<RecordKey> = Vec::with_capacity(manifest.qdata_chunks as usize);
+        for i in 0..manifest.qdata_chunks as usize {
+            qdata_keys.push(chunk_key(keyspace, gen, "qdata", i));
+        }
+        let qg_vals = store.get_many(qgraph_keys).await?;
+        let qd_vals = store.get_many(qdata_keys).await?;
+        let qg = reassemble_and_verify(&qg_vals, "qgraph")?;
+        let qd = reassemble_and_verify(&qd_vals, "qdata")?;
+        (qg, qd)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // Extend the cross-section crc32 over the u8 sections (the dump path
+    // hashed all four sections together; a non-quant snapshot hashes only
+    // the f32 pair, matching the pre-#412 behaviour).
+    hasher.update(&qgraph_bytes);
+    hasher.update(&qdata_bytes);
+    if hasher.finalize() != sidecar.sections_crc32 {
+        return Err(SnapshotError::Corrupt(
+            "cross-section crc32 mismatch".to_string(),
+        ));
+    }
+
+    // ---- 4. write temp files, Box::leak HnswIo, load f32 graph (CPU/IO) --
     let load_dir = tempfile::tempdir()?;
     let graph_path = load_dir
         .path()
@@ -613,6 +854,7 @@ pub async fn load_snapshot(
     let rid_to_internal_pairs = sidecar.rid_to_internal.clone();
     let tombstones = sidecar.tombstones.clone();
     let vectors_pairs = sidecar.vectors.clone();
+    let vectors_u8_pairs = sidecar.vectors_u8.clone();
 
     // Verify the dump came from a compatible `hnsw_rs` BEFORE we hand it to
     // the loader — `load_hnsw_with_dist` will panic on an unknown format.
@@ -669,6 +911,66 @@ pub async fn load_snapshot(
     // advisory — `get_*` reads them off the loaded structure.)
     debug_assert_build_params(&hnsw, m, max_layer, ef_construction);
 
+    // ---- 4b. V5.3 (#412): load the u8 graph (if quantized) ---------------
+    //
+    // Decode the QuantMeta → Sq8Quantizer → ShamirDistU8, write the qgraph/
+    // qdata temp files, and reload the u8 graph via a second `HnswIo`. The
+    // leaked HnswIo mirrors the f32 pattern (boot-only, one per shard).
+    //
+    // The carrier is a tuple `(u8 graph Arc, reconstructed quantizer Arc)` —
+    // both are needed to assemble the fitted adapter in step 5. We allow the
+    // `type_complexity` lint because the tuple is a local carrier, not a
+    // public signature.
+    #[allow(clippy::type_complexity)] // local carrier tuple — see comment above
+    let hnsw_u8_opt: Option<(Arc<Hnsw<'static, u8, ShamirDistU8>>, Arc<Sq8Quantizer>)> =
+        if let Some(meta) = &quant_meta {
+            // Reconstruct the quantizer from the stored params.
+            let quantizer = Arc::new(meta.to_quantizer());
+            let qbasename = manifest.qbasename.clone();
+            // The u8 graph temp files live in a SECOND TempDir so the f32
+            // TempDir's drop (which happens when the f32 spawn_blocking closure
+            // returns) does NOT delete the u8 files before we load them. We
+            // leak this TempDir for the same reason we leak the HnswIo: boot-
+            // only, one per shard. (The HnswIo loads the data INTO MEMORY, so
+            // the files are not needed after load completes — but the leak is
+            // defensive: if anyone enables mmap, the files survive.)
+            let qload_dir = tempfile::tempdir()?;
+            let qgraph_path = qload_dir.path().join(format!("{qbasename}.hnsw.graph"));
+            let qdata_path = qload_dir.path().join(format!("{qbasename}.hnsw.data"));
+            let qgraph_bytes_move = qgraph_bytes.clone();
+            let qdata_bytes_move = qdata_bytes.clone();
+            let quantizer_for_load = Arc::clone(&quantizer);
+            let hnsw_u8 = tokio::task::spawn_blocking(move || {
+                let mut qgf = std::fs::File::create(&qgraph_path)?;
+                qgf.write_all(&qgraph_bytes_move)?;
+                qgf.flush()?;
+                let mut qdf = std::fs::File::create(&qdata_path)?;
+                qdf.write_all(&qdata_bytes_move)?;
+                qdf.flush()?;
+                drop(qgf);
+                drop(qdf);
+
+                // Leak the TempDir so its files survive the HnswIo load. See the
+                // f32 path's leak comment for the rationale. The qload_dir
+                // itself is cheap (~a path + a dir handle); leaking one per shard
+                // at boot is acceptable.
+                let leaked_qdir: &'static tempfile::TempDir = Box::leak(Box::new(qload_dir));
+                let leaked_qio: &'static HnswIo =
+                    Box::leak(Box::new(HnswIo::new(leaked_qdir.path(), &qbasename)));
+                let dist_for_load = ShamirDistU8::new(quantizer_for_load, metric);
+                let hnsw_u8: Hnsw<'static, u8, ShamirDistU8> =
+                    leaked_qio.load_hnsw_with_dist(dist_for_load).map_err(|e| {
+                        SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist (u8) failed: {e}"))
+                    })?;
+                Ok::<_, SnapshotError>(Arc::new(hnsw_u8))
+            })
+            .await
+            .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+            Some((hnsw_u8, quantizer))
+        } else {
+            None
+        };
+
     // ---- 5. rebuild the adapter maps -------------------------------------
     let cap = rid_map_pairs.len().max(64);
     let rid_map = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
@@ -686,6 +988,30 @@ pub async fn load_snapshot(
     }
     for internal in tombstones {
         let _ = deleted.insert(internal, ());
+    }
+
+    // V5.3 (#412): if a u8 graph was loaded, assemble the fitted adapter.
+    if let Some((hnsw_u8, quantizer)) = hnsw_u8_opt {
+        // Rebuild the vectors_u8 map from the sidecar pairs.
+        let vectors_u8 = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
+        for (internal, codes) in vectors_u8_pairs {
+            let _ = vectors_u8.insert(internal, codes);
+        }
+        let adapter = HnswAdapter::from_parts_with_quantization(
+            dim,
+            metric,
+            ef_search,
+            hnsw,
+            rid_map,
+            rid_to_internal,
+            vectors,
+            deleted,
+            next_id,
+            hnsw_u8,
+            quantizer,
+            vectors_u8,
+        );
+        return Ok(adapter);
     }
 
     let adapter = HnswAdapter::from_parts(

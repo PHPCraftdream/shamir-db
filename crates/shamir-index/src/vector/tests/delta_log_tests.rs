@@ -292,7 +292,10 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
         gen: 1,
         graph_chunks: written.graph_chunks,
         data_chunks: written.data_chunks,
+        qgraph_chunks: written.qgraph_chunks,
+        qdata_chunks: written.qdata_chunks,
         basename: written.basename.clone(),
+        qbasename: written.qbasename.clone(),
         delta_applied_upto: 3, // all 3 chunks absorbed
     };
 
@@ -441,7 +444,10 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         gen: 1,
         graph_chunks: written.graph_chunks,
         data_chunks: written.data_chunks,
+        qgraph_chunks: written.qgraph_chunks,
+        qdata_chunks: written.qdata_chunks,
         basename: written.basename.clone(),
+        qbasename: written.qbasename.clone(),
         delta_applied_upto: 2, // both delta chunks (0 and 1) absorbed
     };
     let env_bytes = MetaEnvelope::new(crashed_manifest).encode().unwrap();
@@ -516,7 +522,10 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         gen: 2,
         graph_chunks: written2.graph_chunks,
         data_chunks: written2.data_chunks,
+        qgraph_chunks: written2.qgraph_chunks,
+        qdata_chunks: written2.qdata_chunks,
         basename: written2.basename,
+        qbasename: written2.qbasename.clone(),
         delta_applied_upto: 2, // covers the orphan chunks 0/1
     };
     snapshot::flip_generation(

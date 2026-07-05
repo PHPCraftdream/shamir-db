@@ -363,6 +363,71 @@ impl HnswAdapter {
         }
     }
 
+    /// V5.3 (#412) — Reconstruct a FITTED quantized adapter from snapshot
+    /// parts. Used by `snapshot::load` when the sidecar carries a
+    /// `quantization = Some(bincode(QuantMeta))` field and the manifest
+    /// points at `qgraph`/`qdata` sections (a quantized v2 snapshot).
+    ///
+    /// This is the load counterpart of the dump branch in
+    /// [`dump_snapshot_with_gen`](crate::vector::snapshot::dump_snapshot_with_gen):
+    /// it stitches the already-loaded u8 graph (`hnsw_u8`), the reconstructed
+    /// [`Sq8Quantizer`] (`quantizer`), and the sidecar's `vectors_u8` codes
+    /// into a live adapter with `is_fitted = true`. Post-load search and
+    /// upsert go through the quantized path immediately — no re-fit is
+    /// needed.
+    ///
+    /// `quantization` is set to `Some(Sq8)` so [`quantized_active`](Self::quantized_active)
+    /// returns `true` (it gates on `is_fitted && quantization.is_some()`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts_with_quantization(
+        dim: u32,
+        metric: VectorMetric,
+        ef_search: usize,
+        hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
+        rid_map: scc::HashMap<usize, RecordId, THasher>,
+        rid_to_internal: scc::HashMap<RecordId, usize, THasher>,
+        vectors: scc::HashMap<usize, Vec<f32>, THasher>,
+        deleted: scc::HashMap<usize, (), THasher>,
+        next_id: usize,
+        hnsw_u8: Arc<Hnsw<'static, u8, ShamirDistU8>>,
+        quantizer: Arc<Sq8Quantizer>,
+        vectors_u8: scc::HashMap<usize, Vec<u8>, THasher>,
+    ) -> Self {
+        #[allow(clippy::disallowed_methods)] // O(N) ack: one-time seed at snapshot load
+        let deleted_cnt = deleted.len();
+        Self {
+            dim,
+            metric,
+            ef_search,
+            // Mark the adapter as quantization-enabled so `quantized_active`
+            // (which gates on `is_fitted && quantization.is_some()`) returns
+            // true once `is_fitted` is flipped below.
+            quantization: Some(VectorQuantization::Sq8),
+            hnsw,
+            rid_map,
+            rid_to_internal,
+            vectors,
+            deleted,
+            deleted_count: AtomicUsize::new(deleted_cnt),
+            next_id: AtomicUsize::new(next_id),
+            compaction_deleted_rids: None,
+            // Install the u8 graph under the ArcSwapOption. We use `store`
+            // (Release) so the happens-before edge pairs with the Acquire
+            // load in `hnsw_u8_handle`.
+            hnsw_u8: arc_swap::ArcSwapOption::from(Some(hnsw_u8)),
+            vectors_u8,
+            // Publish the quantizer via the OnceLock — it is a write-once
+            // slot, and this is the single publish point on the load path.
+            quantizer: {
+                let lock = std::sync::OnceLock::new();
+                let _ = lock.set(quantizer);
+                lock
+            },
+            is_fitted: AtomicBool::new(true),
+            fit_in_flight: AtomicBool::new(false),
+        }
+    }
+
     /// Number of tombstoned internal ids (O(1) atomic mirror).
     #[allow(dead_code)] // API for #408 compaction trigger
     pub(crate) fn deleted_count(&self) -> usize {

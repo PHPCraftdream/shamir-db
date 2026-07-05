@@ -192,6 +192,10 @@ harness = false
 name = "vector_bulk_compaction"
 harness = false
 
+[[bench]]
+name = "quantization_f32_vs_sq8"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
