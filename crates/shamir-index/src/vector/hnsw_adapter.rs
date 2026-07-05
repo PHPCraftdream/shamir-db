@@ -123,6 +123,7 @@ pub struct HnswAdapter {
     /// entries are removed here on replace/delete.
     vectors: scc::HashMap<usize, Vec<f32>, THasher>,
     pub(crate) deleted: scc::HashMap<usize, (), THasher>,
+    deleted_count: AtomicUsize,
     next_id: AtomicUsize,
 }
 
@@ -146,6 +147,7 @@ impl HnswAdapter {
             rid_to_internal: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             vectors: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             deleted: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
+            deleted_count: AtomicUsize::new(0),
             next_id: AtomicUsize::new(0),
         }
     }
@@ -226,6 +228,8 @@ impl HnswAdapter {
         deleted: scc::HashMap<usize, (), THasher>,
         next_id: usize,
     ) -> Self {
+        #[allow(clippy::disallowed_methods)] // O(N) ack: one-time seed at snapshot load
+        let deleted_cnt = deleted.len();
         Self {
             dim,
             metric,
@@ -235,8 +239,41 @@ impl HnswAdapter {
             rid_to_internal,
             vectors,
             deleted,
+            deleted_count: AtomicUsize::new(deleted_cnt),
             next_id: AtomicUsize::new(next_id),
         }
+    }
+
+    /// Number of tombstoned internal ids (O(1) atomic mirror).
+    #[allow(dead_code)] // API for #408 compaction trigger
+    pub(crate) fn deleted_count(&self) -> usize {
+        self.deleted_count.load(Ordering::Relaxed)
+    }
+
+    /// Number of live vectors (O(1) = next_id - deleted_count).
+    ///
+    /// `saturating_sub`: `next_id` and `deleted_count` are two independent
+    /// Relaxed loads. `next_id` is bumped BEFORE its tombstone increment, so
+    /// globally `deleted_count <= next_id` always holds — but a reader can
+    /// observe a stale `next_id` with a fresher `deleted_count` under
+    /// concurrent replace/delete, which would underflow a plain subtraction.
+    /// Saturating keeps the heuristic cardinality at 0 in that transient
+    /// window instead of panicking (debug) / wrapping to usize::MAX (release).
+    #[allow(dead_code)] // API for #408 compaction trigger
+    pub(crate) fn live_count(&self) -> usize {
+        self.next_id
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.deleted_count.load(Ordering::Relaxed))
+    }
+
+    /// Ratio of tombstoned slots to total allocated ids (0.0 when empty).
+    #[allow(dead_code)] // API for #408 compaction trigger
+    pub(crate) fn deleted_ratio(&self) -> f64 {
+        let next = self.next_id.load(Ordering::Relaxed);
+        if next == 0 {
+            return 0.0;
+        }
+        self.deleted_count.load(Ordering::Relaxed) as f64 / next as f64
     }
 }
 
@@ -427,7 +464,9 @@ impl VectorAdapter for HnswAdapter {
                 Occupied(mut occ) => {
                     let old_internal = *occ.get();
                     // Tombstone the previous (or concurrently-serialised) internal.
-                    let _ = self.deleted.insert(old_internal, ());
+                    if self.deleted.insert(old_internal, ()).is_ok() {
+                        self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                    }
                     *occ.get_mut() = internal;
                     replaced = Some(old_internal);
                 }
@@ -512,7 +551,9 @@ impl VectorAdapter for HnswAdapter {
                         // earlier-in-this-batch) internal. Same rationale as
                         // single `upsert`: the transition is atomic per rid
                         // while the entry is held.
-                        let _ = self.deleted.insert(old_internal, ());
+                        if self.deleted.insert(old_internal, ()).is_ok() {
+                            self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                        }
                         *occ.get_mut() = internal;
                         replaced.push(old_internal);
                     }
@@ -560,7 +601,9 @@ impl VectorAdapter for HnswAdapter {
 
     async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-            let _ = self.deleted.insert_async(internal, ()).await;
+            if self.deleted.insert_async(internal, ()).await.is_ok() {
+                self.deleted_count.fetch_add(1, Ordering::Relaxed);
+            }
             let _ = self.rid_to_internal.remove_async(&rid).await;
             let _ = self.vectors.remove_async(&internal).await;
         }
@@ -670,9 +713,13 @@ impl VectorAdapter for HnswAdapter {
         self.dim
     }
 
-    #[allow(clippy::disallowed_methods)] // O(N) ack: deleted-tombstone count for live cardinality, off hot path
     fn len(&self) -> usize {
-        self.next_id.load(Ordering::Relaxed) - self.deleted.len()
+        // `saturating_sub`: two independent Relaxed loads; a stale `next_id`
+        // with a fresher `deleted_count` under concurrent replace/delete
+        // would underflow a plain subtraction (see `live_count`).
+        self.next_id
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.deleted_count.load(Ordering::Relaxed))
     }
 
     /// V2.3 (#402) — `HnswAdapter` IS the snapshot-able adapter. The
