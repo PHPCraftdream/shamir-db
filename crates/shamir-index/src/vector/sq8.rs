@@ -319,4 +319,37 @@ impl Sq8Quantizer {
     pub fn scales(&self) -> &[f32] {
         &self.scales
     }
+
+    /// V5.3 (#412) — Overwrite the fit-derived params with stored ones.
+    ///
+    /// Used by [`QuantMeta::to_quantizer`](crate::vector::quant_meta::QuantMeta::to_quantizer)
+    /// to restore a quantizer from a v2 snapshot sidecar without re-fitting
+    /// on the training data (which is not carried in the snapshot). The
+    /// `min_sq_sum` constant term is recomputed from the new `mins`
+    /// (an `O(dim)` pass). This is NOT a public API — it is `pub(crate)` and
+    /// exists solely for the snapshot load path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mins.len() != self.dim` or `scales.len() != self.dim`.
+    pub(crate) fn overwrite_params(&mut self, mins: &[f32], scales: &[f32]) {
+        assert_eq!(
+            mins.len(),
+            self.dim,
+            "overwrite_params: mins len {} != dim {}",
+            mins.len(),
+            self.dim
+        );
+        assert_eq!(
+            scales.len(),
+            self.dim,
+            "overwrite_params: scales len {} != dim {}",
+            scales.len(),
+            self.dim
+        );
+        self.mins = mins.to_vec();
+        self.scales = scales.to_vec();
+        // Recompute min_sq_sum = Σ min_i².
+        self.min_sq_sum = mins.iter().map(|m| m * m).sum();
+    }
 }

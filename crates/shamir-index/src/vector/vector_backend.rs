@@ -878,7 +878,10 @@ async fn run_background_snapshot(
         gen: written.gen,
         graph_chunks: written.graph_chunks,
         data_chunks: written.data_chunks,
+        qgraph_chunks: written.qgraph_chunks,
+        qdata_chunks: written.qdata_chunks,
         basename: written.basename,
+        qbasename: written.qbasename,
         delta_applied_upto: new_delta_applied_upto,
     };
 
