@@ -80,6 +80,8 @@ pub struct UniqueGuard {
 /// - **write_set** — per-table `StagingStore` buffers (set/remove ops).
 /// - **index_write_set** — accumulated `IndexWriteOp`s across all tables.
 /// - **staged_vectors** — per-table HNSW vectors awaiting commit.
+/// - **staged_vector_deletes** — per-table HNSW rids awaiting commit-time
+///   tombstone + `DeltaOp::Delete` (gap#1).
 /// - **interner_overlay** — new `(key_name → id)` mappings for this tx.
 /// - **counter_deltas** — per-table row-count adjustments.
 /// - **read_set** — SSI read tracking `(table_id, key) → version_seen`.
@@ -115,6 +117,17 @@ pub struct TxContext {
     /// abort — exactly like every other tx-local field. This is the home
     /// for vector staging: nothing lives outside the `TxContext` anymore.
     pub staged_vectors: TFxMap<u64, Vec<(RecordId, Vec<f32>)>>,
+
+    /// Per-table HNSW staged vector deletes. Key = table token (interned
+    /// table name). Each entry is a `RecordId` whose vector-backed row this
+    /// tx intends to delete, routed here by the executor's delete path
+    /// instead of into the live HNSW graph. Promoted into the graph
+    /// (adapter tombstone) + the durable delta log (`DeltaOp::Delete`)
+    /// atomically at commit (Phase 5d); discarded by RAII drop on abort —
+    /// the live graph is never touched until commit (gap#1 / HIGH-6).
+    /// Mirrors [`staged_vectors`](Self::staged_vectors) exactly, for the
+    /// delete side of the contract.
+    pub staged_vector_deletes: TFxMap<u64, Vec<RecordId>>,
 
     /// Interner overlay: new `(key_name → id)` mappings created during
     /// this tx. Merged into base interner on commit; dropped on abort.
@@ -257,6 +270,7 @@ impl TxContext {
             write_set: TFxMap::default(),
             index_write_set: Vec::new(),
             staged_vectors: TFxMap::default(),
+            staged_vector_deletes: TFxMap::default(),
             interner_overlay: scc::HashMap::with_hasher(THasher::default()),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: TFxMap::default(),
@@ -376,7 +390,8 @@ impl TxContext {
     /// Mirrors the per-field set that `wal_ops_from_tx`
     /// (`crates/shamir-engine/src/tx/commit.rs:236`) materialises into the
     /// WAL entry: per-table staging (`write_set`), accumulated index ops
-    /// (`index_write_set`), and tx-buffered HNSW vectors (`staged_vectors`).
+    /// (`index_write_set`), and tx-buffered HNSW vectors (`staged_vectors` +
+    /// `staged_vector_deletes`).
     /// Counters, interner overlay, read-set, table tokens and unique guards
     /// are bounded bookkeeping and intentionally excluded — the cap is there
     /// to protect the *payload* dimension.
@@ -412,6 +427,10 @@ impl TxContext {
                     .saturating_add(embedding.len().saturating_mul(4));
             }
         }
+        for dels in self.staged_vector_deletes.values() {
+            // 16 bytes of RecordId per staged vector delete (gap#1).
+            total = total.saturating_add(dels.len().saturating_mul(16));
+        }
         total
     }
 
@@ -420,6 +439,7 @@ impl TxContext {
         self.write_set.is_empty()
             && self.index_write_set.is_empty()
             && self.staged_vectors.is_empty()
+            && self.staged_vector_deletes.is_empty()
             && self.interner_overlay.is_empty()
             && self.counter_deltas.is_empty()
     }
@@ -593,6 +613,29 @@ impl TxContext {
     /// merge. `None` when the table has no staged vectors.
     pub fn staged_vectors_for(&self, table_token: u64) -> Option<&[(RecordId, Vec<f32>)]> {
         self.staged_vectors.get(&table_token).map(Vec::as_slice)
+    }
+
+    /// Stage a vector delete under this tx for the given table token
+    /// (gap#1 / HIGH-6). The rid is buffered tx-locally and applied to the
+    /// live graph (adapter tombstone) + the durable delta log
+    /// (`DeltaOp::Delete`) at commit (Phase 5d). A dropped/aborted tx
+    /// discards it (RAII) — the live graph is never touched until commit,
+    /// so no ghost appears. Mirrors [`stage_vector`](Self::stage_vector)
+    /// for the delete side of the contract.
+    pub fn stage_vector_delete(&mut self, table_token: u64, rid: RecordId) {
+        self.staged_vector_deletes
+            .entry(table_token)
+            .or_default()
+            .push(rid);
+    }
+
+    /// Vector deletes staged under this tx for `table_token`. `None` when
+    /// the table has no staged vector deletes. Used by Phase 5d to promote
+    /// the tombstones + delta ops.
+    pub fn staged_vector_deletes_for(&self, table_token: u64) -> Option<&[RecordId]> {
+        self.staged_vector_deletes
+            .get(&table_token)
+            .map(Vec::as_slice)
     }
 
     /// Attach a version provider used by commit_tx Phase 2 for SSI

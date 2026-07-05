@@ -349,3 +349,150 @@ async fn rebuild_from_store_batched_all_records_present() {
         _ => panic!("expected Ranked"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// gap#1 / HIGH-6 — apply_staged_vector_deletes (the tx-delete promote at
+// Phase 5d). Verifies the graph-side tombstone + the compaction double-write.
+// ---------------------------------------------------------------------------
+
+/// gap#1: `apply_staged_vector_deletes` tombstones each rid on the live
+/// graph so a subsequent search does NOT return it. Mirrors the insert
+/// promote's `apply_staged_vectors` for the delete side.
+#[tokio::test]
+async fn apply_staged_vector_deletes_tombstones_live_graph() {
+    let i = Interner::new();
+    let backend = make_backend(&i);
+
+    let r1 = RecordId::new();
+    let r2 = RecordId::new();
+    backend
+        .plan_insert(r1, &make_rec(&i, &[1.0, 0.0, 0.0]))
+        .await
+        .unwrap();
+    backend
+        .plan_insert(r2, &make_rec(&i, &[0.0, 1.0, 0.0]))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Both vectors searchable before the delete promote.
+    let pre = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![1.0, 0.0, 0.0],
+            k: 10,
+            opts: crate::vector::SearchOpts::default(),
+        })
+        .await
+        .unwrap();
+    match pre {
+        IndexResult::Ranked(ranked) => {
+            assert!(
+                ranked.iter().any(|(r, _)| *r == r1),
+                "r1 must be searchable before the delete promote"
+            );
+        }
+        _ => panic!("expected Ranked"),
+    }
+
+    // Promote the staged delete — tombstones r1 on the live graph.
+    backend.apply_staged_vector_deletes(&[r1]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // r1 must NOT surface; r2 survives.
+    let post = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![1.0, 0.0, 0.0],
+            k: 10,
+            opts: crate::vector::SearchOpts::default(),
+        })
+        .await
+        .unwrap();
+    match post {
+        IndexResult::Ranked(ranked) => {
+            assert!(
+                !ranked.iter().any(|(r, _)| *r == r1),
+                "gap#1: apply_staged_vector_deletes must tombstone r1 on the \
+                 live graph; got {:?}",
+                ranked
+            );
+        }
+        _ => panic!("expected Ranked"),
+    }
+    let post2 = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![0.0, 1.0, 0.0],
+            k: 10,
+            opts: crate::vector::SearchOpts::default(),
+        })
+        .await
+        .unwrap();
+    match post2 {
+        IndexResult::Ranked(ranked) => {
+            assert!(
+                ranked.iter().any(|(r, _)| *r == r2),
+                "r2 must survive the r1 delete promote"
+            );
+        }
+        _ => panic!("expected Ranked"),
+    }
+}
+
+/// gap#1 + #408: `apply_staged_vector_deletes` double-writes the delete to
+/// the compaction target with the ghost-race guard ordering (record
+/// `compaction_deleted_rids` BEFORE `target.adapter.delete`). Verifies the
+/// tombstone lands on the target too.
+#[tokio::test]
+async fn apply_staged_vector_deletes_double_writes_to_compaction_target() {
+    use crate::vector::vector_backend::AdapterSlot;
+
+    let i = Interner::new();
+    let backend = make_backend(&i);
+
+    let r1 = RecordId::new();
+    backend
+        .plan_insert(r1, &make_rec(&i, &[1.0, 0.0, 0.0]))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Arm a compaction target (Step 2 of run_background_compaction) — a
+    // fresh HnswAdapter with `compaction_deleted_rids` set.
+    let target_adapter: Arc<dyn VectorAdapter> = Arc::new(HnswAdapter::new_compaction_target(
+        3,
+        VectorMetric::Cosine,
+        HnswConfig::default(),
+    ));
+    // Backfill the live vector into the target so the delete has something
+    // to tombstone (mirrors Step 4a of run_background_compaction).
+    target_adapter.upsert(r1, &[1.0, 0.0, 0.0]).await.unwrap();
+
+    backend
+        .compaction_target_for_test()
+        .store(Some(Arc::new(AdapterSlot {
+            adapter: Arc::clone(&target_adapter),
+        })));
+
+    // Promote the staged delete — must tombstone r1 on BOTH the live graph
+    // AND the compaction target (double-write).
+    backend.apply_staged_vector_deletes(&[r1]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The compaction target must NOT return r1 (the delete was
+    // double-written, so a subsequent generation flip will not resurrect
+    // the ghost).
+    let target_hits = target_adapter
+        .search(
+            &[1.0, 0.0, 0.0],
+            10,
+            crate::vector::SearchOpts::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !target_hits.iter().any(|(r, _)| *r == r1),
+        "gap#1+#408: apply_staged_vector_deletes must double-write the \
+         tombstone to the compaction target; target returned {:?}",
+        target_hits
+    );
+}

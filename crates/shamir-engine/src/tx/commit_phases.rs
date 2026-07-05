@@ -272,8 +272,22 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
         .map(|(t, v)| (*t, v.clone()))
         .collect::<Vec<_>>();
     for (token, vecs) in vector_batches {
+        // gap#1: gather this table's staged vector deletes so they ride
+        // the SAME commit-ack promote pass as the inserts. A replace
+        // (delete old + insert new on the same rid) lands BOTH here: the
+        // old rid in `deleted` and the new embedding in `vecs`. Order is
+        // apply-deletes-then-inserts inside `apply_vector_batch`, which is
+        // the inverse-direction-safe order for HNSW (a tombstone followed
+        // by an upsert on the same rid leaves the NEW vector live —
+        // `upsert` re-inserts the node; `delete` first is a no-op on a
+        // not-yet-inserted node, so either order converges, but
+        // delete-then-insert matches the replace intent literally).
+        let deleted: Vec<shamir_types::types::record_id::RecordId> = tx
+            .staged_vector_deletes_for(token)
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
         if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_batch(repo, token, &vecs, tx_id)
+            apply_vector_batch(repo, token, &vecs, &deleted, tx_id)
         })
         .await
         {
@@ -282,6 +296,33 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
             // reconciles via `VectorBackend::rebuild` on the next open.
             log::warn!(
                 "commit_tx Phase 5d (hnsw promote, post-lock) failed for tx {tx_id} \
+                 commit_version {commit_version} table {token}: {e}; the live graph \
+                 lags until rebuild-on-open reconciles it (tx stays COMMITTED + \
+                 materialized — NOT deferred)"
+            );
+        }
+    }
+
+    // gap#1: tables that have ONLY staged vector deletes (no staged
+    // inserts) still need their deletes promoted — otherwise a tx that
+    // deletes a vector-backed row without inserting a new one leaves a
+    // ghost in the live graph + delta. The loop above only visits tables
+    // present in `staged_vectors`; this second loop visits the
+    // delete-only tables.
+    let delete_only_batches = tx
+        .staged_vector_deletes
+        .iter()
+        .filter(|(t, dels)| !dels.is_empty() && !tx.staged_vectors.contains_key(t))
+        .map(|(t, dels)| (*t, dels.clone()))
+        .collect::<Vec<_>>();
+    for (token, deleted) in delete_only_batches {
+        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+            apply_vector_batch(repo, token, &[], &deleted, tx_id)
+        })
+        .await
+        {
+            log::warn!(
+                "commit_tx Phase 5d (hnsw delete promote, post-lock) failed for tx {tx_id} \
                  commit_version {commit_version} table {token}: {e}; the live graph \
                  lags until rebuild-on-open reconciles it (tx stays COMMITTED + \
                  materialized — NOT deferred)"
@@ -397,12 +438,23 @@ pub(crate) async fn apply_index_batch(
     Ok(())
 }
 
-/// Promote one table's staged HNSW vectors into the live graph (Phase 5d,
-/// post-lock — see [`promote_vectors`]).
+/// Promote one table's staged HNSW vectors + vector deletes into the live
+/// graph (Phase 5d, post-lock — see [`promote_vectors`]).
+///
+/// gap#1 / HIGH-6: `deleted` is this table's slice of staged vector-delete
+/// rids (`tx.staged_vector_deletes_for(token)`). The promote order is
+/// delete-then-insert: a replace (delete old + insert new on the same rid)
+/// converges to the NEW vector live (HNSW `upsert` re-inserts a tombstoned
+/// node; `delete` on a not-yet-inserted node is a no-op, so either order is
+/// safe, but delete-then-insert matches the replace intent literally). The
+/// deleted rids are ALSO handed to `append_vector_delta` so a restart
+/// replays the tombstone over the base snapshot (durable
+/// `DeltaOp::Delete`).
 pub(crate) async fn apply_vector_batch(
     repo: &RepoInstance,
     token: u64,
     vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
+    deleted: &[shamir_types::types::record_id::RecordId],
     _tx_id: u64,
 ) -> Result<(), DbError> {
     // Test-only failure injection: simulate a persistent post-lock HNSW
@@ -420,42 +472,42 @@ pub(crate) async fn apply_vector_batch(
     if let Some(tbl) = repo.table_by_token(token).await? {
         let info_store = tbl.info_store().clone();
         for backend in tbl.index2_registry().all_backends().await {
+            // gap#1: tombstone the deleted rids on the live graph FIRST,
+            // so a replace (same rid) leaves the NEW vector live after the
+            // insert promote below. `apply_staged_vector_deletes` is a
+            // no-op for non-vector backends.
+            if !deleted.is_empty() {
+                backend
+                    .apply_staged_vector_deletes(deleted)
+                    .await
+                    .map_err(|e| {
+                        DbError::Internal(format!(
+                            "hnsw apply_staged_vector_deletes at commit: {e}"
+                        ))
+                    })?;
+            }
             backend.apply_staged_vectors(vecs).await.map_err(|e| {
                 DbError::Internal(format!("hnsw apply_staged_vectors at commit: {e}"))
             })?;
-            // V2.3 (#402) — durable delta-log append + snapshot trigger. The
-            // delta chunk captures the vectors just promoted so a restart
-            // replays them over the base snapshot. The append is ONE
-            // `Store::set` (§5.6 — cheap, runs on the ack path). The
-            // snapshot trigger is a `tokio::spawn` when the threshold is
-            // crossed (§5.6 — the dump itself is off the ack path).
+            // V2.3 (#402) — durable delta-log append + snapshot trigger.
+            // The delta chunk captures the vectors just promoted AND the
+            // deletes just tombstoned so a restart replays both over the
+            // base snapshot. The append is ONE `Store::set` (§5.6 — cheap,
+            // runs on the ack path). The snapshot trigger is a
+            // `tokio::spawn` when the threshold is crossed (§5.6 — the
+            // dump itself is off the ack path).
             //
-            // `deleted` is empty here: the tx path's vector deletes go
-            // through `plan_delete` (non-tx) or are not promoted (tx);
-            // neither is staged in `staged_vectors`, so there is no delete
-            // batch to append at Phase 5d.
-            //
-            // gap#1 (V2.4 — DEFERRED): wiring tx-path vector deletes here is
-            // an explicit follow-up. The `TxContext` has no `staged_deletes`
-            // field for vectors today; a tx that deletes a row backed by a
-            // vector index routes through `plan_delete_tx` → `index_write_set`
-            // (RemovePosting-style ops), NOT through the HNSW promote path.
-            // Threading the deleted rids for vector-backed tables into this
-            // call requires (a) collecting them from the tx write_set /
-            // index_write_set, (b) filtering to tables whose backends are
-            // `VectorBackend`, and (c) ensuring the graph-side delete already
-            // ran (the delta chunk is the durable echo of an in-memory
-            // mutation — see DeltaOp::Delete contract in snapshot.rs). That
-            // is a multi-layer wiring job the P2-closing sheet chose not to
-            // risk. The MECHANISM is proven:
-            // `delta_log_tests::append_vector_delta_with_deleted_slice_persists_and_replays_delete`
-            // pins that `append_vector_delta(.., deleted=[rid])` writes a
-            // `DeltaOp::Delete` that is replayed on restart. When gap#1
-            // variant-A lands, replace the `&[]` below with the collected
-            // deleted-rid slice. See VECTOR_PRODUCTION_EXECUTION.md (P2
-            // follow-ups).
+            // gap#1 (variant-A, landed): tx-path vector deletes are now
+            // staged in `TxContext::staged_vector_deletes`, promoted into
+            // the live graph above, and handed here as `deleted` so the
+            // delta chunk carries a durable `DeltaOp::Delete` per rid. A
+            // restart replays the delete over the base snapshot
+            // (`replay_delta` applies `DeltaOp::Delete` via
+            // `adapter.delete`), closing the post-restart ghost. The
+            // mechanism was proven by
+            // `delta_log_tests::append_vector_delta_with_deleted_slice_persists_and_replays_delete`.
             backend
-                .append_vector_delta(&info_store, vecs, &[])
+                .append_vector_delta(&info_store, vecs, deleted)
                 .await
                 .map_err(|e| DbError::Internal(format!("delta append at commit: {e}")))?;
             backend.trigger_snapshot_check(&info_store);

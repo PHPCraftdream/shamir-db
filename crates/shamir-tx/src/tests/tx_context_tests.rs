@@ -61,6 +61,49 @@ fn stage_vector_buffers_per_table() {
 }
 
 #[test]
+fn stage_vector_delete_buffers_per_table() {
+    // gap#1 / HIGH-6: the delete mirror of stage_vector_buffers_per_table.
+    let mut ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    ctx.stage_vector_delete(10, RecordId([0u8; 16]));
+    ctx.stage_vector_delete(10, RecordId([1u8; 16]));
+    ctx.stage_vector_delete(20, RecordId([2u8; 16]));
+
+    assert_eq!(
+        ctx.staged_vector_deletes_for(10).map(<[_]>::len),
+        Some(2),
+        "two deletes staged under table 10"
+    );
+    assert_eq!(
+        ctx.staged_vector_deletes_for(20).map(<[_]>::len),
+        Some(1),
+        "one delete staged under table 20"
+    );
+    assert_eq!(
+        ctx.staged_vector_deletes_for(30),
+        None,
+        "no deletes staged under an untouched table"
+    );
+    assert!(
+        !ctx.is_empty(),
+        "staged vector deletes make the tx non-empty"
+    );
+}
+
+#[test]
+fn staged_vector_deletes_accounted_in_staged_bytes() {
+    // gap#1: each staged delete rid accounts for 16 bytes of RecordId.
+    let mut ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    let before = ctx.staged_bytes();
+    ctx.stage_vector_delete(1, RecordId([0u8; 16]));
+    let after = ctx.staged_bytes();
+    assert_eq!(
+        after,
+        before + 16,
+        "one staged delete rid must add 16 bytes to the staged footprint"
+    );
+}
+
+#[test]
 fn is_empty_after_mutation() {
     let mut ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
     assert!(ctx.is_empty());

@@ -88,6 +88,62 @@ impl TableManager {
         }
     }
 
+    /// HIGH-6 / gap#1: route any HNSW vector delete carried by `rec` into
+    /// the tx's own `staged_vector_deletes` buffer instead of the live
+    /// graph. Mirrors [`stage_vectors`] for the delete side: each vector
+    /// backend checks whether `rec` carries a vector at its field path
+    /// (`IndexBackend::staged_vector`); if so, the rid lands under this
+    /// table's token. Promoted into the graph (adapter tombstone) + the
+    /// durable delta log (`DeltaOp::Delete`) atomically at commit
+    /// (Phase 5d), discarded by RAII on abort. A record that carries no
+    /// vector at a backend's field path returns `None` and contributes
+    /// nothing — so a non-vector-backed delete is a no-op here, and the
+    /// non-tx path (which forwards to `plan_delete`) is untouched.
+    pub(super) async fn stage_vector_delete<R>(
+        &self,
+        rid: RecordId,
+        rec: &R,
+        tx: &mut shamir_tx::TxContext,
+    ) where
+        R: RecordRef + Sync,
+    {
+        let token = self.table_token();
+        for backend in self.index2_registry.all_backends().await {
+            if backend.staged_vector(rid, rec).await.is_some() {
+                tx.stage_vector_delete(token, rid);
+            }
+        }
+    }
+
+    /// gap#1 (update branch): stage a vector DELETE for every vector backend
+    /// whose embedding field the update REMOVES — `old` carried a vector at
+    /// the backend's field path, `new` does not. Mirrors the non-tx
+    /// `plan_update`'s `else`-branch tombstone (which the tx path otherwise
+    /// loses): without this, a tx UPDATE that drops the embedding field
+    /// leaves the old vector live in the graph (a ghost that also survives
+    /// restart, since no `DeltaOp::Delete` is appended). A backend where
+    /// `new` still carries a vector contributes nothing here — the staged
+    /// insert (`stage_vectors`) replaces it at promote time.
+    pub(super) async fn stage_vector_deletes_on_update<Old, New>(
+        &self,
+        rid: RecordId,
+        old: &Old,
+        new: &New,
+        tx: &mut shamir_tx::TxContext,
+    ) where
+        Old: RecordRef + Sync,
+        New: RecordRef + Sync,
+    {
+        let token = self.table_token();
+        for backend in self.index2_registry.all_backends().await {
+            if backend.staged_vector(rid, old).await.is_some()
+                && backend.staged_vector(rid, new).await.is_none()
+            {
+                tx.stage_vector_delete(token, rid);
+            }
+        }
+    }
+
     /// Collect index ops from all index2 backends for an update.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
@@ -737,6 +793,14 @@ impl TableManager {
         // HIGH-6: stage the new vector tx-locally (apply_committed_vectors
         // upsert-replaces the prior committed entry at commit time).
         self.stage_vectors(id, value, tx).await;
+        // gap#1 (update branch): if the update REMOVES the embedding field,
+        // stage a vector delete — otherwise the old vector stays live in the
+        // graph as a ghost (the tx path has no non-tx `plan_update` else-
+        // branch tombstone). See `stage_vector_deletes_on_update`.
+        if let Some(old_val) = &old {
+            self.stage_vector_deletes_on_update(id, old_val, value, tx)
+                .await;
+        }
 
         self.stage_mutation(
             StagedMutation {
@@ -870,8 +934,14 @@ impl TableManager {
     /// zero-copy `RecordView` lens (no `InnerValue` tree decode), stages
     /// Remove. Returns `true` if a record was present.
     ///
-    /// HIGH-6: see `insert_tx` for the staging contract and the
-    /// commit-time application gap.
+    /// HIGH-6 / gap#1: any vector the deleted row carries is routed
+    /// tx-locally into `tx.staged_vector_deletes` (via
+    /// [`stage_vector_delete`](Self::stage_vector_delete), the delete
+    /// mirror of the insert path's `stage_vectors`). The tx-aware
+    /// `plan_delete_tx` is a no-op on the live graph for a tx, so a
+    /// dropped/aborted tx leaves no ghost. At commit (Phase 5d) the staged
+    /// delete is promoted into the graph (`adapter.delete`) AND the durable
+    /// delta log (`DeltaOp::Delete`).
     pub async fn delete_tx(
         &self,
         id: RecordId,
@@ -899,11 +969,19 @@ impl TableManager {
         // tests), RecordView::new fails; fall back to a full InnerValue
         // decode so the planners still see the value and produce correct
         // (typically empty) index ops.
+        //
+        // gap#1 / HIGH-6: in BOTH branches we also stage any vector
+        // delete the record carries into `tx.staged_vector_deletes` — the
+        // delete mirror of the insert path's `stage_vectors`. This is the
+        // sole staging path for tx vector deletes; the tx-aware
+        // `plan_delete_tx` is a no-op on the live graph for a tx (like
+        // `plan_insert_tx`), so a dropped/aborted tx leaves no ghost.
         let tx_id = Some(tx.tx_id);
         let index_ops = match RecordView::new(&old_bytes) {
             Ok(old_view) => {
                 let mut ops = self.plan_delete_ops(id, &old_view, tx_id).await?;
                 ops.extend(self.plan_legacy_delete_ops(id, &old_view).await?);
+                self.stage_vector_delete(id, &old_view, tx).await;
                 ops
             }
             Err(_) => {
@@ -916,6 +994,7 @@ impl TableManager {
                 })?;
                 let mut ops = self.plan_delete_ops(id, &old_inner, tx_id).await?;
                 ops.extend(self.plan_legacy_delete_ops(id, &old_inner).await?);
+                self.stage_vector_delete(id, &old_inner, tx).await;
                 ops
             }
         };
