@@ -939,3 +939,130 @@ async fn vr6_non_quant_compaction_stays_f32() {
     assert_eq!(new.live_count(), 300);
     assert_eq!(new.deleted_count(), 0);
 }
+
+// ===========================================================================
+// Post-VR-8 follow-up — delete-vs-backfill same-rid race (found by the final
+// 10x `@vector @engine --full` stress gate, then confirmed by @sh
+// adversarial review of the `backfill_if_absent` per-item dispatch fix).
+//
+// `backfill_if_absent`'s self-migration re-check (mirrors `upsert`, Б-1/#423)
+// MUST guard the claim on `!self.deleted.contains(&internal)`, exactly like
+// `upsert` does — without the guard, a concurrent `delete(r)` on the SAME rid
+// backfill just claimed (reachable via the double-write compaction protocol)
+// tombstones `internal` (bumping `migrated_pre_flip` once via
+// `bump_migrated_on_tombstone`) BEFORE backfill's own re-check runs; the
+// re-check's claim then wins a SECOND time (vectors_u8 was never populated
+// by the tombstone path) and bumps `migrated_pre_flip` again — a double
+// count that can trip the catch-up loop's `migrated >= target` convergence
+// early, and inserts a live graph node for an already-tombstoned internal.
+//
+// This is deliberately NOT covered by `stress_concurrent_mutations_during_
+// quantized_compaction` above — that test's delete workers only ever target
+// rids THEY themselves inserted via double-write (rids >= n_initial), never
+// the rids backfill_if_absent is concurrently processing (rids < n_initial).
+// This test closes exactly that gap: delete workers race the SAME rid range
+// backfill is backfilling, for the whole duration of the backfill call.
+// ===========================================================================
+#[tokio::test]
+async fn backfill_delete_same_rid_race_no_double_count() {
+    // Hang guard (matches the codebase convention for this test class, e.g.
+    // `concurrent_upsert_with_tombstone_across_fit_does_not_hang`): a
+    // convergence bug must surface as an actionable test FAILURE within a
+    // bounded window, never as an indefinite hang burning CI/dev wall-clock.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let dim = 8u32;
+        let target = Arc::new(HnswAdapter::new_compaction_target_quantized(
+            dim,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 5000,
+                ..Default::default()
+            },
+            Some(VectorQuantization::Sq8),
+        ));
+
+        // The exact rid range backfill_if_absent will process — deliberately
+        // BELOW FIT_THRESHOLD (256) alone, so the flip must come from the
+        // concurrent upsert workers below (crossing threshold via THEIR OWN
+        // deferred-fit trigger), landing mid-backfill-loop — exactly the
+        // window the (now-fixed) missing guard left open. Kept small: this
+        // test only needs ONE delete to land inside the narrow race window,
+        // not scale for its own sake — a large item count just multiplies
+        // real spawn_blocking round-trips without improving reproduction odds.
+        let n_backfill = 40u16;
+        let backfill_items: Vec<(RecordId, Vec<f32>)> = (0..n_backfill)
+            .map(|i| (rid(i), random_vec(dim as usize, i as u64)))
+            .collect();
+
+        let backfill_target = Arc::clone(&target);
+        let backfill_handle = tokio::spawn(async move {
+            backfill_target
+                .backfill_if_absent(&backfill_items)
+                .await
+                .unwrap();
+        });
+
+        // Push the target past FIT_THRESHOLD via a DIFFERENT rid range so
+        // the adapter's own deferred-fit fires concurrently with (not
+        // after) backfill's loop above.
+        let mut upsert_handles = Vec::new();
+        for w in 0..4u16 {
+            let target = Arc::clone(&target);
+            upsert_handles.push(tokio::spawn(async move {
+                for i in 0..70u16 {
+                    let r = rid(1000 + w * 100 + i);
+                    let _ = target
+                        .upsert(r, &random_vec(dim as usize, (2000 + w * 100 + i) as u64))
+                        .await;
+                }
+            }));
+        }
+
+        // Race deletes against the SAME rid range backfill is backfilling —
+        // the missing guard's failure window is narrow (between backfill's
+        // Vacant claim and its self-migration re-check), so a handful of
+        // concurrent passes over the small range is enough to have a
+        // realistic shot at landing inside it without inflating runtime.
+        let mut delete_handles = Vec::new();
+        for _ in 0..4u16 {
+            let target = Arc::clone(&target);
+            delete_handles.push(tokio::spawn(async move {
+                for i in 0..n_backfill {
+                    let _ = target.delete(rid(i)).await;
+                }
+            }));
+        }
+
+        backfill_handle.await.unwrap();
+        for h in upsert_handles {
+            h.await.unwrap();
+        }
+        for h in delete_handles {
+            h.await.unwrap();
+        }
+
+        target
+    })
+    .await;
+
+    let target = result.expect(
+        "backfill_delete_same_rid_race_no_double_count timed out (30s) — \
+         convergence never reached migrated_pre_flip >= next_id_at_flip, \
+         a regression in the catch-up loop or the claim-guard fix",
+    );
+
+    // The invariant a double-count would violate: migrated_pre_flip must
+    // never exceed next_id_at_flip once fitted. (Pre-fix, this could also
+    // manifest as `backfill_if_absent` itself returning an Internal error
+    // — the `.unwrap()` above already guards that regression class.)
+    if target.is_quantized() {
+        let (migrated, target_count) = target.test_convergence_counters();
+        assert!(
+            migrated <= target_count,
+            "migrated_pre_flip ({migrated}) exceeded next_id_at_flip \
+             ({target_count}) — double-counted a claim (missing \
+             !self.deleted.contains(&internal) guard in backfill_if_absent's \
+             self-migration re-check)"
+        );
+    }
+}
