@@ -380,6 +380,22 @@ pub(super) async fn post_publish_cleanup(
     }
 }
 
+/// CRIT-2 (#436) test-injection seam: when set to `true`, force
+/// `interner_delta_safe_to_truncate` to return `Ok(false)` (unsafe),
+/// simulating an interner delta id that is NOT yet persisted. Mirrors
+/// the `FAIL_HISTORY_SEED_TX_ID` pattern in `recovery.rs` but is a
+/// simple boolean latch because the regression test needs to gate the
+/// WHOLE A5 decision, not a single txn (the drainer's Phase C pass
+/// calls the gate once per entry; a static-atomic latch flips ALL of
+/// them in one pass).
+///
+/// `#[cfg(debug_assertions)]` so a `--release` build pays zero cost —
+/// the static is absent and the load branch is elided. Tests MUST
+/// reset to `false` between runs to avoid cross-test bleed.
+#[cfg(debug_assertions)]
+pub(crate) static FORCE_A5_UNSAFE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A5 interner-hwm gate: true iff WAL truncation for an entry carrying this
 /// interner delta max-id is safe — i.e. the repo's persisted interner
 /// high-water mark covers the entry's max id.
@@ -400,6 +416,14 @@ pub(crate) async fn interner_delta_safe_to_truncate(
     repo: &RepoInstance,
     interner_delta_max_id: Option<u64>,
 ) -> shamir_storage::error::DbResult<bool> {
+    // CRIT-2 (#436) test-injection: force UNSAFE so the drainer's
+    // truncation-ceiling fix can be exercised. The whole branch is
+    // `#[cfg(debug_assertions)]` so release builds elide it.
+    #[cfg(debug_assertions)]
+    if FORCE_A5_UNSAFE.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(false);
+    }
+
     let Some(max_id) = interner_delta_max_id else {
         return Ok(true);
     };

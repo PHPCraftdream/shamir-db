@@ -101,6 +101,37 @@ pub struct Drainer {
     /// recovered via gap-reseed). Bounded slack ≤ concurrent committer
     /// count.
     window_depth: AtomicUsize,
+    /// CRIT-2 (#436): every entry version whose A5 interner-hwm gate has
+    /// EVER reported unsafe and has not yet been individually reconfirmed
+    /// safe. Keyed by `commit_version`, value is the entry's interner-delta
+    /// max id (`0` = none, matching `entry_interner_max_id`'s `None`;
+    /// interner ids are 1-based — see
+    /// `interner_manager.rs::persisted_high_water`).
+    ///
+    /// This is the SINGLE authoritative source for the truncation ceiling:
+    /// `ceiling = min(durable_watermark, min_key(pending_unsafe) - 1)`,
+    /// recomputed fresh on every call, never cached as a per-call local. Two
+    /// earlier (rejected, @sh-caught) designs both failed under concurrent
+    /// `drain_step` callers sharing one `Drainer` via `repo.drainer()` (the
+    /// ambient background loop races any explicit `drain_all` caller):
+    ///   1. A per-call `truncation_ceiling` local seeded from
+    ///      `durable_watermark()` read at call start — poisoned by a
+    ///      CONCURRENT call's `mark_durable` advancing the SAME watermark
+    ///      for still-unsafe entries before this call computed its ceiling.
+    ///   2. A single `unsafe_floor_version` "first-unsafe-only" latch —
+    ///      only ever recorded the FIRST entry to trip unsafe; a LATER
+    ///      still-unsafe entry in a subsequent pass silently had no floor
+    ///      to latch onto (the single-slot floor was already occupied), so
+    ///      once the FIRST entry's delta was confirmed safe, truncation
+    ///      jumped straight to `durable_watermark` — past the second
+    ///      entry's still-unpersisted delta.
+    ///
+    /// A concurrent map (lock-free, `scc::TreeIndex`) that tracks EVERY
+    /// pending-unsafe version and re-derives the ceiling as "one below the
+    /// smallest still-pending version" closes both gaps: it is always
+    /// exhaustive (every unsafe entry is tracked, not just the first) and
+    /// always current (no per-call snapshot to go stale).
+    pending_unsafe: TreeIndex<u64, u64>,
 }
 
 impl Default for Drainer {
@@ -120,6 +151,7 @@ impl Drainer {
             offer_dropped_total: AtomicU64::new(0),
             recover_calls: AtomicU64::new(0),
             window_depth: AtomicUsize::new(0),
+            pending_unsafe: TreeIndex::new(),
         }
     }
 
@@ -244,8 +276,13 @@ impl Drainer {
         let gate = repo.tx_gate().await?;
         let vis = gate.last_committed();
         let dur = gate.durable_watermark();
-        // Nothing visible is un-durable → nothing to drain.
+        // Nothing visible is un-durable → nothing new to REPLAY. But CRIT-2
+        // (#436): truncation may still be pending on an entry whose A5 gate
+        // tripped unsafe in an earlier pass — the interner can catch up
+        // without any new commit, so re-settle `pending_unsafe` and attempt
+        // truncation here before bailing out.
         if dur >= vis {
+            self.settle_and_truncate(repo).await?;
             return Ok(0);
         }
 
@@ -430,6 +467,7 @@ impl Drainer {
         // ================================================================
 
         let mut drained = 0usize;
+
         for (entry, (v, touched_tables)) in window_entries.iter().zip(entry_tables.iter()) {
             // Contiguity: stop at the first entry that touches a failed table.
             // Entries above this version must not be finalized (the watermark
@@ -449,23 +487,23 @@ impl Drainer {
             // has NOT yet run. Recovery re-replays idempotently.
             crate::tx::commit::maybe_crash("drain_replay", repo).await;
 
-            // The value is now durable in history -> advance the durable
-            // watermark (contiguous; safe to call redundantly).
-            gate.mark_durable(*v);
-            drained += 1;
-
-            // A5 interner-hwm gate, then truncate the inflight marker.
+            // CRIT-2 (@sh round-2 finding): the A5 interner-hwm gate MUST be
+            // checked and `pending_unsafe` populated BEFORE `mark_durable`
+            // runs, not after. `interner_delta_safe_to_truncate` is a
+            // genuine `.await` (over `repo.repo_interner().await?`) — if
+            // `mark_durable(*v)` ran first, a CONCURRENT `settle_and_truncate`
+            // call (the ambient background drainer racing this explicit
+            // call, both sharing one `Drainer` via `repo.drainer()`, no
+            // mutex between them) could observe `durable_watermark == v`
+            // with `pending_unsafe` NOT YET containing `v` — computing a
+            // ceiling that includes `v` before this call ever gets to
+            // protect it. Checking A5 and inserting into `pending_unsafe`
+            // FIRST closes that window: by the time `durable_watermark`
+            // advances to cover `v`, `pending_unsafe` already protects it if
+            // unsafe.
             let delta_max_id = entry_interner_max_id(entry);
-            match interner_delta_safe_to_truncate(repo, delta_max_id).await {
-                Ok(true) => {
-                    if let Err(e) = wal.commit(entry.txn_id).await {
-                        log::warn!(
-                            "drain_step: wal.commit(tx {}) failed: {e}; \
-                             marker left inflight (data already durable)",
-                            entry.txn_id
-                        );
-                    }
-                }
+            let a5_safe = match interner_delta_safe_to_truncate(repo, delta_max_id).await {
+                Ok(true) => true,
                 Ok(false) => {
                     log::debug!(
                         "drain_step: tx {} commit_version {} drained to history but \
@@ -473,11 +511,49 @@ impl Drainer {
                         entry.txn_id,
                         v
                     );
+                    false
                 }
                 Err(e) => {
                     log::warn!(
                         "drain_step: A5 interner-hwm check for tx {} failed: {e}; \
                          conservatively retaining marker",
+                        entry.txn_id
+                    );
+                    false
+                }
+            };
+            if !a5_safe {
+                // CRIT-2: record every A5-unsafe entry into the shared
+                // `pending_unsafe` set — NOT just the first one — so
+                // `settle_and_truncate`'s ceiling computation (`min(durable,
+                // min_key(pending_unsafe) - 1)`) is always exhaustive over
+                // every still-unpersisted interner delta, not just the
+                // earliest. Inserted BEFORE `mark_durable` below (see the
+                // comment above) so no concurrent truncation attempt can
+                // ever observe `v` as durable without also seeing it as
+                // protected.
+                let _ = self.pending_unsafe.insert(*v, delta_max_id.unwrap_or(0));
+            }
+
+            // The value is now durable in history -> advance the durable
+            // watermark (contiguous; safe to call redundantly).
+            //
+            // NOTE (CRIT-2): `mark_durable` advancing here does NOT imply the
+            // WAL segment holding this entry is safe to truncate — the A5
+            // gate above (and `pending_unsafe`, populated before this call)
+            // decides that. F6b uses `settle_and_truncate`'s ceiling, not
+            // `durable_watermark` directly.
+            gate.mark_durable(*v);
+            drained += 1;
+
+            // Truncate the inflight marker now that both mark_durable and
+            // the pending_unsafe bookkeeping above are settled for this
+            // entry.
+            if a5_safe {
+                if let Err(e) = wal.commit(entry.txn_id).await {
+                    log::warn!(
+                        "drain_step: wal.commit(tx {}) failed: {e}; \
+                         marker left inflight (data already durable)",
                         entry.txn_id
                     );
                 }
@@ -508,48 +584,122 @@ impl Drainer {
             // instead of letting it grow without limit. Lock-free: each
             // `gc_overlay_to` is a B+-tree sweep with no `.await` and no shared
             // mutex (see `MvccStore::gc_overlay_to`).
+            //
+            // CRIT-2 (#436): overlay GC uses `durable_watermark` (read
+            // visibility) — the overlay copy is redundant once the value is in
+            // `history`, which is independent of WAL-segment truncation. Only
+            // F6b below must use the interner-safe ceiling.
             let durable = gate.durable_watermark();
             repo.per_table_mvcc().scan(|_, mvcc| {
                 mvcc.gc_overlay_to(durable);
             });
 
-            // F6b — WAL truncation. Every record with `commit_version <=
-            // durable` is now durable in `history`, so the sealed WAL
-            // segments holding only such records are reclaimable. The
-            // `has_truncatable` gate is CHEAP (a lock-held scan of the short
-            // sealed list, no I/O) and is USUALLY false: segments are large
-            // (`WAL_SEGMENT_MAX_BYTES`), so a sealed segment crosses the
-            // watermark only at a segment boundary, not on every drain pass.
-            //
-            // ORDER (I1/I2): history-flush BEFORE truncate. The drainer
-            // already advanced `durable` only after replaying each entry into
-            // `history` (`mark_durable`), but that write may sit in the page
-            // cache. Before unlinking a sealed segment we `fsync` `history`
-            // (narrow seam — `flush_all_history`, NOT `flush_buffers`, which
-            // would re-enter `drain_all` and recurse) so a power-loss after
-            // the unlink cannot lose the data (I2). Then delete the segments.
-            if wal.has_truncatable(durable) {
-                // F6c crash seam: BEFORE history-flush + unlink. A HARD crash
-                // here leaves EVERY sealed segment on disk (nothing unlinked
-                // yet) — recovery replays all of them idempotently and loses
-                // nothing (the data is also already in `history`).
-                crate::tx::commit::maybe_crash("pre_truncate", repo).await;
-                repo.flush_all_history().await?;
-                let removed = wal.truncate_below(durable).await?;
-                // F6c crash seam: AFTER a successful truncate. The unlinked
-                // segments are durable in `history` (flushed above, I2), so
-                // recovery from the survivors is correct and complete.
-                crate::tx::commit::maybe_crash("post_truncate", repo).await;
-                if removed > 0 {
-                    log::debug!(
-                        "drain_step: truncated {} sealed WAL segment(s) below durable {}",
-                        removed,
-                        durable
-                    );
-                }
-            }
+            // F6b — WAL truncation. `settle_and_truncate` computes the
+            // interner-safe ceiling (see `pending_unsafe`'s field doc) and
+            // performs the has_truncatable/flush/truncate_below/crash-seam
+            // sequence.
+            self.settle_and_truncate(repo).await?;
         }
         Ok(drained)
+    }
+
+    /// CRIT-2 (#436): re-check every version in `pending_unsafe` against the
+    /// CURRENT interner hwm (dropping any that are now confirmed safe), then
+    /// compute the truncation ceiling as `min(durable_watermark,
+    /// min_key(pending_unsafe) - 1)` and attempt F6b truncation up to it.
+    ///
+    /// Called both at the end of `drain_step`'s normal per-entry pass AND
+    /// from the `dur >= vis` early-return path — the interner can catch up
+    /// without any new commit (e.g. a background `InternerManager::persist`
+    /// tick), so truncation must be independently re-attempted even when
+    /// there is nothing new to replay; otherwise a pending-unsafe entry
+    /// would wedge truncation forever once `durable_watermark` reaches
+    /// `visibility`.
+    ///
+    /// Safe under concurrent callers (the ambient background loop AND any
+    /// explicit `drain_all` share one `Drainer` via `repo.drainer()`, with
+    /// no mutex between them): `pending_unsafe` is the single authoritative,
+    /// lock-free set both converge on, and the ceiling is ALWAYS recomputed
+    /// fresh from it plus the current `durable_watermark` — never cached
+    /// from a per-call snapshot that a concurrent unsafe entry could poison.
+    /// A version is removed from `pending_unsafe` ONLY after an explicit
+    /// positive re-check (never optimistically), so two racing callers each
+    /// converge on a ceiling that is conservative-or-equal, never unsafe.
+    async fn settle_and_truncate(&self, repo: &RepoInstance) -> DbResult<()> {
+        let snapshot: Vec<(u64, u64)> = {
+            let guard = scc::ebr::Guard::new();
+            self.pending_unsafe
+                .iter(&guard)
+                .map(|(k, v)| (*k, *v))
+                .collect()
+        };
+        for (v, delta_max_id_raw) in snapshot {
+            let delta_max_id = if delta_max_id_raw == 0 {
+                None
+            } else {
+                Some(delta_max_id_raw)
+            };
+            if matches!(
+                interner_delta_safe_to_truncate(repo, delta_max_id).await,
+                Ok(true)
+            ) {
+                log::debug!(
+                    "drain_step: pending-unsafe commit_version {v} is now A5-safe; \
+                     removing from the pending set"
+                );
+                let _ = self.pending_unsafe.remove(&v);
+            }
+            // Ok(false)/Err: leave it in `pending_unsafe` — still bounds the
+            // ceiling below `v`.
+        }
+
+        let gate = repo.tx_gate().await?;
+        let durable = gate.durable_watermark();
+        let min_pending: Option<u64> = {
+            let guard = scc::ebr::Guard::new();
+            self.pending_unsafe.iter(&guard).next().map(|(k, _)| *k)
+        };
+        let ceiling = match min_pending {
+            Some(min_v) => min_v.saturating_sub(1).min(durable),
+            None => durable,
+        };
+
+        // F6b — every record with `commit_version <= ceiling` is BOTH
+        // durable in `history` AND has its interner delta durably persisted
+        // (or has no delta at all), so the sealed WAL segments holding only
+        // such records are reclaimable. `has_truncatable` is CHEAP (a
+        // lock-held scan of the short sealed list, no I/O) and is USUALLY
+        // false: segments are large (`WAL_SEGMENT_MAX_BYTES`), so a sealed
+        // segment crosses the ceiling only at a segment boundary, not on
+        // every drain pass.
+        //
+        // ORDER (I1/I2): history-flush BEFORE truncate — `mark_durable`'s
+        // write may still sit in the page cache. Before unlinking a sealed
+        // segment we `fsync` `history` (narrow seam — `flush_all_history`,
+        // NOT `flush_buffers`, which would re-enter `drain_all` and
+        // recurse) so a power-loss after the unlink cannot lose the data
+        // (I2). Then delete the segments.
+        let wal = repo.repo_wal().await?;
+        if wal.has_truncatable(ceiling) {
+            // F6c crash seam: BEFORE history-flush + unlink. A HARD crash
+            // here leaves EVERY sealed segment on disk (nothing unlinked
+            // yet) — recovery replays all of them idempotently and loses
+            // nothing (the data is also already in `history`).
+            crate::tx::commit::maybe_crash("pre_truncate", repo).await;
+            repo.flush_all_history().await?;
+            let removed = wal.truncate_below(ceiling).await?;
+            // F6c crash seam: AFTER a successful truncate. The unlinked
+            // segments are durable in `history` (flushed above, I2), so
+            // recovery from the survivors is correct and complete.
+            crate::tx::commit::maybe_crash("post_truncate", repo).await;
+            if removed > 0 {
+                log::debug!(
+                    "drain_step: truncated {removed} sealed WAL segment(s) below \
+                     ceiling {ceiling} (durable {durable}, min_pending_unsafe={min_pending:?})"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Drain repeatedly until a pass drains nothing. Used for graceful
