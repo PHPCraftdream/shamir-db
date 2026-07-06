@@ -158,6 +158,32 @@ impl TableManager {
                 (kind, backend)
             }
             "vector" => {
+                // VR-10 (#432) — one vector index per table.
+                //
+                // `TxContext::staged_vectors` is keyed by the TABLE token (not
+                // per-index), and `promote_vectors` / `apply_vector_batch`
+                // (`commit_phases.rs`) fan the SAME batch out to every vector
+                // backend on the table. A second vector index with a different
+                // `dim` therefore hits `DimMismatch` and fails the post-commit
+                // promote. Until the staging/promote pipeline is reworked to key
+                // vectors per-index, the DDL must refuse a second vector index
+                // on a table that already has one. (Full multi-vector-index
+                // support is tracked in BACKLOG.)
+                let has_vector = self
+                    .index2_registry
+                    .all_backends()
+                    .await
+                    .iter()
+                    .any(|b| matches!(b.descriptor().kind, IndexKind::Vector(_)));
+                if has_vector {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                        "table '{}' already has a vector index; only ONE vector index per table \
+                         is supported (staged-vector promote is keyed per-table, not per-index — \
+                         see docs/guide/06-search.md). Drop the existing vector index first, or \
+                         track full multi-vector-index support in BACKLOG.md.",
+                        self.name()
+                    )));
+                }
                 let dim = op.vector_dim.unwrap_or(384);
                 let metric = match op.vector_metric.as_deref() {
                     Some("l2") => VectorMetric::L2,

@@ -103,3 +103,4 @@ id** (минтит и персистит). Клиент берёт только 
 | #82 | DX value-API над QueryValue (процедуры) | large | medium |
 | #100 | TS/napi client-side interner | large | high (разгрузка сервера) |
 | — | WAL `truncate_below`: Windows `PermissionDenied` на `remove_file` учитывается как reclaimed, файл висит untracked до следующего `SegmentSet::open` (утечка сегментов в долгоживущем процессе при конкурентном replay). Найдено при #422. | small | medium |
+| — | Полная поддержка мульти-vector-index на таблицу: сейчас DDL отказывает во втором vector-индексе (VR-10/#432), т.к. `TxContext::staged_vectors` ключуется по токену таблицы, а `promote_vectors` разносит один батч по всем vector-backend'ам → два индекса с разной `dim` дают `DimMismatch`. Нужно переработать staging/promote под per-index keying (router вектора по field→index, батч на backend по index_id, а не по table token). | large | medium |
