@@ -992,6 +992,30 @@ impl HnswAdapter {
         }
     }
 
+    /// VR-8 (#430, Б-6) — test-only: force a code into `vectors_u8` for
+    /// `internal` WITHOUT running a fit. Simulates the exact race window the
+    /// Б-6 fix guards against: a concurrent `try_fit_and_rebuild`'s
+    /// `claim_and_publish_u8` (snapshot/delta pass) has ALREADY inserted the
+    /// code for this internal, but the adapter is still PRE-flip — i.e. a
+    /// `delete()` that reads `quantized_active() == false`. Pre-VR-8 such a
+    /// delete skipped `vectors_u8.remove_async` and the code leaked until the
+    /// next compaction. No-op if a code is already present. Compiles away in
+    /// release builds.
+    #[cfg(test)]
+    pub(crate) fn test_force_publish_u8(&self, internal: usize, codes: Vec<u8>) {
+        let _ = self.vectors_u8.insert(internal, codes);
+    }
+
+    /// VR-8 (#430, Б-6) — test-only: does `vectors_u8` hold a code for
+    /// `internal`? Unlike [`Self::for_each_vector_u8`] this is NOT gated on
+    /// `is_quantized()`, so it can observe the race window where a code is
+    /// resident in `vectors_u8` while the adapter is still pre-flip. Compiles
+    /// away in release builds.
+    #[cfg(test)]
+    pub(crate) fn test_vectors_u8_contains(&self, internal: usize) -> bool {
+        self.vectors_u8.contains(&internal)
+    }
+
     /// `true` when the adapter should run the u8 graph path. Equivalent to
     /// `is_quantized()` but inlined for the hot search/insert branches.
     #[inline]
@@ -1124,7 +1148,25 @@ impl HnswAdapter {
         // it post-fit (see the drop at the end of this fn) — the snapshot
         // already captured everything the u8 graph needs.
 
-        let quantizer_arc = Arc::new(Sq8Quantizer::fit(&training, dim));
+        // VR-8 (#430, О-2): `Sq8Quantizer::fit` is pure CPU work (O(N×dim)
+        // min/max/scale over the training set, potentially thousands of
+        // vectors). Push it onto the blocking pool so it never stalls a
+        // tokio worker thread (pillar №2: CPU-bound → spawn_blocking).
+        // `training` is an owned `Vec<Vec<f32>>` (no `&self` borrows), so it
+        // moves cleanly into the closure; we get back an `Arc<Sq8Quantizer>`.
+        // This same path serves the compaction (VR-6) re-fit, which reuses
+        // `try_fit_and_rebuild` verbatim, so both fit sites are covered.
+        let quantizer_arc =
+            match tokio::task::spawn_blocking(move || Arc::new(Sq8Quantizer::fit(&training, dim)))
+                .await
+            {
+                Ok(q) => q,
+                Err(e) => {
+                    return Err(VectorError::Internal(format!(
+                        "Sq8Quantizer::fit spawn_blocking join error: {e}"
+                    )))
+                }
+            };
         let dist = ShamirDistU8::new(Arc::clone(&quantizer_arc), metric);
 
         // Quantize the snapshot and CLAIM each internal into vectors_u8.
@@ -2255,9 +2297,20 @@ impl VectorAdapter for HnswAdapter {
             // V5.2 (#411) — also drop codes from the u8 buffer post-fit.
             // The graph node stays (hnsw_rs has no delete) but search
             // filters tombstoned internals, so it's invisible.
-            if self.quantized_active() {
-                let _ = self.vectors_u8.remove_async(&internal).await;
-            }
+            //
+            // VR-8 (#430, Б-6): the u8 removal is UNCONDITIONAL — we do NOT
+            // gate it on `quantized_active()`. The tombstone insert above is
+            // a happens-before point, so we must guarantee the code is evicted
+            // regardless of whether a concurrent `try_fit_and_rebuild` flips
+            // quantization false→true (or true→false) in the window between
+            // our reads. Gating on a single `quantized_active()` snapshot
+            // here would leak the code if a concurrent fitter's
+            // `claim_and_publish_u8` (snapshot/delta pass) had already
+            // inserted codes for this internal before we read the flag as
+            // `false`. `scc::HashMap::remove_async` on a missing key is a
+            // no-op (returns `Ok(None)`), so this is safe both pre-fit
+            // (buffer empty) and post-fit.
+            let _ = self.vectors_u8.remove_async(&internal).await;
         }
         Ok(())
     }

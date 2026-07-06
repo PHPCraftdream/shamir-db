@@ -475,6 +475,204 @@ async fn delete_on_quantized_index() {
 }
 
 // =========================================================================
+// VR-8 (#430, Б-6) — regression: `delete()` must UNCONDITIONALLY evict the
+// deleted internal's u8 codes from `vectors_u8`.
+//
+// Pre-VR-8 the eviction was gated on a SINGLE read of `quantized_active()`,
+// which created a delete-race-with-flip window: if a concurrent
+// `try_fit_and_rebuild` flipped quantization false→true (or true→false)
+// between that read and the (skipped) `vectors_u8.remove_async`, the code
+// for an internal that a concurrent fitter's `claim_and_publish_u8` had
+// JUST inserted would leak — search still hid it via the tombstone, but the
+// memory was never reclaimed until the next compaction.
+//
+// The fix (VR-8) makes the `vectors_u8.remove_async` unconditional: the
+// tombstone insert is the happens-before point, and `remove_async` on a
+// missing key is a no-op (`scc::HashMap` returns `Ok(None)`), so it is safe
+// in both pre-fit (buffer empty) and post-fit regimes. This test exercises
+// the post-fit path (the regime where codes are actually present) and
+// asserts the deleted internal's codes are GONE from `vectors_u8` — which a
+// regressed `if quantized_active() { ... }` gate would still pass today but
+// would FAIL the moment any future change makes `quantized_active()` return
+// false for an index that nonetheless has codes resident (e.g. a flip
+// mid-delete). The test pins the unconditional contract.
+// =========================================================================
+
+#[tokio::test]
+async fn delete_unconditionally_evicts_u8_codes_post_fit() {
+    let dim = 16u32;
+    let adapter = HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    );
+
+    let data = clustered(300, dim as usize, 12, 0.2, 0xB6_C0_43_0F);
+    let items: Vec<(RecordId, Vec<f32>)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (rid(i as u64), v.clone()))
+        .collect();
+    adapter.upsert_batch(&items).await.unwrap();
+    assert!(
+        adapter.is_quantized(),
+        "test setup: adapter must be fitted so codes are resident in vectors_u8"
+    );
+
+    // Capture the internal id that rid(7) currently maps to — `delete`
+    // removes the rid_to_internal entry, so we must read it BEFORE the
+    // delete to know which internal's codes to look for afterwards.
+    let target_rid = rid(7);
+    let target_internal = {
+        let mut found: Option<usize> = None;
+        adapter.for_each_rid_to_internal(|r, internal| {
+            if r == target_rid {
+                found = Some(internal);
+            }
+        });
+        found.expect("rid(7) must be present before delete")
+    };
+
+    // Sanity: codes for target_internal ARE resident pre-delete.
+    let has_pre = {
+        let mut hit = false;
+        adapter.for_each_vector_u8(|internal, _| {
+            if internal == target_internal {
+                hit = true;
+            }
+        });
+        hit
+    };
+    assert!(
+        has_pre,
+        "test setup: target_internal's u8 codes must be in vectors_u8 before delete"
+    );
+
+    // The act under test.
+    adapter.delete(target_rid).await.unwrap();
+
+    // The contract: target_internal's codes must be GONE from vectors_u8,
+    // unconditionally — not merely hidden by the tombstone. If a future
+    // change re-introduces a `quantized_active()` gate (or any other
+    // condition) around the eviction, this assertion fires.
+    let still_present = {
+        let mut hit = false;
+        adapter.for_each_vector_u8(|internal, _| {
+            if internal == target_internal {
+                hit = true;
+            }
+        });
+        hit
+    };
+    assert!(
+        !still_present,
+        "VR-8 (Б-6): after delete(rid(7)) the deleted internal's u8 codes \
+         are still resident in vectors_u8 — `delete()` must evict them \
+         UNCONDITIONALLY (not gated on quantized_active()). This leaks \
+         memory until the next compaction."
+    );
+}
+
+// =========================================================================
+// VR-8 (#430, Б-6) — regression, PRE-FIT path: this is the actual race the
+// fix targets. Pre-VR-8 the `vectors_u8.remove_async` in `delete()` was gated
+// on a single `quantized_active()` read. Consider this interleaving:
+//
+//   T1 (fitter)   : snapshot/delta pass calls `claim_and_publish_u8(internal)`
+//                   → `vectors_u8.insert(internal, codes)` succeeds (code now
+//                   resident) — BUT `is_fitted` is still `false` (the flip
+//                   happens later, after the graph build).
+//   T2 (delete)   : reads `quantized_active()` → `false` (pre-flip) → SKIPS
+//                   `vectors_u8.remove_async`. Tombstone is set, so the code
+//                   is invisible to search, but it LEAKS in memory until the
+//                   next compaction.
+//
+// We cannot deterministically interleave two threads into this nanosecond
+// window without heroic orchestration, but the CONTRACT the fix establishes
+// is directly testable: with the adapter PRE-flip, force a code into
+// `vectors_u8` (mimicking the fitter's claim), then `delete()` the rid — the
+// code MUST be evicted even though `quantized_active() == false`. Pre-VR-8
+// this assertion fails (the code stays resident).
+// =========================================================================
+
+#[tokio::test]
+async fn delete_evicts_u8_codes_even_pre_fit_race_window() {
+    let dim = 16u32;
+    // Build a quantization-ENABLED adapter but stay WELL below FIT_THRESHOLD
+    // (256) so no fit ever triggers — `quantized_active()` stays `false`.
+    let adapter = HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    );
+
+    // Insert a handful of vectors — nowhere near the fit threshold.
+    let data = clustered(8, dim as usize, 4, 0.2, 0xB6_C0_DE_0F);
+    let items: Vec<(RecordId, Vec<f32>)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (rid(i as u64), v.clone()))
+        .collect();
+    adapter.upsert_batch(&items).await.unwrap();
+    assert!(
+        !adapter.is_quantized(),
+        "test setup: adapter must be PRE-flip (quantized_active == false)"
+    );
+
+    // Simulate the race: a concurrent fitter's claim has already landed a
+    // code for rid(3)'s internal into `vectors_u8`, but the flip hasn't
+    // happened yet. We must read the internal id BEFORE the delete (the
+    // delete drops the rid_to_internal entry).
+    let target_rid = rid(3);
+    let target_internal = {
+        let mut found: Option<usize> = None;
+        adapter.for_each_rid_to_internal(|r, internal| {
+            if r == target_rid {
+                found = Some(internal);
+            }
+        });
+        found.expect("rid(3) must be present before delete")
+    };
+    adapter.test_force_publish_u8(target_internal, vec![0u8; dim as usize]);
+
+    // Sanity: the simulated race left a code resident while still pre-flip.
+    // NOTE: we use `test_vectors_u8_contains` (NOT `for_each_vector_u8`):
+    // the latter short-circuits on `!is_quantized()` and would hide the
+    // resident code, making this regression vacuously pass.
+    assert!(
+        adapter.test_vectors_u8_contains(target_internal),
+        "test setup: simulated fitter claim must have placed a code in vectors_u8"
+    );
+
+    // The act under test — `delete()` observes quantized_active() == false.
+    adapter.delete(target_rid).await.unwrap();
+
+    // VR-8 (Б-6): the code MUST be evicted unconditionally, NOT gated on
+    // quantized_active(). Pre-VR-8 this leaks (remove skipped).
+    assert!(
+        !adapter.test_vectors_u8_contains(target_internal),
+        "VR-8 (Б-6) pre-fit race: after delete(rid(3)) with quantized_active() \
+         == false, the deleted internal's u8 codes are still resident in \
+         vectors_u8. `delete()` must evict UNCONDITIONALLY — the tombstone is \
+         the happens-before authority, not the quantized_active() snapshot."
+    );
+}
+
+// =========================================================================
 // upsert replace on a quantized index: old internal tombstoned
 // =========================================================================
 
