@@ -209,6 +209,41 @@ async fn fts_hit_count(tbl: &TableManager) -> usize {
 // CHILD: open the redb repo, stage a record, commit → abort at the seam.
 // ---------------------------------------------------------------------------
 
+/// Flake fix (found via a full `@engine --full` stress run): `commit_tx`'s
+/// tail already calls `repo.drainer().wake()`, which lazily spawns AND wakes
+/// the background drain loop — racing an explicit `drain_all()` call with no
+/// single-flight guard between them (by design, see `Drainer::spawn`'s doc:
+/// "single-owner contract... is the caller's responsibility", not enforced
+/// here since both passes are individually idempotent). If the background
+/// task wins partial progress on the entry (e.g. it suspends between
+/// `gate.mark_durable` and the `phase7` `maybe_crash` check, both inside
+/// `drain_step`) while an explicit `drain_all()` call finds nothing left to
+/// drain and returns immediately, the child scenario would return,
+/// `child_entrypoint`'s `rt.block_on` would return, and the tokio runtime
+/// would be torn down — CANCELLING the still-in-flight background task
+/// before it ever reaches the phase7 crash seam. Net effect: a clean exit
+/// instead of the expected abort, observed as an intermittent
+/// `crash_at_phase7_is_clean_committed` failure under full-suite scheduling
+/// contention.
+///
+/// Fix: give the background task a bounded window to finish its OWN pass
+/// (and hit the seam, if armed) before the scenario returns. `wal.recover()`
+/// returning empty is a task-agnostic proxy for "fully drained" — true
+/// regardless of which task (background or the explicit call) did the
+/// draining. Bounded to 500ms total; a real single small entry drains in
+/// microseconds, so this only ever adds latency in the pathological race
+/// window, never on the common path.
+async fn settle_background_drain(repo: &RepoInstance) {
+    if let Ok(wal) = repo.repo_wal().await {
+        for _ in 0..50 {
+            match wal.recover().await {
+                Ok(entries) if entries.is_empty() => break,
+                _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            }
+        }
+    }
+}
+
 /// The scenario the spawned child runs. On a successful return (only when
 /// the crash seam did not match — e.g. an unknown phase label) the child
 /// exits 0; normally the commit pipeline `process::abort()`s before this
@@ -238,6 +273,7 @@ async fn run_child_scenario(path: PathBuf) {
     // (pre_commit..phase6_5) the process has already `process::abort`ed inside
     // `commit_tx` above and never reaches this line.
     let _ = repo.drainer().drain_all(&repo).await;
+    settle_background_drain(&repo).await;
 
     drop(guard);
 }
@@ -462,6 +498,7 @@ async fn run_child_scenario_multi_table(path: PathBuf) {
     // (pre_commit..phase6_5) the process has already `process::abort`ed inside
     // `commit_tx` above and never reaches this line.
     let _ = repo.drainer().drain_all(&repo).await;
+    settle_background_drain(&repo).await;
 
     drop(guard);
 }
@@ -566,6 +603,7 @@ async fn run_child_scenario_trunc(path: PathBuf) {
     // crosses the boundary and aborts here. If no seam matches, this returns
     // and the child exits cleanly (the parent's `!status.success()` flags it).
     let _ = repo.drainer().drain_all(&repo).await;
+    settle_background_drain(&repo).await;
 }
 
 /// Child entrypoint for the truncation scenario. NO-OP in the parent (sentinel
