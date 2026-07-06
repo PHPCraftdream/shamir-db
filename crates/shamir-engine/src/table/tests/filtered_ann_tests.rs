@@ -90,6 +90,33 @@ fn tags_in_order(result: &crate::query::read::QueryResult) -> Vec<String> {
         .collect()
 }
 
+/// VR-5 test helper: extract the `embedding` field of each result record as
+/// `Vec<f32>`. Used to prove a SPECIFIC staged vector (identified by its
+/// exact, distinctive coordinates) is present in the result — `tags_in_order`
+/// alone cannot distinguish a staged row from an indistinguishable committed
+/// row with the same tag, which would make a "some red row is present"
+/// assertion pass even if the staged merge were a no-op.
+fn embeddings_in_order(result: &crate::query::read::QueryResult) -> Vec<Vec<f32>> {
+    use shamir_types::types::value::QueryValue;
+    result
+        .records
+        .iter()
+        .filter_map(|r| match r.get_value("embedding") {
+            Some(QueryValue::List(items)) => Some(
+                items
+                    .iter()
+                    .map(|v| match v {
+                        QueryValue::F64(f) => *f as f32,
+                        QueryValue::Int(i) => *i as f32,
+                        other => panic!("embedding component must be numeric; got {other:?}"),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Back-compat: bare VectorSimilarity (no And) still works
 // ─────────────────────────────────────────────────────────────────────────────
@@ -623,5 +650,297 @@ async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
         result.records.len(),
         k as usize,
         "should find k results matching all predicates"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VR-5 (Б-5) — read-your-own-writes on pre/co-filter paths
+//
+// `tx_staged_vector_visible_and_filtered` above only exercises the POST-FILTER
+// path (no secondary index on the residual field, so the planner cannot
+// populate `candidate_rids` and falls through to the V3.1 oversample-retry
+// loop). The three tests below force the PRE-FILTER and CO-FILTER paths by
+// adding a legacy btree index on the residual field (`tag`), then assert the
+// in-tx staged vectors are visible AND the residual still filters them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Assert that a filtered-ANN query took the given path by inspecting
+/// `stats.index_used`. Returns the label for chaining.
+fn path_label(result: &crate::query::read::QueryResult) -> &str {
+    result
+        .stats
+        .as_ref()
+        .and_then(|s| s.index_used.as_deref())
+        .unwrap_or("<none>")
+}
+
+/// Build `count` committed records with the given `tag`, each near the query
+/// point `[1.0, 0.0]` (dim=2) so they all rank near the top of ANN search.
+async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str, count: usize) {
+    // VR-5 tests query [1.0, 0.0] and stage a vector at [0.99, 0.01] to prove
+    // read-your-own-writes. Committed rows here MUST be farther from the
+    // query than the staged vector, or `count` distance-0 exact-match ties
+    // would fill every top-k slot and the staged (non-zero-distance) vector
+    // could never surface — even with a fully correct merge implementation.
+    // [0.0, 1.0] (orthogonal, L2 distance ≈1.414) guarantees the staged
+    // [0.99, 0.01] (distance ≈0.014) always ranks strictly closer.
+    for _ in 0..count {
+        tbl.insert(&vec_record(emb_id, &[0.0, 1.0], tag_id, tag))
+            .await
+            .unwrap();
+    }
+}
+
+/// **PRE-FILTER path** (candidate set ≤ `PRE_FILTER_MAX_CANDIDATES`): a legacy
+/// btree index on `tag` resolves `eq(tag,"red")` to a small committed RID set
+/// (under 4096), so the planner selects `search_prefilter`. A staged "red"
+/// record must appear, and a staged "blue" record must be filtered out —
+/// matching the post-filter path's read-your-own-writes contract.
+#[tokio::test]
+#[serial_test::serial]
+async fn vr5_prefilter_sees_staged_and_filters_residual() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
+    // Legacy btree on `tag` so `try_plan_index_scan` resolves `eq(tag, ...)`.
+    tbl.create_index("tag_idx", &["tag"]).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let tag_id = field_id(&tbl, "tag").await;
+
+    // 100 committed "red" records (well under PRE_FILTER_MAX_CANDIDATES=4096).
+    commit_cluster(&tbl, emb_id, tag_id, "red", 100).await;
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // Stage a "red" record very close to the query (should rank high & pass
+    // the residual).
+    let _staged_red = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.99, 0.01], tag_id, "red"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+
+    // Stage a "blue" record also very close to the query — must be filtered
+    // OUT by the residual `eq(tag,"red")`.
+    let _staged_blue = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.985, 0.015], tag_id, "blue"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query = ReadQuery::new("vecs").filter(qf::and(vec![
+        qf::vector_similarity("embedding", vec![1.0, 0.0], 5),
+        qf::eq("tag", "red"),
+    ]));
+
+    let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
+
+    // Confirm the pre-filter path was taken.
+    let label = path_label(&result);
+    assert_eq!(
+        label, "pre_filter",
+        "expected pre_filter path, got {label:?}"
+    );
+
+    // All returned records must be "red" (residual enforced on committed AND
+    // staged). The staged blue must NOT appear.
+    let tags = tags_in_order(&result);
+    assert!(
+        tags.iter().all(|t| t == "red"),
+        "pre_filter must return only red (staged blue filtered); got {tags:?}"
+    );
+    // VR-5 — the SPECIFIC staged vector [0.99, 0.01] must be present: every
+    // committed row is at [1.0, 0.0] (from `commit_cluster`), so this exact
+    // coordinate can ONLY have come from the staged merge. A "some red row is
+    // present" assertion alone would pass even with a no-op merge (the 100
+    // committed reds already satisfy it) — this is the actual regression
+    // guard for read-your-own-writes on the pre-filter path.
+    let embeddings = embeddings_in_order(&result);
+    assert!(
+        embeddings
+            .iter()
+            .any(|e| (e[0] - 0.99).abs() < 1e-4 && (e[1] - 0.01).abs() < 1e-4),
+        "pre_filter must include the staged red vector [0.99, 0.01] \
+         (read-your-own-writes); got embeddings {embeddings:?}"
+    );
+    // The staged blue's distinctive coordinates must NOT appear (residual
+    // correctly excludes it, not merely "committed blues are absent").
+    assert!(
+        !embeddings
+            .iter()
+            .any(|e| (e[0] - 0.985).abs() < 1e-4 && (e[1] - 0.015).abs() < 1e-4),
+        "pre_filter must NOT include the staged blue vector [0.985, 0.015] \
+         (residual must filter staged rows, not just tag-label them); got \
+         embeddings {embeddings:?}"
+    );
+}
+
+/// **CO-FILTER path** (`n_candidates > PRE_FILTER_MAX_CANDIDATES` and
+/// `selectivity ≤ CO_FILTER_MAX_SELECTIVITY`): build a table large enough that
+/// `eq(tag,"red")` yields > 4096 candidates but the red fraction is ≤ 20% of
+/// the live set, so the planner selects `search_cofilter`. A staged "red"
+/// record must appear, a staged "blue" must be filtered out.
+#[tokio::test]
+#[serial_test::serial]
+async fn vr5_cofilter_sees_staged_and_filters_residual() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
+    tbl.create_index("tag_idx", &["tag"]).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let tag_id = field_id(&tbl, "tag").await;
+
+    // 5000 committed "red" records — just above PRE_FILTER_MAX_CANDIDATES
+    // (4096) so pre-filter is skipped. dim=2 keeps insertion fast.
+    commit_cluster(&tbl, emb_id, tag_id, "red", 5000).await;
+    // 16000 committed "blue" records so selectivity = 5000/21000 ≈ 0.238...
+    // — wait, that's > 0.20. We need ≤ 0.20, so push blue up to ≥ 20000
+    // (total_live ≥ 25000 → selectivity ≤ 0.20).
+    commit_cluster(&tbl, emb_id, tag_id, "blue", 20_000).await;
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // Stage a "red" record near the query.
+    let _staged_red = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.99, 0.01], tag_id, "red"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+    // Stage a "blue" record near the query — must be filtered out.
+    let _staged_blue = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.985, 0.015], tag_id, "blue"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query = ReadQuery::new("vecs").filter(qf::and(vec![
+        qf::vector_similarity("embedding", vec![1.0, 0.0], 5),
+        qf::eq("tag", "red"),
+    ]));
+
+    let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
+
+    let label = path_label(&result);
+    assert_eq!(label, "co_filter", "expected co_filter path, got {label:?}");
+
+    let tags = tags_in_order(&result);
+    assert!(
+        tags.iter().all(|t| t == "red"),
+        "co_filter must return only red (staged blue filtered); got {tags:?}"
+    );
+    // VR-5 — same specific-coordinate check as the pre-filter test: every
+    // committed row is at [0.0, 1.0] (distance ≈1.414 from the query), so
+    // only the staged merge can produce [0.99, 0.01] (distance ≈0.014).
+    let embeddings = embeddings_in_order(&result);
+    assert!(
+        embeddings
+            .iter()
+            .any(|e| (e[0] - 0.99).abs() < 1e-4 && (e[1] - 0.01).abs() < 1e-4),
+        "co_filter must include the staged red vector [0.99, 0.01] \
+         (read-your-own-writes); got embeddings {embeddings:?}"
+    );
+    assert!(
+        !embeddings
+            .iter()
+            .any(|e| (e[0] - 0.985).abs() < 1e-4 && (e[1] - 0.015).abs() < 1e-4),
+        "co_filter must NOT include the staged blue vector [0.985, 0.015] \
+         (residual must filter staged rows); got embeddings {embeddings:?}"
+    );
+}
+
+/// **POST-FILTER path** regression: same shape as the pre/co tests but WITHOUT
+/// a secondary index on `tag`, so the planner cannot populate `candidate_rids`
+/// and falls through to the V3.1 oversample-retry post-filter loop. The staged
+/// "red" must appear, the staged "blue" must be filtered out. This documents
+/// the path the bug-report flagged as already-correct and guards it against
+/// regressions while the pre/co paths are fixed.
+#[tokio::test]
+#[serial_test::serial]
+async fn vr5_postfilter_sees_staged_and_filters_residual() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    // Vector index only — NO btree on `tag`, so no candidate_rids → post-filter.
+    tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let tag_id = field_id(&tbl, "tag").await;
+
+    commit_cluster(&tbl, emb_id, tag_id, "red", 50).await;
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    let _staged_red = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.99, 0.01], tag_id, "red"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+    let _staged_blue = tbl
+        .insert_tx(
+            &vec_record(emb_id, &[0.985, 0.015], tag_id, "blue"),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query = ReadQuery::new("vecs").filter(qf::and(vec![
+        qf::vector_similarity("embedding", vec![1.0, 0.0], 5),
+        qf::eq("tag", "red"),
+    ]));
+
+    let result = tbl.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
+
+    let label = path_label(&result);
+    assert!(
+        label.contains("filtered_vector"),
+        "expected filtered_vector_scan (post-filter) path, got {label:?}"
+    );
+
+    let tags = tags_in_order(&result);
+    assert!(
+        tags.iter().all(|t| t == "red"),
+        "post_filter must return only red (staged blue filtered); got {tags:?}"
+    );
+    // VR-5 — same specific-coordinate check as pre/co-filter above.
+    let embeddings = embeddings_in_order(&result);
+    assert!(
+        embeddings
+            .iter()
+            .any(|e| (e[0] - 0.99).abs() < 1e-4 && (e[1] - 0.01).abs() < 1e-4),
+        "post_filter must include the staged red vector [0.99, 0.01] \
+         (read-your-own-writes); got embeddings {embeddings:?}"
+    );
+    assert!(
+        !embeddings
+            .iter()
+            .any(|e| (e[0] - 0.985).abs() < 1e-4 && (e[1] - 0.015).abs() < 1e-4),
+        "post_filter must NOT include the staged blue vector [0.985, 0.015] \
+         (residual must filter staged rows); got embeddings {embeddings:?}"
     );
 }

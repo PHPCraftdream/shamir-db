@@ -1634,6 +1634,63 @@ impl HnswAdapter {
         Ok(scored)
     }
 
+    /// **Staged-vector scoring** (VR-5 / Б-5): exact brute-force top-k scoring
+    /// over the caller's own un-committed staged vectors, for the pre-filter
+    /// and co-filter paths of filtered ANN.
+    ///
+    /// Staged vectors live in `TxContext::staged_vectors` and are NOT in the
+    /// committed HNSW graph, so `search_prefilter` / `search_cofilter` (which
+    /// resolve RIDs against `rid_to_internal`) cannot see them. The bare
+    /// `search` path already merges staged vectors brute-force
+    /// (`Merge the caller's own un-committed staged vectors`); this method
+    /// exposes the same scoring primitive so the filtered-ANN pre/co-filter
+    /// paths can do an identical merge and preserve read-your-own-writes
+    /// semantics across all three paths.
+    ///
+    /// The caller is responsible for applying the residual predicate to the
+    /// staged records BEFORE calling this (so only residual-matching staged
+    /// vectors are passed in). This method does pure distance scoring against
+    /// `query`, exactly mirroring `ShamirDist::eval` used by `search`.
+    ///
+    /// Returns the scored pairs sorted by distance ascending, truncated to
+    /// `k`. `Ok(vec![])` when `staged` is empty or `k == 0`.
+    pub async fn score_staged_candidates(
+        &self,
+        query: &[f32],
+        k: u32,
+        staged: &[(RecordId, Vec<f32>)],
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        if staged.is_empty() {
+            return Ok(vec![]);
+        }
+        if k == 0 {
+            return Ok(vec![]);
+        }
+        if query.len() as u32 != self.dim {
+            return Err(VectorError::DimMismatch {
+                expected: self.dim,
+                got: query.len() as u32,
+            });
+        }
+        let k = k.min(MAX_TOPK);
+        let dist = ShamirDist {
+            metric: self.metric,
+        };
+        let mut scored: Vec<(RecordId, f32)> = Vec::with_capacity(staged.len());
+        for (rid, vec) in staged {
+            // Guard against a malformed staged vector of the wrong dim — skip
+            // rather than error so one bad row cannot poison the whole query.
+            if vec.len() as u32 != self.dim {
+                continue;
+            }
+            let d = dist.eval(query, vec);
+            scored.push((*rid, d));
+        }
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(k as usize);
+        Ok(scored)
+    }
+
     /// **Co-filter path** (V3.2): HNSW `search_filter` with an allow-set of
     /// internal IDs derived from the candidate RIDs.
     ///

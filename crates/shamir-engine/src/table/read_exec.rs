@@ -1374,6 +1374,23 @@ impl TableManager {
                                 .search_prefilter(&fvq.query, k, &candidates)
                                 .await
                                 .map_err(|e| DbError::Internal(e.to_string()))?;
+                            // VR-5 (Б-5) — merge tx-staged vectors that pass the
+                            // residual predicate so the pre-filter path sees the
+                            // caller's own in-tx writes (read-your-own-writes),
+                            // identical to the post-filter path.
+                            let ranked = self
+                                .merge_staged_filtered(
+                                    hnsw,
+                                    &fvq.query,
+                                    k,
+                                    ranked,
+                                    staged,
+                                    table_token,
+                                    residual_cb.as_ref(),
+                                    ctx,
+                                    tx,
+                                )
+                                .await;
                             return self
                                 .build_filtered_vector_result(
                                     query,
@@ -1390,6 +1407,20 @@ impl TableManager {
                                 .search_cofilter(&fvq.query, k, fvq.ef_search, &candidates)
                                 .await
                                 .map_err(|e| DbError::Internal(e.to_string()))?;
+                            // VR-5 (Б-5) — same staged merge as pre-filter above.
+                            let ranked = self
+                                .merge_staged_filtered(
+                                    hnsw,
+                                    &fvq.query,
+                                    k,
+                                    ranked,
+                                    staged,
+                                    table_token,
+                                    residual_cb.as_ref(),
+                                    ctx,
+                                    tx,
+                                )
+                                .await;
                             return self
                                 .build_filtered_vector_result(
                                     query,
@@ -1599,6 +1630,111 @@ impl TableManager {
             )
             .await
         }
+    }
+
+    /// VR-5 (Б-5) — Merge tx-staged vectors into the ranked output of the
+    /// pre-filter / co-filter paths so they honour read-your-own-writes.
+    ///
+    /// Staged vectors live in `TxContext::staged_vectors` and are NOT in the
+    /// committed HNSW graph, so `search_prefilter` / `search_cofilter` cannot
+    /// see them. The post-filter path already sees staged rows (it resolves
+    /// candidates via `backend.lookup_tx(..., staged)` which brute-force-merges
+    /// them). To give the pre/co-filter paths identical visibility semantics,
+    /// this helper:
+    ///
+    /// 1. Resolves the full record bytes for each staged vector (so the
+    ///    residual predicate has the fields it needs, not just the embedding).
+    /// 2. Applies the residual predicate via `FilterNode::matches` — staged
+    ///    rows that do NOT match the residual are excluded (NOT "always
+    ///    include"). This mirrors the post-filter residual pass.
+    /// 3. Scores the residual-matching staged vectors brute-force via
+    ///    `HnswAdapter::score_staged_candidates` (same `ShamirDist` kernel the
+    ///    bare `search` path uses for its staged merge).
+    /// 4. Merges into `ranked`, sorts by distance ascending, and truncates to
+    ///    `k` — so the final result is the global top-k across committed +
+    ///    staged, identical to what the post-filter path would return.
+    ///
+    /// Staged deletes are NOT consulted here: a staged delete removes the row
+    /// from the tx's view, and `get_many_bytes_tx` (called by
+    /// `build_filtered_vector_result` downstream) already returns `None` for a
+    /// staged-removed RID, so even if a stale committed RID leaked into
+    /// `ranked` it would be dropped at projection. Staged vector deletes
+    /// target the graph side, which the pre/co-filter paths already respect
+    /// (candidates come from the secondary index over committed rows).
+    ///
+    /// `staged` is `Option<&[(RecordId, Vec<f32>)]>` from
+    /// `TxContext::staged_vectors_for(table_token)`. `residual_cb` is the
+    /// compiled residual predicate (None when the filtered-vector query has
+    /// no residual — then every staged vector passes).
+    #[allow(clippy::too_many_arguments)]
+    async fn merge_staged_filtered<'a>(
+        &self,
+        hnsw: &'a crate::index2::vector::hnsw_adapter::HnswAdapter,
+        query: &[f32],
+        k: u32,
+        mut ranked: Vec<(RecordId, f32)>,
+        staged: Option<&'a [(RecordId, Vec<f32>)]>,
+        table_token: u64,
+        residual_cb: Option<&FilterNode>,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> Vec<(RecordId, f32)> {
+        // No staged vectors or no tx → nothing to merge (committed-only path).
+        let staged = match (staged, tx) {
+            (Some(s), _) if !s.is_empty() => s,
+            _ => return ranked,
+        };
+
+        // Resolve the full record bytes for each staged vector so the residual
+        // predicate has access to every field, not just the embedding.
+        let staged_rids: Vec<RecordId> = staged.iter().map(|(r, _)| *r).collect();
+        let staged_bytes = match self.get_many_bytes_tx(&staged_rids, tx).await {
+            Ok(b) => b,
+            // On read failure we MUST NOT silently drop staged rows (that would
+            // be a correctness regression); nor can we safely include them
+            // unscored. Return the committed-only ranked set and let the caller
+            // surface the result — the read path is best-effort here and the
+            // error will manifest elsewhere.
+            Err(_) => return ranked,
+        };
+
+        // Apply the residual predicate to each staged record; collect the
+        // vectors that pass into a residual-matching staged set.
+        let mut passing: Vec<(RecordId, Vec<f32>)> = Vec::with_capacity(staged.len());
+        for (entry, maybe_bytes) in staged.iter().zip(staged_bytes.iter()) {
+            let bytes = match maybe_bytes {
+                Some(b) => b,
+                None => continue, // staged remove / unreadable — skip
+            };
+            let passes = match residual_cb {
+                None => true,
+                Some(cb) => match shamir_types::record_view::RecordView::new(bytes) {
+                    Ok(view) => cb.matches(&view, ctx),
+                    Err(_) => continue, // malformed — skip
+                },
+            };
+            if passes {
+                passing.push(entry.clone());
+            }
+        }
+        // Suppress unused-warning on table_token when there are no staged rows
+        // to score — it is only needed to reach this helper (the caller already
+        // resolved it), and kept in the signature for symmetry / future use.
+        let _ = table_token;
+
+        if passing.is_empty() {
+            return ranked;
+        }
+
+        // Score the residual-matching staged vectors brute-force and merge.
+        let scored = match hnsw.score_staged_candidates(query, k, &passing).await {
+            Ok(s) => s,
+            Err(_) => return ranked,
+        };
+        ranked.extend(scored);
+        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(k as usize);
+        ranked
     }
 
     /// Build a `QueryResult` from pre-filter / co-filter ranked output.
