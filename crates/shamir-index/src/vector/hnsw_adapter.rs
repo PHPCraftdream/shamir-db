@@ -222,19 +222,32 @@ pub struct HnswAdapter {
     /// delta pass after the swap).
     fit_in_flight: AtomicBool,
     /// #423 (Б-3) — count of pre-flip internals (`internal <
-    /// next_id_at_flip`) that have landed in `vectors_u8`. The fit
-    /// catch-up loop uses this for an EXACT O(1) convergence check that
-    /// cannot be inflated by post-flip upserts (which allocate internals
-    /// `>= next_id_at_flip` and never migrate through the f32 buffer).
+    /// next_id_at_flip`) that have been ACCOUNTED FOR — either landed in
+    /// `vectors_u8` (claimed) or tombstoned. The fit catch-up loop uses
+    /// this for an EXACT O(1) convergence check that cannot be inflated by
+    /// post-flip upserts (which allocate internals `>= next_id_at_flip`
+    /// and never migrate through the f32 buffer).
     ///
-    /// Incremented under exactly ONE condition: a `vectors_u8` insert
-    /// returns `Ok` (the atomic claim won — first time this `internal`
-    /// enters `vectors_u8`) AND `internal < next_id_at_flip`. Because
-    /// `scc::HashMap::insert` returns `Ok` exactly once per key, the
-    /// counter is incremented exactly once per distinct pre-flip
-    /// internal — no double-counting, no missed increments. Readers
-    /// (the fit loop) compare it against `next_id_at_flip -
-    /// deleted_count_at_flip`; the loop breaks when equality holds.
+    /// Incremented for a given `internal < next_id_at_flip` under exactly
+    /// ONE of two conditions (mutually exclusive — a tombstoned internal
+    /// is filtered out of every claim path by `deleted.contains`, so it
+    /// can never ALSO win a claim):
+    ///  - a `vectors_u8` insert returns `Ok` (the atomic claim won — first
+    ///    time this `internal` enters `vectors_u8`), via
+    ///    [`Self::claim_and_publish_u8`]/`claim_and_publish_u8_async`; or
+    ///  - a `deleted` insert returns `Ok` (the atomic tombstone won) at one
+    ///    of the three tombstone call sites (`upsert`, `upsert_batch`,
+    ///    `delete`).
+    ///
+    /// Because both `scc::HashMap::insert` calls return `Ok` exactly once
+    /// per key, the counter is incremented exactly once per distinct
+    /// pre-flip internal — no double-counting, no missed increments.
+    /// Readers (the fit loop) compare it against `next_id_at_flip`; the
+    /// loop breaks when equality holds. See the seed comment in
+    /// `try_fit_and_rebuild` for why a previous version of this fix (which
+    /// subtracted a frozen `deleted_count_at_flip` from the target instead
+    /// of folding tombstones into this counter) could hang forever on a
+    /// post-flip tombstone of a pre-flip internal.
     migrated_pre_flip: AtomicUsize,
     /// #423 (Б-3) — the value of `next_id` at the moment `is_fitted`
     /// flipped true. `usize::MAX` sentinel = "not fitted / no flip
@@ -831,6 +844,28 @@ impl HnswAdapter {
         }
     }
 
+    /// #423 (Б-3) — bump `migrated_pre_flip` for a NEWLY-tombstoned
+    /// pre-flip internal. Call ONLY after the `deleted.insert[_async]` that
+    /// tombstoned `internal` returned `Ok` (i.e. this call won the
+    /// tombstone) — mirrors [`claim_and_publish_u8`]'s claim-then-bump
+    /// pattern so a tombstone counts toward fit convergence exactly once,
+    /// exactly like a claim does. A tombstoned internal never ALSO wins a
+    /// `vectors_u8` claim (every claim path filters `deleted.contains`
+    /// first), so this and `claim_and_publish_u8[_async]` bump disjoint
+    /// events for the same `internal` — no double-counting.
+    ///
+    /// Without this, a pre-flip internal tombstoned AFTER the fit-transition
+    /// flip (a concurrent `delete`/rid-replacing `upsert` racing the fit)
+    /// would never be claimed (the catch-up scan skips `deleted` entries)
+    /// and the catch-up loop would spin forever waiting for a target that
+    /// excluded it. See the seed comment in `try_fit_and_rebuild`.
+    fn bump_migrated_on_tombstone(&self, internal: usize) {
+        let nif = self.next_id_at_flip.load(Ordering::Acquire);
+        if internal < nif {
+            self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// `true` when the adapter should run the u8 graph path. Equivalent to
     /// `is_quantized()` but inlined for the hot search/insert branches.
     #[inline]
@@ -1059,33 +1094,64 @@ impl HnswAdapter {
         // allocated pre-flip and must end up in vectors_u8 (unless
         // tombstoned). Used by the catch-up convergence check (Б-3).
         let next_id_at_flip = self.next_id.load(Ordering::Acquire);
-        // Snapshot the deleted count at flip: a pre-flip internal that was
-        // tombstoned counts toward convergence without ever entering
-        // vectors_u8. `deleted_count_at_flip` is the upper bound of such
-        // tombstones; later deletes (post-flip) can only INCREASE
-        // deleted_count, which would make the convergence target SMALLER
-        // — safe, because migrated_pre_flip is monotonic and the loop
-        // breaks on >=. Using the flip-time value keeps the target stable
-        // across the catch-up loop.
+        // Deleted count AT FLIP: every tombstone counted here is of an
+        // internal `< next_id_at_flip` (an internal must exist — i.e. have
+        // been allocated by `next_id.fetch_add`, which only increases —
+        // before it can be tombstoned, and `next_id` is monotonic, so any
+        // tombstone visible at this Acquire load happened against an
+        // internal that already existed when `next_id_at_flip` was read).
+        // Folded into the `migrated_pre_flip` seed below — see the seed
+        // comment for why pre-flip tombstones are counted as "accounted
+        // for" alongside pre-flip claims.
         let deleted_count_at_flip = self.deleted_count.load(Ordering::Acquire);
-        // Б-3 convergence seed. The snapshot + delta claim passes above
-        // already published EVERY pre-flip internal that was in `vectors`
-        // at claim time into `vectors_u8` (and, for those still in
-        // `vectors`, their graph node is in the build batch). All snapshot
-        // + delta internals are `< next_id_at_flip` (they came from
-        // `vectors`, and `next_id` is monotonic). So the count of pre-flip
-        // internals ALREADY migrated at the flip is exactly
-        // `snapshot_claimed + delta_claimed`. Seed the counter to that
-        // value so the catch-up loop's `>= target` check only needs to
-        // account for the REMAINING in-flight pre-flip upserts (those
-        // whose `vectors.insert` had not completed when the delta scan
-        // ran). The seed is written as a plain `store` (not
-        // `fetch_add`): no concurrent self-migration can have run yet —
-        // self-migration requires `is_fitted == true`, which is only set
-        // by the next line. Ordering: `Release` pairs with the `Acquire`
-        // load in the catch-up loop's convergence read.
-        self.migrated_pre_flip
-            .store(snapshot_claimed + delta_claimed, Ordering::Release);
+        // Б-3 convergence seed + target. Every pre-flip internal (id <
+        // next_id_at_flip) ends up in EXACTLY ONE of two disjoint states:
+        // (a) claimed into vectors_u8 (via snapshot/delta/catch-up/
+        //     self-migration — all funnel through `claim_and_publish_u8`,
+        //     which bumps `migrated_pre_flip` for `internal <
+        //     next_id_at_flip`), or
+        // (b) tombstoned (via `delete`/rid-replacing `upsert`/
+        //     `upsert_batch` — these ALSO bump `migrated_pre_flip` for
+        //     `old_internal < next_id_at_flip`, using the exact same
+        //     sentinel-then-seed trick as claims: see those call sites).
+        // A tombstoned internal is excluded from the live snapshot/delta
+        // scan (`self.deleted.contains` guards both), so (a) and (b) never
+        // double-count the SAME internal — the seed below is exact, not
+        // an over/under-approximation.
+        //
+        // The ORIGINAL Б-3 fix (a single reviewer round before this one)
+        // subtracted a FROZEN `deleted_count_at_flip` from `target` instead
+        // of counting tombstones into `migrated_pre_flip` — that undercounts
+        // `target` correctly for tombstones that happened BEFORE the flip,
+        // but any tombstone of a pre-flip internal AFTER the flip (a
+        // concurrent `delete`/rid-collision racing the fit) would never be
+        // claimed (the catch-up scan skips `deleted` entries) and never
+        // bump the frozen target — the loop would spin forever (CONFIRMED
+        // adversarial-review finding). Folding tombstones into the SAME
+        // live counter as claims closes that gap: a post-flip tombstone of
+        // a pre-flip internal now bumps `migrated_pre_flip` directly, so
+        // convergence is reachable regardless of WHEN the tombstone lands.
+        //
+        // Seed = (claims already won at flip time) + (tombstones already
+        // recorded at flip time); target = next_id_at_flip (no
+        // subtraction — tombstones now count INTO the accumulator instead
+        // of OUT of the target). The seed is written as a plain `store`
+        // (not `fetch_add`): no concurrent self-migration or tombstone
+        // bump can be lost by this overwrite, because both gate on
+        // `next_id_at_flip` via an `Acquire` load, and that load cannot
+        // observe the real (non-sentinel) value until AFTER this store
+        // has completed — `next_id_at_flip.store` (below, `Release`) is
+        // strictly ORDERED AFTER this store in program order on this
+        // thread, and the standard release-sequence guarantee means any
+        // thread whose `Acquire` load of `next_id_at_flip` observes the
+        // real value also observes every write (including this one) that
+        // preceded the `next_id_at_flip` release-store in program order.
+        // So a concurrent claim/tombstone can only ever see (and
+        // `fetch_add` on top of) the seed — never race under it.
+        self.migrated_pre_flip.store(
+            snapshot_claimed + delta_claimed + deleted_count_at_flip,
+            Ordering::Release,
+        );
         self.next_id_at_flip
             .store(next_id_at_flip, Ordering::Release);
         self.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
@@ -1103,24 +1169,25 @@ impl HnswAdapter {
         // insert their own single node via `quantize_and_insert_u8`.
         //
         // Convergence (Б-3): count ONLY pre-flip internals that have landed
-        // in vectors_u8 (`migrated_pre_flip`), NOT `vectors_u8.len()`. The
-        // latter is inflated by post-flip upserts (internals >=
-        // next_id_at_flip land directly in vectors_u8), which would make
-        // the loop exit early — before a pre-flip upsert's `vectors.insert`
-        // has run, dropping the f32 graph under its feet (Б-3 →
-        // "f32 graph absent" Internal error). `migrated_pre_flip` is bumped
-        // exactly once per distinct pre-flip internal (claim Ok +
-        // internal < next_id_at_flip), so it reaches
-        // `next_id_at_flip - deleted_count_at_flip` precisely when every
-        // non-tombstoned pre-flip internal has been claimed.
+        // in vectors_u8 OR been tombstoned (`migrated_pre_flip`), NOT
+        // `vectors_u8.len()`. The latter is inflated by post-flip upserts
+        // (internals >= next_id_at_flip land directly in vectors_u8),
+        // which would make the loop exit early — before a pre-flip
+        // upsert's `vectors.insert` has run, dropping the f32 graph under
+        // its feet (Б-3 → "f32 graph absent" Internal error).
+        // `migrated_pre_flip` is bumped exactly once per distinct pre-flip
+        // internal — once via a winning `claim_and_publish_u8[_async]`
+        // call, or once via a tombstone site (`delete`/rid-replacing
+        // `upsert`/`upsert_batch`) — so it reaches `next_id_at_flip`
+        // precisely when every pre-flip internal has been claimed or
+        // tombstoned (see the seed comment above for why these two sets
+        // are disjoint and jointly exhaustive).
         let mut pending_graph_inserts: Vec<(usize, Vec<u8>)> = Vec::new();
-        // Target: every pre-flip internal is either migrated (claimed into
-        // vectors_u8) or tombstoned. Saturating sub guards against a
-        // transient `deleted_count_at_flip > next_id_at_flip` window (a
-        // delete racing the flip's next_id load) — in that window the
-        // target is 0 and the loop breaks immediately, which is correct:
-        // there are no live pre-flip internals to wait for.
-        let target = next_id_at_flip.saturating_sub(deleted_count_at_flip);
+        // Target: every pre-flip internal — no subtraction. Tombstones now
+        // count INTO `migrated_pre_flip` (see above), not out of the
+        // target, so the target is simply the count of internals allocated
+        // before the flip.
+        let target = next_id_at_flip;
         loop {
             // Claim any pre-flip internals still sitting in the f32 buffer.
             self.vectors.scan(|internal, vec| {
@@ -1529,6 +1596,7 @@ impl VectorAdapter for HnswAdapter {
                     // Tombstone the previous (or concurrently-serialised) internal.
                     if self.deleted.insert(old_internal, ()).is_ok() {
                         self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                        self.bump_migrated_on_tombstone(old_internal);
                     }
                     *occ.get_mut() = internal;
                     replaced = Some(old_internal);
@@ -1684,6 +1752,7 @@ impl VectorAdapter for HnswAdapter {
                         // while the entry is held.
                         if self.deleted.insert(old_internal, ()).is_ok() {
                             self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                            self.bump_migrated_on_tombstone(old_internal);
                         }
                         *occ.get_mut() = internal;
                         replaced.push(old_internal);
@@ -1819,6 +1888,7 @@ impl VectorAdapter for HnswAdapter {
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
             if self.deleted.insert_async(internal, ()).await.is_ok() {
                 self.deleted_count.fetch_add(1, Ordering::Relaxed);
+                self.bump_migrated_on_tombstone(internal);
             }
             let _ = self.rid_to_internal.remove_async(&rid).await;
             let _ = self.vectors.remove_async(&internal).await;
