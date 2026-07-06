@@ -316,6 +316,19 @@ impl InternerManager {
         self.info_store
             .set(chunk_record_id(idx).to_bytes(), bytes)
             .await?;
+        // CRIT-2 (#436): flush the chunk write BEFORE advancing
+        // `last_persisted_len`. `Store::set` above lands in a write-back
+        // buffer (MemBuffer's periodic drain / fjall's unfsynced journal) —
+        // without this flush, `persisted_high_water()` (read by the
+        // drainer's A5 gate, `materialize.rs::interner_delta_safe_to_
+        // truncate`) claims a mapping is "durably persisted" while it is
+        // still only in RAM. A crash before the periodic drain would lose
+        // the chunk while the WAL segment that could have recovered it was
+        // already truncated (trusting the premature hwm) — the exact
+        // corruption CRIT-2 closes on the drainer side. `flush()` is a
+        // best-effort default no-op on `Store` for in-memory backends
+        // (harmless there) and a real drain+fsync on disk-backed stores.
+        self.info_store.flush().await?;
         self.next_chunk_idx.store(idx + 1, Ordering::Release);
         self.last_persisted_len.store(new_high, Ordering::Release);
         drop(guard);

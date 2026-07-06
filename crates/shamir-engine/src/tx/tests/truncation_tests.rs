@@ -345,3 +345,131 @@ async fn reopen_after_truncation_recovers_all() {
         );
     }
 }
+
+/// CRIT-2 (#436): the F6b truncation bound is `truncation_ceiling`, NOT
+/// `durable_watermark`. `durable_watermark` advances unconditionally on every
+/// entry (`gate.mark_durable`), but a sealed WAL segment must NOT be unlinked
+/// while it may hold an entry whose interner delta is not yet durably
+/// persisted (the A5 gate, `interner_delta_safe_to_truncate`, tripped
+/// `Ok(false)`) — otherwise the only surviving copy of a (name, id) mapping
+/// is deleted, and a crash before the interner's own checkpoint lets a later
+/// mint reuse the id under a different name (silent corruption).
+///
+/// This test forces the A5 gate to ALWAYS report unsafe (via the
+/// `FORCE_A5_UNSAFE` test seam in `materialize.rs`) on a disk-backed repo
+/// with a tiny segment cap (so committing N records rolls multiple sealed
+/// segments), then proves: `durable_watermark` converges to visibility (data
+/// IS durable in `history`), but the on-disk segment count does NOT shrink —
+/// the interner-unsafe ceiling pins every segment in place, contradicting
+/// what `durable_watermark`-gated truncation (the pre-fix behavior) would do.
+/// Disarming the fault and draining again then truncates normally, proving
+/// the ceiling is a genuine gate, not a permanent stall.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {
+    use crate::tx::materialize::FORCE_A5_UNSAFE;
+    use std::sync::atomic::Ordering;
+
+    const N: usize = 80;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let repo_dir = tempdir.path().join("crit2_repo");
+
+    std::env::set_var("SHAMIR_WAL_SEGMENT_MAX_BYTES", "1024");
+
+    // Arm the fault BEFORE any commits. `commit_tx`'s tail wakes an ambient
+    // background drain loop (the same one behind the `crash_at_phase7`
+    // flake fixed earlier) that runs the identical `drain_step` code and
+    // reads the SAME `FORCE_A5_UNSAFE` flag — if it were armed only after
+    // the commit loop, that background task could race ahead and drain
+    // (safely truncate) some segments before this test ever gets to force
+    // the fault, corrupting the "before" baseline. Arming first makes every
+    // drain pass — background or foreground — agree that nothing is safe to
+    // truncate for the whole setup phase.
+    FORCE_A5_UNSAFE.store(true, Ordering::SeqCst);
+
+    let repo = reopen_disk_repo("crit2", repo_dir.clone(), vec![TableConfig::new("t")]).await;
+    let tbl = repo.get_table("t").await.unwrap();
+    let gate = repo.tx_gate().await.unwrap();
+    // Use the repo's OWN ambient drainer (`repo.drainer()`), NOT a fresh
+    // `Drainer::new()`. `commit_tx`'s tail wakes the ambient one (lazily
+    // spawned via `RepoInstance`'s `OnceLock`) in the background regardless
+    // of what this test does explicitly — a separate `Drainer::new()`
+    // instance has its OWN `unsafe_floor_version`/`window` state, so the
+    // persisted-floor mechanism (CRIT-2) on a throwaway instance would never
+    // see what the ambient background drainer already did (or vice versa).
+    // Driving the SAME instance the background loop uses is the only way to
+    // get a deterministic, single-authority view of the truncation ceiling.
+    let drainer = repo.drainer();
+
+    for i in 0..N {
+        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        tbl.insert_tx(&InnerValue::Str(format!("crit2-{i:04}")), Some(&mut tx))
+            .await
+            .unwrap();
+        repo.commit_tx(tx).await.unwrap();
+    }
+
+    // Sanity: with the tiny cap and N=80 records, multiple sealed segments
+    // must exist before any drain — otherwise the test proves nothing (a
+    // single-segment repo has no truncation to observe).
+    let segs_before_drain = shamirwal_seg_count(&repo_dir);
+    assert!(
+        segs_before_drain >= 2,
+        "test setup: expected multiple rolled segments before drain, got {segs_before_drain}"
+    );
+
+    // Explicit drain while STILL armed — belt-and-suspenders against any
+    // remaining undrained tail. Keep the fault ARMED through the entire
+    // "unsafe" assertion window below: `repo.drainer()` is the SAME ambient
+    // instance `commit_tx`'s `wake()` drives in the background, so disarming
+    // here (before checking segment counts) would let a background pass that
+    // is still catching up from one of the 80 commits observe
+    // `FORCE_A5_UNSAFE == false` and legitimately truncate a segment WHILE
+    // this test is still in its "everything must stay unsafe" window —
+    // exactly the flake this comment now documents (found under a full
+    // `@engine --full` stress run: 1/4 runs failed with
+    // `segments before=6, after=5`).
+    drainer.drain_all(&repo).await.unwrap();
+
+    // Durable watermark still converges to visibility — `mark_durable` runs
+    // unconditionally regardless of the A5 gate (read-visibility must not
+    // regress just because the interner hasn't checkpointed).
+    assert_eq!(
+        gate.durable_watermark(),
+        gate.last_committed(),
+        "durable_watermark must converge to visibility even when every A5 \
+         gate call is forced unsafe — mark_durable is unconditional"
+    );
+
+    // But NOT ONE segment was removed: with A5 forced unsafe on every entry,
+    // `truncation_ceiling` never advances past 0, so `wal.has_truncatable`
+    // (gated on the ceiling, not `durable_watermark`) stays false the whole
+    // pass. Pre-fix (truncation gated on `durable_watermark` directly) this
+    // would have collapsed to ~1 segment, exactly like
+    // `wal_segment_count_bounded_under_drain` above.
+    let segs_after_unsafe_drain = shamirwal_seg_count(&repo_dir);
+    assert_eq!(
+        segs_after_unsafe_drain, segs_before_drain,
+        "CRIT-2 regression: WAL segments were removed despite EVERY entry's \
+         A5 interner-hwm gate reporting unsafe — truncation must be bounded \
+         by truncation_ceiling, not durable_watermark (segments before={segs_before_drain}, \
+         after={segs_after_unsafe_drain})"
+    );
+
+    // ONLY NOW disarm — after the "everything stayed unsafe" assertion has
+    // been checked, so no background pass can slip a truncation through
+    // while that invariant is still being verified.
+    FORCE_A5_UNSAFE.store(false, Ordering::SeqCst);
+
+    // Disarming the fault and draining again must now truncate normally —
+    // proving the ceiling is a real, liftable gate, not a permanent wedge.
+    drainer.drain_all(&repo).await.unwrap();
+    let segs_after_safe_drain = shamirwal_seg_count(&repo_dir);
+    std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
+    assert!(
+        segs_after_safe_drain < segs_before_drain,
+        "once the A5 gate is safe again, truncation must proceed and shrink \
+         the segment count (before={segs_before_drain}, after={segs_after_safe_drain})"
+    );
+}
