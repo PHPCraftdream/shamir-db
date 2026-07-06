@@ -13,10 +13,18 @@
 //!  * Part C — RAII: an aborted (dropped) tx leaves no staged vectors
 //!    behind, because they live inside the `TxContext::staged_vectors`
 //!    and vanish with the tx — the live graph was never touched.
-//!  * Part D (III.5) — a failed post-lock HNSW promote does NOT defer the
-//!    tx: the outcome is `Complete`, no WAL marker is left inflight (Phase
-//!    7 already ran under the lock), and the data is durable. The graph
-//!    reconciles via rebuild-on-open, not WAL replay.
+//!  * Part D (III.5) — a failed post-lock HNSW GRAPH promote does NOT
+//!    defer the tx: the outcome is `Complete`, no WAL marker is left
+//!    inflight (Phase 7 already ran under the lock), and the data is
+//!    durable. The live in-RAM graph lags, but the DURABLE delta chunk
+//!    (appended PRE-publish by `apply_vector_delta_phase` — #426, VR-4
+//!    variant A) is replayed by `restore_on_open` on the next open.
+//!  * Part E (#426, VR-4 variant A) — a failed PRE-publish DELTA append
+//!    DOES defer the tx: the delta chunk is the durable bridge
+//!    `restore_on_open` relies on, so a missing echo is a loss of the
+//!    vector mutation from the live graph. Unlike a graph-promote
+//!    failure (Part D), this surfaces as `Deferred` so the client can
+//!    detect it and retry — NOT a silent `Complete`.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -34,7 +42,7 @@ use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::commit_phases::FAIL_VECTOR_PROMOTE_TX_ID;
+use crate::tx::commit_phases::{FAIL_VECTOR_DELTA_TX_ID, FAIL_VECTOR_PROMOTE_TX_ID};
 use crate::tx::tx_outcome::MaterializationState;
 use serial_test::serial;
 
@@ -432,10 +440,10 @@ async fn in_tx_search_sees_own_staged_vector() {
     }
 }
 
-/// Part D (III.5): the HNSW promote moved OUT of `commit_lock` and runs
-/// AFTER Phase 7 (`wal.commit`). The decisive behavioural consequence: a
-/// FAILED post-lock promote no longer defers the tx. We arm a synthetic
-/// promote failure for exactly this tx and prove:
+/// Part D (III.5): the HNSW GRAPH promote moved OUT of `commit_lock` and
+/// runs AFTER Phase 7 (`wal.commit`). The decisive behavioural consequence:
+/// a FAILED post-lock GRAPH promote no longer defers the tx. We arm a
+/// synthetic promote failure for exactly this tx and prove:
 ///
 ///  (1) the commit returns `Ok` with `MaterializationState::Complete`
 ///      (NOT `Deferred`) — data + index already committed and materialized
@@ -445,8 +453,12 @@ async fn in_tx_search_sees_own_staged_vector() {
 ///      would instead have skipped Phase 7 and left it inflight);
 ///  (3) the data record is durable and fetchable.
 ///
-/// The in-memory graph lags the data until `VectorBackend::rebuild`
-/// reconciles it on the next open — HNSW is derived, not WAL-replayed.
+/// The live in-RAM graph lags until the next open, but the DURABLE delta
+/// chunk (appended PRE-publish by `apply_vector_delta_phase` — #426, VR-4
+/// variant A) is replayed by `restore_on_open::replay_delta` on reopen, so
+/// the vector is re-materialized from the durable echo — NOT lost. The
+/// graph promote is a RAM-only mutation; the delta chunk is the durable
+/// bridge.
 ///
 /// `current_thread` flavor keeps the whole commit on one task/thread so the
 /// process-global injection register is observed deterministically.
@@ -484,8 +496,10 @@ async fn failed_post_lock_vector_promote_is_committed_not_deferred() {
     assert_eq!(
         outcome.materialization,
         MaterializationState::Complete,
-        "a failed post-lock HNSW promote must NOT defer the tx — data + index \
-         already committed under the lock; graph reconciles via rebuild-on-open"
+        "a failed post-lock HNSW GRAPH promote must NOT defer the tx — data \
+         + index already committed under the lock; the live graph lags but \
+         the durable delta chunk (appended pre-publish, #426) is replayed by \
+         restore_on_open on reopen"
     );
     assert!(
         outcome.materialized(),
@@ -501,4 +515,85 @@ async fn failed_post_lock_vector_promote_is_committed_not_deferred() {
         matches!(stored, InnerValue::Map(_)),
         "stored record must be the committed map, got {stored:?}"
     );
+}
+
+/// Part E (#426, VR-4 variant A): a failed PRE-publish DELTA append DOES
+/// defer the tx. The delta chunk is the durable bridge `restore_on_open`
+/// relies on; a missing echo is a loss of the vector mutation from the
+/// live graph (recovery does NOT replay vectors — they are derived, not
+/// WAL-serialised). Unlike a GRAPH-promote failure (Part D, which stays
+/// `Complete` because the delta chunk is durable), a DELTA-append failure
+/// surfaces as `Deferred` so the client DETECTS the missing durable echo
+/// and can retry — NOT a silent `Complete` that hides the loss.
+///
+/// This is the negative-test half of variant A's failure contract (§5.3 of
+/// the design): the residual risk is that a persistent delta-append
+/// failure still loses the vector mutation, but now it is DETECTABLE
+/// pre-ack (`Deferred` + warn-log + metric) instead of silent post-ack.
+///
+/// `current_thread` flavor keeps the whole commit on one task/thread so
+/// the process-global injection register is observed deterministically.
+#[tokio::test(flavor = "current_thread")]
+#[serial]
+async fn failed_pre_publish_delta_append_is_deferred() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op()).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+
+    // Stage a vector through a real `insert_tx` so `tx.staged_vectors` is
+    // populated by the production path.
+    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid = tbl
+        .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+
+    // Arm the DELTA-append failure injection for exactly this tx.
+    let inject_tx_id = tx.tx_id.0;
+    assert!(inject_tx_id != 0, "tx_id must be assigned");
+    FAIL_VECTOR_DELTA_TX_ID.store(inject_tx_id, Ordering::SeqCst);
+    let outcome = repo.commit_tx(tx).await;
+    FAIL_VECTOR_DELTA_TX_ID.store(0, Ordering::SeqCst);
+    drop(guard);
+
+    // The commit SUCCEEDS (Phase 4 made the data durable; abort before
+    // publish is impossible), but the materialization is `Deferred`: the
+    // delta-append failure lost the durable vector echo, so the tx is
+    // reported as not-fully-materialized. This is the honest surface —
+    // NOT a silent `Complete` that hides the loss (the pre-#426 behavior
+    // was a silent post-ack loss with no signal at all).
+    let outcome =
+        outcome.expect("commit must succeed even when the pre-publish delta append fails");
+    assert_eq!(
+        outcome.materialization,
+        MaterializationState::Deferred,
+        "a failed pre-publish DELTA append MUST defer the tx — the delta \
+         chunk is the durable bridge restore_on_open relies on; a missing \
+         echo loses the vector mutation, so the client must be signaled to \
+         retry (NOT a silent Complete)"
+    );
+    assert!(
+        !outcome.materialized(),
+        "materialized() must be false: the delta-append failure left the \
+         vector mutation without a durable echo"
+    );
+
+    // The DATA record is still durable (Phase 5a published the overlay;
+    // recovery / the drainer will reconcile the data). The vector
+    // PROJECTION is what is lost — that is the deferred part.
+    let stored = tbl
+        .get(rid)
+        .await
+        .expect("committed data record must be durable even with a delta failure");
+    assert!(
+        matches!(stored, InnerValue::Map(_)),
+        "stored record must be the committed map, got {stored:?}"
+    );
+
+    // rid is used by the assertions above; suppress unused-variable warning
+    // on builds where the get() is compiled out.
+    let _ = rid;
 }
