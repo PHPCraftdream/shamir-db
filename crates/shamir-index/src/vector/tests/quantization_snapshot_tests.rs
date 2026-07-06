@@ -556,6 +556,102 @@ async fn back_compat_non_quant_v2_round_trips_like_v1() {
 }
 
 // ============================================================================
+// #423 (Б-1) — snapshot round-trip under concurrent fit-transition races:
+// the v2 dump serialises `vectors_u8` AND `hnsw_u8`. Before the fix, vectors
+// that entered `vectors_u8` without a graph node (catch-up / self-migration
+// holes) rode into the snapshot as holes — the loaded adapter had FEWER
+// retrievable vectors than the pre-dump adapter. This test forces the race
+// (concurrent upserts across the fit boundary, dataset >512 so the graph
+// path is exercised), dumps, loads, and asserts no-count-loss round-trip.
+// ============================================================================
+
+#[tokio::test]
+async fn snapshot_round_trip_after_concurrent_fit_no_node_loss() {
+    let dim = 24u32;
+    let store = mem_store();
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 600 vectors, 8 concurrent tasks racing the fit transition. This is
+    // the exact Б-1 window: upserts land in `vectors` after the fitter's
+    // delta scan → catch-up / self-migration must insert their graph node.
+    let n = 600usize;
+    let data = clustered(n, dim as usize, 24, 0.2, 0x0524_2342);
+    let n_tasks = 8usize;
+    let per_task = data.len() / n_tasks;
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        let chunk: Vec<(RecordId, Vec<f32>)> = data[t * per_task..(t + 1) * per_task]
+            .iter()
+            .enumerate()
+            .map(|(j, v)| (rid(t * per_task + j), v.clone()))
+            .collect();
+        handles.push(tokio::spawn(async move {
+            adapter.upsert_batch(&chunk).await.expect("upsert_batch");
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+    assert!(adapter.is_quantized(), "adapter did not fit under load");
+    let live_before = adapter.len();
+    assert!(
+        live_before > 512,
+        "test must exercise the graph path: live_before={live_before} > 512"
+    );
+
+    // #423 (Б-1) DETERMINISTIC pre-dump check: every upserted internal MUST
+    // have a node in `hnsw_u8`. Before the fix, the catch-up / self-migration
+    // paths populated `vectors_u8` WITHOUT inserting the u8 graph node — so
+    // `get_nb_point()` would be LESS than the number of upserted vectors.
+    // `hnsw_rs::get_nb_point` returns the total number of inserted DataPoints.
+    // We assert EXACT equality (no HNSW approximation involved).
+    let nodes_before = adapter.hnsw_u8_handle().expect("fitted").get_nb_point();
+    assert_eq!(
+        nodes_before, n,
+        "pre-dump: u8 graph has {nodes_before} nodes but {n} vectors were upserted — \
+         Б-1 graph-connectivity loss (fit-window vectors missing from hnsw_u8)"
+    );
+
+    // Dump the v2 snapshot (serialises hnsw_u8 + vectors_u8).
+    dump_snapshot(&adapter, &store, KEYSPACE).await.unwrap();
+
+    // Cold-start load.
+    let loaded = load_snapshot(&store, KEYSPACE).await.unwrap();
+    assert!(loaded.is_quantized(), "loaded adapter must be fitted (v2)");
+    let live_after = loaded.len();
+    assert_eq!(
+        live_after, live_before,
+        "round-trip live-count mismatch: before={live_before} after={live_after} \
+         (snapshot lost or duplicated nodes)"
+    );
+
+    // Post-load, the graph MUST hold the SAME number of nodes (the round-trip
+    // preserved every node — no holes rode into the dump). This is the
+    // deterministic round-trip Б-1 invariant.
+    let nodes_after = loaded
+        .hnsw_u8_handle()
+        .expect("fitted post-load")
+        .get_nb_point();
+    assert_eq!(
+        nodes_after, nodes_before,
+        "post-load: u8 graph has {nodes_after} nodes but had {nodes_before} pre-dump — \
+         snapshot round-trip lost graph nodes (Б-1 holes rode into the dump)"
+    );
+}
+
+// ============================================================================
 // QuantMeta (de)serialization sanity
 // ============================================================================
 
