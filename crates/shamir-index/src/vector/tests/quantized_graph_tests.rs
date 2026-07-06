@@ -1046,3 +1046,210 @@ async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
         );
     }
 }
+
+// =========================================================================
+// #424 (Б-4) — regression: a search that reads `quantized_active() == false`
+// (pre-flip) and THEN does `hnsw.load_full()` must NOT silently get an empty
+// result when a fit transition drops the f32 graph between those two reads.
+//
+// The race window:
+//   1. search reads `quantized_active()` → false (pre-flip) → f32 branch.
+//   2. fitter: `is_fitted.store(true, Release)` + catch-up + `hnsw.store(None)`.
+//   3. search: `hnsw.load_full()` → None.
+//
+// Before the fix, `search`/`search_cofilter` returned `Ok(vec![])` on None.
+//
+// The window is a few nanoseconds of synchronous code (no `.await` between
+// the two reads), so a statistical concurrent test CANNOT reliably reproduce
+// it (confirmed: 3× consecutive runs of a tight-loop test passed even with
+// the fix disabled). Instead we use a deterministic test-only hook
+// (`install_test_search_f32_gate`) that PAUSES a search request at exactly
+// the race point — after `quantized_active() == false`, before
+// `load_full()`. The test then triggers a fit transition (which drops the
+// f32 graph), confirms the drop, and releases the paused request — which now
+// observes `load_full() == None` and must exercise the retry path.
+//
+// We test BOTH `search` and `search_cofilter`, since both had the same
+// transient-None defect.
+// =========================================================================
+
+#[tokio::test]
+async fn search_post_fit_returns_nonempty_via_u8_path() {
+    // #424 (Б-4) — functional complement to the co-filter gate test.
+    //
+    // `search`'s f32-HNSW branch (where the transient-None race lives)
+    // requires `len() > BRUTE_FORCE_MAX`. But `FIT_THRESHOLD ==
+    // BRUTE_FORCE_MAX`, so the fit trigger fires at exactly the same count
+    // — a deterministic gate test for `search` (like the co-filter one
+    // below) cannot place a pre-fit request in the f32-HNSW branch without
+    // racing the fit trigger itself.
+    //
+    // Instead this test verifies the FUNCTIONAL contract: after the fit
+    // transition drops the f32 graph, `search` routes through the u8 path
+    // (via the same `search_quantized_*` helpers the retry uses) and
+    // returns correct, non-empty results. Combined with the co-filter gate
+    // test (which deterministically exercises the retry on the same
+    // `search_cofilter_quantized` helper), this covers both code paths.
+
+    let dim = 16u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // Cross the fit threshold so the adapter fully transitions to the u8
+    // graph and drops the f32 graph.
+    let n = 300usize;
+    let data = clustered(n, dim as usize, 16, 0.2, 0x5EA4_0F11);
+    for (i, v) in data.iter().enumerate() {
+        adapter.upsert(rid(i as u64), v).await.expect("upsert");
+    }
+    assert!(
+        adapter.is_quantized(),
+        "test setup: adapter should have fitted"
+    );
+    assert!(
+        !adapter.f32_graph_present(),
+        "test setup: f32 graph should be dropped post-fit"
+    );
+
+    // Search for each vector — it MUST find itself (distance ~0).
+    for (i, v) in data.iter().enumerate().take(50) {
+        let res = adapter
+            .search(v, 1, SearchOpts::default(), None)
+            .await
+            .expect("search");
+        assert!(
+            !res.is_empty(),
+            "#424 (Б-4): search returned empty for vector {i} post-fit. \
+             The f32 graph is dropped; search must route through the u8 \
+             path and return results."
+        );
+        // The nearest result should be the query vector itself.
+        assert_eq!(
+            res[0].0,
+            rid(i as u64),
+            "search returned wrong nearest neighbor for vector {i}"
+        );
+    }
+}
+
+/// RAII guard clearing the global `TEST_SEARCH_F32_GATE` on drop — including
+/// on a panicking unwind. Without this, a panic anywhere between
+/// `install_test_search_f32_gate()` and the tail-of-body
+/// `clear_test_search_f32_gate()` call leaves the gate `Some(_)` for the
+/// rest of the test process: nextest runs a crate's tests as concurrent
+/// threads within ONE process (no `test-threads=1` isolation), so an
+/// unrelated concurrent test that reaches `search`'s f32 branch would then
+/// block on `gate.notify.notified().await` forever — surfacing as a
+/// misleading unrelated `TIMEOUT` at the 180s nextest kill, not the true
+/// panic that leaked the gate.
+struct TestSearchF32GateGuard;
+impl Drop for TestSearchF32GateGuard {
+    fn drop(&mut self) {
+        crate::vector::hnsw_adapter::clear_test_search_f32_gate();
+    }
+}
+
+#[tokio::test]
+async fn search_cofilter_transient_none_retries_into_u8_path() {
+    use crate::vector::hnsw_adapter::install_test_search_f32_gate;
+
+    let dim = 16u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    let n_pre = 255usize;
+    let n_total = 300usize;
+    let data = clustered(n_total, dim as usize, 16, 0.2, 0xCF1C_FE54);
+    for (i, v) in data.iter().enumerate().take(n_pre) {
+        adapter
+            .upsert(rid(i as u64), v)
+            .await
+            .expect("pre-populate");
+    }
+    assert!(!adapter.is_quantized());
+
+    // Candidate set for co-filter: all pre-populated rids.
+    let candidates: Vec<RecordId> = (0..n_pre as u64).map(rid).collect();
+
+    let gate = install_test_search_f32_gate();
+    let _gate_guard = TestSearchF32GateGuard;
+
+    let adapter_search = Arc::clone(&adapter);
+    let query = data[0].clone();
+    let candidates_clone = candidates.clone();
+    let search_handle = tokio::spawn(async move {
+        adapter_search
+            .search_cofilter(&query, 5, None, &candidates_clone)
+            .await
+    });
+
+    // Wait until the co-filter search task reaches the f32-gate.
+    let reached = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !gate.arrived.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        reached.is_ok(),
+        "co-filter search task did not reach the f32-gate within 5s"
+    );
+
+    // Trigger fit.
+    for (i, v) in data.iter().enumerate().take(n_total).skip(n_pre) {
+        adapter
+            .upsert(rid(i as u64), v)
+            .await
+            .expect("upsert to trigger fit");
+    }
+
+    assert!(
+        adapter.is_quantized(),
+        "test setup: adapter should have fitted"
+    );
+    assert!(
+        !adapter.f32_graph_present(),
+        "test setup: f32 graph should be dropped post-fit"
+    );
+
+    gate.notify.notify_one();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), search_handle)
+        .await
+        .expect("co-filter search task hung past 10s timeout after gate release")
+        .expect("co-filter search task panicked");
+
+    let results = result.expect("search_cofilter returned error");
+    assert!(
+        !results.is_empty(),
+        "#424 (Б-4): search_cofilter returned EMPTY after a transient-None \
+         race. Same window as `search`: the co-filter read \
+         `quantized_active() == false`, was paused, then the fit dropped \
+         the f32 graph. On resume, `load_full()` returned None. The retry \
+         must re-check `quantized_active()` and route through the u8 \
+         co-filter path."
+    );
+
+    // `_gate_guard` drops here (and on any earlier panic/assert failure
+    // above), clearing the global gate unconditionally.
+}

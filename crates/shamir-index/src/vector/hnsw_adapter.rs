@@ -57,6 +57,64 @@ pub const MAX_EF_SEARCH: u32 = 10_000;
 /// recall-tolerance tests (≥1k vectors) on the HNSW path.
 const BRUTE_FORCE_MAX: usize = 256;
 
+// #424 (Б-4) — test-only hook for deterministically reproducing the
+// transient-None race window in `search`/`search_cofilter`.
+//
+// The race is between `quantized_active()` (Acquire load) and
+// `hnsw.load_full()` (ArcSwap load) — two atomic reads with NO `.await`
+// between them in the f32-graph branch. Under normal execution the window
+// is a few nanoseconds of synchronous code; a statistical test cannot
+// reliably hit it (confirmed: 3× consecutive runs of a tight-loop
+// concurrent test passed even with the fix disabled).
+//
+// This hook lets a test PAUSE a search request at exactly the point where
+// the race lives — AFTER `quantized_active() == false` has been read (so
+// the request is committed to the f32 branch) but BEFORE
+// `hnsw.load_full()`. The test then triggers a fit transition (which
+// drops the f32 graph), confirms the drop, and releases the paused
+// request — which now observes `load_full() == None` and must exercise the
+// retry path.
+//
+// The hook carries TWO pieces of state:
+//  * `arrived` — set by the search request when it REACHES the gate (so
+//    the test knows the request is past the `quantized_active()` check and
+//    is now paused inside the f32 branch).
+//  * `notify` — the pause/release mechanism. The search request awaits
+//    `notify.notified()`; the test calls `notify.notify_one()` to release
+//    it after confirming the f32 graph has been dropped.
+//
+// `ArcSwapOption` so tests can install/clear it freely. Compiles away
+// entirely in release builds (`#[cfg(test)]`).
+#[cfg(test)]
+pub(crate) struct TestF32Gate {
+    pub(crate) arrived: std::sync::atomic::AtomicBool,
+    pub(crate) notify: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+static TEST_SEARCH_F32_GATE: std::sync::LazyLock<arc_swap::ArcSwapOption<TestF32Gate>> =
+    std::sync::LazyLock::new(arc_swap::ArcSwapOption::empty);
+
+/// #424 (Б-4) — install the test-only f32-gate hook. Returns the `Arc`
+/// so the test can: (a) poll `.arrived` to confirm the search request has
+/// reached the gate, and (b) call `.notify.notify_one()` to release it
+/// after confirming the f32 graph has been dropped. Test-only.
+#[cfg(test)]
+pub(crate) fn install_test_search_f32_gate() -> Arc<TestF32Gate> {
+    let gate = Arc::new(TestF32Gate {
+        arrived: std::sync::atomic::AtomicBool::new(false),
+        notify: tokio::sync::Notify::new(),
+    });
+    TEST_SEARCH_F32_GATE.store(Some(Arc::clone(&gate)));
+    gate
+}
+
+/// #424 (Б-4) — clear the test-only f32-gate hook (between tests).
+#[cfg(test)]
+pub(crate) fn clear_test_search_f32_gate() {
+    TEST_SEARCH_F32_GATE.store(None);
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ShamirDist {
     pub(crate) metric: VectorMetric,
@@ -1333,6 +1391,142 @@ impl HnswAdapter {
         self.insert_u8_graph_node(internal, codes.clone()).await?;
         Ok(codes)
     }
+
+    // ------------------------------------------------------------------
+    // #424 (Б-4) — post-fit u8 search cores.
+    //
+    // These are the u8-graph / u8-brute-force bodies that the main
+    // `quantized_active()` branches in `search` / `search_cofilter` inline.
+    // Extracted as private helpers so the transient-None retry path (a
+    // request that read `quantized_active() == false`, then raced a fit
+    // flip that dropped the f32 graph before `hnsw.load_full()`) can re-run
+    // the EXACT same u8 logic instead of returning an empty result.
+    // ------------------------------------------------------------------
+
+    /// Post-fit quantized search on a SMALL index (exact brute-force over
+    /// dequantized u8 codes). Mirrors the `quantized_active() && len <=
+    /// QUANT_BRUTE_FORCE_MAX` branch of [`Self::search`].
+    ///
+    /// `k` is the (already clamped) top-k; returns at most `k` pairs sorted
+    /// ascending by distance. Tombstoned internals are skipped.
+    async fn search_quantized_bruteforce(
+        &self,
+        query: &[f32],
+        k: u32,
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        let quantizer = self
+            .quantizer
+            .get()
+            .expect("quantized_active but quantizer unset");
+        let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
+        self.vectors_u8.scan(|i, c| pairs.push((*i, c.clone())));
+        let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
+        for (internal, codes) in pairs {
+            if self.deleted.contains_async(&internal).await {
+                continue;
+            }
+            if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+                let d = rescore_f32(self.metric, quantizer, query, &codes);
+                out.push((rid, d));
+            }
+        }
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(k as usize);
+        Ok(out)
+    }
+
+    /// Post-fit quantized search on a LARGE index (u8 HNSW graph traversal
+    /// + exact f32 rescore). Mirrors the `quantized_active() && len >
+    /// QUANT_BRUTE_FORCE_MAX` branch of [`Self::search`].
+    ///
+    /// `ef` is the (already clamped) ef_search floor; the actual graph
+    /// exploration uses `max(ef, overscan)` where `overscan = 16k+64`.
+    async fn search_quantized_graph(
+        &self,
+        query: &[f32],
+        k: u32,
+        ef: usize,
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        let quantizer = self
+            .quantizer
+            .get()
+            .expect("quantized_active but quantizer unset");
+        let hnsw_u8 = self
+            .hnsw_u8_handle()
+            .expect("quantized_active but u8 graph unset");
+        let query_codes = quantizer.quantize(query);
+        let overscan = ((k as usize) * 16 + 64).min(MAX_TOPK as usize);
+        let ef_q = ef.max(overscan);
+        let neighbors =
+            tokio::task::spawn_blocking(move || hnsw_u8.search(&query_codes, overscan, ef_q))
+                .await
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
+        for n in neighbors {
+            if self.deleted.contains_async(&n.d_id).await {
+                continue;
+            }
+            let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+            if let Some(codes) = codes_opt {
+                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                    let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                    out.push((rid, exact));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(k as usize);
+        Ok(out)
+    }
+
+    /// Post-fit quantized co-filter search (u8 HNSW `search_filter` with an
+    /// allow-set + exact f32 rescore). Mirrors the `quantized_active()`
+    /// branch of [`Self::search_cofilter`].
+    ///
+    /// `ef` is the (already overscan-clamped) ef_search; `allow_set` is the
+    /// internal-ID allow-set built from the candidate RIDs.
+    async fn search_cofilter_quantized(
+        &self,
+        query: &[f32],
+        k: u32,
+        ef: usize,
+        allow_set: &shamir_collections::TFxSet<usize>,
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+        let quantizer = self
+            .quantizer
+            .get()
+            .expect("quantized_active but quantizer unset");
+        let hnsw_u8 = self
+            .hnsw_u8_handle()
+            .expect("quantized_active but u8 graph unset");
+        let query_codes = quantizer.quantize(query);
+        let knbn = k as usize;
+        // Clone the allow-set into an Arc so the spawn_blocking closure is
+        // 'static. The set is typically small (the candidate RID count) so
+        // the clone is cheap relative to the graph traversal.
+        let allow = Arc::new(allow_set.clone());
+        let neighbors = tokio::task::spawn_blocking(move || {
+            let pred = |id: &usize| allow.contains(id);
+            hnsw_u8.search_filter(&query_codes, knbn, ef, Some(&pred))
+        })
+        .await
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+        let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
+        for n in neighbors {
+            let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+            if let Some(codes) = codes_opt {
+                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                    let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                    out.push((rid, exact));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(k as usize);
+        Ok(out)
+    }
 }
 
 /// Co-filter ef-overscan multiplier. `search_filter` can return < knbn under
@@ -1489,47 +1683,53 @@ impl HnswAdapter {
         // V5.2 (#411) — post-fit: co-filter on the u8 graph, then rescore.
         // Pre-fit/unquantized: co-filter on the f32 graph as before.
         if self.quantized_active() {
-            let quantizer = self
-                .quantizer
-                .get()
-                .expect("quantized_active but quantizer unset");
-            let hnsw_u8 = self
-                .hnsw_u8_handle()
-                .expect("quantized_active but u8 graph unset");
-            let query_codes = quantizer.quantize(query);
-            let knbn = k as usize;
-            let neighbors = tokio::task::spawn_blocking(move || {
-                let pred = |id: &usize| allow_set.contains(id);
-                hnsw_u8.search_filter(&query_codes, knbn, ef, Some(&pred))
-            })
-            .await
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
-            for n in neighbors {
-                let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
-                if let Some(codes) = codes_opt {
-                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                        let exact = rescore_f32(self.metric, quantizer, query, &codes);
-                        out.push((rid, exact));
-                    }
-                }
-            }
-            out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            out.truncate(k as usize);
-            return Ok(out);
+            // #424 (Б-4) — body extracted to [`search_cofilter_quantized`]
+            // so the transient-None retry path in the f32-graph branch below
+            // can re-run the EXACT same logic instead of returning empty.
+            return self
+                .search_cofilter_quantized(query, k, ef, &allow_set)
+                .await;
         }
 
         // #418 — f32 co-filter path. Reached ONLY when `!quantized_active()`
         // (the quantized branch returned above). In that state the f32 graph
         // is always present (unquantized adapters never drop it; quantized
-        // adapters drop it only post-fit, which IS `quantized_active()`).
-        // `None` here is an invariant violation; we surface it as an empty
-        // result rather than panic — a transient None under no observable
-        // state is unreachable, but defensive empty is safer on a read path.
+        // adapters drop it only post-fit, which IS `quantized_active()`)...
+        // UNLESS a concurrent fit transition raced between this function's
+        // `quantized_active()` gate (above) and the `hnsw.load_full()` below.
+        //
+        // #424 (Б-4) — transient-None race window. Same window as `search`:
+        //   1. THIS request read `quantized_active() == false` (pre-flip) in
+        //      the `if` above, so it landed here on the f32 path.
+        //   2. A concurrent fitter flipped `is_fitted = true` + dropped the
+        //      f32 graph (`hnsw.store(None)`).
+        //   3. THIS request's `hnsw.load_full()` now returns `None`.
+        //
+        // The old code returned `Ok(vec![])` — silently empty. Fix: re-check
+        // `quantized_active()` and route through the u8 co-filter path if the
+        // flip landed in the window. If still `false`, it is a genuine
+        // invariant violation (unreachable) — defensive empty.
+        //
+        // #424 (Б-4) — test hook: same as `search` above. Pause between
+        // the `quantized_active() == false` gate and `load_full()` so a
+        // deterministic test can trigger the fit-drop in the window.
+        #[cfg(test)]
+        if let Some(gate) = TEST_SEARCH_F32_GATE.load_full() {
+            gate.arrived
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            gate.notify.notified().await;
+        }
         let hnsw = match self.hnsw.load_full() {
             Some(h) => h,
             None => {
+                // #424 (Б-4) — transient flip during this request.
+                if self.quantized_active() {
+                    return self
+                        .search_cofilter_quantized(query, k, ef, &allow_set)
+                        .await;
+                }
+                // Genuinely unreachable: non-quantized / pre-flip adapter
+                // with no f32 graph. Defensive empty on a read path.
                 return Ok(vec![]);
             }
         };
@@ -1985,123 +2185,129 @@ impl VectorAdapter for HnswAdapter {
         // recall. Beyond 512 the graph is large enough for reliable
         // connectivity.
         const QUANT_BRUTE_FORCE_MAX: usize = FIT_THRESHOLD * 2;
-        let mut results: Vec<(RecordId, f32)> = if self.quantized_active()
-            && self.len() <= QUANT_BRUTE_FORCE_MAX
-        {
-            // V5.2 (#411) — small quantized index: exact brute-force scan
-            // over dequantized vectors (same as unquantized brute-force but
-            // reading from vectors_u8 via the quantizer). Guarantees 100%
-            // recall on small indexes where the HNSW graph may have poor
-            // connectivity due to hnsw_rs's nondeterministic layer assignment.
-            let quantizer = self
-                .quantizer
-                .get()
-                .expect("quantized_active but quantizer unset");
-            let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
-            self.vectors_u8.scan(|i, c| pairs.push((*i, c.clone())));
-            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
-            for (internal, codes) in pairs {
-                if self.deleted.contains_async(&internal).await {
-                    continue;
-                }
-                if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
-                    let d = rescore_f32(self.metric, quantizer, query, &codes);
-                    out.push((rid, d));
-                }
-            }
-            out
-        } else if self.quantized_active() {
-            // V5.2 (#411) — post-fit quantized search: traversal on the u8
-            // graph (cheap integer distance) with overscan `2k+10`, then
-            // dequant-rescore each candidate with the EXACT f32 distance to
-            // the original (unquantized) query.
-            let quantizer = self
-                .quantizer
-                .get()
-                .expect("quantized_active but quantizer unset");
-            let hnsw_u8 = self
-                .hnsw_u8_handle()
-                .expect("quantized_active but u8 graph unset");
-            // Quantize the query for the graph traversal. The original f32
-            // query is retained for the rescore.
-            let query_codes = quantizer.quantize(query);
-            // Quantized traversal navigates on lossy integer distance, so the
-            // candidate pool handed to the exact-f32 rescore must be generous
-            // — a tight `2k+10` pool leaves the true top-k un-recovered and
-            // pushes recall below the ≤2%-drop DoD. `16k+64` (capped at
-            // MAX_TOPK) gives the rescore a wide net; `ef` is raised to at
-            // least the overscan so the graph actually explores that many.
-            let overscan = ((k as usize) * 16 + 64).min(MAX_TOPK as usize);
-            let ef_q = ef.max(overscan);
-            let neighbors =
-                tokio::task::spawn_blocking(move || hnsw_u8.search(&query_codes, overscan, ef_q))
-                    .await
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-            // Rescore each non-tombstoned candidate with the exact f32
-            // distance to the original query. `rescore_f32` dequantizes
-            // the candidate codes and applies the SAME metric convention
-            // as ShamirDist, so distances are directly comparable.
-            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
-            for n in neighbors {
-                if self.deleted.contains_async(&n.d_id).await {
-                    continue;
-                }
-                let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
-                if let Some(codes) = codes_opt {
-                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                        let exact = rescore_f32(self.metric, quantizer, query, &codes);
-                        out.push((rid, exact));
+        let mut results: Vec<(RecordId, f32)> =
+            if self.quantized_active() && self.len() <= QUANT_BRUTE_FORCE_MAX {
+                // V5.2 (#411) — small quantized index: exact brute-force scan
+                // over dequantized vectors (same as unquantized brute-force but
+                // reading from vectors_u8 via the quantizer). Guarantees 100%
+                // recall on small indexes where the HNSW graph may have poor
+                // connectivity due to hnsw_rs's nondeterministic layer assignment.
+                //
+                // #424 (Б-4) — body extracted to [`search_quantized_bruteforce`]
+                // so the transient-None retry path in the f32-graph branch below
+                // can re-run the EXACT same logic instead of returning empty.
+                self.search_quantized_bruteforce(query, k).await?
+            } else if self.quantized_active() {
+                // V5.2 (#411) — post-fit quantized search: traversal on the u8
+                // graph (cheap integer distance) with overscan `16k+64`, then
+                // dequant-rescore each candidate with the EXACT f32 distance to
+                // the original (unquantized) query.
+                //
+                // #424 (Б-4) — body extracted to [`search_quantized_graph`] so
+                // the transient-None retry path in the f32-graph branch below
+                // can re-run the EXACT same logic instead of returning empty.
+                self.search_quantized_graph(query, k, ef).await?
+            } else if self.len() <= BRUTE_FORCE_MAX {
+                let dist = ShamirDist {
+                    metric: self.metric,
+                };
+                // Snapshot (internal, vector) pairs — the index is tiny here.
+                let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
+                self.vectors.scan(|i, v| pairs.push((*i, v.clone())));
+                let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
+                for (internal, v) in pairs {
+                    if self.deleted.contains_async(&internal).await {
+                        continue;
+                    }
+                    if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+                        out.push((rid, dist.eval(query, &v)));
                     }
                 }
-            }
-            out
-        } else if self.len() <= BRUTE_FORCE_MAX {
-            let dist = ShamirDist {
-                metric: self.metric,
-            };
-            // Snapshot (internal, vector) pairs — the index is tiny here.
-            let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
-            self.vectors.scan(|i, v| pairs.push((*i, v.clone())));
-            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
-            for (internal, v) in pairs {
-                if self.deleted.contains_async(&internal).await {
-                    continue;
+                out
+            } else {
+                // Search committed f32 graph (approximate). Reached ONLY when
+                // `!quantized_active()` AND `len() > BRUTE_FORCE_MAX` — in that
+                // state the f32 graph is always present... UNLESS a concurrent
+                // fit transition raced between this function's `quantized_active()`
+                // gate (above) and the `hnsw.load_full()` below.
+                //
+                // #424 (Б-4) — transient-None race window. The sequence:
+                //   1. THIS request read `quantized_active() == false` (pre-flip)
+                //      in the `if/else if` chain above, so it landed here on the
+                //      f32 path.
+                //   2. A concurrent fitter ran `try_fit_and_rebuild`: it set
+                //      `is_fitted = true` (Release) and then `hnsw.store(None)`
+                //      (Release) to drop the f32 graph (#418 memory win).
+                //   3. THIS request's `hnsw.load_full()` now returns `None`.
+                //
+                // The old code called this "invariant violation, unreachable" and
+                // returned `Ok(vec![])` — but the window is REAL (the gate and the
+                // load are two independent atomic reads with no lock between them).
+                // A request that hits it silently got an empty result instead of a
+                // correct answer through the now-live u8 graph.
+                //
+                // Fix: on `None`, RE-CHECK `quantized_active()`. If it is now
+                // `true`, the flip happened in the window — route through the u8
+                // path (same helper the main quantized branch uses). If it is
+                // STILL `false`, the f32 graph is genuinely absent on a
+                // non-quantized adapter — a true invariant violation (unquantized
+                // adapters never drop the f32 graph; quantized adapters only drop
+                // it post-flip, which IS `quantized_active()`) — defensive empty.
+                //
+                // #424 (Б-4) — test hook: pause HERE (after the
+                // `quantized_active() == false` gate, before `load_full()`)
+                // so a deterministic test can trigger a fit transition that
+                // drops the f32 graph while this request is paused. Compiles
+                // away in release builds.
+                #[cfg(test)]
+                if let Some(gate) = TEST_SEARCH_F32_GATE.load_full() {
+                    // Signal the test that this request has reached the
+                    // f32-gate (past the `quantized_active() == false`
+                    // check, now paused before `load_full()`).
+                    gate.arrived
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    // `notified()` is cancellation-safe: if the test has
+                    // already called `notify_one` before we get here, the
+                    // permit is stored and `notified()` resolves immediately.
+                    gate.notify.notified().await;
                 }
-                if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
-                    out.push((rid, dist.eval(query, &v)));
-                }
-            }
-            out
-        } else {
-            // Search committed f32 graph (approximate). Reached ONLY when
-            // `!quantized_active()` AND `len() > BRUTE_FORCE_MAX` — in that
-            // state the f32 graph is always present. #418: None here is an
-            // invariant violation; defensive empty result on a read path.
-            let hnsw = match self.hnsw.load_full() {
-                Some(h) => h,
-                None => {
-                    return Ok(vec![]);
-                }
-            };
-            let overscan = (k as usize) * 2 + 10;
-            let query_owned = query.to_vec();
-            let neighbors =
-                tokio::task::spawn_blocking(move || hnsw.search(&query_owned, overscan, ef))
-                    .await
-                    .map_err(|e| VectorError::Internal(e.to_string()))?;
+                let hnsw = match self.hnsw.load_full() {
+                    Some(h) => h,
+                    None => {
+                        // #424 (Б-4) — transient flip during this request. Re-check
+                        // and route through the now-correct u8 path.
+                        if self.quantized_active() {
+                            if self.len() <= QUANT_BRUTE_FORCE_MAX {
+                                return self.search_quantized_bruteforce(query, k).await;
+                            } else {
+                                return self.search_quantized_graph(query, k, ef).await;
+                            }
+                        }
+                        // Genuinely unreachable: a non-quantized adapter (or a
+                        // pre-flip quantized adapter) has no reason for the f32
+                        // graph to be absent. Defensive empty on a read path —
+                        // never panic.
+                        return Ok(vec![]);
+                    }
+                };
+                let overscan = (k as usize) * 2 + 10;
+                let query_owned = query.to_vec();
+                let neighbors =
+                    tokio::task::spawn_blocking(move || hnsw.search(&query_owned, overscan, ef))
+                        .await
+                        .map_err(|e| VectorError::Internal(e.to_string()))?;
 
-            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
-            for n in neighbors {
-                if self.deleted.contains_async(&n.d_id).await {
-                    continue;
+                let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
+                for n in neighbors {
+                    if self.deleted.contains_async(&n.d_id).await {
+                        continue;
+                    }
+                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                        out.push((rid, n.distance));
+                    }
                 }
-                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                    out.push((rid, n.distance));
-                }
-            }
-            out
-        };
+                out
+            };
 
         // Merge the caller's own un-committed staged vectors (in-tx search)
         // via a brute-force scan — they are not in the committed graph.
