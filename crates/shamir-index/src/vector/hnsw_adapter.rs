@@ -658,10 +658,14 @@ impl HnswAdapter {
     ///
     /// V5.2 (#411) — post-fit: returns DEQUANTIZED f32 vectors (the codes
     /// in `vectors_u8` are dequantized through the frozen quantizer). The
-    /// compaction rebuild target is always an unquantized adapter (the
-    /// compaction path does not preserve quantization in #411 — a
-    /// quantization-aware compaction is #412), so returning f32 vectors
-    /// is correct: the target adapter re-fits at its own threshold.
+    /// compaction rebuild target is always an UNQUANTIZED adapter at
+    /// backfill time: live vectors are re-inserted as f32 into the target's
+    /// fresh f32 graph, and the target re-fits its OWN quantizer on the
+    /// post-compaction live set when it crosses `FIT_THRESHOLD` (#428,
+    /// Variant A — see `backfill_if_absent`). Re-fitting from scratch is
+    /// honest: the live distribution may have drifted from the pre-compaction
+    /// fit (deletes shift it), so retraining on the surviving set is at
+    /// least as accurate as copying the old `QuantMeta`.
     pub(crate) fn collect_live_vectors(&self) -> Vec<(RecordId, Vec<f32>)> {
         let mut result: Vec<(RecordId, Vec<f32>)> = Vec::new();
         // Post-fit: dequantize codes. Pre-fit/unquantized: f32 buffer.
@@ -689,6 +693,22 @@ impl HnswAdapter {
     /// V4.2 (#408) — Insert (rid, vec) ONLY if rid is absent from
     /// `rid_to_internal` AND absent from `compaction_deleted_rids`.
     /// Uses `entry_async` for atomic check-and-insert per rid.
+    ///
+    /// #428 (VR-6) — quantization-aware routing.
+    ///
+    /// The compaction target may be `quantization == Some(Sq8)` (see
+    /// [`Self::new_compaction_target_quantized`]). The target STARTS
+    /// un-fitted: every backfill insert runs the f32 path (graph + buffer),
+    /// exactly like the legacy non-quant target. After the LAST row is
+    /// inserted, a deferred-fit check fires (mirroring `upsert`'s trigger):
+    /// if `live_count >= FIT_THRESHOLD` and the target is a quantization
+    /// adapter, [`Self::try_fit_and_rebuild`] trains a fresh SQ8 quantizer
+    /// on the post-compaction live set, builds the u8 graph, and drops the
+    /// f32 graph. The fit snapshot/delta/catch-up machinery in
+    /// `try_fit_and_rebuild` is REUSED verbatim — no duplicate claim path.
+    /// If the live set is below `FIT_THRESHOLD` (rare for a compaction that
+    /// fires past `VECTOR_COMPACTION_MIN_LIVE`), the target stays on the f32
+    /// path until a subsequent `upsert` crosses the threshold and fits.
     pub(crate) async fn backfill_if_absent(
         &self,
         items: &[(RecordId, Vec<f32>)],
@@ -714,10 +734,12 @@ impl HnswAdapter {
                     let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
                     vac.insert_entry(internal);
 
-                    // Insert into graph. backfill runs on a compaction target
-                    // (always a non-quant adapter), so the f32 graph is always
-                    // present; None here is an invariant violation surfaced as
-                    // an error, not a normal-path panic.
+                    // Insert into the f32 graph. At backfill time the target
+                    // is ALWAYS un-fitted (`is_quantized() == false`): even a
+                    // quantization-enabled target starts un-fitted and the
+                    // deferred-fit check below fires AFTER the loop. So the
+                    // f32 graph is always present here; a `None` load is an
+                    // invariant violation surfaced as an error.
                     let hnsw = self.hnsw.load_full().ok_or_else(|| {
                         VectorError::Internal(
                             "backfill_if_absent: f32 graph absent on compaction target".into(),
@@ -734,6 +756,21 @@ impl HnswAdapter {
                     let _ = self.rid_map.insert_async(internal, *rid).await;
                 }
             }
+        }
+
+        // #428 (VR-6) — deferred-fit on a quantization-enabled target.
+        // Mirrors the trigger in `upsert`: if the post-compaction live set
+        // crosses `FIT_THRESHOLD`, retrain the SQ8 quantizer from scratch on
+        // the surviving vectors and build the u8 graph. This is Variant A
+        // (honest re-fit, no QuantMeta carry-over from the pre-compaction
+        // adapter). `try_fit_and_rebuild` is single-flight and a no-op when
+        // `quantization.is_none()`, so this block is safe for non-quant
+        // targets too (it just returns early).
+        if self.quantization.is_some() && !self.is_quantized() && self.len() >= FIT_THRESHOLD {
+            // Best-effort: a fit failure is logged inside `try_fit_and_rebuild`
+            // and does not fail the backfill — the target continues on the f32
+            // path, which is always correct (just slower and 4× the memory).
+            let _ = self.try_fit_and_rebuild().await;
         }
         Ok(())
     }
@@ -756,12 +793,42 @@ impl HnswAdapter {
 
     /// V4.2 (#408) — Create a new empty adapter suitable as a compaction target,
     /// with `compaction_deleted_rids` set to Some.
+    ///
+    /// Retained as the explicit non-quant constructor for tests/benches that
+    /// model the f32 compaction rebuild; production compaction now goes through
+    /// [`Self::new_compaction_target_quantized`] (which delegates here when `q`
+    /// is `None`).
+    #[allow(dead_code)] // test/bench API; production uses the quantized twin
     pub(crate) fn new_compaction_target(
         dim: u32,
         metric: VectorMetric,
         config: HnswConfig,
     ) -> Self {
         let mut adapter = Self::new(dim, metric, config);
+        adapter.compaction_deleted_rids =
+            Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
+        adapter
+    }
+
+    /// #428 (VR-6) — quantization-aware compaction target.
+    ///
+    /// Mirrors [`Self::new_compaction_target`] but constructs the adapter via
+    /// [`Self::new_with_quantization`] so the target is `quantization ==
+    /// Some(q)`. The target STARTS un-fitted (`is_quantized() == false`): it
+    /// runs the f32 path during `backfill_if_absent`, then the deferred-fit
+    /// check at the end of backfill (or a subsequent `upsert`) crosses
+    /// [`FIT_THRESHOLD`] and re-trains the quantizer on the POST-COMPACTION
+    /// live set (Variant A — honest re-fit, no QuantMeta carry-over).
+    ///
+    /// `q == None` is equivalent to [`Self::new_compaction_target`]; callers
+    /// may pass the old adapter's `quantization_mode()` directly.
+    pub(crate) fn new_compaction_target_quantized(
+        dim: u32,
+        metric: VectorMetric,
+        config: HnswConfig,
+        q: Option<VectorQuantization>,
+    ) -> Self {
+        let mut adapter = Self::new_with_quantization(dim, metric, config, q);
         adapter.compaction_deleted_rids =
             Some(Arc::new(scc::HashMap::with_hasher(THasher::default())));
         adapter
@@ -786,8 +853,9 @@ impl HnswAdapter {
     }
 
     /// The opt-in quantization mode the adapter was constructed with.
-    /// `None` = legacy f32 path, bit-for-bit.
-    #[allow(dead_code)] // API for #412 snapshot codec
+    /// `None` = legacy f32 path, bit-for-bit. Used by the background
+    /// compaction path (#428) to decide whether the compaction target
+    /// should be a quantization-enabled adapter.
     pub(crate) fn quantization_mode(&self) -> Option<VectorQuantization> {
         self.quantization
     }
