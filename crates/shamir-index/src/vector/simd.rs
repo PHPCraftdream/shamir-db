@@ -562,6 +562,11 @@ fn has_dotprod() -> bool {
 /// equal length (debug-asserted); behaviour on mismatched tails is to
 /// truncate to the shorter (matching `dot_product`).
 #[inline]
+#[allow(dead_code)] // VR-7 (#429): sole production call site (approx_dot) was
+                    // dead-weight; the kernel survives as tested SIMD
+                    // infrastructure for a future weighted-SQ8 dot (see the
+                    // block comment above + `tests/simd_tests.rs`), not
+                    // because anything in the lib calls it today.
 pub(crate) fn dot_u8(a: &[u8], b: &[u8]) -> u32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {

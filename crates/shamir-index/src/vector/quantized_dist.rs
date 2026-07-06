@@ -42,6 +42,86 @@
 //! `Distance` for rayon thread-locals, and `Arc::clone` is cheap. The
 //! quantizer params are frozen at fit time and never mutated thereafter,
 //! so `eval` is deterministic and lock-free.
+//!
+//! ## Cosine norm cache — VR-7 (#429), architecture analysis
+//!
+//! The Cosine arm of [`ShamirDistU8::eval`] recomputes the dequantized
+//! vector norm `||x||² = Σ (min_i + q_i·s_i)²` for BOTH code slices `a`
+//! and `b` on every call — O(dim) twice per HNSW hop (once for the query
+//! code, once for the candidate). At scale this dominates the Cosine
+//! traversal: the baseline bench (`benches/sq8_hot_path.rs`,
+//! `shamir_dist_u8_eval/Cosine/128`) shows Cosine ~3.5× slower than L2
+//! (~243 µs vs ~69 µs over a 256-candidate pool at dim=128), entirely
+//! accounted for by the two extra `dequant_norm_sq` passes per eval.
+//!
+//! The obvious fix — cache `||x||²` per internal-id, populated at insert
+//! time next to `vectors_u8` — **cannot reach `eval`** without rewriting
+//! the `hnsw_rs` integration. `hnsw_rs::Distance<T>::eval(&self, a: &[T],
+//! b: &[T])` is symmetric and ID-blind: the graph stores its own
+//! `Vec<u8>` per `Arc<Point>` internally and passes the *slice* to `eval`
+//! on every hop; the internal-id (the `usize` we published at insert) is
+//! never threaded into `eval`. So a per-internal-id cache in
+//! [`HnswAdapter`](super::hnsw_adapter::HnswAdapter) (parallel to
+//! `vectors_u8`) is invisible to the Cosine hot path — `eval` cannot look
+//! it up because it does not know which internal-id it is scoring.
+//!
+//! ### Options considered
+//!
+//! 1. **Per-internal-id cache in the adapter** (parallel to `vectors_u8`,
+//!    populated at `claim_and_publish_u8` / fit / backfill / delete).
+//!    Correctness-wise clean and RCU-friendly (lock-free `scc::HashMap`),
+//!    but **does not speed up `eval`** — `eval` cannot read it. Would only
+//!    help if we abandoned `hnsw_rs`'s built-in traversal for an
+//!    in-house graph walk that threads internal-ids into the scorer.
+//!    Rejected for this task (out of scope: would rewrite the HNSW
+//!    integration).
+//!
+//! 2. **Query-norm hoist**: compute the query code's norm ONCE per search
+//!    (in `search_quantized_graph`) and stash it on `ShamirDistU8` for the
+//!    duration of the single `hnsw_u8.search(...)` call. Cuts ONE of the
+//!    two `dequant_norm_sq` passes per eval (the query side). BUT
+//!    `ShamirDistU8` is shared (`Arc<Hnsw>` holds one `Distance`, cloned
+//!    per rayon thread-local) and `hnsw_u8.search` is re-entrant under
+//!    concurrent queries on the same thread-local clone — a per-search
+//!    stash needs a stack of (`query_ptr` → norm) entries to be safe, and
+//!    even then the candidate-side norm (the larger cost — there are many
+//!    candidates, one query) is untouched. At most a ~2× win on the query
+//!    term; ~1.75× on the full Cosine eval. Feasible but partial.
+//!
+//! 3. **Pointer-keyed norm cache** (`DashMap<*const u8 as usize, f32>`)
+//!    inside `ShamirDistU8`: keys are the slice pointers `hnsw_rs` hands
+//!    to `eval`. Both the per-node `Arc<Point>` data (stable for the
+//!    graph's lifetime — `hnsw_rs` never moves or reallocates a published
+//!    point) and our own per-search `query_codes` `Vec` have stable
+//!    pointers across the traversal. This is the ONLY option that reaches
+//!    BOTH the query and candidate norms from inside `eval` without
+//!    touching `hnsw_rs`. Risks: (a) the cache leaks one entry per
+//!    DISTINCT query pointer over the adapter's lifetime (slow, unbounded
+//!    growth proportional to the number of distinct queries issued —
+//!    needs an LRU/size cap); (b) keying on raw pointer values couples us
+//!    to `hnsw_rs`'s internal storage layout (a future `hnsw_rs` version
+//!    that reallocates the per-point `Vec` would silently return stale
+//!    norms — a correctness hazard with no compile-time guard). Defer to
+//!    a dedicated task that can add the eviction policy and a
+//!    pointer-stability invariant test.
+//!
+//! 4. **Fold the norm into the code vector** (e.g. SQ8 + 1 trailing byte
+//!    encoding a precomputed norm bucket): changes the wire/snapshot
+//!    format and the quantizer contract — a much larger refactor that
+//!    affects `Sq8Quantizer`, the v2 snapshot sidecar, and every caller.
+//!    Out of scope.
+//!
+//! ### Recommendation
+//!
+//! A full norm cache is a **separate task**: it is not a surgical hot-path
+//! edit. Option 2 (query-norm hoist) is the smallest safe win and could
+//! land as a follow-up; option 3 is the largest win but needs an eviction
+//! policy + a pointer-stability guard. This module ships VR-7 fix #1
+//! (dead `dot_u8` removal in [`Sq8Quantizer::approx_dot`]) which speeds
+//! up the Dot AND Cosine arms (both call `approx_dot`); the Cosine
+//! norm-cache work is tracked as the recommendation above. The bench
+//! (`benches/sq8_hot_path.rs`) pins the current Cosine throughput so the
+//! follow-up can show its improvement.
 
 use crate::kind::VectorMetric;
 use crate::vector::simd::{dot_product, l2_squared};
@@ -85,8 +165,11 @@ impl ShamirDistU8 {
     /// Squared L2 norm of the dequantized vector for a code vector:
     /// `||x||² = Σ (min_i + q_i·s_i)²`. Used by the Cosine metric.
     ///
-    /// This is `O(dim)` per call; for hot-path Cosine the adapter may
-    /// precompute and cache norms per internal-id at insert time.
+    /// This is `O(dim)` per call. VR-7 (#429) analyzed caching it per
+    /// internal-id at insert time — see the module-level "Cosine norm
+    /// cache" architecture section for why that cache cannot reach `eval`
+    /// without rewriting the `hnsw_rs` integration, and the recommended
+    /// follow-up options (query-norm hoist / pointer-keyed cache).
     fn dequant_norm_sq(&self, q: &[u8]) -> f32 {
         debug_assert_eq!(q.len(), self.params.dim());
         let mins = self.params.mins();
