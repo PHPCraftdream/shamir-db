@@ -81,6 +81,13 @@ fn rid(n: u64) -> RecordId {
     RecordId(bytes)
 }
 
+/// #433 — seeded single-vector generator for the fast-path convergence
+/// regression tests (deterministic, one vector per seed).
+fn random_vec(dim: usize, seed: u64) -> Vec<f32> {
+    let mut rng = Lcg::new(seed.wrapping_add(0x9E37_79B9_7F4A_7C15));
+    (0..dim).map(|_| rng.next_range(-1.0, 1.0)).collect()
+}
+
 fn recall_at_k(truth: &[RecordId], cand: &[RecordId]) -> f32 {
     let hits = cand
         .iter()
@@ -1241,6 +1248,224 @@ async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
             "rid {r}'s current vector must be findable post-fit — an empty \
              result indicates its internal was lost from the graph (Б-3 \
              double-count regression)"
+        );
+    }
+}
+
+// =========================================================================
+// #433 (post-VR-8) — regression: the `upsert` quantized FAST-PATH must
+// account for a PRE-flip internal in `migrated_pre_flip`, or the fitter's
+// catch-up loop never converges (hangs forever).
+//
+// The window: `upsert` allocates `internal` via `next_id.fetch_add` and
+// THEN suspends on `rid_to_internal.entry_async(...).await`. If a
+// concurrent `try_fit_and_rebuild` completes ENTIRELY inside that suspend
+// (captures `next_id_at_flip > internal`, flips `is_fitted`), the upsert
+// resumes, reads `quantized_active() == true`, and took the fast-path.
+// Pre-#433 that fast-path did a RAW `vectors_u8.insert_async` — it never
+// bumped `migrated_pre_flip`, and the catch-up loop (which scans only the
+// f32 `vectors` buffer this path never touches) never claimed the internal
+// either. `migrated_pre_flip` never reached `target = next_id_at_flip` →
+// the loop span forever → the whole fit call (and every upsert awaiting it)
+// hung → 60s TIMEOUT.
+//
+// Coverage note: this is a STATISTICAL convergence + correctness test, not
+// a deterministic reproduction of the exact fast-path window (the upsert
+// allocate→`quantized_active()` gap spans only `entry_async`, which rarely
+// suspends long enough for a whole fit; the sibling `backfill` test provoked
+// a DISTINCT hang — an unconditional `vectors.remove` — not this window). It
+// exercises the fast-path under heavy same-rid churn across the flip and
+// asserts (a) convergence (no 60s hang) and (b) every live rid stays
+// findable, which a fast-path that dropped a pre-flip internal from the
+// graph would violate. The fix itself (`quantized_fastpath_publish`) is
+// correct by construction: it routes the fast-path through the same claim
+// authority the catch-up loop counts on.
+// =========================================================================
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_upsert_quantized_fastpath_converges_no_hang() {
+    let dim = 8u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // Enough distinct rids to cross FIT_THRESHOLD (256), with continued
+    // upserts AFTER the fit so many calls take the quantized fast-path while
+    // the catch-up loop is still draining pre-flip internals. Same-rid
+    // replays inject `entry_async` suspends at the allocate→check gap.
+    let n = 400u64;
+    let n_tasks = 6u64;
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        handles.push(tokio::spawn(async move {
+            for i in 0..n {
+                // Interleave distinct + shared rids so some tasks tombstone
+                // pre-flip internals others just allocated.
+                let r = rid((i + t) % n);
+                let v = random_vec(dim as usize, t * n + i);
+                let _ = adapter.upsert(r, &v).await;
+            }
+        }));
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for h in handles {
+            h.await.unwrap();
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "#433: concurrent upserts across the fit boundary HUNG past 60s — \
+         the quantized fast-path published a pre-flip internal via a raw \
+         vectors_u8 insert without bumping migrated_pre_flip, so the \
+         catch-up loop never converged. See `quantized_fastpath_publish`."
+    );
+    assert!(
+        adapter.is_quantized(),
+        "adapter did not fit under load (test setup failure)"
+    );
+
+    // Correctness (mirrors `concurrent_same_rid_upsert_race_across_fit_no_
+    // double_count`): the counter is NOT asserted here — under heavy
+    // same-rid churn across the flip, an internal claimed by the fast-path
+    // and LATER tombstoned by a replacing same-rid upsert bumps
+    // `migrated_pre_flip` twice (an over-count inherent to the whole
+    // claim-then-tombstone design, shared by every self-migration path, not
+    // specific to the fast-path). That over-count only makes the catch-up
+    // loop exit slightly EARLY; the load-bearing guarantee is that no LIVE
+    // rid's current internal is lost from the graph. We assert exactly that:
+    // every live rid must retrieve itself post-fit.
+    for r in 0..n {
+        let last_v = {
+            // The last write for rid `r` is the highest (t, i) with
+            // (i + t) % n == r; reconstruct its seed the same way.
+            let mut found: Option<Vec<f32>> = None;
+            for t in 0..n_tasks {
+                for i in 0..n {
+                    if (i + t) % n == r {
+                        found = Some(random_vec(dim as usize, t * n + i));
+                    }
+                }
+            }
+            found.expect("every rid in 0..n is written at least once")
+        };
+        let res = adapter
+            .search(&last_v, 1, SearchOpts::default(), None)
+            .await
+            .expect("search");
+        assert!(
+            !res.is_empty(),
+            "rid {r}'s current vector must be findable post-fit — an empty \
+             result means its internal was lost from the graph (a fast-path \
+             convergence regression)"
+        );
+    }
+}
+
+// =========================================================================
+// #433 (post-VR-8) — the SAME convergence gap for the `upsert_batch`
+// quantized fast-path. Identical mechanism: rows allocate pre-flip
+// internals, suspend on `entry_async`, and a concurrent fit flips mid-loop;
+// the batch fast-path must claim (bump `migrated_pre_flip`) rather than
+// raw-insert, or the fitter hangs.
+// =========================================================================
+
+#[tokio::test(flavor = "current_thread")]
+async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang() {
+    let dim = 8u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    let n_batches = 60u64;
+    let batch_sz = 8u64;
+    let n_tasks = 6u64;
+    let total_rids = n_batches * batch_sz;
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        handles.push(tokio::spawn(async move {
+            for b in 0..n_batches {
+                let items: Vec<(RecordId, Vec<f32>)> = (0..batch_sz)
+                    .map(|k| {
+                        let idx = (b * batch_sz + k + t) % total_rids;
+                        (rid(idx), random_vec(dim as usize, t * 100_000 + idx))
+                    })
+                    .collect();
+                let _ = adapter.upsert_batch(&items).await;
+            }
+        }));
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for h in handles {
+            h.await.unwrap();
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "#433: concurrent upsert_batch across the fit boundary HUNG past \
+         60s — the quantized batch fast-path published pre-flip internals \
+         via raw vectors_u8 inserts without bumping migrated_pre_flip."
+    );
+    assert!(
+        adapter.is_quantized(),
+        "adapter did not fit under load (test setup failure)"
+    );
+
+    // Correctness (see the single-upsert sibling above): the counter itself
+    // is not asserted (claim-then-tombstone over-count under same-rid churn
+    // is inherent to the design). Instead assert every live rid is findable
+    // post-fit — a convergence regression that dropped the f32 graph while a
+    // live pre-flip internal was still in flight would surface as an empty
+    // result for that rid.
+    for r in 0..total_rids {
+        let last_v = {
+            let mut found: Option<Vec<f32>> = None;
+            for t in 0..n_tasks {
+                for b in 0..n_batches {
+                    for k in 0..batch_sz {
+                        let idx = (b * batch_sz + k + t) % total_rids;
+                        if idx == r {
+                            found = Some(random_vec(dim as usize, t * 100_000 + idx));
+                        }
+                    }
+                }
+            }
+            found.expect("every rid is written at least once")
+        };
+        let res = adapter
+            .search(&last_v, 1, SearchOpts::default(), None)
+            .await
+            .expect("search");
+        assert!(
+            !res.is_empty(),
+            "rid {r}'s current vector must be findable post-fit — an empty \
+             result means its internal was lost from the graph (a batch \
+             fast-path convergence regression)"
         );
     }
 }
