@@ -809,3 +809,109 @@ async fn concurrent_upsert_across_fit_no_f32_graph_absent_error() {
          guarantee the f32 graph stays until every pre-flip internal has landed."
     );
 }
+
+// =========================================================================
+// #423 (Б-3, adversarial-review finding) — regression: tombstoning a
+// pre-flip internal DURING the fit transition must NOT hang the catch-up
+// loop forever.
+//
+// An earlier version of this fix computed `target = next_id_at_flip -
+// deleted_count_at_flip` (a FROZEN snapshot of the deleted count taken at
+// flip time). A pre-flip internal tombstoned AFTER the flip (a concurrent
+// `delete`/rid-replacing `upsert` racing the fit) was never counted in the
+// frozen `deleted_count_at_flip`, was skipped by the catch-up scan
+// (`deleted.contains` guard), and so could never bump `migrated_pre_flip`
+// to reach the frozen target — the catch-up loop would spin
+// (`yield_now().await`) forever, hanging `try_fit_and_rebuild` and every
+// upsert future waiting on the fit.
+//
+// The fix folds tombstones into `migrated_pre_flip` directly (see
+// `bump_migrated_on_tombstone`), so a post-flip tombstone of a pre-flip
+// internal advances convergence exactly like a claim would. This test
+// races upserts that both cross the fit threshold AND repeatedly replace
+// the SAME rid (tombstoning the previous internal on every replace) —
+// reproducing the exact interleaving the adversarial review identified —
+// and asserts the whole operation completes within a generous timeout.
+// Before the fix this test would hang (timeout) instead of failing fast.
+// =========================================================================
+
+#[tokio::test]
+async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
+    let dim = 16u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 600 vectors cross FIT_THRESHOLD (256). Each rid is upserted TWICE:
+    // the first upsert allocates a pre-flip internal that may still be
+    // in-flight (or already claimed) when the fitter flips; the second
+    // upsert on the SAME rid tombstones that first internal via the
+    // `Occupied` rid_to_internal branch — exactly the tombstone-during-fit
+    // race the adversarial review found. Interleaving the two upsert
+    // rounds across tasks (rather than doing all first-upserts then all
+    // second-upserts) widens the race window around the flip.
+    let n = 600usize;
+    let data = Arc::new(clustered(n, dim as usize, 24, 0.2, 0x0B3_C423F));
+    let n_tasks = 8usize;
+    let per_task = n / n_tasks;
+
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        let data = Arc::clone(&data);
+        let start = t * per_task;
+        let end = (t + 1) * per_task;
+        handles.push(tokio::spawn(async move {
+            for j in start..end {
+                let v = &data[j];
+                // First upsert: allocates a fresh internal for this rid.
+                adapter
+                    .upsert(rid(j as u64), v)
+                    .await
+                    .expect("first upsert");
+                // Second upsert on the SAME rid: tombstones the internal
+                // just allocated above via the `Occupied` rid_to_internal
+                // branch — a pre-flip internal being tombstoned mid-fit.
+                adapter
+                    .upsert(rid(j as u64), v)
+                    .await
+                    .expect("replacing upsert");
+            }
+        }));
+    }
+
+    // Generous timeout: if the catch-up loop regresses to the frozen-target
+    // hang, this fires instead of the test suite blocking forever (per
+    // project discipline: hangs are bugs, never tolerate — fail fast with a
+    // clear signal instead of a silent multi-minute stall).
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for h in handles {
+            h.await.unwrap();
+        }
+    })
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "#423 (Б-3 adversarial finding): concurrent upserts that tombstone \
+         pre-flip internals during the fit transition HUNG past the 60s \
+         timeout — the catch-up loop's convergence target excluded a \
+         post-flip-tombstoned pre-flip internal and never reached it. \
+         See `bump_migrated_on_tombstone` and the seed comment in \
+         `try_fit_and_rebuild`."
+    );
+
+    assert!(
+        adapter.is_quantized(),
+        "adapter did not fit under load (test setup failure)"
+    );
+}
