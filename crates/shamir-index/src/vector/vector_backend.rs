@@ -1041,7 +1041,14 @@ async fn run_background_compaction(
     let config = old_hnsw.build_config();
     let dim = old_hnsw.dim_field();
     let metric = old_hnsw.metric_field();
-    let new_adapter = HnswAdapter::new_compaction_target(dim, metric, config);
+    // #428 (VR-6) — quantization-aware compaction target. If the OLD adapter
+    // was constructed with a quantization mode, the target inherits the SAME
+    // mode (so the post-compaction snapshot is v2 with QuantMeta, and the
+    // deferred-fit in `backfill_if_absent` re-trains the quantizer on the
+    // surviving live set). `None` → legacy `new_compaction_target` (f32 path,
+    // bit-for-bit back-compat with the pre-#428 compaction).
+    let quant_mode = old_hnsw.quantization_mode();
+    let new_adapter = HnswAdapter::new_compaction_target_quantized(dim, metric, config, quant_mode);
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
 
     // Step 2: Arm double-write
