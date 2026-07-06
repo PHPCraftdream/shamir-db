@@ -7,7 +7,8 @@ use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
-    apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
+    apply_counter_phase, apply_data_phase, apply_vector_delta_phase, materialize_async_tail,
+    promote_vectors,
 };
 use crate::tx::finalize::finalize_sync_post_publish;
 use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
@@ -63,8 +64,11 @@ const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_s
 ///   env var present every existing test pays at most one `env::var` miss
 ///   per seam and never crashes or flushes.
 ///
-/// Phase labels: `pre_commit`, `phase4`, `phase5a`, `phase5c`, `phase6`,
-/// `phase6_5`, `phase7`. D4 drain seam (fired from the drainer's per-entry
+/// Phase labels: `pre_commit`, `phase4`, `phase5a`, `phase5c`,
+/// `phase5d_delta` (#426 VR-4 — after the pre-publish delta-chunk append,
+/// before publish; proves the durable delta survives a crash and
+/// `restore_on_open` replays it), `phase5d_delta_async` (the AsyncIndex
+/// twin), `phase6`, `phase6_5`, `phase7`. D4 drain seam (fired from the drainer's per-entry
 /// loop, not the ack-path): `drain_replay` — AFTER `replay_v2_entry` made the
 /// entry durable in `history` but BEFORE `mark_durable` advanced the durable
 /// watermark, so the entry is still inflight and recovery re-replays it
@@ -545,6 +549,26 @@ async fn commit_tx_inner_legacy_async(
     }
     drop(cell_guards);
     apply_counter_phase(&tx, repo).await;
+    // #426 (VR-4 variant A): append the durable vector delta-log chunk(s)
+    // BEFORE `version_guard.commit()` (pre-publish). The delta chunk is the
+    // bridge `restore_on_open::replay_delta` re-materializes vectors from
+    // on the next open; appending it pre-publish closes the W-2 window. The
+    // GRAPH half (in-RAM HNSW mutation) stays in `promote_vectors` inside
+    // the spawned tail (post-lock, III.5). A delta-append failure sets
+    // `tx.async_prefix_failed` → the ack-path reports `Deferred` (NOT a
+    // silent `Complete`) so the client can detect the missing durable echo.
+    apply_vector_delta_phase(&mut tx, repo, commit_version).await;
+    let delta_deferred = tx.async_prefix_failed;
+
+    // Crash seam (test-only): fires BEFORE publish, mirroring the sync
+    // path's `phase5d_delta` seam in `materialize.rs` — the durable delta
+    // chunk is on disk but the version is not yet published and Phase 7
+    // has not run. Placed here (before `version_guard.commit()`), not
+    // after, so it actually proves what its name claims: a crash between
+    // the pre-publish delta-append and publish still leaves the chunk
+    // durable for `restore_on_open::replay_delta` to pick up.
+    maybe_crash("phase5d_delta_async", repo).await;
+
     // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
     // last_committed_version from the watermark (fetch_max). Replaces the
     // prior manual mark + sync_last_committed_from_watermark +
@@ -578,11 +602,22 @@ async fn commit_tx_inner_legacy_async(
 
     repo.tx_metrics().on_tx_committed();
 
+    // #426 (VR-4 variant A): a pre-publish delta-append failure
+    // (`tx.async_prefix_failed` set by `apply_vector_delta_phase`) surfaces
+    // as `Deferred` in the ack-path TxOutcome so the client detects the
+    // missing durable vector echo and can retry — NOT a silent `Complete`.
+    let materialization = if delta_deferred {
+        repo.tx_metrics().on_tx_materialization_deferred();
+        MaterializationState::Deferred
+    } else {
+        MaterializationState::Complete
+    };
+
     Ok(TxOutcome {
         tx_id: tx_id_u64,
         snapshot_version,
         commit_version,
-        materialization: MaterializationState::Complete,
+        materialization,
         background: Some(BackgroundCommitHandle { join }),
     })
 }

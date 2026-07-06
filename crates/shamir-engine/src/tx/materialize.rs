@@ -6,8 +6,8 @@ use shamir_tx::{RepoTxGate, TxContext};
 use crate::repo::RepoInstance;
 use crate::tx::commit::maybe_crash;
 use crate::tx::commit_phases::{
-    apply_data_batch, apply_index_batch, collect_data_batches, persist_markers, retry_materialize,
-    MATERIALIZE_ATTEMPTS,
+    apply_data_batch, apply_index_batch, apply_vector_delta_phase, collect_data_batches,
+    persist_markers, retry_materialize, MATERIALIZE_ATTEMPTS,
 };
 use crate::tx::tx_outcome::MaterializationState;
 
@@ -202,6 +202,29 @@ pub(super) async fn materialize(
     // so its unbounded per-vector work must not stall other committers
     // under the gate, and a failed promote does NOT defer the tx — see
     // `promote_vectors`.
+    //
+    // #426 (VR-4 variant A): the DELTA half of Phase 5d (`append_vector_delta`
+    // + `trigger_snapshot_check`) was moved INTO the commit critical
+    // section, here, BEFORE `version_guard.commit()`. The delta chunk is
+    // the durable bridge `restore_on_open::replay_delta` re-materializes
+    // the vectors from on the next open; appending it pre-publish closes
+    // the W-2 window where a post-ack crash could leave a committed
+    // vector WITHOUT a durable delta echo. The GRAPH half (in-RAM HNSW
+    // mutation) stays post-lock in `promote_vectors` (III.5). A
+    // delta-append failure flips `ok` → `Deferred` (detectable pre-ack,
+    // unlike the prior silent post-ack loss).
+    apply_vector_delta_phase(tx, repo, commit_version).await;
+    if tx.async_prefix_failed {
+        ok = false;
+    }
+
+    // Crash seam (test-only): the durable delta chunk is on disk (one
+    // `Store::set` per vector backend, flushed by the seam) but the version
+    // is still unpublished and Phase 7 has not run. The inflight WAL marker
+    // survives → recovery replays the data; `restore_on_open` replays the
+    // delta chunk → the vector is searchable after restart. Proves variant
+    // A: delta durable pre-publish survives a crash at this seam.
+    maybe_crash("phase5d_delta", repo).await;
 
     // Phase 6: publish — atomic publish-committed. ALWAYS runs: the
     // version IS committed (the WAL entry is durable) regardless of
