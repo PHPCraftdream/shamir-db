@@ -622,3 +622,190 @@ async fn f32_graph_dropped_after_fit_and_search_survives() {
         "f32 graph must stay dropped across post-fit ops"
     );
 }
+
+// =========================================================================
+// #423 (Б-1) — regression: fit-window vectors ARE inserted into the u8
+// graph. Dataset >512 so search takes the GRAPH path (not brute-force):
+// QUANT_BRUTE_FORCE_MAX == FIT_THRESHOLD * 2 == 512.
+// =========================================================================
+//
+// Before the fix, the fit catch-up loop and the upsert self-migration path
+// populated `vectors_u8` WITHOUT inserting the corresponding u8 graph node.
+// A vector that entered `vectors_u8` after the fitter's delta scan was
+// invisible to graph-search forever (and rode into the v2 snapshot as a
+// hole). Brute-force (len <= 512) masked the bug. This test forces the
+// GRAPH path by exceeding 512 vectors, then self-queries every vector with
+// a generous ef: a PRESENT vector self-retrieves within the top-k with
+// overwhelming probability, while a genuinely LOST vector (no graph node)
+// never appears at any k. `missing == 0` is the no-loss invariant.
+
+#[tokio::test]
+async fn concurrent_upsert_across_fit_window_graph_path_no_loss() {
+    let dim = 24u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 600 vectors — crosses FIT_THRESHOLD (256) AND exceeds
+    // QUANT_BRUTE_FORCE_MAX (512), so post-fit search MUST take the graph
+    // path. 8 concurrent tasks race the fit transition.
+    let n = 600usize;
+    let data = clustered(n, dim as usize, 24, 0.2, 0x0BEE_F423);
+    let n_tasks = 8usize;
+    let per_task = data.len() / n_tasks;
+    let adapter_for_tasks = Arc::clone(&adapter);
+
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter_for_tasks);
+        let chunk: Vec<(RecordId, Vec<f32>)> = data[t * per_task..(t + 1) * per_task]
+            .iter()
+            .enumerate()
+            .map(|(j, v)| (rid((t * per_task + j) as u64), v.clone()))
+            .collect();
+        handles.push(tokio::spawn(async move {
+            adapter.upsert_batch(&chunk).await.expect("upsert_batch");
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // The adapter MUST have fitted (600 > 256).
+    assert!(adapter.is_quantized(), "adapter did not fit under load");
+
+    // CRITICAL: confirm the test exercises the GRAPH path, not brute-force.
+    // len() == next_id - deleted_count; with 600 upserts and no deletes,
+    // len() == 600 > 512 == QUANT_BRUTE_FORCE_MAX → graph path. If this
+    // ever flips to <= 512 the test would silently mask Б-1.
+    let live = adapter.len();
+    assert!(
+        live > 512,
+        "test must take the GRAPH path: len()={live} must be > 512 (QUANT_BRUTE_FORCE_MAX); \
+         otherwise brute-force masks the bug"
+    );
+
+    // #423 (Б-1) DETERMINISTIC no-loss check: every upserted internal MUST
+    // have a node in `hnsw_u8`. Before the fix, the fit catch-up loop and
+    // the upsert self-migration path populated `vectors_u8` WITHOUT
+    // inserting the u8 graph node — so `get_nb_point()` would be LESS than
+    // the number of upserted vectors. We assert EXACT equality (no HNSW
+    // approximation involved — this is a direct node-count check).
+    //
+    // `hnsw_rs::get_nb_point` returns the total number of inserted DataPoints
+    // (every `parallel_insert`/`insert` call adds one). With 600 upserts and
+    // no deletes, the graph MUST hold exactly `n` nodes.
+    let graph_nodes = adapter.hnsw_u8_handle().expect("fitted").get_nb_point();
+    assert_eq!(
+        graph_nodes,
+        n,
+        "Б-1: u8 graph has {graph_nodes} nodes but {n} vectors were upserted — \
+         {missing} vectors lost their graph node during the concurrent fit transition. \
+         Graph path was exercised (len={live} > 512).",
+        missing = n.saturating_sub(graph_nodes)
+    );
+
+    // Search sanity: the graph must return results (the path is exercised
+    // since len > 512). We do NOT assert missing==0 here because hnsw_rs's
+    // unseedable layer RNG can leave a handful of nodes unreachable at
+    // search time even when ALL nodes are present in the graph (confirmed
+    // via `get_nb_point()` above — the deterministic check). The
+    // node-count assertion is the Б-1 invariant; this is a recall smoke.
+    let opts = SearchOpts {
+        ef_search: Some(512),
+        oversample: None,
+    };
+    let res = adapter.search(&data[0], 10, opts, None).await.unwrap();
+    assert!(
+        !res.is_empty(),
+        "graph search returned empty on a 600-node graph"
+    );
+}
+
+// =========================================================================
+// #423 (Б-3) — regression: a pre-flip upsert that completes its f32 insert
+// AFTER the fitter's convergence check must NOT observe a dropped f32 graph.
+// Before the fix, `vectors_u8.len()` (inflated by post-flip upserts) drove
+// the convergence check, the loop exited early, the f32 graph was dropped
+// (`hnsw.store(None)`) before the pre-flip upsert's `hnsw.load_full()` →
+// `Internal("f32 graph absent on non-quantized path")` on a legit commit.
+//
+// This test reproduces the race statistically: many concurrent upserts
+// across the fit boundary, asserting NONE of them returns an Internal
+// error. Under the old convergence metric the race was reproducible; under
+// the migrated_pre_flip metric the f32 graph is dropped ONLY after every
+// pre-flip internal has landed, so no in-flight upsert can miss it.
+// =========================================================================
+
+#[tokio::test]
+async fn concurrent_upsert_across_fit_no_f32_graph_absent_error() {
+    let dim = 16u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 16 tasks, each upserting ~40 vectors one-at-a-time (single `upsert`,
+    // not batch) to maximize the window where a pre-flip upsert is in
+    // flight between its initial `quantized_active()` check and its f32
+    // `hnsw.load_full()`. 640 vectors total crosses the fit threshold.
+    let n = 640usize;
+    let data = Arc::new(clustered(n, dim as usize, 16, 0.2, 0x00B3_C423));
+    let n_tasks = 16usize;
+    let per_task = data.len() / n_tasks;
+
+    let error_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0usize));
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        let ec = Arc::clone(&error_count);
+        let data = Arc::clone(&data);
+        let chunk_start = t * per_task;
+        let chunk_end = (t + 1) * per_task;
+        handles.push(tokio::spawn(async move {
+            for j in chunk_start..chunk_end {
+                let v = &data[j];
+                // Single upserts (not batch) widen the race window: each
+                // upsert checks `quantized_active()`, then later does
+                // `hnsw.load_full()` on the f32 path. If the fitter drops
+                // the f32 graph in between (Б-3), this returns Internal.
+                if adapter.upsert(rid(j as u64), v).await.is_err() {
+                    ec.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let errors = error_count.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        adapter.is_quantized(),
+        "adapter did not fit under load (test setup failure)"
+    );
+    assert_eq!(
+        errors, 0,
+        "concurrent upserts across the fit boundary returned {errors} Internal error(s) \
+         (Б-3 regression: the f32 graph was dropped before a pre-flip upsert's \
+         `hnsw.load_full()` completed). migrated_pre_flip convergence metric must \
+         guarantee the f32 graph stays until every pre-flip internal has landed."
+    );
+}

@@ -221,6 +221,32 @@ pub struct HnswAdapter {
     /// the f32 path (their internals are re-inserted by the fitter's
     /// delta pass after the swap).
     fit_in_flight: AtomicBool,
+    /// #423 (Б-3) — count of pre-flip internals (`internal <
+    /// next_id_at_flip`) that have landed in `vectors_u8`. The fit
+    /// catch-up loop uses this for an EXACT O(1) convergence check that
+    /// cannot be inflated by post-flip upserts (which allocate internals
+    /// `>= next_id_at_flip` and never migrate through the f32 buffer).
+    ///
+    /// Incremented under exactly ONE condition: a `vectors_u8` insert
+    /// returns `Ok` (the atomic claim won — first time this `internal`
+    /// enters `vectors_u8`) AND `internal < next_id_at_flip`. Because
+    /// `scc::HashMap::insert` returns `Ok` exactly once per key, the
+    /// counter is incremented exactly once per distinct pre-flip
+    /// internal — no double-counting, no missed increments. Readers
+    /// (the fit loop) compare it against `next_id_at_flip -
+    /// deleted_count_at_flip`; the loop breaks when equality holds.
+    migrated_pre_flip: AtomicUsize,
+    /// #423 (Б-3) — the value of `next_id` at the moment `is_fitted`
+    /// flipped true. `usize::MAX` sentinel = "not fitted / no flip
+    /// boundary" (the value is inert before the first fit). Both the
+    /// fit catch-up loop AND the upsert self-migration path read this to
+    /// decide whether a winning `vectors_u8` claim should bump
+    /// `migrated_pre_flip` (only internals `< next_id_at_flip` count —
+    /// they are the pre-flip internals the catch-up loop waits for).
+    /// Written ONCE by the fitter (right before the flip), read
+    /// concurrently thereafter; `AtomicUsize` keeps the read O(1) and
+    /// lock-free.
+    next_id_at_flip: AtomicUsize,
 }
 
 /// At or above this live-element count a `quantization == Some(Sq8)`
@@ -278,6 +304,8 @@ impl HnswAdapter {
             quantizer: std::sync::OnceLock::new(),
             is_fitted: AtomicBool::new(false),
             fit_in_flight: AtomicBool::new(false),
+            migrated_pre_flip: AtomicUsize::new(0),
+            next_id_at_flip: AtomicUsize::new(usize::MAX),
         }
     }
 
@@ -433,6 +461,9 @@ impl HnswAdapter {
             quantizer: std::sync::OnceLock::new(),
             is_fitted: AtomicBool::new(false),
             fit_in_flight: AtomicBool::new(false),
+            // Unfitted on load (v1 path) — no pre-flip migration has run.
+            migrated_pre_flip: AtomicUsize::new(0),
+            next_id_at_flip: AtomicUsize::new(usize::MAX),
         }
     }
 
@@ -510,6 +541,13 @@ impl HnswAdapter {
             },
             is_fitted: AtomicBool::new(true),
             fit_in_flight: AtomicBool::new(false),
+            // Loaded already-fitted: every internal is in the graph.
+            // The fit catch-up loop never runs on a loaded adapter
+            // (`is_quantized()` is already true → the deferred-fit guard
+            // is a no-op), so the value is inert here; set to `next_id`
+            // for invariant clarity.
+            migrated_pre_flip: AtomicUsize::new(next_id),
+            next_id_at_flip: AtomicUsize::new(usize::MAX),
         }
     }
 
@@ -720,6 +758,79 @@ impl HnswAdapter {
         q.quantize(vec)
     }
 
+    /// #423 (Б-1) — Canonical "publish codes + claim graph membership" op.
+    ///
+    /// Inserts `(internal, codes)` into `vectors_u8` via the atomic
+    /// `scc::HashMap::insert` (lock-free CAS on the bucket slot) and
+    /// returns `Some(())` IFF this call won the claim — i.e. `internal`
+    /// was ABSENT from `vectors_u8` before this call. Returns `None` if
+    /// `internal` was already present (another caller, or an earlier pass
+    /// of the fit, already published codes for this internal).
+    ///
+    /// **Why the return value is the dedup authority for graph inserts.**
+    /// A u8 graph node is identified by its `d_id == internal`. Inserting
+    /// the same `d_id` twice creates a DUPLICATE node (a bug class we have
+    /// hit before — `concurrent_upsert_across_threshold_no_duplicate_rids`).
+    /// `hnsw_rs` exposes no `contains(id)` query, so we cannot ask the
+    /// graph itself. Instead we make the `vectors_u8` slot the SINGLE
+    /// source of truth: the caller that wins the `Ok` claim is the ONE
+    /// caller entitled to insert the graph node. Every other caller
+    /// observes `None` and skips the graph insert. Because
+    /// `scc::HashMap::insert` is atomic per key, exactly one caller wins
+    /// per `internal` — no double-insert is possible, regardless of
+    /// concurrency between the fit catch-up loop, the fit snapshot/delta
+    /// passes, and the upsert self-migration path.
+    ///
+    /// **Б-3 convergence:** a winning claim for an `internal <
+    /// next_id_at_flip` (read from the adapter field, set by the fitter at
+    /// the flip) also bumps `migrated_pre_flip`. This gives the catch-up
+    /// loop an O(1) convergence signal that counts ONLY pre-flip internals
+    /// and cannot be inflated by post-flip upserts (which allocate
+    /// internals `>= next_id_at_flip`). Before the flip, `next_id_at_flip`
+    /// is `usize::MAX` (sentinel), so pre-flip snapshot/delta claims (which
+    /// happen before the field is set to the real value) would wrongly bump
+    /// the counter — but the counter is only READ after the flip, and the
+    /// fitter resets it to 0 at the flip, so the spurious pre-flip bumps are
+    /// discarded (see `try_fit_and_rebuild`).
+    ///
+    /// `codes` is always consumed into `vectors_u8` on the winning path.
+    /// On the losing path (`None`) the caller's `codes` are dropped — the
+    /// already-present entry is authoritative (both are quantizations of
+    /// the same vector under the same frozen quantizer, so they are
+    /// bit-identical; keeping the existing one is correct).
+    #[allow(clippy::disallowed_methods)] // scc::HashMap::insert is lock-free (CAS)
+    fn claim_and_publish_u8(&self, internal: usize, codes: Vec<u8>) -> Option<()> {
+        if self.vectors_u8.insert(internal, codes).is_ok() {
+            // Won the claim — this internal is new to vectors_u8. Bump
+            // the pre-flip migration counter if this is a pre-flip internal.
+            let nif = self.next_id_at_flip.load(Ordering::Acquire);
+            if internal < nif {
+                self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Async twin of [`claim_and_publish_u8`] for the upsert paths (which
+    /// run inside an async context and prefer `insert_async` to avoid the
+    /// synchronous bucket spin on contention). Identical semantics: wins
+    /// iff the slot was vacant, bumps `migrated_pre_flip` for pre-flip
+    /// internals. See [`claim_and_publish_u8`] for the dedup authority
+    /// argument.
+    async fn claim_and_publish_u8_async(&self, internal: usize, codes: Vec<u8>) -> Option<()> {
+        if self.vectors_u8.insert_async(internal, codes).await.is_ok() {
+            let nif = self.next_id_at_flip.load(Ordering::Acquire);
+            if internal < nif {
+                self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(())
+        } else {
+            None
+        }
+    }
+
     /// `true` when the adapter should run the u8 graph path. Equivalent to
     /// `is_quantized()` but inlined for the hot search/insert branches.
     #[inline]
@@ -770,6 +881,21 @@ impl HnswAdapter {
     /// [`Self::is_quantized`]. After publish, every subsequent upsert
     /// goes through the post-fit path (quantize + insert into the u8
     /// graph directly).
+    ///
+    /// **#423 (Б-1 + Б-3) — graph connectivity + exact convergence.**
+    /// A catch-up loop runs post-publish to drain pre-flip in-flight
+    /// upserts. Every code that enters `vectors_u8` — whether via the
+    /// snapshot pass, the delta pass, the catch-up loop, or the upsert
+    /// self-migration path — claims its `vectors_u8` slot through
+    /// [`Self::claim_and_publish_u8`], which is the SINGLE authority for
+    /// "this internal's graph node has been inserted" (see its doc). The
+    /// catch-up loop accumulates the codes that won the claim but had no
+    /// graph node yet (the snapshot/delta passes inserted graph nodes
+    /// for their own claims; the catch-up and self-migration claims are
+    /// the ones that still need a node) and performs ONE final
+    /// `parallel_insert` into `hnsw_u8` before dropping the f32 graph.
+    /// Convergence is counted by `migrated_pre_flip` (only internals
+    /// `< next_id_at_flip`), NOT by `vectors_u8.len()` — see Б-3.
     ///
     /// Returns `Ok(())` if the fit completed OR if another caller was
     /// already fitting (the single-flight loser). Errors only on graph
@@ -825,25 +951,71 @@ impl HnswAdapter {
         let m = 16usize;
         let max_layer = 16usize;
 
-        // Phase 1+2: fit + build, all in ONE spawn_blocking.
+        // Phase 1+2: fit + build. The graph INSERT is deferred until AFTER
+        // the snapshot codes are claimed into `vectors_u8` so that the
+        // claim (Ok/Err) is the exact authority for "does this internal
+        // already have a graph node" — see [`claim_and_publish_u8`].
         let training: Vec<Vec<f32>> = snapshot.iter().map(|(_, v)| v.clone()).collect();
         // #418 — the f32 graph is NO LONGER retained here. The pre-#418 code
         // held an explicit `Arc::clone(&self.hnsw)` "to keep the f32 graph
         // alive", which was exactly the bug that defeated SQ8's memory win
         // (the graph stayed resident for the adapter's lifetime). We now drop
-        // it post-fit (see `drop_f32_graph` below) — the snapshot already
-        // captured everything the u8 graph needs.
+        // it post-fit (see the drop at the end of this fn) — the snapshot
+        // already captured everything the u8 graph needs.
 
         let quantizer_arc = Arc::new(Sq8Quantizer::fit(&training, dim));
         let dist = ShamirDistU8::new(Arc::clone(&quantizer_arc), metric);
 
-        // Build the codes map (internal -> codes) for the snapshot.
-        let codes_map: Vec<(usize, Vec<u8>)> = snapshot
-            .iter()
-            .map(|(internal, vec)| (*internal, quantizer_arc.quantize(vec)))
-            .collect();
+        // Quantize the snapshot and CLAIM each internal into vectors_u8.
+        // Pre-flip: `next_id_at_flip` is still `usize::MAX` (sentinel), so
+        // the claims DO bump `migrated_pre_flip` spuriously — but the
+        // fitter OVERWRITES the counter with the correct seed at the flip
+        // (see the flip block below), discarding those bumps. The snapshot
+        // pass is the FIRST claimant for these internals (they were in
+        // `vectors` at snapshot time and no post-flip path has run —
+        // `is_fitted` is still false), so every claim here wins Ok and the
+        // codes enter vectors_u8. `snapshot_claimed` tallies the winners
+        // for the Б-3 convergence seed.
+        let mut graph_batch_snapshot: Vec<(usize, Vec<u8>)> = Vec::with_capacity(snapshot.len());
+        let mut snapshot_claimed = 0usize;
+        for (internal, vec) in &snapshot {
+            let codes = quantizer_arc.quantize(vec);
+            if self
+                .claim_and_publish_u8(*internal, codes.clone())
+                .is_some()
+            {
+                graph_batch_snapshot.push((*internal, codes));
+                snapshot_claimed += 1;
+            }
+        }
 
-        let codes_map_for_build = codes_map.clone();
+        // Phase 3: delta re-insert. Collect any internals that arrived
+        // during the build (they're in `vectors` but not in our snapshot)
+        // and claim them into vectors_u8 + the graph batch.
+        let snapshot_ids: shamir_collections::TFxSet<usize> =
+            snapshot.iter().map(|(i, _)| *i).collect();
+        let mut graph_batch_delta: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut delta_claimed = 0usize;
+        self.vectors.scan(|internal, vec| {
+            if !snapshot_ids.contains(internal) && !self.deleted.contains(internal) {
+                let codes = quantizer_arc.quantize(vec);
+                if self
+                    .claim_and_publish_u8(*internal, codes.clone())
+                    .is_some()
+                {
+                    graph_batch_delta.push((*internal, codes));
+                    // SAFETY: this closure is `FnMut`-safe for a plain
+                    // `usize` counter increment (no await, no guard).
+                    delta_claimed += 1;
+                }
+            }
+        });
+
+        // Build the u8 graph and insert the snapshot + delta codes in ONE
+        // `parallel_insert` (the delta codes arrived during the build; both
+        // sets were claimed above so there is exactly one node per internal).
+        let mut graph_batch_for_build: Vec<(usize, Vec<u8>)> = graph_batch_snapshot;
+        graph_batch_for_build.append(&mut graph_batch_delta);
         let dist_for_build = dist.clone();
         let (hnsw_u8, build_result): (
             Arc<Hnsw<'static, u8, ShamirDistU8>>,
@@ -852,12 +1024,12 @@ impl HnswAdapter {
             let result = tokio::task::spawn_blocking(move || {
                 let hnsw = Hnsw::<u8, ShamirDistU8>::new(
                     m,
-                    codes_map_for_build.len().max(1000) + 1000,
+                    graph_batch_for_build.len().max(1000) + 1000,
                     max_layer,
                     ef_construction,
                     dist_for_build,
                 );
-                let batch: Vec<(&Vec<u8>, usize)> = codes_map_for_build
+                let batch: Vec<(&Vec<u8>, usize)> = graph_batch_for_build
                     .iter()
                     .map(|(internal, codes)| (codes, *internal))
                     .collect();
@@ -876,42 +1048,6 @@ impl HnswAdapter {
         };
         build_result?;
 
-        // Phase 3: delta re-insert. Collect any internals that arrived
-        // during the build (they're in `vectors` but not in our snapshot).
-        // We scan the f32 buffer again and insert the ones we missed.
-        let snapshot_ids: shamir_collections::TFxSet<usize> =
-            snapshot.iter().map(|(i, _)| *i).collect();
-        let mut delta_codes: Vec<(usize, Vec<u8>)> = Vec::new();
-        self.vectors.scan(|internal, vec| {
-            if !snapshot_ids.contains(internal) && !self.deleted.contains(internal) {
-                delta_codes.push((*internal, quantizer_arc.quantize(vec)));
-            }
-        });
-
-        // Publish: swap the u8 graph under the mutex, populate vectors_u8,
-        // set the quantizer, flip is_fitted. The mutex provides the
-        // happens-before edge for readers of hnsw_u8_handle.
-        {
-            let hnsw_u8_for_delta = Arc::clone(&hnsw_u8);
-            if !delta_codes.is_empty() {
-                let delta_codes_for_insert = delta_codes.clone();
-                tokio::task::spawn_blocking(move || {
-                    let batch: Vec<(&Vec<u8>, usize)> = delta_codes_for_insert
-                        .iter()
-                        .map(|(internal, codes)| (codes, *internal))
-                        .collect();
-                    hnsw_u8_for_delta.parallel_insert(&batch);
-                })
-                .await
-                .map_err(|e| VectorError::Internal(format!("delta insert join error: {e}")))?;
-            }
-        }
-
-        // Populate vectors_u8 with ALL codes (snapshot + delta).
-        for (internal, codes) in codes_map.into_iter().chain(delta_codes.into_iter()) {
-            let _ = self.vectors_u8.insert(internal, codes);
-        }
-
         // === PUBLISH quantizer (needed for self-migration quantize) ===
         let _ = self.quantizer.set(Arc::clone(&quantizer_arc));
 
@@ -921,32 +1057,89 @@ impl HnswAdapter {
         //
         // Capture next_id at flip time: all internals < this value were
         // allocated pre-flip and must end up in vectors_u8 (unless
-        // tombstoned). Used by the catch-up convergence check.
+        // tombstoned). Used by the catch-up convergence check (Б-3).
         let next_id_at_flip = self.next_id.load(Ordering::Acquire);
+        // Snapshot the deleted count at flip: a pre-flip internal that was
+        // tombstoned counts toward convergence without ever entering
+        // vectors_u8. `deleted_count_at_flip` is the upper bound of such
+        // tombstones; later deletes (post-flip) can only INCREASE
+        // deleted_count, which would make the convergence target SMALLER
+        // — safe, because migrated_pre_flip is monotonic and the loop
+        // breaks on >=. Using the flip-time value keeps the target stable
+        // across the catch-up loop.
+        let deleted_count_at_flip = self.deleted_count.load(Ordering::Acquire);
+        // Б-3 convergence seed. The snapshot + delta claim passes above
+        // already published EVERY pre-flip internal that was in `vectors`
+        // at claim time into `vectors_u8` (and, for those still in
+        // `vectors`, their graph node is in the build batch). All snapshot
+        // + delta internals are `< next_id_at_flip` (they came from
+        // `vectors`, and `next_id` is monotonic). So the count of pre-flip
+        // internals ALREADY migrated at the flip is exactly
+        // `snapshot_claimed + delta_claimed`. Seed the counter to that
+        // value so the catch-up loop's `>= target` check only needs to
+        // account for the REMAINING in-flight pre-flip upserts (those
+        // whose `vectors.insert` had not completed when the delta scan
+        // ran). The seed is written as a plain `store` (not
+        // `fetch_add`): no concurrent self-migration can have run yet —
+        // self-migration requires `is_fitted == true`, which is only set
+        // by the next line. Ordering: `Release` pairs with the `Acquire`
+        // load in the catch-up loop's convergence read.
+        self.migrated_pre_flip
+            .store(snapshot_claimed + delta_claimed, Ordering::Release);
+        self.next_id_at_flip
+            .store(next_id_at_flip, Ordering::Release);
         self.hnsw_u8.store(Some(Arc::clone(&hnsw_u8)));
         self.is_fitted.store(true, Ordering::Release);
 
         // === CONVERGING CATCH-UP LOOP (post-publish) ===
         //
-        // In-flight pre-flip upserts finish inserting into `vectors`.
-        // Self-migration (triggered by is_fitted==true check in upsert
-        // paths) puts codes in vectors_u8 and removes from vectors.
-        // This loop catches anything self-migration missed (scc scan
-        // non-atomicity) and drains the rest. Converges when vectors
-        // is empty for two consecutive passes.
+        // In-flight pre-flip upserts finish inserting into `vectors`. The
+        // upsert self-migration path AND this loop both claim their codes
+        // into vectors_u8 via [`claim_and_publish_u8`]; whichever wins the
+        // claim owns the graph-node insert. This loop accumulates the codes
+        // whose claim it WON (and which therefore still need a graph node)
+        // into `pending_graph_inserts`; a single `parallel_insert` after
+        // the loop installs all of them at once. Self-migration winners
+        // insert their own single node via `quantize_and_insert_u8`.
+        //
+        // Convergence (Б-3): count ONLY pre-flip internals that have landed
+        // in vectors_u8 (`migrated_pre_flip`), NOT `vectors_u8.len()`. The
+        // latter is inflated by post-flip upserts (internals >=
+        // next_id_at_flip land directly in vectors_u8), which would make
+        // the loop exit early — before a pre-flip upsert's `vectors.insert`
+        // has run, dropping the f32 graph under its feet (Б-3 →
+        // "f32 graph absent" Internal error). `migrated_pre_flip` is bumped
+        // exactly once per distinct pre-flip internal (claim Ok +
+        // internal < next_id_at_flip), so it reaches
+        // `next_id_at_flip - deleted_count_at_flip` precisely when every
+        // non-tombstoned pre-flip internal has been claimed.
+        let mut pending_graph_inserts: Vec<(usize, Vec<u8>)> = Vec::new();
+        // Target: every pre-flip internal is either migrated (claimed into
+        // vectors_u8) or tombstoned. Saturating sub guards against a
+        // transient `deleted_count_at_flip > next_id_at_flip` window (a
+        // delete racing the flip's next_id load) — in that window the
+        // target is 0 and the loop breaks immediately, which is correct:
+        // there are no live pre-flip internals to wait for.
+        let target = next_id_at_flip.saturating_sub(deleted_count_at_flip);
         loop {
-            let mut catchup_candidates: Vec<(usize, Vec<u8>)> = Vec::new();
+            // Claim any pre-flip internals still sitting in the f32 buffer.
             self.vectors.scan(|internal, vec| {
                 if !self.deleted.contains(internal) {
-                    catchup_candidates.push((*internal, quantizer_arc.quantize(vec)));
+                    let codes = quantizer_arc.quantize(vec);
+                    if self
+                        .claim_and_publish_u8(*internal, codes.clone())
+                        .is_some()
+                    {
+                        // We won the claim → we owe a graph node. Stash
+                        // for the final batch insert after the loop.
+                        pending_graph_inserts.push((*internal, codes));
+                    }
                 }
             });
 
-            for (internal, codes) in catchup_candidates {
-                let _ = self.vectors_u8.insert(internal, codes);
-            }
-
-            // Drain entries that are in vectors_u8.
+            // Drain entries that are in vectors_u8 (claimed by us or by a
+            // concurrent self-migration upsert). Both paths remove from
+            // `vectors`; whichever runs first wins, the second is a no-op.
             let mut internals_to_drop: Vec<usize> = Vec::new();
             self.vectors.scan(|internal, _| {
                 if self.vectors_u8.contains(internal) {
@@ -957,18 +1150,48 @@ impl HnswAdapter {
                 let _ = self.vectors.remove(internal);
             }
 
-            // Convergence: all pre-flip internals must be accounted for
-            // (in vectors_u8 or tombstoned). Count vectors_u8 entries +
-            // deleted entries; when the sum reaches next_id_at_flip, every
-            // in-flight pre-flip upsert has landed.
-            #[allow(clippy::disallowed_methods)] // O(N) ack: fit-time convergence check
-            let u8_count = self.vectors_u8.len();
-            let del_count = self.deleted_count.load(Ordering::Acquire);
-            if u8_count + del_count >= next_id_at_flip {
+            // Convergence: migrated_pre_flip is bumped only for claims on
+            // internals < next_id_at_flip (see claim_and_publish_u8). When
+            // it reaches `target`, every non-tombstoned pre-flip internal
+            // has been claimed into vectors_u8 — by this loop OR by a
+            // concurrent self-migration upsert (both bump the same
+            // counter, since both go through claim_and_publish_u8).
+            let migrated = self.migrated_pre_flip.load(Ordering::Acquire);
+            if migrated >= target {
                 break;
             }
 
             tokio::task::yield_now().await;
+        }
+
+        // === #423 (Б-1) — FINAL GRAPH CONNECTIVITY INSERT ===
+        //
+        // Every internal that entered `vectors_u8` via THIS fit (snapshot,
+        // delta, and catch-up passes above) won its claim and is owed a
+        // graph node. The snapshot + delta nodes were inserted in the build
+        // `parallel_insert`; the catch-up claims are collected in
+        // `pending_graph_inserts`. Internals claimed by a concurrent
+        // self-migration upsert inserted their OWN single node (and are NOT
+        // in `pending_graph_inserts` — we lost those claims). So this batch
+        // contains exactly the nodes we owe, no duplicates, no omissions.
+        //
+        // This runs BEFORE `self.hnsw.store(None)`: by the time the f32
+        // graph is dropped, every internal in `vectors_u8` has a node in
+        // `hnsw_u8`. Before this fix, the catch-up loop and self-migration
+        // populated `vectors_u8` WITHOUT inserting graph nodes — a vector
+        // was invisible to graph-search and co-filter forever, and rode
+        // into the v2 snapshot (which dumps hnsw_u8) as a hole.
+        if !pending_graph_inserts.is_empty() {
+            let hnsw_u8_for_catchup = Arc::clone(&hnsw_u8);
+            tokio::task::spawn_blocking(move || {
+                let batch: Vec<(&Vec<u8>, usize)> = pending_graph_inserts
+                    .iter()
+                    .map(|(internal, codes)| (codes, *internal))
+                    .collect();
+                hnsw_u8_for_catchup.parallel_insert(&batch);
+            })
+            .await
+            .map_err(|e| VectorError::Internal(format!("catch-up graph insert join error: {e}")))?;
         }
 
         // === #418 — DROP THE F32 GRAPH ===
@@ -981,10 +1204,12 @@ impl HnswAdapter {
         //  - The catch-up loop above drained `vectors`: every pre-flip
         //    in-flight upsert has either landed in `vectors_u8` or been
         //    tombstoned. The f32 buffer is empty.
-        //  - `vectors_u8` holds every live code; `collect_live_vectors`
-        //    dequantizes from it (NOT from the f32 graph); the v2 snapshot
-        //    dumps the u8 graph. The f32 graph is unobservable to every
-        //    post-fit code path.
+        //  - `vectors_u8` holds every live code AND every one of those
+        //    codes has a node in `hnsw_u8` (the final connectivity insert
+        //    above closed Б-1). `collect_live_vectors` dequantizes from
+        //    `vectors_u8` (NOT from the f32 graph); the v2 snapshot dumps
+        //    `hnsw_u8` + `vectors_u8`. The f32 graph is unobservable to
+        //    every post-fit code path.
         //
         // `store(None)` is a Release store. Any in-flight pre-fit SEARCH that
         // already did `hnsw.load_full()` holds its own `Arc` clone and
@@ -1004,6 +1229,28 @@ impl HnswAdapter {
         Ok(())
     }
 
+    /// Insert a single node `(codes, internal)` into the live u8 graph.
+    /// CPU-bound (rayon `insert`) → `spawn_blocking`; the codes are tiny
+    /// (dim bytes) so the clone is cheap. Used by [`quantize_and_insert_u8`]
+    /// (post-fit single upsert) and by the self-migration path (which owns
+    /// the node insert when it wins the `vectors_u8` claim — see Б-1).
+    async fn insert_u8_graph_node(
+        &self,
+        internal: usize,
+        codes: Vec<u8>,
+    ) -> Result<(), VectorError> {
+        let hnsw_u8 = self
+            .hnsw_u8_handle()
+            .ok_or_else(|| VectorError::Internal("u8 graph not fitted".into()))?;
+        let codes_for_insert = codes.clone();
+        tokio::task::spawn_blocking(move || {
+            hnsw_u8.insert((&codes_for_insert, internal));
+        })
+        .await
+        .map_err(|e| VectorError::Internal(format!("u8 insert join error: {e}")))?;
+        Ok(())
+    }
+
     /// Internal: post-fit insert path. Quantizes the vector and inserts
     /// the codes into the u8 graph + vectors_u8. Does NOT touch the f32
     /// buffer (post-fit the f32 buffer is empty and stays empty).
@@ -1016,17 +1263,7 @@ impl HnswAdapter {
         vec: &[f32],
     ) -> Result<Vec<u8>, VectorError> {
         let codes = self.quantize(vec);
-        let hnsw_u8 = self
-            .hnsw_u8_handle()
-            .ok_or_else(|| VectorError::Internal("u8 graph not fitted".into()))?;
-        let codes_for_insert = codes.clone();
-        // graph insert is CPU-bound (rayon) → spawn_blocking. The codes
-        // are tiny (dim bytes) so the clone is cheap.
-        tokio::task::spawn_blocking(move || {
-            hnsw_u8.insert((&codes_for_insert, internal));
-        })
-        .await
-        .map_err(|e| VectorError::Internal(format!("u8 insert join error: {e}")))?;
+        self.insert_u8_graph_node(internal, codes.clone()).await?;
         Ok(codes)
     }
 }
@@ -1345,15 +1582,34 @@ impl VectorAdapter for HnswAdapter {
         }
         let _ = self.rid_map.insert_async(internal, rid).await;
 
-        // V5.2 (#411) — self-migration re-check: if `is_fitted` flipped
+        // #423 (Б-1) — self-migration re-check: if `is_fitted` flipped
         // true between our initial `quantized_active()` check and now, our
-        // vector is in `vectors` but might not be caught by the fitter's
-        // catch-up scan. Populate vectors_u8 with the codes (the fitter's
-        // final parallel_insert after the catch-up loop handles graph
-        // connectivity for all post-initial vectors).
+        // vector is in `vectors` but the fitter's snapshot/delta scan may
+        // have already passed. We claim the codes into `vectors_u8` via
+        // `claim_and_publish_u8_async`. The claim is the EXACT authority
+        // for "who inserts the graph node":
+        //  - If WE win the claim (Some), this internal was not yet in
+        //    `vectors_u8` → the fitter will NOT insert its node (it never
+        //    saw it). We must insert the u8 graph node ourselves via
+        //    `quantize_and_insert_u8`.
+        //  - If we LOSE the claim (None), the fitter already claimed this
+        //    internal and will insert (or has inserted) its node in its
+        //    final connectivity batch — we must NOT double-insert (a
+        //    duplicate d_id node is a separate bug class).
+        // This replaces the pre-#423 lie that "the fitter's final
+        // parallel_insert handles graph connectivity" — that code did not
+        // exist, so the vector was silently dropped from the graph.
         if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
             let codes = self.quantize(&vec_for_store);
-            let _ = self.vectors_u8.insert_async(internal, codes).await;
+            if self
+                .claim_and_publish_u8_async(internal, codes.clone())
+                .await
+                .is_some()
+            {
+                // We own the graph node. Insert it (CPU-bound rayon insert
+                // → spawn_blocking, no guard held across the await).
+                self.insert_u8_graph_node(internal, codes).await?;
+            }
             // Remove from f32 buffer so the catch-up drain sees it as done.
             let _ = self.vectors.remove_async(&internal).await;
             return Ok(());
@@ -1503,18 +1759,49 @@ impl VectorAdapter for HnswAdapter {
         //
         // `into_iter` moves each owned Vec straight into `vectors` — the only
         // clone of a row's vector is the Phase-1 `vec.clone()` above.
+        //
+        // #423 (Б-1) — self-migration re-check for the batch f32 path. If
+        // `is_fitted` flipped true during this batch, the rows whose
+        // `vectors.insert_async` landed AFTER the flip must migrate to
+        // `vectors_u8`. Each migrated row CLAIMS its slot via
+        // `claim_and_publish_u8_async`; the rows that WIN the claim owe a
+        // graph node, collected into `migrated_graph_batch` for ONE
+        // `parallel_insert` after the loop (mirrors the single-upsert
+        // self-migration contract). Rows that LOSE the claim were already
+        // claimed by the fitter, which owns their graph node.
+        let mut migrated_graph_batch: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut any_migrated = false;
         for (internal, rid, vec) in insert_rows.into_iter() {
             let _ = self.vectors.insert_async(internal, vec.clone()).await;
             let _ = self.rid_map.insert_async(internal, rid).await;
 
-            // V5.2 (#411) — self-migration re-check for batch f32 path.
-            // Populate vectors_u8 with codes; the fitter's final
-            // parallel_insert handles graph connectivity.
             if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
+                any_migrated = true;
                 let codes = self.quantize(&vec);
-                let _ = self.vectors_u8.insert_async(internal, codes).await;
+                if self
+                    .claim_and_publish_u8_async(internal, codes.clone())
+                    .await
+                    .is_some()
+                {
+                    migrated_graph_batch.push((internal, codes));
+                }
                 let _ = self.vectors.remove_async(&internal).await;
             }
+        }
+        // #423 (Б-1) — install the graph nodes for the rows this batch
+        // claimed. ONE `parallel_insert` (rayon-parallelised) for the
+        // whole batch; runs only if at least one row migrated.
+        if any_migrated && !migrated_graph_batch.is_empty() {
+            let hnsw_u8 = self.hnsw_u8_handle().ok_or_else(|| {
+                VectorError::Internal("self-migration: u8 graph not fitted".into())
+            })?;
+            tokio::task::spawn_blocking(move || {
+                let batch: Vec<(&Vec<u8>, usize)> =
+                    migrated_graph_batch.iter().map(|(i, c)| (c, *i)).collect();
+                hnsw_u8.parallel_insert(&batch);
+            })
+            .await
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         for old in replaced {
             let _ = self.vectors.remove_async(&old).await;
