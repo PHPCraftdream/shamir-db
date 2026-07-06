@@ -1667,18 +1667,43 @@ impl VectorAdapter for HnswAdapter {
         // This replaces the pre-#423 lie that "the fitter's final
         // parallel_insert handles graph connectivity" — that code did not
         // exist, so the vector was silently dropped from the graph.
+        //
         if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
-            let codes = self.quantize(&vec_for_store);
-            if self
-                .claim_and_publish_u8_async(internal, codes.clone())
-                .await
-                .is_some()
-            {
-                // We own the graph node. Insert it (CPU-bound rayon insert
-                // → spawn_blocking, no guard held across the await).
-                self.insert_u8_graph_node(internal, codes).await?;
+            // #423 (Б-3, adversarial-review finding) — `!self.deleted.contains`
+            // guard around the CLAIM, mirroring the three scan-based claim
+            // sites (fit snapshot, delta, catch-up loop). Without it: a
+            // concurrent `upsert` on the SAME rid can tombstone THIS
+            // internal (via the `Occupied` rid_to_internal branch,
+            // published by that call's entry_async block) between this
+            // call publishing its own `internal` and reaching this check.
+            // The tombstone already bumped `migrated_pre_flip` via
+            // `bump_migrated_on_tombstone`; without this guard, this call
+            // would ALSO claim the (now-tombstoned) internal into
+            // `vectors_u8` and bump the counter a second time — an
+            // over-count that can trip the catch-up loop's
+            // `migrated >= target` convergence early, dropping the f32
+            // graph while a genuinely still-in-flight, distinct pre-flip
+            // internal has not yet landed. The buffer cleanup below still
+            // runs regardless — a tombstoned internal must not linger in
+            // the f32 `vectors` map (the catch-up scan and every other
+            // claim path also skip `deleted` entries, so nothing else
+            // would ever remove it).
+            if !self.deleted.contains(&internal) {
+                let codes = self.quantize(&vec_for_store);
+                if self
+                    .claim_and_publish_u8_async(internal, codes.clone())
+                    .await
+                    .is_some()
+                {
+                    // We own the graph node. Insert it (CPU-bound rayon
+                    // insert → spawn_blocking, no guard held across the
+                    // await).
+                    self.insert_u8_graph_node(internal, codes).await?;
+                }
             }
-            // Remove from f32 buffer so the catch-up drain sees it as done.
+            // Remove from f32 buffer so the catch-up drain sees it as done
+            // (whether we claimed it, lost the claim, or it was already
+            // tombstoned by a concurrent racer).
             let _ = self.vectors.remove_async(&internal).await;
             return Ok(());
         }
@@ -1846,13 +1871,23 @@ impl VectorAdapter for HnswAdapter {
 
             if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
                 any_migrated = true;
-                let codes = self.quantize(&vec);
-                if self
-                    .claim_and_publish_u8_async(internal, codes.clone())
-                    .await
-                    .is_some()
-                {
-                    migrated_graph_batch.push((internal, codes));
+                // #423 (Б-3, adversarial-review finding) — same
+                // `!self.deleted.contains` guard as the single-`upsert`
+                // self-migration re-check: a concurrent `upsert`/batch on
+                // the SAME rid can tombstone THIS freshly-allocated
+                // `internal` between this batch publishing it (in the
+                // `entry_async` loop above) and this loop reaching it. The
+                // tombstone already bumped `migrated_pre_flip`; claiming a
+                // tombstoned internal here would double-bump the counter.
+                if !self.deleted.contains(&internal) {
+                    let codes = self.quantize(&vec);
+                    if self
+                        .claim_and_publish_u8_async(internal, codes.clone())
+                        .await
+                        .is_some()
+                    {
+                        migrated_graph_batch.push((internal, codes));
+                    }
                 }
                 let _ = self.vectors.remove_async(&internal).await;
             }

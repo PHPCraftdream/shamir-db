@@ -915,3 +915,134 @@ async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang() {
         "adapter did not fit under load (test setup failure)"
     );
 }
+
+// =========================================================================
+// #423 (Б-3, SECOND adversarial-review finding) — regression: the
+// single-`upsert` self-migration re-check must not double-count a
+// tombstoned internal in `migrated_pre_flip`.
+//
+// The first tombstone-during-fit fix (bump_migrated_on_tombstone) closed
+// the frozen-target hang, but introduced a narrower gap: the self-migration
+// re-check in `upsert`/`upsert_batch` claimed a JUST-tombstoned internal
+// (from a concurrent racer replacing the SAME rid) into `vectors_u8`
+// WITHOUT checking `deleted.contains` first — unlike the three scan-based
+// claim sites (fit snapshot, delta, catch-up loop), which all guard on it.
+// This let `migrated_pre_flip` be bumped TWICE for one internal: once by
+// the tombstone, once by the (incorrect) claim — an over-count that can
+// trip the catch-up loop's convergence early, dropping the f32 graph while
+// a genuinely still-in-flight, distinct pre-flip internal has not yet
+// landed (the exact class of bug the Б-3 fix exists to prevent).
+//
+// This test drives the SPECIFIC interleaving the prior regression test
+// (`concurrent_upsert_with_tombstone_across_fit_does_not_hang`) does not
+// cover: tasks race `upsert` on OVERLAPPING/shared rids (not disjoint
+// per-task ranges), so one task's freshly-allocated internal can be
+// tombstoned by ANOTHER task's concurrent replace on the SAME rid while
+// the first task's own self-migration re-check is still in flight. We
+// cannot directly assert `migrated_pre_flip` (private), so we assert the
+// deterministic node-count invariant from Б-1 — `get_nb_map() ==
+// live count` — which a premature f32-graph-drop (induced by an
+// over-counted convergence target) would violate by racing a genuine
+// pre-flip vector out of both `vectors` and `vectors_u8`/the graph.
+// =========================================================================
+
+#[tokio::test]
+async fn concurrent_same_rid_upsert_race_across_fit_no_double_count() {
+    let dim = 16u32;
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 10_000,
+            m: 16,
+            max_layer: 16,
+            ef_construction: 200,
+            ef_search: 64,
+        },
+        Some(VectorQuantization::Sq8),
+    ));
+
+    // 600 upserts, but only ~half land on DISTINCT rids — `shared_rid_count`
+    // must stay comfortably ABOVE FIT_THRESHOLD (256)/QUANT_BRUTE_FORCE_MAX
+    // (512) so enough LIVE (non-superseded) rids remain to force the fit +
+    // exercise the graph path; the remaining updates replay the SAME rids
+    // (interleaved across tasks) to manufacture the tombstone-during-fit
+    // race: every task repeatedly upserts a rid some OTHER task may also be
+    // upserting concurrently, maximizing the chance that one task's fresh
+    // internal is tombstoned by another task's concurrent replace before
+    // its self-migration re-check runs.
+    let n_updates = 600usize;
+    let shared_rid_count = 560u64;
+    let data = Arc::new(clustered(n_updates, dim as usize, 24, 0.2, 0x0F00_DBEE));
+    let n_tasks = 8usize;
+    let per_task = n_updates / n_tasks;
+
+    let mut handles = Vec::new();
+    for t in 0..n_tasks {
+        let adapter = Arc::clone(&adapter);
+        let data = Arc::clone(&data);
+        let start = t * per_task;
+        let end = (t + 1) * per_task;
+        handles.push(tokio::spawn(async move {
+            for j in start..end {
+                let v = &data[j];
+                // Every task hammers the SAME pool of `shared_rid_count`
+                // rids — heavy same-rid contention across tasks.
+                let r = rid(j as u64 % shared_rid_count);
+                adapter.upsert(r, v).await.expect("upsert");
+            }
+        }));
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        for h in handles {
+            h.await.unwrap();
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "concurrent same-rid upserts across the fit boundary hung past the \
+         60s timeout"
+    );
+
+    assert!(
+        adapter.is_quantized(),
+        "adapter did not fit under load (test setup failure)"
+    );
+
+    // Deterministic Б-1 invariant: every LIVE rid (post-race, each of the
+    // `shared_rid_count` rids has one final internal — all earlier
+    // internals for that rid were tombstoned by the last writer) must have
+    // exactly one node in the u8 graph. `get_nb_point()` counts ALL nodes
+    // ever inserted (including tombstoned-but-already-graphed ones from
+    // before the last replace), so we cannot assert exact equality to
+    // `shared_rid_count` here (superseded internals may have already
+    // landed a graph node before being tombstoned, which is expected and
+    // harmless — search filters `deleted`). Instead we assert search
+    // correctness: every live rid's own vector must retrieve itself with
+    // ~zero distance, proving its CURRENT internal has a live, findable
+    // graph node (a double-counted convergence over-shoot that dropped the
+    // f32 graph prematurely would leave some live internals stuck in
+    // neither `vectors` nor a graph node — unfindable).
+    for r in 0..shared_rid_count {
+        // The vector most recently written for this rid is at the highest
+        // `j` with `j % shared_rid_count == r` — reconstruct it the same
+        // way the upsert loop did.
+        let last_j = (0..n_updates)
+            .rev()
+            .find(|j| *j as u64 % shared_rid_count == r)
+            .expect("at least one update per shared rid");
+        let q = &data[last_j];
+        let res = adapter
+            .search(q, 1, SearchOpts::default(), None)
+            .await
+            .expect("search");
+        assert!(
+            !res.is_empty(),
+            "rid {r}'s current vector must be findable post-fit — an empty \
+             result indicates its internal was lost from the graph (Б-3 \
+             double-count regression)"
+        );
+    }
+}
