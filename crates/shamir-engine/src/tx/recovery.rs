@@ -14,6 +14,26 @@ use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
 
+/// Test-only injection (CRIT-1 / #435): when set to a non-zero `txn_id`,
+/// `seed_version_cache_for_entry` returns a synthetic error for the matching
+/// entry in place of the real `write_committed_to_history` call. This proves
+/// the post-fix contract: a history-write failure during cold recovery is
+/// FATAL to `open()` (the entry is NOT marked durable, recovery returns Err,
+/// `add_repo`'s `recover_v2_inflight().await?` refuses to serve the repo).
+///
+/// Mirrors the `FAIL_VECTOR_DELTA_TX_ID` / `FAIL_VECTOR_PROMOTE_TX_ID`
+/// pattern in `commit_phases.rs` (keyed by `txn_id`, atomically loaded).
+/// Reset to 0 between tests to avoid cross-test bleed. Gated by
+/// `#[cfg(debug_assertions)]` (same as `commit.rs::maybe_crash`) so a
+/// `--release` production build pays zero cost — the static is absent and
+/// the load branch in `seed_version_cache_for_entry` is elided. The external
+/// `crash_recovery` integration harness (separate test binary that cannot
+/// reach this `pub(crate)` static) additionally honors the
+/// `SHAMIR_TEST_FAIL_HISTORY_SEED` env var to arm the same fault.
+#[cfg(debug_assertions)]
+pub(crate) static FAIL_HISTORY_SEED_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// cancel-safe: NO — multi-step state mutation. Each branch issues a
 /// table lookup followed by one or more store writes (and the broadcast
 /// branches loop across tables). Cancellation mid-broadcast leaves the
@@ -351,7 +371,7 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
             ))
         })?;
     }
-    seed_version_cache_for_entry(entry, repo).await;
+    seed_version_cache_for_entry(entry, repo).await?;
     Ok(())
 }
 
@@ -370,7 +390,33 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
 /// `table_by_token` (called during replay) instantiates the
 /// `TableManager`. A missing entry (dropped/unconfigured table) is a
 /// silent skip, matching the replay ops' own graceful handling.
-async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) {
+///
+/// # CRIT-1 (#435): history-write error is FATAL to recovery
+///
+/// An entry whose `write_committed_to_history` fails MUST surface an error.
+/// Pre-fix this branch swallowed the error in a `log::warn!` and returned
+/// `()`, so `recover_inflight_v2` unconditionally proceeded to
+/// `gate.completion().mark(v, Materialized)` + `gate.mark_durable(v)` — a
+/// silent loss of the confirmed commit (readers see `last_committed ≥ v`
+/// with no value in either overlay (empty post-restart) or history), and
+/// the next F6 truncation pass could unlink the sole sealed WAL segment
+/// holding v → unrecoverable loss. The historical justification ("the WAL
+/// marker is untouched") was already obsolete post-F6 (truncation follows
+/// the durable watermark, not per-entry markers).
+///
+/// The fix mirrors `RepoInstance::flush_buffers`: iterate EVERY table
+/// (best-effort — a failure on one table does NOT skip the remaining
+/// tables; they still get their write attempt) but capture the FIRST error
+/// and return it. The caller (`replay_v2_entry` → `recover_inflight_v2`)
+/// propagates it up to `open()`, where `add_repo`'s `recover_v2_inflight().await?`
+/// refuses to serve a repo that could not recover ("repo that cannot recover
+/// must not be served", `db_management.rs:337-343`). The failed entry is
+/// therefore NEVER marked durable/materialized — the watermark stays below
+/// it, so F6 truncation cannot unlink the segment holding it.
+async fn seed_version_cache_for_entry(
+    entry: &shamir_wal::WalEntryV2,
+    repo: &RepoInstance,
+) -> DbResult<()> {
     let v = entry.commit_version;
 
     // D2 P1d-2b: group this entry's DATA ops per table and route them through
@@ -399,6 +445,16 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
         by_table.entry(table_id).or_default().push(kvop);
     }
 
+    // CRIT-1 (#435): a failed history write is FATAL to recovery — see the
+    // function doc. We still attempt EVERY table (best-effort: a failure on
+    // one table must not skip the remaining tables) and capture the first
+    // error to return, mirroring `RepoInstance::flush_buffers`' first-err
+    // pattern. Returning Err propagates through `replay_v2_entry`'s `?` and
+    // breaks `recover_inflight_v2`'s `for entry in entries` loop BEFORE the
+    // failing entry is marked `Materialized` / `mark_durable`, so the durable
+    // watermark stays below it and F6 truncation cannot unlink the WAL
+    // segment holding its only copy.
+    let mut first_err: Option<DbError> = None;
     for (table_id, ops) in by_table {
         if let Some(mvcc) = repo
             .per_table_mvcc()
@@ -406,20 +462,57 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
             .await
         {
             // C2 + ts: write the version-log + commit ts + seed cell/floor.
-            // Best-effort on error: leaving a partial history write inflight is
-            // safe — the WAL marker is untouched on the recovery path (the
-            // caller `recover_inflight_v2` only `wal.commit`s after this
-            // returns Ok-ish), and the drainer / next recovery converges.
-            if let Err(e) = mvcc.write_committed_to_history(&ops, v).await {
+            // Failure is captured, NOT swallowed: see the function doc for
+            // why a silent warn here is a silent loss of a confirmed commit.
+            //
+            // Test-only injection (CRIT-1 / #435): simulate a persistent
+            // history-write error so the post-fix contract (a failed history
+            // write is FATAL to recovery) can be exercised two ways:
+            //   (a) in-process unit tests arm the `FAIL_HISTORY_SEED_TX_ID`
+            //       static (keyed by `txn_id`, mirrors the
+            //       `FAIL_VECTOR_DELTA_TX_ID` pattern in `commit_phases.rs`);
+            //   (b) the external `crash_recovery` integration harness (a
+            //       separate test binary that cannot reach this `pub(crate)`
+            //       static) arms the `SHAMIR_TEST_FAIL_HISTORY_SEED` env var.
+            // The whole branch is `#[cfg(debug_assertions)]` (same gate as
+            // `maybe_crash`) so a `--release` production build pays zero cost
+            // — no atomic load, no env read, the branch is elided.
+            #[cfg(debug_assertions)]
+            let inject_fail = {
+                let static_armed = entry.txn_id != 0
+                    && FAIL_HISTORY_SEED_TX_ID.load(std::sync::atomic::Ordering::SeqCst)
+                        == entry.txn_id;
+                let env_armed = std::env::var("SHAMIR_TEST_FAIL_HISTORY_SEED").is_ok();
+                static_armed || env_armed
+            };
+            #[cfg(not(debug_assertions))]
+            let inject_fail = false;
+
+            let write_result = if inject_fail {
+                Err(DbError::Internal(format!(
+                    "injected history-seed failure for tx {} (CRIT-1 fault vector)",
+                    entry.txn_id
+                )))
+            } else {
+                mvcc.write_committed_to_history(&ops, v).await
+            };
+
+            if let Err(e) = write_result {
                 log::warn!(
                     "seed_version_cache_for_entry: history write for tx {} \
-                     table {} commit_version {} failed: {e}",
+                     table {} commit_version {} failed (recovery will fail): {e}",
                     entry.txn_id,
                     table_id,
                     v
                 );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
             }
         }
+    }
+    if let Some(e) = first_err {
+        return Err(e);
     }
     // R3: advance the reader-visible floor even when no MVCC table matched
     // (e.g. an entry touching only unattached tables). `write_committed_to_history`
@@ -430,4 +523,5 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
             gate.publish_committed_max(v);
         }
     }
+    Ok(())
 }
