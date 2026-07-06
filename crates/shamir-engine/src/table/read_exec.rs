@@ -1385,7 +1385,6 @@ impl TableManager {
                                     k,
                                     ranked,
                                     staged,
-                                    table_token,
                                     residual_cb.as_ref(),
                                     ctx,
                                     tx,
@@ -1415,7 +1414,6 @@ impl TableManager {
                                     k,
                                     ranked,
                                     staged,
-                                    table_token,
                                     residual_cb.as_ref(),
                                     ctx,
                                     tx,
@@ -1672,9 +1670,8 @@ impl TableManager {
         hnsw: &'a crate::index2::vector::hnsw_adapter::HnswAdapter,
         query: &[f32],
         k: u32,
-        mut ranked: Vec<(RecordId, f32)>,
+        ranked: Vec<(RecordId, f32)>,
         staged: Option<&'a [(RecordId, Vec<f32>)]>,
-        table_token: u64,
         residual_cb: Option<&FilterNode>,
         ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
@@ -1685,6 +1682,25 @@ impl TableManager {
             _ => return ranked,
         };
 
+        // #427 (VR-5, @sh adversarial-review finding) — an UPDATE-in-tx that
+        // changes an ALREADY-committed row's embedding (without removing the
+        // field) does NOT stage a vector delete (`stage_vector_deletes_on_update`
+        // only stages a delete when the NEW record has no embedding at all —
+        // `table_manager_tx_ops.rs`), so the row's OLD version is still in the
+        // committed HNSW graph and can appear in `ranked` via
+        // `search_prefilter`/`search_cofilter`. The SAME rid then also appears
+        // in `staged` (the tx's new embedding). Without dedup, both versions
+        // would be scored and merged — the same RecordId twice in `ranked`,
+        // wasting a top-k slot and violating the "no duplicate rids" contract.
+        // The staged (newer, tx-visible) version must win: drop any `ranked`
+        // entry whose rid is ALSO staged, before merging the staged score in.
+        let staged_rid_set: shamir_collections::TFxSet<RecordId> =
+            staged.iter().map(|(r, _)| *r).collect();
+        let mut ranked: Vec<(RecordId, f32)> = ranked
+            .into_iter()
+            .filter(|(rid, _)| !staged_rid_set.contains(rid))
+            .collect();
+
         // Resolve the full record bytes for each staged vector so the residual
         // predicate has access to every field, not just the embedding.
         let staged_rids: Vec<RecordId> = staged.iter().map(|(r, _)| *r).collect();
@@ -1692,10 +1708,17 @@ impl TableManager {
             Ok(b) => b,
             // On read failure we MUST NOT silently drop staged rows (that would
             // be a correctness regression); nor can we safely include them
-            // unscored. Return the committed-only ranked set and let the caller
-            // surface the result — the read path is best-effort here and the
-            // error will manifest elsewhere.
-            Err(_) => return ranked,
+            // unscored. Return the (already de-duplicated) committed-only
+            // ranked set — the read path is best-effort here.
+            Err(e) => {
+                log::warn!(
+                    "merge_staged_filtered: get_many_bytes_tx failed for {} staged \
+                     rid(s), falling back to committed-only filtered-ANN results \
+                     (read-your-own-writes degraded for this query): {e}",
+                    staged_rids.len()
+                );
+                return ranked;
+            }
         };
 
         // Apply the residual predicate to each staged record; collect the
@@ -1717,10 +1740,6 @@ impl TableManager {
                 passing.push(entry.clone());
             }
         }
-        // Suppress unused-warning on table_token when there are no staged rows
-        // to score — it is only needed to reach this helper (the caller already
-        // resolved it), and kept in the signature for symmetry / future use.
-        let _ = table_token;
 
         if passing.is_empty() {
             return ranked;
