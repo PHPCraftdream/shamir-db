@@ -97,7 +97,10 @@ tempfile = "3"
 # docs/perf/sefer-alloc-rollout-2026-06-30.md. The earlier "mimalloc leads
 # +22% on db_handler_rps" note was measured at opt-level=0 (debug) and does
 # not hold at release opt levels.
-sefer-alloc = { version = "0.2.1", features = ["production"] }
+#
+# Switched to a local path dependency to track the in-development
+# D:/dev/rust/sefer-alloc checkout instead of the published crates.io release.
+sefer-alloc = { path = "D:/dev/rust/sefer-alloc", features = ["production"] }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —
