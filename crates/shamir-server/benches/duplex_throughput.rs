@@ -1,7 +1,8 @@
 //! Benchmark: lock-step (max_in_flight=1) vs duplex-32 (max_in_flight=32).
 //!
 //! Uses `request_loop` over `tokio::io::duplex` — same transport path as the
-//! `duplex_loop` integration tests, but driven by criterion for stable timing.
+//! `duplex_loop` integration tests, but driven by the fixed-iteration
+//! harness for stable timing.
 //!
 //! No TLS, no Argon2id, no TCP — those are transport-layer overheads that sit
 //! **on top of** the in-process dispatch we want to measure here.
@@ -10,22 +11,24 @@
 //!
 //! Each iteration opens a fresh `tokio::io::duplex` pair, spawns
 //! `request_loop`, sends N pre-built request frames, and drains N responses.
+//! `setup` (fresh duplex pair) is untimed; `routine` (send N, drain N,
+//! teardown) is timed — hence `bench_batched_async`.
 //!
 //! The handler (`DelayHandler`) sleeps 1 ms per request to simulate realistic
-//! IO-bound latency.  With `max_in_flight=32` all N requests overlap; with
-//! `max_in_flight=1` they serialise, taking N × 1 ms.  The speedup is
+//! IO-bound latency. With `max_in_flight=32` all N requests overlap; with
+//! `max_in_flight=1` they serialise, taking N × 1 ms. The speedup is
 //! therefore bounded by `min(N, 32)`.
 //!
-//! `ConnectionContext` is constructed once per benchmark group (outside the
-//! timed `b.iter` region) to avoid measuring redb setup overhead.
+//! `ConnectionContext` is constructed once per variant (outside every timed
+//! iteration) to avoid measuring redb setup overhead.
 
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use tokio::io::AsyncWriteExt;
 
-use shamir_bench_utils as bu;
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -67,11 +70,7 @@ impl RequestHandler for DelayHandler {
 const SESSION_ID: [u8; 32] = [0xABu8; 32];
 
 /// Build a minimal `ConnectionContext` with `max_in_flight`.
-/// The `ConnectionContext` is re-used across iterations — only the
-/// `tokio::io::duplex` pair and the `request_loop` task are rebuilt per
-/// iteration.
 fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
-    // ConnectionContext::new returns Arc<Self> directly.
     use shamir_connect::common::crypto::Ed25519Keypair;
     use shamir_connect::common::kdf_params::KdfParams;
     use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
@@ -150,109 +149,108 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
 }
 
 /// Pre-build length-framed request bytes for rid 1..=n.
-fn build_frames(n: u32) -> Vec<Vec<u8>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    (1..=n)
-        .map(|rid| {
-            let env = RequestEnvelope {
-                session_id: SESSION_ID.to_vec(),
-                request_id: Some(rid),
-                req: b"ping".to_vec(),
-            };
-            let msgpack = env.to_msgpack().unwrap();
-            let mut frame = Vec::with_capacity(64);
-            rt.block_on(async {
-                let mut scratch = Vec::with_capacity(64);
-                write_frame_into(&mut frame, &msgpack, &mut scratch)
-                    .await
-                    .unwrap();
-            });
-            frame
-        })
-        .collect()
+async fn build_frames(n: u32) -> Vec<Vec<u8>> {
+    let mut out = Vec::with_capacity(n as usize);
+    for rid in 1..=n {
+        let env = RequestEnvelope {
+            session_id: SESSION_ID.to_vec(),
+            request_id: Some(rid),
+            req: b"ping".to_vec(),
+        };
+        let msgpack = env.to_msgpack().unwrap();
+        let mut frame = Vec::with_capacity(64);
+        let mut scratch = Vec::with_capacity(64);
+        write_frame_into(&mut frame, &msgpack, &mut scratch)
+            .await
+            .unwrap();
+        out.push(frame);
+    }
+    out
 }
 
 /// Timed region: open a duplex pair, spawn `request_loop`, send N frames,
 /// drain N responses, then tear down.
-fn run_round(rt: &tokio::runtime::Runtime, ctx: Arc<ConnectionContext>, frames: &[Vec<u8>]) {
+async fn run_round(ctx: Arc<ConnectionContext>, frames: Vec<Vec<u8>>) {
     let n = frames.len();
-    let frames_owned: Vec<Vec<u8>> = frames.to_vec();
 
-    rt.block_on(async move {
-        // Generous buffer: 4 MiB prevents send-side blocking.
-        let (server_io, client_io) = tokio::io::duplex(4 * 1024 * 1024);
-        let (server_r, server_w) = TcpFramer::new(server_io).split();
+    // Generous buffer: 4 MiB prevents send-side blocking.
+    let (server_io, client_io) = tokio::io::duplex(4 * 1024 * 1024);
+    let (server_r, server_w) = TcpFramer::new(server_io).split();
 
-        let loop_task = tokio::spawn(request_loop(ctx, server_r, server_w, SESSION_ID));
+    let loop_task = tokio::spawn(request_loop(ctx, server_r, server_w, SESSION_ID));
 
-        let (mut cr, mut cw) = tokio::io::split(client_io);
+    let (mut cr, mut cw) = tokio::io::split(client_io);
 
-        // Sender: fire all N frames without waiting for responses.
-        let send_task = tokio::spawn(async move {
-            for frame in frames_owned {
-                cw.write_all(&frame).await.unwrap();
-            }
-            cw
-        });
-
-        // Receiver: drain exactly N responses.
-        let mut buf = Vec::new();
-        for _ in 0..n {
-            buf.clear();
-            read_frame_into(&mut cr, MAX_FRAME_SIZE_DEFAULT, &mut buf)
-                .await
-                .unwrap();
-            let resp = ResponseEnvelope::from_msgpack(&buf).unwrap();
-            black_box(resp);
+    // Sender: fire all N frames without waiting for responses.
+    let send_task = tokio::spawn(async move {
+        for frame in frames {
+            cw.write_all(&frame).await.unwrap();
         }
-
-        // Teardown: drop both client halves to signal EOF to the server.
-        let cw = send_task.await.unwrap();
-        drop(cw);
-        drop(cr);
-        let _ = loop_task.await;
+        cw
     });
-}
 
-// ---------------------------------------------------------------------------
-// Benchmark groups
-// ---------------------------------------------------------------------------
-
-fn bench_duplex_vs_lockstep(c: &mut Criterion) {
-    // Multi-thread runtime: request_loop uses spawn internally.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let mut group = c.benchmark_group("duplex_throughput");
-    // Extend target time: with 1 ms/request × 100 requests × cap=1, each
-    // lockstep iteration takes ~100 ms.
-    group.measurement_time(bu::measurement_time(Duration::from_secs(20)));
-    group.sample_size(bu::sample_size(20));
-
-    for &n in &[10u32, 32u32] {
-        group.throughput(Throughput::Elements(n as u64));
-        let frames = build_frames(n);
-
-        // --- lock-step: max_in_flight = 1 ---
-        let ctx_lockstep = make_ctx(1);
-        group.bench_with_input(BenchmarkId::new("lockstep_cap1", n), &n, |b, _| {
-            b.iter(|| run_round(&rt, Arc::clone(&ctx_lockstep), &frames));
-        });
-
-        // --- duplex: max_in_flight = 32 ---
-        let ctx_duplex = make_ctx(32);
-        group.bench_with_input(BenchmarkId::new("duplex_cap32", n), &n, |b, _| {
-            b.iter(|| run_round(&rt, Arc::clone(&ctx_duplex), &frames));
-        });
+    // Receiver: drain exactly N responses.
+    let mut buf = Vec::new();
+    for _ in 0..n {
+        buf.clear();
+        read_frame_into(&mut cr, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+            .await
+            .unwrap();
+        let resp = ResponseEnvelope::from_msgpack(&buf).unwrap();
+        black_box(resp);
     }
 
-    group.finish();
+    // Teardown: drop both client halves to signal EOF to the server.
+    let cw = send_task.await.unwrap();
+    drop(cw);
+    drop(cr);
+    let _ = loop_task.await;
 }
 
-criterion_group!(benches, bench_duplex_vs_lockstep);
-criterion_main!(benches);
+// ---------------------------------------------------------------------------
+// Benchmark registration
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let mut h = Harness::new("duplex_throughput", env!("CARGO_MANIFEST_DIR"));
+
+    for &n in &[10u32, 32u32] {
+        // --- lock-step: max_in_flight = 1 ---
+        {
+            let ctx_lockstep = make_ctx(1);
+            h.bench_batched_async(
+                &format!("duplex_throughput/lockstep_cap1/n_{n}"),
+                move || build_frames(n),
+                {
+                    let ctx = ctx_lockstep.clone();
+                    move |frames| {
+                        let ctx = ctx.clone();
+                        async move {
+                            run_round(ctx, frames).await;
+                        }
+                    }
+                },
+            );
+        }
+
+        // --- duplex: max_in_flight = 32 ---
+        {
+            let ctx_duplex = make_ctx(32);
+            h.bench_batched_async(
+                &format!("duplex_throughput/duplex_cap32/n_{n}"),
+                move || build_frames(n),
+                {
+                    let ctx = ctx_duplex.clone();
+                    move |frames| {
+                        let ctx = ctx.clone();
+                        async move {
+                            run_round(ctx, frames).await;
+                        }
+                    }
+                },
+            );
+        }
+    }
+
+    h.run();
+}

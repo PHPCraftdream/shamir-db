@@ -28,20 +28,25 @@
 //!   - `file_synced`    — `SegmentSet` File sink, all `Synced` appends (one
 //!     fsync per window). Level-3 durability; shows fsync dominance.
 //!
-//! Metric: `Throughput::Elements(N)` → Criterion reports appends/sec.
-//! Each Criterion iteration spawns N tasks (one `append` each) on a
-//! multi-thread runtime and joins them, so contention is real, not simulated.
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`, `async`
+//! feature). Each scenario's sink (`WalGroupCommit` + backing store) is
+//! built ONCE outside the timed closure and reused across iterations —
+//! exactly as the prior Criterion `iter_custom` reused `gc` across its
+//! `iters` loop — so this is plan 1 (`bench_async`) per concurrency level.
+//! One `fan_out` call (N concurrent `append`s, joined) is one timed
+//! iteration; the harness's fixed iteration count replaces Criterion's
+//! `iters` parameter.
 //!
 //! Bench-only crate API used is fully public: `WalGroupCommit::new`,
 //! `WalGroupCommit::append`, `WalSink::mem`, `SegmentSet::open`. No prod-code
 //! visibility was widened. The payload is opaque bytes on the append path
 //! (only `replay` decodes), so a fixed filler buffer is a faithful frame.
 
+use std::cell::Cell;
+use std::hint::black_box;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_wal::segment_set::SegmentSet;
 use shamir_wal::wal_group_commit::{WalDurability, WalGroupCommit};
 use shamir_wal::wal_sink::WalSink;
@@ -58,21 +63,11 @@ const PAYLOAD_LEN: usize = 128;
 /// window (rotation is a rare path, not what we are measuring).
 const SEG_MAX_BYTES: u64 = 1 << 30; // 1 GiB
 
-fn rt() -> tokio::runtime::Runtime {
-    // Multi-thread: concurrent committers must actually run in parallel so
-    // the lock + coordination contention is genuine.
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
 fn payload() -> Vec<u8> {
     vec![0xABu8; PAYLOAD_LEN]
 }
 
-/// Run `n` concurrent `append`s at the given tier against `gc`, return the
-/// wall-clock for the whole fan-out (one window's worth of work).
+/// Run `n` concurrent `append`s at the given tier against `gc`.
 async fn fan_out(gc: Arc<WalGroupCommit>, n: usize, tier: WalDurability, version_base: u64) {
     let mut handles = Vec::with_capacity(n);
     for w in 0..n {
@@ -82,105 +77,85 @@ async fn fan_out(gc: Arc<WalGroupCommit>, n: usize, tier: WalDurability, version
             gc.append(payload(), v, tier).await.expect("wal append");
         }));
     }
-    for h in handles {
-        h.await.unwrap();
+    for handle in handles {
+        handle.await.unwrap();
     }
 }
 
-// ── mem sink: lock + coordination cost, NO I/O ─────────────────────────────
+fn main() {
+    let mut h = Harness::new("wal_append", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_mem(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("wal_append/mem");
-    bu::tune_tiered(&mut group, 50, 2, 1, 60);
-
+    // ── mem sink: lock + coordination cost, NO I/O ─────────────────────────
     for &n in CONCURRENCY {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("n", n), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                // One sink reused across iters — there is no per-iter teardown
-                // for an in-RAM Vec, and reusing it keeps the measurement on
-                // the steady-state append path. A fresh GC each iter would only
-                // add allocation noise.
-                let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::mem())));
-                let mut total = Duration::ZERO;
-                for i in 0..iters {
-                    let base = i * (n as u64) + 1;
-                    let start = Instant::now();
-                    fan_out(Arc::clone(&gc), n, WalDurability::Buffered, base).await;
-                    total += start.elapsed();
-                }
-                total
-            });
+        // One sink reused across iterations — there is no per-iter teardown
+        // for an in-RAM Vec, and reusing it keeps the measurement on the
+        // steady-state append path. A fresh GC each iter would only add
+        // allocation noise.
+        let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::mem())));
+        let counter = Cell::new(0u64);
+        let id = format!("wal_append/mem/n_{n}");
+        h.bench_async(&id, move || {
+            let i = counter.get();
+            counter.set(i + 1);
+            let base = i * (n as u64) + 1;
+            let gc = Arc::clone(&gc);
+            async move {
+                black_box(fan_out(gc, n, WalDurability::Buffered, base).await);
+            }
         });
     }
-    group.finish();
-}
 
-// ── file sink, Buffered: write() to page cache, NO fsync ───────────────────
-
-fn bench_file_buffered(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("wal_append/file_buffered");
-    bu::tune_tiered(&mut group, 30, 2, 1, 60);
-
+    // ── file sink, Buffered: write() to page cache, NO fsync ───────────────
     for &n in CONCURRENCY {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("n", n), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let dir = tempfile::TempDir::new().expect("tempdir");
-                let segset = SegmentSet::open(dir.path().to_path_buf(), SEG_MAX_BYTES)
-                    .await
-                    .expect("SegmentSet::open");
-                let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::File(segset))));
-                let mut total = Duration::ZERO;
-                for i in 0..iters {
-                    let base = i * (n as u64) + 1;
-                    let start = Instant::now();
-                    fan_out(Arc::clone(&gc), n, WalDurability::Buffered, base).await;
-                    total += start.elapsed();
-                }
-                drop(gc);
-                drop(dir);
-                total
-            });
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let setup_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let segset = setup_rt
+            .block_on(SegmentSet::open(dir.path().to_path_buf(), SEG_MAX_BYTES))
+            .expect("SegmentSet::open");
+        let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::File(segset))));
+        let counter = Cell::new(0u64);
+        let id = format!("wal_append/file_buffered/n_{n}");
+        // `dir` (TempDir) must outlive every iteration — captured by the
+        // closure so it is dropped only when the harness drops the workload.
+        h.bench_async(&id, move || {
+            let _keep_alive = &dir;
+            let i = counter.get();
+            counter.set(i + 1);
+            let base = i * (n as u64) + 1;
+            let gc = Arc::clone(&gc);
+            async move {
+                black_box(fan_out(gc, n, WalDurability::Buffered, base).await);
+            }
         });
     }
-    group.finish();
-}
 
-// ── file sink, Synced: one fsync per window ────────────────────────────────
-
-fn bench_file_synced(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("wal_append/file_synced");
-    // fsync is the slowest variant — keep the sample floor modest.
-    bu::tune_tiered(&mut group, 20, 2, 1, 60);
-
+    // ── file sink, Synced: one fsync per window ────────────────────────────
     for &n in CONCURRENCY {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("n", n), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let dir = tempfile::TempDir::new().expect("tempdir");
-                let segset = SegmentSet::open(dir.path().to_path_buf(), SEG_MAX_BYTES)
-                    .await
-                    .expect("SegmentSet::open");
-                let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::File(segset))));
-                let mut total = Duration::ZERO;
-                for i in 0..iters {
-                    let base = i * (n as u64) + 1;
-                    let start = Instant::now();
-                    fan_out(Arc::clone(&gc), n, WalDurability::Synced, base).await;
-                    total += start.elapsed();
-                }
-                drop(gc);
-                drop(dir);
-                total
-            });
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let setup_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let segset = setup_rt
+            .block_on(SegmentSet::open(dir.path().to_path_buf(), SEG_MAX_BYTES))
+            .expect("SegmentSet::open");
+        let gc = Arc::new(WalGroupCommit::new(Arc::new(WalSink::File(segset))));
+        let counter = Cell::new(0u64);
+        let id = format!("wal_append/file_synced/n_{n}");
+        h.bench_async(&id, move || {
+            let _keep_alive = &dir;
+            let i = counter.get();
+            counter.set(i + 1);
+            let base = i * (n as u64) + 1;
+            let gc = Arc::clone(&gc);
+            async move {
+                black_box(fan_out(gc, n, WalDurability::Synced, base).await);
+            }
         });
     }
-    group.finish();
-}
 
-criterion_group!(benches, bench_mem, bench_file_buffered, bench_file_synced);
-criterion_main!(benches);
+    h.run();
+}

@@ -8,13 +8,15 @@
 //!   - select_all_100k          — `SELECT *` over 100k records (full Map clone)
 //!   - select_few_fields_100k   — explicit projection of 2 of 6 fields
 //!   - select_all_then_serialize_100k — project to QueryValue, then to_vec
-//!   - select_all_streaming_100k      — streaming bytes path (fast path)
 //!
-//! Run: `cargo bench --bench select_projection`
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
+//! (interner, 100k records) is built ONCE outside the timed closures — the
+//! same shape as the old `b.iter_batched(|| (), |_| ..., BatchSize::SmallInput)`,
+//! which never actually rebuilt anything per iteration.
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use std::hint::black_box;
 
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::query::read::exec::apply_select_value;
 use shamir_engine::query::read::{Select, SelectItem};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
@@ -56,7 +58,9 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-fn bench(c: &mut Criterion) {
+fn main() {
+    let mut h = Harness::new("select_projection", env!("CARGO_MANIFEST_DIR"));
+
     let interner = Interner::new();
     for k in ["id", "name", "email", "score", "active", "created_at"] {
         let _ = interner.touch_ind(k);
@@ -87,54 +91,41 @@ fn bench(c: &mut Criterion) {
     };
 
     // ── Scenario 1: SELECT * (full Map projection) ────────────────
-    let mut g1 = c.benchmark_group("select_all");
-    g1.throughput(Throughput::Elements(n_records));
-    g1.sample_size(bu::sample_size(10));
-    g1.bench_function("select_all_100k", |b| {
-        b.iter_batched(
-            || (),
-            |_| {
-                let projected = apply_select_value(&raw_records, &select_all, &interner);
-                black_box(projected);
-            },
-            BatchSize::SmallInput,
-        )
-    });
-    g1.finish();
+    {
+        let raw_records = raw_records.clone();
+        let select_all = select_all.clone();
+        let interner = interner.clone();
+        h.bench("select_all/select_all_100k", move || {
+            let projected = apply_select_value(&raw_records, &select_all, &interner);
+            black_box(projected);
+        });
+    }
 
     // ── Scenario 2: explicit field list (skips most of the record) ─
-    let mut g2 = c.benchmark_group("select_few_fields");
-    g2.throughput(Throughput::Elements(n_records));
-    g2.sample_size(bu::sample_size(10));
-    g2.bench_function("select_2_of_6_fields_100k", |b| {
-        b.iter_batched(
-            || (),
-            |_| {
-                let projected = apply_select_value(&raw_records, &select_few, &interner);
-                black_box(projected);
-            },
-            BatchSize::SmallInput,
-        )
-    });
-    g2.finish();
+    {
+        let raw_records = raw_records.clone();
+        let select_few = select_few.clone();
+        let interner = interner.clone();
+        h.bench("select_few_fields/select_2_of_6_fields_100k", move || {
+            let projected = apply_select_value(&raw_records, &select_few, &interner);
+            black_box(projected);
+        });
+    }
 
     // ── Scenario 3: project + serialize (matches the wire path) ────
-    let mut g3 = c.benchmark_group("select_then_serialize");
-    g3.throughput(Throughput::Elements(n_records));
-    g3.sample_size(bu::sample_size(10));
-    g3.bench_function("select_all_then_serialize_100k", |b| {
-        b.iter_batched(
-            || (),
-            |_| {
+    {
+        let raw_records = raw_records.clone();
+        let select_all = select_all.clone();
+        let interner = interner.clone();
+        h.bench(
+            "select_then_serialize/select_all_then_serialize_100k",
+            move || {
                 let projected = apply_select_value(&raw_records, &select_all, &interner);
                 let bytes = rmp_serde::to_vec_named(&projected).unwrap();
                 black_box(bytes);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g3.finish();
-}
+        );
+    }
 
-criterion_group!(benches, bench);
-criterion_main!(benches);
+    h.run();
+}

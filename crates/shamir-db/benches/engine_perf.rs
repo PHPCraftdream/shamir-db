@@ -11,22 +11,26 @@
 //! pre-created. The delta exposes both today's hot spots and the
 //! ceiling that the planned optimisations should approach.
 //!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): every
+//! group below chooses `bench_async` (shared setup, read-only or
+//! same-key-upsert workloads that don't invalidate the fixture) or
+//! `bench_batched_async` (setup must be fresh every iteration — deletes
+//! that shrink the table, or a DB that must start from a clean tempdir/
+//! empty state) per the module docs' plan 1 / plan 2 split.
+//!
 //! Run:
-//!   cargo bench -p shamir-db
-//!   cargo bench -p shamir-db -- 'set_existing'   # filter by name
+//!   cargo bench -p shamir-db --bench engine_perf
 
+use std::hint::black_box;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 include!("bench_allocator.rs");
 
+use bench_scale_tool::Harness;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 use tokio::runtime::Runtime;
 
-use shamir_bench_utils as bu;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
@@ -212,6 +216,18 @@ async fn seeded(n: usize, with_id_index: bool) -> Arc<ShamirDb> {
     shamir
 }
 
+async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
+    for chunk_start in (0..n).step_by(50) {
+        let chunk_end = (chunk_start + 50).min(n);
+        let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user).collect();
+        let mut b = Batch::new();
+        b.id(chunk_start)
+            .insert("s", write::insert(table).rows(values));
+        let req = b.build();
+        shamir.execute("bench", &req).await.unwrap();
+    }
+}
+
 // --------------------------------------------------------------------------
 // Op factories — keeps the bench loops short
 // --------------------------------------------------------------------------
@@ -353,593 +369,346 @@ fn req_batch_independent_reads() -> BatchRequest {
 }
 
 // --------------------------------------------------------------------------
-// Benchmark groups
+// Sweep constants
 // --------------------------------------------------------------------------
 
-/// `BENCH_QUICK=1` switches every group to a fast-feedback regime:
-///   * sample_size = 10 (criterion minimum),
-///   * measurement_time = 1 s,
-///   * dataset sizes trimmed to a single representative point.
-///
-/// Cuts the full bench RUN from ~6 min to ~1.5 min. Acceptable for
-/// iterative perf work; for publishable numbers run without the
-/// env var.
-fn quick() -> bool {
-    std::env::var_os("BENCH_QUICK").is_some()
-}
-
-/// Dataset-size sweep — full when default, single point in quick mode.
-fn sweep_sizes() -> &'static [usize] {
-    if quick() {
-        &[1_000]
-    } else {
-        SIZES
-    }
-}
-
-/// Bulk-insert sweep for disk-backed bench groups. Each iter
-/// creates a fresh tempdir + opens the DB, so even the smaller
-/// sizes pay a ~1 s overhead per sample. In quick mode we drop
-/// to a single representative point.
-fn bulk_sweep() -> &'static [usize] {
-    if quick() {
-        &[100]
-    } else {
-        &[100, 1_000]
-    }
-}
-
 const SIZES: &[usize] = &[100, 1_000, 10_000];
+const BULK_SIZES: &[usize] = &[100, 1_000];
 
-/// Bulk insert — measures pure write throughput (no scan). Each iter
-/// gets a fresh empty table so insert cost is constant.
-fn bench_bulk_insert(c: &mut Criterion) {
+fn main() {
+    let mut h = Harness::new("engine_perf", env!("CARGO_MANIFEST_DIR"));
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("bulk_insert");
 
-    for &count in bulk_sweep() {
-        group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let shamir = fresh_db().await;
-                    let req = req_bulk_insert(0, count);
-                    let start = Instant::now();
-                    shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
+    // ── bulk_insert — pure write throughput, fresh empty table per iter ──
+    for &count in BULK_SIZES {
+        let id = format!("bulk_insert/{count}");
+        h.bench_batched_async(
+            &id,
+            || async move { fresh_db().await },
+            move |shamir| async move {
+                let req = req_bulk_insert(0, count);
+                shamir.execute("bench", &req).await.unwrap();
+            },
+        );
     }
-    group.finish();
-}
 
-/// `set` (upsert) on existing key — currently O(n) full scan regardless
-/// of indexes (optimisation B will make this O(log n)). Without index
-/// is the baseline we want to beat.
-///
-/// Target = LAST seeded record to measure worst-case scan; the executor
-/// short-circuits on first match, so picking the first record would
-/// hide the O(n) cost.
-fn bench_set_existing_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("set_existing_no_index");
-
-    for &n in sweep_sizes() {
+    // ── set_existing_no_index / with_index — shared seeded fixture ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
         let target = format!("u{:08}", n - 1);
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_set_one(&target, 42);
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("set_existing_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_set_one(&target, 42);
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-/// Same `set` but with a unique index on `id` pre-created. With current
-/// code this changes nothing (index isn't consulted on the write path),
-/// so the numbers match no-index. After optimisation B + C the times
-/// here should drop dramatically.
-fn bench_set_existing_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("set_existing_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, true));
         let target = format!("u{:08}", n - 1);
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_set_one(&target, 42);
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("set_existing_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_set_one(&target, 42);
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// Read by id: the read planner already uses indexes — this should
-/// already be O(log n) when index exists, O(n) otherwise. Two groups
-/// to confirm the gap.
-fn bench_read_by_id_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("read_by_id_no_index");
-
-    for &n in sweep_sizes() {
+    // ── read_by_id_no_index / with_index ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_by_id(&format!("u{:08}", n - 1));
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("read_by_id_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_by_id(&format!("u{:08}", n - 1));
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_read_by_id_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("read_by_id_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, true));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_by_id(&format!("u{:08}", n - 1));
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("read_by_id_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_by_id(&format!("u{:08}", n - 1));
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// Read by city — non-PK column, lower selectivity (~12.5% records per
-/// city). Run with and without an index on `city`.
-fn bench_read_by_city_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("read_by_city_no_index");
-
-    for &n in sweep_sizes() {
+    // ── read_by_city_no_index / with_index ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_by_city("NYC");
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("read_by_city_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_by_city("NYC");
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_read_by_city_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("read_by_city_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_city", "city", false).await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_by_city("NYC");
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("read_by_city_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_by_city("NYC");
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// Update by id — write path that today scans regardless of index.
-/// Optimisation C will make the indexed variant fast.
-fn bench_update_by_id_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("update_by_id_no_index");
-
-    for &n in sweep_sizes() {
+    // ── update_by_id_no_index / with_index ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_update_by_id(&format!("u{:08}", n - 1));
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("update_by_id_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_update_by_id(&format!("u{:08}", n - 1));
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_update_by_id_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("update_by_id_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, true));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_update_by_id(&format!("u{:08}", n - 1));
+        let id = format!("update_by_id_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_update_by_id(&format!("u{:08}", n - 1));
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
+        });
+    }
+
+    // ── delete_by_id_no_index / with_index — table shrinks, fresh per iter ──
+    for &n in SIZES {
+        let id = format!("delete_by_id_no_index/{n}");
+        h.bench_batched_async(
+            &id,
+            move || async move { seeded(n, false).await },
+            move |shamir| {
+                let req = req_delete_by_id(&format!("u{:08}", n - 1));
                 async move {
                     shamir.execute("bench", &req).await.unwrap();
                 }
-            });
-        });
+            },
+        );
     }
-    group.finish();
-}
-
-/// Delete by id — same story as update. Delete shrinks the table, so
-/// we reset state per iteration via `iter_custom` to keep N constant.
-fn bench_delete_by_id_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("delete_by_id_no_index");
-
-    for &n in sweep_sizes() {
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let shamir = seeded(n, false).await;
-                    let req = req_delete_by_id(&format!("u{:08}", n - 1));
-                    let start = Instant::now();
+    for &n in SIZES {
+        let id = format!("delete_by_id_with_index/{n}");
+        h.bench_batched_async(
+            &id,
+            move || async move { seeded(n, true).await },
+            move |shamir| {
+                let req = req_delete_by_id(&format!("u{:08}", n - 1));
+                async move {
                     shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
                 }
-                total
-            });
-        });
+            },
+        );
     }
-    group.finish();
-}
 
-fn bench_delete_by_id_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("delete_by_id_with_index");
-
-    for &n in sweep_sizes() {
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let shamir = seeded(n, true).await;
-                    let req = req_delete_by_id(&format!("u{:08}", n - 1));
-                    let start = Instant::now();
-                    shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
-    }
-    group.finish();
-}
-
-/// Complex filter (AND of nested OR over indexed + non-indexed
-/// columns). Tests planner cost on real-shaped queries.
-fn bench_complex_filter(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("complex_filter");
-
-    for &n in sweep_sizes() {
+    // ── complex_filter ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_complex_filter();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("complex_filter/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_complex_filter();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// Order_by + limit — full scan + sort.
-fn bench_order_limit(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("order_limit_top10");
-
-    for &n in sweep_sizes() {
+    // ── order_limit_top10 (full scan + sort, no index) ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_with_order_limit();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("order_limit_top10/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_with_order_limit();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// COUNT(*) without filter — Opt #2: should fast-path through
-/// RecordCounter (O(1)) instead of a full scan.
-fn bench_count_all_no_filter(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("count_all_no_filter");
-
-    for &n in sweep_sizes() {
+    // ── count_all_no_filter ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_count_all();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("count_all_no_filter/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_count_all();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// COUNT(*) with eq filter — eligible for index-lookup fast path
-/// (count = matched_set.len() without materialising records).
-fn bench_count_with_filter_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("count_with_filter_no_index");
-
-    for &n in sweep_sizes() {
+    // ── count_with_filter_no_index / with_index ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_count_with_filter("NYC");
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("count_with_filter_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_count_with_filter("NYC");
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_count_with_filter_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("count_with_filter_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_city", "city", false).await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_count_with_filter("NYC");
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("count_with_filter_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_count_with_filter("NYC");
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// MIN(score) + MAX(score) over the whole table — Opt #4 should walk
-/// the score index (first / last key) instead of scanning everything.
-fn bench_min_max_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("min_max_no_index");
-
-    for &n in sweep_sizes() {
+    // ── min_max_no_index / with_index ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_min_max_score();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("min_max_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_min_max_score();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_min_max_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("min_max_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_score", "score", false).await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_min_max_score();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("min_max_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_min_max_score();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// Q1 baseline: MIN alone WITHOUT sorted index — falls through to
-/// full scan + aggregate.
-fn bench_min_only_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("min_only_no_index");
-
-    for &n in sweep_sizes() {
+    // ── min_only_no_index / with_index (sorted) ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_min_score();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("min_only_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_min_score();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-/// Q1 fast-path: MIN alone with sorted index on `score`. Should hit
-/// the lookup_min path in read(), O(log n).
-fn bench_min_only_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("min_only_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_min_score();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("min_only_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_min_score();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// `order_by score DESC + LIMIT 10` with a SORTED index on `score`.
-/// Hits the reverse-iter fast path — `lookup_last_k(index, 10)`
-/// using `Store::iter_range_stream_reverse` instead of full scan
-/// + sort.
-fn bench_order_limit_desc_with_sorted_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("order_limit_top10_desc_sorted");
-
-    for &n in sweep_sizes() {
+    // ── order_limit_top10_desc_sorted (sorted index, reverse-iter fast path) ──
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_with_order_limit();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("order_limit_top10_desc_sorted/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_with_order_limit();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// `order_by score ASC + LIMIT 10` with a SORTED index on `score`.
-/// Hits the Opt #6 fast path — `lookup_first_k(index, 10)` instead
-/// of full scan + sort. Companion to the existing
-/// `order_limit_top10` (which is DESC and falls through to full
-/// scan + sort by design).
-fn bench_order_limit_asc_with_sorted_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("order_limit_top10_asc_sorted");
-
-    for &n in sweep_sizes() {
+    // ── order_limit_top10_asc_sorted (sorted index, forward-iter fast path) ──
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_with_order_limit_asc();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("order_limit_top10_asc_sorted/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_with_order_limit_asc();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// `order_by score desc + LIMIT 10` on indexed score field — Opt #1
-/// can read the index in order and stop after K matches.
-fn bench_order_limit_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("order_limit_top10_with_index");
-
-    for &n in sweep_sizes() {
+    // ── order_limit_top10_with_index (regular index) ──
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_score", "score", false).await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_read_with_order_limit();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("order_limit_top10_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_read_with_order_limit();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
 
-/// `where age between 30 AND 35` — narrow range, ~5 % selectivity.
-/// Opt #5 should make this O(log N + K) via sorted-index range scan.
-fn bench_range_query_no_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_no_index");
-
-    for &n in sweep_sizes() {
+    // ── range_query_no_index / with_index (sorted) ──
+    for &n in SIZES {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age();
-                async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
+        let id = format!("range_query_no_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_range_age();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
         });
     }
-    group.finish();
-}
-
-fn bench_range_query_with_index(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("range_query_with_index");
-
-    for &n in sweep_sizes() {
+    for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             // Sorted index for range queries — equality (hash) index
@@ -947,151 +716,97 @@ fn bench_range_query_with_index(c: &mut Criterion) {
             create_sorted_index(&s, "users", "by_age", "age").await;
             s
         });
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
-                let shamir = Arc::clone(&shamir);
-                let req = req_range_age();
+        let id = format!("range_query_with_index/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_range_age();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
+        });
+    }
+
+    // --------------------------------------------------------------------
+    // Sled/disk-backed range bench — exercises the native
+    // `iter_range_stream` path on a real disk backend. Fresh tempdir per
+    // iter, so `bench_batched_async`.
+    // --------------------------------------------------------------------
+
+    for &count in BULK_SIZES {
+        let id = format!("bulk_insert_fjall/{count}");
+        h.bench_batched_async(
+            &id,
+            || async move {
+                let tempdir = tempfile::TempDir::new().expect("tempdir");
+                let shamir = fresh_db_fjall(tempdir.path()).await;
+                (shamir, tempdir)
+            },
+            move |(shamir, tempdir)| {
+                let req = req_bulk_insert(0, count);
                 async move {
                     shamir.execute("bench", &req).await.unwrap();
+                    drop(shamir);
+                    drop(tempdir);
                 }
-            });
-        });
+            },
+        );
     }
-    group.finish();
-}
 
-// --------------------------------------------------------------------------
-// Sled-backed range bench — exercises the native `iter_range_stream`
-// path on a real disk backend. Contrast with `range_query_*` (above)
-// which run against `in_memory` where the default O(N) fallback is
-// used. Same scenarios, different backend, fair before/after picture
-// of what the sorted-index work actually buys in production.
-// --------------------------------------------------------------------------
-
-/// Same `bulk_insert` for every disk backend. Used as a parity
-/// check — each backend should converge to a similar
-/// "amortised-fsync, no per-write commit" cost. Sample counts kept
-/// low (each iter spawns a fresh tempdir + DB).
-macro_rules! bench_bulk_insert_for_backend {
-    ($fn_name:ident, $group:literal, $fresh:ident) => {
-        fn $fn_name(c: &mut Criterion) {
-            let rt = Runtime::new().unwrap();
-            let mut group = c.benchmark_group($group);
-            group.sample_size(bu::sample_size(10));
-            group.measurement_time(bu::measurement_time(Duration::from_secs(10)));
-            for &count in bulk_sweep() {
-                group.throughput(Throughput::Elements(count as u64));
-                group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-                    b.to_async(&rt).iter_custom(|iters| async move {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let tempdir = tempfile::TempDir::new().expect("tempdir");
-                            let shamir = $fresh(tempdir.path()).await;
-                            let req = req_bulk_insert(0, count);
-                            let start = Instant::now();
-                            shamir.execute("bench", &req).await.unwrap();
-                            total += start.elapsed();
-                            drop(shamir);
-                            drop(tempdir);
-                        }
-                        total
-                    });
-                });
-            }
-            group.finish();
-        }
-    };
-}
-
-bench_bulk_insert_for_backend!(bench_bulk_insert_fjall, "bulk_insert_fjall", fresh_db_fjall);
-
-// MemBuffer-wrapped variants. Same backends, same numbers as raw
-// for the passthrough proxy phase.
-bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_fjall,
-    "bulk_insert_membuffer_fjall",
-    fresh_db_membuffer_fjall
-);
-
-// Membuffer-only bench using the macro shape: in-memory backend
-// wrapped — measures pure wrapper overhead (no I/O).
-fn bench_bulk_insert_membuffer_in_memory(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("bulk_insert_membuffer_in_memory");
-    for &count in bulk_sweep() {
-        group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let shamir = fresh_db_membuffer_in_memory().await;
-                    let req = req_bulk_insert(0, count);
-                    let start = Instant::now();
-                    shamir.execute("bench", &req).await.unwrap();
-                    total += start.elapsed();
-                }
-                total
-            });
-        });
-    }
-    group.finish();
-}
-
-/// Steady-state throughput: 10 000 inserts in one batch into a
-/// fresh MemBuffer-wrapped DB. Long enough that the flusher
-/// engages and the LRU is well past its warmup. Contrast with
-/// `bulk_insert*/100` which captures startup latency.
-fn bench_steady_state_insert(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("steady_state_insert_10k");
-    group.sample_size(bu::sample_size(10));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(30)));
-    group.throughput(Throughput::Elements(10_000));
-
-    group.bench_function("membuffer_in_memory", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let shamir = fresh_db_membuffer_in_memory().await;
-                let req = req_bulk_insert(0, 10_000);
-                let start = Instant::now();
+    // ── bulk_insert_membuffer_in_memory — fresh DB per iter (pure wrapper overhead) ──
+    for &count in BULK_SIZES {
+        let id = format!("bulk_insert_membuffer_in_memory/{count}");
+        h.bench_batched_async(
+            &id,
+            || async move { fresh_db_membuffer_in_memory().await },
+            move |shamir| async move {
+                let req = req_bulk_insert(0, count);
                 shamir.execute("bench", &req).await.unwrap();
-                total += start.elapsed();
-                drop(shamir);
-            }
-            total
-        });
-    });
+            },
+        );
+    }
 
-    group.finish();
-}
+    // ── bulk_insert_membuffer_fjall — fresh tempdir + DB per iter ──
+    for &count in BULK_SIZES {
+        let id = format!("bulk_insert_membuffer_fjall/{count}");
+        h.bench_batched_async(
+            &id,
+            || async move {
+                let tempdir = tempfile::TempDir::new().expect("tempdir");
+                let shamir = fresh_db_membuffer_fjall(tempdir.path()).await;
+                (shamir, tempdir)
+            },
+            move |(shamir, tempdir)| {
+                let req = req_bulk_insert(0, count);
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                    drop(shamir);
+                    drop(tempdir);
+                }
+            },
+        );
+    }
 
-/// TTL sweep cost: one full TTL-eviction pass over a cache
-/// holding 50k stale entries. Measures how long the cache lock
-/// is blocked when TTL sweep runs.
-///
-/// Caveat: relies on the background flusher firing the sweep.
-/// We instead measure indirectly via a `flush().await` (which
-/// drains the dirty queue + triggers downstream propagation).
-/// The actual sweep is internal — this bench captures the
-/// observable latency when TTL is enabled vs disabled.
-fn bench_ttl_sweep_50k(c: &mut Criterion) {
-    use shamir_db::storage::storage_in_memory::InMemoryStore;
-    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
-    use shamir_db::storage::types::{RecordKey, Store};
-    use shamir_types::types::record_id::RecordId;
+    // ── steady_state_insert_10k — 10k inserts into a fresh MemBuffer DB ──
+    h.bench_batched_async(
+        "steady_state_insert_10k/membuffer_in_memory",
+        || async move { fresh_db_membuffer_in_memory().await },
+        |shamir| async move {
+            let req = req_bulk_insert(0, 10_000);
+            shamir.execute("bench", &req).await.unwrap();
+            drop(shamir);
+        },
+    );
 
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("ttl_sweep");
-    group.sample_size(bu::sample_size(10));
-    group.throughput(Throughput::Elements(50_000));
+    // ── ttl_sweep — no_ttl vs short-TTL 50k-seed cost ──
+    {
+        use shamir_db::storage::storage_in_memory::InMemoryStore;
+        use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+        use shamir_db::storage::types::{RecordKey, Store};
+        use shamir_types::types::record_id::RecordId;
 
-    // No TTL — baseline for "what does a cache lookup look like"
-    // when sweep does not run at all.
-    group.bench_function("no_ttl_seed_50k", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
+        h.bench_batched_async(
+            "ttl_sweep/no_ttl_seed_50k",
+            || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
                 let cfg = MemBufferConfig {
                     max_bytes: 100 * 1024 * 1024,
@@ -1102,26 +817,21 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
-                let start = Instant::now();
+                (store, v)
+            },
+            |(store, v)| async move {
                 for _ in 0..50_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
-                total += start.elapsed();
                 drop(store);
-            }
-            total
-        });
-    });
+            },
+        );
 
-    // TTL enabled, very short: every entry is stale by the time
-    // the flusher tick fires. Measures the cost of inserting
-    // 50k while a sweep is potentially racing.
-    group.bench_function("ttl_50ms_seed_50k_flush_300ms", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
+        h.bench_batched_async(
+            "ttl_sweep/ttl_50ms_seed_50k_flush_300ms",
+            || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
                 let cfg = MemBufferConfig {
                     max_bytes: 100 * 1024 * 1024,
@@ -1132,45 +842,29 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
-                let start = Instant::now();
+                (store, v)
+            },
+            |(store, v)| async move {
                 for _ in 0..50_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
-                total += start.elapsed();
                 drop(store);
-            }
-            total
-        });
-    });
+            },
+        );
+    }
 
-    group.finish();
-}
+    // ── eviction_byte_pressure — seed 8k near cap, time next 1k writes ──
+    {
+        use shamir_db::storage::storage_in_memory::InMemoryStore;
+        use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+        use shamir_db::storage::types::{RecordKey, Store};
+        use shamir_types::types::record_id::RecordId;
 
-/// Eviction under byte-pressure: cache is intentionally held
-/// near its `max_bytes` cap so every new insert triggers the
-/// byte-cap eviction loop in `cache_put`. Each iter does 1000
-/// writes; the byte-cap loop pops + (maybe-)flushes one LRU
-/// entry per write.
-///
-/// Inner store = InMemoryStore to isolate the eviction-loop
-/// cost from disk I/O.
-fn bench_eviction_byte_pressure(c: &mut Criterion) {
-    use shamir_db::storage::storage_in_memory::InMemoryStore;
-    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
-    use shamir_db::storage::types::{RecordKey, Store};
-    use shamir_types::types::record_id::RecordId;
-
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("eviction_byte_pressure");
-    group.sample_size(bu::sample_size(10));
-    group.throughput(Throughput::Elements(1_000));
-
-    group.bench_function("seed_8k_then_insert_1k", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
+        h.bench_batched_async(
+            "eviction_byte_pressure/seed_8k_then_insert_1k",
+            || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
                 // ~100 bytes/value × 8000 = ~800k cache footprint.
                 // max_bytes 1_000_000 leaves ~200k headroom — first
@@ -1183,592 +877,310 @@ fn bench_eviction_byte_pressure(c: &mut Criterion) {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v: shamir_db::storage::types::RecordKey =
-                    shamir_db::storage::types::RecordKey::copy_from_slice(&[0xAAu8; 80]);
+                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
                 for _ in 0..8_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
+                (store, v)
+            },
+            |(store, v)| async move {
                 // Now seeded near cap. Time the next 1000 writes.
-                let start = Instant::now();
                 for _ in 0..1_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
-                total += start.elapsed();
                 drop(store);
+            },
+        );
+    }
+
+    // ── wal_high_qps — 1000 single-record batches into fresh MemBuffer DB ──
+    h.bench_batched_async(
+        "wal_high_qps/1000_single_record_batches",
+        || async move { fresh_db_membuffer_in_memory().await },
+        |shamir| async move {
+            let req = req_bulk_insert(0, 1);
+            for _ in 0..1_000 {
+                shamir.execute("bench", &req).await.unwrap();
             }
-            total
-        });
-    });
+            drop(shamir);
+        },
+    );
 
-    group.finish();
-}
+    // ── cache_hit_get — warm MemBuffer cache, 100% hit, random key ──
+    {
+        use rand::seq::SliceRandom;
+        use shamir_db::storage::storage_in_memory::InMemoryStore;
+        use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+        use shamir_db::storage::types::Store;
+        use shamir_types::types::record_id::RecordId;
 
-/// High-QPS WAL: 1000 batches × 1 record each, against a fresh
-/// MemBuffer-wrapped DB. Each batch goes through
-/// `wal.begin` (info_store.set marker) -> data write -> counter
-/// update -> `wal.commit_async` (spawn task to remove marker).
-///
-/// Measures: per-batch overhead at high QPS, including spawn
-/// cost of commit_async. If `tokio::spawn` allocation dominates,
-/// switching to a long-lived drainer + channel would show here.
-fn bench_wal_high_qps(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("wal_high_qps");
-    group.sample_size(bu::sample_size(10));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(20)));
-    group.throughput(Throughput::Elements(1_000));
+        for &n in &[1_000usize, 10_000] {
+            // Build a warmed MemBuffer cache holding `n` keys, all
+            // resident (cache size = n, large max_bytes).
+            let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt
+                .block_on(async {
+                    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+                    let cfg = MemBufferConfig {
+                        max_bytes: 64 * 1024 * 1024,
+                        max_entries: n * 2,
+                        ttl_ms: None,
+                        flush_interval_ms: 500,
+                        flush_batch_size: 256,
+                    };
+                    let store: Arc<dyn Store> =
+                        Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                    let mut keys = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let id = RecordId::new();
+                        let key =
+                            shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
+                        let value =
+                            shamir_db::storage::types::RecordKey::from(format!("v{i}"));
+                        store.set(key.clone(), value).await.unwrap();
+                        keys.push(key);
+                    }
+                    (store, keys)
+                });
 
-    group.bench_function("1000_single_record_batches", |b| {
-        b.to_async(&rt).iter_custom(|iters| async move {
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                let shamir = fresh_db_membuffer_in_memory().await;
-                let req = req_bulk_insert(0, 1);
-                let start = Instant::now();
-                for _ in 0..1_000 {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-                total += start.elapsed();
-                drop(shamir);
-            }
-            total
-        });
-    });
+            // Shuffle keys for uniform-random access pattern.
+            let mut rng = rand::thread_rng();
+            let mut shuffled = keys.clone();
+            shuffled.shuffle(&mut rng);
+            let cursor = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    group.finish();
-}
-
-/// Low-level micro: cost of one `MemBufferStore::get` on a warm
-/// cache (100 % hit, random key). Bypasses engine, planner,
-/// interner — measures pure cache-lookup path.
-///
-/// Used as a stable signal for LRU-lookup optimisations
-/// (sharded cache, lockless dirty queue, etc).
-fn bench_cache_hit_get(c: &mut Criterion) {
-    use rand::seq::SliceRandom;
-    use shamir_db::storage::storage_in_memory::InMemoryStore;
-    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
-    use shamir_db::storage::types::Store;
-    use shamir_types::types::record_id::RecordId;
-
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("cache_hit_get");
-
-    for &n in &[1_000usize, 10_000] {
-        // Build a warmed MemBuffer cache holding `n` keys, all
-        // resident (cache size = n, large max_bytes).
-        let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt
-            .block_on(async {
-                let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-                let cfg = MemBufferConfig {
-                    max_bytes: 64 * 1024 * 1024,
-                    max_entries: n * 2,
-                    ttl_ms: None,
-                    flush_interval_ms: 500,
-                    flush_batch_size: 256,
-                };
-                let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let mut keys = Vec::with_capacity(n);
-                for i in 0..n {
-                    let id = RecordId::new();
-                    let key = shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
-                    let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
-                    store.set(key.clone(), value).await.unwrap();
-                    keys.push(key);
-                }
-                (store, keys)
-            });
-
-        // Shuffle keys for uniform-random access pattern.
-        let mut rng = rand::thread_rng();
-        let mut shuffled = keys.clone();
-        shuffled.shuffle(&mut rng);
-
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            let mut cursor = 0usize;
-            b.to_async(&rt).iter(|| {
+            let id = format!("cache_hit_get/{n}");
+            h.bench_async(&id, move || {
                 let store = Arc::clone(&store);
-                let key = shuffled[cursor % shuffled.len()].clone();
-                cursor = cursor.wrapping_add(1);
+                let cursor = Arc::clone(&cursor);
+                let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let key = shuffled[i % shuffled.len()].clone();
                 async move {
                     let _ = store.get(key).await.unwrap();
                 }
             });
-        });
+        }
     }
-    group.finish();
-}
 
-/// 8 independent reads in a single batch — exercises the parallel
-/// stage planner.
-fn bench_batch_multi_read(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("batch_multi_read_8");
-
+    // ── batch_multi_read_8 — 8 independent reads in one batch ──
     for &n in &[1_000usize, 10_000] {
         let shamir = block_on_setup(&rt, seeded(n, false));
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.to_async(&rt).iter(|| {
+        let id = format!("batch_multi_read_8/{n}");
+        h.bench_async(&id, move || {
+            let shamir = Arc::clone(&shamir);
+            let req = req_batch_independent_reads();
+            async move {
+                shamir.execute("bench", &req).await.unwrap();
+            }
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Concurrent write contention
+    // ═══════════════════════════════════════════════════════════════════
+
+    {
+        let shamir = rt.block_on(async {
+            let s = Arc::new(ShamirDb::init_memory().await.unwrap());
+            s.create_db("bench").await;
+            let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users"));
+            s.add_repo("bench", cfg).await.unwrap();
+            s
+        });
+        for n_writers in [1usize, 2, 4, 8] {
+            let shamir = Arc::clone(&shamir);
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let id = format!("concurrent_inserts/writers_{n_writers}");
+            h.bench_async(&id, move || {
                 let shamir = Arc::clone(&shamir);
-                let req = req_batch_independent_reads();
+                let counter = Arc::clone(&counter);
                 async move {
-                    shamir.execute("bench", &req).await.unwrap();
-                }
-            });
-        });
-    }
-    group.finish();
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// P7 — nested-batch overhead
-//
-// Measures the overhead introduced by `BatchOp::Batch` (sub_batch) —
-// bind-resolution, recursive execution, and result-wrapping — versus
-// the same logical work expressed as sibling ops in a flat batch.
-//
-// Work performed in both cases:
-//   1. Read one user by id ("u00000999") from a 1000-record table.
-//   2. Upsert one record with a fixed score (42).
-//
-// flat:   both ops are siblings in a single batch.
-// nested: the upsert is wrapped in a sub_batch; the uid parameter is
-//         bound from the outer read result via a $query reference
-//         (outer `user` query → first row → field "id"), and the inner
-//         upsert filter references it through `val::param("uid")`.
-// ═══════════════════════════════════════════════════════════════════
-
-fn bench_nested_batch(c: &mut Criterion) {
-    const N: usize = 1_000;
-    const TARGET: &str = "u00000999";
-    const SCORE: i64 = 42;
-
-    let rt = Runtime::new().unwrap();
-    let shamir = block_on_setup(&rt, seeded(N, false));
-
-    // ── flat request ───────────────────────────────────────────────
-    // op1: read user by id
-    // op2: upsert with fixed values — same record that the read finds
-    let req_flat = {
-        let mut b = Batch::new();
-        b.id("flat_nb").return_flagged();
-        b.query("user", Query::from("users").where_eq("id", TARGET));
-        b.upsert(
-            "write",
-            write::upsert("users")
-                .key(mpack!({ "id": @(QueryValue::from(TARGET)) }))
-                .value(mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true })),
-        );
-        b.build()
-    };
-
-    // ── nested request ─────────────────────────────────────────────
-    // outer: read user by id
-    // sub_batch: upsert parameterised on uid bound from @user[0].id
-    let req_nested = {
-        // Build the inner batch whose upsert key/value use $param("uid").
-        let inner = {
-            let mut ib = Batch::new();
-            ib.id("inner_nb").return_flagged();
-            // Filter: where id = $param("uid")
-            ib.upsert(
-                "write",
-                write::upsert("users").key(mpack!({ "id": @(QueryValue::from(TARGET)) })).value(
-                    mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true }),
-                ),
-            );
-            ib.build()
-        };
-
-        let mut ob = Batch::new();
-        ob.id("nested_nb").return_flagged();
-        let user_handle = ob.query("user", Query::from("users").where_eq("id", TARGET));
-        // bind uid → @user[0].id
-        let uid_ref = user_handle.first().field("id");
-        let mut bind = new_map();
-        bind.insert("uid".to_string(), uid_ref);
-        ob.sub_batch("proc", inner, bind);
-        ob.build()
-    };
-
-    let mut group = c.benchmark_group("nested_batch");
-    if quick() {
-        group
-            .sample_size(bu::sample_size(10))
-            .measurement_time(bu::measurement_time(Duration::from_secs(1)));
-    }
-
-    group.bench_function("flat", |b| {
-        let shamir = Arc::clone(&shamir);
-        let req = req_flat.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&shamir);
-            let r = req.clone();
-            async move {
-                s.execute("bench", &r).await.unwrap();
-            }
-        });
-    });
-
-    group.bench_function("nested", |b| {
-        let shamir = Arc::clone(&shamir);
-        let req = req_nested.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&shamir);
-            let r = req.clone();
-            async move {
-                s.execute("bench", &r).await.unwrap();
-            }
-        });
-    });
-
-    group.finish();
-}
-
-// --------------------------------------------------------------------------
-// Driver
-// --------------------------------------------------------------------------
-
-/// Construct a `Criterion` that respects `BENCH_QUICK`. In quick
-/// mode the global sample-size + measurement-time floors are
-/// dropped so every inline `group.sample_size(...)` /
-/// `group.measurement_time(...)` setter is overridden by the
-/// smaller defaults this returns. Without the env var, behaviour
-/// matches `Criterion::default()` exactly.
-fn quick_aware_criterion() -> Criterion {
-    let c = Criterion::default();
-    if quick() {
-        c.sample_size(bu::sample_size(10))
-            .measurement_time(bu::measurement_time(Duration::from_secs(1)))
-            .warm_up_time(bu::warm_up_time(Duration::from_millis(100)))
-    } else {
-        c
-    }
-}
-
-criterion_group! {
-    name = benches;
-    config = quick_aware_criterion();
-    targets =
-    bench_bulk_insert,
-    bench_set_existing_no_index,
-    bench_set_existing_with_index,
-    bench_read_by_id_no_index,
-    bench_read_by_id_with_index,
-    bench_read_by_city_no_index,
-    bench_read_by_city_with_index,
-    bench_update_by_id_no_index,
-    bench_update_by_id_with_index,
-    bench_delete_by_id_no_index,
-    bench_delete_by_id_with_index,
-    bench_complex_filter,
-    bench_order_limit,
-    bench_count_all_no_filter,
-    bench_count_with_filter_no_index,
-    bench_count_with_filter_with_index,
-    bench_min_max_no_index,
-    bench_min_max_with_index,
-    bench_min_only_no_index,
-    bench_min_only_with_index,
-    bench_order_limit_with_index,
-    bench_order_limit_asc_with_sorted_index,
-    bench_order_limit_desc_with_sorted_index,
-    bench_range_query_no_index,
-    bench_range_query_with_index,
-    bench_bulk_insert_fjall,
-    bench_bulk_insert_membuffer_in_memory,
-    bench_bulk_insert_membuffer_fjall,
-    bench_batch_multi_read,
-    bench_cache_hit_get,
-    bench_steady_state_insert,
-    bench_wal_high_qps,
-    bench_eviction_byte_pressure,
-    bench_ttl_sweep_50k,
-    bench_concurrent_inserts,
-    bench_ddl_create_index_on_seeded,
-    bench_group_by_sum_e2e,
-    bench_changefeed_overhead,
-    bench_validator_overhead,
-    bench_nested_batch
-}
-criterion_main!(benches);
-
-// ═══════════════════════════════════════════════════════════════════
-// Concurrent write contention
-// ═══════════════════════════════════════════════════════════════════
-
-fn bench_concurrent_inserts(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let shamir = rt.block_on(async {
-        let s = Arc::new(ShamirDb::init_memory().await.unwrap());
-        s.create_db("bench").await;
-        let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("users"));
-        s.add_repo("bench", cfg).await.unwrap();
-        s
-    });
-
-    let mut group = c.benchmark_group("concurrent_inserts");
-    for n_writers in [1, 2, 4, 8] {
-        group.throughput(Throughput::Elements(n_writers as u64));
-        group.bench_with_input(
-            BenchmarkId::new("writers", n_writers),
-            &n_writers,
-            |b, &n| {
-                let counter = std::sync::atomic::AtomicU64::new(0);
-                b.to_async(&rt).iter(|| {
-                    let shamir = Arc::clone(&shamir);
-                    let c = &counter;
-                    async move {
-                        let mut handles = Vec::new();
-                        for _w in 0..n {
-                            let s = Arc::clone(&shamir);
-                            let id = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            handles.push(tokio::spawn(async move {
-                                let mut b = Batch::new();
-                                b.id(id).upsert(
-                                    "ups",
-                                    write::upsert("users").key(mpack!({ "id": @(QueryValue::from(id)) })).value(
-                                        mpack!({ "id": @(QueryValue::from(id)), "name": @(QueryValue::from(format!("w{id}"))), "score": @(QueryValue::from(id)) }),
-                                    ),
-                                );
-                                let req = b.build();
-                                s.execute("bench", &req).await.unwrap();
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                    }
-                });
-            },
-        );
-    }
-    group.finish();
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// DDL: create_index on a seeded table (rebuild cost)
-// ═══════════════════════════════════════════════════════════════════
-
-fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-
-    let mut group = c.benchmark_group("ddl_create_index");
-    group.sample_size(bu::sample_size(10));
-    for n_records in [100, 1000] {
-        group.bench_with_input(
-            BenchmarkId::new("records", n_records),
-            &n_records,
-            |b, &n| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let shamir = rt.block_on(async {
-                            let s = Arc::new(ShamirDb::init_memory().await.unwrap());
-                            s.create_db("bench").await;
-                            let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-                                .add_table(TableConfig::new("items"));
-                            s.add_repo("bench", cfg).await.unwrap();
-                            seed_users_inner(&s, n, "items").await;
-                            s
-                        });
-                        let start = Instant::now();
-                        rt.block_on(async {
-                            let idx = ddl::create_index("by_score", "items")
-                                .field("score")
-                                .build();
+                    let mut handles = Vec::new();
+                    for _w in 0..n_writers {
+                        let s = Arc::clone(&shamir);
+                        let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        handles.push(tokio::spawn(async move {
                             let mut b = Batch::new();
-                            b.id(1).create_index("idx", idx);
+                            b.id(id).upsert(
+                                "ups",
+                                write::upsert("users").key(mpack!({ "id": @(QueryValue::from(id)) })).value(
+                                    mpack!({ "id": @(QueryValue::from(id)), "name": @(QueryValue::from(format!("w{id}"))), "score": @(QueryValue::from(id)) }),
+                                ),
+                            );
                             let req = b.build();
-                            shamir.execute("bench", &req).await.unwrap();
-                        });
-                        total += start.elapsed();
+                            s.execute("bench", &req).await.unwrap();
+                        }));
                     }
-                    total
-                });
+                    for h in handles {
+                        h.await.unwrap();
+                    }
+                }
+            });
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // DDL: create_index on a seeded table (rebuild cost) — fresh table per iter
+    // ═══════════════════════════════════════════════════════════════════
+
+    for n_records in [100usize, 1000] {
+        let id = format!("ddl_create_index/records_{n_records}");
+        h.bench_batched_async(
+            &id,
+            move || async move {
+                let s = Arc::new(ShamirDb::init_memory().await.unwrap());
+                s.create_db("bench").await;
+                let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+                    .add_table(TableConfig::new("items"));
+                s.add_repo("bench", cfg).await.unwrap();
+                seed_users_inner(&s, n_records, "items").await;
+                s
+            },
+            move |shamir| async move {
+                let idx = ddl::create_index("by_score", "items")
+                    .field("score")
+                    .build();
+                let mut b = Batch::new();
+                b.id(1).create_index("idx", idx);
+                let req = b.build();
+                shamir.execute("bench", &req).await.unwrap();
             },
         );
     }
-    group.finish();
-}
 
-// ═══════════════════════════════════════════════════════════════════
-// GROUP BY + aggregation e2e
-// ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
+    // GROUP BY + aggregation e2e
+    // ═══════════════════════════════════════════════════════════════════
 
-fn bench_group_by_sum_e2e(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let shamir = block_on_setup(&rt, seeded(1000, false));
+    {
+        let shamir = block_on_setup(&rt, seeded(1000, false));
 
-    let mut b_sum = Batch::new();
-    b_sum.id(1).query(
-        "g",
-        Query::from("users")
-            .select([
-                select::field("city"),
-                select::sum("score", "total_score"),
-                select::count_all("n"),
-            ])
-            .group_by_many(["city"]),
-    );
-    let req_group_sum = b_sum.build();
+        let mut b_sum = Batch::new();
+        b_sum.id(1).query(
+            "g",
+            Query::from("users")
+                .select([
+                    select::field("city"),
+                    select::sum("score", "total_score"),
+                    select::count_all("n"),
+                ])
+                .group_by_many(["city"]),
+        );
+        let req_group_sum = b_sum.build();
 
-    let mut b_avg = Batch::new();
-    b_avg.id(2).query(
-        "g",
-        Query::from("users")
-            .select([select::field("city"), select::avg("score", "avg_score")])
-            .group_by_many(["city"]),
-    );
-    let req_group_avg = b_avg.build();
+        let mut b_avg = Batch::new();
+        b_avg.id(2).query(
+            "g",
+            Query::from("users")
+                .select([select::field("city"), select::avg("score", "avg_score")])
+                .group_by_many(["city"]),
+        );
+        let req_group_avg = b_avg.build();
 
-    let mut group = c.benchmark_group("group_by_e2e");
-    group.throughput(Throughput::Elements(1000));
-    group.bench_function("sum_count_by_city_1000", |b| {
-        let s = Arc::clone(&shamir);
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
+        {
+            let shamir = Arc::clone(&shamir);
             let req = req_group_sum.clone();
-            async move { s.execute("bench", &req).await.unwrap() }
-        });
-    });
-    group.bench_function("avg_by_city_1000", |b| {
-        let s = Arc::clone(&shamir);
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
+            h.bench_async("group_by_e2e/sum_count_by_city_1000", move || {
+                let s = Arc::clone(&shamir);
+                let req = req.clone();
+                async move {
+                    black_box(s.execute("bench", &req).await.unwrap());
+                }
+            });
+        }
+        {
+            let shamir = Arc::clone(&shamir);
             let req = req_group_avg.clone();
-            async move { s.execute("bench", &req).await.unwrap() }
-        });
-    });
-    group.finish();
-}
+            h.bench_async("group_by_e2e/avg_by_city_1000", move || {
+                let s = Arc::clone(&shamir);
+                let req = req.clone();
+                async move {
+                    black_box(s.execute("bench", &req).await.unwrap());
+                }
+            });
+        }
+    }
 
-// ═══════════════════════════════════════════════════════════════════
-// B1a — changefeed emission overhead
-// ═══════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════
+    // B1a — changefeed emission overhead
+    //
+    // Regression guard: overhead of `emit_nontx_changefeed` on a single
+    // insert when (a) no subscriber is attached, and (b) one subscriber
+    // is holding a `broadcast::Receiver`.
+    // ═══════════════════════════════════════════════════════════════════
 
-/// Regression guard: overhead of `emit_nontx_changefeed` on a single
-/// insert when (a) no subscriber is attached, and (b) one subscriber
-/// is holding a `broadcast::Receiver`.
-///
-/// Both scenarios go through the full `execute` → planner → table
-/// write → emit path.  The delta between (a) and (b) is the cost
-/// of a single `try_send` into a bounded broadcast channel.
-fn bench_changefeed_overhead(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("changefeed_overhead");
-
-    // Shared request: insert record with id "b1" into the bench table.
-    // Using a fixed id means repeated calls overwrite the same row
-    // (upsert), keeping the table size stable across iterations.
-    let mut b_ins = Batch::new();
-    b_ins
-        .id("b1")
-        .return_flagged()
-        .insert("ins", write::insert("users").row(gen_user(999)));
-    let req_insert = b_ins.build();
-
-    // (a) no_subscribers — changefeed channel has no active receivers.
-    //     emit_nontx_changefeed does try_send; with 0 receivers it still
-    //     serialises the event into Arc but the send is a no-op.
     {
-        let shamir = block_on_setup(&rt, seeded(100, false));
-        group.bench_function("no_subscribers", |b| {
-            let shamir = Arc::clone(&shamir);
+        let mut b_ins = Batch::new();
+        b_ins
+            .id("b1")
+            .return_flagged()
+            .insert("ins", write::insert("users").row(gen_user(999)));
+        let req_insert = b_ins.build();
+
+        // (a) no_subscribers.
+        {
+            let shamir = block_on_setup(&rt, seeded(100, false));
             let req = req_insert.clone();
-            b.to_async(&rt).iter(|| {
+            h.bench_async("changefeed_overhead/no_subscribers", move || {
                 let s = Arc::clone(&shamir);
                 let r = req.clone();
                 async move {
                     s.execute("bench", &r).await.unwrap();
                 }
             });
-        });
-    }
+        }
 
-    // (b) with_subscriber — one live broadcast::Receiver is held for
-    //     the duration of the bench.  The receiver is never polled, so
-    //     the channel will lag after the ring fills; that's intentional
-    //     — we measure the send-side cost, not the recv side.
-    {
-        let shamir = block_on_setup(&rt, seeded(100, false));
-        // subscribe_changelog returns None when the repo does not exist;
-        // if it returns None here the bench still runs but measures the
-        // no-subscriber path.
-        let _subscriber = rt.block_on(shamir.subscribe_changelog("bench", "main"));
-        group.bench_function("with_subscriber", |b| {
-            let shamir = Arc::clone(&shamir);
+        // (b) with_subscriber — one live broadcast::Receiver held for the
+        //     duration; never polled (measures send-side cost only).
+        {
+            let shamir = block_on_setup(&rt, seeded(100, false));
+            let _subscriber = rt.block_on(shamir.subscribe_changelog("bench", "main"));
             let req = req_insert.clone();
-            b.to_async(&rt).iter(|| {
+            h.bench_async("changefeed_overhead/with_subscriber", move || {
                 let s = Arc::clone(&shamir);
                 let r = req.clone();
                 async move {
                     s.execute("bench", &r).await.unwrap();
                 }
             });
-        });
+        }
     }
 
-    group.finish();
-}
+    // ═══════════════════════════════════════════════════════════════════
+    // B1b — validator dispatch overhead
+    // ═══════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════
-// B1b — validator dispatch overhead
-// ═══════════════════════════════════════════════════════════════════
-
-/// Regression guard: per-insert cost of `run_validators` when
-/// (a) zero validators are bound (empty-registry fast path), and
-/// (b) one no-op WASM validator is bound to the table.
-///
-/// Scenario (b) uses the minimal `(module)` WAT which compiles to
-/// a zero-function WASM module; the validator succeeds vacuously.
-/// This isolates the dispatch / fn-lookup overhead from any real
-/// WASM execution cost.
-fn bench_validator_overhead(c: &mut Criterion) {
-    use shamir_db::engine::validator::WriteOp;
-
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("validator_overhead");
-
-    let mut b_ins = Batch::new();
-    b_ins
-        .id("b1")
-        .return_flagged()
-        .insert("ins", write::insert("users").row(gen_user(999)));
-    let req_insert = b_ins.build();
-
-    // (a) no_validators — default state, run_validators checks an
-    //     empty binding list and returns immediately.
     {
-        let shamir = block_on_setup(&rt, seeded(100, false));
-        group.bench_function("no_validators", |b| {
-            let shamir = Arc::clone(&shamir);
+        use shamir_db::engine::validator::WriteOp;
+
+        let mut b_ins = Batch::new();
+        b_ins
+            .id("b1")
+            .return_flagged()
+            .insert("ins", write::insert("users").row(gen_user(999)));
+        let req_insert = b_ins.build();
+
+        // (a) no_validators.
+        {
+            let shamir = block_on_setup(&rt, seeded(100, false));
             let req = req_insert.clone();
-            b.to_async(&rt).iter(|| {
+            h.bench_async("validator_overhead/no_validators", move || {
                 let s = Arc::clone(&shamir);
                 let r = req.clone();
                 async move {
                     s.execute("bench", &r).await.unwrap();
                 }
             });
-        });
-    }
+        }
 
-    // (b) one_validator — a minimal WASM module (no exported functions)
-    //     is registered and bound to the `users` table for Insert ops.
-    //     The validator succeeds vacuously; cost = dispatch + WASM call
-    //     with no meaningful work.
-    {
-        // Minimal WAT that satisfies the validator ABI:
-        //   - exports `memory`
-        //   - exports `shamir_alloc` (allocator)
-        //   - exports `shamir_call` returning msgpack `null` (0xC0) = accept
-        const NOOP_VALIDATOR_WAT: &str = r#"
+        // (b) one_validator — minimal WASM module (no exported functions,
+        //     vacuous accept) bound to `users` for Insert ops.
+        {
+            const NOOP_VALIDATOR_WAT: &str = r#"
 (module
   (memory (export "memory") 2)
   (global $bump (mut i32) (i32.const 1024))
@@ -1787,48 +1199,112 @@ fn bench_validator_overhead(c: &mut Criterion) {
   )
 )
 "#;
-        let shamir = rt.block_on(async {
-            let s = seeded(100, false).await;
-            let noop_wasm = wat::parse_str(NOOP_VALIDATOR_WAT).unwrap();
-            s.create_validator_from_wasm("v_bench_noop", &noop_wasm, false)
+            let shamir = rt.block_on(async {
+                let s = seeded(100, false).await;
+                let noop_wasm = wat::parse_str(NOOP_VALIDATOR_WAT).unwrap();
+                s.create_validator_from_wasm("v_bench_noop", &noop_wasm, false)
+                    .await
+                    .expect("create validator");
+                s.bind_validator(
+                    "bench",
+                    "main",
+                    "users",
+                    "v_bench_noop",
+                    vec![WriteOp::Insert],
+                    1000,
+                )
                 .await
-                .expect("create validator");
-            s.bind_validator(
-                "bench",
-                "main",
-                "users",
-                "v_bench_noop",
-                vec![WriteOp::Insert],
-                1000,
-            )
-            .await
-            .expect("bind validator");
-            s
-        });
-        group.bench_function("one_validator", |b| {
-            let shamir = Arc::clone(&shamir);
+                .expect("bind validator");
+                s
+            });
             let req = req_insert.clone();
-            b.to_async(&rt).iter(|| {
+            h.bench_async("validator_overhead/one_validator", move || {
                 let s = Arc::clone(&shamir);
                 let r = req.clone();
                 async move {
                     s.execute("bench", &r).await.unwrap();
                 }
             });
-        });
+        }
     }
 
-    group.finish();
-}
+    // ═══════════════════════════════════════════════════════════════════
+    // P7 — nested-batch overhead
+    //
+    // Measures the overhead introduced by `BatchOp::Batch` (sub_batch) —
+    // bind-resolution, recursive execution, and result-wrapping — versus
+    // the same logical work expressed as sibling ops in a flat batch.
+    // ═══════════════════════════════════════════════════════════════════
 
-async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
-    for chunk_start in (0..n).step_by(50) {
-        let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<QueryValue> = (chunk_start..chunk_end).map(gen_user).collect();
-        let mut b = Batch::new();
-        b.id(chunk_start)
-            .insert("s", write::insert(table).rows(values));
-        let req = b.build();
-        shamir.execute("bench", &req).await.unwrap();
+    {
+        const N: usize = 1_000;
+        const TARGET: &str = "u00000999";
+        const SCORE: i64 = 42;
+
+        let shamir = block_on_setup(&rt, seeded(N, false));
+
+        // ── flat request ───────────────────────────────────────────────
+        let req_flat = {
+            let mut b = Batch::new();
+            b.id("flat_nb").return_flagged();
+            b.query("user", Query::from("users").where_eq("id", TARGET));
+            b.upsert(
+                "write",
+                write::upsert("users")
+                    .key(mpack!({ "id": @(QueryValue::from(TARGET)) }))
+                    .value(mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true })),
+            );
+            b.build()
+        };
+
+        // ── nested request ─────────────────────────────────────────────
+        let req_nested = {
+            let inner = {
+                let mut ib = Batch::new();
+                ib.id("inner_nb").return_flagged();
+                ib.upsert(
+                    "write",
+                    write::upsert("users").key(mpack!({ "id": @(QueryValue::from(TARGET)) })).value(
+                        mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true }),
+                    ),
+                );
+                ib.build()
+            };
+
+            let mut ob = Batch::new();
+            ob.id("nested_nb").return_flagged();
+            let user_handle = ob.query("user", Query::from("users").where_eq("id", TARGET));
+            let uid_ref = user_handle.first().field("id");
+            let mut bind = new_map();
+            bind.insert("uid".to_string(), uid_ref);
+            ob.sub_batch("proc", inner, bind);
+            ob.build()
+        };
+
+        {
+            let shamir = Arc::clone(&shamir);
+            let req = req_flat.clone();
+            h.bench_async("nested_batch/flat", move || {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        }
+
+        {
+            let shamir = Arc::clone(&shamir);
+            let req = req_nested.clone();
+            h.bench_async("nested_batch/nested", move || {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        }
     }
+
+    h.run();
 }

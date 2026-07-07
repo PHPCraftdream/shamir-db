@@ -95,21 +95,28 @@
 //! Noise budget. Contention benches are inherently noisier than
 //! single-thread benches: schedulers, futex wake latency, and abort-retry
 //! tails all add jitter. Expect ±30% variance on contended groups;
-//! trends across N matter more than absolute numbers. `sample_size = 20`
-//! and `measurement_time = 5s` are picked accordingly.
+//! trends across N matter more than absolute numbers.
 //!
 //! This bench drives the engine's typed `insert_tx`/`update_tx` directly
 //! (same pattern as `tx_pipeline`) — the groups under test ARE the engine
 //! primitives, not the query-builder surface. The Level-3 lock benches go
 //! one level deeper, into `MvccStore::lock_key`, for the same reason.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`). Every
+//! group provisions a FRESH repo/MvccStore per iteration (disjoint keys,
+//! retry-history, and lock state must not bleed across iterations), so
+//! every workload uses `bench_batched_async` — setup builds the fresh
+//! repo/store, the routine spawns and joins the N concurrent tasks. The
+//! observational abort/wound counters are process-global `Arc<...>`
+//! constructed once outside the harness registration and dumped via
+//! `eprintln!` after `h.run()` returns — same "outside the timed window"
+//! contract as the original Criterion version.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
+use bench_scale_tool::Harness;
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
@@ -117,22 +124,16 @@ use shamir_tx::mvcc_store::LockMode;
 use shamir_tx::{IsolationLevel, MvccStore, RepoTxGate};
 use shamir_types::types::value::InnerValue;
 
-// --- runtime / resolver plumbing -------------------------------------------
-
-fn rt() -> tokio::runtime::Runtime {
-    // Multi-thread is load-bearing for this whole file — current_thread
-    // would serialise the N spawned tasks and erase the contention signal.
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     let instance = RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
     instance.add_table(TableConfig::new("bench_table".to_string()));
     instance
+}
+
+fn make_mvcc() -> Arc<MvccStore> {
+    let gate = Arc::new(RepoTxGate::fresh());
+    Arc::new(MvccStore::new(Arc::new(InMemoryStore::new()), gate))
 }
 
 // NOTE: Engine-internal tx APIs (`insert_tx` / `update_tx` / `begin_tx` /
@@ -142,72 +143,59 @@ fn make_repo() -> RepoInstance {
 // fan out to these same engine calls). Existing `tx_pipeline` benches
 // follow the same pattern.
 
-// --- Group 1: disjoint-key concurrent inserts ------------------------------
+fn main() {
+    let mut h = Harness::new("tx_concurrent", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_disjoint_inserts(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/disjoint_inserts");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+    // Global iteration counter — makes keys unique across ALL calls to a
+    // given workload's routine, mirroring the original `iter_i` Criterion
+    // gave per-sample-iteration.
+    let iter_ctr = Arc::new(AtomicU64::new(0));
+
+    // --- Group 1: disjoint-key concurrent inserts ---------------------------
 
     const K: usize = 10; // rows per writer
-
     for &n in &[1usize, 2, 4, 8] {
-        group.throughput(Throughput::Elements((n * K) as u64));
-        let fn_name = format!("n_{}", n);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for iter_i in 0..iters {
-                    // Fresh repo per iter — disjoint keys never collide across iters either.
-                    let repo = make_repo();
+        let iter_ctr = Arc::clone(&iter_ctr);
+        h.bench_batched_async(
+            &format!("disjoint_inserts/n_{n}"),
+            move || {
+                let repo = make_repo();
+                let iter_i = iter_ctr.fetch_add(1, Ordering::Relaxed);
+                async move {
                     let _ = repo.get_table("bench_table").await.unwrap();
-
-                    let start = Instant::now();
-                    let mut handles = Vec::with_capacity(n);
-                    for w in 0..n {
-                        let repo = repo.clone();
-                        let base = (iter_i as usize * n + w) * K;
-                        handles.push(tokio::spawn(async move {
-                            let (mut tx, _g) =
-                                repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-                            let tbl = repo.get_table("bench_table").await.unwrap();
-                            for i in 0..K {
-                                tbl.insert_tx(
-                                    &InnerValue::Str(format!("v_{}_{}", base, i)),
-                                    Some(&mut tx),
-                                )
-                                .await
-                                .unwrap();
-                            }
-                            let out = repo.commit_tx(tx).await.unwrap();
-                            black_box(out);
-                        }));
-                    }
-                    for h in handles {
-                        h.await.unwrap();
-                    }
-                    total += start.elapsed();
+                    (repo, iter_i)
                 }
-                total
-            });
-        });
+            },
+            move |(repo, iter_i)| async move {
+                let mut handles = Vec::with_capacity(n);
+                for w in 0..n {
+                    let repo = repo.clone();
+                    let base = (iter_i as usize * n + w) * K;
+                    handles.push(tokio::spawn(async move {
+                        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+                        let tbl = repo.get_table("bench_table").await.unwrap();
+                        for i in 0..K {
+                            tbl.insert_tx(
+                                &InnerValue::Str(format!("v_{}_{}", base, i)),
+                                Some(&mut tx),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        let out = repo.commit_tx(tx).await.unwrap();
+                        std::hint::black_box(out);
+                    }));
+                }
+                for hd in handles {
+                    hd.await.unwrap();
+                }
+            },
+        );
     }
 
-    group.finish();
-}
+    // --- Group 2: hot-key SSI conflicts (Snapshot) ---------------------------
 
-// --- Group 2: hot-key SSI conflicts ----------------------------------------
-
-fn bench_hot_key_snapshot(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/hot_key_snapshot");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    // Observational abort counters. Printed after the criterion run; NOT in
-    // the timed window.
-    let abort_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+    let hot_key_snapshot_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
         [2usize, 4, 8]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
@@ -215,84 +203,452 @@ fn bench_hot_key_snapshot(c: &mut Criterion) {
     );
 
     for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&abort_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
+        let counters = Arc::clone(&hot_key_snapshot_counts);
+        h.bench_batched_async(
+            &format!("hot_key_snapshot/n_{n}"),
+            move || {
+                let repo = make_repo();
+                async move {
+                    let tbl = repo.get_table("bench_table").await.unwrap();
+                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                    drop(tbl);
+                    (repo, rid)
+                }
+            },
+            move |(repo, rid)| {
                 let counters = Arc::clone(&counters);
                 async move {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        // Fresh repo per iter so retry-history doesn't bleed.
-                        let repo = make_repo();
-                        let tbl = repo.get_table("bench_table").await.unwrap();
-                        // Seed the hot row.
-                        let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                        drop(tbl);
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            let repo = repo.clone();
-                            let counters = Arc::clone(&counters);
-                            handles.push(tokio::spawn(async move {
-                                let mut attempts = 0u64;
-                                loop {
-                                    attempts += 1;
-                                    let (mut tx, _g) =
-                                        repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-                                    let tbl = repo.get_table("bench_table").await.unwrap();
-                                    // Stage the update of the same hot rid.
-                                    let upd = tbl
-                                        .update_tx(
-                                            rid,
-                                            &InnerValue::Str(format!("v{}_{}", w, attempts)),
-                                            Some(&mut tx),
-                                        )
-                                        .await;
-                                    if upd.is_err() {
-                                        // Drop tx implicitly aborts.
-                                        drop(tx);
-                                        if attempts < 10 {
-                                            continue;
-                                        }
-                                        panic!("hot-key writer exhausted 10 retries on stage");
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let repo = repo.clone();
+                        let counters = Arc::clone(&counters);
+                        handles.push(tokio::spawn(async move {
+                            let mut attempts = 0u64;
+                            loop {
+                                attempts += 1;
+                                let (mut tx, _g) =
+                                    repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+                                let tbl = repo.get_table("bench_table").await.unwrap();
+                                let upd = tbl
+                                    .update_tx(
+                                        rid,
+                                        &InnerValue::Str(format!("v{}_{}", w, attempts)),
+                                        Some(&mut tx),
+                                    )
+                                    .await;
+                                if upd.is_err() {
+                                    drop(tx);
+                                    if attempts < 10 {
+                                        continue;
                                     }
-                                    let res = repo.commit_tx(tx).await;
-                                    match res {
-                                        Ok(out) => {
-                                            black_box(&out);
-                                            counters[idx]
-                                                .1
-                                                .fetch_add(attempts - 1, Ordering::Relaxed);
-                                            counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                            return;
-                                        }
-                                        Err(_) if attempts < 10 => continue,
-                                        Err(e) => {
-                                            panic!("hot-key writer exhausted 10 retries: {e:?}")
-                                        }
-                                    }
+                                    panic!("hot-key writer exhausted 10 retries on stage");
                                 }
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
+                                let res = repo.commit_tx(tx).await;
+                                match res {
+                                    Ok(out) => {
+                                        std::hint::black_box(&out);
+                                        counters[idx].1.fetch_add(attempts - 1, Ordering::Relaxed);
+                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                        return;
+                                    }
+                                    Err(_) if attempts < 10 => continue,
+                                    Err(e) => panic!("hot-key writer exhausted 10 retries: {e:?}"),
+                                }
+                            }
+                        }));
                     }
-                    total
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
                 }
-            });
-        });
+            },
+        );
     }
 
-    group.finish();
+    // --- Group 2b: hot-key SSI conflicts (Serializable) ----------------------
 
-    // Observational dump — outside the timed window.
-    for (n, aborts, commits) in abort_counts.iter() {
+    let hot_key_serializable_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        let counters = Arc::clone(&hot_key_serializable_counts);
+        h.bench_batched_async(
+            &format!("hot_key_serializable/n_{n}"),
+            move || {
+                let repo = make_repo();
+                async move {
+                    let tbl = repo.get_table("bench_table").await.unwrap();
+                    let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                    drop(tbl);
+                    (repo, rid)
+                }
+            },
+            move |(repo, rid)| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let repo = repo.clone();
+                        let counters = Arc::clone(&counters);
+                        handles.push(tokio::spawn(async move {
+                            let mut attempts = 0u64;
+                            loop {
+                                attempts += 1;
+                                let (mut tx, _g) = repo
+                                    .begin_tx(IsolationLevel::Serializable)
+                                    .await
+                                    .unwrap();
+                                let tbl = repo.get_table("bench_table").await.unwrap();
+                                let upd = tbl
+                                    .update_tx(
+                                        rid,
+                                        &InnerValue::Str(format!("v{}_{}", w, attempts)),
+                                        Some(&mut tx),
+                                    )
+                                    .await;
+                                if upd.is_err() {
+                                    drop(tx);
+                                    if attempts < 20 {
+                                        continue;
+                                    }
+                                    panic!(
+                                        "hot-key serializable writer exhausted 20 retries on stage"
+                                    );
+                                }
+                                let res = repo.commit_tx(tx).await;
+                                match res {
+                                    Ok(out) => {
+                                        std::hint::black_box(&out);
+                                        counters[idx].1.fetch_add(attempts - 1, Ordering::Relaxed);
+                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                        return;
+                                    }
+                                    Err(_) if attempts < 20 => continue,
+                                    Err(e) => panic!(
+                                        "hot-key serializable writer exhausted 20 retries: {e:?}"
+                                    ),
+                                }
+                            }
+                        }));
+                    }
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
+                }
+            },
+        );
+    }
+
+    // --- Group 3: pessimistic-lock uncontended -------------------------------
+
+    {
+        let mvcc = make_mvcc();
+        let key = Bytes::from_static(b"hot_key");
+        let ctr = Arc::new(AtomicU64::new(1_000_000));
+        h.bench_batched_async(
+            "pess_lock_uncontended/acquire_release_single_key",
+            {
+                let mvcc = Arc::clone(&mvcc);
+                let key = key.clone();
+                let ctr = Arc::clone(&ctr);
+                move || {
+                    let mvcc = Arc::clone(&mvcc);
+                    let key = key.clone();
+                    let tx_v = ctr.fetch_add(1, Ordering::Relaxed);
+                    async move { (mvcc, key, tx_v) }
+                }
+            },
+            move |(mvcc, key, tx_v)| async move {
+                let wounded = Arc::new(AtomicBool::new(false));
+                let notify = Arc::new(tokio::sync::Notify::new());
+                mvcc.lock_key(
+                    key.clone(),
+                    tx_v,
+                    Arc::clone(&wounded),
+                    Arc::clone(&notify),
+                    LockMode::Exclusive,
+                )
+                .await
+                .unwrap();
+                mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+            },
+        );
+    }
+
+    // --- Group 4: pessimistic-lock contended ---------------------------------
+
+    let pess_contended_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        let counters = Arc::clone(&pess_contended_counts);
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("pess_lock_contended/n_{n}"),
+            {
+                let ctr = Arc::clone(&ctr);
+                move || {
+                    let mvcc = make_mvcc();
+                    let key = Bytes::from_static(b"contended_key");
+                    let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                    async move { (mvcc, key, iter_i) }
+                }
+            },
+            move |(mvcc, key, iter_i)| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let tx_v = 2_000_000u64 + iter_i * 100 + w as u64;
+                        let mvcc = Arc::clone(&mvcc);
+                        let key = key.clone();
+                        let counters = Arc::clone(&counters);
+                        handles.push(tokio::spawn(async move {
+                            let wounded = Arc::new(AtomicBool::new(false));
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            let res = mvcc
+                                .lock_key(
+                                    key.clone(),
+                                    tx_v,
+                                    Arc::clone(&wounded),
+                                    Arc::clone(&notify),
+                                    LockMode::Exclusive,
+                                )
+                                .await;
+                            match res {
+                                Ok(()) => {
+                                    tokio::task::yield_now().await;
+                                    mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                    counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }));
+                    }
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
+                }
+            },
+        );
+    }
+
+    // --- Group 4b: pessimistic-lock contended, REVERSE age -------------------
+
+    let pess_reverse_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        let counters = Arc::clone(&pess_reverse_counts);
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("pess_lock_contended_reverse_age/n_{n}"),
+            {
+                let ctr = Arc::clone(&ctr);
+                move || {
+                    let mvcc = make_mvcc();
+                    let key = Bytes::from_static(b"contended_key");
+                    let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                    async move { (mvcc, key, iter_i) }
+                }
+            },
+            move |(mvcc, key, iter_i)| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                        let mvcc = Arc::clone(&mvcc);
+                        let key = key.clone();
+                        let counters = Arc::clone(&counters);
+                        handles.push(tokio::spawn(async move {
+                            let wounded = Arc::new(AtomicBool::new(false));
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            let res = mvcc
+                                .lock_key(
+                                    key.clone(),
+                                    tx_v,
+                                    Arc::clone(&wounded),
+                                    Arc::clone(&notify),
+                                    LockMode::Exclusive,
+                                )
+                                .await;
+                            match res {
+                                Ok(()) => {
+                                    tokio::task::yield_now().await;
+                                    mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                    counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }));
+                    }
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
+                }
+            },
+        );
+    }
+
+    // --- Group 7: pessimistic-lock contended, REVERSE age + BARRIER ---------
+
+    let pess_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        let counters = Arc::clone(&pess_barrier_counts);
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("pess_lock_contended_barrier/n_{n}"),
+            {
+                let ctr = Arc::clone(&ctr);
+                move || {
+                    let mvcc = make_mvcc();
+                    let key = Bytes::from_static(b"contended_key");
+                    let barrier = Arc::new(tokio::sync::Barrier::new(n));
+                    let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                    async move { (mvcc, key, barrier, iter_i) }
+                }
+            },
+            move |(mvcc, key, barrier, iter_i)| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                        let mvcc = Arc::clone(&mvcc);
+                        let key = key.clone();
+                        let counters = Arc::clone(&counters);
+                        let barrier = Arc::clone(&barrier);
+                        handles.push(tokio::spawn(async move {
+                            let wounded = Arc::new(AtomicBool::new(false));
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            barrier.wait().await;
+                            let res = mvcc
+                                .lock_key(
+                                    key.clone(),
+                                    tx_v,
+                                    Arc::clone(&wounded),
+                                    Arc::clone(&notify),
+                                    LockMode::Exclusive,
+                                )
+                                .await;
+                            match res {
+                                Ok(()) => {
+                                    tokio::task::yield_now().await;
+                                    mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                    counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }));
+                    }
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
+                }
+            },
+        );
+    }
+
+    // --- Group 8: pessimistic-lock contended, pre-lock barrier + in-CS hold -
+
+    let pess_in_cs_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        let counters = Arc::clone(&pess_in_cs_barrier_counts);
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("pess_lock_contended_in_cs_barrier/n_{n}"),
+            {
+                let ctr = Arc::clone(&ctr);
+                move || {
+                    let mvcc = make_mvcc();
+                    let key = Bytes::from_static(b"contended_key");
+                    let barrier = Arc::new(tokio::sync::Barrier::new(n));
+                    let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                    async move { (mvcc, key, barrier, iter_i) }
+                }
+            },
+            move |(mvcc, key, barrier, iter_i)| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for w in 0..n {
+                        let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                        let mvcc = Arc::clone(&mvcc);
+                        let key = key.clone();
+                        let counters = Arc::clone(&counters);
+                        let barrier = Arc::clone(&barrier);
+                        handles.push(tokio::spawn(async move {
+                            let wounded = Arc::new(AtomicBool::new(false));
+                            let notify = Arc::new(tokio::sync::Notify::new());
+                            barrier.wait().await;
+                            let res = mvcc
+                                .lock_key(
+                                    key.clone(),
+                                    tx_v,
+                                    Arc::clone(&wounded),
+                                    Arc::clone(&notify),
+                                    LockMode::Exclusive,
+                                )
+                                .await;
+                            match res {
+                                Ok(()) => {
+                                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                                    mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                    if wounded.load(Ordering::Acquire) {
+                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(_) => {
+                                    counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }));
+                    }
+                    for hd in handles {
+                        hd.await.unwrap();
+                    }
+                }
+            },
+        );
+    }
+
+    h.run();
+
+    // Observational dumps — outside the timed window.
+    for (n, aborts, commits) in hot_key_snapshot_counts.iter() {
         let a = aborts.load(Ordering::Relaxed);
         let c = commits.load(Ordering::Relaxed);
         if c > 0 {
@@ -302,250 +658,7 @@ fn bench_hot_key_snapshot(c: &mut Criterion) {
             );
         }
     }
-}
-
-// --- Group 3: pessimistic-lock uncontended ---------------------------------
-
-fn make_mvcc() -> Arc<MvccStore> {
-    let gate = Arc::new(RepoTxGate::fresh());
-    Arc::new(MvccStore::new(Arc::new(InMemoryStore::new()), gate))
-}
-
-fn bench_pess_lock_uncontended(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/pess_lock_uncontended");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-    group.throughput(Throughput::Elements(1));
-
-    group.bench_function("acquire_release_single_key", |b| {
-        let mvcc = make_mvcc();
-        let key = Bytes::from_static(b"hot_key");
-        b.to_async(&rt).iter_custom(|iters| {
-            let mvcc = Arc::clone(&mvcc);
-            let key = key.clone();
-            async move {
-                let start = Instant::now();
-                for i in 0..iters {
-                    let tx_v = 1_000_000u64 + i;
-                    let wounded = Arc::new(AtomicBool::new(false));
-                    let notify = Arc::new(tokio::sync::Notify::new());
-                    mvcc.lock_key(
-                        key.clone(),
-                        tx_v,
-                        Arc::clone(&wounded),
-                        Arc::clone(&notify),
-                        LockMode::Exclusive,
-                    )
-                    .await
-                    .unwrap();
-                    mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
-                }
-                start.elapsed()
-            }
-        });
-    });
-
-    group.finish();
-}
-
-// --- Group 4: pessimistic-lock contended -----------------------------------
-
-fn bench_pess_lock_contended(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    // Observational wound counters.
-    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
-            .iter()
-            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
-            .collect(),
-    );
-
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&wound_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
-                let counters = Arc::clone(&counters);
-                async move {
-                    let mut total = Duration::ZERO;
-                    for iter_i in 0..iters {
-                        // Fresh MvccStore per iter — no carry-over locks.
-                        let mvcc = make_mvcc();
-                        let key = Bytes::from_static(b"contended_key");
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            // tx_v strictly ordered: smaller = older = wound-wait
-                            // winner. Iter offset keeps tx_vs globally unique.
-                            let tx_v = 2_000_000u64 + iter_i * 100 + w as u64;
-                            let mvcc = Arc::clone(&mvcc);
-                            let key = key.clone();
-                            let counters = Arc::clone(&counters);
-                            handles.push(tokio::spawn(async move {
-                                let wounded = Arc::new(AtomicBool::new(false));
-                                let notify = Arc::new(tokio::sync::Notify::new());
-                                let res = mvcc
-                                    .lock_key(
-                                        key.clone(),
-                                        tx_v,
-                                        Arc::clone(&wounded),
-                                        Arc::clone(&notify),
-                                        LockMode::Exclusive,
-                                    )
-                                    .await;
-                                match res {
-                                    Ok(()) => {
-                                        // Trivial critical section: yield once
-                                        // so the runtime can wake waiters
-                                        // and we exercise the contended path,
-                                        // then release.
-                                        tokio::task::yield_now().await;
-                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
-                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Err(_) => {
-                                        // Wounded — older requester aborted us.
-                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }));
-                        }
-                        for h in handles {
-                            // A real deadlock manifests as a hang here;
-                            // wound-wait is deadlock-free by construction,
-                            // so this MUST complete.
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
-                    }
-                    total
-                }
-            });
-        });
-    }
-
-    group.finish();
-
-    for (n, wounds, acquires) in wound_counts.iter() {
-        let w = wounds.load(Ordering::Relaxed);
-        let a = acquires.load(Ordering::Relaxed);
-        let tot = w + a;
-        if tot > 0 {
-            eprintln!(
-                "pess_lock_contended n={n}: {w} wounds, {a} clean acquires \
-                 ({:.1}% wound rate)",
-                100.0 * w as f64 / tot as f64
-            );
-        }
-    }
-}
-
-// --- Group 2b: hot-key SSI Serializable ------------------------------------
-//
-// Sibling of `bench_hot_key_snapshot`. The ONLY difference is the isolation
-// level: Serializable. Under Serializable, `update_tx`'s internal old-value
-// read populates the SSI read-set; concurrent updates produce overlapping
-// read/write sets; `validate_read_set` aborts the losers — the retry-loop
-// kicks in. Retry cap bumped to 20 (vs 10 for Snapshot) because contention
-// tails can be longer here.
-
-fn bench_hot_key_serializable(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/hot_key_serializable");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    let abort_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
-            .iter()
-            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
-            .collect(),
-    );
-
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&abort_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
-                let counters = Arc::clone(&counters);
-                async move {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let repo = make_repo();
-                        let tbl = repo.get_table("bench_table").await.unwrap();
-                        let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
-                        drop(tbl);
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            let repo = repo.clone();
-                            let counters = Arc::clone(&counters);
-                            handles.push(tokio::spawn(async move {
-                                let mut attempts = 0u64;
-                                loop {
-                                    attempts += 1;
-                                    let (mut tx, _g) = repo
-                                        .begin_tx(IsolationLevel::Serializable)
-                                        .await
-                                        .unwrap();
-                                    let tbl = repo.get_table("bench_table").await.unwrap();
-                                    let upd = tbl
-                                        .update_tx(
-                                            rid,
-                                            &InnerValue::Str(format!("v{}_{}", w, attempts)),
-                                            Some(&mut tx),
-                                        )
-                                        .await;
-                                    if upd.is_err() {
-                                        drop(tx);
-                                        if attempts < 20 {
-                                            continue;
-                                        }
-                                        panic!("hot-key serializable writer exhausted 20 retries on stage");
-                                    }
-                                    let res = repo.commit_tx(tx).await;
-                                    match res {
-                                        Ok(out) => {
-                                            black_box(&out);
-                                            counters[idx]
-                                                .1
-                                                .fetch_add(attempts - 1, Ordering::Relaxed);
-                                            counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                            return;
-                                        }
-                                        Err(_) if attempts < 20 => continue,
-                                        Err(e) => panic!(
-                                            "hot-key serializable writer exhausted 20 retries: {e:?}"
-                                        ),
-                                    }
-                                }
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
-                    }
-                    total
-                }
-            });
-        });
-    }
-
-    group.finish();
-
-    for (n, aborts, commits) in abort_counts.iter() {
+    for (n, aborts, commits) in hot_key_serializable_counts.iter() {
         let a = aborts.load(Ordering::Relaxed);
         let c = commits.load(Ordering::Relaxed);
         if c > 0 {
@@ -555,92 +668,18 @@ fn bench_hot_key_serializable(c: &mut Criterion) {
             );
         }
     }
-}
-
-// --- Group 4b: pessimistic-lock contended, REVERSE age ---------------------
-//
-// Sibling of `bench_pess_lock_contended`. The only difference: tx_v is
-// assigned in REVERSE spawn order — spawn-0 gets the highest tx_v
-// (youngest), spawn-(n-1) gets the lowest (oldest). Older arrivals then
-// wound the younger holder. (Empirically the wound path may still stay
-// near-zero if the critical section is short enough that arrivals
-// serialize cleanly via the wait queue.)
-
-fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_reverse_age");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
-            .iter()
-            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
-            .collect(),
-    );
-
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&wound_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
-                let counters = Arc::clone(&counters);
-                async move {
-                    let mut total = Duration::ZERO;
-                    for iter_i in 0..iters {
-                        let mvcc = make_mvcc();
-                        let key = Bytes::from_static(b"contended_key");
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            // REVERSE age: spawn-0 = youngest (highest tx_v),
-                            // spawn-(n-1) = oldest (lowest tx_v). Older
-                            // arrivals wound the younger holder.
-                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
-                            let mvcc = Arc::clone(&mvcc);
-                            let key = key.clone();
-                            let counters = Arc::clone(&counters);
-                            handles.push(tokio::spawn(async move {
-                                let wounded = Arc::new(AtomicBool::new(false));
-                                let notify = Arc::new(tokio::sync::Notify::new());
-                                let res = mvcc
-                                    .lock_key(
-                                        key.clone(),
-                                        tx_v,
-                                        Arc::clone(&wounded),
-                                        Arc::clone(&notify),
-                                        LockMode::Exclusive,
-                                    )
-                                    .await;
-                                match res {
-                                    Ok(()) => {
-                                        tokio::task::yield_now().await;
-                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
-                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Err(_) => {
-                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
-                    }
-                    total
-                }
-            });
-        });
+    for (n, wounds, acquires) in pess_contended_counts.iter() {
+        let w = wounds.load(Ordering::Relaxed);
+        let a = acquires.load(Ordering::Relaxed);
+        let tot = w + a;
+        if tot > 0 {
+            eprintln!(
+                "pess_lock_contended n={n}: {w} wounds, {a} clean acquires ({:.1}% wound rate)",
+                100.0 * w as f64 / tot as f64
+            );
+        }
     }
-
-    group.finish();
-
-    for (n, wounds, acquires) in wound_counts.iter() {
+    for (n, wounds, acquires) in pess_reverse_counts.iter() {
         let w = wounds.load(Ordering::Relaxed);
         let a = acquires.load(Ordering::Relaxed);
         let tot = w + a;
@@ -652,96 +691,7 @@ fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
             );
         }
     }
-}
-
-// --- Group 7: pessimistic-lock contended, REVERSE age + BARRIER ------------
-//
-// Follow-up to Group 6. The reverse-age variant alone produced zero wounds
-// because each task's critical section was so short the younger holder
-// always released before the older arrival reached `lock_key`. Here a
-// `tokio::sync::Barrier::new(n)` is placed RIGHT BEFORE each `lock_key`
-// call: all N tasks reach the barrier, are released together, and race
-// for the lock in the same instant. The youngest (highest tx_v) wins,
-// then older arrivals find a younger holder and wound it.
-
-fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_barrier");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
-            .iter()
-            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
-            .collect(),
-    );
-
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&wound_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
-                let counters = Arc::clone(&counters);
-                async move {
-                    let mut total = Duration::ZERO;
-                    for iter_i in 0..iters {
-                        let mvcc = make_mvcc();
-                        let key = Bytes::from_static(b"contended_key");
-                        let barrier = Arc::new(tokio::sync::Barrier::new(n));
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            // REVERSE age, same as Group 6.
-                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
-                            let mvcc = Arc::clone(&mvcc);
-                            let key = key.clone();
-                            let counters = Arc::clone(&counters);
-                            let barrier = Arc::clone(&barrier);
-                            handles.push(tokio::spawn(async move {
-                                let wounded = Arc::new(AtomicBool::new(false));
-                                let notify = Arc::new(tokio::sync::Notify::new());
-                                // Synchronise the lock-attempt phase: all N
-                                // tasks reach here, then all leave together.
-                                barrier.wait().await;
-                                let res = mvcc
-                                    .lock_key(
-                                        key.clone(),
-                                        tx_v,
-                                        Arc::clone(&wounded),
-                                        Arc::clone(&notify),
-                                        LockMode::Exclusive,
-                                    )
-                                    .await;
-                                match res {
-                                    Ok(()) => {
-                                        tokio::task::yield_now().await;
-                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
-                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Err(_) => {
-                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
-                    }
-                    total
-                }
-            });
-        });
-    }
-
-    group.finish();
-
-    for (n, wounds, acquires) in wound_counts.iter() {
+    for (n, wounds, acquires) in pess_barrier_counts.iter() {
         let w = wounds.load(Ordering::Relaxed);
         let a = acquires.load(Ordering::Relaxed);
         let tot = w + a;
@@ -753,117 +703,7 @@ fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
             );
         }
     }
-}
-
-// --- Group 8: pessimistic-lock contended, pre-lock barrier + in-CS hold ----
-//
-// Follow-up to Group 7. Group 7 confirmed that a pre-lock barrier alone is
-// not enough to fire the wound path: the winner's CS (`yield_now`) is so
-// short it releases before any losing contender enters `lock_key`. Here the
-// winner additionally sleeps inside the CS so that contenders DO enter the
-// lock wait queue while the (younger) holder is still holding.
-//
-// Wound signal source: NOT the contender's `lock_key` return value. In
-// wound-wait, an older contender that finds a younger holder flips the
-// holder's `wounded` flag and then waits / re-loops; the contender itself
-// acquires `Ok(())` once the dead holder releases. So we read the wound
-// signal from the holder's own `wounded` AtomicBool AFTER releasing.
-
-fn bench_pess_lock_contended_in_cs_barrier(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_in_cs_barrier");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
-            .iter()
-            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
-            .collect(),
-    );
-
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
-        group.throughput(Throughput::Elements(n as u64));
-        let fn_name = format!("n_{}", n);
-        let counters = Arc::clone(&wound_counts);
-        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
-            let counters = Arc::clone(&counters);
-            b.to_async(&rt).iter_custom(move |iters| {
-                let counters = Arc::clone(&counters);
-                async move {
-                    let mut total = Duration::ZERO;
-                    for iter_i in 0..iters {
-                        let mvcc = make_mvcc();
-                        let key = Bytes::from_static(b"contended_key");
-                        let barrier = Arc::new(tokio::sync::Barrier::new(n));
-
-                        let start = Instant::now();
-                        let mut handles = Vec::with_capacity(n);
-                        for w in 0..n {
-                            // REVERSE age, same as Group 6/7.
-                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
-                            let mvcc = Arc::clone(&mvcc);
-                            let key = key.clone();
-                            let counters = Arc::clone(&counters);
-                            let barrier = Arc::clone(&barrier);
-                            handles.push(tokio::spawn(async move {
-                                let wounded = Arc::new(AtomicBool::new(false));
-                                let notify = Arc::new(tokio::sync::Notify::new());
-                                // Pre-lock barrier: all N tasks align here.
-                                barrier.wait().await;
-                                let res = mvcc
-                                    .lock_key(
-                                        key.clone(),
-                                        tx_v,
-                                        Arc::clone(&wounded),
-                                        Arc::clone(&notify),
-                                        LockMode::Exclusive,
-                                    )
-                                    .await;
-                                match res {
-                                    Ok(()) => {
-                                        // In-CS HOLD: stay in the critical
-                                        // section long enough for the other
-                                        // N-1 tasks to enter `lock_key` and
-                                        // (if older than us) wound us via
-                                        // our `wounded` flag. 2 ms is a
-                                        // heuristic — long vs wake-up
-                                        // jitter, short enough to bench.
-                                        tokio::time::sleep(Duration::from_millis(2)).await;
-                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
-                                        // Read the wound signal from OUR
-                                        // own wounded flag — older
-                                        // contenders set it on us, then
-                                        // themselves acquire Ok after we
-                                        // release. `lock_key` returning Err
-                                        // is the OTHER path (we were
-                                        // already wounded while waiting).
-                                        if wounded.load(Ordering::Acquire) {
-                                            counters[idx].1.fetch_add(1, Ordering::Relaxed);
-                                        } else {
-                                            counters[idx].2.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                    Err(_) => {
-                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                }
-                            }));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        total += start.elapsed();
-                    }
-                    total
-                }
-            });
-        });
-    }
-
-    group.finish();
-
-    for (n, wounds, acquires) in wound_counts.iter() {
+    for (n, wounds, acquires) in pess_in_cs_barrier_counts.iter() {
         let w = wounds.load(Ordering::Relaxed);
         let a = acquires.load(Ordering::Relaxed);
         let tot = w + a;
@@ -876,16 +716,3 @@ fn bench_pess_lock_contended_in_cs_barrier(c: &mut Criterion) {
         }
     }
 }
-
-criterion_group!(
-    benches,
-    bench_disjoint_inserts,
-    bench_hot_key_snapshot,
-    bench_hot_key_serializable,
-    bench_pess_lock_uncontended,
-    bench_pess_lock_contended,
-    bench_pess_lock_contended_reverse_age,
-    bench_pess_lock_contended_barrier,
-    bench_pess_lock_contended_in_cs_barrier,
-);
-criterion_main!(benches);

@@ -7,11 +7,15 @@
 //! (0.20).
 //!
 //! Dataset: `clustered_vectors(10_000, 128, k=64, sigma=0.1, seed=42)`.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): the HNSW
+//! index and allow-sets are built ONCE at registration time and shared
+//! read-only across every iteration (search doesn't mutate the index) →
+//! `bench_async`.
 
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_bench_utils::vector_data::clustered_vectors;
 use shamir_engine::index2::kind::VectorMetric;
 use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
@@ -33,13 +37,6 @@ const SELECTIVITIES: &[f64] = &[0.001, 0.01, 0.05, 0.10, 0.25, 0.50];
 
 /// Post-filter oversample multiplier (matches V3.1 default).
 const POST_FILTER_OVERSAMPLE: u32 = 4;
-
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
 
 fn rid_from(i: usize) -> RecordId {
     let mut a = [0u8; 16];
@@ -66,12 +63,13 @@ fn build_allow_set(n: usize, selectivity: f64, seed: u64) -> Vec<RecordId> {
     selected.into_iter().map(rid_from).collect()
 }
 
-fn bench_filtered(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("filtered_vector_search");
-    // QUICK-default via tune_tiered + wall-guard 60s.
-    bu::tune_tiered(&mut group, 100, 5, 3, 60);
-    group.throughput(Throughput::Elements(1));
+fn main() {
+    let mut h = Harness::new("filtered_vector_search", env!("CARGO_MANIFEST_DIR"));
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     // Build dataset and HNSW once.
     let ds = clustered_vectors(N, DIM, K_CLUSTERS, SIGMA, SEED);
@@ -114,16 +112,11 @@ fn bench_filtered(c: &mut Criterion) {
             let hnsw = Arc::clone(&hnsw);
             let q = query.clone();
             let candidates = allow_set.clone();
-            group.bench_with_input(BenchmarkId::new("prefilter", &label), &sel, |b, _| {
+            h.bench_async(&format!("prefilter/{label}"), move || {
                 let hnsw = Arc::clone(&hnsw);
                 let q = q.clone();
                 let candidates = candidates.clone();
-                b.to_async(&rt).iter(move || {
-                    let hnsw = Arc::clone(&hnsw);
-                    let q = q.clone();
-                    let candidates = candidates.clone();
-                    async move { hnsw.search_prefilter(&q, TOP_K, &candidates).await.unwrap() }
-                });
+                async move { hnsw.search_prefilter(&q, TOP_K, &candidates).await.unwrap() }
             });
         }
 
@@ -132,20 +125,15 @@ fn bench_filtered(c: &mut Criterion) {
             let hnsw = Arc::clone(&hnsw);
             let q = query.clone();
             let candidates = allow_set.clone();
-            group.bench_with_input(BenchmarkId::new("cofilter", &label), &sel, |b, _| {
+            h.bench_async(&format!("cofilter/{label}"), move || {
                 let hnsw = Arc::clone(&hnsw);
                 let q = q.clone();
                 let candidates = candidates.clone();
-                b.to_async(&rt).iter(move || {
-                    let hnsw = Arc::clone(&hnsw);
-                    let q = q.clone();
-                    let candidates = candidates.clone();
-                    async move {
-                        hnsw.search_cofilter(&q, TOP_K, None, &candidates)
-                            .await
-                            .unwrap()
-                    }
-                });
+                async move {
+                    hnsw.search_cofilter(&q, TOP_K, None, &candidates)
+                        .await
+                        .unwrap()
+                }
             });
         }
 
@@ -154,35 +142,27 @@ fn bench_filtered(c: &mut Criterion) {
             let hnsw = Arc::clone(&hnsw);
             let q = query.clone();
             let candidates = allow_set.clone();
-            group.bench_with_input(BenchmarkId::new("postfilter", &label), &sel, |b, _| {
+            h.bench_async(&format!("postfilter/{label}"), move || {
                 let hnsw = Arc::clone(&hnsw);
                 let q = q.clone();
                 let candidates = candidates.clone();
-                b.to_async(&rt).iter(move || {
-                    let hnsw = Arc::clone(&hnsw);
-                    let q = q.clone();
-                    let candidates = candidates.clone();
-                    async move {
-                        // Oversample: fetch k * multiplier, then filter to allow-set.
-                        let oversample_k = TOP_K * POST_FILTER_OVERSAMPLE;
-                        let mut results = hnsw
-                            .search(&q, oversample_k, SearchOpts::default(), None)
-                            .await
-                            .unwrap();
-                        // Filter to allowed RIDs only.
-                        let allow: shamir_collections::TFxSet<RecordId> =
-                            candidates.iter().copied().collect();
-                        results.retain(|(rid, _)| allow.contains(rid));
-                        results.truncate(TOP_K as usize);
-                        results
-                    }
-                });
+                async move {
+                    // Oversample: fetch k * multiplier, then filter to allow-set.
+                    let oversample_k = TOP_K * POST_FILTER_OVERSAMPLE;
+                    let mut results = hnsw
+                        .search(&q, oversample_k, SearchOpts::default(), None)
+                        .await
+                        .unwrap();
+                    // Filter to allowed RIDs only.
+                    let allow: shamir_collections::TFxSet<RecordId> =
+                        candidates.iter().copied().collect();
+                    results.retain(|(rid, _)| allow.contains(rid));
+                    results.truncate(TOP_K as usize);
+                    results
+                }
             });
         }
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_filtered);
-criterion_main!(benches);

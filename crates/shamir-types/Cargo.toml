@@ -47,6 +47,7 @@ tempfile = "3.10.1"
 serial_test = "3.3.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
+bench-scale-tool = { workspace = true }
 
 [[bench]]
 name = "record_id"

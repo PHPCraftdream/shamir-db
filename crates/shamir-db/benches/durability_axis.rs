@@ -9,10 +9,12 @@
 //!   - batch size N ∈ {1, 10, 100} rows per commit
 //!   - durability level ∈ {buffered, synced}
 //!
-//! Six functions total: `buffered_n{1,10,100}` and `synced_n{1,10,100}`.
-//! Each iteration spins up a fresh redb-backed table in a per-iter tempdir
-//! and submits a single batch via the typed `shamir_query_builder::Batch`.
-//! Setup happens OUTSIDE the timed window.
+//! Six workloads total: `buffered_n{1,10,100}` and `synced_n{1,10,100}`.
+//! Migrated to `bench_scale_tool`: each iteration spins up a fresh
+//! redb-backed table in a per-iter tempdir — that setup must be fresh
+//! every time (can't share a DB handle across iterations once it's been
+//! committed to and the tempdir needs a clean slate), so this uses
+//! `bench_batched_async` — only the `execute` call is timed.
 //!
 //! Persistent backend: **redb**. redb is part of the default workspace
 //! `all-backends` feature, has the lightest setup surface (single-file
@@ -21,22 +23,19 @@
 //!
 //! Noise budget: fsync timing on Windows is significantly noisier than
 //! memory ops (NTFS write barrier behaviour is OS-scheduler-dependent).
-//! `sample_size(20)` + `measurement_time(5)` keep totals reasonable while
-//! still smoothing outliers; expect synced timings to vary ~10-20% run to
-//! run on Windows. Use the medians, not the means, when comparing.
+//! Expect synced timings to vary ~10-20% run to run on Windows. Use the
+//! medians, not the means, when comparing (rerun `--calibrate` if drift
+//! makes the pinned N misleading).
 
+use std::hint::black_box;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 include!("bench_allocator.rs");
 
+use bench_scale_tool::Harness;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
-use tokio::runtime::Runtime;
 
-use shamir_bench_utils as bu;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
@@ -83,48 +82,39 @@ fn req_insert(n: usize, level: Durability) -> BatchRequest {
 // Bench group
 // --------------------------------------------------------------------------
 
-fn bench_durability(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("durability");
-    group.sample_size(bu::sample_size(20));
-    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+fn main() {
+    let mut h = Harness::new("durability_axis", env!("CARGO_MANIFEST_DIR"));
 
     for &n in &[1usize, 10, 100] {
         for &(level, label) in &[
             (Durability::Buffered, "buffered"),
             (Durability::Synced, "synced"),
         ] {
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(
-                BenchmarkId::new(label, format!("n_{}", n)),
-                &(n, level),
-                |b, &(n, level)| {
-                    b.to_async(&rt).iter_custom(|iters| async move {
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            // Fresh tempdir + DB per iter — no cross-iter state,
-                            // measurement window covers exactly one commit.
-                            let tempdir = tempfile::TempDir::new().expect("tempdir");
-                            let shamir = fresh_db_redb(tempdir.path()).await;
-                            let req = req_insert(n, level);
-                            let start = Instant::now();
-                            let resp = shamir.execute("bench", &req).await.unwrap();
-                            total += start.elapsed();
-                            black_box(resp);
-                            drop(shamir);
-                            drop(tempdir);
-                        }
-                        total
-                    });
+            let id = format!("durability/{label}_n{n}");
+            h.bench_batched_async(
+                &id,
+                // setup — NOT timed: fresh tempdir + DB per iteration.
+                move || async move {
+                    let tempdir = tempfile::TempDir::new().expect("tempdir");
+                    let shamir = fresh_db_redb(tempdir.path()).await;
+                    (shamir, tempdir)
+                },
+                // routine — ONLY the commit itself is timed.
+                move |(shamir, tempdir)| {
+                    let req = req_insert(n, level);
+                    async move {
+                        let resp = shamir.execute("bench", &req).await.unwrap();
+                        black_box(resp);
+                        drop(shamir);
+                        drop(tempdir);
+                    }
                 },
             );
         }
     }
-    group.finish();
-}
 
-criterion_group!(benches, bench_durability);
-criterion_main!(benches);
+    h.run();
+}
 
 // ----- Headline numbers (redb backend, Windows 10, sample-size 10, mt 3s) -----
 //

@@ -63,9 +63,8 @@ log = "0.4"
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
-shamir-bench-utils = { path = "../shamir-bench-utils" }
+bench-scale-tool = { workspace = true, features = ["async"] }
 
 [[bench]]
 name = "store_raw"

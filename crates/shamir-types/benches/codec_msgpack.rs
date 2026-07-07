@@ -7,9 +7,15 @@
 //!
 //! Baseline: current `inner_to_rmpv_value` -> `rmpv::encode::write_value`
 //! (allocates a full rmpv::Value tree before encoding).
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
+//! (interner, records, encoded blobs) is built ONCE outside the timed
+//! closure, exactly as under Criterion's `b.iter` — plan 1 (shared setup).
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
+use std::rc::Rc;
 
+use bench_scale_tool::Harness;
 use shamir_types::codecs::interned::messagepack::{inner_to_msgpack, msgpack_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
@@ -68,41 +74,35 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-fn bench_encode(c: &mut Criterion) {
-    let interner = Interner::new();
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
+fn main() {
+    let mut h = Harness::new("codec_msgpack", env!("CARGO_MANIFEST_DIR"));
 
-    let mut group = c.benchmark_group("codec_msgpack_encode");
-    group.throughput(Throughput::Elements(records.len() as u64));
-    group.bench_function("interned_1000_records", |b| {
-        b.iter(|| {
-            for r in &records {
-                black_box(inner_to_msgpack(&interner, r).unwrap());
-            }
-        })
-    });
-    group.finish();
-}
-
-fn bench_decode(c: &mut Criterion) {
-    let interner = Interner::new();
+    let interner = Rc::new(Interner::new());
     let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
     let encoded: Vec<Vec<u8>> = records
         .iter()
         .map(|r| inner_to_msgpack(&interner, r).unwrap())
         .collect();
 
-    let mut group = c.benchmark_group("codec_msgpack_decode");
-    group.throughput(Throughput::Elements(encoded.len() as u64));
-    group.bench_function("interned_1000_records", |b| {
-        b.iter(|| {
-            for blob in &encoded {
+    {
+        let interner = interner.clone();
+        let records = records.clone();
+        h.bench("codec_msgpack_encode/interned_1000_records", move || {
+            for r in black_box(&records) {
+                black_box(inner_to_msgpack(&interner, r).unwrap());
+            }
+        });
+    }
+
+    {
+        let interner = interner.clone();
+        let encoded = encoded.clone();
+        h.bench("codec_msgpack_decode/interned_1000_records", move || {
+            for blob in black_box(&encoded) {
                 black_box(msgpack_to_inner(&interner, blob).unwrap());
             }
-        })
-    });
-    group.finish();
-}
+        });
+    }
 
-criterion_group!(benches, bench_encode, bench_decode);
-criterion_main!(benches);
+    h.run();
+}

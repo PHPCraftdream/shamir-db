@@ -32,14 +32,16 @@
 //! Same generator as `vector_search.rs`: `clustered_vectors(n, dim, k=64,
 //! sigma=0.1, seed=42)`. Reproducibility key: `(n, dim, k=64, σ=0.1, seed=42)`.
 //!
-//! ## Tuning
+//! ## Migration note
 //!
-//! `tune_tiered` + wall-guard on every group (QUICK-default). The compaction
-//! group's per-iter cost (rebuild-aside of thousands of vectors) is bounded by
-//! the wall-guard so a QUICK cell stays in the seconds range.
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`). Both groups
+//! build a fresh `HnswAdapter` and populate it inside the timed region in the
+//! original Criterion bench — that construction IS the thing under test
+//! (bulk-load cost, rebuild cost), so the dataset/live-set is prepared ONCE
+//! as untimed setup and the adapter-build call is the timed routine →
+//! `bench_batched_async`.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_bench_utils::vector_data::clustered_vectors;
 use shamir_collections::TFxSet;
 use shamir_engine::index2::kind::VectorMetric;
@@ -62,13 +64,6 @@ const COMPACTION_N: usize = 10_000;
 const TOMBSTONE_FRACTIONS: &[f64] = &[0.3, 0.5];
 /// Bulk-load n-ladder.
 const BULK_LADDER: &[usize] = &[1_000, 10_000];
-
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
 
 fn rid_from(i: usize) -> RecordId {
     let mut a = [0u8; 16];
@@ -105,15 +100,10 @@ fn hnsw_config(capacity: usize) -> HnswConfig {
     }
 }
 
-// ─── Group 1: bulk-load (serial vs batch) ───────────────────────────────────
+fn main() {
+    let mut h = Harness::new("vector_bulk_compaction", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_bulk_load(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("vector_bulk_load");
-    // QUICK-default. The serial n=10K cell is the slowest (10K serial upserts);
-    // wall-guard 120s keeps even a FULL worst case bounded.
-    bu::tune_tiered(&mut group, 100, 5, 3, 120);
-
+    // ─── Group 1: bulk-load (serial vs batch) ───────────────────────────
     for &n in BULK_LADDER {
         let ds = clustered_vectors(n, DIM, K_CLUSTERS, SIGMA, SEED);
         let batch: Vec<(RecordId, Vec<f32>)> = ds
@@ -124,51 +114,46 @@ fn bench_bulk_load(c: &mut Criterion) {
             .collect();
         let cell = format!("n{n}");
 
-        group.throughput(Throughput::Elements(n as u64));
-
-        // Serial: N individual upsert calls (each its own spawn_blocking graph
-        // insert). This is the pre-V0.2 path the batch replaces.
-        group.bench_with_input(BenchmarkId::new("serial", &cell), &n, |b, &n| {
-            b.to_async(&rt).iter(|| {
-                let batch = batch.clone();
-                async move {
-                    let adapter =
-                        HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
+        // Serial: N individual upsert calls (each its own spawn_blocking
+        // graph insert). This is the pre-V0.2 path the batch replaces.
+        {
+            let batch = batch.clone();
+            h.bench_batched_async(
+                &format!("vector_bulk_load/serial/{cell}"),
+                move || {
+                    let batch = batch.clone();
+                    async move { batch }
+                },
+                move |batch| async move {
+                    let adapter = HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
                     for (rid, vec) in &batch {
                         adapter.upsert(*rid, vec).await.unwrap();
                     }
                     adapter
-                }
-            });
-        });
+                },
+            );
+        }
 
-        // Batch: ONE upsert_batch call (single rayon parallel_insert over the
-        // whole dataset). This is the V0.2 fast path.
-        group.bench_with_input(BenchmarkId::new("batch", &cell), &n, |b, &n| {
-            b.to_async(&rt).iter(|| {
-                let batch = batch.clone();
-                async move {
-                    let adapter =
-                        HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
+        // Batch: ONE upsert_batch call (single rayon parallel_insert over
+        // the whole dataset). This is the V0.2 fast path.
+        {
+            let batch = batch.clone();
+            h.bench_batched_async(
+                &format!("vector_bulk_load/batch/{cell}"),
+                move || {
+                    let batch = batch.clone();
+                    async move { batch }
+                },
+                move |batch| async move {
+                    let adapter = HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
                     adapter.upsert_batch(&batch).await.unwrap();
                     adapter
-                }
-            });
-        });
+                },
+            );
+        }
     }
 
-    group.finish();
-}
-
-// ─── Group 2: compaction rebuild-aside cost ─────────────────────────────────
-
-fn bench_compaction(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("vector_compaction");
-    // QUICK-default. Each iter rebuilds an adapter from the live-set (up to 7K
-    // vectors at d=0.3); wall-guard 120s bounds the worst case.
-    bu::tune_tiered(&mut group, 100, 5, 3, 120);
-
+    // ─── Group 2: compaction rebuild-aside cost ─────────────────────────
     let n = COMPACTION_N;
     let ds = clustered_vectors(n, DIM, K_CLUSTERS, SIGMA, SEED);
     let batch: Vec<(RecordId, Vec<f32>)> = ds
@@ -186,9 +171,9 @@ fn bench_compaction(c: &mut Criterion) {
         debug_assert_eq!(deleted_idxs.len(), n_deleted);
 
         // Pre-build the live-set ONCE: this is the data that
-        // `collect_live_vectors` would return from the dirty adapter. The bench
-        // measures the cost of building a fresh adapter from it — the hot path
-        // of `backfill_if_absent`.
+        // `collect_live_vectors` would return from the dirty adapter. The
+        // bench measures the cost of building a fresh adapter from it —
+        // the hot path of `backfill_if_absent`.
         let deleted_set: TFxSet<usize> = deleted_idxs.iter().copied().collect();
         let live_set: Vec<(RecordId, Vec<f32>)> = batch
             .iter()
@@ -199,31 +184,28 @@ fn bench_compaction(c: &mut Criterion) {
         debug_assert_eq!(live_set.len(), n_live);
 
         let cell = format!("d{}/n{n}", (frac * 100.0) as u32);
-        group.throughput(Throughput::Elements(n_live as u64));
 
-        // The measured operation: build a fresh adapter (compaction target)
-        // from the live-set via upsert_batch. This is the rebuild-aside cost —
-        // graph construction over the surviving vectors.
-        group.bench_with_input(
-            BenchmarkId::new("rebuild_aside", &cell),
-            &(frac, n_live),
-            |b, &(_, n_live)| {
+        // The measured operation: build a fresh adapter (compaction
+        // target) from the live-set via upsert_batch. This is the
+        // rebuild-aside cost — graph construction over the surviving
+        // vectors.
+        h.bench_batched_async(
+            &format!("vector_compaction/rebuild_aside/{cell}"),
+            {
                 let live_set = live_set.clone();
-                b.to_async(&rt).iter(move || {
+                move || {
                     let live_set = live_set.clone();
-                    async move {
-                        let target =
-                            HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n_live));
-                        target.upsert_batch(&live_set).await.unwrap();
-                        target
-                    }
-                });
+                    async move { live_set }
+                }
+            },
+            move |live_set| async move {
+                let target =
+                    HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n_live));
+                target.upsert_batch(&live_set).await.unwrap();
+                target
             },
         );
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_bulk_load, bench_compaction);
-criterion_main!(benches);

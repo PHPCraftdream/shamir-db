@@ -61,8 +61,7 @@ fjall = { version = "3.0.1", optional = true }
 [dev-dependencies]
 hex = "0.4"
 toml = "0.8"
-criterion = { version = "0.5", features = ["html_reports"] }
-shamir-bench-utils = { path = "../shamir-bench-utils" }
+bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 

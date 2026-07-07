@@ -32,10 +32,17 @@
 //!
 //! Note: J1 migration — `apply_select` removed; this bench now uses
 //! `apply_select_value` + `apply_order_by_qv` (QueryValue path).
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): the
+//! projected `Vec<QueryValue>` fixture is built ONCE outside the timed
+//! closures. `apply_order_by_qv` sorts in place (mutates its input), so a
+//! shared instance can't be reused across iterations — every scenario uses
+//! `bench_batched` with an untimed `projected.clone()` setup, matching the
+//! original Criterion `b.iter_batched(|| projected.clone(), ..., SmallInput)`.
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use std::hint::black_box;
 
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
@@ -78,7 +85,9 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-fn bench(c: &mut Criterion) {
+fn main() {
+    let mut h = Harness::new("order_by_pipeline", env!("CARGO_MANIFEST_DIR"));
+
     // ── Setup ─────────────────────────────────────────────────────
     let interner = Interner::new();
     for k in ["id", "name", "email", "score", "active", "created_at"] {
@@ -115,13 +124,13 @@ fn bench(c: &mut Criterion) {
     };
 
     // ── Scenario 1: indexed field + LIMIT 100 ─────────────────────
-    let mut g1 = c.benchmark_group("order_by_indexed_field_limit_100");
-    g1.throughput(Throughput::Elements(n_records));
-    g1.sample_size(bu::sample_size(10));
-    g1.bench_function("score_asc_limit_100", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+    {
+        let projected = projected.clone();
+        let order_by_score = order_by_score.clone();
+        h.bench_batched(
+            "order_by_indexed_field_limit_100/score_asc_limit_100",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_score);
                 let limited = apply_pagination(
                     recs,
@@ -133,19 +142,17 @@ fn bench(c: &mut Criterion) {
                 );
                 black_box(limited);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g1.finish();
+        );
+    }
 
     // ── Scenario 2: non-indexed field + LIMIT 100 ─────────────────
-    let mut g2 = c.benchmark_group("order_by_non_indexed_field_limit_100");
-    g2.throughput(Throughput::Elements(n_records));
-    g2.sample_size(bu::sample_size(10));
-    g2.bench_function("email_asc_limit_100", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+    {
+        let projected = projected.clone();
+        let order_by_email = order_by_email.clone();
+        h.bench_batched(
+            "order_by_non_indexed_field_limit_100/email_asc_limit_100",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_email);
                 let limited = apply_pagination(
                     recs,
@@ -157,26 +164,22 @@ fn bench(c: &mut Criterion) {
                 );
                 black_box(limited);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g2.finish();
+        );
+    }
 
     // ── Scenario 3: non-indexed field, full sort (no LIMIT) ───────
-    let mut g3 = c.benchmark_group("order_by_non_indexed_field_full");
-    g3.throughput(Throughput::Elements(n_records));
-    g3.sample_size(bu::sample_size(10));
-    g3.bench_function("email_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+    {
+        let projected = projected.clone();
+        let order_by_email = order_by_email.clone();
+        h.bench_batched(
+            "order_by_non_indexed_field_full/email_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_email);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g3.finish();
+        );
+    }
 
     // ══════════════════════════════════════════════════════════════
     // Single-column type-specialised scenarios (for #109)
@@ -211,67 +214,67 @@ fn bench(c: &mut Criterion) {
         ],
     };
 
-    let mut g4 = c.benchmark_group("order_by_single_column_typed");
-    g4.throughput(Throughput::Elements(n_records));
-    g4.sample_size(bu::sample_size(10));
-    g4.bench_function("id_i64_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+    {
+        let projected = projected.clone();
+        let order_by_id = order_by_id.clone();
+        h.bench_batched(
+            "order_by_single_column_typed/id_i64_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_id);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g4.bench_function("score_f64_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+        );
+    }
+    {
+        let projected = projected.clone();
+        let order_by_score = order_by_score.clone();
+        h.bench_batched(
+            "order_by_single_column_typed/score_f64_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_score);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g4.bench_function("email_str_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+        );
+    }
+    {
+        let projected = projected.clone();
+        let order_by_email = order_by_email.clone();
+        h.bench_batched(
+            "order_by_single_column_typed/email_str_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_email);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g4.bench_function("active_bool_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+        );
+    }
+    {
+        let projected = projected.clone();
+        let order_by_active = order_by_active.clone();
+        h.bench_batched(
+            "order_by_single_column_typed/active_bool_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_active);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g4.finish();
+        );
+    }
 
     // ── Multi-column / fallback path (must not regress) ───────────
-    let mut g5 = c.benchmark_group("order_by_multi_column");
-    g5.throughput(Throughput::Elements(n_records));
-    g5.sample_size(bu::sample_size(10));
-    g5.bench_function("active_then_email_asc_full", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
+    {
+        let projected = projected.clone();
+        h.bench_batched(
+            "order_by_multi_column/active_then_email_asc_full",
+            move || projected.clone(),
+            move |mut recs| {
                 apply_order_by_qv(&mut recs, &order_by_multi);
                 black_box(recs);
             },
-            BatchSize::SmallInput,
-        )
-    });
-    g5.finish();
-}
+        );
+    }
 
-criterion_group!(benches, bench);
-criterion_main!(benches);
+    h.run();
+}

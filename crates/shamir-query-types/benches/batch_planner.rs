@@ -4,8 +4,13 @@
 //!
 //! Measures `BatchPlanner::plan()` — dependency graph analysis +
 //! topological sort. Pure CPU, no I/O.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): each batch
+//! is built ONCE outside the timed closure — plan 1 (shared setup).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use bench_scale_tool::Harness;
 use shamir_collections::TMap;
 use shamir_types::types::value::QueryValue;
 
@@ -55,7 +60,9 @@ fn make_batch(n: usize, chain: bool) -> BatchRequest {
     }
 }
 
-fn bench_planner(c: &mut Criterion) {
+fn main() {
+    let mut h = Harness::new("batch_planner", env!("CARGO_MANIFEST_DIR"));
+
     let limits = BatchLimits::default();
     // `chain(n)` builds a linear dependency chain of depth n-1 (q0 -> q1 ->
     // ... -> q(n-1)); the largest tested n is 20, i.e. depth 19, which
@@ -68,21 +75,23 @@ fn bench_planner(c: &mut Criterion) {
         ..BatchLimits::default()
     };
 
-    let mut group = c.benchmark_group("batch_planner");
     for n in [5, 10, 20, 50] {
-        group.bench_with_input(BenchmarkId::new("independent", n), &n, |b, &n| {
-            let batch = make_batch(n, false);
-            b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
+        let batch = make_batch(n, false);
+        let limits = limits.clone();
+        let id = format!("batch_planner/independent/{n}");
+        h.bench(&id, move || {
+            black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap());
         });
+
         if n <= 20 {
-            group.bench_with_input(BenchmarkId::new("chain", n), &n, |b, &n| {
-                let batch = make_batch(n, true);
-                b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &chain_limits).unwrap()));
+            let batch = make_batch(n, true);
+            let chain_limits = chain_limits.clone();
+            let id = format!("batch_planner/chain/{n}");
+            h.bench(&id, move || {
+                black_box(BatchPlanner::plan(&batch.queries, &chain_limits).unwrap());
             });
         }
     }
-    group.finish();
-}
 
-criterion_group!(benches, bench_planner);
-criterion_main!(benches);
+    h.run();
+}

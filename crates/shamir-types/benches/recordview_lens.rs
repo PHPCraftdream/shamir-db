@@ -19,9 +19,15 @@
 //!                          compare its raw string value bytes to a constant
 //!                          literal on BYTES (no string construct, no typed
 //!                          decode).
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): every
+//! workload's setup (interner, records, encoded blobs) is built ONCE outside
+//! the timed closure, exactly as it was under Criterion's `b.iter` — this is
+//! plan 1 (shared setup) from the harness's methodology docs.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use std::hint::black_box;
+
+use bench_scale_tool::Harness;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::record_view::RecordView;
 use shamir_types::types::common::new_map_wc;
@@ -84,25 +90,19 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-// ---------------------------------------------------------------------------
-// Bench groups
-// ---------------------------------------------------------------------------
+fn main() {
+    let mut h = Harness::new("recordview_lens", env!("CARGO_MANIFEST_DIR"));
 
-/// Measurement 1: lens vs tree for a single-field read over the STORAGE form.
-/// Same blob, same interner for all three variants.
-fn bench_lens_vs_tree(c: &mut Criterion) {
+    // --- Measurement 1: lens vs tree for a single-field read (STORAGE form) --
     let interner = Interner::new();
-    // One representative record (idx=0 -> age=0, name="user-0").
     let record = make_record(&interner, 0);
-    // STORAGE form: InnerValue::to_bytes() (id-keyed msgpack via rmp_serde).
     let blob = record.to_bytes().expect("encode");
-
     let age_ik = intern(&interner, "age");
     let name_ik = intern(&interner, "name");
 
     // Sanity: the lens must agree with the tree on the "age" value, and the
     // string match must succeed — otherwise we'd be benchmarking a broken
-    // prototype. Panic early in the bench setup, not in the hot loop.
+    // prototype. Panic early at registration, not in the hot loop.
     {
         let tree_val = match &record {
             InnerValue::Map(m) => m.get(&age_ik).and_then(|v| match v {
@@ -119,14 +119,11 @@ fn bench_lens_vs_tree(c: &mut Criterion) {
         assert!(name_match, "lens string-match failed");
     }
 
-    let mut group = c.benchmark_group("recordview_lens_single_field");
-    group.throughput(Throughput::Elements(1));
-    bu::tune_tiered(&mut group, 10, 1, 1, 30);
-
     // (a) BASELINE — full tree decode (from_bytes) + map lookup + Int read.
-    group.bench_function("tree_read_age", |b| {
+    {
+        let blob = blob.clone();
         let age_key = age_ik.clone();
-        b.iter(|| {
+        h.bench("recordview_lens_single_field/tree_read_age", move || {
             let iv = InnerValue::from_bytes(black_box(&*blob)).expect("decode");
             let v = match &iv {
                 InnerValue::Map(m) => m.get(black_box(&age_key)).and_then(|e| match e {
@@ -136,95 +133,67 @@ fn bench_lens_vs_tree(c: &mut Criterion) {
                 _ => None,
             };
             black_box(v);
-        })
-    });
+        });
+    }
 
     // (b) LENS — RecordView over to_bytes() blob, scan id-keyed + decode Int.
-    group.bench_function("lens_read_age", |b| {
+    {
+        let blob = blob.clone();
         let age_key = age_ik.clone();
-        b.iter(|| {
+        h.bench("recordview_lens_single_field/lens_read_age", move || {
             let lens = RecordView::new(black_box(&*blob)).unwrap();
             let v = lens.get_int(black_box(age_key.clone()));
             black_box(v);
-        })
-    });
+        });
+    }
 
     // (c) LENS — filter-eval proxy: scan to "name" id-key + compare string
     //     value bytes (no decode).
-    group.bench_function("lens_match_name", |b| {
+    {
+        let blob = blob.clone();
         let name_key = name_ik.clone();
-        b.iter(|| {
+        h.bench("recordview_lens_single_field/lens_match_name", move || {
             let lens = RecordView::new(black_box(&*blob)).unwrap();
             let v = lens.match_str_eq(black_box(name_key.clone()), black_box(b"user-0"));
             black_box(v);
-        })
-    });
+        });
+    }
 
-    group.finish();
-}
-
-/// Tier B cross-check (isolation): per-record encode (to_bytes) and
-/// decode (from_bytes) over `make_record`, so the tree round-trip cost is
-/// measured in isolation.
-fn bench_tree_roundtrip(c: &mut Criterion) {
-    let interner = Interner::new();
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
+    // --- Tier B cross-check: per-record encode/decode round-trip -----------
+    let interner_b = Interner::new();
+    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner_b, i)).collect();
     let encoded: Vec<bytes::Bytes> = records
         .iter()
         .map(|r| r.to_bytes().expect("encode"))
         .collect();
 
-    let mut group = c.benchmark_group("recordview_tier_b_tree_roundtrip");
-    group.throughput(Throughput::Elements(records.len() as u64));
-    bu::tune_tiered(&mut group, 10, 1, 1, 30);
-
-    // Tier B — encode: InnerValue tree -> msgpack bytes (storage form).
-    group.bench_function("encode_1000", |b| {
-        b.iter(|| {
+    {
+        let records = records.clone();
+        h.bench("recordview_tier_b_tree_roundtrip/encode_1000", move || {
             for r in black_box(&records) {
                 black_box(r.to_bytes().expect("encode"));
             }
-        })
-    });
-
-    // Tier B — decode: msgpack bytes -> InnerValue tree (storage form).
-    group.bench_function("decode_1000", |b| {
-        b.iter(|| {
+        });
+    }
+    {
+        let encoded = encoded.clone();
+        h.bench("recordview_tier_b_tree_roundtrip/decode_1000", move || {
             for blob in black_box(&encoded) {
                 black_box(InnerValue::from_bytes(&**blob).expect("decode"));
             }
-        })
-    });
+        });
+    }
 
-    group.finish();
-}
-
-/// Tier A supplementary: measure the deep-clone cost of one `InnerValue` tree.
-fn bench_tree_clone_cost(c: &mut Criterion) {
-    let interner = Interner::new();
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
-
-    let mut group = c.benchmark_group("recordview_tier_a_clone_cost");
-    group.throughput(Throughput::Elements(records.len() as u64));
-    bu::tune_tiered(&mut group, 10, 1, 1, 30);
-
-    // Deep-clone of one InnerValue tree (Map + nested Map + List of Strings).
-    group.bench_function("clone_inner_1000", |b| {
-        b.iter(|| {
+    // --- Tier A supplementary: deep-clone cost of one InnerValue tree ------
+    {
+        let records = records.clone();
+        h.bench("recordview_tier_a_clone_cost/clone_inner_1000", move || {
             for r in black_box(&records) {
                 let cloned = r.clone();
                 black_box(cloned);
             }
-        })
-    });
+        });
+    }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(
-    benches,
-    bench_lens_vs_tree,
-    bench_tree_roundtrip,
-    bench_tree_clone_cost
-);
-criterion_main!(benches);

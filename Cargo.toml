@@ -15,6 +15,7 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [workspace.dependencies]
 captrack = { path = "D:/dev/rust/captrack", features = ["telemetry"] }
+bench-scale-tool = { path = "D:/dev/rust/bench-scale-tool" }
 
 [workspace.lints.clippy]
 absolute_paths = "warn"
