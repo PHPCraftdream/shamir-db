@@ -15,18 +15,35 @@
 //!   `set()` write the legacy code did. NOT calling the manager —
 //!   the manager no longer offers this path.
 //!
-//! Run:
-//!   cargo bench -p shamir-engine --bench interner_cold_growth
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): each
+//! `new_incremental` / `old_full_blob` workload builds a fresh store +
+//! interner/manager INSIDE the timed closure (the loop of N touch+persist
+//! calls IS the thing under test — there is no separable "setup" phase to
+//! hoist out), so these use `bench_batched_async` with a no-op setup and
+//! the harness-owned shared runtime, mirroring the original `rt.block_on`
+//! timing exactly. `bench_batched_async` (not `bench_async`) matters here:
+//! calibration checks elapsed time after every single call for a `Batched`
+//! workload, whereas `bench_async` batches 64 calls before its first
+//! check — fine for cheap ops, but `old_full_blob` is `O(N^2)` by design
+//! (the pathology under test), so 64 uncalibrated calls turned a 0.3s
+//! calibration into several CPU-minutes.
+//! The structural "bytes written" comparison (previously a Criterion
+//! side-channel `eprintln!` piggy-backing a 1-iter noop bench) is now a
+//! one-shot printout at registration time, before `h.run()` — it was never
+//! really a timed workload. Its own `N` is capped well below the timed
+//! workloads' largest `N` (see `STRUCTURAL_NS` below) — it runs
+//! unconditionally on every invocation of this bench binary regardless of
+//! `--scale`, so its `O(N^2)` old-path cost is NOT scaled down by the
+//! harness and must stay small enough not to dominate a full sweep.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use std::pin::Pin;
 
+use bench_scale_tool::Harness;
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use futures::Stream;
-use shamir_bench_utils as bu;
 use tokio::runtime::Runtime;
 
 use shamir_engine::meta::MetaKey;
@@ -35,7 +52,7 @@ use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::codecs::basic::bincode;
-use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::core::interner::Interner;
 
 /// Byte-counting Store wrapper — totals the bytes written through
 /// `set()` so we can prove the O(N²) → O(N) structural difference.
@@ -114,71 +131,18 @@ async fn old_full_blob_persist(
     Ok(())
 }
 
-fn bench_cold_growth(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("interner_cold_growth");
-
-    for &n in &[1000usize, 5000] {
-        group.throughput(Throughput::Elements(n as u64));
-
-        // NEW path — append-only chunk per persist.
-        group.bench_with_input(BenchmarkId::new("new_incremental", n), &n, |b, &n| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let (store, _bytes) = make_counting_store();
-                    let mgr = InternerManager::new(Arc::clone(&store));
-                    let elapsed = rt.block_on(async {
-                        let start = std::time::Instant::now();
-                        for i in 0..n {
-                            let interner = mgr.get().await.unwrap();
-                            let _ = interner.touch_ind(format!("field_{i}")).unwrap();
-                            mgr.persist().await.unwrap();
-                        }
-                        start.elapsed()
-                    });
-                    total += elapsed;
-                }
-                total
-            });
-        });
-
-        // OLD path — full blob rewrite per persist.
-        group.bench_with_input(BenchmarkId::new("old_full_blob", n), &n, |b, &n| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let (store, _bytes) = make_counting_store();
-                    let interner = Interner::new();
-                    let elapsed = rt.block_on(async {
-                        let start = std::time::Instant::now();
-                        for i in 0..n {
-                            let _ = interner.touch_ind(format!("field_{i}")).unwrap();
-                            old_full_blob_persist(&store, &interner).await.unwrap();
-                        }
-                        start.elapsed()
-                    });
-                    total += elapsed;
-                }
-                total
-            });
-        });
-    }
-
-    group.finish();
-}
+/// `N`s for the one-shot structural printout only — deliberately smaller
+/// than the timed workloads' largest `N` (see the module docs above): this
+/// runs unconditionally on every invocation, unscaled, so its `old_full_blob`
+/// arm (`O(N^2)`) must stay cheap. 500 still shows a several-hundred-x
+/// ratio without costing minutes.
+const STRUCTURAL_NS: [usize; 2] = [250, 500];
 
 /// One-shot structural measurement — print bytes written by each path
-/// (NOT a Criterion bench, just executed once per `criterion_main`
-/// invocation via a 1-iter benchmark so the numbers show up).
-fn bench_bytes_written_structural(c: &mut Criterion) {
+/// (NOT a timed workload, just a printout before the harness runs).
+fn print_bytes_written_structural() {
     let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("interner_cold_growth_bytes");
-    // Tight measurement window — we want the bytes-written totals,
-    // not a tight timing distribution.
-    group.sample_size(bu::sample_size(10));
-
-    for &n in &[1000usize, 5000] {
+    for &n in &STRUCTURAL_NS {
         // Measure NEW total bytes — single run.
         let (store_new, bytes_new) = make_counting_store();
         let mgr = InternerManager::new(Arc::clone(&store_new));
@@ -207,56 +171,85 @@ fn bench_bytes_written_structural(c: &mut Criterion) {
              ratio_old/new={:.1}x",
             old_total as f64 / new_total.max(1) as f64
         );
-
-        // Touch the values so the compiler can't elide.
-        let _ = (new_total, old_total);
-        // Register a trivially-cheap bench point so Criterion runs the
-        // group (otherwise it skips an empty group).
-        group.bench_function(BenchmarkId::new("noop", n), |b| {
-            b.iter(|| criterion::black_box(InternerKey::new(n as u64)));
-        });
-        let _ = criterion::black_box("x");
     }
-
-    group.finish();
 }
 
-/// Direct in-memory `touch_ind` cold-growth bench.
-///
-/// This bench measures the CAS-clone cost of growing the reverse spine
-/// from 0 to N distinct keys. Op B (Arc<str> slots) changes this from
-/// O(N²) byte copies to O(N) refcount bumps — each CAS-loop clone
-/// previously deep-copied every `String` slot.
-///
-/// Run alongside `interner_concurrent` to confirm read-path is unchanged.
-fn bench_touch_ind_cold_growth(c: &mut Criterion) {
-    let mut group = c.benchmark_group("interner_touch_ind_cold_growth");
-    bu::tune(&mut group, 20, 3, 1);
+fn main() {
+    let mut h = Harness::new("interner_cold_growth", env!("CARGO_MANIFEST_DIR"));
 
-    for &n in &[1_000usize, 5_000, 20_000] {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::new("touch_ind", n), &n, |b, &n| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let interner = Interner::new();
-                    let start = std::time::Instant::now();
-                    for i in 0..n {
-                        let _ = criterion::black_box(interner.touch_ind(format!("field_{i}")));
-                    }
-                    total += start.elapsed();
+    print_bytes_written_structural();
+
+    // Same N cap rationale as `STRUCTURAL_NS`, tightened further per the
+    // "every workload should cost the harness only a few ms per call"
+    // normalization pass: `old_full_blob` is `O(N^2)` by design, so even
+    // small N increases cost fast. 250/500 keeps the comparison meaningful
+    // (still a visible ratio spread) while `old_full_blob_500` lands close
+    // to, not many multiples of, the ~10ms per-call target — the
+    // O(N^2) shape means it can't be driven arbitrarily low without
+    // losing the demonstration entirely, so this is accepted as a known,
+    // documented exception rather than force-fit under 10ms.
+    for &n in &[250usize, 500] {
+        // NEW path — append-only chunk per persist.
+        //
+        // `bench_batched_async` (not `bench_async`) on purpose: calibration
+        // checks the elapsed time after every single iteration (batch=1),
+        // whereas `bench_async` -> `Workload::Simple` batches 64 calls
+        // before its first check. `old_full_blob` below costs
+        // O(N^2) bytes-written per call by design (the pathology under
+        // test) — 64 uncalibrated calls at that cost turned a 0.3s
+        // calibration into several CPU-minutes. Setup is a no-op `()`;
+        // the whole touch+persist loop is the timed routine, unchanged.
+        h.bench_batched_async(
+            &format!("interner_cold_growth/new_incremental_{n}"),
+            || async {},
+            move |()| async move {
+                let (store, _bytes) = make_counting_store();
+                let mgr = InternerManager::new(Arc::clone(&store));
+                for i in 0..n {
+                    let interner = mgr.get().await.unwrap();
+                    let _ = interner.touch_ind(format!("field_{i}")).unwrap();
+                    mgr.persist().await.unwrap();
                 }
-                total
-            });
-        });
-    }
-    group.finish();
-}
+            },
+        );
 
-criterion_group!(
-    benches,
-    bench_cold_growth,
-    bench_bytes_written_structural,
-    bench_touch_ind_cold_growth
-);
-criterion_main!(benches);
+        // OLD path — full blob rewrite per persist. See the comment above:
+        // `bench_batched_async` for the same batch=1 calibration reason.
+        h.bench_batched_async(
+            &format!("interner_cold_growth/old_full_blob_{n}"),
+            || async {},
+            move |()| async move {
+                let (store, _bytes) = make_counting_store();
+                let interner = Interner::new();
+                for i in 0..n {
+                    let _ = interner.touch_ind(format!("field_{i}")).unwrap();
+                    old_full_blob_persist(&store, &interner).await.unwrap();
+                }
+            },
+        );
+    }
+
+    // Direct in-memory `touch_ind` cold-growth bench.
+    //
+    // This bench measures the CAS-clone cost of growing the reverse spine
+    // from 0 to N distinct keys. Op B (Arc<str> slots) changes this from
+    // O(N²) byte copies to O(N) refcount bumps — each CAS-loop clone
+    // previously deep-copied every `String` slot.
+    //
+    // Run alongside `interner_concurrent` to confirm read-path is unchanged.
+    // N capped so each call stays near the ~10ms per-call target (measured
+    // ~26µs/touch, so N=300 lands around 8ms).
+    for &n in &[100usize, 200, 300] {
+        h.bench(
+            &format!("interner_touch_ind_cold_growth/touch_ind_{n}"),
+            move || {
+                let interner = Interner::new();
+                for i in 0..n {
+                    let _ = std::hint::black_box(interner.touch_ind(format!("field_{i}")));
+                }
+            },
+        );
+    }
+
+    h.run();
+}

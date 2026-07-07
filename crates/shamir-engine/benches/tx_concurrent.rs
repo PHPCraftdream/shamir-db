@@ -298,10 +298,8 @@ fn main() {
                             let mut attempts = 0u64;
                             loop {
                                 attempts += 1;
-                                let (mut tx, _g) = repo
-                                    .begin_tx(IsolationLevel::Serializable)
-                                    .await
-                                    .unwrap();
+                                let (mut tx, _g) =
+                                    repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
                                 let tbl = repo.get_table("bench_table").await.unwrap();
                                 let upd = tbl
                                     .update_tx(

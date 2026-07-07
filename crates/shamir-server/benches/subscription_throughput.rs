@@ -6,15 +6,20 @@
 //! changefeed emit → broadcast deliver → de-intern → filter → payload →
 //! `PushSink::try_push`. That's the cost a real client sees on every
 //! delivered change.
+//!
+//! Each iteration builds a fresh DB + registry + subscription (`setup`,
+//! untimed) then fires N inserts and drains N Events (`routine`, timed) —
+//! `bench_batched_async`, mirroring the original `iter_custom` design where
+//! only the insert+drain phase counted toward the measurement.
 
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 
-use shamir_bench_utils as bu;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
@@ -136,103 +141,112 @@ async fn drain_events_for(
     got
 }
 
-fn bench_bridge_throughput_single_sub(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_bridge_throughput");
-    const N: usize = 100;
-    g.throughput(Throughput::Elements(N as u64));
-    g.sample_size(bu::sample_size(10));
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    g.bench_function("single_sub_filtered_inserts_100", |b| {
-        b.iter_custom(|iters| {
-            rt.block_on(async move {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    // Fresh DB + registry per iter so subscription IDs don't pile up.
-                    let shamir = make_db_one_repo("app", "main", "messages").await;
-                    let handler = ShamirDbHandler::new(shamir);
-                    let s = fixture_session();
-                    let (push, mut rx) = capture();
-                    let registry = Arc::new(SubscriptionRegistry::new());
-                    let conn = conn_with(push, registry.clone());
-
-                    // Subscribe with a value filter that matches every insert.
-                    let src = SourceBuilder::table(TableRef::with_repo("main", "messages"))
-                        .filter(Filter::Eq {
-                            field: vec!["thread_id".into()],
-                            value: FilterValue::Int(42),
-                        })
-                        .build();
-                    let sub_op = Subscribe::source(src).build();
-                    let mut sb = Batch::new();
-                    sb.id(1);
-                    sb.subscribe("m", sub_op);
-                    let resp = decode(
-                        &handler
-                            .handle(&s, &encode(&execute_built("app", sb.build())), &conn)
-                            .await
-                            .unwrap(),
-                    );
-                    let sub_id = {
-                        use shamir_types::types::value::QueryValue;
-                        match resp {
-                            DbResponse::Batch { response } => {
-                                let v = response
-                                    .results
-                                    .get("m")
-                                    .and_then(|qr| qr.value.as_ref())
-                                    .expect("subscribe result has no value");
-                                match v {
-                                    QueryValue::Map(m) => match m.get("sub") {
-                                        Some(QueryValue::Int(id)) => *id as u64,
-                                        other => panic!("sub field not Int: {:?}", other),
-                                    },
-                                    other => panic!("value not Map: {:?}", other),
-                                }
-                            }
-                            _ => panic!("expected Batch response"),
-                        }
-                    };
-
-                    // Let the bridge attach to the changefeed.
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-
-                    let start = std::time::Instant::now();
-                    // Fire N inserts.
-                    for i in 0..N {
-                        let mut wb = Batch::new();
-                        wb.id((i as u64) + 100);
-                        wb.insert(
-                            "ins",
-                            insert("messages").row(
-                                doc! { "_id" => format!("k{i}") }
-                                    .set("thread_id", 42_i64)
-                                    .set("body", format!("msg-{i}")),
-                            ),
-                        );
-                        let _ = handler
-                            .handle(&s, &encode(&execute_built("app", wb.build())), &conn)
-                            .await
-                            .unwrap();
-                    }
-                    let got = drain_events_for(&mut rx, sub_id, N, Duration::from_secs(10)).await;
-                    let elapsed = start.elapsed();
-                    assert_eq!(got, N, "did not receive all events: got {got}/{N}");
-                    total += elapsed;
-                    black_box(sub_id);
-                }
-                total
-            })
-        });
-    });
-
-    g.finish();
+/// Fresh-per-iteration state: DB, handler, subscription, and drain receiver.
+struct IterState {
+    handler: ShamirDbHandler,
+    session: Session,
+    conn: ConnectionServices,
+    rx: UnboundedReceiver<Vec<u8>>,
+    sub_id: u64,
 }
 
-criterion_group!(benches, bench_bridge_throughput_single_sub);
-criterion_main!(benches);
+const N: usize = 100;
+
+async fn setup_iter() -> IterState {
+    // Fresh DB + registry per iter so subscription IDs don't pile up.
+    let shamir = make_db_one_repo("app", "main", "messages").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let s = fixture_session();
+    let (push, rx) = capture();
+    let registry = Arc::new(SubscriptionRegistry::new());
+    let conn = conn_with(push, registry.clone());
+
+    // Subscribe with a value filter that matches every insert.
+    let src = SourceBuilder::table(TableRef::with_repo("main", "messages"))
+        .filter(Filter::Eq {
+            field: vec!["thread_id".into()],
+            value: FilterValue::Int(42),
+        })
+        .build();
+    let sub_op = Subscribe::source(src).build();
+    let mut sb = Batch::new();
+    sb.id(1);
+    sb.subscribe("m", sub_op);
+    let resp = decode(
+        &handler
+            .handle(&s, &encode(&execute_built("app", sb.build())), &conn)
+            .await
+            .unwrap(),
+    );
+    let sub_id = {
+        use shamir_types::types::value::QueryValue;
+        match resp {
+            DbResponse::Batch { response } => {
+                let v = response
+                    .results
+                    .get("m")
+                    .and_then(|qr| qr.value.as_ref())
+                    .expect("subscribe result has no value");
+                match v {
+                    QueryValue::Map(m) => match m.get("sub") {
+                        Some(QueryValue::Int(id)) => *id as u64,
+                        other => panic!("sub field not Int: {:?}", other),
+                    },
+                    other => panic!("value not Map: {:?}", other),
+                }
+            }
+            _ => panic!("expected Batch response"),
+        }
+    };
+
+    // Let the bridge attach to the changefeed.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    IterState {
+        handler,
+        session: s,
+        conn,
+        rx,
+        sub_id,
+    }
+}
+
+async fn run_iter(mut state: IterState) {
+    // Fire N inserts.
+    for i in 0..N {
+        let mut wb = Batch::new();
+        wb.id((i as u64) + 100);
+        wb.insert(
+            "ins",
+            insert("messages").row(
+                doc! { "_id" => format!("k{i}") }
+                    .set("thread_id", 42_i64)
+                    .set("body", format!("msg-{i}")),
+            ),
+        );
+        let _ = state
+            .handler
+            .handle(
+                &state.session,
+                &encode(&execute_built("app", wb.build())),
+                &state.conn,
+            )
+            .await
+            .unwrap();
+    }
+    let got = drain_events_for(&mut state.rx, state.sub_id, N, Duration::from_secs(10)).await;
+    assert_eq!(got, N, "did not receive all events: got {got}/{N}");
+    black_box(state.sub_id);
+}
+
+fn main() {
+    let mut h = Harness::new("subscription_throughput", env!("CARGO_MANIFEST_DIR"));
+
+    h.bench_batched_async(
+        "subscription_bridge_throughput/single_sub_filtered_inserts_100",
+        setup_iter,
+        run_iter,
+    );
+
+    h.run();
+}

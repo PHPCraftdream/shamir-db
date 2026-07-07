@@ -372,7 +372,12 @@ fn req_batch_independent_reads() -> BatchRequest {
 // Sweep constants
 // --------------------------------------------------------------------------
 
-const SIZES: &[usize] = &[100, 1_000, 10_000];
+// Capped at 2_000 (was 10_000): the harness now owns iteration count
+// externally, so a single call should stay a small, cheap "unit" (target
+// ≲10ms) rather than a multi-hundred-ms operation on its own — a large-N
+// no-index scan at 10_000 records cost 60-150ms per single call, which
+// piles up fast across dozens of size-swept workloads in one bench binary.
+const SIZES: &[usize] = &[100, 1_000, 2_000];
 const BULK_SIZES: &[usize] = &[100, 1_000];
 
 fn main() {
@@ -786,12 +791,12 @@ fn main() {
         );
     }
 
-    // ── steady_state_insert_10k — 10k inserts into a fresh MemBuffer DB ──
+    // ── steady_state_insert — inserts into a fresh MemBuffer DB ──
     h.bench_batched_async(
-        "steady_state_insert_10k/membuffer_in_memory",
+        "steady_state_insert_500/membuffer_in_memory",
         || async move { fresh_db_membuffer_in_memory().await },
         |shamir| async move {
-            let req = req_bulk_insert(0, 10_000);
+            let req = req_bulk_insert(0, 500);
             shamir.execute("bench", &req).await.unwrap();
             drop(shamir);
         },
@@ -805,7 +810,7 @@ fn main() {
         use shamir_types::types::record_id::RecordId;
 
         h.bench_batched_async(
-            "ttl_sweep/no_ttl_seed_50k",
+            "ttl_sweep/no_ttl_seed_2k",
             || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
                 let cfg = MemBufferConfig {
@@ -820,7 +825,7 @@ fn main() {
                 (store, v)
             },
             |(store, v)| async move {
-                for _ in 0..50_000 {
+                for _ in 0..2_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
@@ -830,7 +835,7 @@ fn main() {
         );
 
         h.bench_batched_async(
-            "ttl_sweep/ttl_50ms_seed_50k_flush_300ms",
+            "ttl_sweep/ttl_50ms_seed_2k_flush_300ms",
             || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
                 let cfg = MemBufferConfig {
@@ -845,7 +850,7 @@ fn main() {
                 (store, v)
             },
             |(store, v)| async move {
-                for _ in 0..50_000 {
+                for _ in 0..2_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
@@ -897,13 +902,13 @@ fn main() {
         );
     }
 
-    // ── wal_high_qps — 1000 single-record batches into fresh MemBuffer DB ──
+    // ── wal_high_qps — 200 single-record batches into fresh MemBuffer DB ──
     h.bench_batched_async(
-        "wal_high_qps/1000_single_record_batches",
+        "wal_high_qps/200_single_record_batches",
         || async move { fresh_db_membuffer_in_memory().await },
         |shamir| async move {
             let req = req_bulk_insert(0, 1);
-            for _ in 0..1_000 {
+            for _ in 0..200 {
                 shamir.execute("bench", &req).await.unwrap();
             }
             drop(shamir);
@@ -918,7 +923,7 @@ fn main() {
         use shamir_db::storage::types::Store;
         use shamir_types::types::record_id::RecordId;
 
-        for &n in &[1_000usize, 10_000] {
+        for &n in &[1_000usize, 2_000] {
             // Build a warmed MemBuffer cache holding `n` keys, all
             // resident (cache size = n, large max_bytes).
             let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt
@@ -938,8 +943,7 @@ fn main() {
                         let id = RecordId::new();
                         let key =
                             shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
-                        let value =
-                            shamir_db::storage::types::RecordKey::from(format!("v{i}"));
+                        let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
                         store.set(key.clone(), value).await.unwrap();
                         keys.push(key);
                     }
@@ -966,7 +970,7 @@ fn main() {
     }
 
     // ── batch_multi_read_8 — 8 independent reads in one batch ──
-    for &n in &[1_000usize, 10_000] {
+    for &n in &[1_000usize, 2_000] {
         let shamir = block_on_setup(&rt, seeded(n, false));
         let id = format!("batch_multi_read_8/{n}");
         h.bench_async(&id, move || {
@@ -1027,7 +1031,7 @@ fn main() {
     // DDL: create_index on a seeded table (rebuild cost) — fresh table per iter
     // ═══════════════════════════════════════════════════════════════════
 
-    for n_records in [100usize, 1000] {
+    for n_records in [50usize, 300] {
         let id = format!("ddl_create_index/records_{n_records}");
         h.bench_batched_async(
             &id,

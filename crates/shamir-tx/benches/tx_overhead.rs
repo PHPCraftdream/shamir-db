@@ -57,7 +57,7 @@ fn main() {
     {
         let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let gate = Arc::new(RepoTxGate::fresh());
-        let mvcc = MvccStore::new(history, gate);
+        let mvcc = Arc::new(MvccStore::new(history, gate));
 
         // Pre-populate synchronously via a throwaway current-thread runtime —
         // this setup runs once, at registration time, not in the timed loop.
@@ -81,7 +81,7 @@ fn main() {
             let n = counter.get();
             counter.set(n.wrapping_add(1));
             let key = (n % 1000).to_be_bytes();
-            let mvcc = &mvcc;
+            let mvcc = Arc::clone(&mvcc);
             async move {
                 let _ = mvcc.get_at(&key, u64::MAX).await.unwrap();
             }

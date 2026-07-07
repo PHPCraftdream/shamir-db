@@ -41,7 +41,12 @@ fn main() {
         let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
         let training: Vec<Vec<f32>> = ds.vectors.clone();
         let q = Sq8Quantizer::fit(&training, DIM);
-        let pool_codes: Vec<Vec<u8>> = ds.vectors.iter().take(POOL).map(|v| q.quantize(v)).collect();
+        let pool_codes: Vec<Vec<u8>> = ds
+            .vectors
+            .iter()
+            .take(POOL)
+            .map(|v| q.quantize(v))
+            .collect();
         let query_code = q.quantize(&ds.centroids[0]);
 
         h.bench("sq8_approx_dot/dim_128", move || {
@@ -58,7 +63,12 @@ fn main() {
         let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
         let training: Vec<Vec<f32>> = ds.vectors.clone();
         let q = Arc::new(Sq8Quantizer::fit(&training, DIM));
-        let pool_codes: Vec<Vec<u8>> = ds.vectors.iter().take(POOL).map(|v| q.quantize(v)).collect();
+        let pool_codes: Vec<Vec<u8>> = ds
+            .vectors
+            .iter()
+            .take(POOL)
+            .map(|v| q.quantize(v))
+            .collect();
         let query_code = q.quantize(&ds.centroids[0]);
 
         for metric in [VectorMetric::L2, VectorMetric::Dot, VectorMetric::Cosine] {

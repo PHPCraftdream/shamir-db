@@ -287,7 +287,12 @@ fn main() {
         .build()
         .unwrap();
 
-    for &n in &[10_000usize, 100_000usize] {
+    // Capped at 2_000/5_000 (was 10_000/100_000): "pushdown_disabled" is a
+    // full-table scan without the LIMIT pushdown, so cost is O(n) — at
+    // 10_000 it already cost ~64ms/call, far above the ~10ms per-call
+    // budget the harness now expects (it owns repetition count
+    // externally; each call should stay a cheap unit).
+    for &n in &[2_000usize, 5_000usize] {
         let table = setup_rt.block_on(build_table_with_n(n));
 
         // (A) push-down active: WHERE + LIMIT 10, no ORDER BY.
@@ -338,17 +343,20 @@ fn main() {
         {
             let table = table.clone();
             let q = q_pushdown.clone();
-            h.bench_async(&format!("read_limit_pushdown/pushdown_active_N={n}"), move || {
-                let table = table.clone();
-                let q = q.clone();
-                async move {
-                    let interner = table.interner().get().await.unwrap();
-                    let refs = new_map();
-                    let ctx = FilterContext::new(interner, &refs);
-                    let r = table.read(&q, &ctx).await.unwrap();
-                    black_box(r);
-                }
-            });
+            h.bench_async(
+                &format!("read_limit_pushdown/pushdown_active_N={n}"),
+                move || {
+                    let table = table.clone();
+                    let q = q.clone();
+                    async move {
+                        let interner = table.interner().get().await.unwrap();
+                        let refs = new_map();
+                        let ctx = FilterContext::new(interner, &refs);
+                        let r = table.read(&q, &ctx).await.unwrap();
+                        black_box(r);
+                    }
+                },
+            );
         }
 
         {

@@ -96,8 +96,9 @@ fn main() {
     ] {
         intern(interner, k);
     }
-    let records: &'static Vec<InnerValue> =
-        Box::leak(Box::new((0..1000).map(|i| make_record(interner, i)).collect()));
+    let records: &'static Vec<InnerValue> = Box::leak(Box::new(
+        (0..1000).map(|i| make_record(interner, i)).collect(),
+    ));
     let empty_refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(new_map_wc(0)));
     let ctx: &'static FilterContext<'static> =
         Box::leak(Box::new(FilterContext::new(interner, empty_refs)));
@@ -109,7 +110,13 @@ fn main() {
         },
         interner,
     )));
-    bench_matches(&mut h, "filter_eval/eq_int_top_level_1000", records, ctx, eq_age);
+    bench_matches(
+        &mut h,
+        "filter_eval/eq_int_top_level_1000",
+        records,
+        ctx,
+        eq_age,
+    );
 
     let eq_nested: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Eq {
@@ -227,7 +234,13 @@ fn main() {
         },
         interner,
     )));
-    bench_matches(&mut h, "filter_eval/fts_brute_and_1000", records, ctx, fts_and);
+    bench_matches(
+        &mut h,
+        "filter_eval/fts_brute_and_1000",
+        records,
+        ctx,
+        fts_and,
+    );
 
     // ── FTS brute-force OR: 2 tokens on 1000 text records ────
     let fts_or: &'static FilterNode = Box::leak(Box::new(compile_filter(
@@ -238,7 +251,13 @@ fn main() {
         },
         interner,
     )));
-    bench_matches(&mut h, "filter_eval/fts_brute_or_1000", records, ctx, fts_or);
+    bench_matches(
+        &mut h,
+        "filter_eval/fts_brute_or_1000",
+        records,
+        ctx,
+        fts_or,
+    );
 
     // ── IN list: int membership over a medium-sized list ─────
     let in_int_32: &'static FilterNode = Box::leak(Box::new(compile_filter(

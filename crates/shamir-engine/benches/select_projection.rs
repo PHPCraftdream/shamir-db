@@ -15,6 +15,7 @@
 //! which never actually rebuilt anything per iteration.
 
 use std::hint::black_box;
+use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::query::read::exec::apply_select_value;
@@ -65,6 +66,7 @@ fn main() {
     for k in ["id", "name", "email", "score", "active", "created_at"] {
         let _ = interner.touch_ind(k);
     }
+    let interner = Arc::new(interner);
 
     let n_records: u64 = 100_000;
     let raw_records: Vec<(RecordId, InnerValue)> = (0..n_records)
@@ -94,7 +96,7 @@ fn main() {
     {
         let raw_records = raw_records.clone();
         let select_all = select_all.clone();
-        let interner = interner.clone();
+        let interner = Arc::clone(&interner);
         h.bench("select_all/select_all_100k", move || {
             let projected = apply_select_value(&raw_records, &select_all, &interner);
             black_box(projected);
@@ -105,7 +107,7 @@ fn main() {
     {
         let raw_records = raw_records.clone();
         let select_few = select_few.clone();
-        let interner = interner.clone();
+        let interner = Arc::clone(&interner);
         h.bench("select_few_fields/select_2_of_6_fields_100k", move || {
             let projected = apply_select_value(&raw_records, &select_few, &interner);
             black_box(projected);
@@ -116,7 +118,7 @@ fn main() {
     {
         let raw_records = raw_records.clone();
         let select_all = select_all.clone();
-        let interner = interner.clone();
+        let interner = Arc::clone(&interner);
         h.bench(
             "select_then_serialize/select_all_then_serialize_100k",
             move || {

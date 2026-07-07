@@ -82,7 +82,7 @@ fn main() {
     {
         let target_table = target_table.clone();
         h.bench("permission_check/superadmin_table", move || {
-            black_box(sp_super.check(Action::Read, &target_table))
+            black_box(sp_super.check(Action::Read, &target_table));
         });
     }
 
@@ -92,14 +92,14 @@ fn main() {
         let sp_small = sp_small.clone();
         let target_table = target_table.clone();
         h.bench("permission_check/typical_5tables_table_hit", move || {
-            black_box(sp_small.check(Action::Read, &target_table))
+            black_box(sp_small.check(Action::Read, &target_table));
         });
     }
     {
         let sp_small = sp_small.clone();
         let target_db = target_db.clone();
         h.bench("permission_check/typical_5tables_db_hit", move || {
-            black_box(sp_small.check(Action::Read, &target_db))
+            black_box(sp_small.check(Action::Read, &target_db));
         });
     }
 
@@ -108,13 +108,13 @@ fn main() {
     {
         let target_table = target_table.clone();
         h.bench("permission_check/typical_50tables_table_hit", move || {
-            black_box(sp_big.check(Action::Read, &target_table))
+            black_box(sp_big.check(Action::Read, &target_table));
         });
     }
 
     // ─── deny path: action not in role ───────────────────────────
     h.bench("permission_check/typical_5tables_deny", move || {
-        black_box(sp_small.check(Action::ManageUsers, &target_table))
+        black_box(sp_small.check(Action::ManageUsers, &target_table));
     });
 
     h.run();
