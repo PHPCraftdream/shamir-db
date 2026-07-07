@@ -150,7 +150,13 @@ struct IterState {
     sub_id: u64,
 }
 
-const N: usize = 100;
+/// Inserts per measured call.
+///
+/// Kept at 1: the harness (`bench-scale-tool`) owns repetition count via
+/// `--calibrate`, so an artificial inner loop of N sequential single-row
+/// inserts inside one timed call just inflates per-call cost without adding
+/// signal. Each call fires ONE insert + drains ONE event — the cheap unit.
+const N: usize = 1;
 
 async fn setup_iter() -> IterState {
     // Fresh DB + registry per iter so subscription IDs don't pile up.
@@ -243,7 +249,7 @@ fn main() {
     let mut h = Harness::new("subscription_throughput", env!("CARGO_MANIFEST_DIR"));
 
     h.bench_batched_async(
-        "subscription_bridge_throughput/single_sub_filtered_inserts_100",
+        "subscription_bridge_throughput/single_sub_filtered_insert_1",
         setup_iter,
         run_iter,
     );

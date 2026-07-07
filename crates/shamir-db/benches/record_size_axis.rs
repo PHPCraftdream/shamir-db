@@ -63,16 +63,28 @@ const DB: &str = "bench";
 const REPO: &str = "main";
 const TABLE: &str = "blobs";
 
-/// Sizes for the single-string-field variants. 1MB is the upper bound:
-/// some backends configure max-record limits below this; the in-memory
-/// backend used here has no such cap, but if a future change introduces
-/// one this size should be the first to drop.
-const SIZES: &[(usize, &str)] = &[
-    (1_024, "1kb"),
-    (10 * 1_024, "10kb"),
-    (100 * 1_024, "100kb"),
-    (1_024 * 1_024, "1mb"),
-];
+/// Sizes for the single-string-field variants. This axis exists to show
+/// how insert/read cost scales with record size (1kb → 1mb) — a genuine
+/// structural comparison, not an artificial per-op loop the harness's own
+/// repetition count already covers. Default sweep keeps 1kb only (insert
+/// ~3ms, read ~0.05ms); 10kb/100kb/1mb (1mb insert costs ~17ms/call, over
+/// the fast-sweep budget) are opt-in via BENCH_RECORD_SIZE_SCALING=1 so
+/// the size-scaling signal isn't lost, just not in the default fast path.
+fn sizes() -> &'static [(usize, &'static str)] {
+    let wide = std::env::var("BENCH_RECORD_SIZE_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if wide {
+        &[
+            (1_024, "1kb"),
+            (10 * 1_024, "10kb"),
+            (100 * 1_024, "100kb"),
+            (1_024 * 1_024, "1mb"),
+        ]
+    } else {
+        &[(1_024, "1kb")]
+    }
+}
 
 /// Fresh in-memory ShamirDb with one repo + one table named `TABLE`.
 async fn fresh_db() -> Arc<ShamirDb> {
@@ -142,7 +154,7 @@ fn main() {
 
     // ── Group 1: insert_by_size ─────────────────────────────────────────
     // Fresh DB + unique key required every iteration — `bench_batched_async`.
-    for &(size, label) in SIZES {
+    for &(size, label) in sizes() {
         let id = format!("insert_by_size/value_{label}");
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         h.bench_batched_async(
@@ -167,7 +179,7 @@ fn main() {
 
     // ── Group 2: read_by_size ───────────────────────────────────────────
     // Setup (one seeded record) shared across iterations — `bench_async`.
-    for &(size, label) in SIZES {
+    for &(size, label) in sizes() {
         let shamir = rt.block_on(async {
             let s = fresh_db().await;
             let mut bch = Batch::new();

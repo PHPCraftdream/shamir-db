@@ -1,3 +1,7 @@
+// Single-element `for` loops are intentional: the N-ladders were collapsed
+// to their smallest variant when migrating to the fixed-iteration harness,
+// but the loop structure is kept so the ladder can be re-expanded ad-hoc.
+#![allow(clippy::single_element_loop)]
 //! Stage 4.D.6 / 4.H pipeline benchmarks.
 //!
 //! Measures:
@@ -107,7 +111,9 @@ fn main() {
     }
 
     // ── bench_batch_insert_pipeline: N-record execute_batch, tx vs non_tx ──
-    for &n in &[1usize, 10, 100] {
+    // Scaled ladder collapsed to n=1 (smallest variant); the harness owns
+    // repetition count, so each call must stay a cheap unit.
+    for &n in &[1usize] {
         for transactional in [false, true] {
             let label = if transactional { "tx" } else { "non_tx" };
             let repo = make_repo();
@@ -160,7 +166,8 @@ fn main() {
 
     // fire-and-forget variant — same as above but return_result=false,
     // exercising the result_build skip fast-path added in the P8 cycle.
-    for &n in &[1usize, 10, 100] {
+    // Scaled ladder collapsed to n=1 (smallest variant).
+    for &n in &[1usize] {
         for transactional in [false, true] {
             let label = if transactional { "tx" } else { "non_tx" };
             let repo = make_repo();
@@ -219,7 +226,9 @@ fn main() {
     // outlives any single setup call, so it's held above the harness
     // registration, matching the original `iter_counter` shared across all
     // Criterion samples including warmup).
-    for &n in &[100usize, 1000] {
+    // Scaled ladder collapsed to n=100 (smallest variant); n=1000 was
+    // ~25ms/call, above the ≤10ms budget the harness now expects.
+    for &n in &[100usize] {
         for transactional in [false, true] {
             let label = if transactional { "tx" } else { "non_tx" };
 
@@ -332,7 +341,8 @@ fn main() {
     }
 
     // Phase 2 scaling: Serializable with N read_set entries.
-    for &n in &[10usize, 100, 1000] {
+    // Scaled ladder collapsed to n=10 (smallest variant).
+    for &n in &[10usize] {
         let repo = make_repo();
         {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -365,7 +375,8 @@ fn main() {
     }
 
     // Phase 5 scaling: write N keys into 1 table vs 5 tables.
-    for table_count in [1usize, 5] {
+    // Scaled ladder collapsed to 1 table (smallest variant).
+    for table_count in [1usize] {
         let repo = make_repo();
         {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -422,7 +433,8 @@ fn main() {
             }
         }
 
-        for &n in &[100usize, 1000] {
+        // Scaled ladder collapsed to n=100 (smallest variant).
+        for &n in &[100usize] {
             let stub_repo = make_repo();
             let real_repo = make_repo();
             {
@@ -487,7 +499,13 @@ fn main() {
     // creates a `by_city` index, and runs ONE transactional BatchRequest
     // that inserts `n` rows. All of that (except the actual execute_batch
     // call) is untimed setup.
-    for &n in &[100usize, 1000usize] {
+    //
+    // Scaled ladder collapsed to n=100 (smallest variant). NOTE: cost is
+    // I/O-bound (fjall keyspace init + fsync dominate; n=100 and n=1000
+    // both calibrate to ~1 iter at 0.05s), so reducing N further does not
+    // proportionally reduce measured time — left at n=100 as the smallest
+    // meaningful write batch.
+    for &n in &[100usize] {
         h.bench_batched_async(
             &format!("commit_tx/phase5c_indexed_fjall/{n}"),
             move || async move {
@@ -571,7 +589,12 @@ fn main() {
         };
         use shamir_types::types::record_id::RecordId;
 
-        for &n in &[100usize, 1000usize] {
+        // Scaled ladder collapsed to n=100 (smallest variant). NOTE: the
+        // fjall cells are I/O-bound (fsync dominates; n=100 and n=1000 both
+        // calibrate to ~1 iter at 0.05s), so reducing N further would not
+        // proportionally reduce measured time — left as-is per the I/O
+        // exception. The inmem cells at n=100 are ~1ms (well under budget).
+        for &n in &[100usize] {
             // In-memory backend.
             for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
                 let label = match visibility {

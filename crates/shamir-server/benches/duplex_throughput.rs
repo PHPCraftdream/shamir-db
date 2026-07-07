@@ -214,7 +214,16 @@ async fn run_round(ctx: Arc<ConnectionContext>, frames: Vec<Vec<u8>>) {
 fn main() {
     let mut h = Harness::new("duplex_throughput", env!("CARGO_MANIFEST_DIR"));
 
-    for &n in &[10u32, 32u32] {
+    // N = in-flight request count is a genuine structural axis (pipelining:
+    // does max_in_flight=32 beat lock-step max_in_flight=1?). Default =
+    // smallest tier only (n=4 — cheap even under the 1 ms-per-request
+    // DelayHandler in lock-step mode); set BENCH_DUPLEX_THROUGHPUT_SCALING=1
+    // to run the full ladder.
+    let wide = std::env::var("BENCH_DUPLEX_THROUGHPUT_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let ns: &[u32] = if wide { &[10u32, 32u32] } else { &[4u32] };
+    for &n in ns {
         // --- lock-step: max_in_flight = 1 ---
         {
             let ctx_lockstep = make_ctx(1);

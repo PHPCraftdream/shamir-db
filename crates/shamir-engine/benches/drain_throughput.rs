@@ -9,6 +9,18 @@
 //!
 //! Concurrency levels: {8, 32, 128} writers on a single shared table.
 //!
+//! The writers ladder is a genuine concurrency/contention scaling curve
+//! (sustained ack-throughput under N concurrent committers), so the
+//! larger tiers are NOT deleted. Instead the smallest tier (8 writers)
+//! is the default in the fast sweep, and the full ladder is available
+//! on demand via `BENCH_DRAIN_THROUGHPUT_SCALING=1`. Note: even the
+//! smallest tier calibrates low (1-2 iters at 0.05s) because each
+//! iteration provisions a FRESH tempdir + fjall backend — that fs-I/O
+//! setup floor is a legitimate per-call cost that can't be shrunk
+//! without changing the workload's semantics, so it is accepted as a
+//! documented I/O-bound exception rather than forced under the
+//! ~10ms/call target.
+//!
 //! Each iteration provisions a **fresh** tempdir + backend so inter-iter
 //! state bleed is impossible and the table never grows across samples.
 //!
@@ -43,9 +55,20 @@ async fn make_fjall_repo() -> (RepoInstance, tempfile::TempDir) {
 fn main() {
     let mut h = Harness::new("drain_throughput", env!("CARGO_MANIFEST_DIR"));
 
+    // The writers ladder is a genuine concurrency/contention scaling
+    // curve (see module docs). The smallest tier (8 writers) is the
+    // default so the fast sweep stays bounded; the full ladder is
+    // opt-in via `BENCH_DRAIN_THROUGHPUT_SCALING`. Even the smallest
+    // tier is fs-I/O-bound (fresh tempdir + fjall per call) — see the
+    // documented I/O exception in the module docs.
+    let wide = std::env::var("BENCH_DRAIN_THROUGHPUT_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let levels: &[usize] = if wide { &[8, 32, 128] } else { &[8] };
+
     let ctr = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    for &writers in &[8usize, 32, 128] {
+    for &writers in levels {
         let ctr = Arc::clone(&ctr);
         h.bench_batched_async(
             &format!("fjall/{writers}"),

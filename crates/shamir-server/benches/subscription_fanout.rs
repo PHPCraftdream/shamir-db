@@ -397,7 +397,20 @@ fn main() {
         .build()
         .expect("server_rt");
 
-    for &n in &[1usize, 10, 50, 100] {
+    // N = subscriber count is a genuine structural axis (fan-out scaling:
+    // does per-event delivery cost grow linearly or worse with N?).
+    // Default = smallest tier only so each call stays cheap; set
+    // BENCH_SUBSCRIPTION_FANOUT_SCALING=1 to run the full ladder.
+    let wide = std::env::var("BENCH_SUBSCRIPTION_FANOUT_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let ns: &[usize] = if wide {
+        &[1usize, 10, 50, 100]
+    } else {
+        &[1usize]
+    };
+
+    for &n in ns {
         register_fanout_variant(
             &mut h,
             &server_rt,
@@ -409,7 +422,7 @@ fn main() {
         );
     }
 
-    for &n in &[1usize, 10, 50, 100] {
+    for &n in ns {
         register_fanout_variant(
             &mut h,
             &server_rt,
@@ -437,7 +450,7 @@ fn main() {
     // currently blocked by `find_unsupported_subscription_filter`. The `$in`
     // path exercises the `TSet` build + `FilterValue::clone` costs that are
     // eliminated by compile-once caching.)
-    for &n in &[1usize, 10, 50, 100] {
+    for &n in ns {
         let filter = Filter::In {
             field: vec!["body".into()],
             values: (0..10)

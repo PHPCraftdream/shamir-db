@@ -5,15 +5,17 @@
 //! * **Snapshot** (`initial: true`) — on subscribe, the bridge scans the
 //!   target table, emits one `Event` per row, then a terminal `Ready`
 //!   frame. Worst-case latency a client sees before live delivery starts.
-//!   Two table sizes (1k, 10k) sweep the scan cost.
+//!   Table sizes sweep 100 → 10k (smallest tier by default; set
+//!   `BENCH_SUBSCRIPTION_DELIVERY_SCALING=1` for the full ladder) to
+//!   characterise the scan cost.
 //!
 //! * **Reactive batch** (`DeliverMode::Batch(SubBatchOp)`) — on every
 //!   change the server clones `bind`, injects `$event.*`, then executes
 //!   the sub-batch and ships its msgpack-encoded `BatchResponse` as the
 //!   Event payload. Integrated cost of `inject_event_bindings` +
 //!   `execute_reactive_batch` + the inner Find + payload assembly +
-//!   push, per change. Single 100-insert variant for apples-to-apples
-//!   comparison with `subscription_bridge_throughput/...inserts_100`.
+//!   push, per change. Single 1-insert variant (the harness owns
+//!   repetition count).
 //!
 //! `DeliverMode::Call` is intentionally NOT benched here: it requires a
 //! registered stored function and there's no in-memory funclib fixture
@@ -359,7 +361,13 @@ async fn snapshot_routine(mut state: SnapshotIterState) {
 // Group 2 — Reactive delivery (Д5: DeliverMode::Batch)
 // =============================================================================
 
-const REACTIVE_N: usize = 100;
+/// Inserts per measured call in the reactive-delivery routine.
+///
+/// Kept at 1: the harness owns repetition count, so an inner loop of N
+/// sequential single-row inserts just inflates per-call cost. Each call
+/// fires ONE insert → triggers ONE reactive sub-batch execution → drains
+/// ONE event. That's the cheap unit of reactive delivery cost.
+const REACTIVE_N: usize = 1;
 
 struct ReactiveIterState {
     handler: ShamirDbHandler,
@@ -474,8 +482,21 @@ fn setup_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
 fn main() {
     let mut h = Harness::new("subscription_delivery", env!("CARGO_MANIFEST_DIR"));
 
-    // -- Group 1: snapshot, n = 1000 / 10000.
-    for &n in &[1000usize, 10_000usize] {
+    // -- Group 1: snapshot, table-size sweep.
+    //
+    // Table size is a genuine structural axis: snapshot delivery scans the
+    // full table and pushes one Event per row, so cost grows linearly with N.
+    // Default = smallest tier only (cheap per call); set
+    // BENCH_SUBSCRIPTION_DELIVERY_SCALING=1 to run the full ladder.
+    let wide = std::env::var("BENCH_SUBSCRIPTION_DELIVERY_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let snapshot_ns: &[usize] = if wide {
+        &[100usize, 1_000, 10_000]
+    } else {
+        &[100usize]
+    };
+    for &n in snapshot_ns {
         // One-shot seed shared across all iterations of this variant.
         let shamir = setup_block_on(make_db_one_repo("app", "main", "messages"));
         let handler = Arc::new(ShamirDbHandler::new(shamir));
@@ -500,9 +521,9 @@ fn main() {
         );
     }
 
-    // -- Group 2: reactive batch inserts, N = 100.
+    // -- Group 2: reactive batch inserts, N = 1.
     h.bench_batched_async(
-        "subscription_reactive/reactive_batch_inserts_100",
+        "subscription_reactive/reactive_batch_insert_1",
         reactive_setup,
         reactive_routine,
     );

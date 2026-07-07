@@ -77,9 +77,13 @@ fn rid_from(i: usize) -> RecordId {
     RecordId(a)
 }
 
-/// The default n-ladder. 1M is opt-in via `BENCH_VECTOR_1M=1` (see module docs).
+/// The default n-ladder. Scaled ladder collapsed to the smallest variant
+/// (10_000, was `[10_000, 100_000]`): the per-call search cost is already
+/// cheap at both rungs (sub-ms for HNSW, ~3.5ms for BruteForce d=768), but
+/// the n=100_000 graph BUILD (untimed setup) takes seconds and slows the
+/// whole bench run. 1M is opt-in via `BENCH_VECTOR_1M=1` (see module docs).
 fn ladder() -> Vec<usize> {
-    let mut rungs: Vec<usize> = vec![10_000, 100_000];
+    let mut rungs: Vec<usize> = vec![10_000];
     if std::env::var("BENCH_VECTOR_1M")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)

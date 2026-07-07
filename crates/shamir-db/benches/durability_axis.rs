@@ -26,6 +26,14 @@
 //! Expect synced timings to vary ~10-20% run to run on Windows. Use the
 //! medians, not the means, when comparing (rerun `--calibrate` if drift
 //! makes the pinned N misleading).
+//!
+//! **Per-call cost exception:** every workload here calibrates to N=1
+//! (~25-50ms per single call) because the timed routine is dominated by
+//! real disk I/O — redb file-create + commit/fsync per iteration. This is
+//! a legitimate I/O/fsync/disk-bound exception to the ≲10ms-per-call
+//! target: the disk cost IS the quantity being measured, not something
+//! tunable by shrinking the row count (n=1/10/100 all cost about the
+//! same, since fsync dominates). Left as-is by design.
 
 use std::hint::black_box;
 use std::sync::Arc;

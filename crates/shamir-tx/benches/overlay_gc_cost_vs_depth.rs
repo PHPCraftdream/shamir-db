@@ -27,7 +27,22 @@ use bench_scale_tool::Harness;
 use bytes::Bytes;
 use shamir_tx::VersionedOverlay;
 
-const DEPTHS: &[usize] = &[1_000, 5_000, 20_000];
+/// The full scaling-curve ladder. Gated behind `BENCH_OVERLAY_GC_SCALING` so
+/// the default run stays cheap (≤~10ms/call): the largest tiers cost tens of
+/// milliseconds per `gc_upto` call, which defeats the fixed-iteration
+/// harness's expectation of a cheap per-call unit. The default keeps only the
+/// smallest depth; opt in with `BENCH_OVERLAY_GC_SCALING=1` to replay the
+/// full depth-vs-cost curve.
+fn depths_for_run() -> &'static [usize] {
+    let wide = std::env::var("BENCH_OVERLAY_GC_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if wide {
+        &[1_000, 5_000, 20_000]
+    } else {
+        &[1_000]
+    }
+}
 
 fn build_overlay(depth: usize) -> VersionedOverlay {
     let ov = VersionedOverlay::new();
@@ -43,8 +58,10 @@ fn build_overlay(depth: usize) -> VersionedOverlay {
 fn main() {
     let mut h = Harness::new("overlay_gc_cost_vs_depth", env!("CARGO_MANIFEST_DIR"));
 
+    let depths = depths_for_run();
+
     // --- overlay_gc_full_purge/depth_<depth> --------------------------------
-    for &depth in DEPTHS {
+    for &depth in depths {
         let id = format!("overlay_gc_full_purge/depth_{depth}");
         h.bench_batched(
             &id,
@@ -63,7 +80,7 @@ fn main() {
     // the whole tree to remove a tiny slice. Stage 1's version-major index
     // makes this O(removed + log N) instead.
     const SLICE: u64 = 100;
-    for &depth in DEPTHS {
+    for &depth in depths {
         let id = format!("overlay_gc_small_slice/depth_{depth}_slice_{SLICE}");
         h.bench_batched(
             &id,

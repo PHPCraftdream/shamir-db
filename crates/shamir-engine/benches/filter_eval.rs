@@ -317,10 +317,17 @@ fn main() {
     //
     // A `$in @ref[].field` filter rebuilds the entire ref-column AND linear-scans
     // it ONCE PER outer record. With M outer rows and K ref rows that's O(M·K).
-    // This group measures the per-N wall time at N ∈ {100, 1000, 10000} to make
-    // the quadratic growth visible, and to verify the curve flattens after the
-    // memoisation fix.
+    // This group measures the per-N wall time to make quadratic growth visible
+    // and verify the curve stays flat after the memoisation fix — N=100 alone
+    // cannot show that shape, so the sweep is a genuine algorithmic-scaling
+    // demonstration, not a cheap-call-repeated-N-times artifact. Default sweep
+    // keeps only N=100 (~12µs/call); N=1000/10000 (the tiers that actually
+    // reveal the O(M·K) curve) are opt-in via BENCH_FILTER_EVAL_SCALING=1 so
+    // the fast default sweep isn't stuck with a multi-ms call.
     // ============================================================================
+    let bench_scaling_tail = std::env::var("BENCH_FILTER_EVAL_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
     let interner2: &'static Interner = Box::leak(Box::new(Interner::new()));
     for k in [
         "id", "name", "age", "score", "active", "email", "tags", "val",
@@ -358,7 +365,12 @@ fn main() {
         interner2,
     )));
 
-    for &n in &[100usize, 1_000, 10_000] {
+    let mut in_ref_ns = vec![100usize];
+    if bench_scaling_tail {
+        in_ref_ns.push(1_000);
+        in_ref_ns.push(10_000);
+    }
+    for n in in_ref_ns {
         let records: &'static Vec<InnerValue> = Box::leak(Box::new(
             (0..n)
                 .map(|i| {

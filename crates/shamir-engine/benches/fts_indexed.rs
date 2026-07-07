@@ -71,8 +71,22 @@ use shamir_types::types::value::InnerValue;
 /// Corpus sizes benched. N=1000 mirrors the predicate-only baseline in
 /// `filter_eval.rs`; N=10_000 widens the asymptotic gap between the
 /// indexed and brute paths (the per-call materialisation tail no longer
-/// dominates at 10k rows).
-const NS: &[usize] = &[1000, 10_000];
+/// dominates at 10k rows) — a genuine algorithmic-scaling comparison, not
+/// a cheap-call-repeated-N-times artifact, so it stays as a sweep rather
+/// than collapsing to one size. Default sweep is N=1000 only (each
+/// brute-force call at N=10_000 costs ~6-7ms, too close to the harness's
+/// ~10ms/call budget for the FAST default); N=10_000 is opt-in via
+/// BENCH_FTS_INDEXED_SCALING=1.
+fn corpus_sizes() -> Vec<usize> {
+    let mut ns = vec![1000];
+    let wide = std::env::var("BENCH_FTS_INDEXED_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if wide {
+        ns.push(10_000);
+    }
+    ns
+}
 
 /// Build a `docs` TableManager populated with `n` records whose
 /// `body` field holds `format!("user-{i}")`. When `with_fts_index` is
@@ -201,7 +215,7 @@ fn main() {
     let q_and = build_query("and");
     let q_or = build_query("or");
 
-    for &n in NS {
+    for n in corpus_sizes() {
         let indexed_table = setup_rt.block_on(build_docs_table(n, true));
         let brute_table = setup_rt.block_on(build_docs_table(n, false));
 

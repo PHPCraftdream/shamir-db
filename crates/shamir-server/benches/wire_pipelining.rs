@@ -189,8 +189,21 @@ fn main() {
     // (Phase 5c+6.5+7 deferred to a tokio::spawn'd background task). The
     // pair side-by-side is the comparison that proves whether the
     // commit_mutex critical section shrink lifts the pipelining ceiling.
+    //
+    // N = concurrent in-flight requests is a genuine structural axis
+    // (pipelining: does throughput scale with concurrency?). Default =
+    // smallest tier only (n=1, a single Execute — cheap); set
+    // BENCH_WIRE_PIPELINING_SCALING=1 to run the full ladder.
+    let wide = std::env::var("BENCH_WIRE_PIPELINING_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let ns: &[usize] = if wide {
+        &[1_usize, 8, 32, 128]
+    } else {
+        &[1_usize]
+    };
     for (mode_label, durability_str) in [("sync", None), ("async_index", Some("async_index"))] {
-        for &n in &[1_usize, 8, 32, 128] {
+        for &n in ns {
             let payloads: Vec<Vec<u8>> = (0..n)
                 .map(|i| execute_bytes_with_durability(i, durability_str))
                 .collect();

@@ -9,6 +9,19 @@
 //!   - `same_table/n_{1,8,32}` — all N writers commit to the SAME table.
 //!   - `disjoint_tables/n_{1,8,32}` — each writer commits to its own table.
 //!
+//! The N ladder is a genuine concurrency/contention scaling curve (the
+//! `same[N]/disjoint[N]` and `disjoint[N]/(N*disjoint[1])` ratios ARE the
+//! measurement — see below), so the larger tiers are NOT deleted.
+//! Instead the smallest tier (N=1) is the default in the fast sweep, and
+//! the full ladder is available on demand via
+//! `BENCH_DURABLE_COMMIT_SCALING=1`. Note: even N=1 calibrates low
+//! (1-2 iters at 0.05s) because each iteration provisions a FRESH
+//! tempdir + fjall backend AND pays a real fsync on commit — that
+//! fs-I/O floor is a legitimate per-call cost (the bench's whole subject
+//! is fsync behaviour) that can't be shrunk without changing the
+//! workload's semantics, so it is accepted as a documented I/O-bound
+//! exception rather than forced under the ~10ms/call target.
+//!
 //! fsync-count: fjall does not expose a public fsync counter. Wall-clock
 //! alone is the signal. At N=1 the per-commit cost is dominated by a
 //! single fsync (~0.5–2 ms on spinning rust, <0.1 ms on NVMe). As N
@@ -65,8 +78,19 @@ async fn make_durable_repo(table_count: usize) -> (RepoInstance, tempfile::TempD
 fn main() {
     let mut h = Harness::new("durable_concurrent_commit", env!("CARGO_MANIFEST_DIR"));
 
+    // The N ladder is a genuine concurrency/contention scaling curve (the
+    // ratios in the module docs ARE the measurement). The smallest tier
+    // (N=1) is the default so the fast sweep stays bounded; the full
+    // ladder is opt-in via `BENCH_DURABLE_COMMIT_SCALING`. Even N=1 is
+    // fs-I/O-bound (fresh tempdir + fjall + real fsync per call) — see
+    // the documented I/O exception in the module docs.
+    let wide = std::env::var("BENCH_DURABLE_COMMIT_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let levels: &[usize] = if wide { &[1, 8, 32] } else { &[1] };
+
     // ── same-table: all N writers commit to `tbl_0` ─────────────────────
-    for &n in &[1usize, 8, 32] {
+    for &n in levels {
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(
             &format!("same_table/n_{n}"),
@@ -101,7 +125,7 @@ fn main() {
     }
 
     // ── disjoint-tables: writer w commits to `tbl_{w}` ──────────────────
-    for &n in &[1usize, 8, 32] {
+    for &n in levels {
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(
             &format!("disjoint_tables/n_{n}"),

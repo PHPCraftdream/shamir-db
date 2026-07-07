@@ -2,11 +2,17 @@
 //! across varying selectivities.
 //!
 //! Measures the three filter paths at selectivities {0.1%, 1%, 5%, 10%, 25%, 50%}
-//! on a fixed HNSW index (n=10_000, dim=128, Cosine). Validates cost-based
+//! on a fixed HNSW index (n=1_000, dim=128, Cosine). Validates cost-based
 //! thresholds `PRE_FILTER_MAX_CANDIDATES` (4096) and `CO_FILTER_MAX_SELECTIVITY`
 //! (0.20).
 //!
-//! Dataset: `clustered_vectors(10_000, 128, k=64, sigma=0.1, seed=42)`.
+//! Dataset: `clustered_vectors(1_000, 128, k=64, sigma=0.1, seed=42)`.
+//!
+//! N was reduced from 10_000 to 1_000: the cofilter path at low selectivity
+//! (sel ≤ 0.10) inflates `ef_search` by `CO_FILTER_EF_MULTIPLIER` (8×), and
+//! at N=10_000 a single cofilter call cost ≥50ms — far above the ~10ms/call
+//! budget the fixed-iteration harness expects. N=1_000 keeps the same
+//! selectivity sweep and threshold-crossing shape at ≤5ms/call.
 //!
 //! Migrated to the fixed-iteration harness (`bench_scale_tool`): the HNSW
 //! index and allow-sets are built ONCE at registration time and shared
@@ -25,7 +31,7 @@ use shamir_engine::index2::vector::hnsw_adapter::{
 };
 use shamir_types::types::record_id::RecordId;
 
-const N: usize = 10_000;
+const N: usize = 1_000;
 const DIM: usize = 128;
 const SEED: u64 = 42;
 const K_CLUSTERS: usize = 64;

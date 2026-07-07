@@ -153,7 +153,10 @@ fn main() {
     // ------------------------------------------------------------------
     {
         let sid = [0xa1u8; 32];
-        for body_size in [16usize, 256, 4096] {
+        // Single small body size — the harness (bench-scale-tool) owns
+        // iteration count, so each registered call must be a cheap unit.
+        {
+            let body_size = 16usize;
             let body = vec![0u8; body_size];
             let env = RequestEnvelope::new(sid, Some(42), body);
             let encoded = env.to_msgpack().unwrap();
@@ -217,7 +220,8 @@ fn main() {
         store.insert(sid, fixture_session(uid));
         let handler = std::sync::Arc::new(EchoHandler);
 
-        for body_size in [16usize, 256, 4096] {
+        {
+            let body_size = 16usize;
             let env = RequestEnvelope::new(sid, Some(7), vec![0xcdu8; body_size]);
             // Pre-encoded msgpack bytes for the view path (simulates a wire
             // buffer freshly read by the framing layer).
@@ -355,7 +359,8 @@ fn main() {
     // ------------------------------------------------------------------
 
     // SHA-256
-    for size in [32usize, 1024] {
+    {
+        let size = 32usize;
         let data = vec![0xabu8; size];
         h.bench(&format!("crypto_primitives/sha256/{size}"), move || {
             let h = sha256(black_box(&data));

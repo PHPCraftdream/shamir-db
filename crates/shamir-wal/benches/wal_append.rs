@@ -105,6 +105,13 @@ fn main() {
     }
 
     // ── file sink, Buffered: write() to page cache, NO fsync ───────────────
+    //
+    // All four tiers are kept because per-call cost is comfortably under the
+    // 10ms unit budget: measured ~86µs (n_1) .. ~331µs (n_64) at the 0.2s
+    // calibration — i.e. n_64 is ~30× cheaper than the ceiling. Cost DOES
+    // rise with N (the leader's batched `write()` grows), but the group-commit
+    // batching keeps it sub-linear (1→64 records is only ~4× the cost), so
+    // even the top tier stays a cheap unit. No reduction needed.
     for &n in CONCURRENCY {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let setup_rt = tokio::runtime::Builder::new_multi_thread()
@@ -132,7 +139,22 @@ fn main() {
     }
 
     // ── file sink, Synced: one fsync per window ────────────────────────────
-    for &n in CONCURRENCY {
+    //
+    // I/O-BOUND EXCEPTION (do NOT shrink N to chase a sub-10ms target here):
+    // every file_synced/* tier costs ~the same regardless of N (~50ms at the
+    // 1.0s calibration, 2.5–5ms at 0.2s — disk-state dependent), because the
+    // cost is dominated by the `fsync()` syscall itself (a real durability
+    // guarantee), NOT by the record count. Shrinking N cannot reduce it; the
+    // only way under ~10ms would be to drop fsync, which is the whole point
+    // of this tier. So the per-call cost is accepted as-is.
+    //
+    // To cut total sweep time we keep ONLY n_1 (the purest single-fsync
+    // signal — one leader, one fsync, zero contention): n_4/n_16/n_64 all
+    // measure the same fsync floor plus a little leader-election + contention
+    // noise that the `mem` and `file_buffered` tiers already characterize, so
+    // they add wall-time without adding signal.
+    {
+        let n: usize = 1;
         let dir = tempfile::TempDir::new().expect("tempdir");
         let setup_rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

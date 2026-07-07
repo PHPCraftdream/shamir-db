@@ -10,9 +10,10 @@
 //! Axes:
 //!   - **Backend:** fjall / in_memory
 //!     (durability OFF or default on each — our WAL is the single owner).
-//!   - **Concurrency:** {8, 32, 128} writers.
-//!   - **Batch size:** {1, 10, 100} rows per commit — single-row is worst case,
-//!     batch is the realistic high-throughput path.
+//!   - **Concurrency:** {8} writers (was {8, 32, 128} — collapsed to the
+//!     smallest variant when migrated to the fixed-iteration harness).
+//!   - **Batch size:** {1} rows per commit (was {1, 10, 100} — collapsed
+//!     to the smallest variant).
 //!
 //! Each cell builds ONE repo upfront (untimed), then runs many iterations
 //! against the SAME repo. The table grows monotonically — that's
@@ -87,8 +88,20 @@ fn main() {
     let mut h = Harness::new("backend_matrix", env!("CARGO_MANIFEST_DIR"));
 
     let backends: &[&'static str] = &["in_memory", "fjall"];
-    let writers_levels: &[usize] = &[8, 32, 128];
-    let batch_sizes: &[usize] = &[1, 10, 100];
+    // This IS a matrix bench — its whole purpose is comparing throughput
+    // across concurrency (writers) × batch-size × backend, a genuine
+    // structural comparison, not an artificial per-op loop the harness's
+    // own repetition count already covers. Default sweep keeps the
+    // smallest cell (writers=8, batch=1, ~0.2-0.8ms/call); the full
+    // `[8,32,128] × [1,10,100]` matrix (some cells up to ~25ms/call —
+    // fjall/w128/b100 is also partially I/O-bound/fsync-dominated) is
+    // opt-in via BENCH_BACKEND_MATRIX_SCALING=1 so the cross-axis
+    // comparison isn't lost, just not in the default fast path.
+    let wide = std::env::var("BENCH_BACKEND_MATRIX_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let writers_levels: &[usize] = if wide { &[8, 32, 128] } else { &[8] };
+    let batch_sizes: &[usize] = if wide { &[1, 10, 100] } else { &[1] };
 
     // Persistent tempdirs must outlive their repo's lifetime across every
     // iteration — kept alive by leaking into a Vec held by main's stack

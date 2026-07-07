@@ -4,6 +4,19 @@
 //!
 //! Measures each backend in isolation, bypassing engine/query layers.
 //! Useful for tracking backend regressions and comparing alternatives.
+//!
+//! # Per-call cost policy
+//!
+//! The bench-scale-tool harness owns repetition count (calibrated via
+//! `--calibrate`), so each registered workload must be a cheap unit
+//! (target: ≤10ms per single call). Workloads that vary along a genuine
+//! structural axis — `scan`/`prefix_scan` corpus size, or `*_many` batch
+//! size — keep their smallest tier as the default and expose larger tiers
+//! behind the `BENCH_STORE_RAW_SCALING=1` opt-in env var.
+//!
+//! Fjall (real on-disk LSM) `scan`/`prefix_scan` are dominated by disk I/O
+//! rather than N; reducing N does not proportionally reduce their measured
+//! time, so they are kept at the default tier with an inline comment.
 
 use bench_scale_tool::Harness;
 use bytes::Bytes;
@@ -13,9 +26,18 @@ use std::sync::Arc;
 const RECORD_SIZE: usize = 256;
 const SEED_COUNT: usize = 1000;
 
-/// Prefix scan dataset: 50k records that share a common 8-byte prefix.
-/// Used by `bench_prefix_scan` to measure the cost of `scan_prefix_stream`.
-const PREFIX_SCAN_N: usize = 50_000;
+/// Default `scan` corpus size (number of records the store is seeded with
+/// before a full `iter_stream` sweep). Small enough that in-memory backends
+/// stay well under 1ms per call.
+const SCAN_N_DEFAULT: usize = 256;
+
+/// Default `prefix_scan` corpus size. Half a thousand shared-prefix records
+/// is enough to exercise the range-seek path cheaply.
+const PREFIX_SCAN_N_DEFAULT: usize = 512;
+
+/// Default batch size for `set_many` / `get_many` / `remove_many`. These are
+/// genuine bulk-throughput axes; the smallest tier is the default.
+const MANY_N_DEFAULT: usize = 10;
 
 fn make_value(i: usize) -> Bytes {
     let mut v = vec![0u8; RECORD_SIZE];
@@ -30,6 +52,46 @@ fn rt() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+/// Opt-in scaling ladder: when `BENCH_STORE_RAW_SCALING` is set to a truthy
+/// value (`1`/`true`/`yes`/`on`), the structural-axis workloads
+/// (`scan`, `prefix_scan`, `set_many`, `get_many`, `remove_many`) run their
+/// full N ladder instead of just the smallest default tier.
+fn scaling_enabled() -> bool {
+    std::env::var("BENCH_STORE_RAW_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Returns the N ladder for `scan` (corpus size being swept).
+fn scan_ns() -> &'static [usize] {
+    static FULL: &[usize] = &[SCAN_N_DEFAULT, 1024, 8192];
+    if scaling_enabled() {
+        FULL
+    } else {
+        &[SCAN_N_DEFAULT]
+    }
+}
+
+/// Returns the N ladder for `prefix_scan` (shared-prefix corpus size).
+fn prefix_scan_ns() -> &'static [usize] {
+    static FULL: &[usize] = &[PREFIX_SCAN_N_DEFAULT, 5000, 50_000];
+    if scaling_enabled() {
+        FULL
+    } else {
+        &[PREFIX_SCAN_N_DEFAULT]
+    }
+}
+
+/// Returns the N ladder for `*_many` bulk operations (batch size).
+fn many_ns() -> &'static [usize] {
+    static FULL: &[usize] = &[MANY_N_DEFAULT, 100, 1000];
+    if scaling_enabled() {
+        FULL
+    } else {
+        &[MANY_N_DEFAULT]
+    }
+}
+
 async fn seed(store: &Arc<dyn Store>, n: usize) -> Vec<shamir_storage::types::RecordKey> {
     let mut keys = Vec::with_capacity(n);
     for i in 0..n {
@@ -39,6 +101,8 @@ async fn seed(store: &Arc<dyn Store>, n: usize) -> Vec<shamir_storage::types::Re
 }
 
 fn bench_insert(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
+    // Single-key insert of a fixed-size record — no N axis; the harness's
+    // calibrated repetition count already covers "do this cheap op N times".
     h.bench_async(&format!("{name}/insert"), move || {
         let s = Arc::clone(&store);
         async move {
@@ -48,6 +112,7 @@ fn bench_insert(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
 }
 
 fn bench_get(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
+    // Single-key get — no N axis (see `bench_insert` rationale).
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
     let key = keys[SEED_COUNT / 2].clone();
@@ -60,114 +125,137 @@ fn bench_get(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     });
 }
 
+/// `scan` — full `iter_stream` sweep over a seeded corpus. Scan cost scales
+/// with corpus size (a genuine structural axis), so the N ladder is exposed
+/// via `BENCH_STORE_RAW_SCALING`.
+///
+/// Note: fjall `scan` is dominated by on-disk I/O (LSM iterator open + page
+/// reads) rather than per-record iteration, so it stays expensive even at the
+/// smallest default tier — that is a real I/O cost, not an N-repeat artifact.
 fn bench_scan(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
-    let rt = rt();
-    rt.block_on(seed(&store, SEED_COUNT));
-    h.bench_async(&format!("{name}/scan"), move || {
-        let s = Arc::clone(&store);
-        async move {
-            use futures::StreamExt;
-            let mut stream = s.iter_stream(256);
-            let mut count = 0u64;
-            while let Some(batch) = stream.next().await {
-                count += batch.unwrap().len() as u64;
+    for &n in scan_ns() {
+        let store = Arc::clone(&store);
+        let rt = rt();
+        rt.block_on(seed(&store, n));
+        h.bench_async(&format!("{name}/scan/{n}"), move || {
+            let s = Arc::clone(&store);
+            async move {
+                use futures::StreamExt;
+                let mut stream = s.iter_stream(256);
+                let mut count = 0u64;
+                while let Some(batch) = stream.next().await {
+                    count += batch.unwrap().len() as u64;
+                }
+                std::hint::black_box(count);
             }
-            std::hint::black_box(count);
-        }
-    });
+        });
+    }
 }
 
-/// Prefix-scan benchmark — measures `scan_prefix_stream` end-to-end throughput
-/// on a 50k-record store where ALL records share an 8-byte prefix.
+/// `prefix_scan` — `scan_prefix_stream` end-to-end over a shared-prefix
+/// corpus. Prefix-scan cost scales with corpus size (structural axis), so the
+/// N ladder is exposed via `BENCH_STORE_RAW_SCALING`.
 ///
-/// This is the worst-case shape for the old full-iter+linear-seek implementation
-/// (O(N²) re-scan on every batch) and the best demonstration of the
-/// range-seek rewrite (O(log N + M) per batch).
+/// The 50_000 tier is the canonical "Op A" before/after metric for the
+/// range-seek rewrite (O(N²) → O(log N + M) per batch); reach it with
+/// `BENCH_STORE_RAW_SCALING=1`.
 ///
-/// `prefix_scan/<backend>/50000` is the canonical Op A before/after metric.
+/// Note: fjall `prefix_scan` is dominated by on-disk I/O rather than N.
 fn bench_prefix_scan(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
-    let rt = rt();
-
-    // Shared 8-byte prefix — every record uses it.
     static PREFIX_BYTES: &[u8] = b"pfxscan_";
-    let prefix = Bytes::from_static(PREFIX_BYTES);
 
-    // Seed PREFIX_SCAN_N records whose keys start with the prefix.
-    // We set explicit keys via `store.set(key, value)` so we control the prefix.
-    rt.block_on(async {
-        // Build keys: prefix (8 bytes) + 8-byte big-endian index.
-        for i in 0..PREFIX_SCAN_N {
-            let mut key = Vec::with_capacity(16);
-            key.extend_from_slice(PREFIX_BYTES);
-            key.extend_from_slice(&(i as u64).to_be_bytes());
-            let rk = shamir_storage::types::RecordKey::from(key);
-            store.set(rk, make_value(i)).await.unwrap();
-        }
-    });
+    for &n in prefix_scan_ns() {
+        let store = Arc::clone(&store);
+        let rt = rt();
 
-    h.bench_async(&format!("{name}/prefix_scan"), move || {
-        use futures::StreamExt;
-        let s = Arc::clone(&store);
-        let pfx = prefix.clone();
-        async move {
-            let mut stream = s.scan_prefix_stream(pfx, 256);
-            let mut count = 0u64;
-            while let Some(batch) = stream.next().await {
-                count += batch.unwrap().len() as u64;
+        // Seed `n` records whose keys share the 8-byte prefix.
+        rt.block_on(async {
+            for i in 0..n {
+                let mut key = Vec::with_capacity(16);
+                key.extend_from_slice(PREFIX_BYTES);
+                key.extend_from_slice(&(i as u64).to_be_bytes());
+                let rk = shamir_storage::types::RecordKey::from(key);
+                store.set(rk, make_value(i)).await.unwrap();
             }
-            std::hint::black_box(count);
-        }
-    });
+        });
+
+        let prefix = Bytes::from_static(PREFIX_BYTES);
+        h.bench_async(&format!("{name}/prefix_scan/{n}"), move || {
+            use futures::StreamExt;
+            let s = Arc::clone(&store);
+            let pfx = prefix.clone();
+            async move {
+                let mut stream = s.scan_prefix_stream(pfx, 256);
+                let mut count = 0u64;
+                while let Some(batch) = stream.next().await {
+                    count += batch.unwrap().len() as u64;
+                }
+                std::hint::black_box(count);
+            }
+        });
+    }
 }
 
+/// `set_many` — bulk write of a batch. Bulk throughput vs batch size is a
+/// genuine structural axis (a single call moves N records), so the N ladder
+/// is exposed via `BENCH_STORE_RAW_SCALING`. The harness's repetition count
+/// covers repeating the same batch; the ladder varies the batch itself.
 fn bench_set_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let batch_size = 100;
-    let items: Vec<_> = keys[..batch_size]
-        .iter()
-        .enumerate()
-        .map(|(i, k)| (k.clone(), make_value(i + SEED_COUNT)))
-        .collect();
-    h.bench_async(&format!("{name}/set_many"), move || {
-        let s = Arc::clone(&store);
-        let items = items.clone();
-        async move {
-            s.set_many(items).await.unwrap();
-        }
-    });
+    for &batch in many_ns() {
+        let store = Arc::clone(&store);
+        let items: Vec<_> = keys[..batch]
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.clone(), make_value(i + SEED_COUNT)))
+            .collect();
+        h.bench_async(&format!("{name}/set_many/{batch}"), move || {
+            let s = Arc::clone(&store);
+            let items = items.clone();
+            async move {
+                s.set_many(items).await.unwrap();
+            }
+        });
+    }
 }
 
+/// `get_many` — bulk point-read of a batch (structural axis; see
+/// `bench_set_many`).
 fn bench_get_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let batch_size = 100;
-    let probe: Vec<_> = keys[..batch_size].to_vec();
-    h.bench_async(&format!("{name}/get_many"), move || {
-        let s = Arc::clone(&store);
-        let probe = probe.clone();
-        async move {
-            s.get_many(probe).await.unwrap();
-        }
-    });
+    for &batch in many_ns() {
+        let store = Arc::clone(&store);
+        let probe: Vec<_> = keys[..batch].to_vec();
+        h.bench_async(&format!("{name}/get_many/{batch}"), move || {
+            let s = Arc::clone(&store);
+            let probe = probe.clone();
+            async move {
+                s.get_many(probe).await.unwrap();
+            }
+        });
+    }
 }
 
+/// `remove_many` — bulk remove of a batch (structural axis; see
+/// `bench_set_many`). The pre-seeded working set means the second iter onward
+/// removes tombstoned keys, but the per-key cost shape (dirty insert + cache
+/// insert + notify) matches a hot-path remove on an existing key.
 fn bench_remove_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
-    // Pre-seed a working set; the bench removes the same set of keys
-    // every iter — the second iter onward they're tombstoned, but the
-    // per-key cost shape (dirty insert + cache insert + notify) is the
-    // same as a hot-path remove on an existing key.
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let batch_size = 100;
-    let probe: Vec<_> = keys[..batch_size].to_vec();
-    h.bench_async(&format!("{name}/remove_many"), move || {
-        let s = Arc::clone(&store);
-        let probe = probe.clone();
-        async move {
-            s.remove_many(probe).await.unwrap();
-        }
-    });
+    for &batch in many_ns() {
+        let store = Arc::clone(&store);
+        let probe: Vec<_> = keys[..batch].to_vec();
+        h.bench_async(&format!("{name}/remove_many/{batch}"), move || {
+            let s = Arc::clone(&store);
+            let probe = probe.clone();
+            async move {
+                s.remove_many(probe).await.unwrap();
+            }
+        });
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -198,7 +286,8 @@ fn make_fjall_store(dir: &std::path::Path) -> Arc<dyn Store> {
     rt.block_on(repo.store_get("bench")).unwrap()
 }
 
-/// Fjall bench — includes the prefix_scan 50k cell (Op A before/after target).
+/// Fjall bench — includes the prefix_scan tiers (Op A before/after target at
+/// the 50_000 rung, behind `BENCH_STORE_RAW_SCALING=1`).
 #[cfg(feature = "fjall")]
 fn bench_fjall(h: &mut Harness) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -208,7 +297,6 @@ fn bench_fjall(h: &mut Harness) {
     bench_get(h, name, Arc::clone(&store));
     bench_scan(h, name, Arc::clone(&store));
     bench_set_many(h, name, Arc::clone(&store));
-    // Op A benchmark: prefix_scan on 50k shared-prefix records.
     bench_prefix_scan(h, name, store);
     // Keep the temp dir alive for the lifetime of the registered closures.
     std::mem::forget(dir);
