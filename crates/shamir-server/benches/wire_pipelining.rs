@@ -144,11 +144,7 @@ fn assert_batch_ok(resp: DbResponse, i: usize) {
 ///
 /// Each task gets its own pre-encoded payload (built outside the timed
 /// section) so encoding cost is excluded.
-async fn run_concurrent_burst(
-    handler: &ShamirDbHandler,
-    session: &Session,
-    payloads: &[Vec<u8>],
-) {
+async fn run_concurrent_burst(handler: &ShamirDbHandler, session: &Session, payloads: &[Vec<u8>]) {
     let n = payloads.len();
     // Use join_all so all N futures are polled concurrently on the same
     // task. The `block_in_place` inside each `handle` call transparently

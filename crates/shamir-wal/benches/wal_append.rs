@@ -43,7 +43,6 @@
 //! (only `replay` decodes), so a fixed filler buffer is a faithful frame.
 
 use std::cell::Cell;
-use std::hint::black_box;
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
@@ -100,7 +99,7 @@ fn main() {
             let base = i * (n as u64) + 1;
             let gc = Arc::clone(&gc);
             async move {
-                black_box(fan_out(gc, n, WalDurability::Buffered, base).await);
+                fan_out(gc, n, WalDurability::Buffered, base).await;
             }
         });
     }
@@ -127,7 +126,7 @@ fn main() {
             let base = i * (n as u64) + 1;
             let gc = Arc::clone(&gc);
             async move {
-                black_box(fan_out(gc, n, WalDurability::Buffered, base).await);
+                fan_out(gc, n, WalDurability::Buffered, base).await;
             }
         });
     }
@@ -152,7 +151,7 @@ fn main() {
             let base = i * (n as u64) + 1;
             let gc = Arc::clone(&gc);
             async move {
-                black_box(fan_out(gc, n, WalDurability::Synced, base).await);
+                fan_out(gc, n, WalDurability::Synced, base).await;
             }
         });
     }

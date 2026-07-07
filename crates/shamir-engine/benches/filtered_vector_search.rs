@@ -116,7 +116,10 @@ fn main() {
                 let hnsw = Arc::clone(&hnsw);
                 let q = q.clone();
                 let candidates = candidates.clone();
-                async move { hnsw.search_prefilter(&q, TOP_K, &candidates).await.unwrap() }
+                async move {
+                    let out = hnsw.search_prefilter(&q, TOP_K, &candidates).await.unwrap();
+                    std::hint::black_box(out);
+                }
             });
         }
 
@@ -130,9 +133,11 @@ fn main() {
                 let q = q.clone();
                 let candidates = candidates.clone();
                 async move {
-                    hnsw.search_cofilter(&q, TOP_K, None, &candidates)
+                    let out = hnsw
+                        .search_cofilter(&q, TOP_K, None, &candidates)
                         .await
-                        .unwrap()
+                        .unwrap();
+                    std::hint::black_box(out);
                 }
             });
         }
@@ -158,7 +163,7 @@ fn main() {
                         candidates.iter().copied().collect();
                     results.retain(|(rid, _)| allow.contains(rid));
                     results.truncate(TOP_K as usize);
-                    results
+                    std::hint::black_box(results);
                 }
             });
         }

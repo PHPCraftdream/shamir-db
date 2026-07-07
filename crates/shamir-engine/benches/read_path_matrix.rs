@@ -44,8 +44,17 @@ fn parse_bool_env(name: &str) -> bool {
 }
 
 fn table_sizes() -> Vec<usize> {
-    let mut sizes = vec![10_000, 100_000, 1_000_000];
+    // Default tiers capped at 3_000 (were 10_000/100_000): full-table
+    // no-index scans in this matrix are O(n), and at 100_000 a single
+    // scan call already cost multiple seconds — far past the ~10ms/call
+    // budget the harness now expects (it owns repetition count
+    // externally). Large-N behavior is still available on demand via
+    // `BENCH_READ_PATH_HUGE`, just not part of the default fast sweep.
+    let mut sizes = vec![1_000, 3_000];
     if parse_bool_env("BENCH_READ_PATH_HUGE") {
+        sizes.push(10_000);
+        sizes.push(100_000);
+        sizes.push(1_000_000);
         sizes.push(10_000_000);
     }
     sizes

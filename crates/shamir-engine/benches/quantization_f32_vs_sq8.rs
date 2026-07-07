@@ -282,7 +282,10 @@ fn main() {
         move || {
             let a = Arc::clone(&f32_adapter);
             let q = q.clone();
-            async move { a.search(&q, TOP_K, opts, None).await.unwrap() }
+            async move {
+                let out = a.search(&q, TOP_K, opts, None).await.unwrap();
+                std::hint::black_box(out);
+            }
         }
     });
 
@@ -292,7 +295,10 @@ fn main() {
         move || {
             let a = Arc::clone(&sq8_adapter);
             let q = q.clone();
-            async move { a.search(&q, TOP_K, opts, None).await.unwrap() }
+            async move {
+                let out = a.search(&q, TOP_K, opts, None).await.unwrap();
+                std::hint::black_box(out);
+            }
         }
     });
 

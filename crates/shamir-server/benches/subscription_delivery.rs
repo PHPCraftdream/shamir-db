@@ -24,15 +24,20 @@
 //! Everything is built via the typed `shamir-query-builder` API; the
 //! frame-capture / mpsc / settle-delay scaffolding mirrors
 //! `subscription_throughput.rs` line-for-line so numbers are comparable.
+//!
+//! Both groups need per-iteration fresh state (a fresh subscription so
+//! the registry doesn't accumulate across samples for snapshot; a fresh
+//! DB + registry so subscription ids/changefeed watermarks don't
+//! accumulate for reactive) — both use `bench_batched_async`.
 
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 
-use shamir_bench_utils as bu;
 use shamir_collections::new_map;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -277,186 +282,230 @@ async fn seed_table(
 // Group 1 — Snapshot delivery (Д4)
 // =============================================================================
 
-fn bench_snapshot(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_snapshot");
-    g.sample_size(bu::sample_size(10));
+/// Handler + seeded table shared across every iteration of one `n` variant
+/// (seeding happens once, outside the timed loop).
+struct SnapshotShared {
+    handler: Arc<ShamirDbHandler>,
+    n: usize,
+}
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
+struct SnapshotIterState {
+    handler: Arc<ShamirDbHandler>,
+    session: Session,
+    conn: ConnectionServices,
+    registry: Arc<SubscriptionRegistry>,
+    rx: UnboundedReceiver<Vec<u8>>,
+    sub_id: u64,
+    n: usize,
+}
 
-    // Each variant seeds ONCE outside the measured loop; each iteration
-    // attaches a fresh `initial: true` subscription, drains N Events +
-    // Ready, then unsubscribes so the registry doesn't accumulate across
-    // the 100-sample run.
-    for &n in &[1000usize, 10_000usize] {
-        let label = format!("n_{n}");
-        g.throughput(Throughput::Elements(n as u64));
+async fn snapshot_setup(shared: Arc<SnapshotShared>) -> SnapshotIterState {
+    let s = fixture_session();
+    // Fresh push channel + registry per iter so the measurement isolates
+    // one snapshot delivery and memory doesn't pile up across samples.
+    let (push, rx) = capture();
+    let registry = Arc::new(SubscriptionRegistry::new());
+    let conn = conn_with(push, registry.clone());
 
-        // One-shot seed shared across all iterations of this variant.
-        let shamir = rt.block_on(make_db_one_repo("app", "main", "messages"));
-        let handler = ShamirDbHandler::new(shamir);
-        let seed_sess = fixture_session();
-        let (push_seed, _rx_seed) = capture();
-        let registry_seed = Arc::new(SubscriptionRegistry::new());
-        let conn_seed = conn_with(push_seed, registry_seed);
-        rt.block_on(seed_table(
-            &handler, &seed_sess, &conn_seed, "app", "messages", n,
-        ));
+    let sub_op = Subscribe::table(TableRef::with_repo("main", "messages"))
+        .with_initial()
+        .build();
+    let sub_id = subscribe_and_get_id(&shared.handler, &s, &conn, "app", sub_op).await;
 
-        let handler = Arc::new(handler);
-
-        g.bench_function(&label, |b| {
-            b.iter_custom(|iters| {
-                let handler = handler.clone();
-                rt.block_on(async move {
-                    let s = fixture_session();
-                    let mut total = std::time::Duration::ZERO;
-                    for _ in 0..iters {
-                        // Fresh push channel + registry per iter so the
-                        // measurement isolates one snapshot delivery and
-                        // memory doesn't pile up across samples.
-                        let (push, mut rx) = capture();
-                        let registry = Arc::new(SubscriptionRegistry::new());
-                        let conn = conn_with(push, registry.clone());
-
-                        let sub_op = Subscribe::table(TableRef::with_repo("main", "messages"))
-                            .with_initial()
-                            .build();
-
-                        let start = std::time::Instant::now();
-                        let sub_id = subscribe_and_get_id(&handler, &s, &conn, "app", sub_op).await;
-                        let (got, ready) =
-                            drain_snapshot(&mut rx, sub_id, n, Duration::from_secs(30)).await;
-                        let elapsed = start.elapsed();
-                        assert!(ready, "snapshot did not terminate with Ready frame");
-                        assert_eq!(got, n, "snapshot Event count mismatch: got {got}/{n}");
-                        total += elapsed;
-                        black_box((sub_id, got));
-
-                        // Tear the subscription down so the registry stays empty.
-                        let mut ub = Batch::new();
-                        ub.id(99);
-                        ub.unsubscribe("u", sub_id);
-                        let _ = handler
-                            .handle(&s, &encode(&execute_built("app", ub.build())), &conn)
-                            .await
-                            .unwrap();
-                        debug_assert_eq!(registry.count(), 0);
-                    }
-                    total
-                })
-            });
-        });
+    SnapshotIterState {
+        handler: shared.handler.clone(),
+        session: s,
+        conn,
+        registry,
+        rx,
+        sub_id,
+        n: shared.n,
     }
+}
 
-    g.finish();
+async fn snapshot_routine(mut state: SnapshotIterState) {
+    let (got, ready) = drain_snapshot(
+        &mut state.rx,
+        state.sub_id,
+        state.n,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert!(ready, "snapshot did not terminate with Ready frame");
+    assert_eq!(
+        got, state.n,
+        "snapshot Event count mismatch: got {got}/{}",
+        state.n
+    );
+    black_box((state.sub_id, got));
+
+    // Tear the subscription down so the registry stays empty.
+    let mut ub = Batch::new();
+    ub.id(99);
+    ub.unsubscribe("u", state.sub_id);
+    let _ = state
+        .handler
+        .handle(
+            &state.session,
+            &encode(&execute_built("app", ub.build())),
+            &state.conn,
+        )
+        .await
+        .unwrap();
+    debug_assert_eq!(state.registry.count(), 0);
 }
 
 // =============================================================================
 // Group 2 — Reactive delivery (Д5: DeliverMode::Batch)
 // =============================================================================
 
-fn bench_reactive(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_reactive");
-    const N: usize = 100;
-    g.throughput(Throughput::Elements(N as u64));
-    g.sample_size(bu::sample_size(10));
+const REACTIVE_N: usize = 100;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    g.bench_function("reactive_batch_inserts_100", |b| {
-        b.iter_custom(|iters| {
-            rt.block_on(async move {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    // Fresh DB + registry per iter — keeps subscription ids
-                    // and changefeed watermarks from accumulating.
-                    let shamir = make_db_two_tables("app", "main", "messages", "threads").await;
-                    let handler = ShamirDbHandler::new(shamir);
-                    let s = fixture_session();
-
-                    // Seed a few `threads` rows so the inner Find has work
-                    // to do (mirrors the typical reactive pattern: every
-                    // new message → fetch its thread).
-                    let (push_seed, _rx_seed) = capture();
-                    let registry_seed = Arc::new(SubscriptionRegistry::new());
-                    let conn_seed = conn_with(push_seed, registry_seed);
-                    for i in 0..8 {
-                        let mut wb = Batch::new();
-                        wb.id((i as u64) + 1);
-                        wb.insert(
-                            "ins",
-                            insert("threads").row(
-                                doc! { "_id" => format!("t{i}") }
-                                    .set("title", format!("thread-{i}")),
-                            ),
-                        );
-                        let _ = handler
-                            .handle(&s, &encode(&execute_built("app", wb.build())), &conn_seed)
-                            .await
-                            .unwrap();
-                    }
-
-                    let (push, mut rx) = capture();
-                    let registry = Arc::new(SubscriptionRegistry::new());
-                    let conn = conn_with(push, registry.clone());
-
-                    // Build the reactive sub-batch via typed builders:
-                    // Find all threads on every event.
-                    let mut inner = Batch::new();
-                    inner.id(0);
-                    inner.query("threads", Query::with_repo("main", "threads"));
-                    inner.return_all();
-                    let sub_batch = SubBatchOp {
-                        batch: inner.build(),
-                        bind: new_map(),
-                    };
-
-                    let sub_op = Subscribe::table(TableRef::with_repo("main", "messages"))
-                        .deliver_batch(sub_batch)
-                        .build();
-                    let sub_id = subscribe_and_get_id(&handler, &s, &conn, "app", sub_op).await;
-
-                    // Let the bridge attach.
-                    tokio::time::sleep(Duration::from_millis(80)).await;
-
-                    let start = std::time::Instant::now();
-                    for i in 0..N {
-                        let mut wb = Batch::new();
-                        wb.id((i as u64) + 1000);
-                        wb.insert(
-                            "ins",
-                            insert("messages").row(
-                                doc! { "_id" => format!("m{i}") }
-                                    .set("thread_id", (i as i64) % 8)
-                                    .set("body", format!("reactive-{i}")),
-                            ),
-                        );
-                        let _ = handler
-                            .handle(&s, &encode(&execute_built("app", wb.build())), &conn)
-                            .await
-                            .unwrap();
-                    }
-                    let got = drain_events_for(&mut rx, sub_id, N, Duration::from_secs(30)).await;
-                    let elapsed = start.elapsed();
-                    assert_eq!(got, N, "reactive delivery lost events: got {got}/{N}");
-                    total += elapsed;
-                    black_box(sub_id);
-                }
-                total
-            })
-        });
-    });
-
-    g.finish();
+struct ReactiveIterState {
+    handler: ShamirDbHandler,
+    session: Session,
+    conn: ConnectionServices,
+    rx: UnboundedReceiver<Vec<u8>>,
+    sub_id: u64,
 }
 
-criterion_group!(benches, bench_snapshot, bench_reactive);
-criterion_main!(benches);
+async fn reactive_setup() -> ReactiveIterState {
+    // Fresh DB + registry per iter — keeps subscription ids and
+    // changefeed watermarks from accumulating.
+    let shamir = make_db_two_tables("app", "main", "messages", "threads").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let s = fixture_session();
+
+    // Seed a few `threads` rows so the inner Find has work to do (mirrors
+    // the typical reactive pattern: every new message → fetch its thread).
+    let (push_seed, _rx_seed) = capture();
+    let registry_seed = Arc::new(SubscriptionRegistry::new());
+    let conn_seed = conn_with(push_seed, registry_seed);
+    for i in 0..8 {
+        let mut wb = Batch::new();
+        wb.id((i as u64) + 1);
+        wb.insert(
+            "ins",
+            insert("threads")
+                .row(doc! { "_id" => format!("t{i}") }.set("title", format!("thread-{i}"))),
+        );
+        let _ = handler
+            .handle(&s, &encode(&execute_built("app", wb.build())), &conn_seed)
+            .await
+            .unwrap();
+    }
+
+    let (push, rx) = capture();
+    let registry = Arc::new(SubscriptionRegistry::new());
+    let conn = conn_with(push, registry.clone());
+
+    // Build the reactive sub-batch via typed builders: Find all threads
+    // on every event.
+    let mut inner = Batch::new();
+    inner.id(0);
+    inner.query("threads", Query::with_repo("main", "threads"));
+    inner.return_all();
+    let sub_batch = SubBatchOp {
+        batch: inner.build(),
+        bind: new_map(),
+    };
+
+    let sub_op = Subscribe::table(TableRef::with_repo("main", "messages"))
+        .deliver_batch(sub_batch)
+        .build();
+    let sub_id = subscribe_and_get_id(&handler, &s, &conn, "app", sub_op).await;
+
+    // Let the bridge attach.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    ReactiveIterState {
+        handler,
+        session: s,
+        conn,
+        rx,
+        sub_id,
+    }
+}
+
+async fn reactive_routine(mut state: ReactiveIterState) {
+    for i in 0..REACTIVE_N {
+        let mut wb = Batch::new();
+        wb.id((i as u64) + 1000);
+        wb.insert(
+            "ins",
+            insert("messages").row(
+                doc! { "_id" => format!("m{i}") }
+                    .set("thread_id", (i as i64) % 8)
+                    .set("body", format!("reactive-{i}")),
+            ),
+        );
+        let _ = state
+            .handler
+            .handle(
+                &state.session,
+                &encode(&execute_built("app", wb.build())),
+                &state.conn,
+            )
+            .await
+            .unwrap();
+    }
+    let got = drain_events_for(
+        &mut state.rx,
+        state.sub_id,
+        REACTIVE_N,
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(
+        got, REACTIVE_N,
+        "reactive delivery lost events: got {got}/{REACTIVE_N}"
+    );
+    black_box(state.sub_id);
+}
+
+fn setup_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(fut)
+}
+
+fn main() {
+    let mut h = Harness::new("subscription_delivery", env!("CARGO_MANIFEST_DIR"));
+
+    // -- Group 1: snapshot, n = 1000 / 10000.
+    for &n in &[1000usize, 10_000usize] {
+        // One-shot seed shared across all iterations of this variant.
+        let shamir = setup_block_on(make_db_one_repo("app", "main", "messages"));
+        let handler = Arc::new(ShamirDbHandler::new(shamir));
+        let seed_sess = fixture_session();
+        let (push_seed, _rx_seed) = capture();
+        let registry_seed = Arc::new(SubscriptionRegistry::new());
+        let conn_seed = conn_with(push_seed, registry_seed);
+        setup_block_on(seed_table(
+            &handler, &seed_sess, &conn_seed, "app", "messages", n,
+        ));
+
+        let shared = Arc::new(SnapshotShared {
+            handler: handler.clone(),
+            n,
+        });
+
+        let id = format!("subscription_snapshot/n_{n}");
+        h.bench_batched_async(
+            &id,
+            move || snapshot_setup(shared.clone()),
+            snapshot_routine,
+        );
+    }
+
+    // -- Group 2: reactive batch inserts, N = 100.
+    h.bench_batched_async(
+        "subscription_reactive/reactive_batch_inserts_100",
+        reactive_setup,
+        reactive_routine,
+    );
+
+    h.run();
+}

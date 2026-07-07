@@ -199,45 +199,39 @@ fn main() {
 
     // Scenario A: one big string field, 10KB.
     let (db_a, bytes_a) = rt.block_on(capture_change_bytes(one_big_row("k", 10 * 1_024)));
-    h.bench_async(
-        "decode_record_value_qv_large/string_10kb",
-        move || {
-            let db = Arc::clone(&db_a);
-            let bytes = bytes_a.clone();
-            async move {
-                let v = db
-                    .decode_record_value_query_value(
-                        black_box(DB),
-                        black_box(REPO),
-                        black_box(TABLE),
-                        black_box(&bytes),
-                    )
-                    .await;
-                black_box(v);
-            }
-        },
-    );
+    h.bench_async("decode_record_value_qv_large/string_10kb", move || {
+        let db = Arc::clone(&db_a);
+        let bytes = bytes_a.clone();
+        async move {
+            let v = db
+                .decode_record_value_query_value(
+                    black_box(DB),
+                    black_box(REPO),
+                    black_box(TABLE),
+                    black_box(&bytes),
+                )
+                .await;
+            black_box(v);
+        }
+    });
 
     // Scenario B: one big string field, 100KB.
     let (db_b, bytes_b) = rt.block_on(capture_change_bytes(one_big_row("k", 100 * 1_024)));
-    h.bench_async(
-        "decode_record_value_qv_large/string_100kb",
-        move || {
-            let db = Arc::clone(&db_b);
-            let bytes = bytes_b.clone();
-            async move {
-                let v = db
-                    .decode_record_value_query_value(
-                        black_box(DB),
-                        black_box(REPO),
-                        black_box(TABLE),
-                        black_box(&bytes),
-                    )
-                    .await;
-                black_box(v);
-            }
-        },
-    );
+    h.bench_async("decode_record_value_qv_large/string_100kb", move || {
+        let db = Arc::clone(&db_b);
+        let bytes = bytes_b.clone();
+        async move {
+            let v = db
+                .decode_record_value_query_value(
+                    black_box(DB),
+                    black_box(REPO),
+                    black_box(TABLE),
+                    black_box(&bytes),
+                )
+                .await;
+            black_box(v);
+        }
+    });
 
     // Scenario C: ~10KB total spread across ~50 fields — distinct
     // interner pressure (many string-key lookups vs one big value).

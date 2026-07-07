@@ -42,7 +42,11 @@ fn seed(n: usize) -> (Arc<Interner>, Vec<String>, Vec<InternerKey>) {
 
 /// Run one stress window: spawn `threads` workers hammering `body` for
 /// ~50ms, join, and print the aggregate ops/sec.
-fn stress_window(label: &str, threads: usize, mut spawn_one: impl FnMut(usize, Arc<AtomicUsize>, Arc<AtomicBool>) -> std::thread::JoinHandle<()>) {
+fn stress_window(
+    label: &str,
+    threads: usize,
+    mut spawn_one: impl FnMut(usize, Arc<AtomicUsize>, Arc<AtomicBool>) -> std::thread::JoinHandle<()>,
+) {
     let target = Duration::from_millis(50);
     let counter = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));

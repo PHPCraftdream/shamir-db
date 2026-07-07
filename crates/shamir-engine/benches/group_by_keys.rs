@@ -138,7 +138,13 @@ fn main() {
         let group_by_age = group_by_age.clone();
         let select = select.clone();
         h.bench("apply_group_by/by_int_100_groups", move || {
-            black_box(apply_group_by(records, &group_by_age, &select, interner, ctx))
+            black_box(apply_group_by(
+                records,
+                &group_by_age,
+                &select,
+                interner,
+                ctx,
+            ));
         });
     }
     {
@@ -151,7 +157,7 @@ fn main() {
                 &select,
                 interner,
                 ctx,
-            ))
+            ));
         });
     }
     {
@@ -164,7 +170,7 @@ fn main() {
                 &select,
                 interner,
                 ctx,
-            ))
+            ));
         });
     }
 
@@ -180,7 +186,7 @@ fn main() {
                 &select_multi,
                 interner,
                 ctx,
-            ))
+            ));
         });
     }
 
@@ -196,7 +202,7 @@ fn main() {
                 &select_multi,
                 interner,
                 ctx,
-            ))
+            ));
         },
     );
 

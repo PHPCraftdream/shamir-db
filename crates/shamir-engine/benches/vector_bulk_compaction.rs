@@ -125,11 +125,12 @@ fn main() {
                     async move { batch }
                 },
                 move |batch| async move {
-                    let adapter = HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
+                    let adapter =
+                        HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
                     for (rid, vec) in &batch {
                         adapter.upsert(*rid, vec).await.unwrap();
                     }
-                    adapter
+                    std::hint::black_box(adapter);
                 },
             );
         }
@@ -145,9 +146,10 @@ fn main() {
                     async move { batch }
                 },
                 move |batch| async move {
-                    let adapter = HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
+                    let adapter =
+                        HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n));
                     adapter.upsert_batch(&batch).await.unwrap();
-                    adapter
+                    std::hint::black_box(adapter);
                 },
             );
         }
@@ -202,7 +204,7 @@ fn main() {
                 let target =
                     HnswAdapter::new(DIM as u32, VectorMetric::Cosine, hnsw_config(n_live));
                 target.upsert_batch(&live_set).await.unwrap();
-                target
+                std::hint::black_box(target);
             },
         );
     }

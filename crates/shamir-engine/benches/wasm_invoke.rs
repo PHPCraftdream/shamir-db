@@ -93,8 +93,8 @@ fn main() {
             },
             move |(params, ctx, batch)| async move {
                 let engine = Arc::new(WasmEngine::new().unwrap());
-                let wf = WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default())
-                    .unwrap();
+                let wf =
+                    WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default()).unwrap();
                 let result = wf.call(&ctx, &batch, &params).await.unwrap();
                 std::hint::black_box(result);
             },
@@ -144,9 +144,8 @@ fn main() {
         "wasm_compile_cached/cold_cache",
         || Arc::new(WasmEngine::new().unwrap()),
         |engine| {
-            let wf =
-                WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
-                    .unwrap();
+            let wf = WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
+                .unwrap();
             std::hint::black_box(&wf);
         },
     );
@@ -158,15 +157,13 @@ fn main() {
         "wasm_compile_cached/warm_cache",
         || {
             let engine = Arc::new(WasmEngine::new().unwrap());
-            let _warm =
-                WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
-                    .unwrap();
+            let _warm = WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
+                .unwrap();
             engine
         },
         |engine| {
-            let wf =
-                WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
-                    .unwrap();
+            let wf = WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
+                .unwrap();
             std::hint::black_box(&wf);
         },
     );
