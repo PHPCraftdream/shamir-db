@@ -55,6 +55,20 @@ debug = 1
 t  = "nextest run --no-fail-fast"
 tl = "nextest run --lib --no-fail-fast"
 
+# bench-scale-tool's CLI, run via `cargo bench-tool <subcommand> [args]`
+# (e.g. `cargo bench-tool list`, `cargo bench-tool calibrate-to-budget 60`,
+# `cargo bench-tool sweep`) — no `cargo install`, no absolute path to type,
+# no separate binary to keep in sync. `bench-scale-tool` is a sibling
+# path-dependency (see the root Cargo.toml's `[workspace.dependencies]`
+# TEMPORARY note) — hardcoding its checkout path HERE is that same
+# temporary arrangement, not a new one; swap this one line when it
+# publishes as a real crate. `--release` because `[[bin]] bench-cli`
+# builds cargo bench subprocesses of its own — a debug-profile bench-cli
+# wrapping release-profile benches is a pointless slowdown of the wrapper
+# itself, not the benches. The cargo-runner guard below explicitly lets
+# `bench-cli` through by executable name — see that entry's comment.
+bench-tool = "run --manifest-path=D:/dev/rust/bench-scale-tool/Cargo.toml --release --bin bench-cli --"
+
 # ---------------------------------------------------------------------------
 # Cargo runner — perimeter defense.
 #
@@ -64,6 +78,13 @@ tl = "nextest run --lib --no-fail-fast"
 # test process it launches:
 #   - release-profile binaries (bench harnesses) → pass through.
 #   - $NEXTEST set (we are inside a nextest run) → pass through.
+#   - the binary is `bench-cli` (the bench-scale-tool CLI, run via the
+#     `cargo bench-tool` alias below) → pass through. Not a test binary at
+#     all — a workspace-external tooling binary invoked via `cargo run`,
+#     so it never sets `$NEXTEST` or gets a `--bench` arg from cargo the
+#     way `cargo bench` does. Matched by executable basename only (no
+#     argv trust needed): the guard's job is keeping bare `cargo test` out,
+#     not policing what a named, reviewed tool does once let through.
 #   - otherwise (a bare `cargo test`) → print a refusal and exit 2.
 # Gating on nextest's OWN marker means there is no project-specific escape
 # flag to discover or copy — the only way past the guard is to actually use
@@ -71,12 +92,14 @@ tl = "nextest run --lib --no-fail-fast"
 # separate script) so bash always finds it regardless of cargo's cwd.
 # ---------------------------------------------------------------------------
 [target.'cfg(all())']
-# Pass-through (exec the binary) when EITHER:
-#   - any arg is `--bench`  → this is a `cargo bench` run (criterion
-#     harnesses; separator-independent, exact — replaces the earlier
+# Pass-through (exec the binary) when ANY of:
+#   - any arg is `--bench`     → this is a `cargo bench` run (harness
+#     binaries; separator-independent, exact — replaces the earlier
 #     `*/release/*` glob which did not match the mixed forward/back-slash
 #     target-dir path on Windows and wrongly blocked benches), OR
-#   - $NEXTEST is set       → we are inside `cargo nextest` (the marker
-#     nextest sets in every test process it launches).
+#   - $NEXTEST is set          → we are inside `cargo nextest` (the marker
+#     nextest sets in every test process it launches), OR
+#   - $0's basename is `bench-cli`(.exe) → the bench-scale-tool CLI,
+#     reached via `cargo bench-tool ...`.
 # Otherwise this is a bare `cargo test` → refuse with the banner.
-runner = ["bash", "-c", "for a in \"$@\"; do if [ \"$a\" = \"--bench\" ]; then exec \"$0\" \"$@\"; fi; done; if [ -n \"${NEXTEST:-}\" ]; then exec \"$0\" \"$@\"; fi; printf '\\n══════════════════════════════════════════════════════════════════════\\n  STOP  cargo test is blocked here. This is an intentional guard,\\n        NOT an error in your command and NOT a missing tool. Do not\\n        retry the same command and do not try to install anything.\\n\\n  Run tests through the wrapper (it uses cargo-nextest with a\\n  per-test timeout). Pick the narrowest that fits:\\n    ./scripts/test.sh                       # lib tests, all crates\\n    ./scripts/test.sh -p <crate>            # one crate, lib tests\\n    ./scripts/test.sh -p <crate> -- <name>  # one test by name\\n    ./scripts/test.sh --full                # + integration + e2e\\n    cargo t  /  cargo tl                     # aliases (full / lib)\\n\\n  Why blocked: raw cargo test has caused silent multi-hour hangs\\n  (Windows pipe-buffering + e2e deadlocks); the wrapper enforces\\n  timeouts. The guard lets through ONLY cargo-nextest (which sets\\n  the NEXTEST env var) and cargo bench (--bench). See CLAUDE.md.\\n══════════════════════════════════════════════════════════════════════\\n' >&2; exit 2"]
+runner = ["bash", "-c", "case \"$(basename \"$0\")\" in bench-cli|bench-cli.exe) exec \"$0\" \"$@\";; esac; for a in \"$@\"; do if [ \"$a\" = \"--bench\" ]; then exec \"$0\" \"$@\"; fi; done; if [ -n \"${NEXTEST:-}\" ]; then exec \"$0\" \"$@\"; fi; printf '\\n══════════════════════════════════════════════════════════════════════\\n  STOP  cargo test is blocked here. This is an intentional guard,\\n        NOT an error in your command and NOT a missing tool. Do not\\n        retry the same command and do not try to install anything.\\n\\n  Run tests through the wrapper (it uses cargo-nextest with a\\n  per-test timeout). Pick the narrowest that fits:\\n    ./scripts/test.sh                       # lib tests, all crates\\n    ./scripts/test.sh -p <crate>            # one crate, lib tests\\n    ./scripts/test.sh -p <crate> -- <name>  # one test by name\\n    ./scripts/test.sh --full                # + integration + e2e\\n    cargo t  /  cargo tl                     # aliases (full / lib)\\n\\n  Why blocked: raw cargo test has caused silent multi-hour hangs\\n  (Windows pipe-buffering + e2e deadlocks); the wrapper enforces\\n  timeouts. The guard lets through ONLY cargo-nextest (which sets\\n  the NEXTEST env var), cargo bench (--bench), and bench-cli. See CLAUDE.md.\\n══════════════════════════════════════════════════════════════════════\\n' >&2; exit 2"]
