@@ -16,6 +16,22 @@ doctest = false
 name = "shamir-server"
 path = "src/main.rs"
 
+# ── Bench allocator switch ────────────────────────────────────────
+# The `shamir-server` bin (src/main.rs) always uses sefer-alloc
+# (production config) regardless of these features — this only affects
+# the crate's bench binaries via crates/shamir-server/benches/bench_allocator.rs.
+# Exactly ONE of these may be active at a time. Without any — system
+# default (Windows HeapAlloc / glibc malloc). Mirrors shamir-db's switch.
+#
+#   cargo bench -p shamir-server --features bench-sefer          # sefer defaults
+#   cargo bench -p shamir-server --features bench-sefer-tuned    # sefer + LargeCacheConfig
+#   cargo bench -p shamir-server --features bench-mimalloc       # mimalloc
+#   cargo bench -p shamir-server                                 # system
+[features]
+bench-sefer       = []
+bench-sefer-tuned = []
+bench-mimalloc    = ["dep:mimalloc"]
+
 [dependencies]
 shamir-connect = { path = "../shamir-connect", features = ["server", "client", "durable-fjall"] }
 shamir-tunables = { path = "../shamir-tunables" }
@@ -97,10 +113,10 @@ tempfile = "3"
 # docs/perf/sefer-alloc-rollout-2026-06-30.md. The earlier "mimalloc leads
 # +22% on db_handler_rps" note was measured at opt-level=0 (debug) and does
 # not hold at release opt levels.
-#
-# Switched to a local path dependency to track the in-development
-# D:/dev/rust/sefer-alloc checkout instead of the published crates.io release.
-sefer-alloc = { path = "D:/dev/rust/sefer-alloc", features = ["production"] }
+sefer-alloc = { version = "0.2.1", features = ["production"] }
+# Dev-only bench alternative — see the `[features]` bench allocator switch
+# above. Not used by the production `shamir-server` bin.
+mimalloc = { version = "0.1", default-features = false, optional = true }
 
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —

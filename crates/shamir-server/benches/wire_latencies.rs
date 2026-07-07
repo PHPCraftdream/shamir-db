@@ -65,8 +65,7 @@ use zeroize::Zeroizing;
 #[path = "common.rs"]
 mod common;
 
-#[global_allocator]
-static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
+include!("bench_allocator.rs");
 
 // ---------------------------------------------------------------------------
 // Fixtures (mirror tests/interactive_tx_e2e.rs)
