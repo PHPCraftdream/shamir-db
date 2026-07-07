@@ -11,6 +11,22 @@ use crate::subscriptions::{bridge, SubscriptionRegistry};
 
 /// Activates/deactivates subscriptions after a successful batch execute.
 /// Called from handler.rs alongside persist_table_lifecycle.
+///
+/// # CRIT-5 (#439): partial-reject delivery semantics
+///
+/// The client always receives a `sub_id` synchronously here, BEFORE
+/// `bridge_task` runs the per-table read-ACL checks. The bridge silently
+/// excludes any source the actor cannot `read` (see `bridge_task`). This
+/// means a subscription that requested tables the actor has no `read` on
+/// will deliver only the authorized subset — the client gets a `sub_id`
+/// but fewer (or zero) event streams than requested.
+///
+/// A synchronous error to the client for the "all sources denied" case is
+/// NOT possible here without a wider refactor: `authorize_access` is
+/// `async`, but this function is synchronous. The bridge handles the
+/// all-denied case by aborting (no receiver, no push). A future HIGH task
+/// could surface this as a synchronous rejection if `activate_subscriptions`
+/// is made async.
 pub(super) fn activate_subscriptions(
     conn: &ConnectionServices,
     db: &Arc<ShamirDb>,
