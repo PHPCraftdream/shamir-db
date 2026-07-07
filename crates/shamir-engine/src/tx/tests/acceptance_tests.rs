@@ -732,3 +732,122 @@ async fn repro24_concurrent_ssi_storm_multithread() {
         violations
     );
 }
+
+/// CRIT-4 (#438) — write-skew under the lock-free commit path.
+///
+/// The existing `ssi_write_skew_one_aborts` test is strictly sequential
+/// (A fully commits before B starts) and so cannot exercise the
+/// validate→publish window race that the P2c lock-free path opened.
+///
+/// Scenario (from `docs/audits/2026-07-06-concurrency-engine.md` §A1):
+/// two Serializable txs, same snapshot, disjoint write-sets but a
+/// rw-antidependency cycle:
+///   - tx_a reads x, writes y
+///   - tx_b reads y, writes x
+/// `claim_write_set` does not conflict (disjoint keys), and absent
+/// serialization of the validate→publish window both can pass
+/// `pre_commit_locked_validate` and then both publish — violating
+/// Serializable (a cycle of rw-antidependencies).
+///
+/// The barriers force the dangerous interleaving:
+///   1. both txs set up (begin_tx, record_read, stage the write)
+///   2. a single `b_start` barrier releases both into `commit_tx`
+///      simultaneously, maximizing the validate→publish overlap window
+///      on a multi-thread runtime.
+///
+/// WITHOUT the fix (commit_tx_lockfree serializing Serializable txs via
+/// `commit_lock`): both can validate against the pre-publish cell state
+/// and both commit — a Serializable violation.
+///
+/// WITH the fix: the second Serializable committer blocks on
+/// `commit_lock` until the first finishes publishing; its subsequent
+/// read-set validation then sees the first's published version bump and
+/// aborts with `SsiConflict`. Exactly one commits.
+///
+/// Multi-thread runtime so the two txs genuinely run on different worker
+/// threads (the race is scheduler-dependent). Loop internally so a single
+/// test invocation exercises many scheduling outcomes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn crit4_write_skew_lockfree_disjoint_writesets() {
+    use crate::table::table_manager::table_token_for;
+    use tokio::sync::Barrier;
+
+    const ROUNDS: usize = 15;
+
+    let mut violations: Vec<usize> = Vec::new();
+
+    for round in 0..ROUNDS {
+        let repo = make_repo();
+        repo.add_table(crate::table::TableConfig::new("kv"));
+        let tbl = repo.get_table("kv").await.unwrap();
+
+        // Seed two records x and y at the same version.
+        let x = tbl.insert(&InnerValue::Int(10)).await.unwrap();
+        let y = tbl.insert(&InnerValue::Int(10)).await.unwrap();
+
+        let token = table_token_for("kv");
+        let x_bytes = x.to_bytes();
+        let y_bytes = y.to_bytes();
+
+        // `b_start` ensures both spawned tasks have set up (begin_tx,
+        // record_read, staged write) before either enters `commit_tx`,
+        // maximizing the validate→publish overlap window on a multi-
+        // thread runtime.
+        let b_start = Arc::new(Barrier::new(2));
+
+        let repo_a = repo.clone();
+        let tbl_a = tbl.clone();
+        let b_a = b_start.clone();
+        let xa = x_bytes.clone();
+        let h_a = tokio::spawn(async move {
+            // tx_a (Serializable): reads x, writes y.
+            let (mut tx_a, _g) = repo_a.begin_tx(IsolationLevel::Serializable).await.unwrap();
+            tx_a.record_read(token, xa, tx_a.snapshot_version);
+            tbl_a
+                .update_tx(y, &InnerValue::Int(11), Some(&mut tx_a))
+                .await
+                .unwrap();
+            b_a.wait().await;
+            repo_a.commit_tx(tx_a).await
+        });
+
+        let repo_b = repo.clone();
+        let tbl_b = tbl.clone();
+        let b_b = b_start.clone();
+        let yb = y_bytes.clone();
+        let h_b = tokio::spawn(async move {
+            // tx_b (Serializable): reads y, writes x.
+            let (mut tx_b, _g) = repo_b.begin_tx(IsolationLevel::Serializable).await.unwrap();
+            tx_b.record_read(token, yb, tx_b.snapshot_version);
+            tbl_b
+                .update_tx(x, &InnerValue::Int(12), Some(&mut tx_b))
+                .await
+                .unwrap();
+            b_b.wait().await;
+            repo_b.commit_tx(tx_b).await
+        });
+
+        let r_a = h_a.await.unwrap();
+        let r_b = h_b.await.unwrap();
+
+        let a_ok = r_a.is_ok();
+        let b_ok = r_b.is_ok();
+
+        // Serializable guarantee: at most ONE of the two may commit.
+        // Both committing = write-skew (rw-antidependency cycle
+        // committed) = the CRIT-4 bug.
+        if a_ok && b_ok {
+            violations.push(round);
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "CRIT-4 write-skew VIOLATION: in {}/{} rounds BOTH txs committed \
+         (disjoint write-sets, rw-antidependency cycle = Serializable break). \
+         Violating rounds: {:?}",
+        violations.len(),
+        ROUNDS,
+        violations,
+    );
+}
