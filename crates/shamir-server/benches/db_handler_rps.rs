@@ -14,8 +14,7 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 
-#[global_allocator]
-static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
+include!("bench_allocator.rs");
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};

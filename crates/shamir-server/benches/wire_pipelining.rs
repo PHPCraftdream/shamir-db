@@ -63,8 +63,7 @@ use shamir_query_builder::write::upsert;
 
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 
-#[global_allocator]
-static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::new();
+include!("bench_allocator.rs");
 
 // ---------------------------------------------------------------------------
 // Fixtures

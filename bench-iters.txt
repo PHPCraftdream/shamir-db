@@ -440,6 +440,10 @@ select_pipeline::apply_pagination/limit_10_from_1000 = 26
 select_pipeline::apply_pagination/skip_50_limit_100 = 26
 select_pipeline::apply_select_value/5_fields_1000_records = 13
 select_pipeline::apply_select_value/select_all_1000_records = 13
+select_pipeline::read_limit_pushdown/pushdown_active_N=2000 = 442
+select_pipeline::read_limit_pushdown/pushdown_active_N=5000 = 181
+select_pipeline::read_limit_pushdown/pushdown_disabled_N=2000 = 105
+select_pipeline::read_limit_pushdown/pushdown_disabled_N=5000 = 38
 select_projection::select_all/select_all_100k = 1
 select_projection::select_all/select_all_1k = 14
 select_projection::select_few_fields/select_2_of_6_fields_100k = 1
