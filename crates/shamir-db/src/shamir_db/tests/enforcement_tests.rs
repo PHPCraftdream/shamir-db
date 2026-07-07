@@ -1,6 +1,9 @@
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
+// CRIT-6 part B — `Security` declares INVOKER/DEFINER semantics now
+// honoured by `effective_fn_actor`.
+use shamir_engine::function::Security;
 use shamir_types::access::{Action, Actor, Mode, ResourceMeta, ResourcePath};
 
 // ============================================================================
@@ -478,5 +481,173 @@ async fn effective_fn_actor_missing_meta_returns_caller_not_system() {
         effective,
         Actor::System,
         "escalation to System via open()-default must be impossible"
+    );
+}
+
+// ============================================================================
+// CRIT-6 part B / audit #440 — Security::Definer / Invoker enforcement
+// ============================================================================
+//
+// `effective_fn_actor` now consults `FunctionMeta::security` in addition to
+// the legacy POSIX setuid mode bit. Decision table implemented:
+//
+//   security=Definer, any mode      → owner
+//   security=Invoker, setuid set    → owner   (legacy-compat)
+//   security=Invoker, setuid clear  → caller
+
+/// Test helper: persist a function catalogue entry with the given owner,
+/// setuid mode bit, and declared `Security`, then return the `ShamirDb`.
+///
+/// Mirrors the record shape used by `effective_fn_actor_switches_on_setuid`
+/// above, with the addition of an explicit `security` field injected via
+/// `FunctionMeta::inject_into`.
+async fn make_fn_with_security(
+    shamir: &ShamirDb,
+    name: &str,
+    owner: Actor,
+    setuid: bool,
+    security: shamir_engine::function::Security,
+) {
+    use base64::Engine;
+    use shamir_types::types::common::new_map;
+    use shamir_types::types::value::QueryValue;
+
+    let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00asm\x01\x00\x00\x00");
+    let mut fn_rec_map = new_map();
+    fn_rec_map.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fn_rec_map.insert("wasm_b64".to_string(), QueryValue::Str(wasm_b64));
+    fn_rec_map.insert(
+        "owner".to_string(),
+        QueryValue::Int(owner.to_owner_id() as i64),
+    );
+    fn_rec_map.insert("group".to_string(), QueryValue::Null);
+    let mode = if setuid {
+        Mode::with_setuid(0o755, true)
+    } else {
+        0o755
+    };
+    fn_rec_map.insert("mode".to_string(), QueryValue::Int(mode as i64));
+    let mut fn_rec = QueryValue::Map(fn_rec_map);
+    // Inject the declared `security` (and visibility / empty grants) into
+    // the persisted record so `FunctionMeta::from_record` reads it back.
+    shamir_engine::function::FunctionMeta::new(
+        shamir_engine::function::Visibility::Private,
+        security,
+        Vec::new(),
+    )
+    .inject_into(&mut fn_rec);
+
+    shamir
+        .system_store()
+        .save_function(
+            name,
+            &fn_rec,
+            &ResourceMeta {
+                owner,
+                group: None,
+                mode,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// `Security::Definer` ALWAYS escalates to the function owner, even when
+/// the setuid mode bit is NOT set — the explicit declaration is what
+/// drives escalation, not the legacy bit.
+#[tokio::test]
+async fn effective_fn_actor_definer_escalates_without_setuid() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(10);
+    let caller = Actor::User(42);
+
+    make_fn_with_security(
+        &shamir,
+        "definer_fn",
+        owner.clone(),
+        false,
+        Security::Definer,
+    )
+    .await;
+
+    let effective = shamir.effective_fn_actor("definer_fn", &caller).await;
+    assert_eq!(
+        effective, owner,
+        "security=definer must escalate to owner even without setuid"
+    );
+    assert_ne!(effective, caller);
+}
+
+/// `Security::Definer` with the setuid bit ALSO set still escalates (the
+/// bit is redundant under Definer but must not break the path).
+#[tokio::test]
+async fn effective_fn_actor_definer_with_setuid_still_escalates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(11);
+    let caller = Actor::User(42);
+
+    make_fn_with_security(
+        &shamir,
+        "definer_suid_fn",
+        owner.clone(),
+        true,
+        Security::Definer,
+    )
+    .await;
+
+    let effective = shamir.effective_fn_actor("definer_suid_fn", &caller).await;
+    assert_eq!(effective, owner);
+}
+
+/// `Security::Invoker` WITHOUT the setuid bit must NOT escalate — the
+/// caller is returned unchanged. This is the base case and must not
+/// regress pre-CRIT-6 behaviour for the common `invoker` + plain-mode
+/// function.
+#[tokio::test]
+async fn effective_fn_actor_invoker_without_setuid_returns_caller() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(10);
+    let caller = Actor::User(42);
+
+    make_fn_with_security(
+        &shamir,
+        "invoker_fn",
+        owner.clone(),
+        false,
+        Security::Invoker,
+    )
+    .await;
+
+    let effective = shamir.effective_fn_actor("invoker_fn", &caller).await;
+    assert_eq!(effective, caller);
+    assert_ne!(effective, owner);
+}
+
+/// `Security::Invoker` WITH the legacy setuid bit still escalates, per
+/// the chosen legacy-compatible semantics (see the doc note on
+/// `effective_fn_actor`). This preserves backward compatibility for
+/// callers that relied on the setuid bit alone — the primary CRIT-6
+/// defect (`Definer` was ignored) is closed by the
+/// `definer_*` tests above; this case documents the deliberate
+/// legacy-compat carve-out for `Invoker` + setuid.
+#[tokio::test]
+async fn effective_fn_actor_invoker_with_setuid_legacy_escalates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let owner = Actor::User(12);
+    let caller = Actor::User(42);
+
+    make_fn_with_security(
+        &shamir,
+        "invoker_suid_fn",
+        owner.clone(),
+        true,
+        Security::Invoker,
+    )
+    .await;
+
+    let effective = shamir.effective_fn_actor("invoker_suid_fn", &caller).await;
+    assert_eq!(
+        effective, owner,
+        "invoker + legacy setuid bit must still escalate (backward compat)"
     );
 }

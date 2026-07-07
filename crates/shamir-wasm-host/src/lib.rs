@@ -33,7 +33,7 @@ mod scalar;
 mod wasm;
 
 pub use builtin::Argon2idFunction;
-pub use compile::compile_rust_source;
+pub use compile::{compile_rust_source, compile_rust_source_with_timeout, WASM_COMPILE_TIMEOUT};
 pub use context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 pub use contract::ShamirFunction;
 pub use db_gateway::DbGateway;

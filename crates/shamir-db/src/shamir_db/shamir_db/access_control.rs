@@ -1,6 +1,11 @@
 use shamir_collections::TFxMap;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+// CRIT-6 part B / audit #440 — `Security`/`FunctionMeta` carry the
+// declared SECURITY INVOKER / DEFINER semantics; previously dead weight,
+// now consulted by `effective_fn_actor`. Re-exported by `shamir_engine`
+// (which aliases `shamir_wasm_host as function`).
+use shamir_engine::function::{FunctionMeta, Security};
 
 use crate::access::{
     authorize, permits, principal_id, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
@@ -398,17 +403,63 @@ impl ShamirDb {
 
     /// Resolve the effective actor for function invocation.
     ///
-    /// If the function's metadata has the setuid flag set, the function
-    /// runs with its owner's authority (definer rights). Otherwise the
-    /// caller's actor is used unchanged.
+    /// Combines two previously-independent mechanisms into one decision:
+    ///
+    /// - **`FunctionMeta::security`** (CRIT-6 part B / audit #440): the
+    ///   declared `SECURITY INVOKER` / `SECURITY DEFINER` semantics, stored
+    ///   in the catalogue. This is the *modern, explicit* declaration.
+    /// - **The POSIX setuid mode bit** on `ResourceMeta`: a legacy,
+    ///   bit-level escalation flag carried over from the pre-slice-9
+    ///   access model.
+    ///
+    /// # Decision table
+    ///
+    /// | `security`   | setuid bit | effective actor     |
+    /// |--------------|------------|---------------------|
+    /// | `Definer`    | (any)      | function **owner**  |
+    /// | `Invoker`    | set        | function **owner** (legacy) |
+    /// | `Invoker`    | clear      | **caller**          |
+    ///
+    /// ## Why `Definer` always escalates
+    ///
+    /// `SECURITY DEFINER` is an explicit, unconditional request for
+    /// owner-privilege execution (mirrors Postgres `SECURITY DEFINER`):
+    /// the function runs as its owner regardless of the legacy mode bit.
+    /// Before CRIT-6 this declaration was dead weight — it now drives
+    /// the decision.
+    ///
+    /// ## Why `Invoker` still honours the setuid bit
+    ///
+    /// Two design alternatives were considered:
+    ///
+    /// 1. **Strict** — `Invoker` is a hard, unblockable guarantee that the
+    ///    function runs as the caller, ignoring the setuid bit entirely.
+    ///    Most secure in isolation, but it silently changes the runtime
+    ///    behaviour of every pre-existing function whose catalogue row
+    ///    lacks an explicit `security` field (those default to `Invoker`)
+    ///    yet relied on the setuid bit to escalate — a quiet, broad
+    ///    behavioural regression.
+    /// 2. **Legacy-compatible** (chosen) — an explicit `Invoker`
+    ///    declaration still honours the setuid bit, preserving the
+    ///    pre-CRIT-6 behaviour for callers that depended on the mode bit
+    ///    alone. The primary defect (that `Security::Definer` was never
+    ///    applied) is closed because `Definer` now unconditionally
+    ///    escalates. The setuid bit becomes a legacy escalation path that
+    ///    is *redundant* under `Definer` and *preserved* under `Invoker`
+    ///    for backward compatibility.
+    ///
+    /// This keeps the existing setuid-driven test
+    /// (`effective_fn_actor_switches_on_setuid`, which models a function
+    /// with no explicit `security` and the setuid bit set) green while
+    /// still making `Security::Definer` a real, enforced declaration.
     ///
     /// # Fail-closed guarantee
     ///
     /// Privilege escalation only happens when the function record is
-    /// **definitively loaded** from the catalogue with both `setuid` set
-    /// and a real (non-default) owner stored. On any error or
-    /// not-found the caller is returned unchanged — never `Actor::System`
-    /// via a `ResourceMeta::open()` default.
+    /// **definitively loaded** from the catalogue with a real (non-default)
+    /// owner stored. On any error or not-found the caller is returned
+    /// unchanged — never `Actor::System` via a `ResourceMeta::open()`
+    /// default.
     pub async fn effective_fn_actor(&self, fn_name: &str, caller: &Actor) -> Actor {
         // Load the raw function record directly so we can distinguish
         // "record found" from "error / not present" (the latter must not
@@ -416,11 +467,21 @@ impl ShamirDb {
         let Ok(Some(rec)) = self.system_store.load_function(fn_name).await else {
             return caller.clone();
         };
-        let meta = ResourceMeta::from_record(&rec);
-        if Mode::is_setuid(meta.mode) {
-            meta.owner
-        } else {
-            caller.clone()
+        let res_meta = ResourceMeta::from_record(&rec);
+        let fn_meta = FunctionMeta::from_record(&rec);
+        match fn_meta.security {
+            // Explicit definer request → always run as the function owner,
+            // irrespective of the legacy POSIX setuid mode bit.
+            Security::Definer => res_meta.owner,
+            // Explicit (or defaulted) invoker: honour the legacy setuid
+            // bit for backward compatibility — see the doc note above.
+            Security::Invoker => {
+                if Mode::is_setuid(res_meta.mode) {
+                    res_meta.owner
+                } else {
+                    caller.clone()
+                }
+            }
         }
     }
 
