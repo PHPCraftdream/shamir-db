@@ -11,8 +11,9 @@
 //! 4. The durable watermark advances to the visibility watermark after drain.
 
 use bytes::Bytes;
+use shamir_storage::types::KvOp;
 
-use super::helpers::{count_history_entries, make_mvcc};
+use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::version_codec::encode_version_key;
 
 /// Read the raw value stored in history under `encode_version_key(key, v)`.
@@ -179,5 +180,117 @@ async fn drain_advances_durable_watermark() {
     assert_eq!(
         durable, visibility,
         "durable watermark must equal visibility after drain"
+    );
+}
+
+/// CRIT-3 (#437): `drain_to_history` on ONE table must NOT advance the
+/// (repo-shared) durable watermark past a DIFFERENT table's still-undrained
+/// version. `self.gate` is a single `Arc<RepoTxGate>` shared across every
+/// table in a repo (mirrors production: `per_table_mvcc` stores share one
+/// gate) — pre-fix, `drain_to_history` called `gate.mark_durable(visibility)`
+/// where `visibility` is the repo-GLOBAL last_committed, not this table's own
+/// drained versions. If table B commits AFTER table A's last drained
+/// version but BEFORE A's `drain_to_history` runs (the RENAME-race the
+/// audit describes), the pre-fix code would mark B's version durable
+/// despite never having drained B's overlay — opening the door for a
+/// repo-wide overlay GC to erase B's only RAM copy before it ever reaches
+/// history.
+#[tokio::test]
+async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_table() {
+    let gate = make_gate();
+    let table_a = make_mvcc_with_gate(gate.clone());
+    let table_b = make_mvcc_with_gate(gate.clone());
+
+    // Both tables commit via `apply_committed_visible` + a manual
+    // `VersionGuard` — this is the REAL tx-commit ack-path shape (populate
+    // the overlay, mark visibility Materialized) that leaves durability
+    // to a LATER drain (the background Drainer, or here, `drain_to_history`
+    // on RENAME). `set_versioned` (used by the OTHER tests in this file) is
+    // the "non-tx" path and marks `mark_durable` INLINE at write time
+    // (`mvcc_store/mod.rs::set_versioned`) — it would make every version
+    // durable immediately, defeating the whole point of this test (there
+    // would be nothing left "undrained" for table A's drain to wrongly
+    // mark durable).
+    //
+    // Table A commits first (version 1) — visible, NOT durable.
+    let guard_a = table_a.gate.assign_next_version_guarded();
+    let v_a = guard_a.version();
+    table_a.apply_committed_visible(
+        &[KvOp::Set(
+            Bytes::from_static(b"a-key"),
+            Bytes::from_static(b"a-val"),
+        )],
+        v_a,
+    );
+    guard_a.commit();
+
+    // Table B commits second (version 2) — visible, NOT durable. This is
+    // the version drain_to_history on A must NOT mark durable, since A
+    // never touched B's overlay.
+    let guard_b = table_b.gate.assign_next_version_guarded();
+    let v_b = guard_b.version();
+    table_b.apply_committed_visible(
+        &[KvOp::Set(
+            Bytes::from_static(b"b-key"),
+            Bytes::from_static(b"b-val"),
+        )],
+        v_b,
+    );
+    guard_b.commit();
+    assert!(v_b > v_a, "table B's commit must be the later version");
+    assert_eq!(
+        gate.durable_watermark(),
+        0,
+        "test setup: neither commit is durable yet — both are only visible"
+    );
+
+    // Repo-global visibility now covers BOTH tables' versions.
+    assert_eq!(gate.last_committed(), v_b);
+
+    // Drain ONLY table A (the RENAME path drains the table being renamed,
+    // not every table in the repo).
+    table_a.drain_to_history().await.unwrap();
+
+    // THE FIX: the shared durable watermark must NOT have jumped to v_b —
+    // table B's overlay entry was never drained by this call. Pre-fix, this
+    // would have incorrectly advanced to v_b (the repo-global `visibility`
+    // at the time of A's drain).
+    let durable = gate.durable_watermark();
+    assert!(
+        durable < v_b,
+        "CRIT-3 regression: draining table A alone must not mark table B's \
+         undrained version {v_b} durable (got durable_watermark={durable}) — \
+         this would let a repo-wide overlay GC erase B's only RAM copy \
+         before it ever reaches history"
+    );
+    assert_eq!(
+        durable, v_a,
+        "the durable watermark must advance to exactly table A's own \
+         drained version, no further"
+    );
+
+    // Table B's overlay entry must still be present and readable — the
+    // failure mode this guards against is exactly its premature erasure.
+    assert_eq!(
+        table_b.overlay_len(),
+        1,
+        "table B's overlay entry must survive table A's drain untouched"
+    );
+    let b_val = table_b
+        .get_current(Bytes::from_static(b"b-key"))
+        .await
+        .unwrap();
+    assert_eq!(
+        b_val,
+        Some(Bytes::from_static(b"b-val")),
+        "table B's value must still be readable after table A's drain"
+    );
+
+    // Now drain table B too — the shared watermark must catch up to v_b.
+    table_b.drain_to_history().await.unwrap();
+    assert_eq!(
+        gate.durable_watermark(),
+        v_b,
+        "once B is ALSO drained, the shared watermark must advance to v_b"
     );
 }
