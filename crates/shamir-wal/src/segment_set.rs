@@ -142,6 +142,13 @@ impl SegmentSet {
         }
         let active_path = dir.join(seg_file_name(active_seq));
         let active = Arc::new(WalSegment::open(active_path).await?);
+        // Self-heal the active segment (audit §1.3): a prior process crash
+        // mid-write (or a partial write that could not be rolled back) may
+        // have left a torn tail. Sealed segments are fsync'd before sealing
+        // (I4) so a torn tail is impossible there; the active segment is the
+        // only one that can have one. Removing it now keeps the next
+        // `append_batch` window from being stranded behind it on replay.
+        active.repair_torn_tail().await?;
 
         Ok(Self {
             dir,
@@ -154,25 +161,108 @@ impl SegmentSet {
         })
     }
 
-    /// Append a batch to the active segment, then rotate if the active
+    /// Append a batch to the active segment, then rotates if the active
     /// segment crossed `max_bytes`. Rotation is checked AFTER the whole
     /// batch is written so a batch never straddles two files (simplifies
     /// torn-tail handling and max_version accounting — see §4). Returns the
     /// seq assigned to the last entry in the active segment.
+    ///
+    /// **Poison / fault recovery (audit §1.3):** if the active segment is
+    /// already poisoned (a prior write/sync failure) or the append fails
+    /// mid-flight, the segment is sealed-as-poisoned and a brand-new active
+    /// segment is rotated in — then the batch is retried ONCE on the fresh
+    /// file. This breaks the "next leader writes to the same poisoned
+    /// segment" bug: instead of retrying on the known-bad fd, we cut over to
+    /// a fresh file. A second failure (the new segment also fails) is
+    /// surfaced to the caller — we do not loop indefinitely.
     pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
-        // Clone the active Arc under the lock, then release before awaiting.
-        let active = {
+        // Fast path: clone the active Arc under the lock, then release before awaiting.
+        let mut active = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             Arc::clone(&g.active)
         };
-        let last_seq = active.append_batch(payloads, max_version).await?;
-
-        // Rotate iff this segment crossed the threshold. Read len without
-        // holding the lock across the await above.
-        if active.approx_len_bytes() >= self.max_bytes {
-            self.seal_and_rotate().await?;
+        // If the active segment is already poisoned, rotate BEFORE attempting
+        // the append (writing to a poisoned segment always fails), and re-fetch
+        // the freshly-rotated segment so the append below doesn't immediately
+        // fail again on the stale (poisoned) Arc.
+        if active.is_poisoned() {
+            self.rotate_after_poison().await?;
+            let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+            active = Arc::clone(&g.active);
         }
-        Ok(last_seq)
+        // `payloads` is wrapped in an `Arc` ONCE here — the retry-after-poison
+        // path (rare: only on a write/sync failure) then shares the SAME
+        // allocation via a cheap refcount clone, instead of a full deep copy
+        // of the batch on every append (the common, non-retry case pays only
+        // one Arc::new, no data copy at all).
+        let payloads = Arc::new(payloads);
+        match active
+            .append_batch(Arc::clone(&payloads), max_version)
+            .await
+        {
+            Ok(last_seq) => {
+                // Rotate iff this segment crossed the threshold. Read len
+                // without holding the lock across the await above.
+                if active.approx_len_bytes() >= self.max_bytes {
+                    self.seal_and_rotate().await?;
+                }
+                Ok(last_seq)
+            }
+            Err(e) => {
+                // The append failed (write error → the segment poisoned
+                // itself inside WalSegment::append_batch, OR the segment was
+                // poisoned by a prior sync failure between our is_poisoned
+                // check and our call). Rotate to a fresh segment and retry
+                // the batch ONCE so the leader is not stuck on a dead fd.
+                log::error!(
+                    "SegmentSet append failed on active segment; rotating and \
+                     retrying once. Original error: {e}"
+                );
+                self.rotate_after_poison().await?;
+                let active = {
+                    let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+                    Arc::clone(&g.active)
+                };
+                let last_seq = active.append_batch(payloads, max_version).await?;
+                // The freshly-rotated segment is brand new and small — no
+                // size-based rotation check needed here.
+                Ok(last_seq)
+            }
+        }
+    }
+
+    /// Force a rotation because the current active segment is poisoned (a
+    /// write/sync failure quarantined it — audit §1.3). Unlike
+    /// `seal_and_rotate`, this does NOT fsync the segment being sealed (it is
+    /// known-bad; an fsync would either fail again or falsely "succeed"
+    /// without persisting the in-flight window) and does NOT require it to be
+    /// over the size threshold. The poisoned segment is recorded in the
+    /// sealed list with its current `max_version` so it remains replayable
+    /// (its intact prefix is still valid data) and is reclaimable by
+    /// truncation once durable in history — it simply never accepts new
+    /// appends. A subsequent power-loss replays its intact prefix; the torn
+    /// tail, if any, was already truncated by `WalSegment::append_batch`'s
+    /// rollback (or will be healed by `repair_torn_tail` on next open).
+    async fn rotate_after_poison(&self) -> DbResult<()> {
+        let (sealed_seq, sealed_max, next_seq) = {
+            let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+            (g.active_seq, g.active.max_committed(), g.active_seq + 1)
+        };
+        let sealed_path = self.dir.join(seg_file_name(sealed_seq));
+        let new_active = Arc::new(WalSegment::open(self.dir.join(seg_file_name(next_seq))).await?);
+        let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+        // Re-check: another rotation may have advanced active past us.
+        if g.active_seq != sealed_seq {
+            return Ok(()); // someone else already rotated
+        }
+        g.sealed.push(SealedMeta {
+            seq: sealed_seq,
+            path: sealed_path,
+            max_version: sealed_max,
+        });
+        g.active = new_active;
+        g.active_seq = next_seq;
+        Ok(())
     }
 
     /// Seal the current active segment (record its metadata in the sealed

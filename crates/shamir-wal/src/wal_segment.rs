@@ -17,7 +17,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use shamir_storage::error::{DbError, DbResult};
@@ -72,6 +72,12 @@ pub struct WalSegment {
     /// freshly created segment (does not account for a pre-existing file's
     /// bytes, which is fine — rotation only needs a monotonic growth signal).
     bytes_written: AtomicU64,
+    /// Quarantine flag — set when a `write_all` or `sync_all` on this segment
+    /// failed (audit §1.3). Once poisoned, the segment refuses further appends
+    /// so the leader rotates to a brand-new file instead of stranding later
+    /// acked commits behind a torn tail. A poisoned segment is never un-poisoned
+    /// in-process — recovery on next open rebuilds from disk state.
+    poisoned: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -102,6 +108,7 @@ impl WalSegment {
             next_seq: AtomicU64::new(0),
             max_committed: AtomicU64::new(0),
             bytes_written: AtomicU64::new(existing_len),
+            poisoned: AtomicBool::new(false),
         })
     }
 
@@ -109,7 +116,24 @@ impl WalSegment {
     /// flushing to the OS (level 2) but NOT fsync'ing. Returns the seq
     /// assigned to the LAST entry. Batching amortises the spawn_blocking
     /// hop across all concurrent committers funnelled by the leader.
-    pub async fn append_batch(&self, payloads: Vec<Vec<u8>>, max_version: u64) -> DbResult<u64> {
+    ///
+    /// On a `write_all` failure (e.g. ENOSPC mid-write) the segment is
+    /// **quarantined**: the partial bytes are truncated back to the last
+    /// good frame boundary (`set_len(pre_batch_offset)`) and `poisoned` is
+    /// set so every subsequent append fails fast — forcing the leader to
+    /// rotate to a brand-new file instead of stranding later acked commits
+    /// behind an unreachable torn tail (audit §1.3).
+    pub async fn append_batch(
+        &self,
+        payloads: Arc<Vec<Vec<u8>>>,
+        max_version: u64,
+    ) -> DbResult<u64> {
+        if self.is_poisoned() {
+            return Err(DbError::Storage(format!(
+                "WalSegment append refused: segment {:?} is poisoned (prior write/sync failure)",
+                self.path
+            )));
+        }
         if payloads.is_empty() {
             // Still fold the version in — an empty batch carrying a watermark
             // must not regress max_committed (monotonic, fetch_max).
@@ -119,31 +143,77 @@ impl WalSegment {
         let n = payloads.len() as u64;
         let last_seq = self.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
         self.max_committed.fetch_max(max_version, Ordering::AcqRel);
+        // The last-known-good byte offset BEFORE this batch — the boundary to
+        // roll back to if `write_all` fails partway through `buf`. Tracked
+        // incrementally by this struct; read here (not under the file lock) so
+        // the truncation target is a known frame boundary from a prior
+        // successful append.
+        let pre_batch_offset = self.bytes_written.load(Ordering::Acquire);
         let file = Arc::clone(&self.file);
+        let path = self.path.clone();
         let frame_bytes = spawn_blocking(move || -> DbResult<u64> {
             // Coalesce all frames into one buffer → a single write() syscall
             // instead of 3N (len header + payload + crc per entry).
             // Frame format is unchanged: [u32 len LE][payload][u32 crc32 LE].
             let total: usize = payloads.iter().map(|p| p.len() + 8).sum();
             let mut buf = Vec::with_capacity(total);
-            for p in &payloads {
+            for p in payloads.iter() {
                 let crc = crc32fast::hash(p);
                 buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
                 buf.extend_from_slice(p);
                 buf.extend_from_slice(&crc.to_le_bytes());
             }
             let mut f = file.lock().expect("WalSegment file mutex poisoned");
-            f.write_all(&buf)
-                .map_err(|e| DbError::Storage(format!("WalSegment append: {e}")))?;
-            // Level 2 (OS page cache) is reached by write_all itself — the
-            // write() syscall copies data into kernel buffers. std::fs::File
-            // is unbuffered, so there is no userspace buffer to flush.
-            Ok(buf.len() as u64)
+            match f.write_all(&buf) {
+                Ok(()) => Ok(buf.len() as u64),
+                Err(e) => {
+                    // Partial write — `write_all` may have written some bytes
+                    // before failing (ENOSPC, etc.). Truncate the file back to
+                    // the last good frame boundary so no torn frame survives in
+                    // the file. We open a fresh write-mode handle for the
+                    // truncation: on Windows the append-mode handle the segment
+                    // owns lacks GENERIC_WRITE, so `set_len` on it would be
+                    // denied. A failure here is catastrophic (the file is in
+                    // an unknown state) — log loudly and surface it; the
+                    // segment is poisoned below regardless.
+                    drop(f);
+                    let trunc_res = (|| -> std::io::Result<()> {
+                        let g = OpenOptions::new().write(true).open(&path)?;
+                        g.set_len(pre_batch_offset)
+                    })();
+                    if let Err(trunc_err) = trunc_res {
+                        log::error!(
+                            "WalSegment {path:?}: write_all failed ({e}) AND rollback \
+                             set_len({pre_batch_offset}) failed ({trunc_err}) — segment is \
+                             in an unknown state; it has been poisoned"
+                        );
+                    }
+                    Err(DbError::Storage(format!(
+                        "WalSegment append to {path:?}: {e}"
+                    )))
+                }
+            }
         })
         .await
-        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
-        self.bytes_written.fetch_add(frame_bytes, Ordering::AcqRel);
-        Ok(last_seq)
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+        match frame_bytes {
+            Ok(n) => {
+                self.bytes_written.fetch_add(n, Ordering::AcqRel);
+                Ok(last_seq)
+            }
+            Err(e) => {
+                // Quarantine: no future append may touch this file. The leader
+                // reacts by rotating to a fresh segment.
+                self.poisoned.store(true, Ordering::Release);
+                log::error!(
+                    "WalSegment {:?} poisoned after failed append: {} — \
+                     leader must rotate to a new segment; further appends refused",
+                    self.path,
+                    e
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Highest `commit_version` ever appended to this segment.
@@ -162,15 +232,128 @@ impl WalSegment {
     /// because this is a growing append-only file: metadata (file size) must
     /// be flushed alongside data to guarantee the new extent is visible after
     /// power loss on all platforms.
+    ///
+    /// On an fsync failure the segment is **poisoned** (audit §1.3, the
+    /// "fsyncgate" scenario): a failed fsync means we cannot trust the file
+    /// is durable, and a later "successful" fsync does not retroactively
+    /// persist the in-flight window. The leader reacts to the returned error
+    /// by rotating to a new segment rather than retrying on the same fd.
     pub async fn sync(&self) -> DbResult<()> {
         let file = Arc::clone(&self.file);
-        spawn_blocking(move || -> DbResult<()> {
+        let res = spawn_blocking(move || -> DbResult<()> {
             let f = file.lock().expect("WalSegment file mutex poisoned");
             f.sync_all()
                 .map_err(|e| DbError::Storage(format!("WalSegment sync: {e}")))
         })
         .await
-        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+        if let Err(ref e) = res {
+            self.poisoned.store(true, Ordering::Release);
+            log::error!(
+                "WalSegment {:?} poisoned after failed fsync: {} — \
+                 leader must rotate to a new segment; further appends refused",
+                self.path,
+                e
+            );
+        }
+        res
+    }
+
+    /// Has this segment seen a write or fsync failure? A poisoned segment
+    /// refuses further appends; the leader must rotate to a fresh file.
+    /// Read-only probe (no lock) — used by the segment-set / group-commit
+    /// leader to decide whether to keep appending or force a rotation.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+
+    /// Mark this segment poisoned. Production code does this internally on a
+    /// write/fsync failure; exposed (pub(crate)-ish) for tests that simulate
+    /// a fault by setting the flag directly.
+    pub fn mark_poisoned(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
+    /// Repair a torn trailing frame left in the file by a partial write that
+    /// could not be rolled back at the time (e.g. a process crash mid-write, or
+    /// a fault-injection test that manually appends a torn tail). Walks the
+    /// file's frames in order; on the first torn or CRC-mismatched frame it
+    /// truncates the file back to the byte offset just before that frame. A
+    /// file with no torn tail is a no-op. Idempotent.
+    ///
+    /// This is the **self-heal** path (audit §1.3): it removes the torn tail
+    /// so a subsequent `append_batch` window is not stranded behind it on
+    /// replay. Called by `SegmentSet::open` after reopening an existing
+    /// segment so the file is in a known-good state before the leader appends.
+    /// Distinct from the **in-process rollback** inside `append_batch` (which
+    /// runs synchronously when a `write_all` on a freshly-opened segment
+    /// fails) — that path handles the case where the segment is already open
+    /// and the failed write is on the same fd; this path handles the case
+    /// where the torn tail was left by a prior process / write attempt.
+    pub async fn repair_torn_tail(&self) -> DbResult<()> {
+        // Read the file under the existing append-mode handle to find the
+        // repair point. Truncation is done via a fresh write-mode handle below
+        // (Windows: an append-mode handle lacks the GENERIC_WRITE needed for
+        // SetEndOfFile; opening with `.write(true)` is portable).
+        let path = self.path.clone();
+        let file = Arc::clone(&self.file);
+        let repair_offset: Option<u64> = spawn_blocking(move || -> DbResult<Option<u64>> {
+            let mut buf = Vec::new();
+            {
+                let mut f = file.lock().expect("WalSegment file mutex poisoned");
+                f.read_to_end(&mut buf)
+                    .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
+            }
+            let mut pos = 0usize;
+            while pos + 4 <= buf.len() {
+                let len = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
+                    as usize;
+                let frame_end = pos + 4 + len + 4;
+                if frame_end > buf.len() {
+                    break; // torn tail — repair point found
+                }
+                let payload = &buf[pos + 4..pos + 4 + len];
+                let crc_stored = u32::from_le_bytes([
+                    buf[pos + 4 + len],
+                    buf[pos + 5 + len],
+                    buf[pos + 6 + len],
+                    buf[pos + 7 + len],
+                ]);
+                if crc32fast::hash(payload) != crc_stored {
+                    break; // corrupt frame — repair point found
+                }
+                pos = frame_end;
+            }
+            if pos == buf.len() {
+                return Ok(None); // file is already clean — no-op
+            }
+            // Truncate back to the last good frame boundary. Open a fresh
+            // write-mode handle: the segment's own handle is append-only,
+            // which on Windows lacks GENERIC_WRITE so `set_len` is denied.
+            let trunc_res = (|| -> std::io::Result<()> {
+                let g = OpenOptions::new().write(true).open(&path)?;
+                g.set_len(pos as u64)
+            })();
+            if let Err(e) = trunc_res {
+                return Err(DbError::Storage(format!(
+                    "WalSegment repair set_len {path:?}: {e}"
+                )));
+            }
+            Ok(Some(pos as u64))
+        })
+        .await
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
+        // If we truncated, keep `bytes_written` consistent with the on-disk
+        // length so future appends / rotation see the repaired size.
+        if let Some(new_len) = repair_offset {
+            self.bytes_written.store(new_len, Ordering::Release);
+            log::warn!(
+                "WalSegment {:?} self-heal: truncated torn tail back to {} bytes",
+                self.path,
+                new_len
+            );
+        }
+        Ok(())
     }
 
     /// Replay the segment from the start, returning every intact entry.

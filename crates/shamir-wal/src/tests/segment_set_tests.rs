@@ -87,7 +87,7 @@ async fn replay_across_segments_is_identical() {
         .unwrap();
     for e in &entries {
         single
-            .append_batch(vec![e.encode().unwrap()], e.commit_version)
+            .append_batch(Arc::new(vec![e.encode().unwrap()]), e.commit_version)
             .await
             .unwrap();
     }
