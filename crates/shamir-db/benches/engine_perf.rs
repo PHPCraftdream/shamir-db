@@ -378,14 +378,36 @@ fn req_batch_independent_reads() -> BatchRequest {
 // no-index scan at 10_000 records cost 60-150ms per single call, which
 // piles up fast across dozens of size-swept workloads in one bench binary.
 const SIZES: &[usize] = &[100, 1_000, 2_000];
-const BULK_SIZES: &[usize] = &[100, 1_000];
+// A single bulk-insert call carrying N rows in ONE Batch/execute() request
+// is a genuine feature to measure at realistic N — not an artificial
+// per-op loop the harness's own repetition count already covers. Default
+// sweep keeps /100 (~6ms/call, fast); /1000 (~25ms/call, over the fast-
+// sweep budget but real bulk-throughput signal) is opt-in via
+// BENCH_BULK_INSERT_SCALING=1 so it isn't lost, just not in the default
+// fast path.
+fn bulk_counts() -> Vec<usize> {
+    let mut counts = vec![100usize];
+    let wide = std::env::var("BENCH_BULK_INSERT_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if wide {
+        counts.push(1_000);
+    }
+    counts
+}
+
+/// Fixed single count for the fjall-backed bulk-insert variants below —
+/// these are I/O-bound (every commit hits real disk), so scaling N
+/// doesn't add a meaningful signal the way it does for the in-memory
+/// variants above; kept at the smallest cell only.
+const BULK_COUNT: usize = 100;
 
 fn main() {
     let mut h = Harness::new("engine_perf", env!("CARGO_MANIFEST_DIR"));
     let rt = Runtime::new().unwrap();
 
     // ── bulk_insert — pure write throughput, fresh empty table per iter ──
-    for &count in BULK_SIZES {
+    for count in bulk_counts() {
         let id = format!("bulk_insert/{count}");
         h.bench_batched_async(
             &id,
@@ -735,9 +757,16 @@ fn main() {
     // Sled/disk-backed range bench — exercises the native
     // `iter_range_stream` path on a real disk backend. Fresh tempdir per
     // iter, so `bench_batched_async`.
+    //
+    // I/O-bound exception: fjall is a persistent LSM-tree — every commit
+    // does real disk I/O, so even the /100 cell costs well over the
+    // ≲10ms-per-call target (calibrated N=1). Reduced to the smallest
+    // cell only (BULK_COUNT); the disk cost is the point of the bench,
+    // not something tunable by shrinking N further.
     // --------------------------------------------------------------------
 
-    for &count in BULK_SIZES {
+    {
+        let count = BULK_COUNT;
         let id = format!("bulk_insert_fjall/{count}");
         h.bench_batched_async(
             &id,
@@ -758,7 +787,7 @@ fn main() {
     }
 
     // ── bulk_insert_membuffer_in_memory — fresh DB per iter (pure wrapper overhead) ──
-    for &count in BULK_SIZES {
+    for count in bulk_counts() {
         let id = format!("bulk_insert_membuffer_in_memory/{count}");
         h.bench_batched_async(
             &id,
@@ -771,7 +800,11 @@ fn main() {
     }
 
     // ── bulk_insert_membuffer_fjall — fresh tempdir + DB per iter ──
-    for &count in BULK_SIZES {
+    // I/O-bound exception: same fjall persistent-backend disk cost as
+    // `bulk_insert_fjall` above — every commit hits disk, so calibrated N=1
+    // is expected and accepted. Kept at the smallest cell only (BULK_COUNT).
+    {
+        let count = BULK_COUNT;
         let id = format!("bulk_insert_membuffer_fjall/{count}");
         h.bench_batched_async(
             &id,
@@ -868,14 +901,18 @@ fn main() {
         use shamir_types::types::record_id::RecordId;
 
         h.bench_batched_async(
-            "eviction_byte_pressure/seed_8k_then_insert_1k",
+            "eviction_byte_pressure/seed_1800_then_insert_200",
             || async move {
                 let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-                // ~100 bytes/value × 8000 = ~800k cache footprint.
-                // max_bytes 1_000_000 leaves ~200k headroom — first
-                // new insert puts us over; eviction kicks in.
+                // ~100 bytes/value × 1800 = ~180k cache footprint.
+                // max_bytes 200_000 leaves ~20k headroom (~200 entries) —
+                // the first new inserts put us over; eviction kicks in
+                // immediately. Scaled down from seed_8k/insert_1k (was
+                // ~25ms per single call) so the timed routine stays
+                // ≲10ms while still exercising the eviction path on
+                // every insert.
                 let cfg = MemBufferConfig {
-                    max_bytes: 1_000_000,
+                    max_bytes: 200_000,
                     max_entries: 100_000,
                     ttl_ms: None,
                     flush_interval_ms: 60_000, // effectively no auto-flush
@@ -883,7 +920,7 @@ fn main() {
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
-                for _ in 0..8_000 {
+                for _ in 0..1_800 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
@@ -891,8 +928,9 @@ fn main() {
                 (store, v)
             },
             |(store, v)| async move {
-                // Now seeded near cap. Time the next 1000 writes.
-                for _ in 0..1_000 {
+                // Now seeded near cap. Time the next 200 writes — each
+                // pushes past the byte cap and forces an eviction.
+                for _ in 0..200 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
@@ -923,7 +961,11 @@ fn main() {
         use shamir_db::storage::types::Store;
         use shamir_types::types::record_id::RecordId;
 
-        for &n in &[1_000usize, 2_000] {
+        // Collapsed to the smallest cell (was &[1_000, 2_000]): both
+        // calibrated cheaply (~30k iters), but the harness owns repetition
+        // count now, so a single scaled axis keeps only its smallest unit.
+        let n: usize = 1_000;
+        {
             // Build a warmed MemBuffer cache holding `n` keys, all
             // resident (cache size = n, large max_bytes).
             let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt
@@ -970,7 +1012,13 @@ fn main() {
     }
 
     // ── batch_multi_read_8 — 8 independent reads in one batch ──
-    for &n in &[1_000usize, 2_000] {
+    // Collapsed + tuned down (was &[1_000, 2_000]): each batch fires 8
+    // full-table scans, so a single call at n=1_000 cost ~12ms and n=2_000
+    // ~25ms — both over the ≲10ms-per-call target. n=500 keeps one full
+    // batch (all 8 cities) under budget while preserving the multi-read
+    // shape that's the point of this workload.
+    let n: usize = 500;
+    {
         let shamir = block_on_setup(&rt, seeded(n, false));
         let id = format!("batch_multi_read_8/{n}");
         h.bench_async(&id, move || {

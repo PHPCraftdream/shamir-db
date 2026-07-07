@@ -4,15 +4,18 @@
 //! to bytes. Replaces the old legacy benchmarks (apply_select /
 //! apply_select_to_bytes) which were removed as part of J1 elimination.
 //!
-//! Scenarios:
-//!   - select_all_100k          — `SELECT *` over 100k records (full Map clone)
-//!   - select_few_fields_100k   — explicit projection of 2 of 6 fields
-//!   - select_all_then_serialize_100k — project to QueryValue, then to_vec
+//! Scenarios (single-record unit, ≤10ms/call — the harness owns repetition
+//! count externally):
+//!   - select_all_1k            — `SELECT *` over 1k records (full Map clone)
+//!   - select_few_fields_1k     — explicit projection of 2 of 6 fields
+//!   - select_all_then_serialize_1k — project to QueryValue, then to_vec
 //!
 //! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
-//! (interner, 100k records) is built ONCE outside the timed closures — the
-//! same shape as the old `b.iter_batched(|| (), |_| ..., BatchSize::SmallInput)`,
-//! which never actually rebuilt anything per iteration.
+//! (interner, records) is built ONCE outside the timed closures — the
+//! same shape as the old `b.iter_batched(|| (), |_| ...,
+//! BatchSize::SmallInput)`, which never actually rebuilt anything per
+//! iteration. The record count is capped at 1k so each single call stays
+//! a cheap unit (≤10ms) — the harness decides repetition count.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -68,7 +71,10 @@ fn main() {
     }
     let interner = Arc::new(interner);
 
-    let n_records: u64 = 100_000;
+    // Capped at 1k (was 100k): the per-call cost at 100k was ~50ms, far
+    // above the ≤10ms/call budget the harness now expects (it owns
+    // repetition count externally; each call should stay a cheap unit).
+    let n_records: u64 = 1_000;
     let raw_records: Vec<(RecordId, InnerValue)> = (0..n_records)
         .map(|i| (RecordId::new(), make_record(&interner, i as u32)))
         .collect();
@@ -97,7 +103,7 @@ fn main() {
         let raw_records = raw_records.clone();
         let select_all = select_all.clone();
         let interner = Arc::clone(&interner);
-        h.bench("select_all/select_all_100k", move || {
+        h.bench("select_all/select_all_1k", move || {
             let projected = apply_select_value(&raw_records, &select_all, &interner);
             black_box(projected);
         });
@@ -108,7 +114,7 @@ fn main() {
         let raw_records = raw_records.clone();
         let select_few = select_few.clone();
         let interner = Arc::clone(&interner);
-        h.bench("select_few_fields/select_2_of_6_fields_100k", move || {
+        h.bench("select_few_fields/select_2_of_6_fields_1k", move || {
             let projected = apply_select_value(&raw_records, &select_few, &interner);
             black_box(projected);
         });
@@ -120,7 +126,7 @@ fn main() {
         let select_all = select_all.clone();
         let interner = Arc::clone(&interner);
         h.bench(
-            "select_then_serialize/select_all_then_serialize_100k",
+            "select_then_serialize/select_all_then_serialize_1k",
             move || {
                 let projected = apply_select_value(&raw_records, &select_all, &interner);
                 let bytes = rmp_serde::to_vec_named(&projected).unwrap();

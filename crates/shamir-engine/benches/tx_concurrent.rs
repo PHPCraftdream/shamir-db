@@ -1,9 +1,21 @@
+// Single-element `for` loops are intentional: the N-ladders were collapsed
+// to their smallest variant when migrating to the fixed-iteration harness,
+// but the loop structure is kept so the ladder can be re-expanded ad-hoc.
+#![allow(clippy::single_element_loop)]
 //! Transaction concurrency / SSI conflict / Level-3 pessimistic-lock bench
 //! coverage. Complements the single-threaded `tx_pipeline` / `tx_overhead`
 //! benches (which only measure the no-contention floor).
 //!
 //! Eight groups (four original + four follow-ups added after first-round
 //! review surfaced the structural-zero-aborts / zero-wounds findings):
+//!
+//! NOTE: the N-ladders in every group were collapsed to their smallest
+//! variant (n=1 for group 1, n=2 for the rest) when this bench moved to
+//! the fixed-iteration `bench_scale_tool` harness — the harness now owns
+//! repetition count, so each registered call must stay a cheap unit. The
+//! per-group `N ∈ {…}` ranges below describe the original Criterion
+//! coverage and are kept for historical context; only the smallest N is
+//! registered now.
 //!
 //! 1. `tx_concurrent/disjoint_inserts` — N concurrent writers, each inserting
 //!    into the same table at DISJOINT keys (no SSI / lock conflict). Reveals
@@ -153,8 +165,12 @@ fn main() {
 
     // --- Group 1: disjoint-key concurrent inserts ---------------------------
 
-    const K: usize = 10; // rows per writer
-    for &n in &[1usize, 2, 4, 8] {
+    // rows per writer.
+    //
+    // Scaled ladder collapsed to the smallest variant (n=1); the harness
+    // now owns repetition count, so each call must stay a cheap unit.
+    const K: usize = 10;
+    for &n in &[1usize] {
         let iter_ctr = Arc::clone(&iter_ctr);
         h.bench_batched_async(
             &format!("disjoint_inserts/n_{n}"),
@@ -196,13 +212,13 @@ fn main() {
     // --- Group 2: hot-key SSI conflicts (Snapshot) ---------------------------
 
     let hot_key_snapshot_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&hot_key_snapshot_counts);
         h.bench_batched_async(
             &format!("hot_key_snapshot/n_{n}"),
@@ -268,13 +284,13 @@ fn main() {
     // --- Group 2b: hot-key SSI conflicts (Serializable) ----------------------
 
     let hot_key_serializable_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&hot_key_serializable_counts);
         h.bench_batched_async(
             &format!("hot_key_serializable/n_{n}"),
@@ -380,13 +396,13 @@ fn main() {
     // --- Group 4: pessimistic-lock contended ---------------------------------
 
     let pess_contended_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&pess_contended_counts);
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(
@@ -444,13 +460,13 @@ fn main() {
     // --- Group 4b: pessimistic-lock contended, REVERSE age -------------------
 
     let pess_reverse_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&pess_reverse_counts);
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(
@@ -508,13 +524,13 @@ fn main() {
     // --- Group 7: pessimistic-lock contended, REVERSE age + BARRIER ---------
 
     let pess_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&pess_barrier_counts);
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(
@@ -575,13 +591,13 @@ fn main() {
     // --- Group 8: pessimistic-lock contended, pre-lock barrier + in-CS hold -
 
     let pess_in_cs_barrier_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
-        [2usize, 4, 8]
+        [2usize]
             .iter()
             .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
             .collect(),
     );
 
-    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+    for (idx, &n) in [2usize].iter().enumerate() {
         let counters = Arc::clone(&pess_in_cs_barrier_counts);
         let ctr = Arc::new(AtomicU64::new(0));
         h.bench_batched_async(

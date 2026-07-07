@@ -5,6 +5,12 @@
 //! walk-and-hash operations per record. The walk-and-hash path skips
 //! per-record string serialisation entirely vs the legacy string path.
 //!
+//! N is capped at 200 (was 1000): each record carries a heavy nested
+//! `QueryValue` (List + nested Map + strings), so the per-call clone +
+//! walk-and-hash at N=1000 cost ~7ms — too close to the ~10ms/call budget
+//! the fixed-iteration harness expects. N=200 keeps the same workload
+//! shape at ~1.5ms/call.
+//!
 //! Note: J1 migration — apply_distinct (legacy value path) removed; bench now uses
 //! apply_distinct_qv (QueryValue path) which is the production function.
 //!
@@ -54,15 +60,17 @@ fn make_record(idx: u32) -> QueryValue {
 fn main() {
     let mut h = Harness::new("distinct", env!("CARGO_MANIFEST_DIR"));
 
+    const N: u32 = 200;
+
     // All-unique input — pathological: every record goes through the
     // full key-build path. Closest to what the actual query pipeline
     // hands DISTINCT in practice.
-    let unique: Vec<QueryValue> = (0..1000).map(make_record).collect();
+    let unique: Vec<QueryValue> = (0..N).map(make_record).collect();
 
     // Half-duplicate input — every key appears twice, so half the
     // records hit the IndexMap's existing entry path.
-    let mut dup = Vec::with_capacity(1000);
-    for i in 0..500 {
+    let mut dup = Vec::with_capacity(N as usize);
+    for i in 0..N / 2 {
         let r = make_record(i);
         dup.push(r.clone());
         dup.push(r);
@@ -70,13 +78,13 @@ fn main() {
 
     {
         let unique = unique.clone();
-        h.bench("apply_distinct_qv/1000_all_unique", move || {
+        h.bench("apply_distinct_qv/200_all_unique", move || {
             black_box(apply_distinct_qv(unique.clone()));
         });
     }
     {
         let dup = dup.clone();
-        h.bench("apply_distinct_qv/1000_half_dup", move || {
+        h.bench("apply_distinct_qv/200_half_dup", move || {
             black_box(apply_distinct_qv(dup.clone()));
         });
     }

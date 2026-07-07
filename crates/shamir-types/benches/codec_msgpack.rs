@@ -78,7 +78,11 @@ fn main() {
     let mut h = Harness::new("codec_msgpack", env!("CARGO_MANIFEST_DIR"));
 
     let interner = Rc::new(Interner::new());
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
+    // NOTE: kept at a small batch (100 records, ~0.3-0.8 ms/call) so each
+    // timed call stays a cheap unit — the bench-scale-tool harness owns
+    // macro-iteration count, so the workload must not be a 1000-record
+    // Criterion-era blob that costs ~8 ms/call on the decode path.
+    let records: Vec<InnerValue> = (0..100).map(|i| make_record(&interner, i)).collect();
     let encoded: Vec<Vec<u8>> = records
         .iter()
         .map(|r| inner_to_msgpack(&interner, r).unwrap())
@@ -87,7 +91,7 @@ fn main() {
     {
         let interner = interner.clone();
         let records = records.clone();
-        h.bench("codec_msgpack_encode/interned_1000_records", move || {
+        h.bench("codec_msgpack_encode/interned_100_records", move || {
             for r in black_box(&records) {
                 black_box(inner_to_msgpack(&interner, r).unwrap());
             }
@@ -97,7 +101,7 @@ fn main() {
     {
         let interner = interner.clone();
         let encoded = encoded.clone();
-        h.bench("codec_msgpack_decode/interned_1000_records", move || {
+        h.bench("codec_msgpack_decode/interned_100_records", move || {
             for blob in black_box(&encoded) {
                 black_box(msgpack_to_inner(&interner, blob).unwrap());
             }

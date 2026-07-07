@@ -160,8 +160,13 @@ fn main() {
     }
 
     // --- Tier B cross-check: per-record encode/decode round-trip -----------
+    // NOTE: small batch (100 records) so each timed call is a cheap unit
+    // (~0.3-0.8 ms/call); the bench-scale-tool harness owns macro-iteration
+    // count, so we avoid the Criterion-era 1000-record blob (~7 ms/call on
+    // the decode path). The single-field workloads above already operate on
+    // one record's blob and are untouched.
     let interner_b = Interner::new();
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner_b, i)).collect();
+    let records: Vec<InnerValue> = (0..100).map(|i| make_record(&interner_b, i)).collect();
     let encoded: Vec<bytes::Bytes> = records
         .iter()
         .map(|r| r.to_bytes().expect("encode"))
@@ -169,7 +174,7 @@ fn main() {
 
     {
         let records = records.clone();
-        h.bench("recordview_tier_b_tree_roundtrip/encode_1000", move || {
+        h.bench("recordview_tier_b_tree_roundtrip/encode_100", move || {
             for r in black_box(&records) {
                 black_box(r.to_bytes().expect("encode"));
             }
@@ -177,7 +182,7 @@ fn main() {
     }
     {
         let encoded = encoded.clone();
-        h.bench("recordview_tier_b_tree_roundtrip/decode_1000", move || {
+        h.bench("recordview_tier_b_tree_roundtrip/decode_100", move || {
             for blob in black_box(&encoded) {
                 black_box(InnerValue::from_bytes(&**blob).expect("decode"));
             }
@@ -187,7 +192,7 @@ fn main() {
     // --- Tier A supplementary: deep-clone cost of one InnerValue tree ------
     {
         let records = records.clone();
-        h.bench("recordview_tier_a_clone_cost/clone_inner_1000", move || {
+        h.bench("recordview_tier_a_clone_cost/clone_inner_100", move || {
             for r in black_box(&records) {
                 let cloned = r.clone();
                 black_box(cloned);

@@ -10,6 +10,18 @@
 //!
 //! Cells: `drain_cost_vs_depth/W={1000,5000,20000}/fjall`.
 //!
+//! The W ladder is a genuine scaling curve (the whole point is to see
+//! whether drain cost is O(W) or O(W²) — see "cost vs depth" in the
+//! title), so the larger tiers are NOT deleted. Instead the smallest tier
+//! (W=1000) is the default in the fast sweep, and the full ladder is
+//! available on demand via `BENCH_DRAIN_DEPTH_SCALING=1`. Note: even the
+//! smallest tier calibrates low (1-2 iters at 0.05s) because each
+//! iteration provisions a FRESH tempdir + fjall backend AND seeds W WAL
+//! entries — that fs-I/O setup floor is a legitimate per-call cost that
+//! can't be shrunk without changing the workload's semantics, so it is
+//! accepted as a documented I/O-bound exception rather than forced under
+//! the ~10ms/call target.
+//!
 //! Migrated to the fixed-iteration harness (`bench_scale_tool`): each
 //! iteration provisions a FRESH tempdir + fjall backend and seeds W
 //! inflight WAL entries — that seeded state is consumed by `drain_all`
@@ -82,7 +94,20 @@ async fn seed_inflight_entries(repo: &RepoInstance, w: u64) {
 fn main() {
     let mut h = Harness::new("drain_cost_vs_depth", env!("CARGO_MANIFEST_DIR"));
 
-    let depths: &[u64] = &[1_000, 5_000, 20_000];
+    // The W ladder is a genuine scaling curve (O(W) vs O(W²) — see the
+    // module docs). The smallest tier is the default so the fast sweep
+    // stays bounded; the full ladder is opt-in via
+    // `BENCH_DRAIN_DEPTH_SCALING`. Even the smallest tier is fs-I/O-bound
+    // (fresh tempdir + fjall + W seeded entries per call) — see the
+    // documented I/O exception in the module docs.
+    let wide = std::env::var("BENCH_DRAIN_DEPTH_SCALING")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let depths: &[u64] = if wide {
+        &[1_000, 5_000, 20_000]
+    } else {
+        &[1_000]
+    };
 
     for &w in depths {
         h.bench_batched_async(

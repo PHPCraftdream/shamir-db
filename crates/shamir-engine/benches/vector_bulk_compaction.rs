@@ -59,11 +59,24 @@ const SIGMA: f32 = 0.1;
 /// Fixed dimensionality for both groups (128 ≈ small embedding).
 const DIM: usize = 128;
 /// Compaction group base index size.
-const COMPACTION_N: usize = 10_000;
+///
+/// Capped at 200 (was 10_000): HNSW graph construction over the live-set
+/// is the measured cost, and at 10_000 it was hundreds of ms per call.
+/// The harness now owns repetition count, so each call must stay a cheap
+/// unit (≤10ms) — 200 keeps the rebuild (~140 live vectors at d=0.3) under
+/// that budget while still exercising the batched `upsert_batch` path.
+const COMPACTION_N: usize = 200;
 /// Tombstone fractions for the compaction group.
-const TOMBSTONE_FRACTIONS: &[f64] = &[0.3, 0.5];
+/// Scaled ladder collapsed to the smallest variant (0.3).
+const TOMBSTONE_FRACTIONS: &[f64] = &[0.3];
 /// Bulk-load n-ladder.
-const BULK_LADDER: &[usize] = &[1_000, 10_000];
+///
+/// Scaled ladder collapsed to the smallest variant (50, was
+/// `[1_000, 10_000]`). HNSW graph build at n=1_000 was ~50ms/call; the
+/// serial path (N individual `upsert` calls, each its own spawn_blocking)
+/// is ~O(N) heavier than batch, so n is kept small to hold the serial
+/// variant under the ≤10ms/call budget the harness expects.
+const BULK_LADDER: &[usize] = &[50];
 
 fn rid_from(i: usize) -> RecordId {
     let mut a = [0u8; 16];

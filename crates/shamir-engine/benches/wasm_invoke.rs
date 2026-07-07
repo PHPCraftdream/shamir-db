@@ -1,3 +1,8 @@
+// Single-element `for` loops are intentional: the N/K-ladders were
+// collapsed to their smallest variant when migrating to the fixed-iteration
+// harness, but the loop structure is kept so the ladder can be re-expanded
+// ad-hoc.
+#![allow(clippy::single_element_loop)]
 //! Benchmarks for WASM function invocation paths.
 //!
 //! Five groups:
@@ -123,7 +128,10 @@ fn main() {
     }
 
     // ── Group 3: startup compile K modules (load-on-open) ────────────────
-    for &k in &[10usize, 50] {
+    // Scaled ladder collapsed to k=5 (was `[10, 50]`): each WAT→module
+    // compile is a fixed ~1.2ms VM cost, so the total scales linearly with
+    // K. k=10 was ~12ms/call; k=5 keeps it under the ≤10ms budget.
+    for &k in &[5usize] {
         h.bench(&format!("wasm_startup_compile_k/{k}"), move || {
             let engine = Arc::new(WasmEngine::new().unwrap());
             for _ in 0..k {
@@ -179,7 +187,10 @@ fn main() {
             Arc::new(WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default()).unwrap());
         let params = build_params();
 
-        for &n in &[16usize, 64, 128] {
+        // Scaled ladder collapsed to n=16 (was `[16, 64, 128]`): each
+        // concurrent call instantiates a fresh WASM instance, so cost
+        // scales with N. n=16 is ~3.3ms/call; n=128 was ~25ms.
+        for &n in &[16usize] {
             let wf = wf.clone();
             let params = params.clone();
             h.bench_async(&format!("wasm_concurrent_calls/{n}"), move || {

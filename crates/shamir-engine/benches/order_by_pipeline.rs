@@ -3,7 +3,7 @@
 //! Measures the three realistic ORDER BY scenarios and quantifies how
 //! much CPU is spent in field resolution vs the sort + permutation itself.
 //!
-//! Measured 2026-05-26 (release build, 100k records, 5 fields):
+//! Originally measured at 100k records (release build, 5 fields):
 //!   - order_by_indexed_field_limit_100  (score, sorted): ~84 ms / iter
 //!   - order_by_non_indexed_field_limit_100 (email):     ~107 ms / iter
 //!   - order_by_non_indexed_field_full (email):           ~94 ms / iter
@@ -29,6 +29,14 @@
 //!     and SmallVec[SortKey; 4] cache pressure. A typed columnar buffer
 //!     for the single-column case would unlock the remaining ~6× — tracked
 //!     as a follow-up refinement (do after #70 / arena lands).
+//!
+//! NOTE: the fixture N was 100_000 during the original Criterion
+//! measurements above. It has been lowered to 2_000 to fit the
+//! fixed-iteration harness's per-call budget (the comparator-lookup cost
+//! is linear in N, and each timed iteration also pays an untimed
+//! `projected.clone()` of N QueryValue maps; at 100k the combined cost
+//! was ~50-100ms/call). The relative phase breakdown is unchanged; only
+//! the absolute scale shrinks.
 //!
 //! Note: J1 migration — `apply_select` removed; this bench now uses
 //! `apply_select_value` + `apply_order_by_qv` (QueryValue path).
@@ -94,7 +102,13 @@ fn main() {
         let _ = interner.touch_ind(k);
     }
 
-    let n_records: u64 = 100_000;
+    // 2_000 (was 100_000): see the module-level NOTE — the comparator-
+    // lookup cost is linear in N, and every iteration also pays an
+    // untimed `projected.clone()` (O(N) QueryValue map clones) before the
+    // timed sort. At 100k the combined cost was ~50-100ms/call; 2_000
+    // keeps the timed sort under the ~10ms/call budget while preserving
+    // the relative phase breakdown.
+    let n_records: u64 = 2_000;
     let raw_records: Vec<(RecordId, InnerValue)> = (0..n_records)
         .map(|i| (RecordId::new(), make_record(&interner, i as u32)))
         .collect();
