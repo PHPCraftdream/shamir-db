@@ -24,7 +24,7 @@ async fn batches_concurrent_flushes() {
         let gc = Arc::clone(&gc);
         let flush_count = Arc::clone(&flush_count);
         js.spawn(async move {
-            gc.run(|| {
+            gc.run(move || {
                 let flush_count = Arc::clone(&flush_count);
                 async move {
                     flush_count.fetch_add(1, Ordering::SeqCst);
@@ -60,12 +60,13 @@ async fn batches_concurrent_flushes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn single_caller_flushes_once() {
-    let gc = GroupCommit::new();
+    let gc = Arc::new(GroupCommit::new());
     let flush_count = Arc::new(AtomicUsize::new(0));
 
     let fc = Arc::clone(&flush_count);
     let result = gc
-        .run(|| {
+        .clone()
+        .run(move || {
             let fc = Arc::clone(&fc);
             async move {
                 fc.fetch_add(1, Ordering::SeqCst);
@@ -80,9 +81,10 @@ async fn single_caller_flushes_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn propagates_flush_error() {
-    let gc = GroupCommit::new();
+    let gc = Arc::new(GroupCommit::new());
 
     let result: DbResult<()> = gc
+        .clone()
         .run(|| async { Err(DbError::Internal("boom".into())) })
         .await;
 

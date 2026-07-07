@@ -1257,8 +1257,21 @@ impl RepoInstance {
 
     /// Durability flush for a `synced` commit, batched via group-commit so
     /// concurrent synced commits on this repo share one flush+fsync.
+    ///
+    /// The closure captures a CLONED `RepoInstance` (cheap — every field is
+    /// `Arc`-shared) so it is `'static + Send` and can be moved into the
+    /// detached leader task `GroupCommit::run` spawns (audit §2.1: the leader
+    /// loop must not be tied to the caller's task lifetime, so a cancelled
+    /// caller cannot strand `leader_busy`).
     pub async fn synced_flush(&self) -> DbResult<()> {
-        self.group_commit.run(|| self.flush_buffers()).await
+        let repo = self.clone();
+        self.group_commit
+            .clone()
+            .run(move || {
+                let repo = repo.clone();
+                async move { repo.flush_buffers().await }
+            })
+            .await
     }
 
     /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
