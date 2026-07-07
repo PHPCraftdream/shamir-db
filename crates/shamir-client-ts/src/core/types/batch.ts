@@ -91,6 +91,8 @@ export interface BatchLimits {
   max_dependency_depth: number;
   max_execution_time_secs: number;
   max_result_size: number;
+  /** Maximum sub-batch nesting depth. 0 = no nesting allowed. */
+  max_nesting_depth: number;
 }
 
 // ── BatchRequest ────────────────────────────────────────────────────
