@@ -85,8 +85,17 @@ fn main() {
                 // encode + flush overhead in isolation.
                 async move { (payload, duplex(size + 1024)) }
             },
-            move |(p, (mut w, _r))| async move {
+            move |(p, (mut w, r))| async move {
+                // Keep the read half ALIVE for the whole timed routine —
+                // `tokio::io::duplex`'s pipe closes as soon as EITHER half is
+                // dropped, and `write_frame` writes 4-byte length + payload
+                // via `write_all`, which returns `BrokenPipe` the moment the
+                // reader is gone. Binding the receiver to a live local
+                // (rather than `_r`, which is still dropped by the
+                // destructuring pattern in the same expression) keeps the
+                // pipe open until the routine returns.
                 write_frame(&mut w, &p).await.unwrap();
+                black_box(&r);
             },
         );
     }

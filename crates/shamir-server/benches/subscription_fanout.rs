@@ -17,21 +17,22 @@
 //! Settle: bridge attach is async (registry insert + spawn). For N=100 the
 //! 80 ms used by `subscription_throughput.rs` is too tight; we use a
 //! N-scaled settle (`max(80ms, N*4ms)`, capped at 600 ms). Receivers are
-//! `mpsc::unbounded_channel` — no backpressure, no drop. Bridges are owned
-//! by a `JoinSet` and `abort_all`'d at end of each `iter_custom` batch.
+//! `mpsc::unbounded_channel` — no backpressure, no drop.
 //!
-//! Sample sizing: at N=100, K=20 = 2000 push frames per iter. Group config:
-//! `sample_size(20)` + `measurement_time(5s)`.
+//! Setup (DB + N subscribers) is built ONCE per `n` variant outside the
+//! timed loop (mirrors the original `iter_custom` design, which set up
+//! before the sample loop); each measured call fires K inserts and drains
+//! K events per subscriber — `bench_async`.
 
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use shamir_bench_utils as bu;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
@@ -153,7 +154,7 @@ async fn drain_events_for(
 }
 
 /// One subscriber: its own session/connection/push-sink + receiver.
-/// `_session` / `_conn` are kept alive (the conn owns the push sink Arc
+/// `session` / `conn` are kept alive (the conn owns the push sink Arc
 /// whose other clone lives inside the bridge — dropping conn early would
 /// not actually close the bridge, but we hold both for symmetry with a
 /// real connection's lifetime).
@@ -163,19 +164,6 @@ struct Subscriber {
     rx: UnboundedReceiver<Vec<u8>>,
     session: Session,
     conn: ConnectionServices,
-}
-
-/// Register N subscriptions on the same table, each with its own push sink
-/// and bridge. `JoinSet` is returned so bridges can be aborted. When
-/// `keys` is true the subscriptions use `DeliverMode::Keys` (the path that
-/// exercises the value_qv deferral unconditionally — every event, cache hit
-/// or miss); otherwise the default `DeliverMode::Records` is used.
-async fn setup_subscribers(
-    handler: &ShamirDbHandler,
-    n: usize,
-    keys: bool,
-) -> (Vec<Subscriber>, JoinSet<()>) {
-    setup_subscribers_with_filter(handler, n, keys, default_filter()).await
 }
 
 /// The simple `thread_id == 42` Eq filter used by the standard fan-out benches.
@@ -264,319 +252,208 @@ async fn setup_subscribers_with_filter(
     (subs, joinset)
 }
 
-fn bench_fanout(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_fanout");
-    g.sample_size(bu::sample_size(20));
-    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+const K: usize = 20; // inserts per measured iteration
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    const K: usize = 20; // inserts per measured iteration
-
-    for &n in &[1usize, 10, 50, 100] {
-        g.throughput(Throughput::Elements((n * K) as u64));
-        let name = format!("n_{n}");
-        g.bench_function(&name, |b| {
-            b.iter_custom(|iters| {
-                rt.block_on(async move {
-                    let mut total = std::time::Duration::ZERO;
-
-                    // Setup once per outer Criterion invocation of `iters`.
-                    let shamir = make_db_one_repo("app", "main", "messages").await;
-                    let handler = ShamirDbHandler::new(shamir);
-                    let (mut subs, mut joinset) = setup_subscribers(&handler, n, false).await;
-
-                    // Writer needs ITS own session/conn (any will do; reuse first).
-                    let writer_session = fixture_session();
-                    let writer_push: Arc<dyn PushSink> = {
-                        let (p, _rx) = capture();
-                        p
-                    };
-                    let writer_registry = Arc::new(SubscriptionRegistry::new());
-                    let writer_conn = conn_with(writer_push, writer_registry);
-
-                    // N-scaled settle for bridge attach.
-                    let settle_ms = (n as u64 * 4).clamp(80, 600);
-                    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
-
-                    for iter_idx in 0..iters {
-                        let start = std::time::Instant::now();
-                        // Fire K inserts (writes happen once; fan-out is per-sub).
-                        for i in 0..K {
-                            let mut wb = Batch::new();
-                            wb.id((iter_idx * 1000) + (i as u64) + 10_000);
-                            wb.insert(
-                                "ins",
-                                insert("messages").row(
-                                    doc! { "_id" => format!("k{}-{}", iter_idx, i) }
-                                        .set("thread_id", 42_i64)
-                                        .set("body", format!("msg-{i}")),
-                                ),
-                            );
-                            let _ = handler
-                                .handle(
-                                    &writer_session,
-                                    &encode(&execute_built("app", wb.build())),
-                                    &writer_conn,
-                                )
-                                .await
-                                .unwrap();
-                        }
-
-                        // Drain K events per subscriber. Sum all = N*K.
-                        let mut got_total = 0usize;
-                        for sub in subs.iter_mut() {
-                            let got = drain_events_for(
-                                &mut sub.rx,
-                                sub.sub_id,
-                                K,
-                                Duration::from_secs(15),
-                            )
-                            .await;
-                            got_total += got;
-                            black_box(got);
-                        }
-                        let elapsed = start.elapsed();
-                        assert_eq!(
-                            got_total,
-                            n * K,
-                            "fanout loss: got {got_total}/{} for n={n} K={K}",
-                            n * K
-                        );
-                        total += elapsed;
-                    }
-
-                    // Teardown: drop subs (drops rx → push sends become no-ops),
-                    // drop handler (drops registry → bridges shut down).
-                    joinset.abort_all();
-                    while joinset.join_next().await.is_some() {}
-                    drop(subs);
-                    drop(handler);
-
-                    total
-                })
-            });
-        });
-    }
-
-    g.finish();
+/// Fixed setup shared by all iterations of one `n` variant: DB, handler,
+/// subscribers, writer session/conn. Wrapped in a `Mutex` because
+/// `subs`/`joinset` are mutated per-iteration (drain + abort at the very
+/// end of the whole bench, not per iteration) — but the harness only
+/// needs shared *read* access across repeated `bench_async` calls, so an
+/// interior `tokio::sync::Mutex` mirrors the original single-threaded
+/// `iter_custom` closure's exclusive access to `subs`.
+struct FanoutFixture {
+    handler: ShamirDbHandler,
+    subs: tokio::sync::Mutex<Vec<Subscriber>>,
+    writer_session: Session,
+    writer_conn: ConnectionServices,
+    n: usize,
+    /// `true` for the `$in`-filter variant, whose inserted `body` values
+    /// must cycle `msg-0..msg-9` (`i % 10`) to exercise the `$in` match;
+    /// the standard/keys variants use a distinct `body` per insert
+    /// (`msg-{i}`) since they filter on `thread_id` alone.
+    body_mod_10: bool,
 }
 
-/// Keys-mode fan-out. Identical scaffolding to `bench_fanout`, but every
-/// subscription uses `DeliverMode::Keys`. This is the path where the
-/// `value_qv` de-intern deferral wins **unconditionally** — Keys never
-/// reads `value_qv`, so the decode is pure waste on every event, hit or
-/// miss, multiplied by N subscribers.
-fn bench_fanout_keys(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_fanout_keys");
-    g.sample_size(bu::sample_size(20));
-    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
+async fn build_fanout_fixture(
+    n: usize,
+    keys: bool,
+    filter: Filter,
+    body_mod_10: bool,
+) -> Arc<FanoutFixture> {
+    let shamir = make_db_one_repo("app", "main", "messages").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let (subs, _joinset) = setup_subscribers_with_filter(&handler, n, keys, filter).await;
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
+    // Writer needs ITS own session/conn (any will do).
+    let writer_session = fixture_session();
+    let writer_push: Arc<dyn PushSink> = {
+        let (p, _rx) = capture();
+        p
+    };
+    let writer_registry = Arc::new(SubscriptionRegistry::new());
+    let writer_conn = conn_with(writer_push, writer_registry);
 
-    const K: usize = 20; // inserts per measured iteration
+    // N-scaled settle for bridge attach.
+    let settle_ms = (n as u64 * 4).clamp(80, 600);
+    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
 
-    for &n in &[1usize, 10, 50, 100] {
-        g.throughput(Throughput::Elements((n * K) as u64));
-        let name = format!("n_{n}");
-        g.bench_function(&name, |b| {
-            b.iter_custom(|iters| {
-                rt.block_on(async move {
-                    let mut total = std::time::Duration::ZERO;
-
-                    let shamir = make_db_one_repo("app", "main", "messages").await;
-                    let handler = ShamirDbHandler::new(shamir);
-                    let (mut subs, mut joinset) = setup_subscribers(&handler, n, true).await;
-
-                    let writer_session = fixture_session();
-                    let writer_push: Arc<dyn PushSink> = {
-                        let (p, _rx) = capture();
-                        p
-                    };
-                    let writer_registry = Arc::new(SubscriptionRegistry::new());
-                    let writer_conn = conn_with(writer_push, writer_registry);
-
-                    let settle_ms = (n as u64 * 4).clamp(80, 600);
-                    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
-
-                    for iter_idx in 0..iters {
-                        let start = std::time::Instant::now();
-                        for i in 0..K {
-                            let mut wb = Batch::new();
-                            wb.id((iter_idx * 1000) + (i as u64) + 10_000);
-                            wb.insert(
-                                "ins",
-                                insert("messages").row(
-                                    doc! { "_id" => format!("k{}-{}", iter_idx, i) }
-                                        .set("thread_id", 42_i64)
-                                        .set("body", format!("msg-{i}")),
-                                ),
-                            );
-                            let _ = handler
-                                .handle(
-                                    &writer_session,
-                                    &encode(&execute_built("app", wb.build())),
-                                    &writer_conn,
-                                )
-                                .await
-                                .unwrap();
-                        }
-
-                        let mut got_total = 0usize;
-                        for sub in subs.iter_mut() {
-                            let got = drain_events_for(
-                                &mut sub.rx,
-                                sub.sub_id,
-                                K,
-                                Duration::from_secs(15),
-                            )
-                            .await;
-                            got_total += got;
-                            black_box(got);
-                        }
-                        let elapsed = start.elapsed();
-                        assert_eq!(
-                            got_total,
-                            n * K,
-                            "fanout loss: got {got_total}/{} for n={n} K={K}",
-                            n * K
-                        );
-                        total += elapsed;
-                    }
-
-                    joinset.abort_all();
-                    while joinset.join_next().await.is_some() {}
-                    drop(subs);
-                    drop(handler);
-
-                    total
-                })
-            });
-        });
-    }
-
-    g.finish();
+    Arc::new(FanoutFixture {
+        handler,
+        subs: tokio::sync::Mutex::new(subs),
+        writer_session,
+        writer_conn,
+        n,
+        body_mod_10,
+    })
 }
 
-/// Fan-out with an `$in` filter containing 10 string literals. This is the
-/// supported-filter path where compile caching has the most impact among
-/// allowed subscription operators: `compile_filter` builds a `TSet<QueryValue>`
-/// (hashing all 10 values) and clones each String — work that is currently
-/// repeated per event × per subscriber.
-///
-/// (Note: `Like`/`Regex` are the biggest theoretical win, but they are
-/// currently blocked by `find_unsupported_subscription_filter`. The `$in`
-/// path exercises the `TSet` build + `FilterValue::clone` costs that are
-/// eliminated by compile-once caching.)
-fn bench_fanout_in(c: &mut Criterion) {
-    let mut g = c.benchmark_group("subscription_fanout_in");
-    g.sample_size(bu::sample_size(20));
-    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .unwrap();
-
-    const K: usize = 20;
-
-    for &n in &[1usize, 10, 50, 100] {
-        g.throughput(Throughput::Elements((n * K) as u64));
-        let name = format!("n_{n}");
-        g.bench_function(&name, |b| {
-            b.iter_custom(|iters| {
-                rt.block_on(async move {
-                    let mut total = std::time::Duration::ZERO;
-
-                    let shamir = make_db_one_repo("app", "main", "messages").await;
-                    let handler = ShamirDbHandler::new(shamir);
-                    let filter = Filter::In {
-                        field: vec!["body".into()],
-                        values: (0..10)
-                            .map(|i| FilterValue::String(format!("msg-{i}")))
-                            .collect(),
-                    };
-                    let (mut subs, mut joinset) =
-                        setup_subscribers_with_filter(&handler, n, false, filter).await;
-
-                    let writer_session = fixture_session();
-                    let writer_push: Arc<dyn PushSink> = {
-                        let (p, _rx) = capture();
-                        p
-                    };
-                    let writer_registry = Arc::new(SubscriptionRegistry::new());
-                    let writer_conn = conn_with(writer_push, writer_registry);
-
-                    let settle_ms = (n as u64 * 4).clamp(80, 600);
-                    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
-
-                    for iter_idx in 0..iters {
-                        let start = std::time::Instant::now();
-                        for i in 0..K {
-                            let mut wb = Batch::new();
-                            wb.id((iter_idx * 1000) + (i as u64) + 10_000);
-                            wb.insert(
-                                "ins",
-                                insert("messages").row(
-                                    doc! { "_id" => format!("k{}-{}", iter_idx, i) }
-                                        .set("thread_id", 42_i64)
-                                        .set("body", format!("msg-{}", i % 10)),
-                                ),
-                            );
-                            let _ = handler
-                                .handle(
-                                    &writer_session,
-                                    &encode(&execute_built("app", wb.build())),
-                                    &writer_conn,
-                                )
-                                .await
-                                .unwrap();
-                        }
-
-                        let mut got_total = 0usize;
-                        for sub in subs.iter_mut() {
-                            let got = drain_events_for(
-                                &mut sub.rx,
-                                sub.sub_id,
-                                K,
-                                Duration::from_secs(15),
-                            )
-                            .await;
-                            got_total += got;
-                            black_box(got);
-                        }
-                        let elapsed = start.elapsed();
-                        assert_eq!(
-                            got_total,
-                            n * K,
-                            "fanout loss: got {got_total}/{} for n={n} K={K}",
-                            n * K
-                        );
-                        total += elapsed;
-                    }
-
-                    joinset.abort_all();
-                    while joinset.join_next().await.is_some() {}
-                    drop(subs);
-                    drop(handler);
-
-                    total
-                })
-            });
-        });
+async fn run_fanout_iter(fixture: Arc<FanoutFixture>, iter_idx: u64) {
+    let n = fixture.n;
+    // Fire K inserts (writes happen once; fan-out is per-sub).
+    for i in 0..K {
+        let mut wb = Batch::new();
+        wb.id((iter_idx * 1000) + (i as u64) + 10_000);
+        let body = if fixture.body_mod_10 {
+            format!("msg-{}", i % 10)
+        } else {
+            format!("msg-{i}")
+        };
+        wb.insert(
+            "ins",
+            insert("messages").row(
+                doc! { "_id" => format!("k{}-{}", iter_idx, i) }
+                    .set("thread_id", 42_i64)
+                    .set("body", body),
+            ),
+        );
+        let _ = fixture
+            .handler
+            .handle(
+                &fixture.writer_session,
+                &encode(&execute_built("app", wb.build())),
+                &fixture.writer_conn,
+            )
+            .await
+            .unwrap();
     }
 
-    g.finish();
+    // Drain K events per subscriber. Sum all = N*K.
+    let mut subs = fixture.subs.lock().await;
+    let mut got_total = 0usize;
+    for sub in subs.iter_mut() {
+        let got = drain_events_for(&mut sub.rx, sub.sub_id, K, Duration::from_secs(15)).await;
+        got_total += got;
+        black_box(got);
+    }
+    assert_eq!(
+        got_total,
+        n * K,
+        "fanout loss: got {got_total}/{} for n={n} K={K}",
+        n * K
+    );
 }
 
-criterion_group!(benches, bench_fanout, bench_fanout_keys, bench_fanout_in);
-criterion_main!(benches);
+/// `build_fanout_fixture` spawns one `bridge_task` per subscriber (see the
+/// module doc: "one `bridge_task` per sub drains the changefeed") via
+/// `tokio::spawn` — a background task that must keep running for the
+/// fixture's whole lifetime. Building the fixture on a throwaway
+/// `new_current_thread()` runtime (as this bench used to, via a
+/// `setup_block_on` matching `wire_latencies.rs`'s old helper) aborts every
+/// task spawned on it the instant `block_on` returns — every bridge task
+/// dies, so every subscriber receives zero events forever after
+/// (`fanout loss: got 0/... `). `register_fanout_variant` therefore takes a
+/// PERSISTENT multi-thread runtime (built once in `main`, kept alive until
+/// after `h.run()`) so the bridge tasks it spawns keep draining the
+/// changefeed for the whole bench.
+fn register_fanout_variant(
+    h: &mut Harness,
+    rt: &tokio::runtime::Runtime,
+    group: &str,
+    n: usize,
+    keys: bool,
+    filter: Filter,
+    body_mod_10: bool,
+) {
+    let fixture = rt.block_on(build_fanout_fixture(n, keys, filter, body_mod_10));
+    let iter_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let id = format!("{group}/n_{n}");
+    h.bench_async(&id, move || {
+        let fixture = fixture.clone();
+        let iter_idx = iter_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        async move {
+            run_fanout_iter(fixture, iter_idx).await;
+        }
+    });
+}
+
+fn main() {
+    let mut h = Harness::new("subscription_fanout", env!("CARGO_MANIFEST_DIR"));
+
+    // See `register_fanout_variant`'s doc comment: must be multi-thread and
+    // must outlive `h.run()` so every subscriber's `bridge_task` keeps
+    // running for the whole bench.
+    let server_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("server_rt");
+
+    for &n in &[1usize, 10, 50, 100] {
+        register_fanout_variant(
+            &mut h,
+            &server_rt,
+            "subscription_fanout",
+            n,
+            false,
+            default_filter(),
+            false,
+        );
+    }
+
+    for &n in &[1usize, 10, 50, 100] {
+        register_fanout_variant(
+            &mut h,
+            &server_rt,
+            "subscription_fanout_keys",
+            n,
+            true,
+            default_filter(),
+            false,
+        );
+    }
+
+    // Keys-mode fan-out. Identical scaffolding, but every subscription uses
+    // `DeliverMode::Keys`. This is the path where the `value_qv` de-intern
+    // deferral wins unconditionally — Keys never reads `value_qv`, so the
+    // decode is pure waste on every event, hit or miss, multiplied by N
+    // subscribers.
+    //
+    // Fan-out with an `$in` filter containing 10 string literals. This is
+    // the supported-filter path where compile caching has the most impact
+    // among allowed subscription operators: `compile_filter` builds a
+    // `TSet<QueryValue>` (hashing all 10 values) and clones each String —
+    // work that is currently repeated per event × per subscriber.
+    //
+    // (Note: `Like`/`Regex` are the biggest theoretical win, but they are
+    // currently blocked by `find_unsupported_subscription_filter`. The `$in`
+    // path exercises the `TSet` build + `FilterValue::clone` costs that are
+    // eliminated by compile-once caching.)
+    for &n in &[1usize, 10, 50, 100] {
+        let filter = Filter::In {
+            field: vec!["body".into()],
+            values: (0..10)
+                .map(|i| FilterValue::String(format!("msg-{i}")))
+                .collect(),
+        };
+        register_fanout_variant(
+            &mut h,
+            &server_rt,
+            "subscription_fanout_in",
+            n,
+            false,
+            filter,
+            true,
+        );
+    }
+
+    h.run();
+}

@@ -288,8 +288,9 @@ fn main() {
                     let session = session.clone();
                     let begin_bytes = begin_bytes.clone();
                     async move {
-                        let tx =
-                            expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
+                        let tx = expect_tx_handle(
+                            call(&handler, &session, black_box(&begin_bytes)).await,
+                        );
                         let exec = tx_execute_bytes(tx, 1);
                         let r1 = call(&handler, &session, &exec).await;
                         black_box(&r1);
@@ -306,39 +307,75 @@ fn main() {
             let handler = handler.clone();
             let session = session.clone();
             let begin_bytes = tx_begin_bytes();
-            h.bench_async("interactive_tx_lifecycle/begin_execute_n_commit", move || {
-                let handler = handler.clone();
-                let session = session.clone();
-                let begin_bytes = begin_bytes.clone();
-                async move {
-                    let tx =
-                        expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
-                    let exec = tx_execute_bytes(tx, 10);
-                    let r1 = call(&handler, &session, &exec).await;
-                    black_box(&r1);
-                    let c1 = tx_commit_bytes(tx);
-                    let r2 = call(&handler, &session, &c1).await;
-                    black_box(r2);
-                }
-            });
+            h.bench_async(
+                "interactive_tx_lifecycle/begin_execute_n_commit",
+                move || {
+                    let handler = handler.clone();
+                    let session = session.clone();
+                    let begin_bytes = begin_bytes.clone();
+                    async move {
+                        let tx = expect_tx_handle(
+                            call(&handler, &session, black_box(&begin_bytes)).await,
+                        );
+                        let exec = tx_execute_bytes(tx, 10);
+                        let r1 = call(&handler, &session, &exec).await;
+                        black_box(&r1);
+                        let c1 = tx_commit_bytes(tx);
+                        let r2 = call(&handler, &session, &c1).await;
+                        black_box(r2);
+                    }
+                },
+            );
         }
     }
 
     // -----------------------------------------------------------------
     // Group 2: handshake_paths — full SCRAM connect vs resumption fast-path
     // -----------------------------------------------------------------
+    //
+    // `handle`/`_temp` are declared in `main`'s own scope (not a nested
+    // block) and torn down only after `h.run()` at the bottom of this
+    // function. `Harness::bench_async`/`bench_batched_async` only
+    // REGISTER closures here — they don't execute them; execution happens
+    // inside `h.run()`. A nested block that shuts the server down before
+    // `h.run()` runs tears it down before any registered closure ever
+    // connects, so every `full_scram_connect`/`resume_fast_path` call
+    // hits a dead listener (`ConnectionRefused`).
+    //
+    // `setup_live_server()` (and the pinned-hash capture below) run on a
+    // dedicated PERSISTENT runtime (`server_rt`), NOT `setup_block_on`'s
+    // disposable per-call one. `ServerLauncher::launch()` spawns the
+    // accept-loop tasks via `tokio::spawn` onto whichever runtime is
+    // current at the call site; `setup_block_on` builds a throwaway
+    // current-thread runtime and drops it the instant `block_on` returns,
+    // which aborts every task spawned on it — including those accept
+    // loops and the `TcpListener` they own. The listener socket dies (and
+    // every subsequent connect gets `ConnectionRefused`) the moment
+    // `setup_live_server()` returns, well before any registered
+    // `full_scram_connect`/`resume_fast_path` closure runs. `server_rt`
+    // stays alive until after `h.run()` so the accept loops keep running
+    // for the whole bench.
+    // Multi-thread, NOT `new_current_thread()`: a current-thread runtime
+    // only polls tasks spawned via `tokio::spawn` while a `block_on` call
+    // is actively driving it on that one thread — the accept-loop tasks
+    // `launch()` spawns would go unpolled (and every client connect would
+    // hang forever on the TLS handshake, since the kernel completes the
+    // bare TCP 3-way handshake via backlog regardless) the instant this
+    // setup's `block_on` call returns, until the next explicit `block_on`.
+    // A multi-thread runtime keeps worker threads polling spawned tasks
+    // continuously, independent of any particular `block_on` call.
+    let server_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("server_rt");
+    let (handle, addr, _temp, password) = server_rt.block_on(setup_live_server());
+    let password = Arc::new(password);
     {
-        // Spawn the live server ONCE. Both workloads reuse it — fresh
-        // TCP connection per iteration is what we measure, not the launcher
-        // boot cost.
-        let (handle, addr, _temp, password) = setup_block_on(setup_live_server());
-        let password = Arc::new(password);
-
         // Capture a resumption ticket + pin for the resume-path bench setup
         // needs the pinned hash. Doing this once means the loop only pays
         // the resume cost, not the full SCRAM cost, on the per-iteration
         // setup path below.
-        let pinned_hash = setup_block_on(async {
+        let pinned_hash = server_rt.block_on(async {
             let client = connect_client(addr, &password).await;
             // Ensure the session is fully registered server-side before
             // closing — mirror the pattern in `tests/duplex_e2e.rs::
@@ -404,11 +441,14 @@ fn main() {
                 },
             );
         }
-
-        // Tear the server down explicitly so the data dir is released before
-        // the `TempDir` drop tries to remove it.
-        setup_block_on(handle.shutdown());
     }
 
     h.run();
+
+    // Tear the server down explicitly, after every registered closure has
+    // actually run, so the data dir is released before the `TempDir` drop
+    // (at the end of `main`) tries to remove it. Run on `server_rt` (not
+    // `setup_block_on`'s throwaway runtime) since the accept-loop tasks
+    // `shutdown()` cancels/joins were themselves spawned on `server_rt`.
+    server_rt.block_on(handle.shutdown());
 }
