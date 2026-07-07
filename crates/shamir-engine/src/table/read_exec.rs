@@ -330,6 +330,19 @@ impl TableManager {
         }
 
         // ── index2: FTS / Functional / Vector accelerated path ─────
+        //
+        // CRIT-7: an `IndexResult::Set`/`Ranked` from index2 is the
+        // AUTHORITATIVE, complete answer for this filter — including when
+        // it is EMPTY. An empty set means "zero rows match", full stop.
+        // We must NOT fall through to the legacy btree / full-scan paths
+        // when `rids_vec` is empty:
+        //   - FTS / functional: the full scan would re-derive the same
+        //     empty answer at O(N) needless cost (tokenising every row
+        //     again), plus mis-attribute `index_used`.
+        //   - VectorSimilarity: the bare predicate compiles to
+        //     `FilterNode::True` (it has no row-level representation), so
+        //     a full-scan fall-through returns EVERY row in the table
+        //     instead of zero — a correctness bug.
         if let Some(ref filter) = query.r#where {
             if let Some(result) = self.try_plan_index2(filter, interner).await {
                 let (rids_vec, index_tag) = match result {
@@ -341,68 +354,69 @@ impl TableManager {
                         "index2_ranked",
                     ),
                 };
-                if !rids_vec.is_empty() {
-                    // Preserve full match count for pagination metadata BEFORE
-                    // any page slice — clients rely on count_total for UI.
-                    let count_total = rids_vec.len() as u64;
+                // Preserve full match count for pagination metadata BEFORE
+                // any page slice — clients rely on count_total for UI.
+                let count_total = rids_vec.len() as u64;
 
-                    // Opt #5 (1000×-class): push pagination into index2 path.
-                    // index2 returns a pre-filtered, pre-ranked RID list with no
-                    // residual predicate, so it is safe to slice [skip..skip+take]
-                    // before calling get_many. Gate: finite LIMIT must be present.
-                    let (skip_u64, take_opt) = query.pagination.resolve();
-                    let rids_slice: &[RecordId] = if let Some(take_u64) = take_opt {
-                        let skip = skip_u64 as usize;
-                        let take = take_u64 as usize;
-                        let lo = skip.min(rids_vec.len());
-                        let hi = lo.saturating_add(take).min(rids_vec.len());
-                        &rids_vec[lo..hi]
-                    } else {
-                        &rids_vec
-                    };
+                // Opt #5 (1000×-class): push pagination into index2 path.
+                // index2 returns a pre-filtered, pre-ranked RID list with no
+                // residual predicate, so it is safe to slice [skip..skip+take]
+                // before calling get_many. Gate: finite LIMIT must be present.
+                // Note: an empty `rids_vec` slices down to `&[]`, and
+                // `get_many_bytes(&[])` short-circuits without a storage
+                // round-trip — so the empty case is O(1).
+                let (skip_u64, take_opt) = query.pagination.resolve();
+                let rids_slice: &[RecordId] = if let Some(take_u64) = take_opt {
+                    let skip = skip_u64 as usize;
+                    let take = take_u64 as usize;
+                    let lo = skip.min(rids_vec.len());
+                    let hi = lo.saturating_add(take).min(rids_vec.len());
+                    &rids_vec[lo..hi]
+                } else {
+                    &rids_vec
+                };
 
-                    // S3: zero-copy bytes path — index2 is plain SELECT only.
-                    let raw_records = self.get_many_bytes(rids_slice).await?;
-                    let mut records = Vec::with_capacity(raw_records.len());
-                    for bytes in raw_records.into_iter().flatten() {
-                        let qv = match shamir_types::record_view::RecordView::new(&bytes) {
-                            Ok(view) => view.to_query_value(interner),
-                            Err(_) => match InnerValue::from_bytes(bytes) {
-                                Ok(iv) => {
-                                    match shamir_types::codecs::interned::inner_value_to_query_value(
-                                        &iv, interner,
-                                    ) {
-                                        Ok(q) => q,
-                                        Err(_) => continue,
-                                    }
+                // S3: zero-copy bytes path — index2 is plain SELECT only.
+                let raw_records = self.get_many_bytes(rids_slice).await?;
+                let mut records = Vec::with_capacity(raw_records.len());
+                for bytes in raw_records.into_iter().flatten() {
+                    let qv = match shamir_types::record_view::RecordView::new(&bytes) {
+                        Ok(view) => view.to_query_value(interner),
+                        Err(_) => match InnerValue::from_bytes(bytes) {
+                            Ok(iv) => {
+                                match shamir_types::codecs::interned::inner_value_to_query_value(
+                                    &iv, interner,
+                                ) {
+                                    Ok(q) => q,
+                                    Err(_) => continue,
                                 }
-                                Err(_) => continue,
-                            },
-                        };
-                        records.push(crate::query::read::QueryRecord::Direct(qv));
-                    }
-                    let returned = records.len() as u64;
-                    let pagination = if query.pagination.is_none() {
-                        None
-                    } else {
-                        Some(PaginationInfo::compute(
-                            &query.pagination,
-                            Some(count_total),
-                        ))
+                            }
+                            Err(_) => continue,
+                        },
                     };
-                    return Ok(crate::query::read::QueryResult {
-                        records,
-                        stats: Some(crate::query::read::QueryStats {
-                            index_used: Some(index_tag.into()),
-                            records_scanned: count_total,
-                            records_returned: returned,
-                            execution_time_us: start.elapsed().as_micros() as u64,
-                        }),
-                        pagination,
-                        value: None,
-                        explain: None,
-                    });
+                    records.push(crate::query::read::QueryRecord::Direct(qv));
                 }
+                let returned = records.len() as u64;
+                let pagination = if query.pagination.is_none() {
+                    None
+                } else {
+                    Some(PaginationInfo::compute(
+                        &query.pagination,
+                        Some(count_total),
+                    ))
+                };
+                return Ok(crate::query::read::QueryResult {
+                    records,
+                    stats: Some(crate::query::read::QueryStats {
+                        index_used: Some(index_tag.into()),
+                        records_scanned: count_total,
+                        records_returned: returned,
+                        execution_time_us: start.elapsed().as_micros() as u64,
+                    }),
+                    pagination,
+                    value: None,
+                    explain: None,
+                });
             }
         }
 
