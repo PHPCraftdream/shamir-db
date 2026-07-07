@@ -78,7 +78,6 @@ dhat = "0.3"
 bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3.10.1"
 serial_test = "3.3.1"
-criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
 # RSS sampling for the `vector_report` example (V0.4). Reads the OS
 # resident-set size (procfs on Linux, mach_task_basic_info on macOS,
