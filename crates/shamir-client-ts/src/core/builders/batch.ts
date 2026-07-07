@@ -36,6 +36,7 @@ const DEFAULT_LIMITS: BatchLimits = {
   max_dependency_depth: 10,
   max_execution_time_secs: 30,
   max_result_size: 10_485_760,
+  max_nesting_depth: 4,
 };
 
 /** Minimal client interface needed by `.execute()`. */
@@ -200,6 +201,8 @@ export class Batch {
         DEFAULT_LIMITS.max_execution_time_secs,
       max_result_size:
         partial.max_result_size ?? DEFAULT_LIMITS.max_result_size,
+      max_nesting_depth:
+        partial.max_nesting_depth ?? DEFAULT_LIMITS.max_nesting_depth,
     };
     return this;
   }
