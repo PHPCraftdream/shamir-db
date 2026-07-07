@@ -15,6 +15,8 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [workspace.dependencies]
 captrack = { path = "D:/dev/rust/captrack", features = ["telemetry"] }
+# TEMPORARY: path dep until bench-scale-tool is published as a standalone
+# crate (crates.io or a git dep) — swap this one line then.
 bench-scale-tool = { path = "D:/dev/rust/bench-scale-tool" }
 
 [workspace.lints.clippy]
@@ -63,24 +65,23 @@ panic = "abort"
 inherits = "release"
 lto = false
 incremental = true
-# `opt-level = 0` (down from release's 3). What hurts iterative /opti
-# is the BUILD step, not the measurement; absolute numbers don't matter
-# inside a cycle — only the **delta to baseline** does, and that delta
-# survives any uniform pessimism. opt-0 compiles ~5× faster than opt-3,
-# ~2× faster than opt-1. Measurements come out 2–5× slow vs. opt-3,
-# but criterion auto-adjusts iter counts per sample so stat-precision
-# survives for both integration (~ms) and micro (~ns) benches.
+# Benches ALWAYS build at opt-level=1 — never 0, never 3. Two reasons:
+#
+# 1. Build speed: what hurts iterative /opti is the BUILD step, not the
+#    measurement; with bench-scale-tool's fixed-iteration model the
+#    reported ns/op is already a real per-op cost (no criterion adaptive
+#    sampling to smooth over), so a leaner opt level keeps the
+#    calibrate → run → re-calibrate loop fast. opt-1 is ~2.5× faster to
+#    build than opt-3.
+# 2. Correctness: opt-level=0 generates async fn state machines so large
+#    (no variable-lifetime collapse across await points) that
+#    deeply-chained bench setup (`fresh_db → seed_users → create_index` +
+#    heavier query planner paths) overflows the ~1 MiB Windows main-thread
+#    stack. opt-1 enables the lightest mir-opts that collapse those state
+#    machines back under the limit. Documented in
+#    docs/perf/sefer-alloc-rollout-2026-06-30.md under
+#    "Stack overflow в engine_perf".
 #
 # For "final" / publishable absolute numbers, run explicitly with the
-# release profile:
-#   cargo bench -p shamir-db --profile=release
-#
-# **opt-level=1, not 0** — opt-0 generates async fn state machines so large
-# (no variable-lifetime collapse across await points) that deeply-chained
-# bench setup (`fresh_db → seed_users → create_index` + heavier query
-# planner paths) overflows the ~1 MiB Windows main-thread stack. opt-1
-# enables the lightest mir-opts that collapse those state machines back
-# under the limit, at ~2× the build time of opt-0 (still ~2.5× faster
-# than opt-3). Documented in docs/perf/sefer-alloc-rollout-2026-06-30.md
-# under "Stack overflow в engine_perf".
+# release profile: cargo bench -p <crate> --bench <name> --profile=release
 opt-level = 1
