@@ -3,7 +3,7 @@ use std::sync::Arc;
 use shamir_collections::TFxMap;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
-use shamir_db::access::Actor;
+use shamir_db::access::{Action, Actor, ResourcePath};
 use shamir_db::core::interner::Interner;
 use shamir_db::record_view::{RecordRef, RecordView};
 use shamir_db::types::value::{InnerValue, QueryValue};
@@ -80,6 +80,51 @@ pub(crate) async fn bridge_task(
     };
 
     let run = async {
+        // CRIT-5 (#439): Per-table read-ACL enforcement.
+        //
+        // `BatchOp::Subscribe` is classified at the session layer as
+        // `(Action::Read, Resource::Global)` — a coarse "can this actor
+        // subscribe at all?" gate. The per-table checks the classifier
+        // comment promises ("actual table checks happen when the
+        // subscription is activated") MUST happen here, in the bridge,
+        // where the full `sources` list is known. Without this loop a user
+        // with global `read` but no `read` on table `secrets` would receive
+        // every live insert/update/delete from `secrets`.
+        //
+        // Strategy: authorize each source's table via `authorize_access`;
+        // keep only the authorized subset. Denied sources are logged and
+        // silently excluded (not a hard failure — mirrors the existing
+        // "changefeed not available" partial-reject path). If ALL sources
+        // are denied, bail out before subscribing to any changefeed (no
+        // receiver created, no push).
+        let mut authorized_sources: Vec<SubscriptionSource> = Vec::with_capacity(sources.len());
+        for source in sources {
+            let path = ResourcePath::Table {
+                db: db_name.clone(),
+                store: source.table.repo.clone(),
+                table: source.table.table.clone(),
+            };
+            match db.authorize_access(&actor, &path, Action::Read).await {
+                Ok(()) => authorized_sources.push(source),
+                Err(_) => {
+                    tracing::warn!(
+                        sub_id,
+                        repo = %source.table.repo,
+                        table = %source.table.table,
+                        "subscription source denied by read-ACL; excluding from delivery",
+                    );
+                }
+            }
+        }
+        if authorized_sources.is_empty() {
+            tracing::warn!(
+                sub_id,
+                "all subscription sources denied by read-ACL; aborting bridge"
+            );
+            return;
+        }
+        let sources = authorized_sources;
+
         let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
             .iter()
             .map(|s| {
