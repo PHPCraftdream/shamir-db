@@ -1,7 +1,7 @@
 use shamir_collections::TFxMap;
 use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
-use shamir_tx::TxContext;
+use shamir_tx::{IsolationLevel, TxContext};
 use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
@@ -640,6 +640,36 @@ async fn commit_tx_lockfree(
     use crate::tx::materialize::materialize;
     use crate::tx::pre_commit::pre_commit_locked_validate;
 
+    // CRIT-4 (#438): Serializable txs must serialize the validate→publish
+    // window. The lock-free path relies on per-table `uwl_guards` for
+    // serialization, but those are acquired ONLY for tables with unique
+    // constraints (`pre_commit_prelock`). A Serializable tx with NO unique
+    // constraints is not serialized anywhere in this path, so two such txs
+    // with disjoint write-sets but a rw-antidependency cycle (classic
+    // write-skew: A reads x / writes y, B reads y / writes x) can BOTH pass
+    // `pre_commit_locked_validate` and then BOTH publish — violating
+    // Serializable.
+    //
+    // Fix: take `gate.commit_lock()` for the validate→publish window when
+    // the tx is Serializable, mirroring exactly the section the legacy
+    // (`commit_tx_inner_legacy_async`) path already holds under the same
+    // mutex. Snapshot txs do NOT need SSI validation and keep the full
+    // lock-free parallelism — the branch below is a pure `if` with no lock
+    // taken on the Snapshot path (zero overhead).
+    //
+    // No deadlock / self-block risk: `commit_tx_lockfree` has a single call
+    // site (`commit_tx_inner` line ~490), which itself never holds
+    // `commit_lock`. The AsyncIndex path (`commit_tx_inner_legacy_async`)
+    // acquires `commit_lock` itself but RETURNS at line ~471 before the
+    // control flow reaches this function, so no caller arrives here already
+    // holding the mutex. `tokio::sync::Mutex` is non-reentrant, so this
+    // invariant is load-bearing.
+    let _serializable_guard = if tx.isolation == IsolationLevel::Serializable {
+        Some(gate.commit_lock().await)
+    } else {
+        None
+    };
+
     // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
     let validated = match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards).await {
         Ok(Some(v)) => v,
@@ -715,6 +745,11 @@ async fn commit_tx_lockfree(
         g.disarm();
     }
     drop(cell_guards);
+    // CRIT-4 (#438): release the Serializable serialization window now that
+    // publish (inside `materialize` above) is complete. Holding past this
+    // point would needlessly block the next Serializable committer through
+    // `finalize_sync_post_publish`, which is post-publish tail work.
+    drop(_serializable_guard);
     let materialization = finalize_sync_post_publish(
         &tx,
         post_publish,
