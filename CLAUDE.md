@@ -42,6 +42,47 @@ Prefer `--workspace` flags over per-crate invocations.
 
 ---
 
+## 🚫 NEVER poll a background command with `sleep` (repeated violation — READ THIS)
+
+The user has flagged this mistake **multiple times**. Do not repeat it again.
+
+**Banned pattern:** launching a long-running command with `run_in_background`
+and then babysitting it via `sleep 100; tail -N <logfile>` in a loop, over
+and over, turn after turn. This burns the user's attention on a mechanical
+wait-and-poll cycle that the tooling already automates.
+
+**What to do instead:**
+- Launch the long-running command with `run_in_background: true` and then
+  **stop** — do not chain a `sleep` after it in the same or a follow-up call.
+- The tool layer delivers a `<task-notification>` the moment the background
+  command finishes. React to that notification when it arrives — do not
+  preemptively `sleep` "until it's probably done."
+- If you must check on genuinely long work (a multi-minute build/bench
+  sweep) before its notification arrives, that's a signal to do something
+  else useful in the meantime (read code, prepare the next step, answer the
+  user), not to sit in a `sleep`/`tail` loop.
+- A single `TaskOutput` call with `block: true` (which waits for real
+  completion, not a fixed timer) is the correct primitive when you need to
+  block on a specific backgrounded task — never a manually-guessed `sleep N`.
+
+If you catch yourself about to write `sleep <N>` immediately after
+backgrounding a command: stop, delete it, and rely on the notification
+system instead.
+
+**Same ban applies to polling process state by hand** (`tasklist`, `wmic
+process where ...`, `ps`/`pgrep`, etc.) as a substitute for the notification
+system. Calling `tasklist` after every background launch to check "is it
+still running?" is the exact same anti-pattern as `sleep`-polling — it just
+swaps the wait primitive. If you launched the command via
+`run_in_background: true`, trust the tool to track it and deliver a
+`<task-notification>` on completion; don't re-implement that tracking
+yourself with manual process-list checks. Reach for `tasklist`/`wmic` only
+to investigate a genuine anomaly (e.g. a process that should be dead but
+isn't, or diagnosing an unexpected stray process) — never as a routine
+"is my background command done yet" check.
+
+---
+
 ## ⏱️ Bench cache isolation (iterative /opti)
 
 `cargo bench`, `cargo test`, `cargo clippy --all-targets` write to the
