@@ -6,14 +6,14 @@
 //! - **RSS** (resident-set size) — `memory_stats::memory_stats()` sampled
 //!   right after the graph build, before any query. Reports the 4×
 //!   memory-reduction claim (or the measured ratio).
-//! - **QPS** (search latency) — criterion-bench top-k search, reported as
-//!   throughput (queries / second). The u8-graph traversal is cheaper per
-//!   hop (integer distance vs f32 SIMD), but the rescore adds an O(dim·k)
-//!   f32 pass — net effect is measured here.
+//! - **QPS** (search latency) — top-k search, reported as throughput
+//!   (queries / second). The u8-graph traversal is cheaper per hop
+//!   (integer distance vs f32 SIMD), but the rescore adds an O(dim·k) f32
+//!   pass — net effect is measured here.
 //! - **recall@10** — the SQ8 adapter's top-10 vs the f32 adapter's top-10
 //!   (ground truth from the same HNSW graph build). Reported once per cell
-//!   (NOT per-criterion-iter — recall is a property of the built graph, not
-//!   the latency measurement).
+//!   (NOT per-iter — recall is a property of the built graph, not the
+//!   latency measurement).
 //!
 //! ## Dataset
 //!
@@ -23,17 +23,17 @@
 //! (256) and exercise the u8-graph path, small enough to stay within the
 //! QUICK wall budget.
 //!
-//! ## Tuning
+//! ## Migration note
 //!
-//! `shamir_bench_utils::tune` is applied (QUICK default). The RSS + recall
-//! numbers are printed once to stdout (NOT measured by criterion) so a
-//! report can be built from a single QUICK run.
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`). Both
+//! adapters are built ONCE (RSS + recall reported once, at registration
+//! time, exactly as under Criterion) and shared read-only across every
+//! search iteration → `bench_async`.
 
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use memory_stats::memory_stats;
-use shamir_bench_utils as bu;
 use shamir_engine::index2::kind::{VectorMetric, VectorQuantization};
 use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
 use shamir_engine::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
@@ -51,13 +51,6 @@ const SIGMA: f32 = 0.25;
 const SEED: u64 = 0xBEEF;
 /// top-k for the search + recall measurement.
 const TOP_K: u32 = 10;
-
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
 
 fn rid_from(i: usize) -> RecordId {
     let mut a = [0u8; 16];
@@ -135,14 +128,14 @@ fn recall_at_k(truth: &[RecordId], cand: &[RecordId]) -> f32 {
 
 /// Build BOTH adapters on the same batch, sample RSS after each build,
 /// compute recall@10 over a fixed query set, and print a one-line summary.
-/// The criterion bench below measures only the search latency (QPS).
+/// The search bench below measures only the search latency (QPS).
 ///
 /// #418 — RSS is now sampled PER-ADAPTER in isolation: we build f32, sample
 /// its RSS, compute recall, DROP the f32 adapter, then build sq8 and sample
 /// its RSS. This isolates each adapter's footprint (the pre-#418 code kept
 /// both resident, so `rss_sq8` included the f32 graph and masked SQ8's
-/// memory win). Both adapters are returned for the criterion search bench
-/// (rebuilt after sampling — see `rebuild_for_bench`).
+/// memory win). Both adapters are returned for the search bench (rebuilt
+/// after sampling — see the f32 rebuild at the end).
 fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<HnswAdapter>) {
     let data = clustered(N, DIM, K_CLUSTERS, SIGMA, SEED);
     let batch: Vec<(RecordId, Vec<f32>)> = data
@@ -198,8 +191,8 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
         .collect();
 
     // DROP the f32 adapter so the sq8 RSS sample is not contaminated by
-    // its f32 graph. The Arc is the only strong reference (the criterion
-    // bench rebuilds fresh adapters below).
+    // its f32 graph. The Arc is the only strong reference (the search
+    // bench rebuilds a fresh f32 adapter below).
     drop(f32_adapter);
 
     // ---- Build sq8 adapter, sample RSS, compute recall ------------------
@@ -249,8 +242,8 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
          (Δ={fp_delta}, ratio={ratio:.3}) | recall@{TOP_K} sq8-vs-f32 = {avg_recall:.4}"
     );
 
-    // Rebuild the f32 adapter for the criterion search bench (it was dropped
-    // above for an isolated sq8 RSS sample). The sq8 adapter is reused.
+    // Rebuild the f32 adapter for the search bench (it was dropped above
+    // for an isolated sq8 RSS sample). The sq8 adapter is reused.
     let f32_adapter = Arc::new(HnswAdapter::new(
         DIM as u32,
         VectorMetric::Cosine,
@@ -267,14 +260,14 @@ fn build_and_report(rt: &tokio::runtime::Runtime) -> (Arc<HnswAdapter>, Arc<Hnsw
     (f32_adapter, sq8_adapter)
 }
 
-fn bench_quantization(c: &mut Criterion) {
-    let rt = rt();
-    let (f32_adapter, sq8_adapter) = build_and_report(&rt);
+fn main() {
+    let mut h = Harness::new("quantization_f32_vs_sq8", env!("CARGO_MANIFEST_DIR"));
 
-    let mut group = c.benchmark_group("quantization_f32_vs_sq8");
-    // QUICK by default. The `120s` wall-guard caps the FULL-mode worst case.
-    bu::tune_tiered(&mut group, 100, 5, 3, 120);
-    group.throughput(Throughput::Elements(1));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (f32_adapter, sq8_adapter) = build_and_report(&rt);
 
     // A fixed query (same lineage as the dataset, distinct seed).
     let query: Vec<f32> = clustered(1, DIM, K_CLUSTERS, SIGMA, SEED + 1)
@@ -283,28 +276,25 @@ fn bench_quantization(c: &mut Criterion) {
         .unwrap();
     let opts = SearchOpts::with_ef_search(256);
 
-    group.bench_function("f32_search", |b| {
+    h.bench_async("f32_search", {
         let f32_adapter = Arc::clone(&f32_adapter);
         let q = query.clone();
-        b.to_async(&rt).iter(move || {
+        move || {
             let a = Arc::clone(&f32_adapter);
             let q = q.clone();
             async move { a.search(&q, TOP_K, opts, None).await.unwrap() }
-        });
+        }
     });
 
-    group.bench_function("sq8_search", |b| {
+    h.bench_async("sq8_search", {
         let sq8_adapter = Arc::clone(&sq8_adapter);
         let q = query.clone();
-        b.to_async(&rt).iter(move || {
+        move || {
             let a = Arc::clone(&sq8_adapter);
             let q = q.clone();
             async move { a.search(&q, TOP_K, opts, None).await.unwrap() }
-        });
+        }
     });
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_quantization);
-criterion_main!(benches);

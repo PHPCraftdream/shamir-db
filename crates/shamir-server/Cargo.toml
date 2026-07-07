@@ -127,6 +127,7 @@ shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 shamir-query-builder = { path = "../shamir-query-builder" }
 criterion = { version = "0.5", features = ["html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
+bench-scale-tool = { workspace = true, features = ["async"] }
 # Used by subscription_hot_paths bench to construct `shamir_tx::RecordChange`
 # instances (its `key`/`value` fields are `bytes::Bytes`).
 bytes = "1.11.0"

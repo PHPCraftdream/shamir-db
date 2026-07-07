@@ -1,7 +1,7 @@
 //! D0b — Durable-backend concurrent-commit baseline.
 //!
 //! Measures the wall-clock cost of N concurrent committers against a
-//! RAW (un-MemBuffer-wrapped) sled backend, which fsyncs on every commit.
+//! RAW (un-MemBuffer-wrapped) fjall backend, which fsyncs on every commit.
 //! This is the "before GroupFsync" baseline that D1c/D1d will later
 //! compare against.
 //!
@@ -9,7 +9,7 @@
 //!   - `same_table/n_{1,8,32}` — all N writers commit to the SAME table.
 //!   - `disjoint_tables/n_{1,8,32}` — each writer commits to its own table.
 //!
-//! fsync-count: sled does not expose a public fsync counter. Wall-clock
+//! fsync-count: fjall does not expose a public fsync counter. Wall-clock
 //! alone is the signal. At N=1 the per-commit cost is dominated by a
 //! single fsync (~0.5–2 ms on spinning rust, <0.1 ms on NVMe). As N
 //! grows, same-table serialises on the commit gate AND under the
@@ -20,34 +20,28 @@
 //! the ratio `disjoint[N] / (N * disjoint[1])` is the fsync-fan-out
 //! overhead (ideal = 1.0, >1.0 means OS queue saturation).
 //!
-//! Each Criterion iteration:
-//!   * provisions a fresh tempdir + sled-raw RepoInstance (no MemBuffer),
-//!   * spawns N tasks that each run one insert_tx + commit_tx,
-//!   * joins all tasks and records wall-clock.
-//!
 //! NOTE: Engine-internal APIs (`insert_tx` / `begin_tx` / `commit_tx`)
 //! are used directly, following the same pattern as `tx_concurrent.rs`.
 //! The query-builder exception applies: these are the engine's typed entry
 //! points, not user-facing query construction.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`). Each
+//! iteration provisions a FRESH tempdir + fjall-raw RepoInstance (no
+//! MemBuffer) — this cannot be shared across iterations without a real
+//! fsync-cost being amortised away by state accumulation — so every cell
+//! uses `bench_batched_async`: setup builds the fresh repo, the routine
+//! spawns N committers and joins them.
 
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::repo::{BoxRepoFactory, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_tx::IsolationLevel;
 use shamir_types::types::value::InnerValue;
 
-fn rt() -> tokio::runtime::Runtime {
-    // Multi-thread: concurrent tasks must actually run in parallel.
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
-/// Build a sled-raw (no MemBuffer) RepoInstance with `table_count` tables,
+/// Build a fjall-raw (no MemBuffer) RepoInstance with `table_count` tables,
 /// inside a freshly created tempdir. Returns (instance, _tempdir) — the
 /// tempdir is kept alive via the returned guard; drop it after the repo.
 async fn make_durable_repo(table_count: usize) -> (RepoInstance, tempfile::TempDir) {
@@ -68,101 +62,79 @@ async fn make_durable_repo(table_count: usize) -> (RepoInstance, tempfile::TempD
     (repo, tempdir)
 }
 
-// ── same-table: all N writers commit to `tbl_0` ────────────────────────────
+fn main() {
+    let mut h = Harness::new("durable_concurrent_commit", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_same_table(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("durable_concurrent_commit/same_table");
-    // QUICK: sample_size=10, measurement=1 s, warm_up=1 s.
-    bu::tune_tiered(&mut group, 10, 1, 1, 30);
-
+    // ── same-table: all N writers commit to `tbl_0` ─────────────────────
     for &n in &[1usize, 8, 32] {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("n", n), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for iter_i in 0..iters {
-                    // Fresh durable repo per iter — avoids inter-iter
-                    // state bleed on the sled tree.
-                    let (repo, _dir) = make_durable_repo(1).await;
-
-                    let start = Instant::now();
-                    let mut handles = Vec::with_capacity(n);
-                    for w in 0..n {
-                        let repo = repo.clone();
-                        // Unique value per (iter, writer) → no key collisions.
-                        let val = format!("v_{}_{}", iter_i, w);
-                        handles.push(tokio::spawn(async move {
-                            let (mut tx, _g) =
-                                repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-                            let tbl = repo.get_table("tbl_0").await.unwrap();
-                            tbl.insert_tx(&InnerValue::Str(val), Some(&mut tx))
-                                .await
-                                .unwrap();
-                            repo.commit_tx(tx).await.unwrap();
-                        }));
-                    }
-                    for h in handles {
-                        h.await.unwrap();
-                    }
-                    total += start.elapsed();
-
-                    drop(repo);
-                    // _dir drops here, cleaning up the tempdir.
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("same_table/n_{n}"),
+            move || {
+                let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    let (repo, dir) = make_durable_repo(1).await;
+                    (repo, dir, iter_i)
                 }
-                total
-            });
-        });
+            },
+            move |(repo, dir, iter_i)| async move {
+                let mut handles = Vec::with_capacity(n);
+                for w in 0..n {
+                    let repo = repo.clone();
+                    let val = format!("v_{}_{}", iter_i, w);
+                    handles.push(tokio::spawn(async move {
+                        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+                        let tbl = repo.get_table("tbl_0").await.unwrap();
+                        tbl.insert_tx(&InnerValue::Str(val), Some(&mut tx))
+                            .await
+                            .unwrap();
+                        repo.commit_tx(tx).await.unwrap();
+                    }));
+                }
+                for hd in handles {
+                    hd.await.unwrap();
+                }
+                drop(repo);
+                drop(dir);
+            },
+        );
     }
 
-    group.finish();
-}
-
-// ── disjoint-tables: writer w commits to `tbl_{w}` ─────────────────────────
-
-fn bench_disjoint_tables(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("durable_concurrent_commit/disjoint_tables");
-    bu::tune_tiered(&mut group, 10, 1, 1, 30);
-
+    // ── disjoint-tables: writer w commits to `tbl_{w}` ──────────────────
     for &n in &[1usize, 8, 32] {
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("n", n), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for iter_i in 0..iters {
-                    let (repo, _dir) = make_durable_repo(n).await;
-
-                    let start = Instant::now();
-                    let mut handles = Vec::with_capacity(n);
-                    for w in 0..n {
-                        let repo = repo.clone();
-                        let val = format!("v_{}_{}", iter_i, w);
-                        let tbl_name = format!("tbl_{}", w);
-                        handles.push(tokio::spawn(async move {
-                            let (mut tx, _g) =
-                                repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-                            let tbl = repo.get_table(&tbl_name).await.unwrap();
-                            tbl.insert_tx(&InnerValue::Str(val), Some(&mut tx))
-                                .await
-                                .unwrap();
-                            repo.commit_tx(tx).await.unwrap();
-                        }));
-                    }
-                    for h in handles {
-                        h.await.unwrap();
-                    }
-                    total += start.elapsed();
-
-                    drop(repo);
+        let ctr = Arc::new(AtomicU64::new(0));
+        h.bench_batched_async(
+            &format!("disjoint_tables/n_{n}"),
+            move || {
+                let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    let (repo, dir) = make_durable_repo(n).await;
+                    (repo, dir, iter_i)
                 }
-                total
-            });
-        });
+            },
+            move |(repo, dir, iter_i)| async move {
+                let mut handles = Vec::with_capacity(n);
+                for w in 0..n {
+                    let repo = repo.clone();
+                    let val = format!("v_{}_{}", iter_i, w);
+                    let tbl_name = format!("tbl_{}", w);
+                    handles.push(tokio::spawn(async move {
+                        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+                        let tbl = repo.get_table(&tbl_name).await.unwrap();
+                        tbl.insert_tx(&InnerValue::Str(val), Some(&mut tx))
+                            .await
+                            .unwrap();
+                        repo.commit_tx(tx).await.unwrap();
+                    }));
+                }
+                for hd in handles {
+                    hd.await.unwrap();
+                }
+                drop(repo);
+                drop(dir);
+            },
+        );
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_same_table, bench_disjoint_tables);
-criterion_main!(benches);

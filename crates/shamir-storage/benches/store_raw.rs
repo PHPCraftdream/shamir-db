@@ -5,9 +5,8 @@
 //! Measures each backend in isolation, bypassing engine/query layers.
 //! Useful for tracking backend regressions and comparing alternatives.
 
+use bench_scale_tool::Harness;
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils::tune_tiered;
 use shamir_storage::types::Store;
 use std::sync::Arc;
 
@@ -39,60 +38,43 @@ async fn seed(store: &Arc<dyn Store>, n: usize) -> Vec<shamir_storage::types::Re
     keys
 }
 
-fn bench_insert(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
-    let rt = rt();
-    let mut group = c.benchmark_group(format!("{name}/insert"));
-    group.throughput(Throughput::Elements(1));
-    group.bench_function("single", |b| {
+fn bench_insert(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
+    h.bench_async(&format!("{name}/insert"), move || {
         let s = Arc::clone(&store);
-        b.to_async(&rt).iter(|| async {
+        async move {
             s.insert(make_value(0)).await.unwrap();
-        });
+        }
     });
-    group.finish();
 }
 
-fn bench_get(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+fn bench_get(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let mut group = c.benchmark_group(format!("{name}/get"));
-    group.throughput(Throughput::Elements(1));
     let key = keys[SEED_COUNT / 2].clone();
-    group.bench_function("single", |b| {
+    h.bench_async(&format!("{name}/get"), move || {
         let s = Arc::clone(&store);
         let k = key.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            let k = k.clone();
-            async move {
-                s.get(k).await.unwrap();
-            }
-        });
+        async move {
+            s.get(k).await.unwrap();
+        }
     });
-    group.finish();
 }
 
-fn bench_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+fn bench_scan(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     rt.block_on(seed(&store, SEED_COUNT));
-    let mut group = c.benchmark_group(format!("{name}/scan"));
-    group.throughput(Throughput::Elements(SEED_COUNT as u64));
-    group.bench_function(BenchmarkId::new("iter_stream", SEED_COUNT), |b| {
+    h.bench_async(&format!("{name}/scan"), move || {
         let s = Arc::clone(&store);
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            async move {
-                use futures::StreamExt;
-                let mut stream = s.iter_stream(256);
-                let mut count = 0u64;
-                while let Some(batch) = stream.next().await {
-                    count += batch.unwrap().len() as u64;
-                }
-                count
+        async move {
+            use futures::StreamExt;
+            let mut stream = s.iter_stream(256);
+            let mut count = 0u64;
+            while let Some(batch) = stream.next().await {
+                count += batch.unwrap().len() as u64;
             }
-        });
+            std::hint::black_box(count);
+        }
     });
-    group.finish();
 }
 
 /// Prefix-scan benchmark — measures `scan_prefix_stream` end-to-end throughput
@@ -103,9 +85,7 @@ fn bench_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
 /// range-seek rewrite (O(log N + M) per batch).
 ///
 /// `prefix_scan/<backend>/50000` is the canonical Op A before/after metric.
-fn bench_prefix_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
-    use futures::StreamExt;
-
+fn bench_prefix_scan(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
 
     // Shared 8-byte prefix — every record uses it.
@@ -125,98 +105,69 @@ fn bench_prefix_scan(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
         }
     });
 
-    let mut group = c.benchmark_group(format!("{name}/prefix_scan"));
-    group.throughput(Throughput::Elements(PREFIX_SCAN_N as u64));
-    tune_tiered(&mut group, 20, 5, 3, 120);
-
-    group.bench_function(BenchmarkId::new("scan_prefix_stream", PREFIX_SCAN_N), |b| {
+    h.bench_async(&format!("{name}/prefix_scan"), move || {
+        use futures::StreamExt;
         let s = Arc::clone(&store);
         let pfx = prefix.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            let pfx = pfx.clone();
-            async move {
-                let mut stream = s.scan_prefix_stream(pfx, 256);
-                let mut count = 0u64;
-                while let Some(batch) = stream.next().await {
-                    count += batch.unwrap().len() as u64;
-                }
-                count
+        async move {
+            let mut stream = s.scan_prefix_stream(pfx, 256);
+            let mut count = 0u64;
+            while let Some(batch) = stream.next().await {
+                count += batch.unwrap().len() as u64;
             }
-        });
+            std::hint::black_box(count);
+        }
     });
-    group.finish();
 }
 
-fn bench_set_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+fn bench_set_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let mut group = c.benchmark_group(format!("{name}/set_many"));
     let batch_size = 100;
-    group.throughput(Throughput::Elements(batch_size as u64));
     let items: Vec<_> = keys[..batch_size]
         .iter()
         .enumerate()
         .map(|(i, k)| (k.clone(), make_value(i + SEED_COUNT)))
         .collect();
-    group.bench_function(BenchmarkId::new("batch", batch_size), |b| {
+    h.bench_async(&format!("{name}/set_many"), move || {
         let s = Arc::clone(&store);
         let items = items.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            let items = items.clone();
-            async move {
-                s.set_many(items).await.unwrap();
-            }
-        });
+        async move {
+            s.set_many(items).await.unwrap();
+        }
     });
-    group.finish();
 }
 
-fn bench_get_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+fn bench_get_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let mut group = c.benchmark_group(format!("{name}/get_many"));
     let batch_size = 100;
-    group.throughput(Throughput::Elements(batch_size as u64));
     let probe: Vec<_> = keys[..batch_size].to_vec();
-    group.bench_function(BenchmarkId::new("batch", batch_size), |b| {
+    h.bench_async(&format!("{name}/get_many"), move || {
         let s = Arc::clone(&store);
         let probe = probe.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            let probe = probe.clone();
-            async move {
-                s.get_many(probe).await.unwrap();
-            }
-        });
+        async move {
+            s.get_many(probe).await.unwrap();
+        }
     });
-    group.finish();
 }
 
-fn bench_remove_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+fn bench_remove_many(h: &mut Harness, name: &str, store: Arc<dyn Store>) {
     let rt = rt();
     // Pre-seed a working set; the bench removes the same set of keys
     // every iter — the second iter onward they're tombstoned, but the
     // per-key cost shape (dirty insert + cache insert + notify) is the
     // same as a hot-path remove on an existing key.
     let keys = rt.block_on(seed(&store, SEED_COUNT));
-    let mut group = c.benchmark_group(format!("{name}/remove_many"));
     let batch_size = 100;
-    group.throughput(Throughput::Elements(batch_size as u64));
     let probe: Vec<_> = keys[..batch_size].to_vec();
-    group.bench_function(BenchmarkId::new("batch", batch_size), |b| {
+    h.bench_async(&format!("{name}/remove_many"), move || {
         let s = Arc::clone(&store);
         let probe = probe.clone();
-        b.to_async(&rt).iter(|| {
-            let s = Arc::clone(&s);
-            let probe = probe.clone();
-            async move {
-                s.remove_many(probe).await.unwrap();
-            }
-        });
+        async move {
+            s.remove_many(probe).await.unwrap();
+        }
     });
-    group.finish();
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -227,12 +178,12 @@ fn in_memory_store() -> Arc<dyn Store> {
     Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new())
 }
 
-fn bench_in_memory(c: &mut Criterion) {
+fn bench_in_memory(h: &mut Harness) {
     let name = "in_memory";
-    bench_insert(c, name, in_memory_store());
-    bench_get(c, name, in_memory_store());
-    bench_scan(c, name, in_memory_store());
-    bench_set_many(c, name, in_memory_store());
+    bench_insert(h, name, in_memory_store());
+    bench_get(h, name, in_memory_store());
+    bench_scan(h, name, in_memory_store());
+    bench_set_many(h, name, in_memory_store());
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -249,16 +200,18 @@ fn make_fjall_store(dir: &std::path::Path) -> Arc<dyn Store> {
 
 /// Fjall bench — includes the prefix_scan 50k cell (Op A before/after target).
 #[cfg(feature = "fjall")]
-fn bench_fjall(c: &mut Criterion) {
+fn bench_fjall(h: &mut Harness) {
     let dir = tempfile::TempDir::new().unwrap();
     let store: Arc<dyn Store> = make_fjall_store(dir.path());
     let name = "fjall";
-    bench_insert(c, name, Arc::clone(&store));
-    bench_get(c, name, Arc::clone(&store));
-    bench_scan(c, name, Arc::clone(&store));
-    bench_set_many(c, name, Arc::clone(&store));
+    bench_insert(h, name, Arc::clone(&store));
+    bench_get(h, name, Arc::clone(&store));
+    bench_scan(h, name, Arc::clone(&store));
+    bench_set_many(h, name, Arc::clone(&store));
     // Op A benchmark: prefix_scan on 50k shared-prefix records.
-    bench_prefix_scan(c, name, store);
+    bench_prefix_scan(h, name, store);
+    // Keep the temp dir alive for the lifetime of the registered closures.
+    std::mem::forget(dir);
 }
 
 fn cached_in_memory_store() -> Arc<dyn Store> {
@@ -270,12 +223,12 @@ fn cached_in_memory_store() -> Arc<dyn Store> {
     )
 }
 
-fn bench_cached_in_memory(c: &mut Criterion) {
+fn bench_cached_in_memory(h: &mut Harness) {
     let name = "cached_in_memory";
-    bench_insert(c, name, cached_in_memory_store());
-    bench_get(c, name, cached_in_memory_store());
-    bench_scan(c, name, cached_in_memory_store());
-    bench_set_many(c, name, cached_in_memory_store());
+    bench_insert(h, name, cached_in_memory_store());
+    bench_get(h, name, cached_in_memory_store());
+    bench_scan(h, name, cached_in_memory_store());
+    bench_set_many(h, name, cached_in_memory_store());
 }
 
 fn membuffer_in_memory_store() -> Arc<dyn Store> {
@@ -295,20 +248,19 @@ fn membuffer_in_memory_store() -> Arc<dyn Store> {
     })
 }
 
-fn bench_membuffer_in_memory(c: &mut Criterion) {
+fn bench_membuffer_in_memory(h: &mut Harness) {
     let name = "membuffer_in_memory";
-    bench_set_many(c, name, membuffer_in_memory_store());
-    bench_get_many(c, name, membuffer_in_memory_store());
-    bench_remove_many(c, name, membuffer_in_memory_store());
+    bench_set_many(h, name, membuffer_in_memory_store());
+    bench_get_many(h, name, membuffer_in_memory_store());
+    bench_remove_many(h, name, membuffer_in_memory_store());
 }
 
-fn bench_all_backends(c: &mut Criterion) {
-    bench_in_memory(c);
-    bench_cached_in_memory(c);
-    bench_membuffer_in_memory(c);
+fn main() {
+    let mut h = Harness::new("store_raw", env!("CARGO_MANIFEST_DIR"));
+    bench_in_memory(&mut h);
+    bench_cached_in_memory(&mut h);
+    bench_membuffer_in_memory(&mut h);
     #[cfg(feature = "fjall")]
-    bench_fjall(c);
+    bench_fjall(&mut h);
+    h.run();
 }
-
-criterion_group!(benches, bench_all_backends);
-criterion_main!(benches);

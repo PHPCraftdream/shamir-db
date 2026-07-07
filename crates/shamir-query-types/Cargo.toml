@@ -36,7 +36,7 @@ crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
 server  = []
 
 [dev-dependencies]
-criterion  = { version = "0.5", features = ["html_reports"] }
+bench-scale-tool = { workspace = true }
 
 [[bench]]
 name = "batch_planner"

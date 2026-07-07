@@ -13,12 +13,15 @@
 //! 3. s2_s3_combo — WHERE x > 5 ORDER BY y LIMIT 10, no index (worst case).
 //! 4. s3_range_and — WHERE x >= 10 AND name = "foo", sorted index on x.
 //! 5. s1_asof — AsOf(Timestamp(t)) point read (version_at_or_before_ts scan).
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): each query
+//! shape's fixture (table + index) is built ONCE per N at registration time
+//! and shared read-only across every iteration (reads never mutate the
+//! fixture) → `bench_async`.
 
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::ReadQuery;
 use shamir_engine::table::table_manager::TableManager;
@@ -215,14 +218,11 @@ fn query_s1_asof(ts_millis: u64) -> ReadQuery {
         .build()
 }
 
-// ── Bench runner ────────────────────────────────────────────────────────
+fn main() {
+    let mut h = Harness::new("read_path_matrix", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_read_path_matrix(c: &mut Criterion) {
     let rt = rt();
     let sizes = table_sizes();
-
-    let mut group = c.benchmark_group("read_path_matrix");
-    bu::tune_tiered(&mut group, 10, 1, 1, 60);
 
     for &n in &sizes {
         // ── Shape 1: fast_path (with sorted index on y) ─────────────
@@ -233,19 +233,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
                 f
             });
             let q = query_fast_path();
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("fast_path", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("fast_path/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
 
@@ -253,19 +250,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         {
             let fixture = rt.block_on(build_table(n));
             let q = query_s2_no_index();
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("s2_no_index", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("s2_no_index/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
 
@@ -273,19 +267,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         {
             let fixture = rt.block_on(build_table(n));
             let q = query_s2_s3_combo();
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("s2_s3_combo", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("s2_s3_combo/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
 
@@ -294,15 +285,8 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         // This is the NON-SELECTIVE case (x >= 10, 99% pass) — kept here
         // intentionally to document the "tipping point" where sorted-index
         // scan visits virtually all rows and a full-table scan would win.
-        // At N=1M one iter is ~100s — Criterion would extend measurement
-        // to ~1000s/sample × 10 samples = ~3h, violating the workspace
-        // "max 10 min per bench" contract (CLAUDE.md).
-        //
-        // Cap this shape's N at 500K so even worst-case stays bounded
-        // (~50s/iter × 10 samples = ~8 min wall-clock). The shape's
-        // qualitative behaviour is identical at 500K vs 1M (both flatten
-        // the index-scan vs full-scan curve), so we lose no documentation
-        // value. The companion `s3_range_and_selective` cell (1% selectivity)
+        // Capped at N <= 500K so even worst-case stays wall-clock bounded;
+        // the companion `s3_range_and_selective` cell (1% selectivity)
         // continues to run at the full N range — that's where Phase 2 win
         // is demonstrated.
         if n <= 500_000 {
@@ -312,19 +296,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
                 f
             });
             let q = query_s3_range_and();
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("s3_range_and", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("s3_range_and/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
 
@@ -336,19 +317,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
                 f
             });
             let q = query_s3_range_and_selective();
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("s3_range_and_selective", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("s3_range_and_selective/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
 
@@ -357,22 +335,16 @@ fn bench_read_path_matrix(c: &mut Criterion) {
         // NOTE: this shape measures end-to-end AsOf query cost — which
         // includes full snapshot table scan after ts resolution. The
         // ts-index O(log N) lookup itself is proven by 4 unit tests in
-        // `shamir-tx/src/tests/mvcc_store_tests/ts_index_tests.rs`. The
-        // end-to-end AsOf path is dominated by per-row snapshot read,
-        // not by ts resolution. Skipped at N >= 100K unless
-        // BENCH_READ_PATH_HUGE=1 — per-N runs are minutes-scale.
-        if n < 100_000
-            || std::env::var("BENCH_READ_PATH_HUGE")
-                .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false)
-        {
+        // `shamir-tx/src/tests/mvcc_store_tests/ts_index_tests.rs`. Skipped
+        // at N >= 100K unless BENCH_READ_PATH_HUGE=1 — per-N runs are
+        // minutes-scale.
+        if n < 100_000 || parse_bool_env("BENCH_READ_PATH_HUGE") {
             // Capture ts BETWEEN initial inserts and history accumulation:
             // initial versions have ts < ts_millis, updated versions have
             // ts > ts_millis. AsOf(ts_millis) should return the initial
             // version for any record.
             let (fixture, ts_millis) = rt.block_on(async {
                 let f = build_table_mvcc(n).await;
-                // Sleep briefly so initial-insert ts is strictly before query ts.
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -383,25 +355,19 @@ fn bench_read_path_matrix(c: &mut Criterion) {
                 (f, ts)
             });
             let q = query_s1_asof(ts_millis);
-
-            group.throughput(Throughput::Elements(n as u64));
-            group.bench_with_input(BenchmarkId::new("s1_asof", n), &n, |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let mgr = fixture.mgr.clone();
-                    let q = q.clone();
-                    async move {
-                        let interner = mgr.interner().get().await.unwrap();
-                        let refs = new_map();
-                        let ctx = FilterContext::new(interner, &refs);
-                        black_box(mgr.read(&q, &ctx).await.unwrap());
-                    }
-                });
+            let mgr = fixture.mgr.clone();
+            h.bench_async(&format!("s1_asof/{n}"), move || {
+                let mgr = mgr.clone();
+                let q = q.clone();
+                async move {
+                    let interner = mgr.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    std::hint::black_box(mgr.read(&q, &ctx).await.unwrap());
+                }
             });
         }
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_read_path_matrix);
-criterion_main!(benches);

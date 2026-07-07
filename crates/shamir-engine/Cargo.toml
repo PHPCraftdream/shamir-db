@@ -75,6 +75,7 @@ fjall  = ["shamir-storage/fjall"]
 dhat = "0.3"
 
 [dev-dependencies]
+bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3.10.1"
 serial_test = "3.3.1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }

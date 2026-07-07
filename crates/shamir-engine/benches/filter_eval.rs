@@ -5,12 +5,23 @@
 //! resolved value before the comparison even runs. The intended
 //! optimisation returns a borrow (`Option<&InnerValue>`), avoiding the
 //! clone entirely on a path that runs once per record per predicate.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
+//! (interner, records, compiled filters) is built ONCE outside the timed
+//! closure, exactly as under Criterion's `b.iter` — plan 1 (shared setup).
+//!
+//! `Interner` / `FilterNode` / `FilterContext` are borrowed types with no
+//! `Clone` impl, and the harness's `bench()` closures require `'static`.
+//! Rather than fight the borrow checker with `Rc` plumbing through every
+//! callback, the (small, one-shot) setup fixtures are leaked to `'static`
+//! via `Box::leak` — a bench binary's process lifetime makes this a
+//! deliberate, harmless trade for closure ergonomics.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::query::filter::Filter;
-use shamir_engine::query::filter::{compile_filter, FilterContext};
+use shamir_engine::query::filter::{compile_filter, FilterContext, FilterNode};
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::{QueryRecord, QueryResult};
 
@@ -54,64 +65,69 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-fn bench(c: &mut Criterion) {
-    let interner = Interner::new();
+/// Register a `matches()` sweep over `records` for a compiled filter,
+/// both leaked to `'static` at setup time.
+fn bench_matches(
+    h: &mut Harness,
+    id: &str,
+    records: &'static [InnerValue],
+    ctx: &'static FilterContext<'static>,
+    filter: &'static FilterNode,
+) {
+    h.bench(id, move || {
+        let mut n = 0usize;
+        for r in records {
+            if filter.matches(r, ctx) {
+                n += 1;
+            }
+        }
+        black_box(n);
+    });
+}
+
+fn main() {
+    let mut h = Harness::new("filter_eval", env!("CARGO_MANIFEST_DIR"));
+
+    let interner: &'static Interner = Box::leak(Box::new(Interner::new()));
     // Make sure all field-names are interned before compile_filter runs.
     for k in [
         "id", "name", "age", "score", "active", "email", "tags", "address", "city", "zip",
         "country",
     ] {
-        intern(&interner, k);
+        intern(interner, k);
     }
-    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
-    let empty_refs: TMap<String, _> = new_map_wc(0);
-    let ctx = FilterContext::new(&interner, &empty_refs);
+    let records: &'static Vec<InnerValue> =
+        Box::leak(Box::new((0..1000).map(|i| make_record(interner, i)).collect()));
+    let empty_refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(new_map_wc(0)));
+    let ctx: &'static FilterContext<'static> =
+        Box::leak(Box::new(FilterContext::new(interner, empty_refs)));
 
-    let eq_age = compile_filter(
+    let eq_age: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Eq {
             field: vec!["age".to_string()],
             value: FilterValue::Int(50),
         },
-        &interner,
-    );
+        interner,
+    )));
+    bench_matches(&mut h, "filter_eval/eq_int_top_level_1000", records, ctx, eq_age);
 
-    let eq_nested = compile_filter(
+    let eq_nested: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Eq {
             field: vec!["address".to_string(), "city".to_string()],
             value: FilterValue::String("Jerusalem".to_string()),
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/eq_str_nested_path_1000",
+        records,
+        ctx,
+        eq_nested,
     );
 
-    let mut group = c.benchmark_group("filter_eval");
-    group.throughput(Throughput::Elements(records.len() as u64));
-
-    group.bench_function("eq_int_top_level_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if eq_age.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
-
-    group.bench_function("eq_str_nested_path_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if eq_nested.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
-
     // ── Compound AND: age > 20 AND active = true ──────────────
-    let compound_and = compile_filter(
+    let compound_and: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::And {
             filters: vec![
                 Filter::Gt {
@@ -124,22 +140,18 @@ fn bench(c: &mut Criterion) {
                 },
             ],
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/compound_and_2_1000",
+        records,
+        ctx,
+        compound_and,
     );
-    group.bench_function("compound_and_2_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if compound_and.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── Compound AND(3): age > 20 AND active = true AND score < 500 ─
-    let compound_and3 = compile_filter(
+    let compound_and3: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::And {
             filters: vec![
                 Filter::Gt {
@@ -156,22 +168,18 @@ fn bench(c: &mut Criterion) {
                 },
             ],
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/compound_and_3_1000",
+        records,
+        ctx,
+        compound_and3,
     );
-    group.bench_function("compound_and_3_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if compound_and3.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── Compound OR: age = 50 OR age = 30 ──────────────────────
-    let compound_or = compile_filter(
+    let compound_or: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Or {
             filters: vec![
                 Filter::Eq {
@@ -184,131 +192,90 @@ fn bench(c: &mut Criterion) {
                 },
             ],
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/compound_or_2_1000",
+        records,
+        ctx,
+        compound_or,
     );
-    group.bench_function("compound_or_2_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if compound_or.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── Regex match on name ────────────────────────────────────
-    let regex_filter = compile_filter(
+    let regex_filter: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Regex {
             field: vec!["name".to_string()],
             pattern: "user-[0-9]{2}$".to_string(),
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/regex_match_1000",
+        records,
+        ctx,
+        regex_filter,
     );
-    group.bench_function("regex_match_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if regex_filter.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── FTS brute-force AND: 2 tokens on 1000 text records ──────
-    let fts_and = compile_filter(
+    let fts_and: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Fts {
             field: vec!["name".to_string()],
             query: "user alpha".to_string(),
             mode: "and".to_string(),
         },
-        &interner,
-    );
-    group.bench_function("fts_brute_and_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if fts_and.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
+        interner,
+    )));
+    bench_matches(&mut h, "filter_eval/fts_brute_and_1000", records, ctx, fts_and);
 
     // ── FTS brute-force OR: 2 tokens on 1000 text records ────
-    let fts_or = compile_filter(
+    let fts_or: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Fts {
             field: vec!["name".to_string()],
             query: "user alpha".to_string(),
             mode: "or".to_string(),
         },
-        &interner,
-    );
-    group.bench_function("fts_brute_or_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if fts_or.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
+        interner,
+    )));
+    bench_matches(&mut h, "filter_eval/fts_brute_or_1000", records, ctx, fts_or);
 
     // ── IN list: int membership over a medium-sized list ─────
-    // Targets the per-record `values.iter().any { resolve_filter_value }` loop:
-    // every literal triggers an `InnerValue` materialise (and a `String::clone`
-    // for String variants) — O(records × |list|) per scan.
-    let in_int_32 = compile_filter(
+    let in_int_32: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::In {
             field: vec!["age".to_string()],
             values: (0i64..32).map(FilterValue::Int).collect(),
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/in_int_list_32_1000",
+        records,
+        ctx,
+        in_int_32,
     );
-    group.bench_function("in_int_list_32_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if in_int_32.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── IN list: string membership over a medium-sized list ─────
-    // String literals exercise the `Str(s.clone())` allocation in
-    // `resolve_filter_value` on every record × every list element.
-    let in_str_32 = compile_filter(
+    let in_str_32: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::In {
             field: vec!["name".to_string()],
             values: (0..32)
                 .map(|i| FilterValue::String(format!("user-{}", i * 7)))
                 .collect(),
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/in_str_list_32_1000",
+        records,
+        ctx,
+        in_str_32,
     );
-    group.bench_function("in_str_list_32_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if in_str_32.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
     // ── Computed: LOWER(name) == "user-50" on 1000 records ────
-    let computed_lower = compile_filter(
+    let computed_lower: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::Computed {
             expr_op: "lower".to_string(),
             field: vec!["name".to_string()],
@@ -316,43 +283,32 @@ fn bench(c: &mut Criterion) {
             cmp: "eq".to_string(),
             value: FilterValue::String("user-50".to_string()),
         },
-        &interner,
+        interner,
+    )));
+    bench_matches(
+        &mut h,
+        "filter_eval/computed_lower_eq_1000",
+        records,
+        ctx,
+        computed_lower,
     );
-    group.bench_function("computed_lower_eq_1000", |b| {
-        b.iter(|| {
-            let mut n = 0usize;
-            for r in &records {
-                if computed_lower.matches(r, &ctx) {
-                    n += 1;
-                }
-            }
-            black_box(n);
-        })
-    });
 
-    group.finish();
-}
-
-// ============================================================================
-// $in @ref column — scaling bench (O(N²) → O(N) target).
-//
-// A `$in @ref[].field` filter rebuilds the entire ref-column AND linear-scans
-// it ONCE PER outer record. With M outer rows and K ref rows that's O(M·K).
-// This group measures the per-N wall time at N ∈ {100, 1000, 10000} to make
-// the quadratic growth visible, and to verify the curve flattens after the
-// memoisation fix.
-// ============================================================================
-fn bench_in_query_ref_scaling(c: &mut Criterion) {
-    let interner = Interner::new();
+    // ============================================================================
+    // $in @ref column — scaling bench (O(N²) → O(N) target).
+    //
+    // A `$in @ref[].field` filter rebuilds the entire ref-column AND linear-scans
+    // it ONCE PER outer record. With M outer rows and K ref rows that's O(M·K).
+    // This group measures the per-N wall time at N ∈ {100, 1000, 10000} to make
+    // the quadratic growth visible, and to verify the curve flattens after the
+    // memoisation fix.
+    // ============================================================================
+    let interner2: &'static Interner = Box::leak(Box::new(Interner::new()));
     for k in [
         "id", "name", "age", "score", "active", "email", "tags", "val",
     ] {
-        let _ = interner.touch_ind(k);
+        let _ = interner2.touch_ind(k);
     }
 
-    // Ref column: K=100 records, each {val: i}. The outer records have
-    // `age` cycling 0..99 so ~1% hit-rate (exercises the full scan, not a
-    // short-circuit on the first element).
     const REF_ROWS: usize = 100;
     let ref_records: Vec<QueryRecord> = (0..REF_ROWS)
         .map(|i| QueryRecord::Direct(mpack!({"val": @ Value::Int(i as i64)})))
@@ -368,11 +324,11 @@ fn bench_in_query_ref_scaling(c: &mut Criterion) {
             explain: None,
         },
     );
-    let ctx = FilterContext::new(&interner, &refs);
+    let refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(refs));
+    let ctx2: &'static FilterContext<'static> =
+        Box::leak(Box::new(FilterContext::new(interner2, refs)));
 
-    // `$in` with a single QueryRef column value — compiles to FilterNode::In
-    // (NOT InSet, because QueryRef is non-literal).
-    let in_ref = compile_filter(
+    let in_ref: &'static FilterNode = Box::leak(Box::new(compile_filter(
         &Filter::In {
             field: vec!["age".to_string()],
             values: vec![FilterValue::QueryRef {
@@ -380,41 +336,32 @@ fn bench_in_query_ref_scaling(c: &mut Criterion) {
                 path: Some("[].val".to_string()),
             }],
         },
-        &interner,
-    );
-
-    let mut group = c.benchmark_group("filter_in_query_ref_scaling");
-    bu::tune(&mut group, 20, 5, 1);
+        interner2,
+    )));
 
     for &n in &[100usize, 1_000, 10_000] {
-        let records: Vec<InnerValue> = (0..n)
-            .map(|i| {
-                let touch = |s: &str| match interner.touch_ind(s).unwrap() {
-                    TouchInd::Exists(k) | TouchInd::New(k) => k,
-                };
-                let mut m = new_map_wc(2);
-                m.insert(touch("id"), InnerValue::Int(i as i64));
-                m.insert(touch("age"), InnerValue::Int((i % REF_ROWS) as i64));
-                InnerValue::Map(m)
-            })
-            .collect();
+        let records: &'static Vec<InnerValue> = Box::leak(Box::new(
+            (0..n)
+                .map(|i| {
+                    let touch = |s: &str| match interner2.touch_ind(s).unwrap() {
+                        TouchInd::Exists(k) | TouchInd::New(k) => k,
+                    };
+                    let mut m = new_map_wc(2);
+                    m.insert(touch("id"), InnerValue::Int(i as i64));
+                    m.insert(touch("age"), InnerValue::Int((i % REF_ROWS) as i64));
+                    InnerValue::Map(m)
+                })
+                .collect(),
+        ));
 
-        group.throughput(Throughput::Elements(n as u64));
-        group.bench_with_input(BenchmarkId::new("in_at_ref_col", n), &n, |b, _| {
-            b.iter(|| {
-                let mut hits = 0usize;
-                for r in &records {
-                    if in_ref.matches(r, &ctx) {
-                        hits += 1;
-                    }
-                }
-                black_box(hits);
-            })
-        });
+        bench_matches(
+            &mut h,
+            &format!("filter_in_query_ref_scaling/in_at_ref_col_{n}"),
+            records,
+            ctx2,
+            in_ref,
+        );
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench, bench_in_query_ref_scaling);
-criterion_main!(benches);

@@ -20,9 +20,11 @@ pub mod pessimistic_lock_tests;
 pub mod predicate_range_tests;
 pub mod read_your_own_writes_tests;
 pub mod recovery_gate_tests;
+#[cfg(debug_assertions)]
 pub mod recovery_tests;
 pub mod ssi_phantom_tests;
 pub mod ssi_stress_tests;
 pub mod ssi_unique_serialization_tests;
+#[cfg(debug_assertions)]
 pub mod truncation_tests;
 pub mod tx_vector_delete_tests;

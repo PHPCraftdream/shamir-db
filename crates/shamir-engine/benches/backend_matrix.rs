@@ -14,15 +14,18 @@
 //!   - **Batch size:** {1, 10, 100} rows per commit — single-row is worst case,
 //!     batch is the realistic high-throughput path.
 //!
-//! Each `bench_function` creates ONE repo upfront, then criterion runs many
-//! iterations against the SAME repo. The table grows monotonically — that's
+//! Each cell builds ONE repo upfront (untimed), then runs many iterations
+//! against the SAME repo. The table grows monotonically — that's
 //! intentional, it reflects steady-state DB behavior.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): the repo
+//! is built once at registration time and shared across every iteration
+//! (matches the original Criterion setup, which built it once outside
+//! `b.iter`) → `bench_async`.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::repo::{BoxRepoFactory, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_tx::IsolationLevel;
@@ -34,8 +37,6 @@ fn rt() -> tokio::runtime::Runtime {
         .build()
         .unwrap()
 }
-
-// ── Backend repo factories ────────────────────────────────────────────────
 
 /// Build a fresh `(RepoInstance, optional tempdir)` for the given backend.
 /// The tempdir lives until the repo is dropped.
@@ -61,10 +62,8 @@ async fn make_repo(backend: &str) -> (RepoInstance, Option<tempfile::TempDir>) {
     (repo, tempdir)
 }
 
-// ── Bench cell — concurrent commits over a long-lived repo ────────────────
-
 /// Spawns `writers` concurrent tasks, each performing one transaction with
-/// `batch_size` row inserts and one commit. Returns the wall-clock duration.
+/// `batch_size` row inserts and one commit.
 async fn run_burst(repo: Arc<RepoInstance>, writers: usize, batch_size: usize, iter_i: u64) {
     let mut handles = Vec::with_capacity(writers);
     for w in 0..writers {
@@ -79,66 +78,46 @@ async fn run_burst(repo: Arc<RepoInstance>, writers: usize, batch_size: usize, i
             (*repo).commit_tx(tx).await.unwrap();
         }));
     }
-    for h in handles {
-        h.await.unwrap();
+    for hd in handles {
+        hd.await.unwrap();
     }
 }
 
-fn bench_cell(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    backend: &'static str,
-    writers: usize,
-    batch_size: usize,
-) {
-    let rt = rt();
-    // Build the repo ONCE; reuse across all criterion samples.
-    let (repo, _dir) = rt.block_on(make_repo(backend));
-    let repo = Arc::new(repo);
-    // Total rows committed per sample = writers * batch_size.
-    let total_per_sample = (writers * batch_size) as u64;
-    group.throughput(Throughput::Elements(total_per_sample));
-    let id_name = format!("{backend}/w{writers}/b{batch_size}");
-    group.bench_function(BenchmarkId::from_parameter(id_name), |b| {
-        b.to_async(&rt).iter_custom(|iters| {
-            let repo = repo.clone();
-            async move {
-                let mut total = Duration::ZERO;
-                for iter_i in 0..iters {
-                    let repo = repo.clone();
-                    let start = Instant::now();
-                    run_burst(repo, writers, batch_size, iter_i).await;
-                    total += start.elapsed();
-                }
-                total
-            }
-        });
-    });
-    // Keep _dir alive across the bench by binding it to a local; drop AFTER
-    // criterion finishes the cell.
-    drop(_dir);
-}
+fn main() {
+    let mut h = Harness::new("backend_matrix", env!("CARGO_MANIFEST_DIR"));
 
-fn bench_backend_matrix(c: &mut Criterion) {
-    let mut group = c.benchmark_group("backend_matrix");
-    // QUICK: sample=15, measurement=2s, warm_up=1s — enough for warm caches.
-    // FULL: sample=50, measurement=5s, warm_up=3s.
-    bu::tune_tiered(&mut group, 50, 5, 3, 120);
-
-    // 3 backends × 3 concurrency × 3 batch sizes = 27 cells.
     let backends: &[&'static str] = &["in_memory", "fjall"];
     let writers_levels: &[usize] = &[8, 32, 128];
     let batch_sizes: &[usize] = &[1, 10, 100];
 
+    // Persistent tempdirs must outlive their repo's lifetime across every
+    // iteration — kept alive by leaking into a Vec held by main's stack
+    // frame (the harness runs everything before returning).
+    let mut _dirs: Vec<Option<tempfile::TempDir>> = Vec::new();
+    let rt = rt();
+    let iter_ctr = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     for &backend in backends {
         for &writers in writers_levels {
             for &batch_size in batch_sizes {
-                bench_cell(&mut group, backend, writers, batch_size);
+                let (repo, dir) = rt.block_on(make_repo(backend));
+                _dirs.push(dir);
+                let repo = Arc::new(repo);
+                let id_name = format!("{backend}/w{writers}/b{batch_size}");
+                let iter_ctr = Arc::clone(&iter_ctr);
+                h.bench_async(&id_name, move || {
+                    let repo = repo.clone();
+                    let iter_i = iter_ctr.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    async move {
+                        run_burst(repo, writers, batch_size, iter_i).await;
+                    }
+                });
             }
         }
     }
 
-    group.finish();
-}
+    h.run();
 
-criterion_group!(benches, bench_backend_matrix);
-criterion_main!(benches);
+    // Keep tempdirs alive until after the run completes.
+    drop(_dirs);
+}

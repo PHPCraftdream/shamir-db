@@ -7,9 +7,16 @@
 //!
 //! Note: J1 migration — apply_distinct (legacy value path) removed; bench now uses
 //! apply_distinct_qv (QueryValue path) which is the production function.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): the two
+//! fixtures (`unique`, `dup`) are built ONCE outside the timed closure and
+//! `clone()`d per iteration — the same shape as the original Criterion
+//! `b.iter(|| apply_distinct_qv(unique.clone()))`, since the function
+//! consumes its input by value.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
 
+use bench_scale_tool::Harness;
 use shamir_engine::query::read::exec::apply_distinct_qv;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
@@ -44,7 +51,9 @@ fn make_record(idx: u32) -> QueryValue {
     QueryValue::Map(m)
 }
 
-fn bench(c: &mut Criterion) {
+fn main() {
+    let mut h = Harness::new("distinct", env!("CARGO_MANIFEST_DIR"));
+
     // All-unique input — pathological: every record goes through the
     // full key-build path. Closest to what the actual query pipeline
     // hands DISTINCT in practice.
@@ -59,18 +68,18 @@ fn bench(c: &mut Criterion) {
         dup.push(r);
     }
 
-    let mut group = c.benchmark_group("apply_distinct_qv");
-    group.throughput(Throughput::Elements(1000));
+    {
+        let unique = unique.clone();
+        h.bench("apply_distinct_qv/1000_all_unique", move || {
+            black_box(apply_distinct_qv(unique.clone()));
+        });
+    }
+    {
+        let dup = dup.clone();
+        h.bench("apply_distinct_qv/1000_half_dup", move || {
+            black_box(apply_distinct_qv(dup.clone()));
+        });
+    }
 
-    group.bench_function("1000_all_unique", |b| {
-        b.iter(|| black_box(apply_distinct_qv(unique.clone())));
-    });
-    group.bench_function("1000_half_dup", |b| {
-        b.iter(|| black_box(apply_distinct_qv(dup.clone())));
-    });
-
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench);
-criterion_main!(benches);

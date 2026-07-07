@@ -11,16 +11,20 @@
 //! Stage 1 (version-major index) is justified.
 //!
 //! Each cell:
-//!  1. Build a fresh overlay (sync, no async, no I/O).
+//!  1. Build a fresh overlay (sync, no async, no I/O) — untimed setup.
 //!  2. Pre-fill N=DEPTH entries via plain `insert`, distinct keys, monotone versions.
 //!  3. Time ONE `gc_upto(durable=DEPTH, floor=u64::MAX)` over the full depth.
-//!  4. Drop and rebuild between iterations (single-shot timing, not iterated).
 //!
-//! Quick mode (default): 10 samples, 1s measurement, 1s warm-up, 60s wall-clock cap.
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): the overlay
+//! MUST be rebuilt fresh every iteration (`gc_upto` drains/mutates it, so a
+//! shared overlay would only be gc'able once), so every variant uses
+//! `bench_batched` — the fresh build is the untimed `setup`, only `gc_upto`
+//! is timed.
 
+use std::hint::black_box;
+
+use bench_scale_tool::Harness;
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use shamir_bench_utils::tune_tiered;
 use shamir_tx::VersionedOverlay;
 
 const DEPTHS: &[usize] = &[1_000, 5_000, 20_000];
@@ -36,58 +40,40 @@ fn build_overlay(depth: usize) -> VersionedOverlay {
     ov
 }
 
-fn bench_overlay_gc_full_purge(c: &mut Criterion) {
-    let mut group = c.benchmark_group("overlay_gc_full_purge");
-    // Each "iter" measures one GC over a freshly-built overlay; the build
-    // is done in iter_batched setup so it does NOT count toward the timing.
-    tune_tiered(&mut group, 20, 5, 3, 600);
+fn main() {
+    let mut h = Harness::new("overlay_gc_cost_vs_depth", env!("CARGO_MANIFEST_DIR"));
 
+    // --- overlay_gc_full_purge/depth_<depth> --------------------------------
     for &depth in DEPTHS {
-        group.throughput(Throughput::Elements(depth as u64));
-        group.bench_function(format!("depth_{depth}"), |b| {
-            b.iter_batched(
-                || build_overlay(depth),
-                |ov| {
-                    // Drop EVERY entry — threshold = depth covers all versions.
-                    ov.gc_upto(depth as u64, u64::MAX);
-                    ov
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
+        let id = format!("overlay_gc_full_purge/depth_{depth}");
+        h.bench_batched(
+            &id,
+            move || build_overlay(depth),
+            move |ov| {
+                // Drop EVERY entry — threshold = depth covers all versions.
+                ov.gc_upto(depth as u64, u64::MAX);
+                black_box(&ov);
+            },
+        );
     }
-    group.finish();
-}
 
-fn bench_overlay_gc_small_slice(c: &mut Criterion) {
-    let mut group = c.benchmark_group("overlay_gc_small_slice");
-    tune_tiered(&mut group, 20, 5, 3, 600);
-
+    // --- overlay_gc_small_slice/depth_<depth>_slice_<SLICE> -----------------
     // Same depths, but only the lowest 100 versions removed per GC. The
-    // adversarial case for the current full-iter implementation: we pay
-    // for the whole tree to remove a tiny slice. Stage 1's version-major
-    // index makes this O(removed + log N) instead.
+    // adversarial case for the current full-iter implementation: we pay for
+    // the whole tree to remove a tiny slice. Stage 1's version-major index
+    // makes this O(removed + log N) instead.
     const SLICE: u64 = 100;
-
     for &depth in DEPTHS {
-        group.throughput(Throughput::Elements(SLICE));
-        group.bench_function(format!("depth_{depth}_slice_{SLICE}"), |b| {
-            b.iter_batched(
-                || build_overlay(depth),
-                |ov| {
-                    ov.gc_upto(SLICE, u64::MAX);
-                    ov
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        });
+        let id = format!("overlay_gc_small_slice/depth_{depth}_slice_{SLICE}");
+        h.bench_batched(
+            &id,
+            move || build_overlay(depth),
+            move |ov| {
+                ov.gc_upto(SLICE, u64::MAX);
+                black_box(&ov);
+            },
+        );
     }
-    group.finish();
-}
 
-criterion_group!(
-    benches,
-    bench_overlay_gc_full_purge,
-    bench_overlay_gc_small_slice
-);
-criterion_main!(benches);
+    h.run();
+}

@@ -7,9 +7,17 @@
 //! lookup. We measure the full pipeline through `apply_group_by`
 //! so the win — switching the keying to a hashable typed enum —
 //! shows up as a wall-clock delta on the same input.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
+//! (interner, records, group-by/select shapes) is built ONCE outside the
+//! timed closure — plan 1 (shared setup). `Interner` / `FilterContext`
+//! have no `Clone` impl and the harness's closures require `'static`, so
+//! they are leaked to `'static` via `Box::leak` (a bench binary's process
+//! lifetime makes this a harmless, deliberate trade for closure ergonomics).
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
 
+use bench_scale_tool::Harness;
 use shamir_engine::query::filter::FilterContext;
 use shamir_engine::query::read::exec::apply_group_by;
 use shamir_engine::query::read::{Select, SelectItem};
@@ -48,16 +56,19 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     InnerValue::Map(m)
 }
 
-fn bench(c: &mut Criterion) {
-    let interner = Interner::new();
+fn main() {
+    let mut h = Harness::new("group_by_keys", env!("CARGO_MANIFEST_DIR"));
+
+    let interner: &'static Interner = Box::leak(Box::new(Interner::new()));
     for k in ["id", "age", "city", "score", "count"] {
         let _ = interner.touch_ind(k);
     }
     let records: Vec<(RecordId, InnerValue)> = (0..1000)
-        .map(|i| (RecordId::new(), make_record(&interner, i)))
+        .map(|i| (RecordId::new(), make_record(interner, i)))
         .collect();
-    let empty_refs: TMap<String, _> = new_map_wc(0);
-    let ctx = FilterContext::new(&interner, &empty_refs);
+    let empty_refs: &'static TMap<String, _> = Box::leak(Box::new(new_map_wc(0)));
+    let ctx: &'static FilterContext<'static> =
+        Box::leak(Box::new(FilterContext::new(interner, empty_refs)));
 
     let group_by_age = GroupBy {
         fields: vec![vec!["age".to_string()]],
@@ -80,10 +91,6 @@ fn bench(c: &mut Criterion) {
     };
 
     // Multi-aggregate select: count(*) + sum(age) + avg(age) + min(age) + max(age).
-    // The previous compute_aggregate path re-walked the group per aggregate
-    // (5 walks × Vec<Option<InnerValue>> allocations + Count{All} cloning
-    // the whole record). With 10 groups × 100 rows × 5 aggregates the cost
-    // is visible above bench noise.
     let select_multi = Select {
         items: vec![
             SelectItem::CountAll {
@@ -117,82 +124,81 @@ fn bench(c: &mut Criterion) {
         distinct: false,
     };
 
-    // S4: `apply_group_by` now consumes `&[(RecordId, Bytes)]` (lens feed) —
-    // encode the InnerValue fixtures to storage bytes ONCE, outside the timed
-    // loop, so the bench measures the aggregate hot path (not encoding).
-    let records: Vec<(RecordId, bytes::Bytes)> = records
-        .into_iter()
-        .map(|(id, v)| (id, v.to_bytes().expect("encode bench record")))
-        .collect();
+    // S4: `apply_group_by` consumes `&[(RecordId, Bytes)]` (lens feed) —
+    // encode the InnerValue fixtures to storage bytes ONCE, outside the
+    // timed loop, so the bench measures the aggregate hot path (not encoding).
+    let records: &'static Vec<(RecordId, bytes::Bytes)> = Box::leak(Box::new(
+        records
+            .into_iter()
+            .map(|(id, v)| (id, v.to_bytes().expect("encode bench record")))
+            .collect(),
+    ));
 
-    let mut group = c.benchmark_group("apply_group_by");
-    group.throughput(Throughput::Elements(records.len() as u64));
-
-    group.bench_function("by_int_100_groups", |b| {
-        b.iter(|| {
-            black_box(apply_group_by(
-                &records,
-                &group_by_age,
-                &select,
-                &interner,
-                &ctx,
-            ))
+    {
+        let group_by_age = group_by_age.clone();
+        let select = select.clone();
+        h.bench("apply_group_by/by_int_100_groups", move || {
+            black_box(apply_group_by(records, &group_by_age, &select, interner, ctx))
         });
-    });
-    group.bench_function("by_str_10_groups", |b| {
-        b.iter(|| {
+    }
+    {
+        let group_by_city = group_by_city.clone();
+        let select = select.clone();
+        h.bench("apply_group_by/by_str_10_groups", move || {
             black_box(apply_group_by(
-                &records,
+                records,
                 &group_by_city,
                 &select,
-                &interner,
-                &ctx,
+                interner,
+                ctx,
             ))
         });
-    });
-    group.bench_function("by_str_int_composite", |b| {
-        b.iter(|| {
+    }
+    {
+        let group_by_two = group_by_two.clone();
+        let select = select.clone();
+        h.bench("apply_group_by/by_str_int_composite", move || {
             black_box(apply_group_by(
-                &records,
+                records,
                 &group_by_two,
                 &select,
-                &interner,
-                &ctx,
+                interner,
+                ctx,
             ))
         });
-    });
+    }
 
     // Multi-aggregate scenario: 10 groups (by city) × 100 rows/group,
     // 5 aggregates per group. Tests the per-aggregate re-walk + clone cost.
-    group.bench_function("multi_aggregate_5_funcs", |b| {
-        b.iter(|| {
+    {
+        let group_by_city = group_by_city.clone();
+        let select_multi = select_multi.clone();
+        h.bench("apply_group_by/multi_aggregate_5_funcs", move || {
             black_box(apply_group_by(
-                &records,
+                records,
                 &group_by_city,
                 &select_multi,
-                &interner,
-                &ctx,
+                interner,
+                ctx,
             ))
         });
-    });
+    }
 
     // Many groups (100 by age) × 10 rows/group with multi-aggregate. Stresses
     // the Count{All} record-clone path (one clone per row per aggregate
     // in the baseline).
-    group.bench_function("multi_aggregate_5_funcs_many_groups", |b| {
-        b.iter(|| {
+    h.bench(
+        "apply_group_by/multi_aggregate_5_funcs_many_groups",
+        move || {
             black_box(apply_group_by(
-                &records,
+                records,
                 &group_by_age,
                 &select_multi,
-                &interner,
-                &ctx,
+                interner,
+                ctx,
             ))
-        });
-    });
+        },
+    );
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench);
-criterion_main!(benches);

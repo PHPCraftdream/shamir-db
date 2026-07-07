@@ -1,0 +1,16 @@
+# Fixed-iteration bench manifest (bench-scale-tool).
+# Format: <bin>::<id> = <iterations>
+# Recalibrate: cargo bench -p <crate> --bench <bin> -- --calibrate <secs>
+# Counts are STATIC across runs so run wall-time is a comparable speed signal.
+# Hand-edit an N to pin/nudge it; delete a line to force recalibration.
+
+codec_msgpack::codec_msgpack_decode/interned_1000_records = 128
+codec_msgpack::codec_msgpack_encode/interned_1000_records = 320
+record_id::record_id_single/new = 5911488
+record_id::record_id_single/push_into_fresh_vec = 1198932
+recordview_lens::recordview_lens_single_field/lens_match_name = 17749696
+recordview_lens::recordview_lens_single_field/lens_read_age = 9538880
+recordview_lens::recordview_lens_single_field/tree_read_age = 187712
+recordview_lens::recordview_tier_a_clone_cost/clone_inner_1000 = 512
+recordview_lens::recordview_tier_b_tree_roundtrip/decode_1000 = 192
+recordview_lens::recordview_tier_b_tree_roundtrip/encode_1000 = 448

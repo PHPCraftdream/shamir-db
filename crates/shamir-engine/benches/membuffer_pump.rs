@@ -8,24 +8,24 @@
 //!
 //! Captures *single-write latency* (not throughput) — that's the
 //! number users see when they wait for `set().await`.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): each
+//! `MemBufferStore` (with its seeded 1000 records + warm keys) is built
+//! ONCE per config, outside the timed closure — plan 1 (shared setup).
+//! The harness owns the single shared tokio runtime for `bench_async`.
 
+use std::hint::black_box;
+use std::sync::Arc;
+
+use bench_scale_tool::Harness;
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 use shamir_storage::types::{RecordKey, Store};
-use std::sync::Arc;
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
-
-fn make_store(rt: &tokio::runtime::Runtime, cfg: MemBufferConfig) -> Arc<MemBufferStore> {
+async fn make_store(cfg: MemBufferConfig) -> Arc<MemBufferStore> {
     let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    rt.block_on(async { Arc::new(MemBufferStore::new(inner, cfg)) })
+    Arc::new(MemBufferStore::new(inner, cfg))
 }
 
 fn make_value(i: usize) -> Bytes {
@@ -34,8 +34,8 @@ fn make_value(i: usize) -> Bytes {
     Bytes::from(v)
 }
 
-fn bench_pump(c: &mut Criterion) {
-    let rt = rt();
+fn main() {
+    let mut h = Harness::new("membuffer_pump", env!("CARGO_MANIFEST_DIR"));
 
     let configs = vec![
         (
@@ -70,32 +70,37 @@ fn bench_pump(c: &mut Criterion) {
         ),
     ];
 
-    let mut group = c.benchmark_group("membuffer_pump");
-    group.throughput(Throughput::Elements(1));
+    // Build a temporary single-thread runtime purely for the untimed setup
+    // phase (seeding fixtures) — the harness's own shared runtime only
+    // drives the registered `bench_async` closures.
+    let setup_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     for (name, cfg) in configs {
-        let store = make_store(&rt, cfg);
+        let store = setup_rt.block_on(make_store(cfg));
 
-        // Seed 1000 records to make the pump have actual work
-        rt.block_on(async {
+        // Seed 1000 records to make the pump have actual work.
+        setup_rt.block_on(async {
             for i in 0..1000 {
                 let _ = store.insert(make_value(i)).await.unwrap();
             }
         });
 
-        // bench: single insert latency under this regime
-        group.bench_with_input(BenchmarkId::new("insert_single", name), &name, |b, _| {
+        // bench: single insert latency under this regime.
+        {
             let s = Arc::clone(&store);
-            b.to_async(&rt).iter(|| {
+            h.bench_async(&format!("membuffer_pump/insert_single_{name}"), move || {
                 let s = Arc::clone(&s);
                 async move {
                     let _ = s.insert(make_value(0)).await.unwrap();
                 }
             });
-        });
+        }
 
-        // bench: single get latency (cache hit path)
-        let warm_keys: Vec<RecordKey> = rt.block_on(async {
+        // bench: single get latency (cache hit path).
+        let warm_keys: Vec<RecordKey> = setup_rt.block_on(async {
             let mut keys = Vec::with_capacity(100);
             for i in 0..100 {
                 let k = store.insert(make_value(i + 100_000)).await.unwrap();
@@ -105,21 +110,18 @@ fn bench_pump(c: &mut Criterion) {
         });
         let key = warm_keys[50].clone();
 
-        group.bench_with_input(BenchmarkId::new("get_single", name), &name, |b, _| {
+        {
             let s = Arc::clone(&store);
             let k = key.clone();
-            b.to_async(&rt).iter(|| {
+            h.bench_async(&format!("membuffer_pump/get_single_{name}"), move || {
                 let s = Arc::clone(&s);
                 let k = k.clone();
                 async move {
-                    let _ = s.get(k).await.unwrap();
+                    let _ = black_box(s.get(k).await.unwrap());
                 }
             });
-        });
+        }
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_pump);
-criterion_main!(benches);

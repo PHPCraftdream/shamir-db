@@ -10,8 +10,8 @@
 //! `tests/interactive_tx_e2e.rs`. Closes the gap left by
 //! `db_handler_rps.rs`, which only benches one-shot `Execute`.
 //!
-//! Three functions:
-//!   * `begin_only` — open a tx and immediately drop the handle.
+//! Three workloads:
+//!   * `begin_only` — open a tx and immediately roll it back.
 //!     Bounded cost of `TxBegin` dispatch + registry insert.
 //!   * `begin_execute_commit_minimal` — begin + one trivial insert + commit.
 //!     Minimum non-trivial tx lifecycle.
@@ -20,24 +20,27 @@
 //!
 //! ## Group 2 — `handshake_paths`
 //!
-//! Two bench functions that drive a fresh in-process live server via
-//! the `tests/common/`-equivalent helper mirrored to `benches/common.rs`
+//! Two workloads that drive a fresh in-process live server via the
+//! `tests/common/`-equivalent helper mirrored to `benches/common.rs`
 //! (Cargo `[[bench]]` targets cannot reach into `tests/`):
 //!
 //!   * `full_scram_connect` — `Client::connect()` against a freshly
 //!     spawned server. Dominated by Argon2id (memory_kb=19456, t=2,
-//!     p=1 — spec floor). `sample_size(10)` to keep wall-clock bounded.
-//!   * `resume_fast_path` — open ONCE in setup to capture a resumption
-//!     ticket + pin, then bench `Client::resume()` in the loop. Skips
-//!     Argon2id entirely; default `sample_size(100)` is fine.
+//!     p=1 — spec floor).
+//!   * `resume_fast_path` — a fresh SCRAM connect captures a resumption
+//!     ticket + pin per iteration (untimed setup via `bench_batched_async`),
+//!     then `Client::resume()` is timed. Tickets are single-use and the
+//!     server's resume-cache evicts old entries under churn, so a fresh
+//!     ticket per measured iteration is required (mirrors the original
+//!     `iter_batched` design).
 
+use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use bench_scale_tool::Harness;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-use shamir_bench_utils as bu;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -83,24 +86,22 @@ fn fixture_session() -> Session {
     s
 }
 
-fn build_handler(rt: &tokio::runtime::Runtime) -> ShamirDbHandler {
-    rt.block_on(async {
-        let shamir = ShamirDb::init_memory().await.expect("init shamir");
-        // `create_db`/`add_repo` (System-owned) persist ResourceMeta::owned_enforced
-        // (owner-only 0o700) rather than the old open 0o777 default. `fixture_session()`
-        // below is a regular ("alice") session, not a superuser, so it resolves to
-        // Actor::User(principal_id("alice")) and needs ownership to pass the gate —
-        // stamp the bench db/repo/table with that same actor via the `_as` variants.
-        let bench_user = Actor::User(principal_id("alice"));
-        shamir.create_db_as("app", bench_user.clone()).await;
-        let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("items"));
-        shamir
-            .add_repo_as("app", cfg, bench_user)
-            .await
-            .expect("add repo");
-        ShamirDbHandler::new(Arc::new(shamir))
-    })
+async fn build_handler() -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    // `create_db`/`add_repo` (System-owned) persist ResourceMeta::owned_enforced
+    // (owner-only 0o700) rather than the old open 0o777 default. `fixture_session()`
+    // below is a regular ("alice") session, not a superuser, so it resolves to
+    // Actor::User(principal_id("alice")) and needs ownership to pass the gate —
+    // stamp the bench db/repo/table with that same actor via the `_as` variants.
+    let bench_user = Actor::User(principal_id("alice"));
+    shamir.create_db_as("app", bench_user.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, bench_user)
+        .await
+        .expect("add repo");
+    ShamirDbHandler::new(Arc::new(shamir))
 }
 
 fn encode(req: &DbRequest) -> Vec<u8> {
@@ -174,88 +175,16 @@ fn expect_tx_handle(resp: DbResponse) -> u64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Group 1: interactive_tx_lifecycle
-// ---------------------------------------------------------------------------
-
-fn bench_interactive_tx(c: &mut Criterion) {
-    // Multi-thread runtime: `ShamirDbHandler::handle` uses block_in_place.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+fn setup_block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("rt");
-
-    let handler = build_handler(&rt);
-    let session = fixture_session();
-
-    let mut g = c.benchmark_group("interactive_tx_lifecycle");
-    g.throughput(Throughput::Elements(1));
-
-    // -- begin_only: cost of opening a tx, then rolling back so the
-    //    registry stays empty. We must drain the handle to avoid an
-    //    unbounded leak across thousands of iterations.
-    {
-        let begin_bytes = tx_begin_bytes();
-        g.bench_function("begin_only", |b| {
-            b.iter(|| {
-                rt.block_on(async {
-                    let resp = call(&handler, &session, black_box(&begin_bytes)).await;
-                    let tx = expect_tx_handle(resp);
-                    // Drop the tx via rollback — cheap and keeps the
-                    // registry from growing. The bench targets BEGIN
-                    // cost; the rollback adds a constant offset.
-                    let rb = tx_rollback_bytes(tx);
-                    let r = call(&handler, &session, &rb).await;
-                    black_box(r);
-                });
-            });
-        });
-    }
-
-    // -- begin_execute_commit_minimal: 1 upsert.
-    {
-        let begin_bytes = tx_begin_bytes();
-        g.bench_function("begin_execute_commit_minimal", |b| {
-            b.iter(|| {
-                rt.block_on(async {
-                    let tx =
-                        expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
-                    let exec = tx_execute_bytes(tx, 1);
-                    let r1 = call(&handler, &session, &exec).await;
-                    black_box(&r1);
-                    let c1 = tx_commit_bytes(tx);
-                    let r2 = call(&handler, &session, &c1).await;
-                    black_box(r2);
-                });
-            });
-        });
-    }
-
-    // -- begin_execute_n_commit: 10 upserts in a single execute.
-    {
-        let begin_bytes = tx_begin_bytes();
-        g.bench_function("begin_execute_n_commit", |b| {
-            b.iter(|| {
-                rt.block_on(async {
-                    let tx =
-                        expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
-                    let exec = tx_execute_bytes(tx, 10);
-                    let r1 = call(&handler, &session, &exec).await;
-                    black_box(&r1);
-                    let c1 = tx_commit_bytes(tx);
-                    let r2 = call(&handler, &session, &c1).await;
-                    black_box(r2);
-                });
-            });
-        });
-    }
-
-    g.finish();
+        .unwrap()
+        .block_on(fut)
 }
 
 // ---------------------------------------------------------------------------
-// Group 2: handshake_paths — full SCRAM connect vs resumption fast-path
+// Group 2 setup: live server + SCRAM connect helpers
 // ---------------------------------------------------------------------------
 
 /// Wall-clock setup that spawns a live server and returns
@@ -291,7 +220,20 @@ async fn setup_live_server() -> (
     (handle, addr, temp, password)
 }
 
-fn bench_handshake_paths(c: &mut Criterion) {
+async fn connect_client(addr: std::net::SocketAddr, password: &[u8]) -> Client {
+    Client::connect(ConnectOptions {
+        addr,
+        server_name: "localhost".to_string(),
+        username: "admin".to_string(),
+        password: Zeroizing::new(password.to_vec()),
+        accept_new_host: true,
+        trusted_pin: None,
+    })
+    .await
+    .expect("connect")
+}
+
+fn main() {
     // Best-effort tracing init for diagnosing setup; ignore the
     // "already initialised" error when re-run.
     let _ = tracing_subscriber::fmt()
@@ -301,114 +243,154 @@ fn bench_handshake_paths(c: &mut Criterion) {
         )
         .try_init();
 
-    // Multi-thread runtime: TLS + SCRAM use background tasks; the bench
-    // body itself is awaited on the runtime's `block_on`.
-    // worker_threads matches `tests/duplex_e2e.rs::resume_then_concurrent`
-    // which exercises the same connect+resume pattern; smaller pools
-    // race the in-process server's connection_acceptor against the
-    // bench-side `Client::resume` await and produce an "early eof" on
-    // the first iteration.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("rt");
+    let mut h = Harness::new("wire_latencies", env!("CARGO_MANIFEST_DIR"));
 
-    // Spawn the live server ONCE. Both bench functions reuse it — fresh
-    // TCP connection per iteration is what we measure, not the launcher
-    // boot cost.
-    let (handle, addr, _temp, password) = rt.block_on(setup_live_server());
+    // -----------------------------------------------------------------
+    // Group 1: interactive_tx_lifecycle
+    // -----------------------------------------------------------------
+    {
+        let handler = Arc::new(setup_block_on(build_handler()));
+        let session = Arc::new(fixture_session());
 
-    // Capture a resumption ticket + pin for the resume-path bench. Doing
-    // this in setup means the loop only pays the resume cost, not the
-    // full SCRAM cost.
-    let (_ticket, pinned_hash) = rt.block_on(async {
-        let client = Client::connect(ConnectOptions {
-            addr,
-            server_name: "localhost".to_string(),
-            username: "admin".to_string(),
-            password: Zeroizing::new(password.clone()),
-            accept_new_host: true,
-            trusted_pin: None,
-        })
-        .await
-        .expect("setup connect");
-        // Ensure the session is fully registered server-side before
-        // closing — mirror the pattern in `tests/duplex_e2e.rs::
-        // resume_then_concurrent` which always pings once before
-        // closing & resuming.
-        client.ping().await.expect("setup ping");
-        let ticket = client
-            .resumption_ticket()
-            .expect("server issues ticket")
-            .to_vec();
-        let pin = client.server_pub_key_pin();
-        client.close().await;
-        (ticket, pin)
-    });
-
-    let mut g = c.benchmark_group("handshake_paths");
-    g.throughput(Throughput::Elements(1));
-
-    // -- full_scram_connect: Argon2id-bound; small sample for sane wall-clock.
-    g.sample_size(bu::sample_size(10));
-    g.bench_function("full_scram_connect", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                let client = Client::connect(ConnectOptions {
-                    addr,
-                    server_name: "localhost".to_string(),
-                    username: "admin".to_string(),
-                    password: Zeroizing::new(password.clone()),
-                    accept_new_host: true,
-                    trusted_pin: None,
-                })
-                .await
-                .expect("connect");
-                black_box(&client);
-                client.close().await;
+        // -- begin_only: cost of opening a tx, then rolling back so the
+        //    registry stays empty. We must drain the handle to avoid an
+        //    unbounded leak across thousands of iterations.
+        {
+            let handler = handler.clone();
+            let session = session.clone();
+            let begin_bytes = tx_begin_bytes();
+            h.bench_async("interactive_tx_lifecycle/begin_only", move || {
+                let handler = handler.clone();
+                let session = session.clone();
+                let begin_bytes = begin_bytes.clone();
+                async move {
+                    let resp = call(&handler, &session, black_box(&begin_bytes)).await;
+                    let tx = expect_tx_handle(resp);
+                    // Drop the tx via rollback — cheap and keeps the
+                    // registry from growing. The bench targets BEGIN
+                    // cost; the rollback adds a constant offset.
+                    let rb = tx_rollback_bytes(tx);
+                    let r = call(&handler, &session, &rb).await;
+                    black_box(r);
+                }
             });
-        });
-    });
+        }
 
-    // -- resume_fast_path: skip Argon2id; tighter measurement.
-    //
-    // Tickets are single-use AND the server's resume-cache evicts old
-    // entries under churn — a simple rotation chain (use ticket N,
-    // capture N+1, repeat) fails after K iterations when the chain
-    // accumulates state the server has decided to drop. Cleanest fix:
-    // `iter_batched` — setup phase grabs a fresh ticket via a full
-    // SCRAM connect for EACH measured iteration. The setup cost is
-    // excluded from the measurement, the resume call is what's timed.
-    let password_arc = std::sync::Arc::new(password.clone());
-    g.sample_size(bu::sample_size(20));
-    g.bench_function("resume_fast_path", |b| {
-        let pwd = password_arc.clone();
-        b.iter_batched(
-            || {
-                // Fresh ticket per measured iteration. NOT timed.
-                rt.block_on(async {
-                    let c = Client::connect(ConnectOptions {
-                        addr,
-                        server_name: "localhost".to_string(),
-                        username: "admin".to_string(),
-                        password: Zeroizing::new((*pwd).clone()),
-                        accept_new_host: true,
-                        trusted_pin: None,
-                    })
-                    .await
-                    .expect("setup connect");
-                    c.ping().await.expect("setup ping");
-                    let t = c
-                        .resumption_ticket()
-                        .expect("server issues ticket")
-                        .to_vec();
-                    c.close().await;
-                    t
-                })
-            },
-            |ticket| {
-                rt.block_on(async {
+        // -- begin_execute_commit_minimal: 1 upsert.
+        {
+            let handler = handler.clone();
+            let session = session.clone();
+            let begin_bytes = tx_begin_bytes();
+            h.bench_async(
+                "interactive_tx_lifecycle/begin_execute_commit_minimal",
+                move || {
+                    let handler = handler.clone();
+                    let session = session.clone();
+                    let begin_bytes = begin_bytes.clone();
+                    async move {
+                        let tx =
+                            expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
+                        let exec = tx_execute_bytes(tx, 1);
+                        let r1 = call(&handler, &session, &exec).await;
+                        black_box(&r1);
+                        let c1 = tx_commit_bytes(tx);
+                        let r2 = call(&handler, &session, &c1).await;
+                        black_box(r2);
+                    }
+                },
+            );
+        }
+
+        // -- begin_execute_n_commit: 10 upserts in a single execute.
+        {
+            let handler = handler.clone();
+            let session = session.clone();
+            let begin_bytes = tx_begin_bytes();
+            h.bench_async("interactive_tx_lifecycle/begin_execute_n_commit", move || {
+                let handler = handler.clone();
+                let session = session.clone();
+                let begin_bytes = begin_bytes.clone();
+                async move {
+                    let tx =
+                        expect_tx_handle(call(&handler, &session, black_box(&begin_bytes)).await);
+                    let exec = tx_execute_bytes(tx, 10);
+                    let r1 = call(&handler, &session, &exec).await;
+                    black_box(&r1);
+                    let c1 = tx_commit_bytes(tx);
+                    let r2 = call(&handler, &session, &c1).await;
+                    black_box(r2);
+                }
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Group 2: handshake_paths — full SCRAM connect vs resumption fast-path
+    // -----------------------------------------------------------------
+    {
+        // Spawn the live server ONCE. Both workloads reuse it — fresh
+        // TCP connection per iteration is what we measure, not the launcher
+        // boot cost.
+        let (handle, addr, _temp, password) = setup_block_on(setup_live_server());
+        let password = Arc::new(password);
+
+        // Capture a resumption ticket + pin for the resume-path bench setup
+        // needs the pinned hash. Doing this once means the loop only pays
+        // the resume cost, not the full SCRAM cost, on the per-iteration
+        // setup path below.
+        let pinned_hash = setup_block_on(async {
+            let client = connect_client(addr, &password).await;
+            // Ensure the session is fully registered server-side before
+            // closing — mirror the pattern in `tests/duplex_e2e.rs::
+            // resume_then_concurrent` which always pings once before
+            // closing & resuming.
+            client.ping().await.expect("setup ping");
+            let pin = client.server_pub_key_pin();
+            client.close().await;
+            pin
+        });
+
+        // -- full_scram_connect: Argon2id-bound.
+        {
+            let password = password.clone();
+            h.bench_async("handshake_paths/full_scram_connect", move || {
+                let password = password.clone();
+                async move {
+                    let client = connect_client(addr, &password).await;
+                    black_box(&client);
+                    client.close().await;
+                }
+            });
+        }
+
+        // -- resume_fast_path: skip Argon2id.
+        //
+        // Tickets are single-use AND the server's resume-cache evicts old
+        // entries under churn — a simple rotation chain (use ticket N,
+        // capture N+1, repeat) fails after K iterations when the chain
+        // accumulates state the server has decided to drop. Cleanest fix:
+        // `bench_batched_async` — setup phase grabs a fresh ticket via a
+        // full SCRAM connect for EACH measured iteration. The setup cost is
+        // excluded from the measurement, the resume call is what's timed.
+        {
+            let password = password.clone();
+            h.bench_batched_async(
+                "handshake_paths/resume_fast_path",
+                move || {
+                    let password = password.clone();
+                    async move {
+                        // Fresh ticket per measured iteration. NOT timed.
+                        let c = connect_client(addr, &password).await;
+                        c.ping().await.expect("setup ping");
+                        let ticket = c
+                            .resumption_ticket()
+                            .expect("server issues ticket")
+                            .to_vec();
+                        c.close().await;
+                        ticket
+                    }
+                },
+                move |ticket| async move {
                     let client = Client::resume(ResumeOptions {
                         addr,
                         server_name: "localhost".to_string(),
@@ -419,18 +401,14 @@ fn bench_handshake_paths(c: &mut Criterion) {
                     .expect("resume");
                     black_box(&client);
                     client.close().await;
-                });
-            },
-            criterion::BatchSize::PerIteration,
-        );
-    });
+                },
+            );
+        }
 
-    g.finish();
+        // Tear the server down explicitly so the data dir is released before
+        // the `TempDir` drop tries to remove it.
+        setup_block_on(handle.shutdown());
+    }
 
-    // Tear the server down explicitly so the data dir is released before
-    // the `TempDir` drop tries to remove it.
-    rt.block_on(handle.shutdown());
+    h.run();
 }
-
-criterion_group!(benches, bench_interactive_tx, bench_handshake_paths);
-criterion_main!(benches);

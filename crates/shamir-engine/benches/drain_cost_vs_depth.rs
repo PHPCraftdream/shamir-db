@@ -10,13 +10,13 @@
 //!
 //! Cells: `drain_cost_vs_depth/W={1000,5000,20000}/fjall`.
 //!
-//! Each Criterion iteration provisions a FRESH tempdir + fjall backend
-//! (no inter-iter state bleed).
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): each
+//! iteration provisions a FRESH tempdir + fjall backend and seeds W
+//! inflight WAL entries — that seeded state is consumed by `drain_all`
+//! (drained entries can't be redrained), so setup must be fresh every
+//! iteration → `bench_batched_async`.
 
-use std::time::{Duration, Instant};
-
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::repo::{repo_token, BoxRepoFactory, RepoInstance};
 use shamir_engine::table::table_manager::table_token_for;
 use shamir_engine::table::TableConfig;
@@ -24,13 +24,6 @@ use shamir_engine::tx::drainer::Drainer;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
-
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-}
 
 /// Create a fjall-backed RepoInstance with one table. Returns (instance, tempdir).
 /// Does NOT access repo.drainer() — the background loop is never spawned.
@@ -86,50 +79,36 @@ async fn seed_inflight_entries(repo: &RepoInstance, w: u64) {
     gate.publish_committed_max(w);
 }
 
-fn bench_drain_cost_vs_depth(c: &mut Criterion) {
-    let rt = rt();
-    let mut group = c.benchmark_group("drain_cost_vs_depth");
-    // QUICK mode: sample=10, measurement=500ms, warm_up=500ms.
-    // max_wall_secs=600 per cell (10 min budget).
-    bu::tune_tiered(&mut group, 10, 5, 3, 600);
+fn main() {
+    let mut h = Harness::new("drain_cost_vs_depth", env!("CARGO_MANIFEST_DIR"));
 
     let depths: &[u64] = &[1_000, 5_000, 20_000];
 
     for &w in depths {
-        group.throughput(Throughput::Elements(w));
-        group.bench_function(BenchmarkId::new("fjall", w), |b| {
-            b.to_async(&rt).iter_custom(|iters| async move {
-                let mut total = Duration::ZERO;
-                for _iter_i in 0..iters {
-                    // Setup: fresh repo + seed W inflight entries.
-                    let (repo, _dir) = make_fjall_repo().await;
-                    seed_inflight_entries(&repo, w).await;
+        h.bench_batched_async(
+            &format!("fjall/{w}"),
+            move || async move {
+                let (repo, dir) = make_fjall_repo().await;
+                seed_inflight_entries(&repo, w).await;
+                (repo, dir)
+            },
+            move |(repo, dir)| async move {
+                // The drainer starts with an empty window — drain_step
+                // will hit the gap-reseed path (wal.recover()) once, then
+                // drain from the window.
+                let drainer = Drainer::new();
+                let drained: usize = drainer.drain_all(&repo).await.unwrap();
 
-                    // Timed: create a standalone drainer and drain_all.
-                    // The drainer starts with an empty window — drain_step
-                    // will hit the gap-reseed path (wal.recover()) once,
-                    // then drain from the window.
-                    let drainer = Drainer::new();
+                assert_eq!(
+                    drained as u64, w,
+                    "expected to drain {w} entries, got {drained}"
+                );
 
-                    let start = Instant::now();
-                    let drained: usize = drainer.drain_all(&repo).await.unwrap();
-                    total += start.elapsed();
-
-                    assert_eq!(
-                        drained as u64, w,
-                        "expected to drain {w} entries, got {drained}"
-                    );
-
-                    drop(repo);
-                    // _dir drops here, cleaning up the tempdir.
-                }
-                total
-            });
-        });
+                drop(repo);
+                drop(dir);
+            },
+        );
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_drain_cost_vs_depth);
-criterion_main!(benches);

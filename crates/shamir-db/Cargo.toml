@@ -77,6 +77,7 @@ tempfile    = "3.10.1"
 serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
+bench-scale-tool = { workspace = true, features = ["async"] }
 wat         = "1.226"
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-query-types   = { path = "../shamir-query-types" }

@@ -13,12 +13,18 @@
 //!
 //! Note: J1 migration — apply_select (legacy value path) removed; bench now uses
 //! apply_select_value (QueryValue path) + apply_order_by_qv.
+//!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): sync
+//! fixtures (interner, records, select/order-by/pagination shapes) built
+//! ONCE outside the timed closures (plan 1). The end-to-end push-down
+//! comparison (`bench_pushdown`) builds a fresh `TableManager` per N
+//! outside the timed loop too and drives async reads through
+//! `bench_async` (harness-owned shared runtime).
 
+use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-
-use shamir_bench_utils as bu;
+use bench_scale_tool::Harness;
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, apply_select_value};
 use shamir_engine::query::read::{
@@ -48,176 +54,6 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     m.insert(touch("active"), InnerValue::Bool(idx.is_multiple_of(2)));
     InnerValue::Map(m)
 }
-
-fn bench(c: &mut Criterion) {
-    let interner = Interner::new();
-    for k in ["id", "name", "age", "score", "email", "city", "active"] {
-        let _ = interner.touch_ind(k);
-    }
-    let records: Vec<(RecordId, InnerValue)> = (0..1000)
-        .map(|i| (RecordId::new(), make_record(&interner, i)))
-        .collect();
-
-    let select_5 = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["id".to_string()],
-                alias: None,
-            },
-            SelectItem::Field {
-                path: vec!["name".to_string()],
-                alias: None,
-            },
-            SelectItem::Field {
-                path: vec!["age".to_string()],
-                alias: None,
-            },
-            SelectItem::Field {
-                path: vec!["score".to_string()],
-                alias: None,
-            },
-            SelectItem::Field {
-                path: vec!["email".to_string()],
-                alias: None,
-            },
-        ],
-        distinct: false,
-    };
-
-    let select_all = Select {
-        items: vec![SelectItem::All],
-        distinct: false,
-    };
-
-    let mut group = c.benchmark_group("apply_select_value");
-    group.throughput(Throughput::Elements(1000));
-    group.bench_function("5_fields_1000_records", |b| {
-        b.iter(|| black_box(apply_select_value(&records, &select_5, &interner)))
-    });
-    group.bench_function("select_all_1000_records", |b| {
-        b.iter(|| black_box(apply_select_value(&records, &select_all, &interner)))
-    });
-    group.finish();
-
-    // Projected QueryValues for ORDER BY bench. Build once, clone per
-    // iteration so the sort is the only measured work.
-    let projected: Vec<QueryValue> = apply_select_value(&records, &select_5, &interner);
-    let order_by_single = OrderBy {
-        items: vec![OrderByItem {
-            field: vec!["age".to_string()],
-            direction: OrderDirection::Asc,
-            nulls: None,
-        }],
-    };
-    let order_by_two = OrderBy {
-        items: vec![
-            OrderByItem {
-                field: vec!["age".to_string()],
-                direction: OrderDirection::Asc,
-                nulls: None,
-            },
-            OrderByItem {
-                field: vec!["name".to_string()],
-                direction: OrderDirection::Asc,
-                nulls: None,
-            },
-        ],
-    };
-
-    let mut g2 = c.benchmark_group("apply_order_by_qv");
-    g2.throughput(Throughput::Elements(1000));
-    g2.bench_function("single_int_1000", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
-                apply_order_by_qv(&mut recs, &order_by_single);
-                black_box(recs);
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-    g2.bench_function("two_fields_1000", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |mut recs| {
-                apply_order_by_qv(&mut recs, &order_by_two);
-                black_box(recs);
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-    g2.finish();
-
-    // ── apply_pagination ────────────────────────────────────────
-    let mut g3 = c.benchmark_group("apply_pagination");
-    g3.throughput(Throughput::Elements(1000));
-    g3.bench_function("skip_50_limit_100", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |recs| {
-                black_box(apply_pagination(
-                    recs,
-                    &Pagination::LimitOffset {
-                        limit: Some(100),
-                        offset: 50,
-                    },
-                    false,
-                ));
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-    g3.bench_function("limit_10_from_1000", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |recs| {
-                black_box(apply_pagination(
-                    recs,
-                    &Pagination::LimitOffset {
-                        limit: Some(10),
-                        offset: 0,
-                    },
-                    false,
-                ));
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-    g3.bench_function("count_total_1000", |b| {
-        b.iter_batched(
-            || projected.clone(),
-            |recs| {
-                black_box(apply_pagination(recs, &Pagination::None, true));
-            },
-            criterion::BatchSize::SmallInput,
-        )
-    });
-    g3.finish();
-}
-
-// ============================================================================
-// Opt #3a — end-to-end LIMIT push-down bench.
-//
-// Setup: a real `TableManager` (in-memory) with N records, all matching
-// the WHERE clause. Bench two shapes of the SAME page-of-10 query:
-//
-//   `pushdown_active` — plain `WHERE … LIMIT 10` (no ORDER BY / DISTINCT /
-//       GROUP BY / aggregates). With Opt #3a the read pipeline projects
-//       only the 10 page rows.
-//   `pushdown_disabled` — same WHERE / same LIMIT 10, but with
-//       `ORDER BY name ASC` added. ORDER BY disables the gate, so the
-//       pipeline must project every match before sorting + truncating —
-//       this is the "before" baseline for the push-down.
-//
-// Both shapes touch the same N records / same index plan; the delta is
-// the projection cost of `N - 10` rows. The ratio shows the asymptotic
-// win as N grows.
-//
-// Note: ORDER BY here is NOT served by a sorted index (none defined on
-// `name`), so the dispatcher uses `read_collecting`, NOT the
-// `order_limit_fast_path`. This isolates the projection cost the
-// push-down skips.
-// ============================================================================
 
 async fn build_table_with_n(n: usize) -> shamir_engine::table::TableManager {
     let repo = Arc::new(InMemoryRepo::new());
@@ -263,18 +99,196 @@ async fn build_table_with_n(n: usize) -> shamir_engine::table::TableManager {
     table
 }
 
-fn bench_pushdown(c: &mut Criterion) {
-    let rt = tokio::runtime::Builder::new_current_thread()
+fn main() {
+    let mut h = Harness::new("select_pipeline", env!("CARGO_MANIFEST_DIR"));
+
+    // ── Setup ────────────────────────────────────────────────────
+    let interner: &'static Interner = Box::leak(Box::new(Interner::new()));
+    for k in ["id", "name", "age", "score", "email", "city", "active"] {
+        let _ = interner.touch_ind(k);
+    }
+    let records: Vec<(RecordId, InnerValue)> = (0..1000)
+        .map(|i| (RecordId::new(), make_record(interner, i)))
+        .collect();
+
+    let select_5 = Select {
+        items: vec![
+            SelectItem::Field {
+                path: vec!["id".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["name".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["age".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["score".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["email".to_string()],
+                alias: None,
+            },
+        ],
+        distinct: false,
+    };
+
+    let select_all = Select {
+        items: vec![SelectItem::All],
+        distinct: false,
+    };
+
+    {
+        let records = records.clone();
+        let select_5 = select_5.clone();
+        h.bench("apply_select_value/5_fields_1000_records", move || {
+            black_box(apply_select_value(&records, &select_5, interner));
+        });
+    }
+    {
+        let records = records.clone();
+        let select_all = select_all.clone();
+        h.bench("apply_select_value/select_all_1000_records", move || {
+            black_box(apply_select_value(&records, &select_all, interner));
+        });
+    }
+
+    // Projected QueryValues for ORDER BY bench. Build once, clone per
+    // iteration so the sort is the only measured work.
+    let projected: Vec<QueryValue> = apply_select_value(&records, &select_5, interner);
+    let order_by_single = OrderBy {
+        items: vec![OrderByItem {
+            field: vec!["age".to_string()],
+            direction: OrderDirection::Asc,
+            nulls: None,
+        }],
+    };
+    let order_by_two = OrderBy {
+        items: vec![
+            OrderByItem {
+                field: vec!["age".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+            OrderByItem {
+                field: vec!["name".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+        ],
+    };
+
+    // `apply_order_by_qv` sorts in place — a shared `projected` would be
+    // mutated by the first iteration and stay sorted for the rest, so a
+    // fresh clone is required every iteration (`bench_batched`, setup
+    // untimed).
+    {
+        let projected = projected.clone();
+        let order_by_single = order_by_single.clone();
+        h.bench_batched(
+            "apply_order_by_qv/single_int_1000",
+            move || projected.clone(),
+            move |mut recs| {
+                apply_order_by_qv(&mut recs, &order_by_single);
+                black_box(recs);
+            },
+        );
+    }
+    {
+        let projected = projected.clone();
+        let order_by_two = order_by_two.clone();
+        h.bench_batched(
+            "apply_order_by_qv/two_fields_1000",
+            move || projected.clone(),
+            move |mut recs| {
+                apply_order_by_qv(&mut recs, &order_by_two);
+                black_box(recs);
+            },
+        );
+    }
+
+    // ── apply_pagination ────────────────────────────────────────
+    // `apply_pagination` consumes its `Vec<QueryValue>` by value, so a
+    // fresh clone per iteration is required here too.
+    {
+        let projected = projected.clone();
+        h.bench_batched(
+            "apply_pagination/skip_50_limit_100",
+            move || projected.clone(),
+            move |recs| {
+                black_box(apply_pagination(
+                    recs,
+                    &Pagination::LimitOffset {
+                        limit: Some(100),
+                        offset: 50,
+                    },
+                    false,
+                ));
+            },
+        );
+    }
+    {
+        let projected = projected.clone();
+        h.bench_batched(
+            "apply_pagination/limit_10_from_1000",
+            move || projected.clone(),
+            move |recs| {
+                black_box(apply_pagination(
+                    recs,
+                    &Pagination::LimitOffset {
+                        limit: Some(10),
+                        offset: 0,
+                    },
+                    false,
+                ));
+            },
+        );
+    }
+    {
+        let projected = projected.clone();
+        h.bench_batched(
+            "apply_pagination/count_total_1000",
+            move || projected.clone(),
+            move |recs| {
+                black_box(apply_pagination(recs, &Pagination::None, true));
+            },
+        );
+    }
+
+    // ============================================================================
+    // Opt #3a — end-to-end LIMIT push-down bench.
+    //
+    // Setup: a real `TableManager` (in-memory) with N records, all matching
+    // the WHERE clause. Bench two shapes of the SAME page-of-10 query:
+    //
+    //   `pushdown_active` — plain `WHERE … LIMIT 10` (no ORDER BY / DISTINCT /
+    //       GROUP BY / aggregates). With Opt #3a the read pipeline projects
+    //       only the 10 page rows.
+    //   `pushdown_disabled` — same WHERE / same LIMIT 10, but with
+    //       `ORDER BY name ASC` added. ORDER BY disables the gate, so the
+    //       pipeline must project every match before sorting + truncating —
+    //       this is the "before" baseline for the push-down.
+    //
+    // Both shapes touch the same N records / same index plan; the delta is
+    // the projection cost of `N - 10` rows. The ratio shows the asymptotic
+    // win as N grows.
+    //
+    // Note: ORDER BY here is NOT served by a sorted index (none defined on
+    // `name`), so the dispatcher uses `read_collecting`, NOT the
+    // `order_limit_fast_path`. This isolates the projection cost the
+    // push-down skips.
+    // ============================================================================
+    let setup_rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
 
-    let mut group = c.benchmark_group("read_limit_pushdown");
-    group.sample_size(bu::sample_size(20));
-
     for &n in &[10_000usize, 100_000usize] {
-        let table = rt.block_on(build_table_with_n(n));
-        let interner = rt.block_on(table.interner().get()).unwrap();
+        let table = setup_rt.block_on(build_table_with_n(n));
 
         // (A) push-down active: WHERE + LIMIT 10, no ORDER BY.
         let q_pushdown: ReadQuery = {
@@ -321,14 +335,12 @@ fn bench_pushdown(c: &mut Criterion) {
             rmp_serde::from_slice(&bytes).unwrap()
         };
 
-        group.throughput(Throughput::Elements(10));
-
-        let _ = interner; // interner refcount kept alive via table.
-
-        group.bench_function(format!("pushdown_active_N={}", n), |b| {
-            b.to_async(&rt).iter(|| {
+        {
+            let table = table.clone();
+            let q = q_pushdown.clone();
+            h.bench_async(&format!("read_limit_pushdown/pushdown_active_N={n}"), move || {
                 let table = table.clone();
-                let q = q_pushdown.clone();
+                let q = q.clone();
                 async move {
                     let interner = table.interner().get().await.unwrap();
                     let refs = new_map();
@@ -337,24 +349,27 @@ fn bench_pushdown(c: &mut Criterion) {
                     black_box(r);
                 }
             });
-        });
+        }
 
-        group.bench_function(format!("pushdown_disabled_N={}", n), |b| {
-            b.to_async(&rt).iter(|| {
-                let table = table.clone();
-                let q = q_full.clone();
-                async move {
-                    let interner = table.interner().get().await.unwrap();
-                    let refs = new_map();
-                    let ctx = FilterContext::new(interner, &refs);
-                    let r = table.read(&q, &ctx).await.unwrap();
-                    black_box(r);
-                }
-            });
-        });
+        {
+            let table = table.clone();
+            let q = q_full.clone();
+            h.bench_async(
+                &format!("read_limit_pushdown/pushdown_disabled_N={n}"),
+                move || {
+                    let table = table.clone();
+                    let q = q.clone();
+                    async move {
+                        let interner = table.interner().get().await.unwrap();
+                        let refs = new_map();
+                        let ctx = FilterContext::new(interner, &refs);
+                        let r = table.read(&q, &ctx).await.unwrap();
+                        black_box(r);
+                    }
+                },
+            );
+        }
     }
-    group.finish();
-}
 
-criterion_group!(benches, bench, bench_pushdown);
-criterion_main!(benches);
+    h.run();
+}

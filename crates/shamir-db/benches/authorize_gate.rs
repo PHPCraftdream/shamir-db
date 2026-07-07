@@ -5,15 +5,17 @@
 //!   2. Non-System path with meta resolution + ancestor traversal
 //!      (a Table 3 levels deep under a Database).
 //!
+//! Migrated to the fixed-iteration harness (`bench_scale_tool`): DB setup
+//! (create_db/add_repo, once) is done ONCE outside every timed closure —
+//! plan 1 (shared setup) for all three workloads, since `authorize_access`
+//! only reads the meta tree and never mutates it.
+//!
 //! Run:
-//!   cargo bench -p shamir-db -- 'authorize'
-
-use criterion::{criterion_group, criterion_main, Criterion};
+//!   cargo bench -p shamir-db --bench authorize_gate
 
 include!("bench_allocator.rs");
 
-use tokio::runtime::Runtime;
-
+use bench_scale_tool::Harness;
 use shamir_db::access::{Action, Actor, ResourcePath};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -38,15 +40,20 @@ async fn setup_shamir() -> ShamirDb {
     shamir
 }
 
-fn bench_authorize(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let shamir = rt.block_on(setup_shamir());
+fn main() {
+    let mut h = Harness::new("authorize_gate", env!("CARGO_MANIFEST_DIR"));
 
-    let mut group = c.benchmark_group("authorize_gate");
+    // Setup runs ONCE at registration time, shared across every iteration
+    // of every workload below (authorize_access is read-only).
+    let shamir = {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(setup_shamir())
+    };
 
     // 1. System fast-path (admin bypass).
-    group.bench_function("system_bypass", |b| {
-        b.to_async(&rt).iter(|| {
+    {
+        let shamir = shamir.clone();
+        h.bench_async("authorize_gate/system_bypass", move || {
             let shamir = shamir.clone();
             async move {
                 shamir
@@ -58,12 +65,13 @@ fn bench_authorize(c: &mut Criterion) {
                     .await
                     .unwrap();
             }
-        })
-    });
+        });
+    }
 
     // 2. Non-System path with traversal (3 ancestors + target).
-    group.bench_function("user_traverse_table", |b| {
-        b.to_async(&rt).iter(|| {
+    {
+        let shamir = shamir.clone();
+        h.bench_async("authorize_gate/user_traverse_table", move || {
             let shamir = shamir.clone();
             async move {
                 shamir
@@ -75,12 +83,13 @@ fn bench_authorize(c: &mut Criterion) {
                     .await
                     .unwrap();
             }
-        })
-    });
+        });
+    }
 
     // 3. Non-System path on a deep resource (Record — 4 ancestors).
-    group.bench_function("user_traverse_record", |b| {
-        b.to_async(&rt).iter(|| {
+    {
+        let shamir = shamir.clone();
+        h.bench_async("authorize_gate/user_traverse_record", move || {
             let shamir = shamir.clone();
             async move {
                 shamir
@@ -92,11 +101,8 @@ fn bench_authorize(c: &mut Criterion) {
                     .await
                     .unwrap();
             }
-        })
-    });
+        });
+    }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_authorize);
-criterion_main!(benches);

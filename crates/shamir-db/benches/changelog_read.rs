@@ -16,22 +16,22 @@
 //!
 //! Setup populates the journal with ~12_000 single-row commits (one
 //! commit per `db.execute` call) so even the deepest backfill has real
-//! data behind it. Setup runs once; each iteration only re-runs the
-//! `read_changelog_from` call.
+//! data behind it. Migrated to the fixed-iteration harness
+//! (`bench_scale_tool`): setup runs ONCE, shared across every iteration —
+//! plan 1 (`bench_async`), since `read_changelog_from` never mutates the
+//! journal.
 //!
 //! Run:
 //!   cargo bench -p shamir-db --bench changelog_read
-//!   cargo bench -p shamir-db --bench changelog_read -- --sample-size 10
 
+use std::hint::black_box;
 use std::sync::Arc;
-
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 include!("bench_allocator.rs");
 
+use bench_scale_tool::Harness;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
-use tokio::runtime::Runtime;
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -79,17 +79,19 @@ async fn seeded_journal() -> Arc<ShamirDb> {
     shamir
 }
 
-fn bench_changelog_read_from(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let shamir = rt.block_on(seeded_journal());
+fn main() {
+    let mut h = Harness::new("changelog_read", env!("CARGO_MANIFEST_DIR"));
 
-    // Anchor at the current commit_version so every iteration reads the
-    // same window — no drift across samples.
-    let current = rt
-        .block_on(shamir.current_commit_version(DB, REPO))
-        .expect("repo has a commit version");
-
-    let mut group = c.benchmark_group("changelog_read_from");
+    let (shamir, current) = {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let shamir = rt.block_on(seeded_journal());
+        // Anchor at the current commit_version so every iteration reads the
+        // same window — no drift across samples.
+        let current = rt
+            .block_on(shamir.current_commit_version(DB, REPO))
+            .expect("repo has a commit version");
+        (shamir, current)
+    };
 
     for &depth in &[100u64, 1_000, 10_000] {
         for &limit in &[100usize, 1_000] {
@@ -97,27 +99,20 @@ fn bench_changelog_read_from(c: &mut Criterion) {
             // sit at or after from_version. With `limit ≤ depth` the read
             // returns a full page; with `limit > depth` it returns `depth`.
             let from_version = current.saturating_sub(depth) + 1;
-
-            group.throughput(Throughput::Elements(limit.min(depth as usize) as u64));
-            let id = BenchmarkId::new(format!("from_depth_{depth}_lim_{limit}"), depth);
-            group.bench_function(id, |b| {
-                let shamir = Arc::clone(&shamir);
-                b.to_async(&rt).iter(|| {
-                    let s = Arc::clone(&shamir);
-                    async move {
-                        let events = s
-                            .read_changelog_from(DB, REPO, from_version, limit)
-                            .await
-                            .expect("repo exists");
-                        black_box(events);
-                    }
-                });
+            let shamir = Arc::clone(&shamir);
+            let id = format!("changelog_read_from/from_depth_{depth}_lim_{limit}");
+            h.bench_async(&id, move || {
+                let s = Arc::clone(&shamir);
+                async move {
+                    let events = s
+                        .read_changelog_from(DB, REPO, from_version, limit)
+                        .await
+                        .expect("repo exists");
+                    black_box(events);
+                }
             });
         }
     }
 
-    group.finish();
+    h.run();
 }
-
-criterion_group!(benches, bench_changelog_read_from);
-criterion_main!(benches);
