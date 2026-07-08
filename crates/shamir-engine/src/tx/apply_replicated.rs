@@ -12,12 +12,17 @@
 //!
 //! Per the R1-a task brief (which refines §4.1's "version = source"), the
 //! follower allocates a LOCAL commit version via its own
-//! [`RepoTxGate::assign_next_version`]. The leader's `commit_version` is
-//! carried in the event only for IDEMPOTENCY (R1-b stores the high-water
-//! mark of applied leader versions durably and feeds it back as
-//! `applied_watermark`). Local-version allocation is what lets the follower
-//! emit its OWN changefeed event downstream (chain replication) and keeps
-//! its gate / MVCC floor internally consistent.
+//! [`RepoTxGate::assign_next_version_guarded`] (the RAII `VersionGuard`
+//! variant). The leader's `commit_version` is carried in the event only for
+//! IDEMPOTENCY (R1-b stores the high-water mark of applied leader versions
+//! durably and feeds it back as `applied_watermark`). Local-version
+//! allocation is what lets the follower emit its OWN changefeed event
+//! downstream (chain replication) and keeps its gate / MVCC floor internally
+//! consistent. The guarded allocator ensures every allocated version is
+//! terminally marked exactly once in the gate's completion (visibility)
+//! tracker — `Materialized` on success, `Aborted` on any failure / early
+//! return — so the contiguous visibility watermark can never wedge at an
+//! untracked version (audit A12).
 //!
 //! ## Idempotency (V4, §4)
 //!
@@ -135,7 +140,21 @@ pub async fn apply_replicated(
     // own gate. The leader's `event.commit_version` is for idempotency
     // only; the local version is what the follower's MVCC log, gate floor,
     // and downstream changefeed key on.
-    let local_version = gate.assign_next_version();
+    //
+    // A12: allocate via the GUARDED allocator (`assign_next_version_guarded`)
+    // so the version's terminal-mark obligation in the gate's `completion`
+    // (visibility) tracker is owned by RAII — the guard's `commit()` marks
+    // it `Materialized` on the success path and `Drop` marks it `Aborted` on
+    // ANY early return / panic / failure path. The BARE `assign_next_version`
+    // previously used here left the completion tracker with NO entry for the
+    // version on the success path (only `mark_durable_aborted` ran on
+    // failure, and it touches the SEPARATE `durable_completion` tracker),
+    // which permanently clogged the contiguous watermark at `version - 1`
+    // until a restart re-seeded the floor. Holding the guard across every
+    // exit path is compiler-enforced (no `Default`/`Clone`; `Drop` is the
+    // only terminal transition aside from `commit()`).
+    let version_guard = gate.assign_next_version_guarded();
+    let local_version = version_guard.version();
 
     // Group changes by table so each table's MvccStore / base store is hit
     // at most once with a single batched `transact` (O(tables), not
@@ -238,10 +257,17 @@ pub async fn apply_replicated(
     }
 
     if let Some((token, e)) = any_failed {
-        // Roll back the version allocation by marking it aborted so the
-        // gate's durable + visibility watermarks advance past it (a hole
-        // the drainer / readers will skip). The caller does NOT advance its
-        // applied watermark; re-delivery retries with a fresh local version.
+        // Roll back the version allocation: the `VersionGuard` held in
+        // `version_guard` is NOT committed here, so its `Drop` (firing at
+        // the `return` below) marks the version `Aborted` in BOTH the
+        // visibility tracker (`completion`) AND the durable tracker
+        // (`durable_completion`), advancing both contiguous watermarks past
+        // the hole. This subsumes the previous explicit
+        // `gate.mark_durable_aborted(local_version)` call (which marked only
+        // the durable tracker) AND adds the previously-missing visibility-
+        // tracker terminal mark — closing the A12 clog. The caller does NOT
+        // advance its applied watermark; re-delivery retries with a fresh
+        // local version.
         log::warn!(
             "apply_replicated: event leader_v {} tx {} failed on table token {}: \
              {e}; marking local_version {local_version} aborted",
@@ -249,7 +275,6 @@ pub async fn apply_replicated(
             event.tx_id,
             token
         );
-        gate.mark_durable_aborted(local_version);
         return Err(e);
     }
 
@@ -257,6 +282,23 @@ pub async fn apply_replicated(
     // finalize-tail reuse (see module docs for why the full
     // `finalize_sync_post_publish` is not reusable verbatim).
     // ====================================================================
+
+    // A12: discharge the VersionGuard's terminal-mark obligation by calling
+    // `commit()` — this marks the version `Materialized` in the gate's
+    // VISIBILITY tracker (`completion`) and advances `last_committed_version`
+    // from the resulting watermark. This is the previously-MISSING call that
+    // closed the A12 clog (the bare `assign_next_version` + `mark_durable`
+    // pair left the visibility tracker with no entry for the version).
+    //
+    // `commit()` consumes the guard (disarms its Drop), so the subsequent
+    // `mark_durable` call below is NOT redundant: `commit()` covers the
+    // visibility tracker, while `mark_durable` covers the SEPARATE durable
+    // tracker (`durable_completion`) AND fires `durable_progress.notify_waiters()`
+    // to wake any backpressured committer. Both calls are needed — this
+    // matches the canonical ordering the rest of the commit pipeline uses
+    // (`guard.commit()` first, `gate.mark_durable(v)` second — see
+    // `durable_watermark_tests::mixed_tx_and_nontx_durable_equals_visibility_at_end`).
+    version_guard.commit();
 
     // mark_durable: history was written inline by `apply_committed_ops`,
     // so the version is now durable. Advance the durable watermark so
