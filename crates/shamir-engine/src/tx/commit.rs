@@ -534,8 +534,6 @@ async fn commit_tx_inner_legacy_async(
     // (`apply_data_phase`) finalizes the cells below.
     let mut cell_guards = cell_guards;
 
-    release_pessimistic_locks(&tx, repo).await;
-
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
@@ -576,6 +574,17 @@ async fn commit_tx_inner_legacy_async(
     // a panic between WAL-durable and here drops the guard → Aborted.
     version_guard.commit();
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+
+    // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
+    // (`apply_data_phase` + `version_guard.commit()` above) is complete,
+    // never before. 2PL requires every lock to stay held until the tx's
+    // outcome is fully visible to others: releasing the Exclusive lock on a
+    // key BEFORE its new value is published lets a second tx acquire the
+    // lock and read/write the key while this tx's write is still in-flight
+    // (WAL-durable but not yet cell-published) — a lost-update protocol
+    // violation. Abort / early-exit paths above (lines ~435/440/462/515/526)
+    // release immediately because no write was ever published there.
+    release_pessimistic_locks(&tx, repo).await;
 
     maybe_crash("phase6_async", repo).await;
     drop(commit_guard);
@@ -725,7 +734,6 @@ async fn commit_tx_lockfree(
     // Phase 6-bis: record SSI footprint BEFORE publish (lock-free insert).
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
-    release_pessimistic_locks(&tx, repo).await;
     repo.tx_metrics().on_tx_committed();
 
     // Phases 5–7: materialize OUTSIDE any global lock, gated by uwl_guards.
@@ -750,6 +758,19 @@ async fn commit_tx_lockfree(
     // point would needlessly block the next Serializable committer through
     // `finalize_sync_post_publish`, which is post-publish tail work.
     drop(_serializable_guard);
+
+    // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
+    // (`materialize` above, which performs Phase 5a `apply_committed_visible`
+    // + `finalize_reservation` + `version_guard.commit()`) is complete, never
+    // before. 2PL requires every lock to stay held until the tx's outcome is
+    // fully visible to others: releasing the Exclusive lock on a key BEFORE
+    // its new value is published lets a second tx acquire the lock and
+    // read/write the key while this tx's write is still in-flight
+    // (WAL-durable but not yet cell-published) — a lost-update protocol
+    // violation. Abort / early-exit paths above (lines ~679/689/716) release
+    // immediately because no write was ever published there.
+    release_pessimistic_locks(&tx, repo).await;
+
     let materialization = finalize_sync_post_publish(
         &tx,
         post_publish,

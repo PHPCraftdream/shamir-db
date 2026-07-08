@@ -324,7 +324,18 @@ impl TableManager {
     /// - `tx == None` → same as [`get`]: direct read from main data_store.
     /// - `tx == Some(tx)` and no `mvcc_store` attached → same as [`get`].
     /// - `tx == Some(tx)` and `mvcc_store` attached →
-    ///   `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`:
+    ///   - `Pessimistic` isolation → `mvcc.get_current_bytes(rid.to_bytes())`
+    ///     (the LATEST COMMITTED value), because the caller has already
+    ///     acquired a Shared lock on the key (see
+    ///     `acquire_pessimistic_read_lock` above) — possibly after waiting
+    ///     for an Exclusive holder to release. A read taken under a held
+    ///     lock MUST reflect the latest committed value at the moment the
+    ///     lock was granted, not the tx's original snapshot, otherwise a
+    ///     read-modify-write cycle would compute from stale data and lose
+    ///     the just-released committer's update (A4 fix b).
+    ///   - `Snapshot` / `Serializable` isolation →
+    ///     `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`
+    ///     (snapshot-gated read, unchanged):
     ///     - `Some(bytes)` → deserialize and return.
     ///     - `None` → `DbError::NotFound`.
     ///
@@ -403,6 +414,36 @@ impl TableManager {
             }
 
             if let Some(mvcc) = self.mvcc_store.as_ref() {
+                // A4 (fix b): for a Pessimistic tx reading UNDER a held lock
+                // (the `acquire_pessimistic_read_lock` call above already
+                // granted the Shared lock — possibly after waiting for an
+                // Exclusive holder to release), the read MUST resolve to the
+                // LATEST COMMITTED value, not the tx's original snapshot.
+                // Otherwise a tx that began before a concurrent committer's
+                // publish, then acquired the lock AFTER that publish, would
+                // still see the stale snapshot value — defeating the entire
+                // purpose of taking the lock (a read-modify-write cycle
+                // computed from stale data → lost update). Snapshot /
+                // Serializable isolation's snapshot-gated `get_at` semantics
+                // are unchanged below.
+                if tx.isolation == shamir_tx::IsolationLevel::Pessimistic {
+                    match mvcc.get_current_bytes(key.as_ref()).await? {
+                        Some(bytes) => {
+                            return InnerValue::from_bytes(bytes).map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "Failed to deserialize InnerValue: {}",
+                                    e
+                                ))
+                            });
+                        }
+                        None => {
+                            return Err(shamir_storage::error::DbError::NotFound(format!(
+                                "record not found (latest committed) under Pessimistic lock: {:?}",
+                                id
+                            )));
+                        }
+                    }
+                }
                 match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
                     Some(bytes) => {
                         return InnerValue::from_bytes(bytes).map_err(|e| {
@@ -467,6 +508,12 @@ impl TableManager {
             }
 
             if let Some(mvcc) = self.mvcc_store.as_ref() {
+                // A4 (fix b): see `read_one_tx` — a Pessimistic tx reading
+                // under a held lock resolves to the LATEST COMMITTED value,
+                // not the snapshot. Snapshot / Serializable unchanged.
+                if tx.isolation == shamir_tx::IsolationLevel::Pessimistic {
+                    return mvcc.get_current_bytes(key.as_ref()).await;
+                }
                 return mvcc.get_at(key.as_ref(), tx.snapshot_version).await;
             }
         }
