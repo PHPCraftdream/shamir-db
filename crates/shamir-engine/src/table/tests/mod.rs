@@ -41,4 +41,5 @@ pub mod table_manager_tests;
 pub mod table_tests;
 pub mod test_helpers;
 pub mod update_byte_merge_parity_tests;
+pub mod update_validator_gate_tests;
 pub mod write_exec_tests;

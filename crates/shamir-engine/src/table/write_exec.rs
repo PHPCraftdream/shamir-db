@@ -507,6 +507,17 @@ impl TableManager {
             .unwrap_or(UpdateReturnMode::Changed);
         let wants_records = op.select.is_some();
 
+        // Check whether any Update validators are registered BEFORE the
+        // per-row loop, mirroring `execute_delete_tx`'s `has_delete_validators`.
+        // When false, the per-row `old_qv` / `new_qv` de-intern (String alloc
+        // per key + owned values) + deep `.clone()` is pure waste —
+        // `run_validators_qv` returns instantly when zero validators are bound
+        // for `WriteOp::Update` (audit `2026-07-06-perf-hot-paths.md` §1.3).
+        let has_update_validators = {
+            let bindings = self.validator_bindings();
+            bindings.iter().any(|b| b.ops.contains(&WriteOp::Update))
+        };
+
         for (id, old_bytes) in &matched {
             // Byte-level merge: patch old_bytes with the interned set overlay.
             // Produces bytes identical to merge_inner_maps(old_tree, set_map).to_bytes().
@@ -517,47 +528,60 @@ impl TableManager {
             // so byte equality is safe for this "patched from old" shape.
             let changed = new_bytes.as_ref() != old_bytes.as_ref();
 
+            // Track the validator-built `old_qv` so the RETURNING block below
+            // can REUSE it instead of de-interning `old_bytes` a second time.
+            // Only populated when validators actually ran (which implies
+            // `has_update_validators && changed`); `None` otherwise.
+            let mut reuse_old_qv: Option<QueryValue> = None;
+
             if changed {
-                // S3: run validators before staging (tx overlay-aware).
-                //
-                // Build old/new QueryValues WITHOUT decoding an InnerValue tree.
-                // - old_qv: de-intern the committed bytes via RecordView (base
-                //   interner — all keys are committed).
-                // - new_qv: overlay the string-keyed resolved_set on top of old_qv
-                //   (no overlay-minted interned ids to resolve — the overlay keys
-                //   are already strings in resolved_set). This matches the W3a
-                //   result-QueryValue pattern and avoids the "Interned key not found"
-                //   failure that would occur if we de-interned new_bytes through
-                //   the base-only reverse snapshot (new_bytes may contain overlay-
-                //   minted key ids not yet in base).
-                let old_view = RecordView::new(old_bytes).map_err(|e| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "execute_update_tx: RecordView for validator old: {e}"
-                    ))
-                })?;
-                let old_qv = record_view_to_query_value(&old_view, interner)?;
-                let new_qv = {
-                    let mut m = match old_qv.clone() {
-                        Value::Map(m) => m,
-                        _ => shamir_types::types::common::new_map(),
-                    };
-                    if let Value::Map(overlay) = resolved_set.as_ref() {
-                        for (k, v) in overlay {
-                            m.insert(k.clone(), v.clone());
+                if has_update_validators {
+                    // S3: run validators before staging (tx overlay-aware).
+                    //
+                    // Build old/new QueryValues WITHOUT decoding an InnerValue tree:
+                    // - old_qv: de-intern the committed bytes via RecordView (base
+                    //   interner — all keys are committed).
+                    // - new_qv: overlay the string-keyed resolved_set on top of
+                    //   old_qv (no overlay-minted interned ids to resolve — the
+                    //   overlay keys are already strings in resolved_set). This
+                    //   matches the W3a result-QueryValue pattern and avoids the
+                    //   "Interned key not found" failure that would occur if we
+                    //   de-interned new_bytes through the base-only reverse
+                    //   snapshot (new_bytes may contain overlay-minted key ids
+                    //   not yet in base).
+                    let old_view = RecordView::new(old_bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "execute_update_tx: RecordView for validator old: {e}"
+                        ))
+                    })?;
+                    let old_qv = record_view_to_query_value(&old_view, interner)?;
+                    let new_qv = {
+                        let mut m = match old_qv.clone() {
+                            Value::Map(m) => m,
+                            _ => shamir_types::types::common::new_map(),
+                        };
+                        if let Value::Map(overlay) = resolved_set.as_ref() {
+                            for (k, v) in overlay {
+                                m.insert(k.clone(), v.clone());
+                            }
                         }
-                    }
-                    QueryValue::Map(m)
-                };
-                self.run_validators_qv(
-                    WriteOp::Update,
-                    Some(&new_qv),
-                    Some(&old_qv),
-                    &Actor::System,
-                    Some(tx),
-                    resolver,
-                )
-                .await
-                .map_err(validator_failure_to_db_error)?;
+                        QueryValue::Map(m)
+                    };
+                    self.run_validators_qv(
+                        WriteOp::Update,
+                        Some(&new_qv),
+                        Some(&old_qv),
+                        &Actor::System,
+                        Some(tx),
+                        resolver,
+                    )
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
+
+                    // Make the validator-built old_qv available for RETURNING
+                    // reuse (avoid re-de-interning the same bytes below).
+                    reuse_old_qv = Some(old_qv);
+                }
 
                 self.update_tx_bytes(*id, old_bytes, new_bytes.clone(), &mut *tx)
                     .await?;
@@ -577,12 +601,22 @@ impl TableManager {
                     // new_bytes via the base interner would fail when op.set
                     // introduces brand-new field names that were only interned
                     // into the tx overlay and are not yet in base.
-                    let old_view = RecordView::new(old_bytes).map_err(|e| {
-                        shamir_storage::error::DbError::Codec(format!(
-                            "execute_update_tx: RecordView for result: {e}"
-                        ))
-                    })?;
-                    let base_qv = record_view_to_query_value(&old_view, interner)?;
+                    //
+                    // REUSE the validator-built `old_qv` when validators ran
+                    // (avoid a second `RecordView::new` + de-intern of the SAME
+                    // `old_bytes`). Only de-intern here when the validator path
+                    // was skipped (no Update validators bound).
+                    let base_qv = match reuse_old_qv.take() {
+                        Some(qv) => qv,
+                        None => {
+                            let old_view = RecordView::new(old_bytes).map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "execute_update_tx: RecordView for result: {e}"
+                                ))
+                            })?;
+                            record_view_to_query_value(&old_view, interner)?
+                        }
+                    };
                     let mut m = match base_qv {
                         Value::Map(m) => m,
                         _ => shamir_types::types::common::new_map(),
@@ -899,6 +933,21 @@ impl TableManager {
             (key_fields, set_map, new_bytes_fresh)
         };
 
+        // Check whether any Upsert validators are registered BEFORE the
+        // merge/insert branch, mirroring `execute_update_tx`'s
+        // `has_update_validators`. Both the MERGE and INSERT branches call
+        // `run_validators_qv(WriteOp::Upsert, ...)` — gating on this avoids
+        // the per-call de-intern when no Upsert validator is bound (audit
+        // `2026-07-06-perf-hot-paths.md` §1.3).
+        //
+        // Note: this checks `WriteOp::Upsert` (NOT `WriteOp::Update`) because
+        // both branches below invoke `run_validators_qv` with `WriteOp::Upsert`;
+        // a `WriteOp::Update`-bound validator does NOT fire on the upsert path.
+        let has_upsert_validators = {
+            let bindings = self.validator_bindings();
+            bindings.iter().any(|b| b.ops.contains(&WriteOp::Upsert))
+        };
+
         let found = self
             .lookup_existing_for_set(&key_fields, batch_size)
             .await?;
@@ -930,43 +979,55 @@ impl TableManager {
             // equality is safe for this "patched from old" shape.
             let changed = new_bytes.as_ref() != old_bytes.as_ref();
 
+            // Track the validator-built `old_qv` so the result-record
+            // construction below can REUSE it instead of de-interning
+            // `old_bytes` a second time. Only populated when validators ran
+            // (which implies `has_upsert_validators && changed`).
+            let mut reuse_old_qv: Option<QueryValue> = None;
+
             if changed {
-                // S3: run validators before staging (the W3c keystone pattern).
-                //
-                // Build old/new QueryValues WITHOUT decoding an InnerValue tree:
-                // - old_qv: de-intern the committed bytes via RecordView (base
-                //   interner — all keys are committed).
-                // - new_qv: overlay the string-keyed resolved value on top of
-                //   old_qv (no overlay-minted interned ids to resolve — the
-                //   overlay keys are already strings in resolved_value).
-                let old_view = RecordView::new(&old_bytes).map_err(|e| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "execute_set_tx: RecordView for validator old: {e}"
-                    ))
-                })?;
-                let old_qv = record_view_to_query_value(&old_view, interner)?;
-                let new_qv = {
-                    let mut m = match old_qv.clone() {
-                        Value::Map(m) => m,
-                        _ => shamir_types::types::common::new_map(),
-                    };
-                    if let Value::Map(overlay) = resolved_value.as_ref() {
-                        for (k, v) in overlay {
-                            m.insert(k.clone(), v.clone());
+                if has_upsert_validators {
+                    // S3: run validators before staging (the W3c keystone pattern).
+                    //
+                    // Build old/new QueryValues WITHOUT decoding an InnerValue tree:
+                    // - old_qv: de-intern the committed bytes via RecordView (base
+                    //   interner — all keys are committed).
+                    // - new_qv: overlay the string-keyed resolved value on top of
+                    //   old_qv (no overlay-minted interned ids to resolve — the
+                    //   overlay keys are already strings in resolved_value).
+                    let old_view = RecordView::new(&old_bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "execute_set_tx: RecordView for validator old: {e}"
+                        ))
+                    })?;
+                    let old_qv = record_view_to_query_value(&old_view, interner)?;
+                    let new_qv = {
+                        let mut m = match old_qv.clone() {
+                            Value::Map(m) => m,
+                            _ => shamir_types::types::common::new_map(),
+                        };
+                        if let Value::Map(overlay) = resolved_value.as_ref() {
+                            for (k, v) in overlay {
+                                m.insert(k.clone(), v.clone());
+                            }
                         }
-                    }
-                    Value::Map(m)
-                };
-                self.run_validators_qv(
-                    WriteOp::Upsert,
-                    Some(&new_qv),
-                    Some(&old_qv),
-                    &Actor::System,
-                    Some(tx),
-                    resolver,
-                )
-                .await
-                .map_err(validator_failure_to_db_error)?;
+                        Value::Map(m)
+                    };
+                    self.run_validators_qv(
+                        WriteOp::Upsert,
+                        Some(&new_qv),
+                        Some(&old_qv),
+                        &Actor::System,
+                        Some(tx),
+                        resolver,
+                    )
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
+
+                    // Make the validator-built old_qv available for result
+                    // reuse (avoid re-de-interning the same bytes below).
+                    reuse_old_qv = Some(old_qv);
+                }
 
                 // Stage the merged bytes + index ops through the zero-copy
                 // lens path (no InnerValue tree decode, no value.to_bytes()).
@@ -978,12 +1039,22 @@ impl TableManager {
             // decode) overlaid with the string-keyed resolved SET fields.
             // Decoding new_bytes via the base interner would fail when op.value
             // introduces brand-new field names interned only into the tx overlay.
-            let old_view = RecordView::new(&old_bytes).map_err(|e| {
-                shamir_storage::error::DbError::Codec(format!(
-                    "execute_set_tx: RecordView for result: {e}"
-                ))
-            })?;
-            let base_qv = record_view_to_query_value(&old_view, interner)?;
+            //
+            // REUSE the validator-built `old_qv` when validators ran (avoid a
+            // second `RecordView::new` + de-intern of the SAME `old_bytes`).
+            // Only de-intern here when the validator path was skipped (no
+            // Upsert validators bound, or the row did not change).
+            let base_qv = match reuse_old_qv.take() {
+                Some(qv) => qv,
+                None => {
+                    let old_view = RecordView::new(&old_bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "execute_set_tx: RecordView for result: {e}"
+                        ))
+                    })?;
+                    record_view_to_query_value(&old_view, interner)?
+                }
+            };
             let mut m = match base_qv {
                 Value::Map(m) => m,
                 _ => shamir_types::types::common::new_map(),
