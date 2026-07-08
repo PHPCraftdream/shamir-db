@@ -384,6 +384,21 @@ impl RepoInstance {
             let _ = self
                 .token_names
                 .remove_if(&token, |existing| existing.as_str() == table_name);
+            // A13: evict the per_table_mvcc registration too. The token is
+            // a deterministic hash of the name, so a DROP followed by a
+            // CREATE of the SAME name reuses it — if this entry leaked,
+            // `create_table_context`'s `per_table_mvcc.insert(token, ..)`
+            // would silently no-op (scc::HashMap::insert returns Err when
+            // the key already exists) and the commit pipeline / SSI
+            // provider / drainer — which all resolve the MvccStore BY
+            // TOKEN through this map — would keep writing through the
+            // STALE old store while the new `TableManager` reads through
+            // its own freshly-held store: a split-brain where committed
+            // transactions silently vanish. `Arc::clone` reference
+            // counting means any in-flight handle that already captured
+            // the old store keeps working against it; this only stops
+            // NEW lookups from finding the stale entry.
+            let _ = self.per_table_mvcc.remove(&token);
         }
         removed
     }
@@ -438,8 +453,10 @@ impl RepoInstance {
             .await?;
 
         // 2. Drop the old live registration. `remove_table` also clears
-        //    the in-memory `OnceCell<TableManager>` and the old
-        //    `token_names` reverse-index entry.
+        //    the in-memory `OnceCell<TableManager>`, the old
+        //    `token_names` reverse-index entry, AND the old
+        //    `per_table_mvcc` registration (A13) so a future CREATE under
+        //    the `from` name re-registers cleanly.
         let _ = self.remove_table(from);
 
         // 3. Register the new table config (preserving `enable_indexes`)
