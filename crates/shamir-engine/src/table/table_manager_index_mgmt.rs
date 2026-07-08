@@ -264,13 +264,45 @@ impl TableManager {
 
     /// Create a unique index on specified paths.
     ///
+    /// # Concurrency (audit A9 — write-barrier for unique CREATE)
+    ///
+    /// Holds the table-wide `unique_write_lock` across the ENTIRE
+    /// snapshot→backfill→register sequence. This closes the
+    /// duplicate-slip-through window at its root: while the unique index
+    /// is between "not yet registered" and "registered", no writer can
+    /// insert ANY row (let alone a duplicate). Unique-index uniqueness
+    /// validation during backfill is NOT safely idempotent-double-writable
+    /// (a duplicate is a correctness violation, not a harmless double-write),
+    /// so the write-barrier (Option B) is used instead of the register-first
+    /// approach (Option A) applied to regular indexes.
+    ///
     /// # Errors
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        // Hold the unique_write_lock across snapshot + backfill + register.
+        // This is the same lock non-tx writers (`insert`) and the tx commit
+        // pipeline (Phase 2.5) acquire, so it unifies DDL against all writer
+        // classes. Tables without unique indexes acquire it harmlessly
+        // (no contention); this is a low-frequency DDL operation.
+        let _uwl_guard = self.unique_write_lock.lock().await;
+        self.create_unique_index_locked(name, paths).await
+    }
+
+    /// Inner unique-index create that ASSUMES the caller already holds the
+    /// `unique_write_lock`. Used by [`rename_index`](Self::rename_index) for
+    /// the unique case, which holds the lock across the entire
+    /// drop→backfill→register sequence (avoids re-entrant deadlock on
+    /// `tokio::sync::Mutex`, which is NOT reentrant).
+    pub(super) async fn create_unique_index_locked(
+        &self,
+        name: &str,
+        paths: &[&str],
+    ) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
         // Always use the seam: collect_all_current_records routes
         // attached→log / unattached→data_store, so it is correct for
-        // both cases.
+        // both cases. Collected UNDER the lock (held by caller) so no
+        // writer can interpose.
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_unique_index_from_records(index_def, records)
@@ -437,9 +469,19 @@ impl TableManager {
             )));
         }
 
-        // ── Regular (hash): drop + rebuild under new name ────────────────────
+        // ── Regular (hash): create-new-first, drop-old-second ───────────────
         // Hash-index keys embed name_interned into hash1/hash2; a raw key
         // rewrite breaks lookup. Rebuild from the live record stream instead.
+        //
+        // Order matters for concurrency (audit A9): `create_index` now
+        // registers the new definition FIRST (Option A), so the live
+        // write-hook immediately starts maintaining postings for the NEW
+        // index. By creating the new index BEFORE dropping the old one,
+        // there is NEVER a window where a concurrent write is invisible to
+        // BOTH the old and new indexes — during the brief overlap, a write
+        // goes to both (postings are idempotent: same (index_key, record_id)
+        // → same physical key, empty value). Dropping the old afterward
+        // only removes old-id-prefixed postings, leaving the new index intact.
         if is_regular {
             let old_def = self
                 .index_manager
@@ -453,11 +495,22 @@ impl TableManager {
             let paths = resolve_index_paths(interner, &old_def.paths);
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
-            self.index_manager.drop_index(old_id).await?;
+            // Create the new index FIRST (registers + backfills under new_id).
             self.create_index(new_name, &path_refs).await?;
+            // Then drop the old index (removes old-id postings only).
+            self.index_manager.drop_index(old_id).await?;
         }
 
-        // ── Unique (hash): drop + rebuild under new name ─────────────────────
+        // ── Unique (hash): write-barrier across drop→backfill→register ──────
+        // Unique-index uniqueness validation during backfill is NOT safely
+        // idempotent — a duplicate slipping through the gap is a correctness
+        // violation of the uniqueness guarantee, not a harmless double-write.
+        // So we hold the table-wide `unique_write_lock` across the ENTIRE
+        // drop→backfill→register sequence (Option B), preventing ANY writer
+        // (non-tx insert, tx commit Phase 2.5) from inserting a duplicate
+        // while the unique index is between its old and new registered states.
+        // No gap = no duplicates possible. Acceptable cost for a low-frequency
+        // DDL operation.
         if is_unique {
             let old_def = self
                 .index_manager
@@ -471,20 +524,33 @@ impl TableManager {
             let paths = resolve_index_paths(interner, &old_def.paths);
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
+            // Hold the unique_write_lock across drop + create. This is the
+            // SAME lock non-tx writers acquire (table_manager_crud.rs) and
+            // the tx commit pipeline acquires (Phase 2.5), so it blocks all
+            // writer classes for the rename's duration.
+            let _uwl_guard = self.unique_write_lock.lock().await;
+
             self.index_manager.drop_unique_index(old_id).await?;
-            self.create_unique_index(new_name, &path_refs).await?;
+            // Use the _locked variant: the lock is already held above, and
+            // `create_unique_index` would re-acquire it → deadlock
+            // (tokio::sync::Mutex is NOT reentrant).
+            self.create_unique_index_locked(new_name, &path_refs)
+                .await?;
         }
 
         // ── Rekey sorted index posting entries ────────────────────────────────
+        // Concurrency (audit A9): rename the definition FIRST (atomic RCU
+        // swap), so the live write-hook starts writing under new_id
+        // immediately. THEN rekey old-id postings to new_id. A concurrent
+        // write that lands under old_id during the brief rename→rekey
+        // window is caught by `rekey_sorted_prefix`'s settle re-scan loop.
         if is_sorted {
-            rekey_sorted_prefix(&*self.info_store, old_id, new_id).await?;
-
-            // Drop old sorted-index definition and register new one.
-            // `drop_index` would delete the physical entries we just moved, so
-            // we use `rename_definition` which only swaps the in-memory entry.
+            // Swap the in-memory definition old_id → new_id FIRST.
             self.sorted_indexes
                 .rename_definition(old_id, new_id)
                 .await?;
+            // Then sweep remaining old-id postings to new_id (with settle).
+            rekey_sorted_prefix(&*self.info_store, old_id, new_id).await?;
         }
 
         // ── Rekey index2 (FTS / functional / vector) ──────────────────────────
@@ -521,6 +587,20 @@ impl TableManager {
 ///
 /// For each key found under the old prefix, bytes [1..9] are replaced
 /// with `new_id.to_be_bytes()` (note: **big-endian**, unlike hash indexes).
+///
+/// # Concurrency (audit A9)
+///
+/// `rename_index` calls [`SortedIndexManager::rename_definition`] BEFORE
+/// this function, so the live write-hook starts writing under `new_id`
+/// immediately. This function then sweeps the remaining `old_id`-prefixed
+/// postings to `new_id`. A concurrent write that landed under `old_id`
+/// during the brief rename-definition→rekey window is caught by the
+/// **settle re-scan**: after the initial pass completes, we re-scan the
+/// old-id prefix once more to copy any entries that arrived mid-sweep.
+/// The settle loop is bounded — it terminates as soon as a re-scan finds
+/// no new old-id entries (typically the first re-scan, since the
+/// rename-definition RCU swap is atomic and writers switch to new_id
+/// immediately after).
 async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -> DbResult<()> {
     // SORTED_TAG = 0x80 — the tag byte that distinguishes sorted-index physical
     // keys from hash-index keys and system RecordId keys in the same info_store.
@@ -535,29 +615,41 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
 
     let new_id_bytes = new_id.to_be_bytes();
 
-    let stream = info_store.scan_prefix_stream(old_prefix, FULL_SCAN_BATCH);
-    futures::pin_mut!(stream);
+    // Loop until a full scan of the old-id prefix finds no entries to move.
+    // The first pass moves the bulk; subsequent "settle" passes catch any
+    // entries a concurrent writer inserted under old_id mid-sweep (writers
+    // switch to new_id after the rename-definition RCU swap, so at most a
+    // tiny number of in-flight writers can still be writing old_id — bounded).
+    loop {
+        let stream = info_store.scan_prefix_stream(old_prefix.clone(), FULL_SCAN_BATCH);
+        futures::pin_mut!(stream);
 
-    let mut to_write: Vec<(Bytes, Bytes)> = Vec::new();
-    let mut to_remove: Vec<Bytes> = Vec::new();
+        let mut to_write: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut to_remove: Vec<Bytes> = Vec::new();
 
-    while let Some(batch) = stream.next().await {
-        for (key, value) in batch? {
-            if key.len() < 9 {
-                continue; // malformed; skip
+        while let Some(batch) = stream.next().await {
+            for (key, value) in batch? {
+                if key.len() < 9 {
+                    continue; // malformed; skip
+                }
+                let mut new_key = key.to_vec();
+                new_key[1..9].copy_from_slice(&new_id_bytes);
+                to_write.push((Bytes::from(new_key), value));
+                to_remove.push(key);
             }
-            let mut new_key = key.to_vec();
-            new_key[1..9].copy_from_slice(&new_id_bytes);
-            to_write.push((Bytes::from(new_key), value));
-            to_remove.push(key);
         }
-    }
 
-    if !to_write.is_empty() {
-        let _ = info_store.set_many(to_write).await?;
-    }
-    if !to_remove.is_empty() {
-        let _ = info_store.remove_many(to_remove).await?;
+        if to_write.is_empty() {
+            // No old-id entries found this pass — settle complete.
+            break;
+        }
+
+        if !to_write.is_empty() {
+            let _ = info_store.set_many(to_write).await?;
+        }
+        if !to_remove.is_empty() {
+            let _ = info_store.remove_many(to_remove).await?;
+        }
     }
 
     Ok(())

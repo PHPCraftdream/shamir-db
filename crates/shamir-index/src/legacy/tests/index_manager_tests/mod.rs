@@ -1,3 +1,4 @@
+pub mod audit_a9_concurrency_tests;
 pub mod basic_tests;
 pub mod btree_tests;
 pub mod byte_identity_tests;
