@@ -262,7 +262,23 @@ impl TableManager {
                 if let (Ok(batch), Some(tx)) = (&batch_result, recording_tx) {
                     for (rid, _) in batch {
                         let key = rid.to_bytes();
-                        let version = mvcc.as_ref().map_or(0, |m| m.version_of(key.as_ref()));
+                        // A3: record the version of the value ACTUALLY READ,
+                        // not the cell's current version. The scan reads via
+                        // `get_at(key, snapshot)` (snapshot-gated), so the
+                        // returned bytes never correspond to a version newer
+                        // than the tx's snapshot. Clamping the recorded
+                        // version to `min(version_of(key), snapshot)` ensures
+                        // a concurrent committer that pushed the cell past
+                        // the snapshot is detected at `validate_read_set`
+                        // (`current > version_seen`), instead of masked
+                        // (`current == version_seen` when the raw cell version
+                        // was recorded). `snapshot_version` is constant for
+                        // the tx, so `min` is computed per-record with no
+                        // extra lookup.
+                        let snapshot_v = tx.snapshot_version;
+                        let version = mvcc
+                            .as_ref()
+                            .map_or(0, |m| m.version_of(key.as_ref()).min(snapshot_v));
                         tx.record_read_shared(token, key, version);
                     }
                 }
@@ -340,12 +356,23 @@ impl TableManager {
             // A wound-wait abort surfaces as DbError::Conflict and the tx
             // must abort (the executor / commit path handles it).
             self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
-            // Capture the version at read time, then record the SSI read
-            // dependency. No-op for Snapshot isolation.
-            let version = self
-                .mvcc_store
-                .as_ref()
-                .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
+            // A3: record the version of the value ACTUALLY READ, not the
+            // cell's current version. `read_one_tx` reads via
+            // `get_at(key, tx.snapshot_version)` (snapshot-gated), so the
+            // returned bytes never correspond to a version newer than the
+            // tx's snapshot. A concurrent committer can push the cell's
+            // current version past the snapshot BETWEEN this `version_of`
+            // call and the `get_at` call (or the cell may already be ahead
+            // before the read starts); recording that newer version would
+            // mask the conflict at `validate_read_set` (which checks
+            // `current > version_seen`). Clamping to
+            // `min(version_of(key), snapshot_version)` guarantees the
+            // recorded version never exceeds what could possibly have been
+            // read, so any post-snapshot commit is correctly detected.
+            // No-op for Snapshot isolation.
+            let version = self.mvcc_store.as_ref().map_or(0, |mvcc| {
+                mvcc.version_of(key.as_ref()).min(tx.snapshot_version)
+            });
             tx.record_read_shared(self.table_token(), key.clone(), version);
 
             // I.4 read-your-own-writes: the tx's own staging overlay wins
@@ -417,11 +444,13 @@ impl TableManager {
             // Level-3: acquire a Shared lock on the key before reading.
             // No-op for Snapshot / Serializable (the helper self-gates).
             self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
-            // SSI read-set recording (no-op for Snapshot isolation).
-            let version = self
-                .mvcc_store
-                .as_ref()
-                .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
+            // A3: record the version of the value ACTUALLY READ, not the
+            // cell's current version. See `read_one_tx` for the full
+            // rationale on the `.min(snapshot_version)` clamp. No-op for
+            // Snapshot isolation.
+            let version = self.mvcc_store.as_ref().map_or(0, |mvcc| {
+                mvcc.version_of(key.as_ref()).min(tx.snapshot_version)
+            });
             tx.record_read_shared(self.table_token(), key.clone(), version);
 
             // I.4 read-your-own-writes: check the tx staging overlay first.

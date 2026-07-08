@@ -112,3 +112,96 @@ async fn list_stream_tx_does_not_see_staged_insert() {
         "read_one_tx must see the tx's own staged insert (point-read RYOW holds)"
     );
 }
+
+// ===========================================================================
+// A3 (audit 2026-07-06-concurrency-engine.md) — scan path.
+//
+// `record_scan_reads` wraps every Serializable-scan batch and records each
+// yielded key's version into the tx read-set. Before the fix it recorded
+// `version_of(key)` (the cell's CURRENT version), which — just like the
+// point-read path (`read_one_tx`) — can be strictly newer than
+// `tx.snapshot_version` when a concurrent committer has published a newer
+// version. That mismatch let a Serializable scan-based tx commit on stale
+// data with no detected conflict. The fix clamps the recorded version to
+// `min(version_of(key), tx.snapshot_version)`.
+//
+// This test exercises the REAL scan path (`list_stream_tx` →
+// `record_scan_reads` → `validate_read_set` at commit); it does NOT
+// manually call `record_read`.
+// ===========================================================================
+
+#[tokio::test]
+async fn a3_record_scan_reads_records_snapshot_version_not_current_after_concurrent_commit() {
+    use shamir_storage::storage_in_memory::InMemoryRepo;
+
+    use crate::repo::repo_instance::RepoInstance;
+    use crate::repo::repo_types::BoxRepo;
+    use crate::table::TableConfig;
+    use crate::tx::CommitError;
+
+    let repo = Arc::new(InMemoryRepo::new());
+    let repo = RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new());
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    // Pre-populate a record outside any tx — seeds the MVCC cell at V0.
+    let rid = tbl.insert(&InnerValue::Str("v0".into())).await.unwrap();
+
+    // B begins a Serializable tx → snapshot = V0.
+    let (mut tx_b, _gb) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+        .await
+        .unwrap();
+    let snap_b = tx_b.snapshot_version;
+
+    // A (Serializable) writes the SAME key and commits → publishes V1 > V0.
+    let (mut tx_a, _ga) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+        .await
+        .unwrap();
+    tbl.update_tx(rid, &InnerValue::Str("v1".into()), Some(&mut tx_a))
+        .await
+        .unwrap();
+    let out_a = repo.commit_tx(tx_a).await.unwrap();
+    assert!(
+        out_a.commit_version > snap_b,
+        "A's commit must advance the key past B's snapshot"
+    );
+
+    // B scans the table via the production Serializable-scan path. Each
+    // yielded record is recorded into B's read-set by `record_scan_reads`.
+    // The streaming scan reads the committed/current store (NOT snapshot-
+    // gated like `read_one_tx`), so B observes A's v1 — but B's tx
+    // snapshot is still V0. Before the fix, `record_scan_reads` recorded
+    // the cell's current version (V1); at commit `validate_read_set` saw
+    // `current == version_seen` → no conflict → B committed having
+    // observed data past its own snapshot. After the fix, the recorded
+    // version is clamped to `min(V1, snap_b) = snap_b`, so
+    // `validate_read_set` sees `current(V1) > snap_b` → SsiConflict.
+    let streamed = collect_stream(tbl.list_stream_tx(Some(&tx_b), 10)).await;
+    assert!(
+        streamed
+            .iter()
+            .any(|(r, v)| { *r == rid && matches!(v, InnerValue::Str(ref s) if s == "v1") }),
+        "B's scan yields the current committed value v1 for rid {:?}, got {:?}",
+        rid,
+        streamed
+    );
+
+    // B stages a write (not a read-only fast-path) and commits.
+    tbl.update_tx(rid, &InnerValue::Str("v_b".into()), Some(&mut tx_b))
+        .await
+        .unwrap();
+    let result = repo.commit_tx(tx_b).await;
+
+    // After the fix: the scan read stale data after A published V1, so B
+    // must abort with SsiConflict. Before the fix: B committed (the bug).
+    match result {
+        Err(CommitError::SsiConflict { .. }) => {}
+        other => panic!(
+            "B must abort with SsiConflict (A committed a newer version of \
+             a key B scanned staledly); got {:?}",
+            other.map(|o| o.commit_version).map_err(|_| "Err(other)")
+        ),
+    }
+}
