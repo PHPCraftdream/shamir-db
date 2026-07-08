@@ -150,16 +150,25 @@ pub struct MvccStore {
     /// probe returns `None` → behaviour is byte-identical to history-only.
     overlay: VersionedOverlay,
     /// D2 P1d-2b: per-version COMMIT-TIME timestamp, stamped on the ack-path
-    /// (`apply_committed_visible`) and consumed by the drainer
-    /// (`write_committed_to_history`). The cutover moved the durable `record_ts`
-    /// write OFF the ack-path into the drainer, but the ts VALUE must reflect
-    /// COMMIT time, not drain time (the drainer runs arbitrarily later, and a
-    /// frozen test clock or a real clock that advanced would mis-stamp the
-    /// version — breaking age-retention / as-of-by-ts). So we capture the
-    /// commit-time millis here at ack and the drainer writes THAT into history.
-    /// Entry removed once durably written. Cold recovery (overlay empty) finds
-    /// no entry and falls back to `now_millis()` — its conservative pre-cutover
-    /// behaviour (recovery already could not reconstruct the original ts).
+    /// (`apply_committed_visible`) and READ (non-destructively) by the drainer
+    /// (`write_committed_to_history` / `write_committed_batch_to_history`).
+    /// The cutover moved the durable `record_ts` write OFF the ack-path into
+    /// the drainer, but the ts VALUE must reflect COMMIT time, not drain time
+    /// (the drainer runs arbitrarily later, and a frozen test clock or a real
+    /// clock that advanced would mis-stamp the version — breaking
+    /// age-retention / as-of-by-ts). So we capture the commit-time millis
+    /// here at ack and the drainer writes THAT into history.
+    ///
+    /// A14: entries are read NON-DESTRUCTIVELY (a plain `get`, not `remove`)
+    /// so that two independent drain paths racing for the SAME version (the
+    /// background drainer vs. a forced `flush_buffers`/`drain_to_history`)
+    /// both observe the correct commit-time ts — a destructive `remove` made
+    /// the second caller fall back to `now_millis()` and overwrite the
+    /// correct ts. Reclamation is decoupled: [`Self::gc_overlay_to`] sweeps
+    /// the stamp once the version is durable. Cold recovery (overlay empty)
+    /// finds no entry and falls back to `now_millis()` — its conservative
+    /// pre-cutover behaviour (recovery already could not reconstruct the
+    /// original ts).
     pending_ts: SccHashMap<u64, u64, THasher>,
     /// L6: set `true` when a snapshot is (or was recently) active during a
     /// vacuum_key call. The targeted-remove fast path fires only when this is
@@ -230,12 +239,14 @@ impl MvccStore {
     /// is redundant for overlay GC — see [`VersionedOverlay::gc_upto`]).
     ///
     /// Also evicts any `pending_ts` commit-time stamp for `version <=
-    /// durable_watermark`. On the warm drain path the stamp is already
-    /// consumed (removed) by [`write_committed_to_history`](Self::write_committed_to_history);
-    /// this is a defensive sweep so a stamp that was inserted on the ack-path
-    /// but — for any reason — never consumed by the drain half (e.g. a
-    /// non-drained direct write, or a future code path) cannot accumulate
-    /// unboundedly. Lock-free.
+    /// durable_watermark`. A14: the drain paths read the stamp
+    /// NON-DESTRUCTIVELY (so multiple racers observe the same commit-time
+    /// ts), so this sweep is the SOLE reclamation site — it is NOT
+    /// defensive-only. On the warm drain path the stamp was inserted on the
+    /// ack-path and read by the drainer; this `retain` removes it once the
+    /// version is durable, preventing an unbounded leak (a stamp that was
+    /// inserted but — for any reason — never read, e.g. a non-drained direct
+    /// write or a future code path, is also swept here). Lock-free.
     pub fn gc_overlay_to(&self, durable_watermark: u64) {
         if durable_watermark == 0 {
             return;

@@ -298,13 +298,29 @@ impl MvccStore {
         for (commit_version, ops) in pass {
             let v = *commit_version;
 
-            // T1c: resolve the commit timestamp. Prefer the COMMIT-TIME millis
-            // stamped on the ack-path (`apply_committed_visible`); cold recovery
-            // falls back to `now_millis()`. Remove the stamp once consumed.
+            // T1c/A14: resolve the commit timestamp. Prefer the COMMIT-TIME
+            // millis stamped on the ack-path (`apply_committed_visible`);
+            // cold recovery falls back to `now_millis()`.
+            //
+            // A14: read NON-DESTRUCTIVELY (`get`, not `remove`). Two
+            // independent drain paths (the background drainer's batched path
+            // here, and a forced `flush_buffers`/`drain_to_history` single-
+            // entry drain via `write_committed_to_history`) can BOTH reach
+            // the same `commit_version`. A destructive `remove` made them
+            // race: the first caller won the stamp and the second found
+            // `None` and fell back to `now_millis()`, overwriting the correct
+            // commit-time ts with a drain-time ts in durable history. The
+            // non-destructive `get` lets every racing caller observe the SAME
+            // correct `T0`. Reclamation is decoupled: `gc_overlay_to`
+            // (invoked by the drainer once the version is durable) `retain`-
+            // sweeps the stamp, so the entry does not leak. `None` here now
+            // genuinely means "never stamped" (cold recovery), not "already
+            // consumed by a racing caller" — preserving the fallback
+            // distinction exactly.
             let ts_ms = self
                 .pending_ts
-                .remove(&v)
-                .map(|(_, ms)| ms)
+                .get(&v)
+                .map(|e| *e.get())
                 .unwrap_or_else(|| self.now_millis());
             let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
             ts_entries.push((v, ts_ms));
@@ -408,7 +424,9 @@ impl MvccStore {
         // so the drainer (which writes the durable ts arbitrarily later) stamps
         // history with commit time, NOT drain time. `now_millis()` honours the
         // test clock (`set_test_now`) and the real `SystemTime` alike. Stored
-        // once per commit_version (all ops share it); removed by the drainer.
+        // once per commit_version (all ops share it); reclaimed by
+        // `gc_overlay_to` once the version is durable (A14: the drain paths
+        // READ this non-destructively, so they no longer remove it here).
         let _ = self.pending_ts.insert(commit_version, self.now_millis());
 
         // P1c: populate the overlay with the SAME (key, version) → value pair
@@ -477,13 +495,23 @@ impl MvccStore {
         // (`apply_committed_visible`) so the durable ts reflects commit time,
         // not this (later) drain time. Cold recovery (overlay empty → no stamp)
         // falls back to `now_millis()` — the pre-cutover behaviour (recovery
-        // never had the original ts). Remove the stamp once consumed
-        // (idempotent: a re-drain finds none and uses the fallback, but by then
-        // history already holds the correct ts).
+        // never had the original ts).
+        //
+        // A14: read NON-DESTRUCTIVELY (`get`, not `remove`). See the note on
+        // the batched path (`write_committed_batch_to_history`): two
+        // independent drain paths (this single-entry path is reached by both
+        // `drain_to_history` — used by table rename — AND any forced flush)
+        // can race the background drainer for the SAME `commit_version`. A
+        // destructive `remove` lost the stamp for the second caller, who then
+        // fell back to `now_millis()` and overwrote the correct commit-time
+        // ts. The non-destructive `get` lets every racer observe the SAME
+        // `T0`; `gc_overlay_to` reclaims the stamp once the version is
+        // durable (no leak). `None` now means "never stamped" (cold
+        // recovery), NOT "already consumed by a racer".
         let ts_ms = self
             .pending_ts
-            .remove(&commit_version)
-            .map(|(_, ms)| ms)
+            .get(&commit_version)
+            .map(|e| *e.get())
             .unwrap_or_else(|| self.now_millis());
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
 
