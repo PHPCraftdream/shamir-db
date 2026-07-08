@@ -205,6 +205,19 @@ impl StagingStore {
         self.writes.is_empty()
     }
 
+    /// Iterate the bytes of every staged `Set` op (borrowed, no clone).
+    ///
+    /// A8 fix: `pre_commit_prelock` uses this after the overlay→base remap
+    /// pass to scan every staged value for `InternerKey` ids referenced
+    /// above `persisted_high_water()`, so it can record `(name, id)` pairs
+    /// this tx did NOT create but whose records reference.
+    pub fn iter_set_bytes(&self) -> impl Iterator<Item = &Bytes> {
+        self.writes.values().filter_map(|op| match op {
+            StagedOp::Set(row) => Some(&row.0),
+            StagedOp::Remove => None,
+        })
+    }
+
     /// Iterate keys staged in this store (without cloning the values).
     pub fn keys(&self) -> impl Iterator<Item = &RecordKey> {
         self.writes.keys()

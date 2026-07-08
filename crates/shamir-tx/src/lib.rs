@@ -59,7 +59,7 @@ pub use changefeed::{
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 pub use completion_tracker::{CompletionTracker, State as CompletionState};
-pub use id_remap::{remap_inner_value_bytes, remap_value};
+pub use id_remap::{collect_referenced_ids, remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{
     commit_interner_overlay, LayeredInterner, OverlayCommitResult, OVERLAY_ID_BASE,
