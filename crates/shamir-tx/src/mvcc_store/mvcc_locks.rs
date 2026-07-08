@@ -21,8 +21,11 @@ impl MvccStore {
     /// 1. Lock `state`.
     /// 2. If the requested `mode` is compatible with the current holders
     ///    (Shared+Shared compatible; anything with Exclusive incompatible;
-    ///    a holder with the SAME `tx_version` is always compatible —
-    ///    re-entrant), add the holder, set `mode`, return `Ok(())`.
+    ///    a holder with the SAME `tx_version` is compatible — re-entrant —
+    ///    EXCEPT a Shared→Exclusive UPGRADE when OTHER txs also hold the
+    ///    key, which is treated as incompatible and falls through to step 3
+    ///    so the conflicting other holders are resolved via wound-wait;
+    ///    audit A6), add the holder, set `mode`, return `Ok(())`.
     /// 3. Otherwise, for every CONFLICTING holder `H`:
     ///    - `tx_version < H.tx_version` (requester OLDER / higher priority):
     ///      WOUND `H` — set `H.wounded`, remove `H` from holders. After
@@ -70,12 +73,25 @@ impl MvccStore {
 
             // (2) Compatibility check.
             //
-            // - Re-entrant (this tx already holds the key): always compatible.
+            // - Re-entrant (this tx already holds the key): compatible
+            //   EXCEPT for a Shared→Exclusive UPGRADE when OTHER txs also
+            //   hold the key (audit A6). A re-entrant Exclusive upgrade
+            //   with other Shared holders present would violate the
+            //   "Exclusive ⇒ exactly one holder" invariant, so it must
+            //   fall through to the wound-wait partition logic below
+            //   (wound younger others / wait for older others) instead of
+            //   being blindly granted. A re-entrant Shared re-acquire, a
+            //   re-entrant same-mode re-acquire, or a re-entrant Exclusive
+            //   upgrade with NO other holders (solo upgrade) is always
+            //   safe and stays on the instant-grant fast path.
             // - Shared request vs Shared holders: compatible (multiple readers).
             // - Anything else (Exclusive involved, or Shared vs Exclusive):
             //   incompatible.
             let re_entrant = state.held_by(tx_version);
-            let compatible = re_entrant
+            let has_other_holders = state.holders.iter().any(|h| h.tx_version != tx_version);
+            let re_entrant_compatible =
+                re_entrant && (mode != LockMode::Exclusive || !has_other_holders);
+            let compatible = re_entrant_compatible
                 || state.mode.is_none()
                 || (mode == LockMode::Shared && state.mode == Some(LockMode::Shared));
 
