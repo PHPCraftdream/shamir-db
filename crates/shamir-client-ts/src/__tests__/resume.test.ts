@@ -99,9 +99,57 @@ function makeResumeOpts(
   };
 }
 
-/** Build a length-prefixed server response frame (what AutoReplySocket stores). */
-function serverResponseFrame(fields: Record<string, unknown>): Uint8Array {
-  return encode(fields);
+/**
+ * Build a resume_ok response frame body matching the REAL server wire shape.
+ *
+ * `resume_ok` is emitted via `rmp_serde::to_vec(&ResumeOkWire)`
+ * (crates/shamir-server/src/connection/wire.rs:80-92) — a plain struct with
+ * NO `#[serde(rename_all)]`, so `to_vec` (not `to_vec_named`) serialises it
+ * as a POSITIONAL msgpack ARRAY in declaration order:
+ *
+ *   [0]: session_id (bytes, 32)
+ *   [1]: expires_at_ns (u64)
+ *   [2]: resumption_ticket (bytes; empty when absent)
+ *   [3]: resumption_expires_at_ns (u64; 0 when absent)
+ *   [4]: server_query_version (u8; 0 when absent)
+ *
+ * Mirrors how protocol.test.ts mocks `auth_ok` as a positional array.
+ * Encoding the mock as an array (not a named map) is what makes this test
+ * exercise the real wire shape and catch decode regressions.
+ *
+ * Trailing optional fields default to the server's wire defaults (empty / 0),
+ * matching `WireResumeOk`'s `#[serde(default)]` semantics, so an array with
+ * fewer than 5 elements is also valid on the wire (the client treats absent
+ * trailing elements the same as the default).
+ */
+function resumeOkFrame(opts: {
+  sessionId: Uint8Array;
+  expiresAtNs: number;
+  resumptionTicket?: Uint8Array;
+  resumptionExpiresAtNs?: number;
+  serverQueryVersion?: number;
+}): Uint8Array {
+  return encode([
+    opts.sessionId,
+    opts.expiresAtNs,
+    opts.resumptionTicket ?? new Uint8Array(0),
+    opts.resumptionExpiresAtNs ?? 0,
+    opts.serverQueryVersion ?? 0,
+  ]);
+}
+
+/** Error-response frame: on resume rejection the server actually shuts the
+ *  connection down (handshake.rs:602-606), but `resume()` defensively guards
+ *  an `{error}` map too (mirroring runHandshake's auth_ok error-map check).
+ *  This helper covers that defensive error-map path. */
+function errorFrame(error: string): Uint8Array {
+  return encode({ error });
+}
+
+/** Convenience: pass a frame body through unchanged (AutoReplySocket stores
+ *  raw msgpack bytes; pushFrame adds the length prefix). */
+function serverResponseFrame(body: Uint8Array): Uint8Array {
+  return body;
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
@@ -111,10 +159,12 @@ describe('ShamirClient.resume()', () => {
     const sessionId = new Uint8Array(32).fill(0x01);
     const ticket = new Uint8Array(64).fill(0xcc);
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: sessionId,
-        expires_at_ns: 9_999_999_999,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId,
+          expiresAtNs: 9_999_999_999,
+        }),
+      ),
     );
     const platform = fakePlatform(() => socket);
 
@@ -139,10 +189,12 @@ describe('ShamirClient.resume()', () => {
     const sessionId = new Uint8Array(32).fill(0x42);
     const ticket = new Uint8Array(32).fill(0xdd);
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: sessionId,
-        expires_at_ns: 1_000_000_000,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId,
+          expiresAtNs: 1_000_000_000,
+        }),
+      ),
     );
     const client = await ShamirClient.resume(
       fakePlatform(() => socket),
@@ -159,12 +211,14 @@ describe('ShamirClient.resume()', () => {
     const newExpiryNum = 5_000_000_000;
     const ticket = new Uint8Array(32).fill(0x11);
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: sessionId,
-        expires_at_ns: 1_000_000_000,
-        resumption_ticket: newTicket,
-        resumption_expires_at_ns: newExpiryNum,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId,
+          expiresAtNs: 1_000_000_000,
+          resumptionTicket: newTicket,
+          resumptionExpiresAtNs: newExpiryNum,
+        }),
+      ),
     );
     const client = await ShamirClient.resume(
       fakePlatform(() => socket),
@@ -178,11 +232,17 @@ describe('ShamirClient.resume()', () => {
   it('returns undefined for resumption getters when server omits ticket', async () => {
     const sessionId = new Uint8Array(32).fill(0x01);
     const ticket = new Uint8Array(32).fill(0x22);
+    // Omit resumption_ticket/expires entirely (server sends empty bytes and
+    // 0 for the two resumption fields). The client must treat an empty
+    // resumption_ticket as "no ticket" and undefined-out the expiry.
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: sessionId,
-        expires_at_ns: 1_000_000_000,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId,
+          expiresAtNs: 1_000_000_000,
+          // resumptionTicket defaults to empty Uint8Array(0) inside the helper.
+        }),
+      ),
     );
     const client = await ShamirClient.resume(
       fakePlatform(() => socket),
@@ -195,9 +255,7 @@ describe('ShamirClient.resume()', () => {
 
   it('throws and closes socket when server sends an error', async () => {
     const ticket = new Uint8Array(32).fill(0x33);
-    const socket = new AutoReplySocket(
-      serverResponseFrame({ error: 'ticket_expired' }),
-    );
+    const socket = new AutoReplySocket(errorFrame('ticket_expired'));
     await expect(
       ShamirClient.resume(fakePlatform(() => socket), makeResumeOpts(ticket)),
     ).rejects.toThrow('ticket_expired');
@@ -206,10 +264,12 @@ describe('ShamirClient.resume()', () => {
   it('throws when session_id is not 32 bytes', async () => {
     const ticket = new Uint8Array(32).fill(0x44);
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: new Uint8Array(16),
-        expires_at_ns: 1_000_000_000,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId: new Uint8Array(16),
+          expiresAtNs: 1_000_000_000,
+        }),
+      ),
     );
     await expect(
       ShamirClient.resume(fakePlatform(() => socket), makeResumeOpts(ticket)),
@@ -221,10 +281,12 @@ describe('ShamirClient.resume()', () => {
     const serverPubKey = new Uint8Array(32).fill(0xfe);
     const ticket = new Uint8Array(32).fill(0x55);
     const socket = new AutoReplySocket(
-      serverResponseFrame({
-        session_id: sessionId,
-        expires_at_ns: 1_000_000_000,
-      }),
+      serverResponseFrame(
+        resumeOkFrame({
+          sessionId,
+          expiresAtNs: 1_000_000_000,
+        }),
+      ),
     );
     const client = await ShamirClient.resume(
       fakePlatform(() => socket),

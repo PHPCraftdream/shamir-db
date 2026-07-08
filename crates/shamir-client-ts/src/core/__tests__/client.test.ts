@@ -14,9 +14,14 @@
  * then captures the bytes the client sends for `execute`/`txBegin`/
  * `txExecute` and decodes the inner DbRequest to assert on `query_version`.
  *
- * resume_ok wire shape (as decoded by client.ts): a plain msgpack MAP with
- * keys `session_id`, `expires_at_ns`, `resumption_ticket?`,
- * `resumption_expires_at_ns?`, `server_query_version?`.
+ * resume_ok wire shape (positional msgpack ARRAY — mirrors
+ * `crates/shamir-server/src/connection/wire.rs:ResumeOkWire`, emitted via
+ * `rmp_serde::to_vec`):
+ *   [0]: session_id (bytes, 32)
+ *   [1]: expires_at_ns (u64)
+ *   [2]: resumption_ticket (bytes; empty when none)
+ *   [3]: resumption_expires_at_ns (u64; 0 when none)
+ *   [4]: server_query_version (u8; 0 when none)
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -129,17 +134,20 @@ function makeResumeOpts(): ResumeOptions {
 }
 
 /**
- * Build a resume_ok frame body as the named-key MAP client.ts decodes.
+ * Build a resume_ok frame body as the positional msgpack ARRAY the server
+ * actually sends (`rmp_serde::to_vec(&ResumeOkWire)` — a plain struct with no
+ * `#[serde(rename_all)]` serialises as a positional array in declaration
+ * order, NOT a named map). Mirrors how protocol.test.ts mocks `auth_ok`.
  * `serverQueryVersion` controls the advertised version (defaults to 2).
  */
 function resumeOkFrame(opts?: { serverQueryVersion?: number }): Uint8Array {
-  return encode({
-    session_id: new Uint8Array(32).fill(0x01),
-    expires_at_ns: BigInt('1830000000000000000'),
-    resumption_ticket: new Uint8Array([10, 20, 30, 40]),
-    resumption_expires_at_ns: BigInt('9999999999999999999'),
-    server_query_version: opts?.serverQueryVersion ?? 2,
-  });
+  return encode([
+    new Uint8Array(32).fill(0x01),
+    BigInt('1830000000000000000'),
+    new Uint8Array([10, 20, 30, 40]),
+    BigInt('9999999999999999999'),
+    opts?.serverQueryVersion ?? 2,
+  ]);
 }
 
 /**
@@ -189,11 +197,13 @@ describe('ShamirClient.resume (unit, fake WS socket)', () => {
 
   it('defaults server_query_version to 0 when the field is absent (legacy server)', async () => {
     const { platform, socket } = platformWithSocket();
+    // Pre-v2 server omits server_query_version: a 4-element array (no index 4).
+    // The client must default index 4 to 0.
     socket.pushFrame(
-      encode({
-        session_id: new Uint8Array(32).fill(0x07),
-        expires_at_ns: BigInt('1830000000000000000'),
-      }),
+      encode([
+        new Uint8Array(32).fill(0x07),
+        BigInt('1830000000000000000'),
+      ]),
     );
 
     const client = await ShamirClient.resume(platform, makeResumeOpts());

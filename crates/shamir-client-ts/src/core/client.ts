@@ -12,7 +12,15 @@ import type { ConnectOptions, ResumeOptions } from './types/index.js';
 import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import type { WireValue } from './types/write.js';
 import { WsFramer, encode, decode } from './framing.js';
-import { runHandshake } from './protocol.js';
+import {
+  runHandshake,
+  asBytes,
+  RESUME_OK_SESSION_ID,
+  RESUME_OK_EXPIRES_AT_NS,
+  RESUME_OK_RESUMPTION_TICKET,
+  RESUME_OK_RESUMPTION_EXPIRES_AT_NS,
+  RESUME_OK_SERVER_QUERY_VERSION,
+} from './protocol.js';
 import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
 import { signCanonical } from './hmac.js';
 import { Db } from './db.js';
@@ -189,41 +197,71 @@ export class ShamirClient {
         }),
       );
 
-      // Server responds: { session_id, expires_at_ns, resumption_ticket?,
-      //                    resumption_expires_at_ns?, server_query_version? }
+      // Server responds with `ResumeOkWire` (crates/shamir-server/src/
+      // connection/wire.rs:80-92): a plain struct with NO `#[serde(rename_all)]`,
+      // emitted via `rmp_serde::to_vec` (not `to_vec_named`) → a POSITIONAL
+      // msgpack ARRAY in declaration order:
+      //   [0] session_id (bytes, 32)
+      //   [1] expires_at_ns (u64)
+      //   [2] resumption_ticket (bytes; empty Vec when no ticket)
+      //   [3] resumption_expires_at_ns (u64; 0 when no ticket)
+      //   [4] server_query_version (u8; 0 when absent)
+      // This mirrors how `runHandshake` decodes `auth_ok` positionally.
+      //
+      // On resume REJECTION the server actually shuts the connection down
+      // (handshake.rs:602-606), so the client observes a socket close rather
+      // than an error frame. The array-vs-error-map guard below is kept
+      // defensive (and mirrors runHandshake's auth_ok error-map check): a
+      // map with an `error` string is still surfaced as a thrown rejection.
       const rawBytes = await framer.recv();
-      const resp = decode(rawBytes) as Record<string, unknown>;
+      const resp = decode(rawBytes) as unknown[] | { error?: string };
 
-      if (typeof resp.error === 'string') {
-        throw new Error(`resume rejected: ${resp.error}`);
+      if (!Array.isArray(resp)) {
+        const errMap = resp as { error?: string };
+        if (typeof errMap.error === 'string') {
+          throw new Error(`resume rejected: ${errMap.error}`);
+        }
+        throw new Error('resume_ok: unexpected non-array response');
       }
 
-      const sessionId = resp.session_id;
-      if (!(sessionId instanceof Uint8Array) || sessionId.length !== 32) {
+      const sessionId = asBytes(
+        resp[RESUME_OK_SESSION_ID],
+        'resume response: session_id',
+      );
+      if (sessionId.length !== 32) {
         throw new Error('resume response: session_id must be 32 bytes');
       }
 
       const expiresAtNs = BigInt(
-        resp.expires_at_ns as number | bigint,
+        resp[RESUME_OK_EXPIRES_AT_NS] as number | bigint,
       );
 
+      // Optional trailing fields. The server always emits indices 2 and 3
+      // (even when no ticket is issued: empty Vec and 0u64 respectively), but
+      // a pre-v2 server that omits them yields a shorter array — read them
+      // defensively, matching runHandshake's handling of the analogous
+      // auth_ok trailing fields.
+      // An empty/absent resumption_ticket means "no ticket" → undefined.
+      const ticketRaw = resp[RESUME_OK_RESUMPTION_TICKET];
       const resumptionTicket =
-        resp.resumption_ticket instanceof Uint8Array
-          ? resp.resumption_ticket
+        ticketRaw instanceof Uint8Array && ticketRaw.length > 0
+          ? ticketRaw
           : undefined;
+      const resumptionExpiresRaw = resp[RESUME_OK_RESUMPTION_EXPIRES_AT_NS];
       const resumptionExpiresAtNs =
-        resp.resumption_expires_at_ns !== undefined &&
-        resp.resumption_expires_at_ns !== null
-          ? BigInt(resp.resumption_expires_at_ns as number | bigint)
+        resumptionTicket !== undefined &&
+        resumptionExpiresRaw !== undefined &&
+        resumptionExpiresRaw !== null
+          ? BigInt(resumptionExpiresRaw as number | bigint)
           : undefined;
 
       // Max query-language version the server supports (u8, default 0).
       // Absent/malformed → 0 (a pre-v2 server omitting the field is a valid
       // legacy case), mirroring runHandshake's handling of the analogous
-      // `auth_ok.server_query_version` positional field.
+      // `auth_ok.server_query_version` positional field (index 7 there).
       const serverQueryVersion =
-        typeof resp.server_query_version === 'number'
-          ? resp.server_query_version
+        typeof resp[RESUME_OK_SERVER_QUERY_VERSION] === 'number'
+          ? resp[RESUME_OK_SERVER_QUERY_VERSION]
           : 0;
 
       return new ShamirClient(
