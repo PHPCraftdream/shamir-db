@@ -333,6 +333,168 @@ async fn lock_key_shared_shared_compatible() {
     assert_eq!(s.mode, Some(LockMode::Exclusive));
 }
 
+/// Audit finding A6 — re-entrant Shared→Exclusive UPGRADE must not be
+/// granted instantly when OTHER transactions also hold the key Shared.
+///
+/// Interleaving under the BUG: T1 and T2 both hold Shared on `k`; T1
+/// (older) calls `lock_key(k, Exclusive)`. The buggy `compatible` gate
+/// short-circuits on `re_entrant` alone (T1 already holds Shared), sets
+/// `mode = Exclusive`, but leaves T2's holder entry in place → both txs
+/// believe they hold Exclusive simultaneously (single-writer invariant
+/// "Exclusive ⇒ exactly one holder" violated).
+///
+/// Post-fix: T1's Exclusive-upgrade request must be treated as
+/// INCOMPATIBLE (because T2 — a different tx — still holds Shared), fall
+/// into the wound-wait partition logic, WOUND T2 (younger), remove T2's
+/// holder, and only THEN grant — leaving `holders == [T1]`,
+/// `mode == Exclusive`.
+#[tokio::test]
+async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from("a6_old");
+
+    // T1 (version 1, OLDER) acquires Shared.
+    let t1 = TxWound::new();
+    mvcc.lock_key(key.clone(), 1, t1.flag(), t1.notify(), LockMode::Shared)
+        .await
+        .unwrap();
+    // T2 (version 2, YOUNGER) acquires Shared — compatible, both hold.
+    let t2 = TxWound::new();
+    mvcc.lock_key(key.clone(), 2, t2.flag(), t2.notify(), LockMode::Shared)
+        .await
+        .unwrap();
+
+    // Sanity: two Shared holders, mode Shared.
+    {
+        let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+        let s = lock.state.lock().await;
+        assert_eq!(s.holders.len(), 2);
+        assert_eq!(s.mode, Some(LockMode::Shared));
+    }
+
+    // T1 (older) requests the Shared→Exclusive UPGRADE. Must WOUND T2,
+    // remove T2's holder, and grant — NOT return instantly while T2 still
+    // holds Shared.
+    mvcc.lock_key(key.clone(), 1, t1.flag(), t1.notify(), LockMode::Exclusive)
+        .await
+        .expect("older tx upgrade must succeed after wounding younger holder");
+
+    // T2 (younger Shared holder) must have been wounded.
+    assert!(
+        t2.is_wounded(),
+        "older tx upgrade must wound the younger Shared holder"
+    );
+    assert!(!t1.is_wounded(), "older tx must not wound itself");
+
+    // Invariant restored: exactly one holder (T1), mode Exclusive.
+    let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+    let s = lock.state.lock().await;
+    assert_eq!(
+        s.holders.len(),
+        1,
+        "A6: Exclusive upgrade must leave exactly one holder (no other Shared holders)"
+    );
+    assert_eq!(s.holders[0].tx_version, 1);
+    assert_eq!(s.mode, Some(LockMode::Exclusive));
+
+    // Observable-behavior cross-check: a THIRD tx (T3) attempting Shared
+    // on the key must now CONFLICT (T1 holds a genuine single-holder
+    // Exclusive). T3 is younger than T1, so it must WAIT, not acquire.
+    let t3 = TxWound::new();
+    let t3_acquired = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mvcc.lock_key(key.clone(), 3, t3.flag(), t3.notify(), LockMode::Shared),
+    )
+    .await;
+    assert!(
+        t3_acquired.is_err(),
+        "T3 Shared must block while T1 holds genuine Exclusive (proves the invariant)"
+    );
+}
+
+/// Audit finding A6 — symmetric case: a YOUNGER requester upgrading
+/// Shared→Exclusive while an OLDER tx still holds Shared must WAIT
+/// (per wound-wait's age rule), not be granted instantly.
+///
+/// Under the BUG, T2's upgrade would short-circuit to `compatible = true`
+/// via `re_entrant` and grant immediately even though T1 (older) still
+/// holds Shared. Post-fix, T2 must enter the wound-wait partition logic
+/// and — because T1 is strictly OLDER — choose WAIT (it cannot wound
+/// T1). The test asserts the wait by wrapping the upgrade in a bounded
+/// timeout: if the buggy instant-grant fires, the future resolves Ok and
+/// the timeout succeeds → test fails; if T2 correctly waits, the timeout
+/// elapses → test passes.
+#[tokio::test]
+async fn lock_key_a6_younger_upgrade_waits_for_older_shared_holder() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from("a6_young");
+
+    // T1 (version 1, OLDER) acquires Shared.
+    let t1 = TxWound::new();
+    mvcc.lock_key(key.clone(), 1, t1.flag(), t1.notify(), LockMode::Shared)
+        .await
+        .unwrap();
+    // T2 (version 2, YOUNGER) acquires Shared — compatible.
+    let t2 = TxWound::new();
+    mvcc.lock_key(key.clone(), 2, t2.flag(), t2.notify(), LockMode::Shared)
+        .await
+        .unwrap();
+
+    // T2 (younger) requests Shared→Exclusive upgrade. T1 (older) still
+    // holds Shared, so T2 must WAIT. Bounded by a timeout: a buggy
+    // instant-grant resolves Ok (test fails); a correct wait elapses.
+    let upgrade = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mvcc.lock_key(key.clone(), 2, t2.flag(), t2.notify(), LockMode::Exclusive),
+    )
+    .await;
+    assert!(
+        upgrade.is_err(),
+        "A6: younger tx upgrade must WAIT while older tx holds Shared, not acquire instantly"
+    );
+    // The older holder is NOT wounded by the younger requester.
+    assert!(
+        !t1.is_wounded(),
+        "younger requester must not wound the older Shared holder"
+    );
+    // T2 is not wounded either (nobody wounded it).
+    assert!(!t2.is_wounded());
+}
+
+/// Audit finding A6 — regression guard: the COMMON correct case — a
+/// single tx acquiring Shared then upgrading to Exclusive on a key IT
+/// ALONE holds (no other concurrent holder) — must still get an INSTANT
+/// grant. The fix narrows the re-entrant short-circuit only for the
+/// "other holders present" sub-case; the solo-upgrade fast path must be
+/// preserved.
+#[tokio::test]
+async fn lock_key_a6_solo_upgrade_no_other_holders_fast_path() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from("a6_solo");
+    let w = TxWound::new();
+
+    // Solo Shared acquire.
+    mvcc.lock_key(key.clone(), 42, w.flag(), w.notify(), LockMode::Shared)
+        .await
+        .unwrap();
+
+    // Solo Shared→Exclusive upgrade — no other holders, must be instant.
+    let upgrade = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        mvcc.lock_key(key.clone(), 42, w.flag(), w.notify(), LockMode::Exclusive),
+    )
+    .await
+    .expect("solo upgrade with no other holders must grant instantly (no wait)");
+    upgrade.expect("solo upgrade must succeed");
+
+    // Invariant holds: exactly one holder, mode Exclusive.
+    let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+    let s = lock.state.lock().await;
+    assert_eq!(s.holders.len(), 1);
+    assert_eq!(s.holders[0].tx_version, 42);
+    assert_eq!(s.mode, Some(LockMode::Exclusive));
+}
+
 /// When a tx is wounded while WAITING (on a different key than where
 /// the wound is issued), its `lock_key` returns `DbError::Conflict`
 /// instead of acquiring. This exercises the per-tx `wound_notify`:
