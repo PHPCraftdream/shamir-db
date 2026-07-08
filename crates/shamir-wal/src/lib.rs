@@ -11,48 +11,34 @@
 //! `info_store` there is no built-in transactional link — a partial
 //! crash can leave data without indexes (or vice versa).
 //!
-//! WAL is a lightweight intent journal: before starting a batch
-//! operation we write a marker listing the affected `record_id`s;
-//! after successful completion we remove the marker. On next open:
+//! The WAL bridges that gap as an append-only file-segment journal
+//! (the F5c/F6 cutover retired the earlier KV-marker design that
+//! stored intent records under `b"__wal_active_"` in `info_store`;
+//! production no longer uses such markers). Each committed tx is one
+//! [`WalEntryV2`] appended to a [`SegmentSet`] of [`WalSegment`]s via
+//! [`WalGroupCommit`]. Appends land in the OS page cache (level 2,
+//! surviving a process crash) and are promoted to level 3 (fsync) on
+//! the truncation/sync gate. On next open, [`SegmentSet::recover`]
+//! walks every sealed + active segment in order and replays the
+//! entries that have not yet been truncated.
 //!
-//! - No markers → everything is clean, normal operation.
-//! - Marker present → there was a crash. Recovery checks
-//!   consistency point-by-point and rolls forward or back.
+//! # Truncation model
 //!
-//! # Extensibility
-//!
-//! The design supports future extensions:
-//!
-//! - **Explicit transactions** — user calls `begin()`, N operations,
-//!   `commit()`. The marker is open between begin and commit; on
-//!   crash at any point recovery rolls back all planned changes.
-//! - **Full-text search** — FTS index operations are no different from
-//!   regular `IndexEntry` operations.
-//! - **Schema migrations** — `WalOp::CreateIndex`, `DropIndex` etc.
-//!
-//! # Storage layout
-//!
-//! WAL lives in the same `info_store` under the fixed prefix
-//! `b"__wal_active_"`. One marker = one KV record:
-//!
-//! ```text
-//! key   = b"__wal_active_" || txn_id (8 bytes BE)         = 21 bytes
-//! value = bincode(WalEntry { txn_id, started_at_ns, ops }) — contains
-//!         the full set of intended operations for this transaction
-//! ```
-//!
-//! The marker is written with a single `info_store.set(...)` before
-//! the batch starts and removed with a single `info_store.remove(...)`
-//! after. On backends with buffered durability (sled, redb with
-//! `Durability::None`) both writes go through the buffer — the actual
-//! fsync is amortised in the background. Performance overhead on the
-//! happy path is close to zero.
+//! Entries live in the segments until the background drainer, gated
+//! by `interner_delta_safe_to_truncate` (the A5 interner-hwm gate),
+//! confirms the entry's data is durably materialised in history AND
+//! its interner delta is durably checkpointed. Only then does it call
+//! `wal.commit(txn_id)` to advance the truncation watermark. There
+//! are no per-entry markers to remove on the happy path — truncation
+//! is a watermark advance over the segment set.
 //!
 //! # Recovery scope
 //!
-//! One marker describes one batch operation (or one explicit
-//! transaction). Recovery runs in O(operations_per_marker), not
-//! in O(table_size).
+//! One entry describes one transaction (its full op set + interner
+//! delta). Recovery replays entries in `commit_version` order and
+//! runs in O(operations_per_entry), not in O(table_size). Replayed
+//! ops are idempotent at the data layer, so a re-replay after a
+//! mid-recovery failure converges.
 
 #[cfg(test)]
 mod tests;

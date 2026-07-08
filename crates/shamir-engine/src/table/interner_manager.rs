@@ -250,16 +250,34 @@ impl InternerManager {
         Ok(())
     }
 
-    /// Returns the high-water mark of interner ids that have been durably
-    /// persisted to the chunk store. Any WAL entry whose interner delta
-    /// contains only ids ≤ this value can be safely truncated — the
-    /// (name, id) mappings are recoverable from the persisted chunks
-    /// without the WAL.
+    /// Returns the high-water mark of interner ids whose (name, id)
+    /// mappings have been durably checkpointed to the chunk store.
+    /// Any WAL entry whose interner delta contains only ids ≤ this
+    /// value can be safely truncated — the mappings are recoverable
+    /// from the persisted chunks without the WAL.
     ///
     /// This is `last_persisted_len` expressed as an id upper bound.
-    /// Interner ids are 1-based and dense, so `last_persisted_len` (which
-    /// tracks the highest gap-free index in the reverse vec that was
-    /// written to a chunk) IS the highest persisted id.
+    /// Interner ids are 1-based and dense, so `last_persisted_len`
+    /// (which tracks the highest gap-free index in the reverse vec
+    /// that was written to a chunk) IS the highest persisted id.
+    ///
+    /// # Durability guarantee (post-CRIT-2 / #436)
+    ///
+    /// `persist()` advances `last_persisted_len` ONLY AFTER
+    /// `info_store.flush()` returns Ok (see the CRIT-2 block in
+    /// [`persist`](Self::persist)). On disk-backed stores `flush()` is
+    /// a real drain + fsync of the chunk write, so by the time an id
+    /// is reflected here its chunk is durable on disk (level 3). On
+    /// in-memory stores `flush()` is a no-op and "durable" reduces to
+    /// "in RAM" — which is the only durability tier an in-memory repo
+    /// offers, so the contract holds relative to the backend.
+    ///
+    /// NOTE: this guarantee holds ONLY for entries written via
+    /// [`persist`](Self::persist). The legacy [`save_new_keys`](Self::save_new_keys)
+    /// path advances `last_persisted_len` WITHOUT the CRIT-2 flush and
+    /// WITHOUT checking id density, so it can prematurely satisfy the
+    /// A5 truncate gate — which is why `save_new_keys` is retained only
+    /// for tests and must NOT be called from production paths.
     pub fn persisted_high_water(&self) -> usize {
         self.last_persisted_len.load(Ordering::Acquire)
     }

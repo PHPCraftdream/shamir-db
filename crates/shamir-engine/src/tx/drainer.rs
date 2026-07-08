@@ -30,16 +30,32 @@
 //! truncation gate is shared via
 //! [`interner_delta_safe_to_truncate`](crate::tx::materialize::interner_delta_safe_to_truncate).
 //!
-//! ## Scope of P1d-2a (additive, NOT wired)
+//! ## Current flow (P1d-2b cutover — DONE)
 //!
-//! This is a SCAFFOLD like the P1a overlay: the [`Drainer`] is defined and
-//! its [`spawn`](Drainer::spawn) helper exists, but it is NOT started from
-//! the commit path. The live commit path still writes history inline
-//! (materialize Phase 5a) and truncates inline (post_publish_cleanup
-//! Phase 7). Running `drain_step` over already-drained, already-truncated
-//! state is a no-op (replay is idempotent; `wal.commit` of an absent marker
-//! is OK). The cutover that makes the drainer the SOLE history writer is
-//! P1d-2b.
+//! The drainer is the SOLE history writer on the warm path. The commit
+//! ack-path writes only the overlay (visibility) + the WAL entry, then
+//! calls [`offer`](Drainer::offer) + [`wake`](Drainer::wake) to hand
+//! the entry to the background drain task. That task runs
+//! [`drain_step`](Drainer::drain_step) in a loop:
+//!   - **Phase A** — for each entry in the window
+//!     `durable_watermark < commit_version <= last_committed` (ascending),
+//!     [`replay_v2_entry`](crate::tx::recovery::replay_v2_entry) writes
+//!     the entry's data + index ops to history (idempotent,
+//!     last-write-wins) and applies its interner delta in memory.
+//!   - **Phase B** (A11 mirror of the cold-recovery fix): after the
+//!     per-entry pass, force ONE `repo_interner.persist()` so every
+//!     replayed interner delta is durably checkpointed before any entry
+//!     is finalized.
+//!   - **Phase C** — for each finalized entry: `gate.mark_durable(v)`,
+//!     then the A5 interner-hwm gate
+//!     ([`interner_delta_safe_to_truncate`](crate::tx::materialize::interner_delta_safe_to_truncate)),
+//!     then `wal.commit(txn_id)` to advance the truncation watermark
+//!     ONLY when the interner delta is durably covered.
+//!
+//! Cold recovery ([`recover_inflight_v2`](crate::tx::recovery::recover_inflight_v2))
+//! and the warm drainer converge to the same state. The shared
+//! "replay V → history" core is [`replay_v2_entry`]; the A5 truncation
+//! gate is shared via [`interner_delta_safe_to_truncate`].
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};

@@ -157,11 +157,15 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
         });
     }
 
-    // L10(c): skip the async scan when the overlay is empty — `is_empty()`
-    // is lock-free on `scc::HashMap` (atomic length check), avoiding a
-    // needless `.await` point on the hot commit path. Race with a concurrent
-    // `insert` is benign: the overlay is tx-scoped and only the owning tx
-    // mutates it, so the emptiness check is stable.
+    // L10(c): skip the async scan when the overlay is empty. `is_empty()`
+    // on `scc::HashMap` is NOT an atomic length read (scc exposes no atomic
+    // length — `len()` is banned by `clippy.toml`'s `disallowed-methods`
+    // precisely because it is O(N)); `is_empty` walks the bucket array
+    // until it finds the first entry or exhausts it. That bucket-walk is
+    // sync and short-circuits on the first non-empty bucket, so it stays
+    // cheap on the hot path and avoids a needless `.await` point. Race
+    // with a concurrent `insert` is benign: the overlay is tx-scoped and
+    // only the owning tx mutates it, so the emptiness check is stable.
     if !tx.interner_overlay.is_empty() {
         // O(N) ack: per-tx interner delta sizing, bounded by this tx's touches.
         #[allow(clippy::disallowed_methods)]

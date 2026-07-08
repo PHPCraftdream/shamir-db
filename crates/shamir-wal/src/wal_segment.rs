@@ -12,7 +12,10 @@
 //! `fsync` (level 3). This split is the foundation of the durability
 //! contract (see `docs/perf/durability-model.md`, "Реализация B").
 //!
-//! Wired to nothing yet — additive primitive consumed by later stages.
+//! Live production primitive: composed into a [`crate::SegmentSet`]
+//! that the repo's [`WalSink::File`]` drives via
+//! [`WalGroupCommit`](crate::WalGroupCommit). A `Mem` sink variant
+//! mirrors the same interface for in-memory repos / tests.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};

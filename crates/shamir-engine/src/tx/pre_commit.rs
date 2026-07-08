@@ -542,9 +542,21 @@ pub(super) async fn pre_commit_locked(
 
     // Phase 4: write WAL entry — THE COMMIT POINT.
     //
-    // A successful `wal.begin` makes the entry durable; from here the tx
-    // is committed and `materialize` may not abort. A *failed* `wal.begin`
-    // is still a pre-commit failure (nothing durable) → return Err.
+    // A successful `wal.begin` makes the entry durable (lands in the OS
+    // page cache at minimum — level 2; level 3 only after a later
+    // `sync`); from here the tx is committed and `materialize` may not
+    // abort. A *failed* `wal.begin` returns Err and is treated as a
+    // pre-commit failure: the segment is poisoned and the leader rotates
+    // to a fresh segment. In the COMMON case nothing durable remains —
+    // `WalSegment::append_batch` rolls the file back to the last good
+    // frame boundary on a `write_all` failure, so no torn frame survives
+    // in the file. The rare exception (audit durability §1.6, NOT yet
+    // fixed in this codebase) is when the rollback `set_len` ITSELF
+    // fails: a partial frame may survive in the poisoned file. That
+    // frame is discarded by `repair_torn_tail` on the next open (and by
+    // replay's CRC check even if not repaired), so it cannot corrupt
+    // recovery — but until §1.6 is fixed, the simple "nothing durable"
+    // claim does not hold in that narrow window.
     //
     // HIGH-5: stamp the assigned `commit_version` onto the entry BEFORE
     // persisting it. Recovery sorts inflight entries by `commit_version`
@@ -572,10 +584,14 @@ pub(super) async fn pre_commit_locked(
         .begin_grouped(&entry_arc, shamir_wal::WalDurability::Buffered)
         .await
     {
-        // version_guard drops here → mark(Aborted): WAL begin failed,
-        // nothing durable, this is a pre-commit abort. SSI fix S2: drop the
-        // cell_guards too → release every claimed cell (the publish that would
-        // have finalized them never runs).
+        // version_guard drops here → mark(Aborted): WAL begin failed.
+        // See the Phase 4 note above for the precise durability state
+        // after a failed `wal.begin` (nothing durable in the common case;
+        // a partial frame may survive the rare rollback-failure window,
+        // discarded by `repair_torn_tail` / replay CRC). This is a
+        // pre-commit abort. SSI fix S2: drop the cell_guards too →
+        // release every claimed cell (the publish that would have
+        // finalized them never runs).
         drop(version_guard);
         drop(cell_guards);
         return Err(TxError::Storage(e));

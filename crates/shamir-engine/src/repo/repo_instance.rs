@@ -68,7 +68,10 @@ pub struct RepoInstance {
     /// [`drainer`](Self::drainer) accessor is SYNC (called from the commit
     /// tail to `wake()`), and init does no `.await` — it only constructs the
     /// drainer + `tokio::spawn`s the loop. Single-init is guaranteed by
-    /// `OnceLock`; a lost race just drops a redundant un-spawned `Drainer`.
+    /// `OnceLock::get_or_init`: the closure runs EXACTLY once even under
+    /// concurrent callers (the loser waits for the winner's value and
+    /// returns the same `Arc<Drainer>`), so there is no "lost race" — every
+    /// caller observes the one-and-only drainer.
     drainer: Arc<std::sync::OnceLock<Arc<crate::tx::drainer::Drainer>>>,
     /// Per-repo string interner (Stage I — moved from per-table to per-repo).
     /// Backed by the dedicated `"__interner__"` store. Built once on first

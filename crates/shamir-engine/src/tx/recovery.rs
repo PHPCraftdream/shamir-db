@@ -1,8 +1,14 @@
 //! V2 WAL recovery — applies inflight WalEntryV2 entries on repo open.
 //!
-//! Crashes between commit_tx Phase 4 (WAL begin) and Phase 7 (WAL
-//! commit) leave durable entries that need replay. Without recovery
-//! tx writes are lost despite the WAL marker.
+//! Crashes between commit_tx Phase 4 (WAL begin) and the drainer's
+//! Phase C (WAL truncation) leave entries in the WAL segments that
+//! have not yet been materialised into history. Without recovery those
+//! entries' tx writes would be lost — the sealed/active segments
+//! survive the crash (level-2 page cache at minimum; level-3 if the
+//! drainer had fsynced), and recovery replays them into history before
+//! the repo is served. There are no per-entry KV "markers" post-F6;
+//! truncation is a watermark advance over the segment set, gated by
+//! the durable watermark + the A5 interner-hwm check.
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
