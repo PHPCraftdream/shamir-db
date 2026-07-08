@@ -239,18 +239,29 @@ impl MvccStore {
     /// for SSI conflict detection if the recovered key is immediately
     /// re-written inside a new transaction.
     ///
-    /// `upsert_async` (not `insert`) so a re-replay of the same key
-    /// advances monotonically rather than silently keeping a stale value.
+    /// `entry_async` (occupied/vacant) — NOT `upsert_async` — so that on the
+    /// OCCUPIED branch the cell's `version` is advanced ONLY when `version`
+    /// is strictly greater than the cell's current value (max-monotonic,
+    /// matching `publish_cell`). This prevents a cold read racing the FIRST
+    /// overlay-only commit of a key from seeding an OLDER history-derived
+    /// version on top of a fresher in-memory cell (A2: stale reads / masked
+    /// SSI conflicts). A re-replay of the same key with an equal or lower
+    /// version is a no-op; the VACANT branch always seeds at the offered
+    /// version.
     pub async fn seed_version(&self, key: Bytes, version: u64) {
-        self.cells
-            .upsert_async(
-                key,
-                super::RecordCell {
+        match self.cells.entry_async(key).await {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                if version > e.get().version {
+                    e.get_mut().version = version;
+                }
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(super::RecordCell {
                     version,
                     reserved_by: 0,
-                },
-            )
-            .await;
+                });
+            }
+        }
     }
 
     /// cancel-safe: NO — applies a batch of `KvOp` for MULTIPLE commit versions
