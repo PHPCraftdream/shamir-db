@@ -154,8 +154,21 @@ impl StagingStore {
     ///
     /// Used by `commit_tx` Phase 4 to emit data ops into the WAL
     /// entry, separate from Phase 5's `drain()` that actually applies
-    /// them. Must be called under `RepoTxGate::commit_lock` — caller
-    /// guarantees no concurrent writers.
+    /// them.
+    ///
+    /// # Calling contract
+    ///
+    /// The `StagingStore` is tx-scoped: only the owning `TxContext`
+    /// mutates it, and the tx is single-threaded across its commit
+    /// pipeline (the `&mut TxContext` borrow taken by `wal_ops_from_tx`
+    /// statically excludes any other mutator). So no synchronisation is
+    /// needed regardless of whether the caller holds `commit_lock`. In
+    /// practice the Serializable branch of `commit_tx_lockfree` DOES
+    /// hold `commit_lock` when `wal_ops_from_tx` runs (CRIT-4), and the
+    /// Snapshot branch does NOT — but for THIS method the distinction
+    /// is irrelevant because the borrow rules already provide the
+    /// safety the old "must be called under commit_lock" comment
+    /// claimed the lock provided.
     pub fn snapshot_ops(&self) -> Vec<KvOp> {
         self.writes
             .iter()

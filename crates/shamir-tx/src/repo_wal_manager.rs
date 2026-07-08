@@ -59,8 +59,23 @@ impl RepoWalManager {
         prev.max(floor)
     }
 
-    /// cancel-safe: yes — parks on the group-commit waiter
-    /// (`WalGroupCommit::append`); cancellation drops the future.
+    /// # Cancel-safety — read carefully
+    ///
+    /// "cancel-safe: yes" in the narrow `tokio` sense: the future parks
+    /// on the group-commit waiter and dropping it releases the wait
+    /// without acquiring any lock — no resource leak, no poisoned state.
+    ///
+    /// BUT cancellation is NOT a semantic undo. Once
+    /// [`WalGroupCommit::append`] has completed (the entry was encoded
+    /// and appended to the segment, advancing `max_committed`), the
+    /// entry is **durable in the WAL** and WILL be replayed by recovery
+    /// on restart — even though the caller that was `.await`ing this
+    /// future believes it was cancelled. The cancellation window is the
+    /// park-on-the-waiter phase only: if the future is dropped BEFORE
+    /// `append` returned Ok, the append may or may not have landed
+    /// (the caller cannot tell). Mirrors the honest phrasing already on
+    /// the `commit_tx` call path: a tx whose `begin_grouped` future is
+    /// cancelled may resurrect as a committed tx on restart.
     ///
     /// Encode `entry` and append it to the group at the requested
     /// durability tier. Borrows the entry (mirroring `begin_grouped_many`)

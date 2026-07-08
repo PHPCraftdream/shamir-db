@@ -158,12 +158,32 @@ impl<'a> LayeredInterner<'a> {
 /// merge is harmless (touch_ind is idempotent) but the function must
 /// be re-run under the same commit_mutex to obtain a usable remap.
 ///
-/// Atomically merge `overlay` into `base`.
+/// # Calling contract & safety argument
 ///
-/// Must be called under `RepoTxGate::commit_mutex` — no internal
-/// synchronisation. Returns a remap: `overlay_id → final_base_id`.
-/// The caller rewrites any bytes referencing overlay ids before flush.
-/// Result of [`commit_interner_overlay`]: the id remap and the delta of
+/// In the current P2c / lock-free commit path this is called from
+/// `pre_commit_prelock`, i.e. OUTSIDE `RepoTxGate::commit_mutex`
+/// (the pre-lock phase runs concurrently with other committers —
+/// see `pre_commit.rs::pre_commit_prelock`). It is still correct
+/// WITHOUT the mutex because the only mutation it performs on `base`
+/// is [`Interner::touch_ind`] / `touch_with_id`, which is a CAS-based
+/// idempotent insert: a concurrent committer performing the same merge
+/// on the same `base` interner either observes the mapping already
+/// present (no-op) or inserts it (and the loser's CAS fails harmlessly).
+/// The `(name → id)` assignment is deterministic per name, so two
+/// concurrent merges of the same overlay entry converge to the SAME
+/// base id without coordination. This CAS-idempotency of `touch_ind`
+/// is the load-bearing safety property — it is NOT documented as a
+/// contract on `Interner` itself, so any future change to `touch_ind`
+/// that breaks idempotency would silently break this function.
+///
+/// The `remap` returned to the caller IS caller-local (built into a
+/// fresh `TFxMap` per call), so concurrent callers do not share remap
+/// state — each gets its own `{overlay_id → final_base_id}` view.
+///
+/// Atomically merge `overlay` into `base`. Returns a remap:
+/// `overlay_id → final_base_id`. The caller rewrites any bytes
+/// referencing overlay ids before flush. Result of
+/// [`commit_interner_overlay`]: the id remap and the delta of
 /// genuinely new entries inserted into base during merge.
 pub struct OverlayCommitResult {
     /// `overlay_id → final_base_id` for every overlay entry.

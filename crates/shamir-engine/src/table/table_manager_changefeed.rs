@@ -33,6 +33,13 @@ impl TableManager {
 
         // No Serializable tx watching → nothing can observe this footprint;
         // skip the record entirely (honours Snapshot/level-1 "no overhead").
+        // The `active_serializable_count()` read is `Relaxed`; see the
+        // accuracy contract on `RepoTxGate::active_serializable_count`;
+        // briefly, a stale-zero read can miss a just-opening Serializable
+        // tx, but the consequence is bounded because this write is a blind
+        // write (no read-validate): the missed snapshot's serial order
+        // relative to the write stays valid, and a snapshot that cannot
+        // see the write cannot conflict with its predicate footprint.
         if cf.gate.active_serializable_count() == 0 {
             return;
         }

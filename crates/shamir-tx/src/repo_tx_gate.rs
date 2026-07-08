@@ -60,12 +60,23 @@ impl CommitWriteRecord {
 
 /// Per-repo transactional synchronisation point.
 pub struct RepoTxGate {
-    /// Serialises the commit critical section. After Stage B, the lock
-    /// covers only: SSI validate → phantom validate → assign_version →
-    /// WAL begin → materialize (5a/5b/5c) → publish → record_commit_writes.
+    /// Serialises the commit critical section. NOT every commit takes
+    /// this mutex — only the paths that need to serialize the
+    /// validate→publish window:
+    ///   - The legacy **AsyncIndex** path (`commit_tx_inner_legacy_async`)
+    ///     holds it across the full SSI validate → phantom validate →
+    ///     assign_version → WAL begin → materialize → publish →
+    ///     record_commit_writes section.
+    ///   - The lock-free `commit_tx_lockfree` path takes it ONLY for
+    ///     Serializable txs, for the narrower validate→publish window
+    ///     (CRIT-4 / #438: prevents write-skew between two Serializable
+    ///     txs with disjoint write-sets). Snapshot txs on the same
+    ///     lock-free path do NOT take it — they keep full lock-free
+    ///     parallelism (no SSI validation, no predicate check).
+    ///
     /// Phase 1 (interner merge) and Phase 2.5/2.6 (uwl_guards + unique
-    /// re-validation) run BEFORE the lock. Phase 6.5/7 (markers + WAL
-    /// cleanup) and HNSW promote run AFTER the lock.
+    /// re-validation) run BEFORE the lock on every path. Phase 6.5/7
+    /// (markers + WAL cleanup) and HNSW promote run AFTER the lock.
     /// `tokio::sync::Mutex` because the guard lives across `.await`.
     commit_mutex: tokio::sync::Mutex<()>,
 
@@ -592,12 +603,29 @@ impl RepoTxGate {
     ///
     /// Non-tx write paths use this to skip the SSI footprint recording
     /// when there is no Serializable observer to detect a conflict.
-    /// The load is `Relaxed` — a stale read of zero means a non-tx write
-    /// may skip a footprint that a just-opening Serializable tx has not
-    /// yet registered.  That window is harmless: the tx opened AFTER the
-    /// non-tx write committed, so the write was already committed at the
-    /// tx's snapshot and will be visible as historical data, not as a
-    /// phantom in the predicate window.
+    /// The load is `Relaxed`.
+    ///
+    /// # Why `Relaxed` is sufficient (audit concurrency §2 item 5)
+    ///
+    /// The earlier justification here ("the tx opened AFTER the write
+    /// committed, so the write is visible as historical data") does NOT
+    /// hold in general. Consider the interleaving: (1) writer reads
+    /// `active_serializable_count == 0` (Relaxed); (2) opener increments
+    /// `active_serializable_count`; (3) opener reads `last_committed` for
+    /// its snapshot version; (4) writer assigns its commit version and
+    /// publishes. This can place the opener's snapshot BEFORE the writer's
+    /// commit even though the writer saw zero observers.
+    ///
+    /// The consequence is, however, BOUNDED: a non-tx write is a blind
+    /// write (no read-validate), so its serial order relative to a
+    /// snapshot that missed it is still valid — the snapshot simply sees
+    /// the write as not-yet-happened, and the write's footprint is not
+    /// needed for that snapshot's predicate validation (the snapshot
+    /// cannot conflict with a write it cannot see). A future
+    /// Dekker-style re-check (Acquire on the counter, Release on
+    /// `last_committed`) would tighten this further but is not required
+    /// for correctness of the serial order; it is tracked as a separate,
+    /// riskier fix.
     pub fn active_serializable_count(&self) -> u64 {
         self.active_serializable_count.load(Ordering::Relaxed)
     }
@@ -696,9 +724,24 @@ impl RepoTxGate {
     /// order), or `None` when no dep conflicts with any record in the window.
     /// The caller formats the dep for the `PhantomConflict` error.
     ///
-    /// Called by `pre_commit` Phase 2-bis UNDER `commit_lock`. `deps` is
-    /// already snapshot-collected by the caller (under the PredicateSet
-    /// Mutex), so this method holds no `Mutex` guard.
+    /// # Calling contract
+    ///
+    /// Both call sites (`pre_commit_locked_validate` in the legacy
+    /// AsyncIndex path AND `pre_commit_locked` / `commit_tx_lockfree`)
+    /// invoke this ONLY for Serializable txs (the caller gates on
+    /// `tx.isolation == Serializable`). For Serializable txs the
+    /// `commit_tx_lockfree` path takes `gate.commit_lock()` for the
+    /// validate→publish window (CRIT-4 / #438: Serializable txs must
+    /// serialize that window to prevent write-skew), so in practice
+    /// this method runs UNDER `commit_lock` on every live call path.
+    /// The lock-free claim that "the lock-free commit path does NOT
+    /// hold the lock here" was true before CRIT-4 but is no longer
+    /// accurate for the Serializable branch. Snapshot txs never reach
+    /// this method (no predicate validation), so the no-lock property
+    /// for Snapshot is moot here.
+    ///
+    /// `deps` is already snapshot-collected by the caller (under the
+    /// PredicateSet Mutex), so this method holds no `Mutex` guard.
     pub fn predicate_conflicts_batch(
         &self,
         deps: &[crate::predicate_set::PredicateDep],
@@ -755,13 +798,17 @@ impl RepoTxGate {
     /// Highest contiguous version V for which the value is durable in the
     /// history log.
     ///
-    /// Under the current inline-materialize path this equals
-    /// [`last_committed`](Self::last_committed) by construction (every commit
-    /// calls [`mark_durable`](Self::mark_durable) at the same point it commits
-    /// its [`VersionGuard`]). P1d-2 will decouple the two by moving
-    /// `history.transact` of the tx-path off the ack-path into a background
-    /// drain leader; until then the durable watermark is a redundant view
-    /// kept current so the rest of the machinery can be wired and tested.
+    /// Decoupled from [`last_committed`](Self::last_committed) since the
+    /// P1d-2b cutover: the commit ack-path publishes visibility
+    /// (`last_committed`) BEFORE the value lands in history, and the
+    /// background drainer's [`mark_durable`](Self::mark_durable) advances
+    /// this watermark asynchronously once `replay_v2_entry` has written
+    /// the version's data + index ops into history. Under steady state
+    /// `durable_watermark() <= last_committed()` and the gap is bounded
+    /// by the drainer's lag (one drain pass). The truncation gate
+    /// (drainer Phase C / F6 segment unlink) refuses to advance past
+    /// this watermark, so a sealed WAL segment holding an un-drained
+    /// version is never unlinked.
     ///
     /// Invariant: `durable_watermark() <= last_committed()` always — every
     /// site that marks durable does so AFTER the visibility mark
@@ -773,15 +820,32 @@ impl RepoTxGate {
 
     /// Record that `version`'s value is durable in the history log.
     ///
+    /// # Contract — "durable" here means HISTORY-WRITTEN, not fsynced
+    ///
+    /// **Naming caveat (do not be misled by the name):** "durable" in
+    /// this method's name and in [`durable_watermark`](Self::durable_watermark)
+    /// means "the version's data + index ops have been written into the
+    /// history log (which on buffered backends lands in the OS page cache
+    /// / store write-back buffer, NOT necessarily fsynced to disk)". A
+    /// real on-disk fsync of history happens only later, at the truncation
+    /// gate's checkpoint flush (see `InternerManager::persist`'s CRIT-2
+    /// `info_store.flush()` and `RepoInstance::flush_buffers`). The name
+    /// is retained because it is on every call site and a rename is a
+    /// separate, higher-risk refactor; this doc comment is the contract.
+    ///
+    /// Concretely, `mark_durable(v)` is called by the drainer's
+    /// `drain_step` (Phase C) AFTER `replay_v2_entry` returns Ok for `v`.
+    /// It is NOT called from the commit ack-path (which only publishes
+    /// visibility); the drainer owns the durable-watermark advance.
+    ///
     /// `State::Materialized` is reused as the "durable" terminal state for
     /// this tracker: there is no Aborted analogue (an aborted version was
     /// never written and is irrelevant to durability — but the contiguous
-    /// watermark still needs to advance past it). For now we rely on the
-    /// non-tx path and tx-path Complete-outcome callers to mark every
-    /// non-aborted version. Aborted versions are marked here too (see
+    /// watermark still needs to advance past it). Aborted versions are
+    /// marked here too (see
     /// [`mark_durable_aborted`](Self::mark_durable_aborted)) so the
     /// contiguous prefix on the durable tracker matches the visibility
-    /// tracker under inline materialize.
+    /// tracker's contiguous prefix.
     ///
     /// Idempotent: marking the same version twice (or marking a version at
     /// or below the current watermark) is a no-op.
