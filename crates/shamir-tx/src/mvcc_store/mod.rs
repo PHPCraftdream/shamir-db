@@ -401,10 +401,23 @@ impl MvccStore {
     /// advances the cell's version to `version` on every write path.
     /// (Bump-first ordering is the CALLER's job — this only performs the
     /// cell mutation.)
+    ///
+    /// A2 — max-monotonic: on the OCCUPIED branch the cell's `version` is
+    /// advanced ONLY when `version` is strictly greater than the cell's
+    /// current value. This prevents a slow drainer / recovery replay (which
+    /// seeds the cell from a durable write that may be older than an
+    /// in-memory commit that raced ahead during the drainer's `.await`
+    /// suspension) from regressing the cell backward and causing stale reads
+    /// / masked SSI conflicts. The VACANT branch is untouched (a brand-new
+    /// cell always seeds at the offered version). The NORMAL non-racing
+    /// drain path always offers `<=` the current version, so this guard is a
+    /// no-op there.
     pub(super) async fn publish_cell(&self, key: Bytes, version: u64) {
         match self.cells.entry_async(key).await {
             scc::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().version = version;
+                if version > e.get().version {
+                    e.get_mut().version = version;
+                }
             }
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(RecordCell {
