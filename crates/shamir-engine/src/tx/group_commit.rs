@@ -346,7 +346,12 @@ pub(super) async fn run_leader(
         // Phase 6-bis (Phase C): record SSI write footprint UNDER commit_lock
         // so the next batch's SSI validation sees this tx's writes (P2b).
         gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&v.tx, commit_version));
-        release_pessimistic_locks(&v.tx, repo).await;
+        // NOTE: A4 fix (a) — release_pessimistic_locks is NOT called here.
+        // It is moved to AFTER `materialize` (the publish step) in the
+        // loop below, mirroring the fix applied to `commit_tx_inner` /
+        // `commit_tx_lockfree`. Releasing here would replicate the A4 (a)
+        // lost-update bug (Exclusive lock released before the write is
+        // cell-published).
         repo.tx_metrics().on_tx_committed();
     }
 
@@ -397,6 +402,13 @@ pub(super) async fn run_leader(
             g.disarm();
         }
         drop(work.cell_guards);
+        // A4 (fix a): release Level-3 pessimistic locks AFTER `materialize`
+        // (the publish step) completes — never before. See the equivalent
+        // block in `commit_tx_lockfree` / `commit_tx_inner_legacy_async`
+        // for the full 2PL rationale. Abort / early-exit paths above
+        // (lines ~107/194/245/262) release immediately because no write
+        // was ever published there.
+        release_pessimistic_locks(&work.tx, repo).await;
         let mat = finalize_sync_post_publish(
             &work.tx,
             post_publish,
@@ -471,7 +483,6 @@ async fn run_single_tx(
     // SSI fix S2 — still-armed cell-reservation guards (WAL begin succeeded in
     // pre_commit_locked). Disarmed after `materialize` finalizes the cells.
     let mut cell_guards = pre.cell_guards;
-    release_pessimistic_locks(&tx, repo).await;
 
     // Phase 6-bis (Phase C): record SSI write footprint UNDER commit_lock
     // so the next batch's SSI validation sees this tx's writes (P2b).
@@ -489,6 +500,12 @@ async fn run_single_tx(
         g.disarm();
     }
     drop(cell_guards);
+    // A4 (fix a): release Level-3 pessimistic locks AFTER `materialize`
+    // (the publish step) completes — never before. See the equivalent block
+    // in `commit_tx_lockfree` / `commit_tx_inner_legacy_async` for the full
+    // 2PL rationale. Abort / early-exit paths above (lines ~451/462) release
+    // immediately because no write was ever published there.
+    release_pessimistic_locks(&tx, repo).await;
 
     let materialization = finalize_sync_post_publish(
         &tx,
