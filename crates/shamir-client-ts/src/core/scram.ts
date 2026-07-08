@@ -23,6 +23,16 @@ export const BINDING_MODE_TLS_NO_EXPORT = 0x02;
 /** Supported protocol version (ProtocolVersion::V1). */
 export const SUPPORTED_VERSION = 0x01;
 
+/**
+ * Query-language wire version the client emits in every
+ * `query_version`-carrying DbRequest envelope (`execute`, `tx_begin`,
+ * `tx_execute`). MUST track `CURRENT_QUERY_LANG_VERSION` in
+ * `crates/shamir-query-types/src/wire/db_message.rs` — the v2 value
+ * enables the id-keyed msgpack write/read pass-through
+ * (`records_idmsgpack`, `result_encoding: "id"`).
+ */
+export const CURRENT_QUERY_LANG_VERSION = 2;
+
 /** KDF parameters as carried in the server `challenge`. */
 export interface KdfParams {
   memoryKb: number;

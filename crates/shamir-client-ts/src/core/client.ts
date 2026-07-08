@@ -13,6 +13,7 @@ import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import type { WireValue } from './types/write.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
+import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
 import { signCanonical } from './hmac.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
@@ -189,7 +190,7 @@ export class ShamirClient {
       );
 
       // Server responds: { session_id, expires_at_ns, resumption_ticket?,
-      //                    resumption_expires_at_ns? }
+      //                    resumption_expires_at_ns?, server_query_version? }
       const rawBytes = await framer.recv();
       const resp = decode(rawBytes) as Record<string, unknown>;
 
@@ -216,6 +217,15 @@ export class ShamirClient {
           ? BigInt(resp.resumption_expires_at_ns as number | bigint)
           : undefined;
 
+      // Max query-language version the server supports (u8, default 0).
+      // Absent/malformed → 0 (a pre-v2 server omitting the field is a valid
+      // legacy case), mirroring runHandshake's handling of the analogous
+      // `auth_ok.server_query_version` positional field.
+      const serverQueryVersion =
+        typeof resp.server_query_version === 'number'
+          ? resp.server_query_version
+          : 0;
+
       return new ShamirClient(
         platform,
         framer,
@@ -224,6 +234,7 @@ export class ShamirClient {
         expiresAtNs,
         resumptionTicket,
         resumptionExpiresAtNs,
+        serverQueryVersion,
       );
     } catch (e) {
       await framer.close();
@@ -481,7 +492,7 @@ export class ShamirClient {
 
     const r = await this.sendDbRequest({
       op: 'execute',
-      query_version: 1,
+      query_version: CURRENT_QUERY_LANG_VERSION,
       db,
       batch: enrichedBatch,
     });
@@ -733,7 +744,7 @@ export class ShamirClient {
   ): Promise<TxOpened> {
     const r = await this.sendDbRequest({
       op: 'tx_begin',
-      query_version: 1,
+      query_version: CURRENT_QUERY_LANG_VERSION,
       db,
       repo,
       ...(isolation !== undefined ? { isolation } : {}),
@@ -760,7 +771,7 @@ export class ShamirClient {
   ): Promise<BatchResponse> {
     const r = await this.sendDbRequest({
       op: 'tx_execute',
-      query_version: 1,
+      query_version: CURRENT_QUERY_LANG_VERSION,
       db,
       tx_handle: txHandle,
       batch,
