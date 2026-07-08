@@ -62,6 +62,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
                 // session (no slow-loris drop) while we attempt the third.
                 auth_init_timeout_ms: 30_000,
                 max_active_connections: max_conns,
+                max_active_connections_per_ip: 0,
             },
             query_limits: Default::default(),
             tx: Default::default(),

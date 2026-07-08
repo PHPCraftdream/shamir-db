@@ -1,22 +1,23 @@
-//! Slow-loris defence test.
+//! Pre-handshake slow-loris defence test.
 //!
-//! Verifies the pre-handshake `auth_init_timeout`: a client that completes
-//! the TLS handshake but never sends `auth_init` is dropped within the
-//! configured timeout, freeing the per-connection task and buffers.
+//! Complements `slow_loris.rs` (which completes TLS then stalls on
+//! `auth_init`). This file covers the EARLIER window identified in
+//! audit §2a / top-5 #4: a client that opens a TCP connection but
+//! never sends a TLS ClientHello at all.
 //!
-//! Without the timeout this client would tie up server resources forever
-//! and a few thousand of them would OOM the process.
+//! Before the fix, `acceptor.accept(tcp).await` had no timeout — the
+//! spawned task (and its `ConnLimiter` slot) lived forever. Now the
+//! accept loop wraps the TLS accept in `tokio::time::timeout(
+//! ctx.auth_init_timeout, …)`, so the slot is released within roughly
+//! `auth_init_timeout` of the TCP accept.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
-
-use shamir_transport_tcp::tls::make_client_config_no_ca;
 
 use shamir_server::config::{
     Config, ConnectionSecurity, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
@@ -75,8 +76,12 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
     }
 }
 
+/// A client that connects at the TCP layer but NEVER sends a TLS
+/// ClientHello. The server must release the connection slot within
+/// roughly `auth_init_timeout` — before the fix the slot leaked
+/// indefinitely.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn silent_client_after_tls_is_dropped_within_timeout() {
+async fn silent_tcp_client_is_dropped_within_timeout() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let temp = TempDir::new().unwrap();
@@ -92,38 +97,34 @@ async fn silent_client_after_tls_is_dropped_within_timeout() {
     let handle = launcher.launch().await.expect("launcher");
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
-    // ----- "Silent" client: complete TLS, then never send. -----
-    let connector = TlsConnector::from(make_client_config_no_ca());
-    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
-    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
-    let tls = connector
-        .connect(server_name, tcp)
-        .await
-        .expect("tls handshake");
+    // Connect at TCP layer only — deliberately do NOT perform a TLS
+    // handshake. Hold the socket open so the server's acceptor is
+    // waiting for bytes that never arrive.
+    let mut tcp = TcpStream::connect(addr).await.expect("tcp connect");
 
     let started = Instant::now();
-    // Try to read — the server should close the connection within the
-    // timeout and we'll get EOF (Ok(0)) or a closed-pipe error.
-    let mut tls = tls;
+    // The server should close/reset the socket within ~auth_init_timeout.
+    // We detect this by reading: EOF (Ok(0)) or a reset (Err) both prove
+    // the server tore down its side. If the timeout is NOT applied, this
+    // read hangs and the outer `tokio::time::timeout` fires — the test
+    // then panics in the `expect` below.
     let mut buf = [0u8; 1];
-    let read_result = tokio::time::timeout(Duration::from_secs(2), tls.read(&mut buf)).await;
+    let read_result = tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut buf)).await;
     let elapsed = started.elapsed();
 
-    // The read should have completed (either EOF or error) — NOT timed out.
-    let read = read_result.expect("server should drop us within ~300ms, not hang");
+    // Must NOT have timed out — the server must have closed us.
+    let read = read_result.expect(
+        "server should drop the silent TCP client within ~300ms, not let the read hang for 2s",
+    );
     match read {
-        Ok(0) => {
-            // Clean EOF — server closed.
-        }
-        Ok(_) => panic!("server sent unexpected bytes for a silent client"),
-        Err(_e) => {
-            // Pipe closed / reset — also acceptable.
-        }
+        Ok(0) => { /* clean EOF — server closed */ }
+        Ok(_) => panic!("server sent unexpected bytes for a silent TCP client"),
+        Err(_e) => { /* reset / pipe closed — also acceptable */ }
     }
 
-    // Drop should be near the configured timeout (300ms), not instant
-    // (would mean the handshake failed for a different reason) and not
-    // multi-second (would mean the timeout didn't fire).
+    // The drop must be near the configured timeout (300ms), not instant
+    // (would imply a different error path) and not multi-second (would
+    // imply the timeout didn't fire — the bug we're guarding against).
     assert!(
         elapsed >= Duration::from_millis(200),
         "dropped too fast ({:?}) — likely a different error path",
@@ -131,9 +132,11 @@ async fn silent_client_after_tls_is_dropped_within_timeout() {
     );
     assert!(
         elapsed < Duration::from_millis(1500),
-        "dropped too slow ({:?}) — timeout didn't fire",
+        "dropped too slow ({:?}) — pre-handshake timeout didn't fire (the bug)",
         elapsed
     );
 
+    // Clean up — ensure the socket is closed cleanly on our side too.
+    let _ = tcp.shutdown().await;
     handle.shutdown().await;
 }

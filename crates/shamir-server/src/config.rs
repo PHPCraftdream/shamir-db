@@ -309,6 +309,11 @@ fn default_max_queries_per_batch() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConnectionSecurity {
     /// Slow-loris timeout for `auth_init` in milliseconds. Default 5000.
+    ///
+    /// This same timeout is also applied to the TLS handshake and (for WS
+    /// listeners) the WebSocket upgrade that precede `auth_init` — closing
+    /// the unauthenticated slow-loris window identified in audit §2a /
+    /// top-5 #4. See `accept_loop_*` in `server_launcher.rs`.
     #[serde(default = "default_auth_init_timeout_ms")]
     pub auth_init_timeout_ms: u64,
     /// Global hard cap on simultaneously-active connections across all
@@ -317,6 +322,14 @@ pub struct ConnectionSecurity {
     /// on TLS for connections that won't be served. Default 10000.
     #[serde(default = "default_max_active_connections")]
     pub max_active_connections: usize,
+    /// Per-source-IP cap on simultaneously-active connections. Default
+    /// 100. Bounds a single attacker host to a small fraction of the
+    /// global cap — without this, one IP can occupy the entire
+    /// `max_active_connections` budget with slow-loris sockets and starve
+    /// every legitimate client (audit §2a / top-5 #4). `0` = no per-IP
+    /// limit (mirrors `max_active_connections`'s convention).
+    #[serde(default = "default_max_active_connections_per_ip")]
+    pub max_active_connections_per_ip: usize,
 }
 
 impl Default for ConnectionSecurity {
@@ -324,6 +337,7 @@ impl Default for ConnectionSecurity {
         Self {
             auth_init_timeout_ms: default_auth_init_timeout_ms(),
             max_active_connections: default_max_active_connections(),
+            max_active_connections_per_ip: default_max_active_connections_per_ip(),
         }
     }
 }
@@ -334,6 +348,10 @@ fn default_auth_init_timeout_ms() -> u64 {
 
 fn default_max_active_connections() -> usize {
     10_000
+}
+
+fn default_max_active_connections_per_ip() -> usize {
+    100
 }
 
 /// Logging / tracing configuration.

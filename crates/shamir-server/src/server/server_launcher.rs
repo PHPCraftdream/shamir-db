@@ -46,7 +46,7 @@ use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
 use crate::config::{Config, ListenerKind, ProfileKind};
-use crate::conn_limiter::ConnLimiter;
+use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
 use crate::connection::{handle_connection, ConnectionContext};
 use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap};
 use crate::framer::{TcpFramer, WsFramer};
@@ -460,6 +460,10 @@ impl ServerLauncher {
         // Global cap on simultaneously-active connections — shared across
         // every listener.
         let conn_limiter = ConnLimiter::new(config.security.connection.max_active_connections);
+        // Per-source-IP cap — bounds a single attacker host to a small
+        // fraction of the global cap (audit §2a / top-5 #4). `0` = off.
+        let per_ip_limiter =
+            PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
 
         for l in &config.listeners {
             let addr: SocketAddr = match l.addr.parse() {
@@ -538,8 +542,9 @@ impl ServerLauncher {
                     let token = shutdown_token.clone();
 
                     let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_tcp(
-                        listener, acceptor, ctx, token, limiter,
+                        listener, acceptor, ctx, token, limiter, per_ip,
                     )));
                     local_addr
                 }
@@ -573,8 +578,9 @@ impl ServerLauncher {
                     let token = shutdown_token.clone();
 
                     let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                        listener, acceptor, ctx, token, limiter,
+                        listener, acceptor, ctx, token, limiter, per_ip,
                     )));
                     local_addr
                 }
@@ -608,8 +614,9 @@ impl ServerLauncher {
                     let token = shutdown_token.clone();
 
                     let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                        listener, acceptor, ctx, token, limiter, policy,
+                        listener, acceptor, ctx, token, limiter, per_ip, policy,
                     )));
                     local_addr
                 }
@@ -790,6 +797,7 @@ async fn accept_loop_tcp(
     ctx: Arc<ConnectionContext>,
     shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
+    per_ip: PerIpLimiter,
 ) {
     loop {
         tokio::select! {
@@ -823,14 +831,48 @@ async fn accept_loop_tcp(
                         continue;
                     }
                 };
+                // Cheapest-check-first: the global cap already rejected
+                // above; now enforce the per-source-IP cap before we burn
+                // TLS CPU on a host that's already at its allowance. If
+                // this rejects, the global `guard` drops here, releasing
+                // the global slot (audit §2a / top-5 #4).
+                let per_ip_guard = match per_ip.try_acquire(peer_addr.ip()) {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ip = %peer_addr.ip(),
+                            active = per_ip.active(peer_addr.ip()),
+                            cap = per_ip.cap(),
+                            "max_active_connections_per_ip reached, refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let _guard = guard;  // keep alive for the lifetime of this task
-                    let tls = match acceptor.accept(tcp).await {
-                        Ok(t) => t,
-                        Err(e) => {
+                    let _per_ip_guard = per_ip_guard;
+                    // Bound the TLS handshake — without this a client that
+                    // opens a TCP socket and never sends a ClientHello
+                    // holds the slot forever (audit §2a / top-5 #4).
+                    // Reuses `ctx.auth_init_timeout` (the same window that
+                    // bounds the post-handshake `auth_init` read).
+                    let tls = match tokio::time::timeout(
+                        ctx.auth_init_timeout,
+                        acceptor.accept(tcp),
+                    ).await {
+                        Ok(Ok(t)) => t,
+                        Ok(Err(e)) => {
                             tracing::debug!(?peer_addr, ?e, "tls handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                ?peer_addr,
+                                timeout = ?ctx.auth_init_timeout,
+                                "tls handshake timed out",
+                            );
                             return;
                         }
                     };
@@ -852,6 +894,7 @@ async fn accept_loop_ws_native(
     ctx: Arc<ConnectionContext>,
     shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
+    per_ip: PerIpLimiter,
 ) {
     loop {
         tokio::select! {
@@ -881,14 +924,38 @@ async fn accept_loop_ws_native(
                         continue;
                     }
                 };
+                let per_ip_guard = match per_ip.try_acquire(peer_addr.ip()) {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ip = %peer_addr.ip(),
+                            active = per_ip.active(peer_addr.ip()),
+                            cap = per_ip.cap(),
+                            "max_active_connections_per_ip reached (ws native), refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let _guard = guard;
-                    let tls = match acceptor.accept(tcp).await {
-                        Ok(t) => t,
-                        Err(e) => {
+                    let _per_ip_guard = per_ip_guard;
+                    let tls = match tokio::time::timeout(
+                        ctx.auth_init_timeout,
+                        acceptor.accept(tcp),
+                    ).await {
+                        Ok(Ok(t)) => t,
+                        Ok(Err(e)) => {
                             tracing::debug!(?peer_addr, ?e, "tls handshake failed (ws native)");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                ?peer_addr,
+                                timeout = ?ctx.auth_init_timeout,
+                                "tls handshake timed out (ws native)",
+                            );
                             return;
                         }
                     };
@@ -896,10 +963,21 @@ async fn accept_loop_ws_native(
                     // consumes `tls`. After upgrade the TLS state is owned
                     // by the WebSocketStream and not directly accessible.
                     let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
-                    let ws = match accept_native_ws(tls).await {
-                        Ok(ws) => ws,
-                        Err(e) => {
+                    let ws = match tokio::time::timeout(
+                        ctx.auth_init_timeout,
+                        accept_native_ws(tls),
+                    ).await {
+                        Ok(Ok(ws)) => ws,
+                        Ok(Err(e)) => {
                             tracing::debug!(?peer_addr, ?e, "ws native upgrade failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                ?peer_addr,
+                                timeout = ?ctx.auth_init_timeout,
+                                "ws native upgrade timed out",
+                            );
                             return;
                         }
                     };
@@ -920,6 +998,7 @@ async fn accept_loop_ws_browser(
     ctx: Arc<ConnectionContext>,
     shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
+    per_ip: PerIpLimiter,
     policy: BrowserOriginPolicy,
 ) {
     loop {
@@ -950,24 +1029,59 @@ async fn accept_loop_ws_browser(
                         continue;
                     }
                 };
+                let per_ip_guard = match per_ip.try_acquire(peer_addr.ip()) {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ip = %peer_addr.ip(),
+                            active = per_ip.active(peer_addr.ip()),
+                            cap = per_ip.cap(),
+                            "max_active_connections_per_ip reached (ws browser), refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 let policy = policy.clone();
                 tokio::spawn(async move {
                     let _guard = guard;
-                    let tls = match acceptor.accept(tcp).await {
-                        Ok(t) => t,
-                        Err(e) => {
+                    let _per_ip_guard = per_ip_guard;
+                    let tls = match tokio::time::timeout(
+                        ctx.auth_init_timeout,
+                        acceptor.accept(tcp),
+                    ).await {
+                        Ok(Ok(t)) => t,
+                        Ok(Err(e)) => {
                             tracing::debug!(?peer_addr, ?e, "tls handshake failed (ws browser)");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                ?peer_addr,
+                                timeout = ?ctx.auth_init_timeout,
+                                "tls handshake timed out (ws browser)",
+                            );
                             return;
                         }
                     };
                     // Browser binding mode: exporter MUST be zeros per spec.
                     let exporter = [0u8; 32];
-                    let ws = match accept_browser_ws(tls, &policy).await {
-                        Ok(ws) => ws,
-                        Err(e) => {
+                    let ws = match tokio::time::timeout(
+                        ctx.auth_init_timeout,
+                        accept_browser_ws(tls, &policy),
+                    ).await {
+                        Ok(Ok(ws)) => ws,
+                        Ok(Err(e)) => {
                             tracing::debug!(?peer_addr, ?e, "ws browser upgrade failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::debug!(
+                                ?peer_addr,
+                                timeout = ?ctx.auth_init_timeout,
+                                "ws browser upgrade timed out",
+                            );
                             return;
                         }
                     };
