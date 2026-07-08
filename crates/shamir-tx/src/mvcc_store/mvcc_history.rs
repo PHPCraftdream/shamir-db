@@ -258,6 +258,7 @@ impl MvccStore {
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(super::RecordCell {
                     version,
+                    vacuum_anchor: 0,
                     reserved_by: 0,
                 });
             }

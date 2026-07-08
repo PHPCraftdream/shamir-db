@@ -341,9 +341,12 @@ async fn c1_vacuum_never_reclaims_current() {
         "C1: current version must survive vacuum"
     );
 
-    // No other versions survive.
+    // A10 anchor deferral: current (v5) + deferred previous (v4) = 2 entries.
     let hist = count_history_entries(&mvcc).await;
-    assert_eq!(hist, 1, "C1: only the current version survives vacuum");
+    assert_eq!(
+        hist, 2,
+        "C1+A10: current + deferred anchor survive vacuum = 2"
+    );
 }
 
 /// C1 guarantee: the tombstone (current after delete) survives vacuum.

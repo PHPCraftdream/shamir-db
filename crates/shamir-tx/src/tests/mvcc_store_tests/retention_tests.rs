@@ -22,11 +22,12 @@ async fn eager_vacuum_currentonly_bounds_history() {
     }
 
     // C1: the current version lives in the log and is SACRED (cur_v guard).
-    // After 5 writes with max_count=0, only the current version (v5) survives.
+    // A10 anchor deferral: the immediately-prior version (v4) is kept as a
+    // deferred anchor — 2 entries total (current v5 + deferred v4).
     let hist = count_history_entries(&mvcc).await;
     assert_eq!(
-        hist, 1,
-        "C1: CurrentOnly eager vacuum leaves 1 entry (the current version in the log), got {hist}"
+        hist, 2,
+        "C1+A10: CurrentOnly eager vacuum leaves current + deferred anchor = 2, got {hist}"
     );
 
     // The current value is still readable at the floor.
@@ -264,12 +265,12 @@ async fn retention_current_only_is_max_count_zero() {
             .unwrap();
     }
 
-    // C1: the current version (v4) survives in the log (cur_v guard);
-    // all older versions are reclaimed by max_count=0.
+    // C1: the current version (v4) survives in the log (cur_v guard).
+    // A10 anchor deferral: v3 is kept as deferred anchor — 2 entries total.
     let hist = count_history_entries(&mvcc).await;
     assert_eq!(
-        hist, 1,
-        "C1: max_count=0 reclaims all old versions, current stays (1 entry)"
+        hist, 2,
+        "C1+A10: max_count=0 + deferred anchor = current + previous = 2"
     );
 
     let last_committed = mvcc.gate.last_committed();
