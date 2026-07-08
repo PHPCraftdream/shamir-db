@@ -502,3 +502,135 @@ async fn l5_vacuum_does_not_resurrect_from_cache() {
     );
     assert_eq!(timeline[0].version, v2);
 }
+
+// ============================================================================
+// A13 — remove_table must clean up per_table_mvcc (drop+recreate split-brain)
+// ============================================================================
+//
+// Audit finding A13 (`docs/audits/2026-07-06-concurrency-engine.md`):
+// `remove_table` removed the catalogue (`configs`), the `TableManager`
+// cache (`tables`), and the reverse-index entry (`token_names`), but NOT
+// the `per_table_mvcc` registry entry. Since `table_token_for` is a
+// deterministic hash of the name, a DROP followed by a CREATE of the SAME
+// name produced a split-brain: the new `create_table_context` builds a
+// fresh `MvccStore` and the new `TableManager` holds it directly, but
+// `per_table_mvcc.insert(token, new_mvcc)` silently no-ops (key already
+// present from the dropped table) — so the commit pipeline / SSI provider
+// / drainer, which all resolve the MvccStore BY TOKEN through
+// `per_table_mvcc`, keep writing through the STALE old store. A committed
+// tx's overlay lands in the OLD store and is invisible to reads issued
+// through the NEW `TableManager` (which holds its own store reference) —
+// committed transactions silently vanish.
+
+/// Direct registry-emptiness proof (A13): after `remove_table`, the
+/// `per_table_mvcc` entry for the dropped table's token MUST be gone —
+/// otherwise a subsequent `create_table_context` under the same name
+/// silently fails to register its genuinely-new `MvccStore`.
+#[tokio::test]
+async fn a13_remove_table_clears_per_table_mvcc_entry() {
+    let instance = create_test_instance();
+
+    // Materialize the table so `create_table_context` runs and inserts
+    // the MvccStore into `per_table_mvcc` under the deterministic token.
+    let _ = instance.get_table("users").await.unwrap();
+    let token = table_token_for("users");
+    assert!(
+        instance.per_table_mvcc().get(&token).is_some(),
+        "precondition: users table must have a registered MvccStore"
+    );
+
+    // Drop the table — the stale registry entry must NOT survive.
+    assert!(instance.remove_table("users"));
+    assert!(
+        instance.per_table_mvcc().get(&token).is_none(),
+        "remove_table must evict the per_table_mvcc entry; a stale \
+         registration causes a split-brain on drop+recreate (A13)"
+    );
+
+    // Sibling table is unaffected — only the dropped token is evicted.
+    let orders_token = table_token_for("orders");
+    assert!(
+        instance.per_table_mvcc().get(&orders_token).is_none(),
+        "orders should not be in per_table_mvcc (never materialized)"
+    );
+    let _ = instance.get_table("orders").await.unwrap();
+    assert!(
+        instance.per_table_mvcc().get(&orders_token).is_some(),
+        "sibling table's MvccStore must be untouched by the drop"
+    );
+}
+
+/// End-to-end split-brain reproduction (A13): create table `t`, drop it,
+/// recreate `t` under the SAME name, commit a write through the NEW
+/// `TableManager`, then READ through the same `TableManager` and assert
+/// the just-committed write IS visible. Before the fix, the commit
+/// pipeline resolves the MvccStore via `per_table_mvcc[token]` (which
+/// still points at the STALE old store), so the committed overlay lands
+/// in the OLD store and the NEW `TableManager`'s own read-through-store
+/// sees nothing — committed data silently vanishes.
+#[tokio::test]
+async fn a13_drop_then_recreate_write_visible_through_new_table() {
+    use shamir_tx::IsolationLevel;
+
+    let instance = create_test_instance();
+    instance.add_table(TableConfig::new("t"));
+
+    // Materialize the FIRST incarnation so per_table_mvcc[token("t")]
+    // holds the OLD MvccStore.
+    let t1 = instance.get_table("t").await.unwrap();
+    let seed_rid = t1
+        .insert(&InnerValue::Str("old-incarnation".into()))
+        .await
+        .unwrap();
+    let _ = t1.get(seed_rid).await.unwrap();
+
+    // === DROP the table ===
+    assert!(instance.remove_table("t"));
+
+    // === RECREATE under the SAME name ===
+    instance.add_table(TableConfig::new("t"));
+    let t2 = instance.get_table("t").await.unwrap();
+
+    // The TableManager holds a fresh MvccStore; the commit pipeline must
+    // resolve the SAME store through per_table_mvcc. If the stale entry
+    // leaked (A13), the tx's committed overlay lands in the OLD store.
+    let (mut tx, _g) = instance.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let new_rid = t2
+        .insert_tx(&InnerValue::Str("new-incarnation".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let outcome = instance.commit_tx(tx).await.unwrap();
+    assert!(
+        outcome.commit_version > 0,
+        "tx must commit with a positive version"
+    );
+
+    // Read through the NEW TableManager. Its own held MvccStore is the
+    // same one the commit pipeline wrote to ONLY if A13 is fixed.
+    let read_back = t2.get(new_rid).await.unwrap();
+    assert!(
+        matches!(read_back, InnerValue::Str(ref s) if s == "new-incarnation"),
+        "committed write must be visible through the recreated table; \
+         got {read_back:?} (A13 split-brain: commit pipeline wrote to the \
+         stale old MvccStore still registered in per_table_mvcc)"
+    );
+}
+
+/// Regression guard: a plain DROP (no recreate) must leave the table
+/// genuinely gone — `has_table` false, `get_table` errors, and no panic
+/// from background machinery that may have held a reference.
+#[tokio::test]
+async fn a13_plain_drop_no_recreate_still_clean() {
+    let instance = create_test_instance();
+    let _ = instance.get_table("users").await.unwrap();
+    let token = table_token_for("users");
+    assert!(instance.per_table_mvcc().get(&token).is_some());
+
+    assert!(instance.remove_table("users"));
+    assert!(!instance.has_table("users"));
+    assert!(instance.get_table("users").await.is_err());
+    assert!(
+        instance.per_table_mvcc().get(&token).is_none(),
+        "registry entry must be evicted on plain drop too"
+    );
+}
