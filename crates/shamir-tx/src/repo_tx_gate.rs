@@ -82,9 +82,12 @@ pub struct RepoTxGate {
     /// Monotonic tx-id allocator.
     next_tx_id: AtomicU64,
 
-    /// Set of open snapshot versions. GC must not delete any version
-    /// ≥ `min(active_snapshots)`.
-    active_snapshots: Arc<scc::HashMap<u64, (), THasher>>,
+    /// Refcounted set of open snapshot versions. GC must not delete any
+    /// version >= `min(active_snapshots)`. The value is a refcount so that
+    /// multiple concurrent snapshots pinned to the SAME version do not
+    /// corrupt each other's registration (insert bumps, drop decrements,
+    /// the entry is removed only when the count reaches zero).
+    active_snapshots: Arc<scc::HashMap<u64, u64, THasher>>,
 
     /// Count of currently-open Serializable snapshots. Incremented when
     /// a Serializable tx opens a snapshot; decremented when its
@@ -92,6 +95,25 @@ pub struct RepoTxGate {
     /// if zero, no Serializable tx can observe the footprint, so the
     /// `record_nontx_ssi_footprint` path is skipped entirely.
     active_serializable_count: Arc<AtomicU64>,
+
+    /// A10 in-flight barrier: count of `open_snapshot` /
+    /// `open_snapshot_serializable` calls that have incremented this counter
+    /// (BEFORE reading `last_committed()`) but have not yet completed their
+    /// registration in `active_snapshots`. While this is non-zero, vacuum's
+    /// L6 fast path MUST NOT physically delete any version — a reader is
+    /// mid-registration and its chosen floor version is not yet visible in
+    /// `active_snapshots`. This closes the TOCTOU for an UNBOUNDED number
+    /// of writer cycles: no matter how many writes happen while a reader is
+    /// stalled, vacuum defers all deletion until every in-flight opener has
+    /// completed registration.
+    ///
+    /// Ordering: the increment uses `AcqRel` so it is visible to vacuum's
+    /// `Acquire` load BEFORE the reader's subsequent `last_committed()` read
+    /// (which is itself an `Acquire` load on a different atomic — the
+    /// `AcqRel` store-release on the counter establishes a happens-before
+    /// edge). The decrement also uses `AcqRel` so it is visible to vacuum
+    /// only AFTER the registration (`entry_async` insert) has completed.
+    active_snapshots_opening: AtomicU64,
 
     /// PROPOSED (Phase C). Ring of recently-committed write footprints.
     /// Keyed by `commit_version` (monotonic), so a `range(snapshot..]`
@@ -146,8 +168,16 @@ pub struct RepoTxGate {
 /// decrements `active_serializable_count` so non-tx writes stop paying
 /// the SSI-footprint overhead once no Serializable tx is watching.
 pub struct SnapshotGuard {
-    version: u64,
-    snapshots: Arc<scc::HashMap<u64, (), THasher>>,
+    /// The versions this guard has registered in `active_snapshots`,
+    /// paired with whether the registration used a refcount bump
+    /// (always true under the refcount scheme). On drop, each entry's
+    /// refcount is decremented, and the key is removed when it hits
+    /// zero. A guard may carry MORE than one version when the floor
+    /// moved during `open_snapshot` — the stale registration is cleaned
+    /// up here rather than mid-open so there is never a zero-registration
+    /// window for a concurrently-racing vacuum.
+    registered: Vec<u64>,
+    snapshots: Arc<scc::HashMap<u64, u64, THasher>>,
     /// Non-None iff this guard was opened for a Serializable tx.
     /// Holds the shared counter so Drop can decrement it without
     /// holding a reference back to the `RepoTxGate`.
@@ -155,18 +185,67 @@ pub struct SnapshotGuard {
 }
 
 impl SnapshotGuard {
-    /// The snapshot version this guard protects.
+    /// The snapshot version this guard protects — the FINAL (highest)
+    /// registered version, which is the version the reader reads at.
     pub fn version(&self) -> u64 {
-        self.version
+        *self.registered.last().unwrap_or(&0)
     }
 }
 
 impl Drop for SnapshotGuard {
     fn drop(&mut self) {
-        let _ = self.snapshots.remove(&self.version);
+        // Decrement the refcount for every registered version; remove
+        // the entry when the count reaches zero. Each remove runs under
+        // the per-entry exclusive lock (scc entry API), so the read-
+        // modify-write is race-free.
+        for &v in &self.registered {
+            // Use the sync `entry` API — Drop is not async. `entry` takes
+            // the per-entry exclusive lock, so we can read-and-decrement
+            // atomically.
+            match self.snapshots.entry(v) {
+                scc::hash_map::Entry::Occupied(mut e) => {
+                    let count = e.get_mut();
+                    if *count <= 1 {
+                        let _ = e.remove_entry();
+                    } else {
+                        *count -= 1;
+                    }
+                }
+                scc::hash_map::Entry::Vacant(_) => {
+                    // Already removed by a prior drop or never inserted —
+                    // safe to ignore (idempotent).
+                }
+            }
+        }
         if let Some(cnt) = &self.serializable_count {
             cnt.fetch_sub(1, Ordering::AcqRel);
         }
+    }
+}
+
+/// A10 in-flight barrier RAII guard. Increments the counter on creation,
+/// decrements on drop (including cancellation). Ensures vacuum's fast path
+/// never deletes a version while a reader is between its floor-read and
+/// registration completion.
+pub(crate) struct OpeningBarrier<'a> {
+    counter: &'a AtomicU64,
+}
+
+impl<'a> OpeningBarrier<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
+    }
+}
+
+impl<'a> Drop for OpeningBarrier<'a> {
+    fn drop(&mut self) {
+        // AcqRel: the decrement must be visible to vacuum's Acquire load
+        // ONLY AFTER the registration that preceded this drop is complete.
+        // fetch_sub returns the previous value; we only assert it was > 0
+        // in debug builds to catch double-decrement bugs.
+        let prev = self.counter.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(prev > 0, "OpeningBarrier double-decrement");
     }
 }
 
@@ -181,6 +260,7 @@ impl RepoTxGate {
             next_tx_id: AtomicU64::new(next_tx_id_seed),
             active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
+            active_snapshots_opening: AtomicU64::new(0),
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),
             completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
@@ -209,22 +289,33 @@ impl RepoTxGate {
         self.last_committed_version.load(Ordering::Acquire)
     }
 
-    /// cancel-safe: yes — single `scc::HashMap::insert_async` is CAS-
-    /// based and either completes or leaves the map unchanged on
-    /// cancellation. If the future is dropped after insertion but before
-    /// returning the guard, the snapshot entry leaks (no Drop runs);
-    /// since callers always await this to completion or never call it,
-    /// in practice this is cancel-safe.
+    /// cancel-safe: yes — the `entry_async` calls are CAS-based and either
+    /// complete or leave the map unchanged on cancellation. If the future is
+    /// dropped after a registration but before returning the guard, the
+    /// snapshot entry leaks (no Drop runs); since callers always await this
+    /// to completion or never call it, in practice this is cancel-safe.
     ///
     /// Register a snapshot at the current `last_committed` version and
-    /// return a RAII guard. On drop the snapshot is removed.
+    /// return a RAII guard. On drop the snapshot is removed (refcount-
+    /// decremented).
+    ///
+    /// TOCTOU fix (A10): registration happens BEFORE the snapshot version is
+    /// finalised, then the floor is re-checked. If `last_committed` advanced
+    /// between the initial read and the registration completing, a SECOND
+    /// registration at the new floor is inserted BEFORE the stale one is
+    /// removed, so there is never a zero-registration window during which a
+    /// racing vacuum could observe `active_snapshots_empty() == true` and
+    /// delete a version this reader is about to pin. The guard carries ALL
+    /// registered versions and cleans them up on drop.
+    ///
     /// Use [`open_snapshot_serializable`](Self::open_snapshot_serializable)
     /// when the transaction's isolation level is `Serializable`.
     pub async fn open_snapshot(&self) -> SnapshotGuard {
-        let version = self.last_committed();
-        let _ = self.active_snapshots.insert_async(version, ()).await;
+        let registered = self.register_snapshot().await;
+        // The snapshot version the reader reads at is the FINAL (highest)
+        // registered version — the floor can only move forward.
         SnapshotGuard {
-            version,
+            registered,
             snapshots: Arc::clone(&self.active_snapshots),
             serializable_count: None,
         }
@@ -240,8 +331,7 @@ impl RepoTxGate {
     ///
     /// cancel-safe: same guarantee as `open_snapshot`.
     pub async fn open_snapshot_serializable(&self) -> SnapshotGuard {
-        let version = self.last_committed();
-        let _ = self.active_snapshots.insert_async(version, ()).await;
+        let registered = self.register_snapshot().await;
         // Increment AFTER the snapshot version is registered so that
         // any concurrent non-tx write that races with this path already
         // sees the snapshot version in `active_snapshots` (GC safety).
@@ -251,9 +341,73 @@ impl RepoTxGate {
         self.active_serializable_count
             .fetch_add(1, Ordering::AcqRel);
         SnapshotGuard {
-            version,
+            registered,
             snapshots: Arc::clone(&self.active_snapshots),
             serializable_count: Some(Arc::clone(&self.active_serializable_count)),
+        }
+    }
+
+    /// A10 TOCTOU fix: register-then-verify-then-reconcile, protected by
+    /// an in-flight barrier.
+    ///
+    /// The in-flight barrier (`active_snapshots_opening`) is incremented
+    /// BEFORE the first `last_committed()` read and decremented AFTER the
+    /// final registration completes. While the counter is non-zero, vacuum's
+    /// fast path defers ALL physical deletion — closing the race for an
+    /// unbounded number of writer cycles (a stalled reader's floor version
+    /// is never deleted, no matter how many writes happen while it is
+    /// mid-registration).
+    ///
+    /// The barrier uses an RAII guard (`OpeningBarrier`) so the counter is
+    /// correctly decremented even if the future is dropped/cancelled mid-
+    /// registration — a leaked increment would permanently block vacuum's
+    /// fast path.
+    ///
+    /// After registration:
+    /// 1. Read the floor `v0 = last_committed()`.
+    /// 2. Atomically bump the refcount for `v0` in `active_snapshots`.
+    /// 3. Re-read the floor. If it advanced to `v1 > v0`, register `v1`
+    ///    too (the stale `v0` entry is left for the guard's Drop to clean
+    ///    up via refcount-decrement).
+    ///
+    /// Bounded retry: the floor only moves forward, so at most one
+    /// reconciliation iteration is needed in practice.
+    async fn register_snapshot(&self) -> Vec<u64> {
+        // A10 barrier: increment BEFORE reading the floor. The AcqRel
+        // store ensures vacuum's Acquire load sees the increment before
+        // the reader's subsequent Acquire load of `last_committed()`.
+        let _barrier = OpeningBarrier::new(&self.active_snapshots_opening);
+
+        const MAX_RETRIES: usize = 4;
+        let mut registered = Vec::with_capacity(2);
+        let mut current = self.last_committed();
+        loop {
+            self.bump_refcount(current).await;
+            registered.push(current);
+            let next = self.last_committed();
+            if next == current || registered.len() >= MAX_RETRIES {
+                break;
+            }
+            // Floor moved forward — loop to register the new floor too.
+            current = next;
+        }
+        registered
+        // `_barrier` drops here: AcqRel decrement, visible to vacuum only
+        // AFTER all registrations above are complete.
+    }
+
+    /// Atomically insert-or-bump the refcount for `version` in
+    /// `active_snapshots`. Uses the per-entry exclusive lock held by
+    /// `entry_async` so the read-modify-write is race-free against
+    /// concurrent openers and droppers.
+    async fn bump_refcount(&self, version: u64) {
+        match self.active_snapshots.entry_async(version).await {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                *e.get_mut() = e.get().saturating_add(1);
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(1u64);
+            }
         }
     }
 
@@ -365,7 +519,29 @@ impl RepoTxGate {
 
     /// Minimum alive snapshot version — for GC. Returns
     /// `last_committed()` if no snapshots are open.
+    ///
+    /// A10 in-flight barrier awareness: while any `open_snapshot` call is
+    /// mid-registration (`active_snapshots_opening > 0`), this function
+    /// returns `0` — the maximally conservative floor. This means:
+    /// * History GC (`gc_below`, `vacuum_key`, `purge_below_ts`): no version
+    ///   is reclaimable (all versions `>= 0` are sacred).
+    /// * `prune_commit_log_below`: no records are pruned (real commit
+    ///   versions start at 1, so `commit_version <= 0` matches nothing).
+    /// * `prune_version_cache`: no entries are evicted (all `version >= 0`).
+    ///
+    /// This protects the in-flight reader unconditionally: its floor is some
+    /// `v_old <= last_committed()` (captured before the barrier increment),
+    /// and since `min_alive() == 0 < v_old`, every version the reader might
+    /// need is sacred. Once the reader completes registration, its version
+    /// appears in `active_snapshots` and `min_alive()` returns the true
+    /// minimum — GC resumes normally.
     pub fn min_alive(&self) -> u64 {
+        // Fast path: no in-flight openers. This is the overwhelmingly common
+        // case, so we check it FIRST to avoid the active_snapshots scan when
+        // there is no contention.
+        if self.active_snapshots_opening.load(Ordering::Acquire) > 0 {
+            return 0;
+        }
         let mut min = u64::MAX;
         self.active_snapshots.scan(|k, _| {
             if *k < min {
@@ -380,8 +556,36 @@ impl RepoTxGate {
     }
 
     /// True if no transaction has an open snapshot.
+    ///
+    /// A10 in-flight barrier awareness: returns `false` (i.e. "snapshots
+    /// ARE active") while any `open_snapshot` call is mid-registration,
+    /// even if the registration hasn't landed in `active_snapshots` yet.
+    /// This ensures callers that use `active_snapshots_empty()` to decide
+    /// whether to keep an anchor (e.g. `vacuum_key`'s scan path at
+    /// `have_live_snapshot = !active_snapshots_empty()`) behave
+    /// conservatively during the registration window.
     pub fn active_snapshots_empty(&self) -> bool {
-        self.active_snapshots.is_empty()
+        self.active_snapshots.is_empty() && !self.snapshots_opening()
+    }
+
+    /// A10 in-flight barrier: true if at least one `open_snapshot` call has
+    /// begun (incremented the counter) but not yet completed registration in
+    /// `active_snapshots`. Vacuum's fast path checks this to defer ALL
+    /// physical deletion while a reader is mid-registration.
+    pub fn snapshots_opening(&self) -> bool {
+        self.active_snapshots_opening.load(Ordering::Acquire) > 0
+    }
+
+    /// Test-only: simulate a stalled `open_snapshot` caller that has
+    /// incremented the in-flight barrier but not yet completed registration.
+    /// Returns an RAII guard that decrements on drop. This lets tests
+    /// deterministically reproduce the multi-generation stall scenario
+    /// (reader captured floor, held in-flight across N writes, then
+    /// completes) without relying on scheduler timing.
+    #[doc(hidden)]
+    #[allow(dead_code)]
+    pub(crate) fn test_hold_opening_barrier(&self) -> OpeningBarrier<'_> {
+        OpeningBarrier::new(&self.active_snapshots_opening)
     }
 
     /// Number of currently-open Serializable snapshots.

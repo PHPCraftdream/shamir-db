@@ -59,9 +59,13 @@ async fn currentonly_rewrite_no_prefix_scan() {
         "CurrentOnly rewrite must not scan (targeted remove, third write)"
     );
 
-    // Verify correctness: only 1 history entry (the current version).
+    // Verify correctness: A10 anchor deferral keeps 2 entries (current +
+    // deferred previous). The fast path still does NOT scan.
     let hist = count_history_entries(&mvcc).await;
-    assert_eq!(hist, 1, "CurrentOnly must leave only the current version");
+    assert_eq!(
+        hist, 2,
+        "CurrentOnly with A10 anchor deferral: current + deferred previous = 2"
+    );
 }
 
 /// A version pinned by a live snapshot is NOT reclaimed — the targeted
@@ -186,7 +190,8 @@ async fn append_only_no_vacuum_scan() {
 }
 
 /// delete_versioned + CurrentOnly: the tombstone for the new version is
-/// present; the old data version is reclaimed via targeted remove.
+/// present; the old data version is deferred (A10 anchor) — the tombstone
+/// is current, the old data version stays as the deferred anchor.
 #[tokio::test]
 async fn delete_versioned_currentonly_reclaims_old() {
     let gate = make_gate();
@@ -199,19 +204,20 @@ async fn delete_versioned_currentonly_reclaims_old() {
         .unwrap();
     assert_eq!(count_history_entries(&mvcc).await, 1);
 
-    // Delete — targeted remove fires for old data version.
+    // Delete — fast path fires (no scan). A10: v1 is deferred as anchor,
+    // the tombstone becomes current.
     mvcc.delete_versioned(key.clone()).await.unwrap();
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
         0,
-        "delete_versioned CurrentOnly must use targeted remove"
+        "delete_versioned CurrentOnly must use fast path (no scan)"
     );
 
-    // Only the tombstone remains in history.
+    // A10: 2 entries — tombstone (current) + deferred old data version.
     let hist = count_history_entries(&mvcc).await;
     assert_eq!(
-        hist, 1,
-        "after delete, only the tombstone entry should remain"
+        hist, 2,
+        "after delete: tombstone (current) + deferred old version = 2"
     );
 
     // get_current returns None (tombstone).

@@ -95,6 +95,17 @@ pub(crate) struct RecordCell {
     /// before the physical store mutation. Read by get_at / current_version /
     /// version_of / live_version.
     pub(crate) version: u64,
+    /// A10 vacuum anchor deferral: the version of the immediately-PRIOR
+    /// write that the L6 fast-path vacuum has DEFERRED deletion for.
+    /// `0` = nothing deferred. The fast path does NOT delete `old_v` in the
+    /// same call that created it — instead it stores `old_v` here and only
+    /// physically deletes the PREVIOUSLY-deferred version (if any) on the
+    /// NEXT vacuum_key call. This one-generation slack means the
+    /// immediately-prior version is ALWAYS present in history for at
+    /// least one more write cycle, closing the TOCTOU race: a reader that
+    /// "just missed" registering in `active_snapshots` before vacuum ran
+    /// will still find its version in the log.
+    pub(crate) vacuum_anchor: u64,
     /// SSI fix S1 — cell-reservation marker. `0` = free; otherwise the
     /// `txn_id` of the committer that has CLAIMED this cell as the explicit
     /// serialization point for a write-write conflict (`try_reserve`). The
@@ -422,9 +433,29 @@ impl MvccStore {
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(RecordCell {
                     version,
+                    vacuum_anchor: 0,
                     reserved_by: 0,
                 });
             }
+        }
+    }
+
+    /// A10 vacuum anchor deferral: atomically set the cell's `vacuum_anchor`
+    /// to `new_anchor` and return the PREVIOUS value. Uses the sync `entry`
+    /// API (per-entry exclusive lock) so the read-and-swap is race-free
+    /// against concurrent vacuum calls on the same key. If the cell is
+    /// absent (cold-start or evicted), returns `None` and does nothing —
+    /// the deferred-anchor optimisation only applies when the cell is
+    /// resident.
+    pub(crate) fn swap_vacuum_anchor(&self, key: &[u8], new_anchor: u64) -> Option<u64> {
+        match self.cells.entry(Bytes::copy_from_slice(key)) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                let cell = e.get_mut();
+                let prev = cell.vacuum_anchor;
+                cell.vacuum_anchor = new_anchor;
+                Some(prev)
+            }
+            scc::hash_map::Entry::Vacant(_) => None,
         }
     }
 
@@ -489,6 +520,7 @@ impl MvccStore {
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(RecordCell {
                     version: 0,
+                    vacuum_anchor: 0,
                     reserved_by: txn_id,
                 });
                 true
@@ -518,6 +550,7 @@ impl MvccStore {
             scc::hash_map::Entry::Vacant(e) => {
                 e.insert_entry(RecordCell {
                     version,
+                    vacuum_anchor: 0,
                     reserved_by: 0,
                 });
             }

@@ -373,6 +373,68 @@ fn commit_log_prune_uses_min_alive_floor() {
     assert_eq!(gate.commit_log_len(), 0); // all <=5 dropped, none left
 }
 
+/// A10 in-flight barrier: `min_alive()` returns 0 while an opener is
+/// mid-registration, so `prune_commit_log_below(min_alive())` is a no-op
+/// (no records have `commit_version <= 0`). This protects the in-flight
+/// reader's predicate-conflict window from being pruned by a racing
+/// background GC tick.
+#[test]
+fn a10_min_alive_barrier_protects_commit_log() {
+    let gate = RepoTxGate::new(0, 1);
+    let mk = |v: u64| CommitWriteRecord {
+        commit_version: v,
+        per_table: TFxMap::from_iter([(
+            1,
+            TableWriteFootprint {
+                touched: true,
+                inserted_index_keys: vec![],
+            },
+        )]),
+    };
+    for v in 1..=5 {
+        gate.record_commit_writes(mk(v));
+    }
+    gate.publish_committed(5);
+    assert_eq!(gate.commit_log_len(), 5);
+
+    // Without barrier: min_alive = last_committed = 5, snapshots are empty.
+    assert_eq!(gate.min_alive(), 5);
+    assert!(gate.active_snapshots_empty());
+
+    // Hold the in-flight barrier — simulates a reader mid-open_snapshot.
+    let barrier = gate.test_hold_opening_barrier();
+    assert!(gate.snapshots_opening());
+
+    // min_alive() now returns 0 (maximally conservative).
+    assert_eq!(
+        gate.min_alive(),
+        0,
+        "barrier held: min_alive must return 0 to protect all versions"
+    );
+    assert!(
+        !gate.active_snapshots_empty(),
+        "barrier held: active_snapshots_empty must return false"
+    );
+
+    // prune_commit_log_below(0) is a no-op — no record has commit_version <= 0.
+    let removed = gate.prune_commit_log_below(gate.min_alive());
+    assert_eq!(removed, 0, "barrier held: prune must not remove anything");
+    assert_eq!(
+        gate.commit_log_len(),
+        5,
+        "barrier held: all 5 records must survive"
+    );
+
+    // Release the barrier — reader completes registration.
+    drop(barrier);
+
+    // Now min_alive returns to normal and pruning proceeds.
+    assert_eq!(gate.min_alive(), 5);
+    let removed = gate.prune_commit_log_below(gate.min_alive());
+    assert_eq!(removed, 5, "barrier released: prune removes all 5 records");
+    assert_eq!(gate.commit_log_len(), 0);
+}
+
 // ── Phase C Step 7: prune commit-write-log tests ──────────────────
 
 #[test]

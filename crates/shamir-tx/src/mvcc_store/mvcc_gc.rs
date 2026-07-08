@@ -56,31 +56,77 @@ impl MvccStore {
 
         // L6 fast path: CurrentOnly retention + no live snapshots + no
         // accumulated old versions from a prior snapshot epoch + known prior
-        // version → targeted remove of the single old version, no scan_prefix.
+        // version → deferred-anchor remove of old versions, no scan_prefix.
+        //
+        // A10 TOCTOU fix — PRIMARY mechanism: in-flight barrier.
+        // `gate.snapshots_opening()` returns true if any `open_snapshot` call
+        // has begun (incremented `active_snapshots_opening`) but not yet
+        // completed registration in `active_snapshots`. While this is true,
+        // the fast path MUST NOT physically delete ANY version — a reader is
+        // mid-registration and its floor version is not yet visible in
+        // `active_snapshots`. This closes the race for an UNBOUNDED number
+        // of writer cycles: no matter how many writes happen while the reader
+        // is stalled, vacuum defers all deletion until the opener completes.
+        //
+        // A10 TOCTOU fix — SECONDARY mechanism: anchor deferral.
+        // The fast path does NOT delete `old_v` in the SAME call — it stores
+        // `old_v` as a deferred anchor in the cell's `vacuum_anchor` field and
+        // only physically deletes the PREVIOUSLY-deferred anchor (if any).
+        // This one-generation slack is an additional safety net.
+        //
         // Invariants:
-        //  • old_v == 0 ⇒ append-only (first write), nothing to reclaim.
-        //  • active_snapshots_empty() ⇒ no snapshot floor to protect, no anchor.
+        //  • old_v == 0 ⇒ append-only (first write), nothing to defer.
+        //  • active_snapshots_empty() ⇒ no snapshot floor to protect.
+        //  • !snapshots_opening() ⇒ no reader mid-registration (barrier clear).
         //  • !vacuum_needs_scan ⇒ no accumulated versions from snapshot epochs.
         //  • is_current_only() ⇒ max_count == Some(0), no age axis, no min_count
-        //    floor — every old version must go.
+        //    floor — every old version must go (eventually, after deferral).
         let snapshots_empty = self.gate.active_snapshots_empty();
+        let openings_in_flight = self.gate.snapshots_opening();
         if policy.is_current_only()
             && snapshots_empty
+            && !openings_in_flight
             && !self.vacuum_needs_scan.load(Ordering::Acquire)
         {
             if old_v == 0 {
                 return; // append-only, no prior version
             }
-            // Targeted remove: the old version-key and its ts-key.
-            let _ = self.history.remove(encode_version_key(key, old_v)).await;
-            let _ = self.history.remove(ts_key(old_v)).await;
-            // P1c: drop the old version from the overlay in lockstep.
-            // D2 P1d-2b: gate on durable_watermark — never drop an undrained
-            // version (the overlay holds its only copy until the drainer lands
-            // it in history).
-            if old_v <= self.gate.durable_watermark() {
-                self.overlay.remove(key, old_v);
+            // A10: atomically swap `old_v` into the cell's `vacuum_anchor`,
+            // retrieving the PREVIOUSLY-deferred version (if any). The
+            // previously-deferred version is now ONE generation stale — safe
+            // to physically delete (the barrier guarantees no reader is
+            // mid-registration that could need it). `old_v` itself is NOT
+            // deleted yet — it stays as the new deferred anchor.
+            let prev_anchor = self.swap_vacuum_anchor(key, old_v);
+            if let Some(deferred) = prev_anchor {
+                if deferred != old_v && deferred > 0 {
+                    // Physically delete the previously-deferred version.
+                    let _ = self.history.remove(encode_version_key(key, deferred)).await;
+                    let _ = self.history.remove(ts_key(deferred)).await;
+                    // P1c: drop from overlay in lockstep.
+                    // D2 P1d-2b: gate on durable_watermark.
+                    if deferred <= self.gate.durable_watermark() {
+                        self.overlay.remove(key, deferred);
+                    }
+                }
             }
+            return;
+        }
+
+        // A10 barrier active: a reader is mid-registration. We can still
+        // update the anchor bookkeeping (swap old_v in), but MUST skip the
+        // physical deletion of the previously-deferred version — the stalled
+        // reader's floor could be that old anchor. The deferred version(s)
+        // will accumulate slightly longer until the next vacuum_key call after
+        // the in-flight opener clears. This is safe over-retention.
+        if policy.is_current_only()
+            && snapshots_empty
+            && openings_in_flight
+            && !self.vacuum_needs_scan.load(Ordering::Acquire)
+            && old_v != 0
+        {
+            // Update bookkeeping only — no physical deletes.
+            let _ = self.swap_vacuum_anchor(key, old_v);
             return;
         }
 

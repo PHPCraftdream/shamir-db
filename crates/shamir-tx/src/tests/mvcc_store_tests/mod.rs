@@ -1,6 +1,7 @@
 mod helpers;
 mod test_stores;
 
+pub mod a10_toctou_tests;
 pub mod append_only_fast_path_tests;
 pub mod cell_reservation_tests;
 pub mod crud_tests;
