@@ -158,6 +158,91 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
+/// Concurrency-cap regression (audit §2b).
+///
+/// `argon2id()` is a guest/query-reachable scalar that can allocate up to
+/// `A2_MAX_MEMORY_KB` per call. Without an aggregate concurrency cap a
+/// low-privileged user (or WASM guest function) can issue many parallel
+/// `argon2id()` calls and OOM the server. This test asserts that the number
+/// of `hash_password_into` calls executing *concurrently* never exceeds the
+/// documented cap.
+///
+/// Determinism: the semaphore gates *scheduling* only — it must not change the
+/// KDF output. The `argon2id_matches_reference_and_is_deterministic` test
+/// above covers the bit-identity contract; this test covers the cap.
+///
+/// Methodology: [`crypto::argon2id_fn`] updates a process-wide
+/// `A2_PEAK_IN_FLIGHT` atomic (inc-on-entry / dec-on-exit around the gated
+/// region, with a `fetch_max` to track the running peak). We reset it to zero,
+/// spawn `cap + extra` worker threads each invoking `argon2id()` through the
+/// registry with a light profile (so Argon2 memory-bandwidth contention does
+/// not self-throttle and mask the cap), join them, then read the peak.
+///
+/// - **Capped (correct):** the semaphore holds in-flight at `cap`, so
+///   `A2_PEAK_IN_FLIGHT <= cap`.
+/// - **Uncapped (the bug):** all `cap + extra` calls enter the KDF region
+///   concurrently, so `A2_PEAK_IN_FLIGHT == cap + extra > cap`.
+#[test]
+fn argon2id_concurrency_cap_bounds_parallel_calls() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let cap = crate::crypto::ARGON2ID_CONCURRENCY_CAP;
+    let n_workers = (cap as usize) * 2; // 2× cap → uncapped peak clearly exceeds cap
+
+    // Reset BOTH observability counters so prior tests (which may have left
+    // A2_IN_FLIGHT non-zero if a call was interrupted, or raised the peak)
+    // do not pollute this run's assertion.
+    crate::crypto::A2_PEAK_IN_FLIGHT.store(0, std::sync::atomic::Ordering::Relaxed);
+    crate::crypto::A2_IN_FLIGHT.store(0, std::sync::atomic::Ordering::Relaxed);
+
+    let registry = Arc::new(reg());
+    let password = b"concurrency-test-pw";
+    let salt = b"0123456789abcdef"; // 16 bytes
+
+    let mut handles = Vec::with_capacity(n_workers);
+    for _ in 0..n_workers {
+        let reg = Arc::clone(&registry);
+        handles.push(thread::spawn(move || {
+            // Moderate profile (16 MiB, t=2): each call occupies the KDF
+            // region long enough that 2×cap concurrent workers provably
+            // overlap past `cap` when uncapped, while staying small enough
+            // (16 MiB) that memory-bandwidth contention does not fully
+            // serialise the calls independent of the semaphore.
+            let res = reg.call(
+                "argon2id",
+                &[
+                    bin(password),
+                    bin(salt),
+                    QueryValue::Int(16_384), // memory_kb — 16 MiB
+                    QueryValue::Int(2),      // time
+                    QueryValue::Int(1),      // parallelism
+                    QueryValue::Int(32),     // length
+                ],
+            );
+            res.unwrap_or_else(|e| panic!("argon2id call failed: {e:?}"));
+        }));
+    }
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    let peak = crate::crypto::A2_PEAK_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        peak <= cap,
+        "argon2id concurrency cap violated: observed peak in-flight {peak} > cap {cap} \
+         (spawned {n_workers} concurrent workers)",
+    );
+    // Sanity: with 2×cap workers and moderate params, the cap must actually
+    // have been saturated — otherwise the test is vacuous. Peak == cap (not
+    // below) confirms the semaphore was exercised at saturation.
+    assert_eq!(
+        peak, cap,
+        "expected the concurrency cap to be saturated (peak == cap == {cap}), got peak = {peak}; \
+         the workers likely did not overlap enough — increase n_workers or the per-call work",
+    );
+}
+
 #[test]
 fn argon2id_matches_reference_and_is_deterministic() {
     use argon2::{Algorithm, Argon2, Params, Version};
