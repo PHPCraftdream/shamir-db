@@ -238,20 +238,49 @@ impl IndexManager {
     /// stream instead of `data_store.iter_stream`. Used by `TableManager`
     /// when an MvccStore is attached — the seam (`list_stream`) is the
     /// sole source of truth after FINAL-A.
+    ///
+    /// # Concurrency (audit A9 — register-first, backfill-second)
+    ///
+    /// The index definition is registered (`add_index`) BEFORE backfilling
+    /// postings. This closes the lost-write window: any concurrent writer
+    /// that lands AFTER the snapshot was taken but BEFORE registration is
+    /// now caught by the live write-hook (`on_record_created`), which sees
+    /// the freshly-registered definition and maintains a posting for it.
+    ///
+    /// A record captured by BOTH the snapshot AND a concurrent live write
+    /// (a narrow overlap right at the registration boundary) produces the
+    /// SAME physical posting key — `build_posting_key(index_key, record_id)`
+    /// is a pure function of `(is_unique, name_interned, h1, h2, record_id)`
+    /// with an EMPTY value (`Bytes::new()`) — so writing it twice is an
+    /// idempotent no-op, not a corruption.
     pub async fn create_index_from_records(
         &self,
         index_def: IndexDefinition,
         records: Vec<(RecordId, InnerValue)>,
     ) -> DbResult<()> {
         let name_interned = index_def.name_interned;
-        let mut count = 0usize;
+        // Capture paths before `index_def` is moved into `add_index`.
+        let paths = index_def.paths.clone();
 
+        // ── Phase 1: register the definition FIRST ──────────────────────────
+        // Once registered, the live write-hook starts maintaining postings
+        // for every concurrent/new write against this index immediately.
+        // `save_index_info` persists the registry so a crash between
+        // registration and backfill leaves a correctly-registered (but
+        // possibly under-populated) index that the S9b rebuild-on-open /
+        // doctor `repair()` pass will top up on next open.
+        self.indexes.add_index(index_def);
+        self.has_indexes.store(true, Ordering::Release);
+        self.save_index_info().await?;
+
+        // ── Phase 2: backfill postings from the snapshot ────────────────────
+        // Idempotent: a record also written live by the hook right at the
+        // registration boundary yields the same (key, empty-value) pair.
+        let mut count = 0usize;
         let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(131072);
         let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(131072);
         for (record_id, value) in &records {
-            if let Some(irk) =
-                build_index_key_from_record(false, name_interned, value, &index_def.paths)
-            {
+            if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths) {
                 let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
                 posting_writes.push((posting_key, Bytes::new()));
@@ -265,10 +294,6 @@ impl IndexManager {
         for ik in cache_index_keys {
             self.posting_cache.remove(&ik);
         }
-
-        self.indexes.add_index(index_def);
-        self.has_indexes.store(true, Ordering::Release);
-        self.save_index_info().await?;
 
         log::info!(
             "Created index '{}' with {} entries (from seam)",

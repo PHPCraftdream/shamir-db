@@ -17,6 +17,7 @@ pub mod history_read_tests;
 pub mod index2_empty_result_tests;
 pub mod index2_migration_tests;
 pub mod index2_persistence_tests;
+pub mod index_rename_concurrency_tests;
 pub mod index_scan_tests;
 pub mod insert_tx_tests;
 pub mod interner_manager_tests;
