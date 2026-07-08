@@ -274,17 +274,85 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     // entries are sorted ascending so the last one carries the max, but
     // fold defensively in case of legacy commit_version == 0 entries.
     let mut max_replayed = 0u64;
+
+    // A11 (audit finding): the OLD loop did `replay_v2_entry` →
+    // `gate.mark`/`mark_durable` → `wal.commit` in ONE pass. That finalized
+    // every entry (advance durable watermark, no-op marker commit, seed
+    // version cache into durable history) WITHOUT ever persisting the
+    // interner deltas the entries carried — `replay_v2_entry`'s
+    // `interner.touch_with_id` populates the IN-MEMORY interner only.
+    //
+    // A subsequent crash before the next background interner checkpoint
+    // would lose every replayed (name, id) mapping: the in-memory interner
+    // of the now-dead process is gone, and the persistent chunk store never
+    // learned the ids — but the history records (written during
+    // `replay_v2_entry`, which IS durable) still reference them, leaving
+    // them permanently undecodable. This is the recovery-path analogue of
+    // the drainer's CRIT-2 (#436): the drainer carefully gates WAL
+    // truncation on `interner_delta_safe_to_truncate` (the A5 gate), but
+    // `recover_inflight_v2` had NO equivalent protection.
+    //
+    // Fix (audit fix sketch option 1 — "persist once"): split the loop into
+    // two phases so every entry's interner delta is applied to the in-memory
+    // interner FIRST (Phase A), then force ONE `repo_interner.persist()`
+    // (Phase B) to durably checkpoint every replayed mapping BEFORE any entry
+    // is finalized (Phase C: mark / mark_durable / wal.commit). Recovery is a
+    // COLD, infrequent path — unlike the drainer's hot path, there is no perf
+    // reason to avoid an eager persist, and a single persist covers every
+    // entry's delta in one shot. `persist()` is a no-op when nothing new was
+    // added (the common no-delta / already-covered cases), so the regression
+    // guards stay green without special-casing.
+    //
+    // If `persist()` fails, propagate the error WITHOUT finalizing any entry
+    // — mirroring the drainer's "conservatively retain" behavior. The
+    // entries stay inflight (their WAL markers / segments are untouched
+    // because Phase C never ran), so the next recovery re-replays them
+    // idempotently and retries the persist. `open()`'s
+    // `recover_v2_inflight().await?` then refuses to serve a repo that could
+    // not durably absorb its recovered interner deltas.
+
+    // Phase A: replay every entry (data ops + interner deltas into memory).
+    // `replay_v2_entry` is idempotent at the data layer so re-replay on a
+    // persist failure converges. We capture (txn_id, commit_version) per
+    // entry for Phase C so we don't need to hold the entries themselves.
+    let mut finalized: Vec<(u64 /* txn_id */, u64 /* commit_version */)> =
+        Vec::with_capacity(entries.len());
     for entry in entries {
         max_replayed = max_replayed.max(entry.commit_version);
         replay_v2_entry(&entry, repo).await?;
+        finalized.push((entry.txn_id, entry.commit_version));
+    }
+
+    // Phase B (A11): force ONE interner persist so every replayed delta is
+    // durably checkpointed before any entry is finalized. The persisted
+    // high-water mark now covers every id any replayed entry referenced,
+    // matching the invariant the drainer's A5 gate enforces on its hot path.
+    // Cheap in the common case (no-op when nothing new was added) and
+    // correct in the worst case (one flush covers the whole recovery batch).
+    let repo_interner = repo.repo_interner().await?;
+    repo_interner.persist().await.map_err(|e| {
+        DbError::Internal(format!(
+            "A11 recovery: interner persist after replay failed (history records \
+             may reference ids the persistent interner has not absorbed): {e}; \
+             refusing to finalize any entry"
+        ))
+    })?;
+
+    // Phase C: now that the interner is durably consistent with every replayed
+    // entry's data, finalize each entry (mark / mark_durable / wal.commit).
+    // Safe to do in a separate pass because Phase A already landed the data
+    // in `history` and the gate floor was seeded from the inflight markers in
+    // Step 1 above — finalize here just publishes the recovered state to
+    // readers and clears the (no-op) per-entry marker.
+    for (txn_id, commit_version) in finalized {
         // P1d: mark version as materialized so the completion tracker
         // rebuilds the contiguous prefix. Every durable WAL entry is
         // treated as Materialized — there is no commit/abort marker
         // distinction in the WAL (durable = committed). Legacy entries
         // with commit_version == 0 are skipped (watermark already ≥ 0).
-        if entry.commit_version > 0 {
+        if commit_version > 0 {
             gate.completion()
-                .mark(entry.commit_version, CompletionState::Materialized);
+                .mark(commit_version, CompletionState::Materialized);
             // D2 P1d-2b: `replay_v2_entry` just wrote this version's data into
             // `history` (via `write_committed_to_history`) — it is now durable.
             // Advance the durable watermark so a freshly-opened repo's
@@ -293,11 +361,11 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
             // the durable/visibility gap must be closed). The drainer's normal
             // warm path does this same `mark_durable`; recovery is the cold
             // path doing it for the inflight tail.
-            gate.mark_durable(entry.commit_version);
+            gate.mark_durable(commit_version);
         }
         // No-op: there are no per-entry markers; the segment is cleaned by
         // F6 truncation and replay is idempotent.
-        wal.commit(entry.txn_id).await?;
+        wal.commit(txn_id).await?;
     }
 
     if count > 0 {
