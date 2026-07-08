@@ -274,3 +274,201 @@ async fn apply_before_any_read_is_mvcc_visible() {
         "apply-before-read must be MVCC-visible: got {got:?}"
     );
 }
+
+// ── A12 regression — completion-tracker terminal marking ───────────
+//
+// apply_replicated used to allocate its local version via the BARE
+// `assign_next_version()` (which only bumps the version_counter atomic) and
+// never marked that version in the gate's `completion` tracker on the success
+// path — only `mark_durable_aborted` ran on the failure path, and that touches
+// the SEPARATE `durable_completion` tracker, not the visibility one. A version
+// allocated but never marked in `completion` leaves a permanent hole: the
+// tracker's `try_advance` stops at the first version with no terminal state,
+// so a later local commit at M > N cannot push the contiguous watermark past
+// N. The fix routes both paths through a `VersionGuard` (success → `commit()`
+// marks `Materialized`, failure → `Drop` marks `Aborted`), matching the
+// compiler-enforced RAII pattern the rest of the commit pipeline uses.
+
+/// Reproduce the stuck-watermark scenario: apply_replicated succeeds (version
+/// N allocated), then a LOCAL tx commits at M > N. The completion tracker's
+/// contiguous watermark MUST advance through both N and M — before the fix it
+/// wedged at N-1 forever because N was never terminally marked in
+/// `completion`.
+#[tokio::test]
+async fn a12_success_path_completion_watermark_advances_past_replicated_version() {
+    let follower = follower_repo();
+    // Force-attach the `items` MvccStore BEFORE applying so the write hits the
+    // MVCC path (matches the production follower that has served at least one
+    // read).
+    let _ = follower.get_table("items").await.unwrap();
+    let gate = follower.tx_gate().await.unwrap();
+    let completion_before = gate.completion().watermark();
+    assert_eq!(completion_before, 0, "fresh gate: watermark at 0");
+
+    // Step 1 — apply_replicated allocates local_version = 1 (N) and (post-fix)
+    // marks it `Materialized` in `completion` via the VersionGuard's `commit()`.
+    let event = put_event("a12-ok", rid(21), 1);
+    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let n = match outcome {
+        ApplyOutcome::Applied { local_version } => local_version,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(n, 1, "first allocated version is 1 (N)");
+
+    // The completion tracker MUST now reflect N as terminally marked. Before
+    // the fix the bare `assign_next_version` left NO entry for N here, so the
+    // watermark stayed at 0 (N was neither Pending, Materialized, nor Aborted
+    // in the tracker — `try_advance` breaks on a missing entry).
+    assert_eq!(
+        gate.completion().watermark(),
+        n,
+        "completion watermark must advance to N after a successful apply_replicated"
+    );
+
+    // Step 2 — a LOCAL tx commit at M = N + 1 through the normal commit path.
+    // Its `VersionGuard::commit()` marks M `Materialized`; the tracker's
+    // `try_advance` then needs BOTH N and N+1 terminally marked to advance
+    // past N+1. Before the fix N was unmarked, so the watermark was stuck at
+    // N-1 = 0 even though M was correctly marked.
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_tx::{StagingStore, TxContext};
+    let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(
+        Bytes::from_static(b"local-k"),
+        Bytes::from_static(b"local-v"),
+    );
+    // Use a DIFFERENT table token than `items` so this commit is independent
+    // of the replicated table's state. Any non-zero token works for an
+    // InMemory commit (see durable_watermark_tests::staged_tx).
+    local_tx.write_set.insert(7777u64, staging);
+
+    let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
+    let m = outcome.commit_version;
+    assert!(m > n, "local commit M ({m}) must be > N ({n})");
+    assert!(outcome.materialized(), "InMemory local commit is Complete");
+
+    // The HARD assertion: completion watermark advances to M. Before the fix
+    // this was `0` (stuck at N-1's gap), proving the clog.
+    assert_eq!(
+        gate.completion().watermark(),
+        m,
+        "completion watermark must advance through M after both N (replicated) \
+         and M (local) are terminally marked — was stuck at N-1 before the fix"
+    );
+    // Visibility floor tracks the watermark (both run through the same
+    // `last_committed_version` atomic via `advance_last_committed`).
+    assert_eq!(gate.last_committed(), m);
+}
+
+/// Failure path: when `apply_replicated` errors AFTER allocating a version,
+/// the VersionGuard's `Drop` MUST mark the version `Aborted` in the
+/// completion tracker so the watermark advances past it. Before the fix the
+/// bare `mark_durable_aborted` touched ONLY the durable tracker — the
+/// visibility tracker's watermark was permanently clogged at N-1.
+#[tokio::test]
+async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
+    let follower = follower_repo();
+    let _ = follower.get_table("items").await.unwrap();
+    let gate = follower.tx_gate().await.unwrap();
+    assert_eq!(gate.completion().watermark(), 0);
+
+    // Build a Put event whose RecordChange carries NO value bytes — this
+    // trips the early `Err(DbError::Internal(...))` return inside
+    // `apply_replicated`'s grouping loop (apply_replicated.rs:154-158) AFTER
+    // the version has been allocated but BEFORE any physical write. Clean,
+    // deterministic failure-path trigger that needs no custom failing store.
+    let bad_event = shamir_tx::ChangelogEvent {
+        repo: "leader".into(),
+        commit_version: 1,
+        tx_id: 1,
+        actor: Actor::User(42),
+        timestamp_ns: 0,
+        changes: vec![shamir_tx::RecordChange {
+            table: "items".into(),
+            key: rid(31).to_bytes(),
+            op: shamir_tx::ChangeOp::Put,
+            value: None, // ← triggers the Internal error
+        }],
+    };
+
+    let err = apply_replicated(&follower, &bad_event, 0).await;
+    assert!(err.is_err(), "Put with no value must fail; got {err:?}");
+
+    // The burned version (N = 1) MUST be terminally marked `Aborted` in the
+    // completion tracker — the guard's Drop does this automatically. Before
+    // the fix `mark_durable_aborted` marked only the durable tracker, leaving
+    // the visibility tracker with a hole at N that would clog a later local
+    // commit's watermark advance.
+    assert_eq!(
+        gate.completion().watermark(),
+        1,
+        "completion watermark must advance past the aborted version N=1"
+    );
+
+    // Prove the un-clog end-to-end: a subsequent LOCAL commit at M > N must
+    // be able to push the visibility watermark through the (now-Aborted) N.
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_tx::{StagingStore, TxContext};
+    let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(Bytes::from_static(b"fk"), Bytes::from_static(b"fv"));
+    local_tx.write_set.insert(7777u64, staging);
+    let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
+    let m = outcome.commit_version;
+    assert!(m > 1, "local commit M ({m}) must be > aborted N=1");
+    assert_eq!(
+        gate.completion().watermark(),
+        m,
+        "completion watermark must advance through M after the aborted N"
+    );
+}
+
+/// Regression: the A12 fix MUST NOT change apply_replicated's externally
+/// observable success-path contract — the record still lands, the downstream
+/// changefeed still re-emits at the follower-local version, and the durable
+/// watermark still tracks the visibility watermark (inline-materialize
+/// invariant `durable_watermark() <= last_committed()` preserved).
+#[tokio::test]
+async fn a12_regression_success_path_preserves_data_changefeed_and_durable() {
+    let follower = follower_repo();
+    let _ = follower.get_table("items").await.unwrap();
+    let gate = follower.tx_gate().await.unwrap();
+    let mut rx = follower.subscribe_changelog().await.unwrap();
+
+    let event = put_event("regress", rid(41), 3);
+    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let n = match outcome {
+        ApplyOutcome::Applied { local_version } => local_version,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(n, 1);
+
+    // Data converged.
+    let follower_tbl = follower.get_table("items").await.unwrap();
+    let got = follower_tbl.get(rid(41)).await.unwrap();
+    assert!(
+        matches!(got, InnerValue::Str(ref s) if s == "regress"),
+        "regression: data must still converge: got {got:?}"
+    );
+
+    // Downstream changefeed re-emitted at the follower-local version.
+    let rebroadcast = rx.recv().await.expect("downstream event re-emitted");
+    assert_eq!(rebroadcast.commit_version, n);
+    assert_eq!(rebroadcast.repo, "follower");
+
+    // Durable watermark tracks visibility (the fix keeps `mark_durable(n)`
+    // alongside the new `guard.commit()` — both are needed: the guard covers
+    // the visibility tracker, `mark_durable` covers the durable tracker +
+    // `durable_progress.notify_waiters()`).
+    assert!(
+        gate.durable_watermark() <= gate.last_committed(),
+        "inline-materialize invariant: durable <= visibility"
+    );
+    assert_eq!(gate.durable_watermark(), n);
+    assert_eq!(gate.last_committed(), n);
+}
