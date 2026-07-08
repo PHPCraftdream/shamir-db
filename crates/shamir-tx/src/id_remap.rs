@@ -10,6 +10,15 @@
 //! during commit/recovery, where the name-keyed lens does not yet apply
 //! (no interner context at replay). See `docs/perf/innervalue-floor.md`
 //! (Category 3 — recovery anchors).
+//!
+//! A8 fix: [`collect_referenced_ids`] walks the SAME `InnerValue` shape as
+//! [`remap_value`] (Map keys + List elements) but COLLECTS the referenced
+//! `InternerKey` ids instead of rewriting them. `pre_commit_prelock` uses
+//! it (after the remap pass) to find every base id referenced by this tx's
+//! staged bytes that sits above `persisted_high_water()` and ensure each
+//! one is covered by `tx.interner_deltas` — closing the "first toucher
+//! aborted before WAL" hole where a later committer's records reference an
+//! id no surviving WAL delta mentions.
 
 // hasher-generic boundary: caller supplies the hasher (THasher at every call site)
 #[allow(clippy::disallowed_types)]
@@ -69,4 +78,45 @@ pub fn remap_inner_value_bytes<S: BuildHasher>(
         .map_err(|e| rmp_serde::encode::Error::Syntax(format!("decode failed: {e}")))?;
     remap_value(&mut value, remap);
     value.to_bytes()
+}
+
+/// Recursively walk `value` and collect every `InternerKey` id used as a
+/// `Map` key (descending into nested `Map`s and `List` elements — the
+/// SAME traversal shape as [`remap_value`]).
+///
+/// A8 fix: `pre_commit_prelock` calls this (after the overlay→base remap
+/// pass rewrites staged bytes to reference base ids) to find every base
+/// id this tx's records reference. Any id `> persisted_high_water()` that
+/// is not already in `tx.interner_deltas` is then added — so a committer
+/// whose records reference an id some OTHER (possibly aborted) tx created
+/// still carries that `(name, id)` in its own WAL delta, and recovery can
+/// decode its records after a crash.
+///
+/// Appends to `out` (caller supplies the set so multiple values / tables
+/// can be folded into one set without re-allocation).
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
+pub fn collect_referenced_ids<S: BuildHasher>(value: &InnerValue, out: &mut HashMap<u64, (), S>) {
+    match value {
+        InnerValue::Map(m) => {
+            for (k, v) in m.iter() {
+                out.insert(k.id(), ());
+                collect_referenced_ids(v, out);
+            }
+        }
+        InnerValue::List(l) => {
+            for elem in l {
+                collect_referenced_ids(elem, out);
+            }
+        }
+        InnerValue::Set(_) => {}
+        InnerValue::Null
+        | InnerValue::Bool(_)
+        | InnerValue::Int(_)
+        | InnerValue::F64(_)
+        | InnerValue::Dec(_)
+        | InnerValue::Big(_)
+        | InnerValue::Str(_)
+        | InnerValue::Bin(_) => {}
+    }
 }

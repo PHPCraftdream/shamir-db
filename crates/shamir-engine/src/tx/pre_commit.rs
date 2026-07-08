@@ -3,6 +3,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_storage::error::DbError;
 use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
+use shamir_types::core::interner::InternerKey;
+use shamir_types::types::value::InnerValue;
 use shamir_wal::WalEntryV2;
 
 use crate::repo::RepoInstance;
@@ -170,25 +172,39 @@ pub(super) async fn pre_commit_prelock(
     // table's staging bytes — overlay ids are tx-scoped, and the repo
     // interner is the single base they all resolve against, so the same
     // `{overlay_id → base_id}` mapping is correct for every table.
-    if !tx.interner_overlay.is_empty() {
+    //
+    // A8 fix: after the (optional) overlay merge + remap, EVERY committer
+    // with staged bytes additionally scans its staged bytes for any
+    // `InternerKey` id referenced above `persisted_high_water()` that is
+    // not already in `tx.interner_deltas`, and records `(name, id)` for
+    // each. This closes the hole where a later committer's records
+    // reference an id some OTHER (possibly aborted-before-WAL) tx created
+    // in base — without this pass, no surviving WAL delta would mention
+    // that id, and a crash before the next checkpoint would leave the
+    // later committer's records undecodable. See
+    // `docs/audits/2026-07-06-concurrency-engine.md` A8.
+    let has_staged_writes = !tx.write_set.is_empty();
+    if !tx.interner_overlay.is_empty() || has_staged_writes {
         let repo_interner = repo.repo_interner().await?;
         let base_interner = repo_interner.get().await?;
-        let shamir_tx::OverlayCommitResult { remap, delta } =
-            shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
-        if !delta.is_empty() {
-            tx.interner_deltas.extend(delta);
-        }
-        if !remap.is_empty() {
-            let table_ids: Vec<u64> = tx.write_set.keys().cloned().collect();
-            for table_id in &table_ids {
-                if let Some(staging) = tx.write_set.get_mut(table_id) {
-                    staging
-                        .rewrite_set_bytes(|b| {
-                            shamir_tx::remap_inner_value_bytes(b.clone(), &remap)
-                                .map_err(|e| format!("remap: {e}"))
-                        })
-                        .await
-                        .map_err(DbError::Codec)?;
+        if !tx.interner_overlay.is_empty() {
+            let shamir_tx::OverlayCommitResult { remap, delta } =
+                shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
+            if !delta.is_empty() {
+                tx.interner_deltas.extend(delta);
+            }
+            if !remap.is_empty() {
+                let table_ids: Vec<u64> = tx.write_set.keys().cloned().collect();
+                for table_id in &table_ids {
+                    if let Some(staging) = tx.write_set.get_mut(table_id) {
+                        staging
+                            .rewrite_set_bytes(|b| {
+                                shamir_tx::remap_inner_value_bytes(b.clone(), &remap)
+                                    .map_err(|e| format!("remap: {e}"))
+                            })
+                            .await
+                            .map_err(DbError::Codec)?;
+                    }
                 }
             }
         }
@@ -199,6 +215,47 @@ pub(super) async fn pre_commit_prelock(
         // flushes the delta to the durable chunk store, advancing the
         // persisted high-water mark so Phase 7 WAL truncation can proceed.
         // Graceful shutdown flushes the repo interner once.
+
+        // A8: scan staged bytes (now base-id-referencing after the remap
+        // above) for any interner id ABOVE `persisted_high_water()` that
+        // is not already covered by `tx.interner_deltas`. Each such id was
+        // created in base by some tx (possibly this one, possibly another
+        // that aborted before WAL) and is NOT yet durably recorded in the
+        // chunk store — so THIS committer's WAL must carry `(name, id)`
+        // for it or a crash before the next checkpoint makes this tx's own
+        // records undecodable. `touch_with_id` (recovery replay) is
+        // idempotent, so redundant inclusion across multiple committers'
+        // deltas is harmless.
+        let hwm = repo_interner.persisted_high_water() as u64;
+        // Cheap dedup: build a set of ids already covered by this tx's delta.
+        let mut existing: shamir_collections::TFxSet<u64> = shamir_collections::new_fx_set();
+        existing.extend(tx.interner_deltas.iter().map(|(_, id)| *id));
+        let mut referenced: shamir_collections::TFxMap<u64, ()> = shamir_collections::new_fx_map();
+        for staging in tx.write_set.values() {
+            for bytes in staging.iter_set_bytes() {
+                if let Ok(value) = InnerValue::from_bytes(bytes) {
+                    shamir_tx::collect_referenced_ids(&value, &mut referenced);
+                }
+                // A decode failure here is a pre-existing corruption
+                // (staged bytes are always valid msgpack by construction);
+                // skip rather than abort — the remap pass above would
+                // already have surfaced a codec error for genuinely
+                // malformed bytes.
+            }
+        }
+        for (&id, ()) in referenced.iter() {
+            if id > hwm && !existing.contains(&id) {
+                if let Some(name) = base_interner.get_str(&InternerKey::new(id)) {
+                    tx.interner_deltas.push((name.to_string(), id));
+                    existing.insert(id);
+                }
+                // If `get_str` returns None the id is not in the base
+                // interner's reverse map — this should not happen for a
+                // base id referenced by remapped bytes, but defensively
+                // skip rather than panic: an unresolvable id is a separate
+                // (already-lost) problem, not something this pass can fix.
+            }
+        }
     }
 
     // Phase 2.5 (HIGH-A): acquire each unique table's `unique_write_lock`
