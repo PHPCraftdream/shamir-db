@@ -14,6 +14,7 @@ pub mod lock_tests;
 pub mod overlay_dualwrite_tests;
 pub mod overlay_merge_tests;
 pub mod overlay_ordering_tests;
+pub mod pending_ts_race_tests;
 pub mod point_read_alloc_tests;
 pub mod publish_monotonic_tests;
 pub mod retention_tests;

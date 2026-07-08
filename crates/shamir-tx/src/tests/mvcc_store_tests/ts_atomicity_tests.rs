@@ -190,11 +190,22 @@ async fn write_committed_to_history_ts_atomic() {
     assert_eq!(ts_entries[0].0, commit_version);
     assert_eq!(ts_entries[0].1, frozen_ts);
 
-    // pending_ts should be consumed (removed by write_committed_to_history).
+    // A14: pending_ts is read NON-DESTRUCTIVELY by the drain (so multiple
+    // racing drains observe the same commit-time ts). The stamp survives
+    // the drain and is reclaimed by `gc_overlay_to` once the version is
+    // durable. Pre-A14 the drain itself removed the stamp; that lost it
+    // for any second racer.
+    assert_eq!(
+        mvcc.pending_ts_len(),
+        1,
+        "pending_ts stamp survives the drain (non-destructive read)"
+    );
+    mvcc.gate.mark_durable(commit_version);
+    mvcc.gc_overlay_to(commit_version);
     assert_eq!(
         mvcc.pending_ts_len(),
         0,
-        "pending_ts should be empty after drain"
+        "pending_ts reclaimed by gc_overlay_to after the version is durable"
     );
 }
 

@@ -185,11 +185,21 @@ async fn batch_multiple_versions_single_transact() {
         assert_eq!(*ts, frozen_ts, "ts should match frozen clock");
     }
 
-    // pending_ts consumed.
+    // A14: pending_ts is read NON-DESTRUCTIVELY by the batched drain (so
+    // multiple racing drains observe the same commit-time ts). The stamps
+    // survive the drain and are reclaimed by `gc_overlay_to` once the
+    // versions are durable.
+    assert_eq!(
+        mvcc.pending_ts_len(),
+        3,
+        "pending_ts stamps survive the batched drain (non-destructive read)"
+    );
+    mvcc.gate.mark_durable(v3);
+    mvcc.gc_overlay_to(v3);
     assert_eq!(
         mvcc.pending_ts_len(),
         0,
-        "pending_ts should be empty after batch"
+        "pending_ts reclaimed by gc_overlay_to after the versions are durable"
     );
 }
 
