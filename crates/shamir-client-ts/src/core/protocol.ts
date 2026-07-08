@@ -32,7 +32,10 @@ const KDF_LIMITS = {
  *
  *   Challenge = [salt, memory_kb, time, parallelism, argon2_version, server_nonce]
  *   AuthOk    = [server_signature, server_pub_key, identity_sig, session_id,
- *                expires_at_ns, resumption_ticket?, resumption_expires_at_ns?]
+ *                expires_at_ns, resumption_ticket?, resumption_expires_at_ns?,
+ *                server_query_version?]
+ *   ResumeOk  = [session_id, expires_at_ns, resumption_ticket?,
+ *                resumption_expires_at_ns?, server_query_version?]
  */
 
 // Positional indices for Challenge (rmp_serde array layout).
@@ -50,7 +53,25 @@ const OK_IDENTITY_SIG = 2;
 const OK_SESSION_ID = 3;
 const OK_EXPIRES_AT_NS = 4;
 
-function asBytes(v: unknown, what: string): Uint8Array {
+/**
+ * Positional indices for ResumeOk (rmp_serde array layout). Matches the field
+ * order of `ResumeOkWire` in `crates/shamir-server/src/connection/wire.rs`
+ * (and `WireResumeOk` in `crates/shamir-client/src/wire_frames.rs`). Trailing
+ * fields are `#[serde(default)]` on the server side, so a server that omits
+ * them produces a shorter array — callers read indices 2..4 defensively.
+ */
+export const RESUME_OK_SESSION_ID = 0;
+export const RESUME_OK_EXPIRES_AT_NS = 1;
+export const RESUME_OK_RESUMPTION_TICKET = 2;
+export const RESUME_OK_RESUMPTION_EXPIRES_AT_NS = 3;
+export const RESUME_OK_SERVER_QUERY_VERSION = 4;
+
+/**
+ * Coerce a msgpack-decoded value to `Uint8Array`, else throw with a label.
+ * Shared by the `auth_ok` and `resume_ok` decoders so both enforce the same
+ * bytes-or-throw invariant on binary fields.
+ */
+export function asBytes(v: unknown, what: string): Uint8Array {
   if (v instanceof Uint8Array) return v;
   throw new Error(`${what}: expected binary, got ${typeof v}`);
 }
