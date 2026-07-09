@@ -660,7 +660,21 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Hash for Value<Key> {
             Value::Null => {}
             Value::Bool(b) => b.hash(state),
             Value::Int(i) => i.hash(state),
-            Value::F64(f) => f.to_bits().hash(state),
+            Value::F64(f) => {
+                // `PartialEq` treats ALL NaN as equal regardless of bit
+                // pattern (see the `Eq for Value` impl above), so `Hash`
+                // must canonicalize NaN to a single bit pattern too --
+                // otherwise two NaN values that compare equal could hash
+                // to different buckets, violating the `k1 == k2 =>
+                // hash(k1) == hash(k2)` contract required by `HashSet`/
+                // `HashMap` (found via a `distinct()` dedup regression:
+                // audit 2026-07-06-perf-radical-o-notation finding 1.6).
+                if f.is_nan() {
+                    f64::NAN.to_bits().hash(state);
+                } else {
+                    f.to_bits().hash(state);
+                }
+            }
             Value::Dec(d) => d.hash(state),
             Value::Big(b) => b.hash(state),
             Value::Str(s) => s.hash(state),
