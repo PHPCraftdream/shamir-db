@@ -292,3 +292,48 @@ async fn keyset_seek_asc_excludes_all_rows_with_seek_value() {
     let result = tbl.read(&query, &ctx).await.unwrap();
     assert_eq!(scores_in_order(&result), vec![30]);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit 1.2 — keyset seek must NOT fetch/decode the whole remaining table
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Over a large table with a small `limit`, the keyset-seek path must scan
+/// (fetch + decode + project) only ~`limit` records — NOT the entire
+/// remaining half-plane. Before the ordered early-stop fix, seeking near
+/// the start of a 500-row table with `limit = 5` fetched and decoded all
+/// ~495 rows past the seek key, then sorted and truncated — O(N) per page.
+/// We assert `records_scanned` is bounded by `limit`, proving the walk
+/// stops early instead of materialising the whole tail.
+#[tokio::test]
+async fn keyset_seek_scans_only_limit_not_whole_tail() {
+    let tbl = make_table().await;
+    let n: i64 = 500;
+    for s in 0..n {
+        insert_record(&tbl, s, &format!("r{s}")).await;
+    }
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Seek at 10 → 489 rows remain in the half-plane (11..=499), but with
+    // limit = 5 we must return exactly [11,12,13,14,15] and touch ~5 rows.
+    let limit = 5u64;
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::asc("score"))
+        .pagination(Pagination::after(vec![QueryValue::Int(10)], Some(limit)));
+
+    let result = tbl.read(&query, &ctx).await.unwrap();
+    assert_eq!(scores_in_order(&result), vec![11, 12, 13, 14, 15]);
+
+    let scanned = result
+        .stats
+        .as_ref()
+        .map(|s| s.records_scanned)
+        .unwrap_or(u64::MAX);
+    assert!(
+        scanned <= limit,
+        "keyset seek scanned {scanned} records for limit {limit} — expected \
+         a bounded ~limit walk, not the whole remaining tail"
+    );
+}

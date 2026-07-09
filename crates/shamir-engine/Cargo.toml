@@ -98,6 +98,10 @@ shamir-query-builder = { path = "../shamir-query-builder" }
 # `BatchError` types from the two copies wouldn't match.)
 
 [[bench]]
+name = "keyset_seek"
+harness = false
+
+[[bench]]
 name = "interner_concurrent"
 harness = false
 
