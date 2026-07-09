@@ -440,10 +440,6 @@ select_pipeline::apply_pagination/limit_10_from_1000 = 26
 select_pipeline::apply_pagination/skip_50_limit_100 = 26
 select_pipeline::apply_select_value/5_fields_1000_records = 13
 select_pipeline::apply_select_value/select_all_1000_records = 13
-select_pipeline::read_limit_pushdown/pushdown_active_N=2000 = 442
-select_pipeline::read_limit_pushdown/pushdown_active_N=5000 = 181
-select_pipeline::read_limit_pushdown/pushdown_disabled_N=2000 = 105
-select_pipeline::read_limit_pushdown/pushdown_disabled_N=5000 = 38
 select_projection::select_all/select_all_100k = 1
 select_projection::select_all/select_all_1k = 14
 select_projection::select_few_fields/select_2_of_6_fields_100k = 1
@@ -454,6 +450,14 @@ sq8_hot_path::shamir_dist_u8_eval/Cosine/dim_128 = 152
 sq8_hot_path::shamir_dist_u8_eval/Dot/dim_128 = 369
 sq8_hot_path::shamir_dist_u8_eval/L2/dim_128 = 559
 sq8_hot_path::sq8_approx_dot/dim_128 = 321
+storage_cached_pump::get_backend_miss = 1000329
+storage_cached_pump::get_cache_hit = 1687223
+storage_cached_pump::get_cache_miss = 893443
+storage_cached_pump::iter_first_batch = 90462
+storage_cached_pump::iter_full_drain = 79
+storage_cached_pump::scan_prefix_first_batch = 78225
+storage_cached_pump::scan_prefix_full_drain = 81
+storage_cached_pump::transact_set_then_get = 223599
 storage_fjall_pump::get = 35478
 storage_fjall_pump::insert = 22312
 storage_fjall_pump::scan_prefix = 1947

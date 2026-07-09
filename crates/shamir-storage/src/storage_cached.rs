@@ -26,6 +26,62 @@ pub enum WriteMode {
 }
 
 // ============================================================================
+// CacheAction - what `transact` should do to the cache for a given op
+// ============================================================================
+
+/// Post-commit cache action for a single op in a `transact` batch.
+///
+/// Built from the original `KvOp` slice *before* `ops` is moved into
+/// `inner.transact`, so the fresh value of a `Set` survives the move
+/// and can populate the cache instead of forcing an invalidate (which
+/// would leave the cache cold on just-written keys — audit
+/// `2026-07-06-perf-radical-o-notation` finding 1.4).
+enum CacheAction {
+    /// `KvOp::Set` — populate the cache with the committed value.
+    /// Inlines the same remove-then-insert + conditional size-bump
+    /// that `cache_upsert` uses for the single-key `set` path, so the
+    /// size-accounting discipline is identical (bumps `size` only on a
+    /// genuinely new key).
+    Populate(RecordKey, Bytes),
+    /// `KvOp::Remove` — evict the entry (delete semantics).
+    Invalidate(RecordKey),
+}
+
+impl CacheAction {
+    fn from_op(op: &super::types::KvOp) -> Self {
+        match op {
+            super::types::KvOp::Set(k, v) => Self::Populate(k.clone(), v.clone()),
+            super::types::KvOp::Remove(k) => Self::Invalidate(k.clone()),
+        }
+    }
+
+    /// Apply this action to the cache, mirroring the existing
+    /// size-accounting discipline:
+    /// - `Populate` inlines `cache_upsert`'s remove-then-insert (bumps
+    ///   `size` only on a genuinely new key).
+    /// - `Invalidate` does a single `remove` and decrements `size` if
+    ///   the key was present (unchanged from the prior behaviour).
+    fn apply(self, cache: &TreeIndex<RecordKey, Bytes>, size: &AtomicUsize) {
+        match self {
+            Self::Populate(key, value) => {
+                let existed = cache.remove(&key);
+                if !existed {
+                    size.fetch_add(1, Ordering::Relaxed);
+                }
+                // insert always succeeds after a remove (scc::TreeIndex
+                // only rejects on a duplicate key, which we just removed).
+                let _ = cache.insert(key, value);
+            }
+            Self::Invalidate(key) => {
+                if cache.remove(&key) {
+                    size.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // CachedStore - in-memory full mirror of any Store
 // ============================================================================
 
@@ -274,22 +330,67 @@ impl Store for CachedStore {
         &self,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // Snapshot under an epoch guard; TreeIndex iter is already sorted —
-        // no collect+sort needed (was O(N log N) with the previous DashMap).
-        let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::ebr::Guard::new();
-            self.cache
-                .iter(&g)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
+        // Incremental/cursor stream: one bounded `range` query per batch,
+        // each under its own short-lived `scc::ebr::Guard`. This replaces
+        // the previous eager `collect()` of the entire cache before the
+        // first yield — a consumer that only wants the first batch (e.g.
+        // an upstream `LIMIT 10`) now pays O(batch_size) clones instead
+        // of O(N) (audit `2026-07-06-perf-radical-o-notation` finding 1.3).
+        //
+        // scc's `Iter`/`Range` borrow the EBR `Guard` via a `'g` lifetime
+        // and yield `&'g` references, so a fully-lazy held-cursor stream
+        // (iterator stored across `.await` points in the `stream!` block)
+        // isn't sound — the `Guard` must not outlive its short scope.
+        // The repeated-bounded-requery approach mirrors fjall's
+        // `iter_stream` resume-by-last-key cursor pattern: each batch
+        // re-seeks to `Bound::Excluded(last_key)` and takes
+        // `batch_size`, so per-batch cost is O(batch_size) and total
+        // work scales with what the consumer actually drains. Order is
+        // unchanged (TreeIndex ascending key order).
+        let cache = self.cache.clone();
 
         Box::pin(stream! {
-            let mut entries = entries;
-            while !entries.is_empty() {
-                let take = std::cmp::min(batch_size, entries.len());
-                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+            let mut last_key: Option<RecordKey> = None;
+
+            loop {
+                // Drive one batch inside a short-lived Guard scope.
+                let cur_last = last_key.clone();
+                let batch: Vec<(RecordKey, Bytes)> = {
+                    let g = scc::ebr::Guard::new();
+                    // Use the tuple `(Bound<Bytes>, Bound<Bytes>)` form so
+                    // scc infers `Q = Bytes` (which is `Comparable<Bytes>`);
+                    // an explicit `Bound<Bytes>..` range would make `Q =
+                    // Bound<Bytes>`, which isn't `Comparable<Bytes>`.
+                    let iter = match &cur_last {
+                        Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
+                        None => cache.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &g),
+                    };
+                    let mut items = Vec::with_capacity(batch_size.min(256));
+                    let mut batch_last: Option<RecordKey> = None;
+                    for (k, v) in iter.take(batch_size) {
+                        batch_last = Some(k.clone());
+                        items.push((k.clone(), v.clone()));
+                    }
+                    // If we produced a full batch, advance the cursor to
+                    // its last key; a short (final) batch signals stream
+                    // exhaustion → clear `last_key` so the outer loop ends.
+                    if items.len() == batch_size {
+                        last_key = batch_last;
+                    } else {
+                        last_key = None;
+                    }
+                    items
+                };
+
+                if batch.is_empty() {
+                    break;
+                }
                 yield Ok(batch);
+
+                // A short (final) batch cleared `last_key` → stream done.
+                if last_key.is_none() {
+                    break;
+                }
             }
         })
     }
@@ -299,47 +400,88 @@ impl Store for CachedStore {
         prefix: Bytes,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // O(log N + matches) via TreeIndex::range from the prefix start.
-        // The previous DashMap shape did O(N) full-iter+filter+sort.
-        let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::ebr::Guard::new();
-            self.cache
-                .range(prefix.clone().., &g)
-                .take_while(|(k, _)| k.starts_with(&prefix[..]))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
+        // Same incremental/cursor pattern as `iter_stream` above, but the
+        // initial lower bound is the prefix itself (seek directly to the
+        // prefix range), and each entry is checked against the prefix to
+        // stop as soon as we walk past it (TreeIndex yields lex order).
+        // Per-batch cost is O(batch_size); a `LIMIT`-style early break
+        // costs only what the consumer drained (audit finding 1.3).
+        let cache = self.cache.clone();
 
         Box::pin(stream! {
-            let mut entries = entries;
-            while !entries.is_empty() {
-                let take = std::cmp::min(batch_size, entries.len());
-                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+            let mut last_key: Option<RecordKey> = None;
+
+            loop {
+                let cur_last = last_key.clone();
+                let pfx = prefix.clone();
+                let batch: Vec<(RecordKey, Bytes)> = {
+                    let g = scc::ebr::Guard::new();
+                    // `Bound` type must be `Comparable<Bytes>` → use
+                    // owned `Bytes` for the bound key (see `iter_stream`).
+                    let iter = match &cur_last {
+                        Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
+                        None => cache.range((std::ops::Bound::Included(pfx.clone()), std::ops::Bound::Unbounded), &g),
+                    };
+                    let mut items = Vec::with_capacity(batch_size.min(256));
+                    let mut batch_last: Option<RecordKey> = None;
+                    let mut exited_prefix = false;
+                    for (k, v) in iter.take(batch_size) {
+                        if !k.starts_with(&pfx[..]) {
+                            exited_prefix = true;
+                            break;
+                        }
+                        batch_last = Some(k.clone());
+                        items.push((k.clone(), v.clone()));
+                    }
+                    // Advance the cursor unless we hit the end of the
+                    // prefix range (then signal stream exhaustion).
+                    if exited_prefix || items.len() < batch_size {
+                        last_key = None;
+                    } else {
+                        last_key = batch_last;
+                    }
+                    items
+                };
+
+                if batch.is_empty() {
+                    break;
+                }
                 yield Ok(batch);
+                if last_key.is_none() {
+                    break;
+                }
             }
         })
     }
 
-    /// Delegate to inner store's `transact`, then invalidate cache
-    /// entries for all touched keys. The cache layer itself doesn't
-    /// add atomicity — that comes from the inner backend.
+    /// Delegate to inner store's `transact`, then update the cache
+    /// to reflect the committed state:
+    /// - `KvOp::Set(key, value)` → **populate** the cache with the fresh
+    ///   value, so a subsequent read-after-write hits the cache (RAM)
+    ///   instead of going to the (disk) backend. The previous code
+    ///   *invalidated* every touched key, which systematically kept the
+    ///   cache cold on exactly the hottest keys (just-written data) —
+    ///   audit `2026-07-06-perf-radical-o-notation` finding 1.4.
+    /// - `KvOp::Remove(key)` → keep the existing eviction behaviour
+    ///   (removal from cache is correct for deletes).
+    ///
+    /// The cache layer itself doesn't add atomicity — that comes from
+    /// the inner backend. Size accounting for the populate path mirrors
+    /// the same remove-then-insert + conditional-bump discipline the
+    /// single-key `set` path uses, so the eviction accounting is
+    /// identical.
     async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
-        // Collect keys before delegating (ops is moved into inner).
-        let keys: Vec<RecordKey> = ops
-            .iter()
-            .map(|op| match op {
-                super::types::KvOp::Set(k, _) | super::types::KvOp::Remove(k) => k.clone(),
-            })
-            .collect();
+        // Capture the cache action for each op BEFORE `ops` is moved
+        // into `inner.transact`. `Set` carries the fresh value so the
+        // cache can be populated post-commit; `Remove` just invalidates.
+        let actions: Vec<CacheAction> = ops.iter().map(CacheAction::from_op).collect();
 
         self.inner.transact(ops).await?;
 
-        // Invalidate cache for affected keys so subsequent reads
-        // see the transacted state, not stale cached values.
-        for k in keys {
-            if self.cache.remove(&k) {
-                self.size.fetch_sub(1, Ordering::Relaxed);
-            }
+        // Apply each captured action to the cache. `Set` → populate
+        // (upsert, same size discipline as `set`); `Remove` → evict.
+        for action in actions {
+            action.apply(&self.cache, &self.size);
         }
         Ok(())
     }

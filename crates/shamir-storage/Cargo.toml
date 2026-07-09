@@ -87,6 +87,20 @@ harness = false
 name = "storage_fjall_pump"
 harness = false
 
+# Dedicated CachedStore pump — isolates the two audit
+# `2026-07-06-perf-radical-o-notation` findings on the cache layer:
+#   §1.4 — `transact` with `Set` must POPULATE the cache (not
+#          invalidate), so read-after-write hits RAM not the backend;
+#   §1.3 — `iter_stream` / `scan_prefix_stream` must yield batches
+#          INCREMENTALLY (cursor/resume), not eagerly materialize the
+#          whole corpus before the first yield.
+# Each workload pairs an "early-exit" / "cache-hit" measurement with a
+# "full" / "backend-hit" counterpart so the before→after delta is
+# directly readable off the two columns.
+[[bench]]
+name = "storage_cached_pump"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
