@@ -29,7 +29,13 @@ shamir-tunables    = { path = "../shamir-tunables" }
 
 # Backends — `optional = true` makes each one pulled in only when the
 # matching feature is enabled.
-fjall    = { version = "3.0.1",  optional = true }
+#
+# `bytes_1` (audit 2026-07-06-perf-radical-o-notation §1.1): flips fjall's
+# `Slice` to `bytes::Bytes` under the hood, exposing a zero-copy
+# `From<Slice> for Bytes` impl. Without it, `Slice` is a `byteview::ByteView`
+# (a separate refcounted buffer) and every read must `Bytes::copy_from_slice`
+# — a full memcpy + alloc per point-read, ×2 (key+value) per scanned row.
+fjall    = { version = "3.0.1", optional = true, features = ["bytes_1"] }
 
 # Async / runtime helpers used by the trait surface and a few backends
 tokio = { version = "1.49.0", features = ["full"] }
@@ -68,6 +74,17 @@ bench-scale-tool = { workspace = true, features = ["async"] }
 
 [[bench]]
 name = "store_raw"
+harness = false
+
+# Dedicated fjall pump — isolates point `get`/`insert`/`set` (existing-key
+# path, the one that exercises the pre-mutation `contains_key` LSM lookup)
+# and a small `scan_prefix` against a real tempdir-backed fjall instance.
+# `store_raw` already exercises fjall, but mixes it with in-memory backends
+# and has no single-key `set`/`remove` variant — this bench gives a clean
+# before/after signal for the zero-copy read + double-lookup-removal /opti
+# (audit 2026-07-06-perf-radical-o-notation §1.1/1.2).
+[[bench]]
+name = "storage_fjall_pump"
 harness = false
 
 [lib]
