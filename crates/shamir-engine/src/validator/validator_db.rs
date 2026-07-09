@@ -305,7 +305,8 @@ impl<'a> ValidatorDb<'a> {
                         .index_manager_ref()
                         .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
                         .await?;
-                    for id in &ids {
+                    // Audit 1.5: `ids` is now `Arc<BTreeSet<RecordId>>`; deref-iterate.
+                    for id in ids.iter() {
                         if Some(id) != exclude_rid {
                             return Ok(true);
                         }

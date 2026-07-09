@@ -641,14 +641,26 @@ impl IndexManager {
     ///
     /// # Возвращает
     ///
-    /// - `Ok(BTreeSet<RecordId>)` — множество идентификаторов записей
+    /// - `Ok(Arc<BTreeSet<RecordId>>)` — множество идентификаторов записей
+    ///   за рефкаунт-дугой (O(1) копирование — см. ниже)
     /// - `Ok(empty)` — если нет записей с таким значением индекса
     /// - `Err` — ошибка чтения из хранилища
+    ///
+    /// # Audit 1.5 — Arc вместо полного клона на cache-hit
+    ///
+    /// Раньше возвращался владеющий `BTreeSet<RecordId>`, и на HIT в
+    /// `posting_cache` делался полный node-by-node клон дерева на КАЖДЫЙ
+    /// equality-lookup (для низкокардинального индекса с 100k постингов
+    /// это 100k аллокаций узлов). Теперь возвращается `Arc<BTreeSet<_>>`:
+    /// cache-HIT = `Arc::clone` (атомарный refcount-bump, O(1)), cache-MISS
+    /// строит `BTreeSet` ровно один раз, оборачивает в `Arc` и возвращает
+    /// `Arc::clone` того же `Arc`, что хранится в кэше (никаких лишних
+    /// клонов).
     pub async fn lookup_by_index(
         &self,
         name_interned: u64,
         values: &[InnerValue],
-    ) -> DbResult<BTreeSet<RecordId>> {
+    ) -> DbResult<Arc<BTreeSet<RecordId>>> {
         use futures::StreamExt;
 
         let index_key = build_index_key(false, name_interned, values).to_bytes();
@@ -656,8 +668,10 @@ impl IndexManager {
         // Opt G: try the in-memory posting cache first. DashMap's
         // sharded RwLock lets unrelated concurrent lookups proceed
         // without serialising on a single mutex.
+        // Audit 1.5: cache-HIT — это атомарный refcount-bump через
+        // `Arc::clone`, а НЕ полный node-by-node клон `BTreeSet`.
         if let Some(cached) = self.posting_cache.get(&index_key) {
-            return Ok((**cached).clone());
+            return Ok(Arc::clone(cached.value()));
         }
 
         // Scan the 25-byte index prefix; every match is a posting
@@ -680,6 +694,11 @@ impl IndexManager {
         // overflow; exact LRU isn't worth the dep, index hotsets are
         // small). Empty results are cached too — the next identical
         // lookup short-circuits without re-scanning.
+        //
+        // Audit 1.5 (miss path): обернуть построенный `BTreeSet` в `Arc`
+        // ровно один раз, вставить в кэш `Arc::clone` того же `Arc` и
+        // вернуть исходный `Arc` вызывающему — вместо прежней схемы
+        // «один клон в кэш + один клон вызывающему».
         if self.posting_cache.len() >= POSTING_CACHE_CAP {
             // `iter().next()` on DashMap acquires a single shard's
             // read lock — bounded; evicting an arbitrary entry is
@@ -690,10 +709,11 @@ impl IndexManager {
                 self.posting_cache.remove(&k);
             }
         }
+        let record_ids_arc = Arc::new(record_ids);
         self.posting_cache
-            .insert(index_key, Arc::new(record_ids.clone()));
+            .insert(index_key, Arc::clone(&record_ids_arc));
 
-        Ok(record_ids)
+        Ok(record_ids_arc)
     }
 
     /// Invalidate posting cache entries for every `SetPosting` /

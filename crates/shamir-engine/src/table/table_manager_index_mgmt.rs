@@ -334,7 +334,32 @@ impl TableManager {
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<RecordId>> {
         let name_id = self.intern_string(name).await?;
-        self.index_manager.lookup_by_index(name_id, values).await
+        // Audit 1.5: the internal `IndexManager::lookup_by_index` now
+        // returns `Arc<BTreeSet<RecordId>>` (O(1) cache-hit). This public
+        // wrapper keeps the legacy `BTreeSet<RecordId>` signature for API
+        // stability; the one-time deref-clone here is at the boundary,
+        // NOT on the internal hot path (engine-internal callers go through
+        // `index_manager_ref().lookup_by_index` directly and consume the
+        // `Arc` without cloning).
+        //
+        // ACCEPTED TRADE-OFF (task #488 review): this boundary clone
+        // reintroduces the audit's O(|postings|) cost for whoever reaches
+        // this specific public method — but as of this fix, NOTHING does:
+        // `DbInstance::lookup_by_index`/`RepoInstance::lookup_by_index`
+        // (the only callers of THIS function) have zero callers anywhere
+        // in `shamir-server`/`shamir-client`/`shamir-sdk`/`shamir-db`/
+        // `shamir-connect` (verified by grep across those crates). The
+        // audit's actual dominant cost centers — SELECT execution
+        // (`read_exec.rs`/`read_index_scan.rs`), write-path uniqueness/FK
+        // checks (`write_helpers.rs`, `fk_restrict.rs`, `fk_on_update.rs`),
+        // and validator dedup (`validator_db.rs`) — all bypass this
+        // wrapper and call `index_manager_ref().lookup_by_index(...)`
+        // directly, getting the true O(1) Arc-clone benefit. If a future
+        // caller (SDK, server) starts using this public method on a hot
+        // path, propagate `Arc<BTreeSet<RecordId>>` out through this
+        // wrapper (and `RepoInstance`/`DbInstance`) instead of adding a
+        // second clone-avoidance layer here.
+        Ok((*self.index_manager.lookup_by_index(name_id, values).await?).clone())
     }
 
     /// Check if a regular index exists.

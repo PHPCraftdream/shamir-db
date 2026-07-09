@@ -1351,7 +1351,10 @@ impl TableManager {
                                         .lookup_by_index(idx_name, values)
                                         .await
                                     {
-                                        rids.extend(ids);
+                                        // Audit 1.5: `ids` is now
+                                        // `Arc<BTreeSet<RecordId>>` — deref-iterate
+                                        // instead of the old owned-`BTreeSet` move.
+                                        rids.extend(ids.iter().copied());
                                     }
                                 }
                                 if rids.is_empty() {

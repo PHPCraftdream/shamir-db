@@ -382,7 +382,8 @@ impl TableManager {
                 .index_manager_ref()
                 .lookup_by_index(idx_name, &values)
                 .await?;
-            record_ids.extend(ids);
+            // Audit 1.5: `ids` is now `Arc<BTreeSet<RecordId>>`; deref-iterate.
+            record_ids.extend(ids.iter().copied());
         }
 
         // Compile the residual filter once (if any) so we evaluate it
