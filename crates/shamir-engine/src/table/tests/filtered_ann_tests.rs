@@ -676,6 +676,14 @@ fn path_label(result: &crate::query::read::QueryResult) -> &str {
 
 /// Build `count` committed records with the given `tag`, each near the query
 /// point `[1.0, 0.0]` (dim=2) so they all rank near the top of ANN search.
+///
+/// Uses the bulk `insert_many` path (one store transaction + batch index
+/// hooks) instead of `count` sequential `insert` round-trips. This matters
+/// for the co-filter test (vr5), whose minimum-valid construction is still
+/// ~20k rows (`n_candidates > PRE_FILTER_MAX_CANDIDATES` /
+/// `selectivity ≤ CO_FILTER_MAX_SELECTIVITY`) — under nextest's parallel
+/// load the original per-row `insert` loop blew past the 180s kill (TIMEOUT).
+/// The batch path collapses the store writes to one transaction per call.
 async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str, count: usize) {
     // VR-5 tests query [1.0, 0.0] and stage a vector at [0.99, 0.01] to prove
     // read-your-own-writes. Committed rows here MUST be farther from the
@@ -684,11 +692,10 @@ async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str,
     // could never surface — even with a fully correct merge implementation.
     // [0.0, 1.0] (orthogonal, L2 distance ≈1.414) guarantees the staged
     // [0.99, 0.01] (distance ≈0.014) always ranks strictly closer.
-    for _ in 0..count {
-        tbl.insert(&vec_record(emb_id, &[0.0, 1.0], tag_id, tag))
-            .await
-            .unwrap();
-    }
+    let values: Vec<InnerValue> = (0..count)
+        .map(|_| vec_record(emb_id, &[0.0, 1.0], tag_id, tag))
+        .collect();
+    tbl.insert_many(&values).await.unwrap();
 }
 
 /// **PRE-FILTER path** (candidate set ≤ `PRE_FILTER_MAX_CANDIDATES`): a legacy
@@ -802,13 +809,24 @@ async fn vr5_cofilter_sees_staged_and_filters_residual() {
     let emb_id = field_id(&tbl, "embedding").await;
     let tag_id = field_id(&tbl, "tag").await;
 
-    // 5000 committed "red" records — just above PRE_FILTER_MAX_CANDIDATES
-    // (4096) so pre-filter is skipped. dim=2 keeps insertion fast.
-    commit_cluster(&tbl, emb_id, tag_id, "red", 5000).await;
-    // 16000 committed "blue" records so selectivity = 5000/21000 ≈ 0.238...
-    // — wait, that's > 0.20. We need ≤ 0.20, so push blue up to ≥ 20000
-    // (total_live ≥ 25000 → selectivity ≤ 0.20).
-    commit_cluster(&tbl, emb_id, tag_id, "blue", 20_000).await;
+    // Near-minimum-row construction that satisfies BOTH co-filter
+    // invariants with real headroom: `n_candidates > PRE_FILTER_MAX_CANDIDATES`
+    // (4096, `read_exec.rs`) AND `selectivity <= CO_FILTER_MAX_SELECTIVITY`
+    // (0.20, `hnsw_adapter.rs`). red=4097 is the smallest count strictly
+    // above 4096; blue=16600 makes total_live = 20697 -> selectivity =
+    // 4097/20697 ~= 0.19795 (real ~0.002 margin below 0.20 -- NOT a
+    // knife-edge: 4097/20485 = 16388's original pairing is an EXACT tie
+    // at 0.20 in f64 arithmetic, verified in review, which would flip to
+    // the wrong path under any future `<=` -> `<` refactor of that
+    // comparison; this pairing keeps genuine margin instead).
+    // Reducing from the original 25000 rows keeps the HNSW graph build
+    // (the dominant cost — `index2_on_insert` runs per-row even via the
+    // bulk `insert_many` path) under the 180s nextest kill under parallel
+    // load. The test's actual invariant is the path-selection threshold,
+    // not the absolute row count; the staged-merge assertions are
+    // independent of how many committed rows exist.
+    commit_cluster(&tbl, emb_id, tag_id, "red", 4097).await;
+    commit_cluster(&tbl, emb_id, tag_id, "blue", 16_600).await;
 
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
 
