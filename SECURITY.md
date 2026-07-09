@@ -93,4 +93,33 @@ clients, or the host it runs on. In scope (non-exhaustive):
   2026-07-06 supply-chain audit); `server-cert.pem` and other local secrets
   are `.gitignore`d.
 
+### Priority dependencies — `wasmtime`
+
+`wasmtime` (currently 45.0.0, the entire `wasmtime-internal-*` cluster) is the
+**untrusted-code execution boundary** for guest WASM (see `shamir-wasm-host`).
+Its security advisories (sandbox escape, fuel/epoch bypass, cranelift OOB,
+host-trap escape) are historically regular and high-impact. Because of this
+role, `wasmtime` is treated as a **priority-upgrade dependency**:
+
+- **Advisory tracking beyond RUSTSEC.** The general `cargo audit` /
+  `cargo deny` flow (above) covers RUSTSEC, but wasmtime advisories are also
+  announced through the Bytecode Alliance's own security channel, which can
+  surface issues before/outside the RUSTSEC pipeline. Maintainers should watch:
+  - the Bytecode Alliance security policy + notifications:
+    <https://bytecodealliance.org/security>
+  - the wasmtime GitHub security advisories tab (also the reporting channel):
+    <https://github.com/bytecodealliance/wasmtime/security>
+  These should be checked at the same cadence as the weekly `cargo audit`
+  re-scan, and on any report of a new cranelift/wasmtime CVE.
+- **No cooldown deferral.** Unlike lower-trust-boundary dependencies, `wasmtime`
+  bumps that fix a security issue (or a sandbox-hardening release) should **not**
+  be deferred through the standard 30-day dependency cooldown
+  (`cooldown.toml` / `cargo-cooldown`) the way routine version bumps are. A
+  security-motivated `wasmtime` bump may bypass the cooldown with a recorded
+  justification in the PR description (the cooldown exists to let freshly-
+  published registry versions bake; a security fix is the opposite case).
+
+This policy closes audit finding C5
+(`docs/audits/2026-07-06-security-compliance-supplychain.md`).
+
 [gh-pvr]: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
