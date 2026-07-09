@@ -98,25 +98,22 @@ impl Store for FjallStore {
         let keyspace = self.keyspace.clone();
 
         task::spawn_blocking(move || -> DbResult<RecordKey> {
+            // §1.2 (audit 2026-07-06-perf-radical-o-notation): the previous
+            // `contains_key` check before `insert` was a full LSM point-lookup
+            // (memtable → bloom → on-disk levels) that doubled the cost of
+            // every point-write — and it is provably pointless here because
+            // `RecordId::new()` returns a fresh random 128-bit id per call;
+            // the collision probability across concurrent inserts is
+            // negligible (~2⁻¹²⁸). No caller relies on `insert` erroring on
+            // an already-existing key (the key is generated INSIDE this
+            // method and never seen by the caller before), so the check is
+            // pure overhead. fjall 3.x `Keyspace::insert` returns
+            // `Result<(), Error>` with no prior-value, so there is no
+            // `compare_and_swap` at this layer either — atomic check-and-insert
+            // would require a transaction (extra round-trip per write,
+            // regressing hot-path throughput). The check is removed entirely.
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
-
-            // §B13 (acknowledged, benign here): `contains_key` then
-            // `insert` is two separate fjall ops — formally a TOCTOU
-            // window. Safe in this codepath because `RecordId::new()`
-            // returns a fresh random 128-bit id per call; the
-            // collision probability across concurrent inserts is
-            // negligible (~2⁻¹²⁸). fjall 3.0 `Keyspace::insert`
-            // returns `Result<(), Error>` with no prior-value, and
-            // there is no `compare_and_swap` at this layer — atomic
-            // check-and-insert would require a transaction (extra
-            // round-trip per write, regressing hot-path throughput).
-            if keyspace
-                .contains_key(&key[..])
-                .map_err(|e| DbError::Storage(e.to_string()))?
-            {
-                return Err(DbError::KeyExists(format!("Key already exists: {:?}", key)));
-            }
 
             keyspace
                 .insert(&key[..], &*value)
@@ -131,14 +128,31 @@ impl Store for FjallStore {
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
-            // §B13 (acknowledged): same TOCTOU shape as `insert`
-            // above. The engine layer never issues two concurrent
-            // `set` calls for the same `RecordKey` for a single
-            // table (writes are serialised through `TableManager`
-            // dispatch), so the `existed` flag stays consistent
-            // with the actual write under normal use. Concurrent
-            // calls from outside the engine (e.g. tooling) would
-            // race; documented here so the contract is explicit.
+            // §1.2 (audit 2026-07-06-perf-radical-o-notation): the
+            // `contains_key` here doubles the LSM point-lookup cost of every
+            // `set`. The flag is needed by the `Store` trait contract
+            // (`set` returns `bool` = "was created") and several callers
+            // consume it (engine's `delete_returning_version`, CachedStore's
+            // size tracking, the storage fjall tests). fjall 3.x
+            // `Keyspace::insert` returns `Result<(), Error>` — no prior-value
+            // — so `existed` CANNOT be derived from the write op itself; the
+            // separate lookup is the only way to honor the contract here.
+            //
+            // The engine layer already does its own existence check via
+            // `self.get(id).await.ok()` before calling through (see
+            // `table_manager_crud.rs::delete_returning_version`), so the
+            // storage-side flag is technically redundant for the engine — but
+            // removing the trait's `bool` return would be a cross-workspace
+            // API change, out of scope for this surgical perf fix. A flag-free
+            // fast-path variant on `Store` is the proper follow-up.
+            //
+            // §B13 (acknowledged TOCTOU): the engine never issues two
+            // concurrent `set` calls for the same `RecordKey` on a single
+            // table (writes are serialised through `TableManager` dispatch),
+            // so the `existed` flag stays consistent with the actual write
+            // under normal use. Concurrent calls from outside the engine
+            // (e.g. tooling) would race; documented here so the contract is
+            // explicit.
             let existed = keyspace
                 .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?;
@@ -160,7 +174,13 @@ impl Store for FjallStore {
                 .get(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?
             {
-                Some(slice) => Ok(Bytes::copy_from_slice(&slice)),
+                // §1.1 (audit 2026-07-06-perf-radical-o-notation): with the
+                // fjall `bytes_1` feature on, `Slice` IS a `bytes::Bytes`
+                // under the hood and `From<Slice> for Bytes` is a true
+                // zero-copy move (just unwraps the inner `Bytes` — both are
+                // refcounted byte buffers). The previous `copy_from_slice`
+                // did a full memcpy + alloc per point-read.
+                Some(slice) => Ok(Bytes::from(slice)),
                 None => Err(DbError::NotFound(format!("record not found: {:?}", key))),
             }
         })
@@ -209,10 +229,8 @@ impl Store for FjallStore {
                         let (key, val) = guard
                             .into_inner()
                             .map_err(|e| DbError::Storage(e.to_string()))?;
-                        items.push((
-                            Bytes::copy_from_slice(&key),
-                            Bytes::copy_from_slice(&val),
-                        ));
+                        // §1.1: zero-copy conversion (see `get`).
+                        items.push((Bytes::from(key), Bytes::from(val)));
                     }
                     Ok(items)
                 })
@@ -290,7 +308,8 @@ impl Store for FjallStore {
                     .get(&k[..])
                     .map_err(|e| DbError::Storage(e.to_string()))?
                 {
-                    Some(slice) => out.push(Some(Bytes::copy_from_slice(&slice))),
+                    // §1.1: zero-copy conversion (see `get`).
+                    Some(slice) => out.push(Some(Bytes::from(slice))),
                     None => out.push(None),
                 }
             }
@@ -303,7 +322,16 @@ impl Store for FjallStore {
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
-            // Check if key exists
+            // §1.2 (audit 2026-07-06-perf-radical-o-notation): same shape as
+            // `set` — the `contains_key` doubles the LSM point-lookup cost.
+            // The flag is required by the `Store` trait contract (`remove`
+            // returns `bool` = "existed and was removed") and consumed by
+            // callers (engine's `delete_returning_version`, the storage
+            // fjall tests). fjall 3.x `Keyspace::remove` returns
+            // `Result<(), Error>` — no prior-value — so `existed` cannot be
+            // derived from the tombstone write itself. See `set`'s comment
+            // for the full rationale on why the trait-surface fast-path
+            // variant is left as a follow-up.
             let existed = keyspace
                 .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?;
@@ -350,7 +378,9 @@ impl Store for FjallStore {
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
                         last_batch_key = Some(key.to_vec());
-                        items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
+                        // §1.1: zero-copy conversion for both key and value
+                        // (see `get`).
+                        items.push((Bytes::from(key), Bytes::from(value_slice)));
                     }
 
                     Ok((items, last_batch_key))
@@ -425,10 +455,9 @@ impl Store for FjallStore {
                         }
 
                         last_batch_key = Some(key.to_vec());
-                        items.push((
-                            Bytes::copy_from_slice(&key),
-                            Bytes::copy_from_slice(&value_slice),
-                        ));
+                        // §1.1: zero-copy conversion for both key and value
+                        // (see `get`).
+                        items.push((Bytes::from(key), Bytes::from(value_slice)));
                     }
 
                     Ok((items, last_batch_key))
