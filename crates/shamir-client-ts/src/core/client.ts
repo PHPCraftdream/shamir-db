@@ -9,8 +9,13 @@
 
 import type { Platform } from './platform.js';
 import type { ConnectOptions, ResumeOptions } from './types/index.js';
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_CONNECT_TIMEOUT_MS,
+} from './types/connection.js';
 import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import type { WireValue } from './types/write.js';
+import { ShamirDbError, ShamirTimeoutError } from './errors.js';
 import { WsFramer, encode, decode } from './framing.js';
 import {
   runHandshake,
@@ -57,6 +62,12 @@ export interface ScramUserCreated {
 interface PendingRequest {
   resolve: (v: Record<string, unknown>) => void;
   reject: (e: Error) => void;
+  /**
+   * Per-request timeout handle (Finding 2.2). Cleared when the response
+   * arrives / the request is rejected. `undefined` when timeouts are disabled
+   * (`requestTimeoutMs === 0`).
+   */
+  timer?: ReturnType<typeof setTimeout>;
 }
 
 export class ShamirClient {
@@ -75,6 +86,12 @@ export class ShamirClient {
    * 0 = pre-v2 server (no id-keyed write path). Set once at connect/resume.
    */
   private readonly _serverQueryVersion: number;
+  /**
+   * Per-request deadline in ms (Finding 2.2); `0` disables it. A pending
+   * request with no response within this budget rejects with a
+   * {@link ShamirTimeoutError}.
+   */
+  private readonly _requestTimeoutMs: number;
   private nextRequestId = 1;
 
   /**
@@ -100,6 +117,7 @@ export class ShamirClient {
     resumptionTicket?: Uint8Array,
     resumptionExpiresAtNs?: bigint,
     serverQueryVersion?: number,
+    requestTimeoutMs?: number,
   ) {
     this.platform = platform;
     this.framer = framer;
@@ -109,6 +127,7 @@ export class ShamirClient {
     this._resumptionTicket = resumptionTicket;
     this._resumptionExpiresAtNs = resumptionExpiresAtNs;
     this._serverQueryVersion = serverQueryVersion ?? 0;
+    this._requestTimeoutMs = requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
     // Start the persistent read loop immediately. The loop is the sole consumer
     // of framer.recv(); it routes each incoming frame to the matching pending
@@ -126,10 +145,13 @@ export class ShamirClient {
   ): Promise<ShamirClient> {
     const origin = opts.origin ?? `https://${opts.host}`;
     const url = `wss://${opts.host}:${opts.port}/shamir/v1/browser`;
-    const socket = await platform.openSocket(url, {
-      rejectUnauthorized: opts.tls?.rejectUnauthorized ?? true,
-      origin,
-    });
+    const socket = await withConnectTimeout(
+      platform.openSocket(url, {
+        rejectUnauthorized: opts.tls?.rejectUnauthorized ?? true,
+        origin,
+      }),
+      opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    );
     const framer = new WsFramer(socket);
 
     try {
@@ -155,6 +177,7 @@ export class ShamirClient {
         resumptionTicket,
         resumptionExpiresAtNs,
         serverQueryVersion,
+        opts.requestTimeoutMs,
       );
     } catch (e) {
       await framer.close();
@@ -179,10 +202,13 @@ export class ShamirClient {
   ): Promise<ShamirClient> {
     const origin = opts.origin ?? `https://${opts.host}`;
     const url = `wss://${opts.host}:${opts.port}/shamir/v1/browser`;
-    const socket = await platform.openSocket(url, {
-      rejectUnauthorized: opts.tls?.rejectUnauthorized ?? true,
-      origin,
-    });
+    const socket = await withConnectTimeout(
+      platform.openSocket(url, {
+        rejectUnauthorized: opts.tls?.rejectUnauthorized ?? true,
+        origin,
+      }),
+      opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    );
     const framer = new WsFramer(socket);
 
     try {
@@ -273,6 +299,7 @@ export class ShamirClient {
         resumptionTicket,
         resumptionExpiresAtNs,
         serverQueryVersion,
+        opts.requestTimeoutMs,
       );
     } catch (e) {
       await framer.close();
@@ -367,9 +394,8 @@ export class ShamirClient {
       if (errorMsg !== undefined) {
         if (rid !== undefined) {
           // Request-scoped protocol error — reject only this request.
-          const waiter = this.pending.get(rid);
+          const waiter = this.takePending(rid);
           if (waiter) {
-            this.pending.delete(rid);
             waiter.reject(new Error(`protocol error: ${errorMsg}`));
           }
           // If rid is unknown, the server sent an unsolicited error frame —
@@ -386,9 +412,8 @@ export class ShamirClient {
       }
 
       if (rid !== undefined) {
-        const waiter = this.pending.get(rid);
+        const waiter = this.takePending(rid);
         if (waiter) {
-          this.pending.delete(rid);
           if (frame.res instanceof Uint8Array) {
             let dbResponse: Record<string, unknown>;
             try {
@@ -400,11 +425,13 @@ export class ShamirClient {
               continue;
             }
             if (dbResponse.kind === 'error') {
+              // Finding 2.1: surface a typed ShamirDbError carrying the
+              // server's `code` + a `retryable` classification, instead of an
+              // opaque interpolated-string Error the caller has to regex.
               waiter.reject(
-                new Error(
-                  `db error [${(dbResponse.code as string) ?? 'unknown'}]: ${
-                    (dbResponse.message as string) ?? ''
-                  }`,
+                new ShamirDbError(
+                  (dbResponse.code as string) ?? 'unknown',
+                  (dbResponse.message as string) ?? '',
                 ),
               );
             } else {
@@ -429,9 +456,23 @@ export class ShamirClient {
     }
   }
 
-  /** Reject every pending request with `err` and clear the map. */
+  /**
+   * Remove and return the pending slot for `rid`, clearing its timeout timer
+   * (Finding 2.2) so a settled request never fires a spurious timeout.
+   */
+  private takePending(rid: number): PendingRequest | undefined {
+    const waiter = this.pending.get(rid);
+    if (waiter) {
+      this.pending.delete(rid);
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+    }
+    return waiter;
+  }
+
+  /** Reject every pending request with `err`, clearing timers and the map. */
   private rejectAll(err: Error): void {
     for (const waiter of this.pending.values()) {
+      if (waiter.timer !== undefined) clearTimeout(waiter.timer);
       waiter.reject(err);
     }
     this.pending.clear();
@@ -455,7 +496,24 @@ export class ShamirClient {
 
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       // Register BEFORE sending to avoid missing a fast response.
-      this.pending.set(rid, { resolve, reject });
+      const slot: PendingRequest = { resolve, reject };
+      this.pending.set(rid, slot);
+
+      // Finding 2.2: arm a per-request deadline. Without this a Ping /
+      // TxCommit / CreateScramUser (none bounded by the server's
+      // `max_execution_time_secs`) or a lost response id would hang the caller
+      // forever. On fire, reject with a typed, retryable timeout and drop the
+      // slot; a late response then routes to nothing (harmless).
+      if (this._requestTimeoutMs > 0) {
+        slot.timer = setTimeout(() => {
+          if (this.pending.get(rid) === slot) {
+            this.pending.delete(rid);
+            reject(new ShamirTimeoutError('request', this._requestTimeoutMs));
+          }
+        }, this._requestTimeoutMs);
+        // Do not keep the Node event loop alive solely for this timer.
+        (slot.timer as { unref?: () => void }).unref?.();
+      }
 
       let envelope: Uint8Array;
       try {
@@ -463,7 +521,7 @@ export class ShamirClient {
         // carrying the internally-tagged DbRequest (tag = "op").
         envelope = encode({ sid: this._sessionId, rid, req: encode(req) });
       } catch (err) {
-        this.pending.delete(rid);
+        this.takePending(rid);
         reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
@@ -472,7 +530,7 @@ export class ShamirClient {
         this.framer.send(envelope);
       } catch (err) {
         // Socket already closed — remove the slot and reject immediately.
-        this.pending.delete(rid);
+        this.takePending(rid);
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
@@ -896,6 +954,39 @@ export class ShamirClient {
 }
 
 // ── Helpers (module-private) ──────────────────────────────────────────────
+
+/**
+ * Race an in-flight `openSocket` promise against a connect deadline (Finding
+ * 2.2). If the socket resolves after the timeout already fired, it is closed so
+ * no descriptor leaks. `timeoutMs <= 0` disables the bound (awaits the socket
+ * directly).
+ */
+async function withConnectTimeout(
+  socketPromise: Promise<import('./platform.js').Socket>,
+  timeoutMs: number,
+): Promise<import('./platform.js').Socket> {
+  if (timeoutMs <= 0) return socketPromise;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new ShamirTimeoutError('connect', timeoutMs)),
+      timeoutMs,
+    );
+    (timer as { unref?: () => void }).unref?.();
+  });
+
+  try {
+    return await Promise.race([socketPromise, timeout]);
+  } catch (e) {
+    // If the socket eventually opens after we timed out, close it to avoid a
+    // leaked connection.
+    void socketPromise.then((s) => void s.close()).catch(() => {});
+    throw e;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /** Extract the repo string from a table-ref wire value. */
 function tableRefToRepo(tableRef: unknown): string {

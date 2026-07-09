@@ -71,6 +71,7 @@ export class Query {
   private countTotalFlag = false;
   private temporalValue: Temporal | null = null;
   private withVersionFlag = false;
+  private explainFlag = false;
   private ctxValue: ExecCtx | null = null;
 
   private constructor(from: TableRefWire) {
@@ -358,6 +359,17 @@ export class Query {
     return this;
   }
 
+  /**
+   * EXPLAIN / dry-run: run only the planner and return a plan preview
+   * (index selection, plan type, estimated rows) WITHOUT materialising any
+   * rows. The preview lands in `QueryResult.explain`. Mirrors the Rust
+   * `ReadQuery::explain` flag.
+   */
+  explain(on = true): this {
+    this.explainFlag = on;
+    return this;
+  }
+
   // ── Build ──────────────────────────────────────────────────────────
 
   /** Assemble the wire {@link ReadQuery}. */
@@ -396,6 +408,7 @@ export class Query {
     if (this.countTotalFlag) q.count_total = true;
     if (this.temporalValue !== null) q.temporal = this.temporalValue;
     if (this.withVersionFlag) q.with_version = true;
+    if (this.explainFlag) q.explain = true;
 
     return q;
   }

@@ -261,6 +261,22 @@ impl ShamirClient {
     }
 }
 
+/// Map a [`core::ClientError`] into a napi [`Error`].
+///
+/// Finding 2.1 (node binding — PARTIAL): the server sends a typed `code` in
+/// `ClientError::Db { code, message }`. Ideally the JS `Error` would carry that
+/// code as its `.code` property. In napi-rs 2.x the JS `.code` is derived from
+/// the error's `Status` (`napi_create_error(env, code=status.as_ref(), …)`),
+/// and `Status` is a FIXED enum with no custom-string variant — while the napi
+/// async-method signatures are hard-wired to `Result<T, Error<Status>>` by the
+/// `#[napi]` macro, so an `Error<String>` (which WOULD surface an arbitrary
+/// `.code`) does not thread through. Attaching a true typed `.code` therefore
+/// needs either a napi-rs 3.x upgrade (version bump — out of scope) or a custom
+/// `#[napi]` error-class wrapper. Until then we preserve the
+/// `db error [code]: message` reason so callers can still recover the code by
+/// parsing the message. The TS ws-client (the primary SDK) already exposes a
+/// fully-typed `ShamirDbError { code, retryable }` (see
+/// `shamir-client-ts/src/core/errors.ts`). Tracked as a follow-up.
 fn to_napi(e: core::ClientError) -> Error {
     Error::from_reason(e.to_string())
 }

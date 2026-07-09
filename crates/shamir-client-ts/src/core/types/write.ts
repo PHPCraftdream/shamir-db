@@ -145,6 +145,19 @@ export interface InsertOp {
   insert_into: TableRefWire;
   values: WireValue[];
   select?: InsertSelect;
+  /**
+   * Id-keyed msgpack-encoded record payloads for the smart-write (id-on-wire)
+   * path (Stage 5-wire). Each element is ONE record's id-keyed storage msgpack
+   * (field names replaced by their interned u64 ids). Set by
+   * `executeWithTouch` on v2 servers for fully-literal records; records
+   * carrying `$fn`/computed markers stay on `values`.
+   *
+   * Mirrors `write/types.rs::InsertOp.records_idmsgpack`
+   * (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`, msgpack `bin`
+   * via `serde_bytes`) — a PER-OP (per query-entry) field, NOT a batch-level
+   * one. Omitted when empty.
+   */
+  records_idmsgpack?: Uint8Array[];
 }
 
 /**

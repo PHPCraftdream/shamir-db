@@ -33,6 +33,8 @@ export type {
   At,
   Temporal,
   ReadQuery,
+  PlanType,
+  ExplainPlan,
 } from './query.js';
 
 export type { ConnectOptions, ResumeOptions } from './connection.js';

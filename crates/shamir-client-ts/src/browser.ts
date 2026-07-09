@@ -18,6 +18,12 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 }
 
 export { ShamirClient };
+export {
+  ShamirDbError,
+  ShamirTimeoutError,
+  isRetryableCode,
+  RETRYABLE_ERROR_CODES,
+} from './core/errors.js';
 export type { TxOpened, ScramUserCreated } from './core/client.js';
 export type { Db, Tx } from './core/db.js';
 

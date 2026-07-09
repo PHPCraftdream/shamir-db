@@ -426,3 +426,32 @@ describe('composed query', () => {
     });
   });
 });
+
+// ── Finding 1.3: EXPLAIN ─────────────────────────────────────────────
+//
+// `ReadQuery::explain` (read_query.rs, `skip_serializing_if = is_false`) was
+// entirely missing from the TS type + builder — EXPLAIN was unavailable to TS
+// callers. These pin the field + `.explain()` builder method + wire shape.
+
+describe('EXPLAIN (Finding 1.3)', () => {
+  it('omits explain by default (matches the false skip-serialize default)', () => {
+    const q = Query.from('users').build();
+    expect(q.explain).toBeUndefined();
+  });
+
+  it('.explain() emits explain: true', () => {
+    const q = Query.from('users').explain().build();
+    expect(q.explain).toBe(true);
+  });
+
+  it('.explain(false) omits the field again', () => {
+    const q = Query.from('users').explain(true).explain(false).build();
+    expect(q.explain).toBeUndefined();
+  });
+
+  it('explain combines with a normal WHERE without disturbing it', () => {
+    const q = Query.from('users').whereEq('status', 'active').explain().build();
+    expect(q.explain).toBe(true);
+    expect(q.where).toEqual({ op: 'eq', field: ['status'], value: 'active' });
+  });
+});

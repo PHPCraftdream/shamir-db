@@ -142,9 +142,25 @@ pub enum DbResponse {
     /// DB-layer failure (permission, planner, query, lock-timeout, …).
     /// Not a protocol error; the wire frame is a normal `ResponseEnvelope`.
     Error {
-        /// Coarse classification: `permission_denied`, `validation`,
-        /// `limits`, `query`, `timeout`, `lock_timeout`, `unknown_db`,
-        /// `not_supported`, `user_exists`.
+        /// Coarse classification of the failure. The full vocabulary actually
+        /// emitted by the server (see `shamir-server` `db_handler`):
+        ///
+        /// - Auth / routing: `permission_denied`, `access_denied`,
+        ///   `read_only_replica`, `bad_role`, `unsupported_query_version`.
+        /// - Destructive-op HMAC gate: `hmac_required`, `hmac_mismatch`.
+        /// - Batch / planner: `limits`, `validation`, `query`, `timeout`,
+        ///   `lock_timeout`, `nesting_too_deep`, `unknown_db`, `not_supported`,
+        ///   `user_exists`.
+        /// - Interactive transactions: `tx_conflict`, `tx_not_found`,
+        ///   `tx_already_open`, `tx_in_tx`, `tx_forbidden`, `tx_write`,
+        ///   `tx_wrong_db`, `tx_wrong_repo`, `tx_cross_repo_not_supported`,
+        ///   `tx_too_large`, `tx_error`.
+        /// - Foreign keys: `fk_violation`, `fk_restrict`, `fk_cascade_depth`,
+        ///   `fk_requires_index`, `fk_actions`, `fk_on_update`,
+        ///   `fk_restrict`, `fk_update_unsupported_new_value`.
+        ///
+        /// A `QueryError` may also carry a structured `code` verbatim (e.g.
+        /// `bad_hmac`, `fk_*`); untagged legacy errors fall back to `query`.
         code: String,
         /// Human-readable detail.
         message: String,
