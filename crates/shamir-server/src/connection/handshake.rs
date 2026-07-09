@@ -213,7 +213,14 @@ async fn run_handshake<F: Framer>(
     let uhash = username_hash(&ctx.secrets.lockout_secret, username.as_bytes());
     let pair: PairKey = (subnet, uhash);
     if ctx.lockout.is_locked_out(pair, now_ns) {
-        tracing::info!(user = %username.as_str(), "locked_out at auth_init");
+        // Audit C3: log only the HMAC-derived `username_hash` (already in
+        // scope as the lockout key) on the general `info` channel — the full
+        // plaintext identity goes ONLY to the protected HMAC audit chain via
+        // the `audit_emit` call below. This avoids both PII exposure in
+        // general-purpose log aggregation and a user-enumeration /
+        // credential-stuffing signal (an attacker aggregating `auth_failed`
+        // events by username).
+        tracing::info!(user_hash = %hex::encode(uhash), "locked_out at auth_init");
         audit_emit(
             ctx,
             "auth_failed",
@@ -374,7 +381,11 @@ async fn run_handshake<F: Framer>(
                 // endpoint; `FailureState::backoff_ms` saturates here too).
                 FailureOutcome::LockedOut => BACKOFF_CAP_MS,
             };
-            tracing::info!(user = %username.as_str(), "auth_failed: bad proof");
+            // Audit C3: see the comment on the `locked_out` arm above — log
+            // only `user_hash` on the general `info` channel; the full
+            // plaintext identity goes to the protected audit chain via the
+            // `audit_emit` call below.
+            tracing::info!(user_hash = %hex::encode(uhash), "auth_failed: bad proof");
             audit_emit(
                 ctx,
                 "auth_failed",
