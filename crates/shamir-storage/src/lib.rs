@@ -14,6 +14,7 @@
 //! tests across the workspace.
 
 pub mod error;
+pub mod key_bytes;
 pub mod storage_cached;
 pub mod storage_in_memory;
 pub mod storage_membuffer;

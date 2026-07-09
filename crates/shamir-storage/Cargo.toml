@@ -61,12 +61,24 @@ scc = "2.2"
 # `MemBufferConfig` serializes into the engine's info_store via
 # bincode at the DDL boundary.
 serde = { version = "1", features = ["derive"] }
+# `KeyBytes` (§3 of docs/design/record-key-128-migration-plan.md) is a
+# representation-transparent small-buffer key whose serde encoding MUST be
+# byte-identical to how `bytes::Bytes` is currently (de)serialized across the
+# WAL/storage boundary (see `shamir_wal::wal_entry_v2::serde_bytes_bytes`). We
+# therefore impl Serialize/Deserialize manually via `serde_bytes::Bytes`, the
+# exact same primitive the WAL's `Bytes` helper uses.
+serde_bytes = "0.11"
 
 # Errors / logging
 thiserror = "2.0.18"
 log = "0.4"
 
 [dev-dependencies]
+# For `KeyBytes` serde byte-identity tests vs `bytes::Bytes` (bincode is the
+# WAL's on-disk encoding; rmp-serde covers the client-wire path used in
+# shamir-client). Versions match `shamir-wal` / `shamir-client` exactly.
+bincode = "1.3.3"
+rmp-serde = "1"
 tempfile = "3.10.1"
 serial_test = "3.3.1"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros"] }
