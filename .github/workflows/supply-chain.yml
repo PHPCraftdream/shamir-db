@@ -1,0 +1,84 @@
+name: supply-chain
+
+# Automated supply-chain gate (audit C1).
+#
+# Two jobs on different cadences:
+#
+#  - `deny` runs on EVERY push/PR to master. `cargo deny check` is fast (no
+#    compile), hermetic (consults Cargo.lock + deny.toml), and catches the
+#    push-time regressions: a newly-unsatisfiable license expression, a yanked
+#    crate entering the tree, a duplicate-version explosion, or a
+#    not-yet-known-registry/git source. It also runs the advisory-db check, so
+#    a dependency bump that pulls in a crate with a *known* RUSTSEC at PR time
+#    fails here.
+#
+#  - `audit` runs on a SCHEDULE (weekly) AND on demand (`workflow_dispatch`).
+#    RUSTSEC advisories are published continuously and independently of this
+#    repo's commits — a dep that was clean when merged can become advisory-flagged
+#    weeks later with no code change here. A weekly cadence balances signal
+#    freshness against advisory-db churn/noise (daily would fire on many
+#    advisories that get withdrawn or that don't apply to our locked versions);
+#    the manual trigger lets a maintainer run it immediately after a published
+#    advisory that's relevant to us. `cargo audit` and `cargo deny check
+#    advisories` overlap intentionally — audit is the RustSec-ecosystem-native
+#    tool, deny is the policy gate; running both on schedule is cheap belt-and-
+#    braces.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Sundays 03:17 UTC — picked off the top/bottom of the hour to ease load on
+    # the shared GitHub Actions runner pool. Weekly matches the dependabot
+    # cadence in dependabot.yml so audit findings and Dependabot update PRs
+    # arrive in the same weekly window.
+    - cron: "17 3 * * 0"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Per-push/per-PR policy gate: licenses, bans, sources, AND advisories.
+  # Runs against the committed Cargo.lock + deny.toml.
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # `cargo deny check` needs a Cargo.lock to resolve the graph; it does not
+      # need a Rust toolchain to *check*, but `cargo-deny` shells out to cargo
+      # for metadata, so we install the toolchain pinned by rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: cargo deny check
+        # No `--locked` on deny itself; the lockfile is consulted read-only.
+        # All four check categories run so a single job is the gate.
+        run: cargo deny check
+
+  # Periodic advisory scan. Scheduled + manual only (not per-push) because the
+  # advisory database evolves independently of commits — running it on every PR
+  # would flap the gate on advisories that don't touch our locked versions.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    # Only the scheduled + manual triggers want this job. On push/PR the `deny`
+    # job above already covers the advisory-db check against the PR's lockfile;
+    # this job's value is the time-decoupled re-scan.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      # `--file Cargo.lock` pins the scan to the committed lockfile (no network
+      # resolution). `--ignore` is intentionally absent here — every advisory
+      # audit finds should surface. If a finding is a genuine false positive or
+      # a triaged-yet-unpatched case, silence it via the ignore list in a
+      # committed config (`.cargo/audit.toml`) with a reason + tracking issue,
+      # not via a CI flag that lives only in the workflow.
+      - name: cargo audit
+        run: cargo audit --file Cargo.lock

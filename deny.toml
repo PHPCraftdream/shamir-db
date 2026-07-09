@@ -1,0 +1,122 @@
+# cargo-deny configuration — supply-chain gate (audit C1).
+#
+# Run locally:   cargo install --locked cargo-deny && cargo deny check
+# CI:            .github/workflows/supply-chain.yml (every push/PR)
+#
+# The allow-lists below were derived from the ACTUAL license tree of this
+# workspace (extracted via `cargo metadata`), not copied blindly. Every license
+# allowed here is OSI-approved and permissive. Licenses that appear only inside
+# an OR/AND clause together with a permissive alternative are handled via
+# per-crate `exceptions` (e.g. the OpenSSL term inside `aws-lc-sys`, which is
+# the AWS-LC derived license — permissive in effect — rather than a blanket
+# repo-wide OpenSSL blessing).
+#
+# Schema matches cargo-deny 0.19.x (current as of 2026-07). The legacy
+# `[advisories] vulnerability`/`notice` and `[licenses] copyleft`/`default`/
+# `deny`/`allow-osi-fsf-free` keys are removed in this version — do NOT add
+# them, they emit deprecation warnings.
+
+[graph]
+# Check the full dependency graph (all targets, all features). The default is
+# `all-features = false`, which would miss transitive licenses/advisories that
+# only enter via a feature the workspace actually enables.
+all-features = true
+# `cargo deny check` consults Cargo.lock; we want the gate to run against the
+# committed lockfile, so no targets list is needed (it picks up the workspace).
+
+[advisories]
+# Pull the canonical RustSec advisory database. The default (no db-urls) already
+# points at https://github.com/rustsec/advisory-db, but we state it explicitly
+# so the source of record is unambiguous and pinned in this file.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Fail (not just warn) on yanked crates — a yanked version is a signal the
+# author found a problem; CI should refuse to ship it. (Default is `warn`.)
+yanked = "deny"
+# Treat unmaintained and unsound advisories as errors across the whole graph.
+# The cargo-deny defaults (`unmaintained = "all"`, `unsound = "workspace"`)
+# are looser than appropriate for a database product that ships as a single
+# binary with a WASM sandbox — we want both to fail the gate everywhere.
+unmaintained = "all"
+unsound = "all"
+# `ignore` is intentionally EMPTY. Adding an advisory ID here silences it; we do
+# not want any blanket silences in the base config. If a genuine, triaged
+# advisory needs a temporary ignore, add it as `{ id = "RUSTSEC-XXXX-XXXX",
+# reason = "..." }` with a justification and a tracking issue, then remove it
+# once the dep is patched. CI will fail on any untriaged advisory — that is the
+# point of the gate.
+ignore = []
+
+[licenses]
+# Allow only permissive, OSI-approved licenses. This list is the union of what
+# the real dependency tree actually carries (see the comment block at the top).
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+# Confidence for matching a crate's LICENSE text against the canonical SPDX
+# text. 0.8 is cargo-deny's default; we keep it.
+confidence-threshold = 0.8
+# Per-crate exceptions for licenses that are NOT blanket-allowed but are
+# acceptable for a specific dependency (typically because they appear in an
+# AND-clause alongside permissive terms, so the net effective license is still
+# permissive). Each entry is scoped to ONE crate — never a repo-wide allow.
+exceptions = [
+    # `aws-lc-sys` vendors the AWS-LC C library, whose license is
+    # `ISC AND (Apache-2.0 OR ISC) AND OpenSSL`. The `OpenSSL` term is mandatory
+    # under the AND, but AWS-LC is Amazon's OpenSSL fork distributed under a
+    # permissive (Apache-2.0-compatible) regime — the `OpenSSL` identifier here
+    # is the historical SPDX name for that license family, not classic SSLeay
+    # OpenSSL licensing. We scope the allowance to this one crate only.
+    { allow = ["OpenSSL"], name = "aws-lc-sys", version = "*" },
+    # `webpki-roots` ships Mozilla's curated CA root certificate BUNDLE as data,
+    # licensed `CDLA-Permissive-2.0` (Community Data License Agreement –
+    # Permissive, v2.0). This is a permissive DATA license (not software, not
+    # copyleft) specific to the root-store dataset; it's the standard vehicle
+    # for distributing trusted CA bundles and imposes only attribution. Scoped
+    # to this one crate rather than blanket-allowed repo-wide.
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = "*" },
+]
+
+[bans]
+# Duplicate versions of the same crate are flagged but do NOT fail the build.
+# Rationale: the real tree has ~25 duplicate crate-names, almost all of which
+# are legitimate major-version coexistence (`rand 0.8/0.9`, `getrandom` in
+# three majors, the `windows-*` family, `thiserror 1/2`, `hashbrown 0.14→0.17`)
+# that cannot be collapsed without forcing breaking upgrades on transitive deps
+# we don't control. A `deny` here would block CI on day one on noise rather than
+# signal. `warn` surfaces every duplicate in the CI log for triage (audit C7)
+# without rederring the build; promoting individual duplicates to `deny` via a
+# per-crate `deny = [{ name = "...", deny-multiple-versions = true }]` entry is
+# the documented escalation path once a duplicate is actually actionable.
+multiple-versions = "warn"
+# Dev-dependency duplicates (test-only) are even less of a release concern —
+# but cargo-deny defaults to excluding them from the multiple-versions check,
+# and we keep that default so the signal focuses on the shipped binary.
+multiple-versions-include-dev = false
+# Flag wildcard dependencies (`*`) — these are almost always mistakes and a
+# reproducibility hazard. Default is `allow`; we tighten to `warn` so a stray
+# `version = "*"` is at least visible. (The workspace currently has none.)
+wildcards = "warn"
+
+[sources]
+# crates.io is the only allowed registry. `captrack` is now published there
+# (was a non-reproducible `path = "D:/dev/rust/captrack"` — audit C1), so no
+# `allow-git` entry is required. If a genuine git-only dependency is added
+# later, add it to `allow-git` AND pin a specific rev in Cargo.toml.
+unknown-registry = "deny"
+unknown-git = "deny"
+# `allow-registry` defaults to crates.io; stated explicitly for documentation.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
