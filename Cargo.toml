@@ -14,7 +14,13 @@ resolver = "2"
 exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [workspace.dependencies]
-captrack = { path = "D:/dev/rust/captrack", features = ["telemetry"] }
+# Published on crates.io (https://crates.io/crates/captrack, repo
+# https://github.com/PHPCraftdream/captrack). Pinned exact (`=0.1.0`) rather
+# than a caret range so (a) the supply-chain cooldown's lockfile-baseline stays
+# stable, and (b) `cargo deny` / downstream consumers cannot silently pick up a
+# future 0.1.x/0.2 that hasn't been reviewed here. Was a non-reproducible
+# `path = "D:/dev/rust/captrack"` (audit C1).
+captrack = { version = "=0.1.0", features = ["telemetry"] }
 # TEMPORARY: path dep until bench-scale-tool is published as a standalone
 # crate (crates.io or a git dep) — swap this one line then.
 bench-scale-tool = { path = "D:/dev/rust/bench-scale-tool" }
