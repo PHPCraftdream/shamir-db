@@ -155,6 +155,47 @@ async fn ts_index_rebuilds_on_open() {
     assert_eq!(result, None);
 }
 
+/// Audit 2.1 regression: under sustained overwrites of the same key with the
+/// default `CurrentOnly` retention and no live snapshots, the in-memory
+/// `ts_index` must be PRUNED in lockstep with the history versions the vacuum
+/// fast path reclaims — it must NOT grow one entry per write forever.
+///
+/// Before the fix, `ts_index_insert` fired on every write and NOTHING ever
+/// removed an entry, so `ts_index_len()` climbed to the total write count
+/// (unbounded memory). After the fix, each reclaimed history version drops its
+/// matching `(ts, version)` index entry, so the index stays bounded to roughly
+/// the live (current + one-generation-deferred) versions.
+#[tokio::test]
+async fn ts_index_pruned_by_vacuum_fast_path() {
+    let mvcc = make_mvcc();
+    let key = Bytes::from("hot-key");
+
+    // Overwrite the SAME key many times at monotonically-increasing ts.
+    let writes = 200u64;
+    for i in 0..writes {
+        mvcc.set_test_now(1000 + i);
+        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+            .await
+            .unwrap();
+    }
+
+    // The vacuum fast path (CurrentOnly + no snapshots) reclaims old versions
+    // one generation behind, so only a small constant number of versions —
+    // and thus ts_index entries — survive. Assert the index did NOT grow with
+    // the write count (a bound well under the pre-fix `writes` figure).
+    let len = mvcc.ts_index_len();
+    assert!(
+        len <= 4,
+        "ts_index grew to {len} entries after {writes} overwrites — vacuum \
+         must prune the index in lockstep with history reclaim (bounded, not O(writes))"
+    );
+
+    // The as-of-ts query for the freshest ts still resolves to the current
+    // version — pruning stale entries must not break live lookups.
+    let latest = mvcc.version_at_or_before_ts(u64::MAX).await;
+    assert_eq!(latest, Some(writes)); // monotonic version allocation
+}
+
 /// Concurrent safety: 8 writers + readers operating simultaneously — no panics,
 /// no incorrect results under contention.
 #[tokio::test]

@@ -663,6 +663,82 @@ impl SortedIndexManager {
         Ok(out)
     }
 
+    /// Keyset-seek helper: the first `k` record ids in the half-plane
+    /// beyond `seek_encoded`, returned in value order, EXCLUDING every
+    /// entry whose indexed value equals the seek value (the already-seen
+    /// page boundary).
+    ///
+    /// `forward == true`  → ASC : walk `[seek, +∞)` low→high, skip `== seek`.
+    /// `forward == false` → DESC: walk `(-∞, seek]` high→low, skip `== seek`.
+    ///
+    /// This is the ordered early-stop replacement for
+    /// `lookup_range` + full fetch + full sort + truncate on the keyset
+    /// path: the physical key is `[tag|name|encoded_value|record_id]`, so
+    /// the backend stream is already value-ordered — we compare the
+    /// encoded-value slice of each key against `seek_encoded` to drop the
+    /// boundary rows and stop the walk the instant `k` survivors are
+    /// collected. Per-page cost is O(k + |rows == seek|), not
+    /// O(remaining table).
+    pub async fn lookup_range_first_k(
+        &self,
+        name_interned: u64,
+        seek_encoded: &[u8],
+        k: usize,
+        forward: bool,
+    ) -> DbResult<Vec<RecordId>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = self.entry_prefix(name_interned);
+        let value_start = prefix.len();
+        let (lower, upper) = if forward {
+            self.range_bounds(&prefix, Some(seek_encoded), None)
+        } else {
+            self.range_bounds(&prefix, None, Some(seek_encoded))
+        };
+
+        let mut out = Vec::with_capacity(k);
+        let batch = k.min(MAINT_SCAN_BATCH);
+        if forward {
+            let stream = self
+                .info_store
+                .iter_range_stream(Some(lower), Some(upper), batch);
+            futures::pin_mut!(stream);
+            while let Some(b) = stream.next().await {
+                for (key, _) in b? {
+                    if key_value_slice(key.as_ref(), value_start) == seek_encoded {
+                        continue;
+                    }
+                    if let Some(id) = decode_record_id_suffix(key.as_ref()) {
+                        out.push(id);
+                        if out.len() == k {
+                            return Ok(out);
+                        }
+                    }
+                }
+            }
+        } else {
+            let stream = self
+                .info_store
+                .iter_range_stream_reverse(Some(lower), Some(upper), batch);
+            futures::pin_mut!(stream);
+            while let Some(b) = stream.next().await {
+                for (key, _) in b? {
+                    if key_value_slice(key.as_ref(), value_start) == seek_encoded {
+                        continue;
+                    }
+                    if let Some(id) = decode_record_id_suffix(key.as_ref()) {
+                        out.push(id);
+                        if out.len() == k {
+                            return Ok(out);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// First K record ids under the sorted prefix, in value-asc order.
     pub async fn lookup_first_k(&self, name_interned: u64, k: usize) -> DbResult<Vec<RecordId>> {
         if k == 0 {
@@ -1116,6 +1192,17 @@ fn extract_and_encode(
         ScalarRef::Bin(b) => sort_codec::encode_bytes(&mut buf, b),
     }
     Ok(Some(buf))
+}
+
+/// The encoded-value slice of a sorted-index physical key
+/// `[tag|name|encoded_value|record_id]`: everything between the
+/// `value_start` offset (== prefix length) and the trailing 16-byte
+/// record_id. Returns `&[]` for a malformed / too-short key.
+fn key_value_slice(key_bytes: &[u8], value_start: usize) -> &[u8] {
+    if key_bytes.len() < value_start + 16 {
+        return &[];
+    }
+    &key_bytes[value_start..key_bytes.len() - 16]
 }
 
 fn decode_record_id_suffix(key_bytes: &[u8]) -> Option<RecordId> {

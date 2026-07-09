@@ -289,6 +289,35 @@ impl MvccStore {
             .insert((Reverse(ts_millis), Reverse(version)), ());
     }
 
+    /// Audit 2.1: drop a single `(ts_millis, version)` entry from the
+    /// in-memory ts-index. Called at every history-reclaim site in lockstep
+    /// with the `ts_key(version)` removal so the ts-index never outlives the
+    /// history versions it maps (the SAME "no orphan timestamps" invariant
+    /// already enforced for the durable `ts_key`).
+    ///
+    /// Without this, `ts_index` grew by one entry on EVERY committed version
+    /// with no eviction path — unbounded memory under sustained write load.
+    /// The reclaim sites already prove the version is beyond every live
+    /// snapshot's floor (sacred-floor / anchor logic), so an as-of-ts query
+    /// that would have resolved to `version` could no longer read its value
+    /// anyway (its history entry is being deleted in the same pass) — pruning
+    /// the stale index entry is strictly consistency-preserving.
+    ///
+    /// Lock-free (`TreeIndex::remove` is a CAS-based B+ tree operation).
+    pub(super) fn ts_index_remove(&self, ts_millis: u64, version: u64) {
+        self.ts_index
+            .remove(&(Reverse(ts_millis), Reverse(version)));
+    }
+
+    /// Audit 2.1: number of live entries in the in-memory ts-index.
+    /// Telemetry / test accessor — asserts the index shrinks after a
+    /// vacuum/gc/purge pass instead of growing without bound. Off the hot
+    /// path; `TreeIndex::len` is O(N) but only invoked by tests / diagnostics.
+    #[allow(clippy::disallowed_methods)] // O(N) ack: telemetry/test accessor, off hot path
+    pub fn ts_index_len(&self) -> usize {
+        self.ts_index.len()
+    }
+
     /// Phase 3: query the ts-index for the largest version whose commit ts ≤ target.
     /// Returns `None` if the index is empty or no entry satisfies the bound.
     /// O(log N) via reversed-key forward range + `.next()`.

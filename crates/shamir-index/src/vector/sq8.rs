@@ -55,6 +55,14 @@ pub struct Sq8Quantizer {
     /// Per-dimension scale = `(max - min) / 255`. Zero on a constant
     /// dimension (decode yields `min_i` regardless of the code).
     scales: Vec<f32>,
+    /// Audit finding 4(c): per-dimension `scale_i²`, precomputed once so the
+    /// `approx_dot` / `approx_l2_sq` / `dequant_norm_sq` hot loops (called on
+    /// EVERY HNSW graph hop) do not recompute `s*s` per dimension per call.
+    scales_sq: Vec<f32>,
+    /// Audit finding 4(c): per-dimension `min_i·scale_i`, precomputed so the
+    /// `approx_dot` linear term is a single multiply-add per dimension rather
+    /// than recomputing `m*s` on every call.
+    min_scale: Vec<f32>,
     /// `Σ_i min_i²` — the constant term of the approximate dot product,
     /// precomputed in [`Sq8Quantizer::fit`].
     min_sq_sum: f32,
@@ -105,19 +113,26 @@ impl Sq8Quantizer {
         }
 
         let mut scales = vec![0.0f32; dim];
+        let mut scales_sq = vec![0.0f32; dim];
+        let mut min_scale = vec![0.0f32; dim];
         let mut min_sq_sum = 0.0f32;
-        // Indexes three parallel slices (maxs, mins, scales) by the same i.
+        // Indexes parallel slices (maxs, mins, scales, ...) by the same i.
         #[allow(clippy::needless_range_loop)]
         for i in 0..dim {
             let range = maxs[i] - mins[i];
             // scale == 0 on a constant dimension → decode yields min_i.
-            scales[i] = range / 255.0;
+            let s = range / 255.0;
+            scales[i] = s;
+            scales_sq[i] = s * s;
+            min_scale[i] = mins[i] * s;
             min_sq_sum += mins[i] * mins[i];
         }
 
         Self {
             mins,
             scales,
+            scales_sq,
+            min_scale,
             min_sq_sum,
             dim,
         }
@@ -231,14 +246,14 @@ impl Sq8Quantizer {
         // hot-path call was pure dead weight. Removed.
 
         let mut acc = self.min_sq_sum;
-        // Indexes five parallel slices (mins, scales, qx, qy) by the same i.
+        // Audit 4(c): use precomputed `min_scale` (= min_i·s_i) and
+        // `scales_sq` (= s_i²) instead of recomputing `m*s` / `s*s` per call.
+        // Indexes parallel slices (min_scale, scales_sq, qx, qy) by the same i.
         #[allow(clippy::needless_range_loop)]
         for i in 0..self.dim {
             let qx_i = qx[i] as f32;
             let qy_i = qy[i] as f32;
-            let m = self.mins[i];
-            let s = self.scales[i];
-            acc += m * s * (qx_i + qy_i) + s * s * qx_i * qy_i;
+            acc += self.min_scale[i] * (qx_i + qy_i) + self.scales_sq[i] * qx_i * qy_i;
         }
         acc
     }
@@ -298,16 +313,17 @@ impl Sq8Quantizer {
         );
 
         let mut acc = 0.0f32;
-        // Indexes three parallel slices (scales, qx, qy) by the same i.
+        // Audit 4(c): use precomputed `scales_sq` (= s_i²) instead of
+        // recomputing `s*s` per dimension per call.
+        // Indexes three parallel slices (scales_sq, qx, qy) by the same i.
         #[allow(clippy::needless_range_loop)]
         for i in 0..self.dim {
             // Integer difference in i32: u8 − u8 can be negative.
             let diff = (qx[i] as i32) - (qy[i] as i32);
-            let s = self.scales[i];
             // s² · diff² accumulated in f32. diff² ≤ 65025 fits in i32
             // exactly; the multiply by s² (f32) promotes to f32.
             let diff_sq = (diff * diff) as f32;
-            acc += s * s * diff_sq;
+            acc += self.scales_sq[i] * diff_sq;
         }
         acc
     }
@@ -354,6 +370,10 @@ impl Sq8Quantizer {
         );
         self.mins = mins.to_vec();
         self.scales = scales.to_vec();
+        // Audit 4(c): recompute the precomputed per-dimension products so the
+        // hot loops stay consistent with the restored params.
+        self.scales_sq = scales.iter().map(|s| s * s).collect();
+        self.min_scale = mins.iter().zip(scales).map(|(m, s)| m * s).collect();
         // Recompute min_sq_sum = Σ min_i².
         self.min_sq_sum = mins.iter().map(|m| m * m).sum();
     }

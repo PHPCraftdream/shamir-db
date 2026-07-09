@@ -17,7 +17,7 @@ use shamir_storage::error::DbResult;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::{InnerValue, QueryValue};
+use shamir_types::types::value::InnerValue;
 
 use super::read_exec::{
     apply_select_value_bytes, try_project_page_only, try_project_page_only_bytes,
@@ -453,39 +453,20 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         use shamir_query_types::read::OrderDirection;
 
-        // Build the inclusive half-plane range and collect record IDs.
-        // ASC  → [seek_key, +∞)   (we'll drop rows == seek_key below)
-        // DESC → (-∞, seek_key]   (ditto)
-        let (lower, upper) = match direction {
-            OrderDirection::Asc => (Some(encoded_key), None),
-            OrderDirection::Desc => (None, Some(encoded_key)),
-        };
-
-        let record_ids = self
+        // Audit 1.2: walk the sorted index in value order, dropping the
+        // boundary rows (value == seek) inline and stopping after `limit`
+        // survivors — O(limit + |rows == seek|) per page instead of the
+        // old O(remaining table) fetch → project → full-sort → truncate.
+        // The index returns IDs already in ORDER BY direction, so no
+        // post-fetch sort is needed.
+        let forward = matches!(direction, OrderDirection::Asc);
+        let id_vec = self
             .sorted_indexes()
-            .lookup_range(index_name, lower, upper)
+            .lookup_range_first_k(index_name, encoded_key, limit, forward)
             .await?;
 
-        let id_vec: Vec<RecordId> = record_ids.into_iter().collect();
-
-        // Fetch record bytes.
+        // Fetch record bytes (already value-ordered, already ≤ limit).
         let raw = self.get_many_bytes(&id_vec).await?;
-
-        // Extract the seek value from the pagination DTO for the
-        // exclusivity filter. The planner guarantees key.len() == 1.
-        let seek_qv = query
-            .pagination
-            .keyset()
-            .and_then(|(key, _)| key.first())
-            .cloned();
-
-        // Determine the ORDER BY field name for value extraction.
-        let order_field: Option<&str> = query
-            .order_by
-            .as_ref()
-            .and_then(|ob| ob.items.first())
-            .and_then(|item| item.field.first())
-            .map(|s| s.as_str());
 
         let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
         for (id, opt) in id_vec.iter().zip(raw) {
@@ -494,23 +475,9 @@ impl TableManager {
             }
         }
 
-        // Project to QueryValue, exclude rows whose value equals the seek
-        // value (exclusive bound), then sort + truncate.
-        let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
-
-        // Exclusive filter: drop rows whose ORDER BY value matches the seek key.
-        if let (Some(seek), Some(field)) = (seek_qv.as_ref(), order_field) {
-            result_qv.retain(|qv| extract_qv_field(qv, field) != Some(seek));
-        }
-
-        // Sort by ORDER BY direction (the index returned IDs unordered by value
-        // since lookup_range returns a BTreeSet<RecordId>).
-        if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by_qv(&mut result_qv, order_by);
-        }
-
-        // Truncate to limit.
-        result_qv.truncate(limit);
+        // Project to QueryValue in value order — no sort, no exclusion
+        // filter (both are now handled by the ordered early-stop walk).
+        let result_qv = apply_select_value_bytes(&matched, &query.select, interner);
 
         let records_scanned = matched.len() as u64;
         let records_returned = result_qv.len() as u64;
@@ -720,10 +687,4 @@ impl TableManager {
             })
         }
     }
-}
-
-/// Extract a top-level field from a `QueryValue::Map` row.
-/// Returns `None` for non-map rows or missing keys.
-fn extract_qv_field<'a>(row: &'a QueryValue, field: &str) -> Option<&'a QueryValue> {
-    row.get(field)
 }
