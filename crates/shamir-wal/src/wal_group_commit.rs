@@ -202,6 +202,66 @@ impl WalGroupCommit {
         }
     }
 
+    /// Batched append — all payloads land in ONE leader window (one
+    /// `append_batch` call to the sink), so the batch is atomic at the
+    /// segment level: either every payload is written in a single `write()`
+    /// syscall (and reaches the requested tier together) or, on a write/sync
+    /// failure, the segment is quarantined (§1.3) and every caller gets the
+    /// SAME error — no partial-write resurrection on recovery (audit §1.6).
+    ///
+    /// `entries` is `(payload, commit_version)` pairs; `durability` applies to
+    /// the whole batch. The window's `max_version` (folded into the sink's
+    /// watermark) is the max of the entries' `commit_version`s.
+    ///
+    /// Atomicity argument: all entries are pushed to `pending` under ONE lock
+    /// acquisition. The leader that drains the queue observes the full batch
+    /// in one `mem::take` and issues a single `sink.append_batch(payloads, …)`
+    /// — one `write()`, so a partial write (ENOSPC mid-frame) quarantines the
+    /// segment and rolls back ALL frames in the batch (the §1.3 rollback
+    /// truncates to the pre-batch offset). No entry survives a partial write,
+    /// so recovery never replays a subset of a "failed" batch.
+    pub async fn append_many(
+        &self,
+        entries: Vec<(Vec<u8>, u64)>,
+        durability: WalDurability,
+    ) -> DbResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // One shared waiter for the whole batch. The leader completes it
+        // (possibly multiple times — idempotent) with the single batch
+        // outcome; every caller parks on the same waiter and observes the
+        // same Ok/Err.
+        let waiter = Arc::new(Waiter::new());
+        {
+            let mut p = self.pending.lock().await;
+            for (payload, commit_version) in entries {
+                p.push((payload, commit_version, durability, Arc::clone(&waiter)));
+            }
+        }
+        if self
+            .flushing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.lead_until_drained().await;
+        }
+        loop {
+            let notified = waiter.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if waiter.done.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+        if waiter.ok.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(DbError::Storage("wal group commit batch failed".into()))
+        }
+    }
+
     // Caller holds leadership (flushing == true). Drain windows until the
     // queue is observed empty, then release leadership ATOMICALLY with the
     // empty observation (under the pending lock) so a concurrent pusher is
@@ -312,6 +372,17 @@ impl WalGroupCommit {
     /// window for level-2 (Buffered) commits. Weak-ref lifecycle: the task
     /// exits when the last `Arc<WalGroupCommit>` is dropped (no leak —
     /// mirrors MemBufferStore's flusher). No-op sinks make `sync_now()` cheap.
+    ///
+    /// **Audit §1.5:** `take_dirty()` clears the flag BEFORE attempting the
+    /// fsync. If the fsync fails, restoring the flag (`store(true)`) ensures
+    /// the next tick retries instead of leaving the dirty state lost with no
+    /// further attempt until a new append arrives — on a quiescent system
+    /// that is an unbounded data-at-risk window. The fsync error is logged
+    /// loudly (it was previously swallowed by `let _ =`). Repeated fsync
+    /// failures cause the sink to quarantine the segment (see §1.3 — the
+    /// `WalSegment::sync` poison path forces the leader to rotate), so this
+    /// loop converges: either the fsync eventually succeeds (clearing the
+    /// flag) or every append starts failing fast on a poisoned segment.
     pub fn spawn_background_fsync(self: &Arc<Self>, interval: Duration) {
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -320,7 +391,16 @@ impl WalGroupCommit {
                 match weak.upgrade() {
                     Some(g) => {
                         if g.take_dirty() {
-                            let _ = g.sync_now().await;
+                            if let Err(e) = g.sync_now().await {
+                                // Restore the dirty flag so the next tick
+                                // retries the fsync instead of silently
+                                // abandoning the unflushed Buffered entries.
+                                g.dirty_since_sync.store(true, Ordering::Release);
+                                log::error!(
+                                    "WalGroupCommit background fsync failed: {e}; \
+                                     dirty flag restored — will retry next tick"
+                                );
+                            }
                         }
                     }
                     None => break,
@@ -332,5 +412,20 @@ impl WalGroupCommit {
     #[cfg(test)]
     pub(crate) fn fsync_count(&self) -> u64 {
         self.fsync_count.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: is the dirty flag currently set? Used by the §1.5
+    /// regression test to assert the background fsync restores it after a
+    /// failed sync (rather than silently losing it).
+    #[cfg(test)]
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty_since_sync.load(Ordering::Acquire)
+    }
+
+    /// Test-only: set the dirty flag directly (simulates a Buffered append
+    /// landing without going through the full append path).
+    #[cfg(test)]
+    pub(crate) fn set_dirty(&self) {
+        self.dirty_since_sync.store(true, Ordering::Release);
     }
 }

@@ -1,9 +1,11 @@
 use crate::meta::MetaKey;
 use crate::table::interner_manager::InternerManager;
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{InternerKey, UserKey};
+use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
 async fn create_manager() -> InternerManager {
@@ -215,4 +217,72 @@ async fn test_interner_concurrent_touch_and_persist() {
             .unwrap_or_else(|| panic!("id {} (name {}) not found after reload", id, name));
         assert_eq!(&*got, name.as_str());
     }
+}
+
+/// Audit §2.6 regression: a corrupt delta chunk must be a FATAL open error,
+/// not a silent skip-and-continue. Before the fix, a corrupt chunk was
+/// logged and skipped — continuing with a truncated dictionary means minting
+/// new ids over already-occupied ones, silently corrupting every old record
+/// referencing those ids. Now `get()` must return `Err`.
+#[tokio::test]
+async fn corrupt_delta_chunk_is_fatal() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Write ONE valid chunk (one entry) so the dictionary has state.
+    let valid_chunk = vec![(InternerKey::new(1), UserKey::from_str("alpha"))];
+    let chunk_key = RecordId::system("i.d000000000").to_bytes();
+    store
+        .set(chunk_key.clone(), bincode::to_bytes(&valid_chunk).unwrap())
+        .await
+        .unwrap();
+
+    // Write a SECOND chunk that is garbage (not valid bincode).
+    let corrupt_key = RecordId::system("i.d000000001").to_bytes();
+    store
+        .set(
+            corrupt_key,
+            Bytes::from_static(b"NOT_VALID_BINCODE_GARBAGE"),
+        )
+        .await
+        .unwrap();
+
+    // Loading must FAIL — the corrupt chunk cannot be silently skipped.
+    let manager = InternerManager::new(store);
+    let result = manager.get().await;
+    assert!(
+        result.is_err(),
+        "corrupt interner chunk must be fatal, not silently skipped (audit §2.6)"
+    );
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("§2.6") || err.contains("corrupt") || err.contains("deserialize"),
+        "error must indicate corruption is fatal, got: {err}"
+    );
+}
+
+/// Audit §2.6 regression: a corrupt LEGACY blob (MetaKey::Internals) must
+/// be a FATAL open error, not silently become "empty dictionary". Before the
+/// fix, `unwrap_or_else(|e| { log::error!(...); Vec::new() })` turned a
+/// corrupt legacy blob into an empty seed — then chunk scan found nothing,
+/// and the interner started from zero, re-minting ids over old records.
+#[tokio::test]
+async fn corrupt_legacy_blob_is_fatal() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Write a corrupt legacy blob under MetaKey::Internals.
+    store
+        .set(
+            MetaKey::Internals.as_record_id().to_bytes(),
+            Bytes::from_static(b"CORRUPT_LEGACY_BLOB_GARBAGE"),
+        )
+        .await
+        .unwrap();
+
+    // Loading must FAIL.
+    let manager = InternerManager::new(store);
+    let result = manager.get().await;
+    assert!(
+        result.is_err(),
+        "corrupt legacy interner blob must be fatal, not silently emptied (audit §2.6)"
+    );
 }

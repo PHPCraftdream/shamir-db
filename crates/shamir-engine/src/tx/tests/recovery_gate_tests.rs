@@ -249,3 +249,92 @@ async fn recovered_floor_survives_a_second_restart() {
         "the recovered floor (25) must survive a second restart"
     );
 }
+
+/// Audit §1.7 regression: `persist_markers` must write the MONOTONIC max
+/// (`gate.last_committed()`), not the raw `commit_version` of the calling
+/// tx. Without this, parallel Phase 6.5 writers can regress the marker:
+/// committer A (v=10) writes 10, then committer B (v=9) writes 9, and a
+/// crash leaves the marker at 9 — the gate seeds below a truncated segment
+/// and `assign_next_version` re-issues 10.
+///
+/// This test simulates the race: advance the gate's `last_committed` to 10
+/// (a parallel committer that already published), then call `persist_markers`
+/// with `commit_version = 9` (the "slower" committer). The persisted marker
+/// must be >= 10, NOT regressed to 9.
+#[tokio::test]
+async fn persist_markers_writes_monotonic_max_not_raw_version() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
+    let repo = open_disk("r", path, vec![TableConfig::new("t")]).await;
+    let gate = repo.tx_gate().await.unwrap();
+
+    // Simulate a parallel committer that published v=10 (advancing
+    // last_committed to 10 via the monotonic max).
+    gate.publish_committed_max(10);
+    assert_eq!(gate.last_committed(), 10);
+
+    // Now the "current" committer (v=9) calls persist_markers. Before the
+    // fix this wrote 9, regressing the marker below the already-published 10.
+    crate::tx::commit_phases::persist_markers(&repo, gate.as_ref(), 9)
+        .await
+        .unwrap();
+
+    // The marker must reflect the monotonic max (10), not the raw 9.
+    let info = repo.tx_info_store().await.unwrap();
+    let marker = load_last_committed(&info).await.unwrap();
+    assert!(
+        marker >= Some(10),
+        "persist_markers must write the monotonic max (>= 10), not regress to the \
+         raw commit_version (9); got {marker:?}"
+    );
+}
+
+/// Audit §1.7 residual (found in @sh review of task #494): the in-memory
+/// `gate.last_committed()` value is a monotonic max, but WITHOUT
+/// serialization on the disk write itself, two concurrent `persist_markers`
+/// calls could still land in the WRONG order on disk — e.g. committer A
+/// (reads gate max = 10, about to write) races committer B, which ALSO
+/// reads the gate (still 10 at that instant) but wins the disk-write race
+/// and persists first; if a THIRD write for a smaller value somehow landed
+/// after (a plain `Store::set` has no ordering guarantee relative to other
+/// concurrent `Store::set` calls to the same key), the marker could regress
+/// even though every caller's `gate.last_committed()` read was correct.
+///
+/// This test proves `persist_markers` refuses to regress the ON-DISK value
+/// even when a HIGHER value is already persisted than what this call's own
+/// candidate would be — i.e. it does a genuine read-current/write-if-greater
+/// under `marker_write_mutex`, not a blind write of `gate.last_committed()`.
+#[tokio::test]
+async fn persist_markers_never_regresses_the_on_disk_marker() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
+    let repo = open_disk("r", path, vec![TableConfig::new("t")]).await;
+    let gate = repo.tx_gate().await.unwrap();
+    let info = repo.tx_info_store().await.unwrap();
+
+    // Simulate a "faster" concurrent writer that already persisted 20
+    // directly (bypassing `persist_markers`, standing in for a genuinely
+    // concurrent call that raced ahead on the disk write).
+    save_last_committed(&info, 20).await.unwrap();
+
+    // The gate's own monotonic max is only 10 here (this committer hasn't
+    // observed the other writer's in-memory publish, only sees its own
+    // commit_version=9 candidate folded into gate.last_committed()=10).
+    gate.publish_committed_max(10);
+    assert_eq!(gate.last_committed(), 10);
+
+    // persist_markers must NOT overwrite the already-higher on-disk value
+    // (20) with the lower in-memory candidate (10) — that would be exactly
+    // the disk-write-ordering regression this fix closes.
+    crate::tx::commit_phases::persist_markers(&repo, gate.as_ref(), 9)
+        .await
+        .unwrap();
+
+    let marker = load_last_committed(&info).await.unwrap();
+    assert_eq!(
+        marker,
+        Some(20),
+        "persist_markers must never regress an already-higher on-disk marker; \
+         got {marker:?} (expected the pre-existing 20 to survive)"
+    );
+}

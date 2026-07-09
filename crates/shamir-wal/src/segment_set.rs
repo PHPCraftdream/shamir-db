@@ -131,8 +131,12 @@ impl SegmentSet {
         for seq in seqs {
             let path = dir.join(seg_file_name(seq));
             // Compute max_version once via a one-shot replay (rare, open-time).
+            // Audit §1.8: sealed segments use replay_sealed_at_startup so a CRC
+            // failure (corruption in a fully-fsync'd segment) is a loud open
+            // error. Audit §2.4: PermissionDenied is a hard error at startup
+            // (no concurrent truncation expected).
             let seg = WalSegment::open(path.clone()).await?;
-            let entries = seg.replay().await?;
+            let entries = seg.replay_sealed_at_startup().await?;
             let max_version = entries.iter().map(|e| e.commit_version).max().unwrap_or(0);
             sealed.push(SealedMeta {
                 seq,
@@ -322,6 +326,18 @@ impl SegmentSet {
     /// Replay every segment in seq order: all sealed (ascending) then the
     /// active segment last. Byte-identical to a single segment holding the
     /// same data in the same append order.
+    ///
+    /// **Audit §2.4:** this is the cold-start recovery path — the only
+    /// caller is `RepoWalManager::recover()`, invoked once at repo boot
+    /// (verified: `WalGroupCommit::replay`/`WalSink::replay` have no other
+    /// callers). There is no concurrent `truncate_below` racing a fresh
+    /// process at startup, so every segment here is replayed with the
+    /// `_at_startup` variants — `PermissionDenied` is a hard error (a real
+    /// ACL denial or antivirus/backup-held file, NOT the Windows
+    /// delete-pending race that justifies tolerance during a LIVE
+    /// concurrent truncate). Using the tolerant `replay()`/`replay_sealed()`
+    /// here would silently treat a real permission failure as an empty WAL,
+    /// exactly the bug this finding closes.
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
         // Snapshot sealed metadata + active Arc under the lock; do I/O after.
         let (mut sealed, active) = {
@@ -335,9 +351,15 @@ impl SegmentSet {
         let mut out = Vec::new();
         for meta in &sealed {
             let seg = WalSegment::open(meta.path.clone()).await?;
-            out.extend(seg.replay().await?);
+            // Audit §1.8 + §2.4: sealed segments are fully fsync'd (I4), so
+            // a CRC mismatch is on-disk corruption, not a crash tail —
+            // replay it in "sealed" mode so a CRC failure is a loud
+            // recovery error (operator decision) instead of a silent warn
+            // that discards the valid tail. "_at_startup" additionally
+            // hard-fails PermissionDenied (see method doc above).
+            out.extend(seg.replay_sealed_at_startup().await?);
         }
-        out.extend(active.replay().await?);
+        out.extend(active.replay_at_startup().await?);
         Ok(out)
     }
 

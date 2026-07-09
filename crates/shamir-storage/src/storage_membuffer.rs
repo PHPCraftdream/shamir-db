@@ -167,6 +167,12 @@ struct MemBufferState {
     ttl_ms: AtomicU64,
     flush_interval_ms: AtomicU64,
     flush_batch_size: AtomicUsize,
+    /// Audit §2.2: telemetry counter for background-flush errors. The
+    /// background flusher previously swallowed errors silently (`let _ =
+    /// drain_once(...)`); now each failure increments this counter and logs
+    /// an error so disk-full / I/O failures are observable (otherwise dirty
+    /// grows unboundedly with zero signal).
+    flush_errors: AtomicU64,
 }
 
 impl MemBufferState {
@@ -228,6 +234,7 @@ impl MemBufferStore {
             ttl_ms: AtomicU64::new(config.ttl_ms.unwrap_or(0)),
             flush_interval_ms: AtomicU64::new(config.flush_interval_ms),
             flush_batch_size: AtomicUsize::new(config.flush_batch_size),
+            flush_errors: AtomicU64::new(0),
         });
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -260,7 +267,19 @@ impl MemBufferStore {
                     _ = notify.notified() => {},
                     _ = tokio::time::sleep(flush_interval) => {},
                 }
-                let _ = Self::drain_once(&state, inner_for_task.as_ref(), batch_size).await;
+                // Audit §2.2: surface background-flush errors instead of
+                // swallowing them silently (`let _ = ...`). A disk-full or
+                // I/O failure now increments a telemetry counter and logs an
+                // error so it is observable — without this, dirty grows
+                // unboundedly with zero signal.
+                if let Err(e) = Self::drain_once(&state, inner_for_task.as_ref(), batch_size).await
+                {
+                    state.flush_errors.fetch_add(1, Ordering::Relaxed);
+                    log::error!(
+                        "MemBufferStore background flush failed (dirty entries retained, \
+                         will retry next interval): {e}"
+                    );
+                }
                 // Force moka to run its maintenance — this fires
                 // any pending eviction listeners (TTL + capacity)
                 // so dirty entries that crossed thresholds get
@@ -525,11 +544,21 @@ impl Store for MemBufferStore {
         let batch = batch_size;
         let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
-            while {
-                let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
-                    .unwrap_or(0);
-                n > 0
-            } {}
+            // Audit §2.2: propagate the drain error as a stream item instead
+            // of swallowing it via `unwrap_or(0)`. A flush failure left the
+            // dirty tail unflushed; silently serving `inner` WITHOUT that tail
+            // (full scans, index rebuilds, doctor, copy_store during RENAME)
+            // would return stale data.
+            loop {
+                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
             let inner_stream = inner.iter_stream(batch);
             futures::pin_mut!(inner_stream);
             while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
@@ -544,11 +573,17 @@ impl Store for MemBufferStore {
         let p = prefix;
         let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
-            while {
-                let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
-                    .unwrap_or(0);
-                n > 0
-            } {}
+            // Audit §2.2: propagate drain errors (see iter_stream).
+            loop {
+                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
             let inner_stream = inner.scan_prefix_stream(p, batch_size);
             futures::pin_mut!(inner_stream);
             while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
@@ -567,11 +602,17 @@ impl Store for MemBufferStore {
         let inner = Arc::clone(&self.inner);
         let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
-            while {
-                let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
-                    .unwrap_or(0);
-                n > 0
-            } {}
+            // Audit §2.2: propagate drain errors (see iter_stream).
+            loop {
+                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
             let inner_stream = inner.iter_range_stream(start_inclusive, end_inclusive, batch_size);
             futures::pin_mut!(inner_stream);
             while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
@@ -590,11 +631,17 @@ impl Store for MemBufferStore {
         let inner = Arc::clone(&self.inner);
         let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
-            while {
-                let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
-                    .unwrap_or(0);
-                n > 0
-            } {}
+            // Audit §2.2: propagate drain errors (see iter_stream).
+            loop {
+                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
             let inner_stream =
                 inner.iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size);
             futures::pin_mut!(inner_stream);
@@ -621,6 +668,17 @@ impl Store for MemBufferStore {
     /// Delegate to inner store's `transact`, then update cache + dirty
     /// state for all touched keys. The buffer layer doesn't add
     /// atomicity — that comes from the inner backend.
+    ///
+    /// **Audit §2.3:** the old code called `dirty.remove(&k)` UNCONDITIONALLY
+    /// after `inner.transact`. A concurrent `set(k)` landing between
+    /// `inner.transact` and the `remove` put a NEW value into dirty — which
+    /// then got removed, so it never reached the inner store. After a cache
+    /// eviction or restart, durable state was the OLD value. The fix mirrors
+    /// `drain_once`'s snapshot + `remove_if` pattern: snapshot the dirty slot
+    /// BEFORE the cache update, and only remove the entry if it still matches
+    /// that snapshot (i.e., no concurrent write overwrote it). Since
+    /// `drain_all` at the top already emptied these keys, a surviving entry
+    /// at this point is a concurrent write that must NOT be lost.
     async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
         if ops.is_empty() {
             return Ok(());
@@ -638,14 +696,25 @@ impl Store for MemBufferStore {
             match op {
                 super::types::KvOp::Set(k, v) => {
                     let slot = Slot::Live(v);
-                    cache.insert(k.clone(), slot).await;
-                    // Remove from dirty — inner already has it.
-                    self.state.dirty.remove(&k);
+                    cache.insert(k.clone(), slot.clone()).await;
+                    // Audit §2.3: remove from dirty ONLY if the slot is
+                    // still the one we just wrote — a concurrent `set(k)`
+                    // that landed between `inner.transact` and here put a
+                    // NEWER value into dirty; removing it would lose that
+                    // write (the old unconditional `remove` did exactly
+                    // this). `remove_if` with a value comparison is the
+                    // same pattern `drain_once` uses.
+                    self.state
+                        .dirty
+                        .remove_if(&k, |_, current| *current == slot);
                 }
                 super::types::KvOp::Remove(k) => {
-                    cache.insert(k.clone(), Slot::Tombstone).await;
-                    // Remove from dirty — inner already has it.
-                    self.state.dirty.remove(&k);
+                    let slot = Slot::Tombstone;
+                    cache.insert(k.clone(), slot.clone()).await;
+                    // Audit §2.3: same guarded removal as the Set branch.
+                    self.state
+                        .dirty
+                        .remove_if(&k, |_, current| *current == slot);
                 }
             }
         }
