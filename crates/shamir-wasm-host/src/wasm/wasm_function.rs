@@ -49,9 +49,18 @@
 //! and never `.await`). The new `call` host import is async — it must await
 //! `FunctionRegistry::invoke`.
 //!
-//! Note: a CPU-bound guest with no host-import awaits still occupies the
-//! tokio worker thread for the duration of its timeslice. Epoch-based
-//! yielding is a future refinement; out of scope here.
+//! Guest execution is bounded three ways: per-Store FUEL (instruction count),
+//! EPOCH interruption (wall-clock pre-emption of a pure-CPU guest that never
+//! awaits — engine epoch ticker + per-Store epoch deadline), and a top-level
+//! WALL-CLOCK deadline (`tokio::time::timeout`) bounding the TOTAL time of a
+//! request across every nested `ctx.call`.
+//!
+//! FOLLOW-UP (deferred, task #495 scope-down): fuel is still RESET to a full
+//! budget per nested Store, so nested calls do not draw down from a shared
+//! per-request fuel budget — wall-clock + epoch cap total time but not total
+//! instructions across the fan-out. A genuine AGGREGATE cross-Store fuel
+//! budget (threading a shared remaining-fuel counter through `host_call.rs`)
+//! is a larger Store-lifecycle change left as a documented follow-up.
 
 use super::super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use super::super::contract::ShamirFunction;
@@ -318,9 +327,12 @@ impl ShamirFunction for WasmFunction {
 
         // NOTE: we no longer use spawn_blocking. With async_support enabled
         // the entire execution runs on the tokio runtime; Wasmtime suspends
-        // the fiber at host-import .await points (only the `call` import
-        // awaits today). A CPU-bound guest with no awaits still occupies the
-        // worker — epoch-based yielding is a future refinement.
+        // the fiber at host-import .await points. A pure-CPU guest with no
+        // awaits is now bounded by epoch interruption (engine epoch ticker +
+        // per-Store epoch deadline below), and the whole request — across all
+        // nested `ctx.call` invocations — is additionally bounded by a
+        // top-level wall-clock `timeout` (see the depth-0 call site).
+        let deadline = limits.wall_clock_deadline;
         let limiter = StoreLimitsBuilder::new()
             .memory_size(limits.max_memory_bytes)
             .build();
@@ -341,6 +353,15 @@ impl ShamirFunction for WasmFunction {
         store
             .set_fuel(limits.fuel)
             .map_err(|e| FunctionError::Compute(e.to_string()))?;
+
+        // Per-Store epoch deadline: trap the guest once the engine epoch has
+        // advanced past `ceil(deadline / EPOCH_TICK)` ticks. This pre-empts a
+        // pure-CPU guest that never awaits (fuel exhaustion alone cannot, and
+        // fuel is reset per nested Store). `set_epoch_deadline` defaults to a
+        // trap on overrun, surfaced as a wasm error mapped to `FunctionError`.
+        let tick_ms = WasmEngine::EPOCH_TICK.as_millis().max(1) as u64;
+        let deadline_ticks = (deadline.as_millis() as u64).div_ceil(tick_ms).max(1);
+        store.set_epoch_deadline(deadline_ticks);
 
         let instance = self
             .instance_pre
@@ -384,11 +405,29 @@ impl ShamirFunction for WasmFunction {
         // Write input msgpack into guest memory.
         memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
 
-        // Call the guest function.
-        let packed = call_fn
-            .call_async(&mut store, (in_ptr, input_len))
-            .await
-            .map_err(|e| map_wasm_error(e, "shamir_call"))?;
+        // Call the guest function. At the top level (depth 0) bound the TOTAL
+        // wall-clock of the request — spanning every nested `ctx.call` — with
+        // a `timeout`. Nested invocations (depth > 0) run inside this future,
+        // so a single top-level deadline covers the whole fan-out; re-arming
+        // it per nested Store would multiply the effective budget. Epoch
+        // interruption handles the pure-CPU case even when the future never
+        // yields to let the `timeout` fire.
+        let call_future = call_fn.call_async(&mut store, (in_ptr, input_len));
+        let packed = if depth == 0 {
+            match tokio::time::timeout(deadline, call_future).await {
+                Ok(res) => res.map_err(|e| map_wasm_error(e, "shamir_call"))?,
+                Err(_) => {
+                    return Err(FunctionError::Compute(format!(
+                        "wasm request exceeded wall-clock deadline ({}s)",
+                        deadline.as_secs_f64()
+                    )));
+                }
+            }
+        } else {
+            call_future
+                .await
+                .map_err(|e| map_wasm_error(e, "shamir_call"))?
+        };
 
         // Unpack the result pointer/length.
         let out_ptr = ((packed as u64) >> 32) as usize;
@@ -411,6 +450,8 @@ pub(super) fn map_wasm_error(e: wasmtime::Error, context: &str) -> FunctionError
     let msg = e.to_string();
     if msg.contains("fuel") {
         FunctionError::Compute("fuel exhausted".into())
+    } else if msg.contains("epoch") {
+        FunctionError::Compute("wasm guest interrupted (wall-clock deadline exceeded)".into())
     } else {
         FunctionError::Compute(format!("{context} trap: {msg}"))
     }

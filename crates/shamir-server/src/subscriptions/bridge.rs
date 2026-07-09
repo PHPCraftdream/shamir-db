@@ -10,6 +10,7 @@ use shamir_db::types::value::{InnerValue, QueryValue};
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
+use shamir_query_types::batch::BatchLimits;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::subscribe::deliver_mode::DeliverMode;
 use shamir_query_types::subscribe::event_mask::EventMask;
@@ -59,6 +60,10 @@ pub(crate) async fn bridge_task(
     push: Arc<dyn PushSink>,
     from_version: Option<u64>,
     initial: bool,
+    // Operator-configured query limits (finding 2b-ii). Reactive Batch/Call
+    // deliveries run under the subscribing actor's identity and MUST be
+    // bounded by these limits, not `BatchLimits::default()`.
+    query_limits: BatchLimits,
 ) {
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
@@ -257,6 +262,7 @@ pub(crate) async fn bridge_task(
                                 change,
                                 value_qv.as_ref(),
                                 event.commit_version,
+                                &query_limits,
                             )
                             .await;
                             if !try_push_event(
@@ -475,6 +481,7 @@ pub(crate) async fn bridge_task(
                                     change,
                                     value_qv.as_ref(),
                                     event.commit_version,
+                                    &query_limits,
                                 )
                                 .await;
                                 cached_arc = deliver_cache_insert(
@@ -498,6 +505,7 @@ pub(crate) async fn bridge_task(
                                 change,
                                 None,
                                 event.commit_version,
+                                &query_limits,
                             )
                             .await;
                             &owned_buf

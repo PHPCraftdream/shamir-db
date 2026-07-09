@@ -288,6 +288,36 @@ pub fn process_resume(
         return Err(Error::AuthFailed);
     }
 
+    // NOTE (finding 1d, audit 2026-07-06-security-network-surface.md):
+    // REVERTED after this task's own gate caught a real regression.
+    //
+    // A first attempt added a raw equality check between
+    // `plain.channel_binding_at_auth` and `request.channel_binding_now` here,
+    // reasoning that resume should be bound to the TLS channel VALUE, not
+    // just the binding-mode STRENGTH `check_anti_downgrade` verifies above.
+    // That check is semantically WRONG for this codebase: `channel_binding_now`
+    // is the `tls_exporter_or_zeros` of the NEW connection (see its doc at
+    // this file's `ResumeCheckRequest`), and per RFC 9266, a TLS exporter
+    // value is unique PER CONNECTION even across session resumption — it is
+    // NEVER equal across two independent TLS connections, including a
+    // legitimate client reconnecting with the SAME ticket on a NEW
+    // connection (which is the entire point of ticket-based resume: skip a
+    // full SCRAM handshake on reconnect). Requiring raw equality here breaks
+    // every legitimate cross-connection resume, not just stolen-ticket
+    // replay — confirmed by two failing e2e tests
+    // (`resume_after_full_auth_succeeds`, `resume_then_concurrent` in
+    // `shamir-server/tests/`) when this check was added.
+    //
+    // The audit's underlying concern (a stolen ticket is portable across
+    // TLS sessions/networks) is real, but the fix needs a DIFFERENT
+    // mechanism than exporter-value equality — e.g. binding to something
+    // that legitimately persists across a reconnect (a client certificate
+    // identity, a PSK derived consistently across resumption, or an
+    // explicit accepted-risk decision that ticket resume trades off
+    // channel-binding strength for reconnect ergonomics, documented as
+    // such). This requires a proper design pass, not a one-line equality
+    // check — filed as follow-up task (see commit message / TaskList).
+
     // Step 11: atomic per-(user, family) counter CAS.
     // Optim #2: `plain.ticket_family_id` is `ByteArray<16>` — no copy/parse.
     let family_id: [u8; 16] = *plain.ticket_family_id.as_ref();

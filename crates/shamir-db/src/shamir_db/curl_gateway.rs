@@ -9,7 +9,7 @@
 //! invocation.
 
 use async_trait::async_trait;
-use shamir_engine::function::{check_url_allowed, HttpRequest, HttpResponse, NetGateway};
+use shamir_engine::function::{check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway};
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
@@ -30,8 +30,14 @@ impl CurlNetGateway {
 #[async_trait]
 impl NetGateway for CurlNetGateway {
     async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, String> {
-        // 1. Allowlist guard — reject before any network I/O.
-        check_url_allowed(&req.url, &self.allowlist)?;
+        // 1. Allowlist + DNS-resolved SSRF guard — reject before any network
+        //    I/O. `check_url_allowed_resolved` resolves the host and rejects a
+        //    hostname that resolves to a private/loopback IP (finding 2c),
+        //    unless it is an exact allowlist entry. curl is invoked WITHOUT
+        //    `--location`, so it does not follow redirects — each redirect hop
+        //    would require a fresh guarded request from the guest (no
+        //    transparent redirect-following bypass exists here).
+        check_url_allowed_resolved(&req.url, &self.allowlist).await?;
 
         // 2. Build temp directory for all temp files.
         let tmp_dir =
