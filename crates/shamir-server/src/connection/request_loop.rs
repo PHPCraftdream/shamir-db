@@ -31,6 +31,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use serde::Serialize;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
@@ -49,7 +50,38 @@ use crate::subscriptions::SubscriptionRegistry;
 use super::connection_context::ConnectionContext;
 use super::in_flight_guard::InFlightGuard;
 
+/// Serialize `val` as named msgpack directly into a length-prefixed buffer,
+/// avoiding the extra memcpy that `write_frame_into` does to prepend the
+/// 4-byte length prefix.
+///
+/// Layout: `[4-byte BE u32 length][msgpack payload]`.
+///
+/// The caller MUST pass the result to `write_frame_prereserved` (not
+/// `write_frame_into`).
+fn encode_prereserved<T: Serialize>(val: &T) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+    let mut buf = Vec::with_capacity(256);
+    // Reserve 4 bytes for the length prefix — patched after serialization.
+    buf.extend_from_slice(&[0u8; 4]);
+    rmp_serde::encode::write_named(&mut buf, val)?;
+    let payload_len = (buf.len() - 4) as u32;
+    buf[0..4].copy_from_slice(&payload_len.to_be_bytes());
+    Ok(buf)
+}
+
+/// Wrap an already-serialized payload into a length-prefixed buffer.
+pub(crate) fn prereserve_frame(payload: &[u8]) -> Vec<u8> {
+    let len = payload.len() as u32;
+    let mut buf = Vec::with_capacity(4 + payload.len());
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
 /// Message sent from dispatch tasks to the writer task.
+///
+/// ALL variants carry a **prereserved** buffer: `[4-byte BE u32 length][payload]`.
+/// The writer calls `write_frame_prereserved` directly — no internal memcpy
+/// to prepend the length prefix (finding §3.4).
 pub(crate) enum WriterMsg {
     /// Write these bytes and keep running.
     Reply(Vec<u8>),
@@ -126,10 +158,12 @@ pub async fn request_loop<R, W>(
     // --- Writer task ---------------------------------------------------------
     // Owns the write half; receives replies over mpsc; shuts down on
     // channel-close or ReplyAndClose. §B21: JoinHandle is always awaited.
+    //
+    // All WriterMsg payloads are prereserved ([4-byte len][payload]) — the
+    // writer calls `write_frame_prereserved` directly, skipping the memcpy
+    // that `write_frame_into` does to prepend the length prefix (§3.4).
     let mut writer_handle = tokio::spawn(async move {
         let mut writer = writer;
-        let mut scratch =
-            Vec::with_capacity(shamir_tunables::instance_defaults::IO_FRAME_BUFFER_CAP);
         loop {
             match rx.recv().await {
                 None => {
@@ -140,18 +174,18 @@ pub async fn request_loop<R, W>(
                     // DEFECT C fix: on write error (broken pipe / dead client)
                     // break immediately so the JoinHandle resolves and the
                     // reader's select! branch wakes up (Defect B fix).
-                    if writer.write_frame_into(&bytes, &mut scratch).await.is_err() {
+                    if writer.write_frame_prereserved(&bytes).await.is_err() {
                         break;
                     }
                 }
                 Some(WriterMsg::Push(bytes)) => {
-                    if writer.write_frame_into(&bytes, &mut scratch).await.is_err() {
+                    if writer.write_frame_prereserved(&bytes).await.is_err() {
                         break;
                     }
                 }
                 Some(WriterMsg::ReplyAndClose(bytes)) => {
                     // Write error here is ignored — we're closing anyway.
-                    let _ = writer.write_frame_into(&bytes, &mut scratch).await;
+                    let _ = writer.write_frame_prereserved(&bytes).await;
                     break;
                 }
             }
@@ -269,19 +303,21 @@ pub async fn request_loop<R, W>(
                     {
                         Ok(DispatchOutcome::Response(resp)) => {
                             let rid = v.request_id;
-                            match resp.to_msgpack() {
+                            // §3.4: serialize directly into a length-prefixed
+                            // buffer to avoid the memcpy in write_frame_into.
+                            match encode_prereserved(&resp) {
                                 Ok(b) => Some(WriterMsg::Reply(b)),
                                 Err(_) => {
                                     // Serialisation failure — best-effort error.
                                     let err = ErrorEnvelope::new(rid, "internal_error");
-                                    err.to_msgpack().ok().map(WriterMsg::Reply)
+                                    encode_prereserved(&err).ok().map(WriterMsg::Reply)
                                 }
                             }
                         }
                         Ok(DispatchOutcome::Error(err)) => {
                             let close = err.error == "session_invalidated"
                                 || err.error == "session_expired";
-                            match err.to_msgpack() {
+                            match encode_prereserved(&err) {
                                 Ok(b) => {
                                     if close {
                                         // Signal the reader loop to stop.
@@ -297,14 +333,14 @@ pub async fn request_loop<R, W>(
                         Err(_) => {
                             // Internal dispatch error.
                             let err = ErrorEnvelope::new(v.request_id, "internal_error");
-                            err.to_msgpack().ok().map(WriterMsg::Reply)
+                            encode_prereserved(&err).ok().map(WriterMsg::Reply)
                         }
                     }
                 }
                 Err(_) => {
                     // Malformed envelope.
                     let err = ErrorEnvelope::new(None, "invalid_envelope");
-                    err.to_msgpack().ok().map(WriterMsg::Reply)
+                    encode_prereserved(&err).ok().map(WriterMsg::Reply)
                 }
             };
 

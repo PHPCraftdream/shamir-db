@@ -70,6 +70,10 @@ harness = false
 name = "posting_cache_hit"
 harness = false
 
+[[bench]]
+name = "create_index_streaming"
+harness = false
+
 [lib]
 doctest = false
 

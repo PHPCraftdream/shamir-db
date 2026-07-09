@@ -195,10 +195,11 @@ impl IndexManager {
     /// Создаёт новый индекс для таблицы.
     ///
     /// Процесс создания:
-    /// 1. Читает все существующие записи из data_store
-    /// 2. Для каждой записи извлекает значения по путям индекса
-    /// 3. Создаёт записи в info_store
-    /// 4. Сохраняет метаданные индекса
+    /// 1. Регистрирует определение индекса (чтобы live write-hook
+    ///    начал поддерживать постинги для конкурентных записей).
+    /// 2. Потоково читает `data_store` батчами по `FULL_SCAN_BATCH`
+    ///    записей и для каждого батча строит постинги и флашит их
+    ///    через `set_many` — память ограничена O(батч), а не O(таблица).
     ///
     /// # Аргументы
     ///
@@ -206,18 +207,45 @@ impl IndexManager {
     ///
     /// # Производительность
     ///
-    /// Использует потоковую обработку (stream) с батчами по 1000 записей,
-    /// чтобы избежать загрузки всех данных в память одновременно.
+    /// Потоковая обработка: каждый батч (`FULL_SCAN_BATCH` записей)
+    /// обрабатывается независимо — декодируется, индексируется и
+    /// флашится в `info_store` через `set_many`. Пиковая память
+    /// ограничена размером батча, а не размером всей таблицы.
     pub async fn create_index(&self, index_def: IndexDefinition) -> DbResult<()> {
         use futures::StreamExt;
 
-        // Scan data_store into a decoded vec, then delegate to the
-        // shared build logic in create_index_from_records.
+        let name_interned = index_def.name_interned;
+        // Capture paths before `index_def` is moved into `add_index`.
+        let paths = index_def.paths.clone();
+
+        // ── Phase 1: register the definition FIRST ──────────────────────────
+        // (Same concurrency rationale as `create_index_from_records`.)
+        self.indexes.add_index(index_def);
+        self.has_indexes.store(true, Ordering::Release);
+        self.save_index_info().await?;
+
+        // ── Phase 2: incremental backfill, batch-by-batch ───────────────────
+        // Each batch is decoded, indexed, and flushed independently. Memory
+        // is bounded by the batch size (O(batch)), not the table size.
+        // Idempotent: a record also written live by the hook right at the
+        // registration boundary yields the same (key, empty-value) pair.
+        //
+        // NOTE: we decode each record into a full `InnerValue` (same as the
+        // materialized path in `create_index_from_records`) to guarantee
+        // byte-identical posting keys. The zero-copy `RecordView` lens
+        // produces DIFFERENT scalar hashes for some value types (e.g. f64
+        // encoding edge cases in the msgpack wire form), so it cannot be
+        // used here without breaking index-identity. A follow-up should
+        // reconcile the lens's scalar decoding with `InnerValue`'s and
+        // then switch this path to `RecordView` for zero-copy indexing.
+        let mut count = 0usize;
         let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
-        let mut records: Vec<(RecordId, InnerValue)> = Vec::with_capacity(128);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            for (key_bytes, value_bytes) in batch {
+            let mut posting_writes: Vec<(Bytes, Bytes)> =
+                Vec::with_capacity(batch.len().min(131_072));
+            let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(posting_writes.capacity());
+            for (key_bytes, value_bytes) in &batch {
                 let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
                     Ok(a) => a,
                     Err(_) => continue,
@@ -227,11 +255,29 @@ impl IndexManager {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                records.push((record_id, value));
+                if let Some(irk) = build_index_key_from_record(false, name_interned, &value, &paths)
+                {
+                    let index_key = irk.to_bytes();
+                    let posting_key = build_posting_key(&index_key, &record_id);
+                    posting_writes.push((posting_key, Bytes::new()));
+                    cache_index_keys.push(index_key);
+                    count += 1;
+                }
+            }
+            if !posting_writes.is_empty() {
+                self.info_store.set_many(posting_writes).await?;
+            }
+            for ik in cache_index_keys {
+                self.posting_cache.remove(&ik);
             }
         }
 
-        self.create_index_from_records(index_def, records).await
+        log::info!(
+            "Created index '{}' with {} entries (streamed)",
+            name_interned,
+            count
+        );
+        Ok(())
     }
 
     /// FINAL-A: create index and backfill from an already-decoded record

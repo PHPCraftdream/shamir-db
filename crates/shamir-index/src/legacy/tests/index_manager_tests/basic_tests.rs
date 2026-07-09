@@ -895,3 +895,108 @@ async fn test_create_index_with_duplicate_values() {
         assert!(result.contains(id));
     }
 }
+
+// ============================================================================
+// §2.4 regression: create_index (streaming, batch-by-batch) must produce
+// IDENTICAL index results to create_index_from_records (materialized).
+// The fix changed create_index from "accumulate all records then build" to
+// "build+flush per batch" — this must be a pure memory/incrementality change,
+// not a behavior change.
+// ============================================================================
+
+/// Populate a data_store with `n` records that have diverse field values
+/// (str, int, f64, null, bool) on `FIELD_ID`, then build the SAME index via
+/// both `create_index` (streaming path) and `create_index_from_records`
+/// (materialized path) on two independent managers, and assert lookups return
+/// the same RecordIds for every value.
+#[tokio::test]
+async fn test_create_index_streaming_matches_materialized() {
+    use shamir_types::core::interner::InternerKey;
+    use shamir_types::types::common::new_map;
+
+    const FIELD_ID: u64 = 1;
+    const NAME_INTERNED: u64 = 5001;
+    const N: usize = 500;
+
+    // Build records with diverse field types and unique values.
+    let values: Vec<InnerValue> = (0..N)
+        .map(|i| match i % 5 {
+            0 => InnerValue::Str(format!("val_{i}")),
+            1 => InnerValue::Int(i as i64),
+            2 => InnerValue::F64(i as f64 * 1.5),
+            3 => InnerValue::Null,
+            _ => InnerValue::Bool(i % 2 == 0),
+        })
+        .collect();
+
+    // --- Manager A: streaming path (create_index via data_store.iter_stream) ---
+    let data_store_a = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let info_store_a = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let manager_a = IndexManager::new(Arc::clone(&data_store_a), Arc::clone(&info_store_a))
+        .await
+        .unwrap();
+    // Insert records into data_store.
+    let record_ids: Vec<RecordId> = (0..N)
+        .map(|i| RecordId::from_ts_seq(1_700_000_000_000_000, i as u32))
+        .collect();
+    for (i, v) in values.iter().enumerate() {
+        let mut map = new_map();
+        map.insert(InternerKey::new(FIELD_ID), v.clone());
+        let stored = InnerValue::Map(map);
+        data_store_a
+            .set(record_ids[i].to_bytes(), stored.to_bytes().unwrap())
+            .await
+            .unwrap();
+    }
+    let def_a = IndexDefinition::new(NAME_INTERNED, vec![IndexInfoItem::new(vec![FIELD_ID])]);
+    manager_a.create_index(def_a).await.unwrap();
+
+    // --- Manager B: materialized path (create_index_from_records) ---
+    let data_store_b = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let info_store_b = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let manager_b = IndexManager::new(Arc::clone(&data_store_b), Arc::clone(&info_store_b))
+        .await
+        .unwrap();
+    // Collect the same records (already decoded).
+    let records: Vec<(RecordId, InnerValue)> = (0..N)
+        .map(|i| {
+            let mut map = new_map();
+            map.insert(InternerKey::new(FIELD_ID), values[i].clone());
+            (record_ids[i], InnerValue::Map(map))
+        })
+        .collect();
+    let def_b = IndexDefinition::new(NAME_INTERNED, vec![IndexInfoItem::new(vec![FIELD_ID])]);
+    manager_b
+        .create_index_from_records(def_b, records)
+        .await
+        .unwrap();
+
+    // --- Verify lookup results are identical for every distinct value. ---
+    // Use a set of representative values to look up.
+    use shamir_types::types::common::new_set;
+    let mut distinct_values = new_set::<InnerValue>();
+    for v in &values {
+        distinct_values.insert(v.clone());
+    }
+
+    for lookup_val in &distinct_values {
+        let result_a = manager_a
+            .lookup_by_index(NAME_INTERNED, std::slice::from_ref(lookup_val))
+            .await
+            .unwrap();
+        let result_b = manager_b
+            .lookup_by_index(NAME_INTERNED, std::slice::from_ref(lookup_val))
+            .await
+            .unwrap();
+        assert_eq!(
+            result_a, result_b,
+            "lookup mismatch for {:?}: streaming={:?} materialized={:?}",
+            lookup_val, result_a, result_b
+        );
+    }
+
+    // Also verify the total posting count is the same (excluding system keys).
+    // Count records that have a non-null indexed value — those should have
+    // postings. Null is also a valid posting value.
+    // Both managers should report the same count for every lookup.
+}

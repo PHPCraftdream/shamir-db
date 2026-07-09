@@ -211,3 +211,49 @@ pub async fn write_close<W: AsyncWrite + Unpin>(writer: &mut W) -> Result<(), Fr
     writer.flush().await?;
     Ok(())
 }
+
+/// Write one frame from an ALREADY length-prefixed buffer, skipping the
+/// internal memcpy that [`write_frame_into`] does to prepend the 4-byte
+/// length prefix.
+///
+/// `buf` must start with a 4-byte big-endian `u32` length prefix followed
+/// by exactly that many payload bytes — i.e. `buf.len() == 4 + payload_len`
+/// and `u32::from_be_bytes(buf[0..4]) == payload_len as u32`.
+///
+/// This is the zero-copy-encoding variant for callers that serialize the
+/// response payload DIRECTLY into a buffer that already has the 4-byte
+/// length prefix reserved (push 4 placeholder bytes, serialize, patch the
+/// length in-place). For large responses (multi-MB SELECT results) this
+/// avoids a full-payload memcpy into a scratch buffer.
+///
+/// # Correctness contract
+///
+/// The caller MUST ensure `buf[0..4]` is a valid BE `u32` equal to
+/// `buf.len() - 4`. Violating this produces a malformed frame on the wire.
+pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    buf: &[u8],
+) -> Result<(), FrameError> {
+    // Defensive: verify the length prefix matches the buffer size. This
+    // catches caller bugs that would silently produce corrupt frames.
+    // The check is O(1) (two loads + one comparison) — negligible vs. the
+    // I/O cost of the `write_all`.
+    if buf.len() < 4 {
+        return Err(FrameError::TooLarge {
+            actual: 0,
+            max: MAX_FRAME_SIZE_DEFAULT,
+        });
+    }
+    let declared_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    // The payload length on the wire must match what's in the buffer.
+    let actual_payload = buf.len() - 4;
+    if declared_len != actual_payload || declared_len > MAX_FRAME_SIZE_DEFAULT {
+        return Err(FrameError::TooLarge {
+            actual: declared_len,
+            max: MAX_FRAME_SIZE_DEFAULT,
+        });
+    }
+    writer.write_all(buf).await?;
+    writer.flush().await?;
+    Ok(())
+}

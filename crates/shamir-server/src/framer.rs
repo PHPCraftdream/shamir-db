@@ -51,6 +51,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use shamir_transport_tcp::framing::{
     read_frame_into as tcp_read_frame_into, write_frame_into as tcp_write_frame_into,
+    write_frame_prereserved as tcp_write_frame_prereserved,
 };
 use shamir_transport_ws::framing::{
     ws_recv_into_stream, ws_send_sink, WsFrameError, MAX_WS_FRAME_SIZE,
@@ -102,6 +103,29 @@ pub trait FrameWriter: Send {
         scratch: &'a mut Vec<u8>,
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a;
 
+    /// Write one frame from an already length-prefixed buffer (4-byte BE
+    /// `u32` length + payload). Avoids the internal memcpy that
+    /// `write_frame_into` does to prepend the length prefix. See
+    /// [`Framer::write_frame_prereserved`] for the full contract.
+    fn write_frame_prereserved<'a>(
+        &'a mut self,
+        buf: &'a [u8],
+    ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
+        async move {
+            // Default: strip the 4-byte prefix and delegate to the normal
+            // path. Transports that can write the prereserved buffer directly
+            // (TCP) override this.
+            if buf.len() < 4 {
+                return Err(FramerError::Decode(
+                    "write_frame_prereserved: buffer shorter than 4-byte length prefix".into(),
+                ));
+            }
+            let payload = &buf[4..];
+            let mut scratch = Vec::with_capacity(0);
+            self.write_frame_into(payload, &mut scratch).await
+        }
+    }
+
     /// Half-close the write side; best-effort, no error reporting.
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a;
 }
@@ -148,6 +172,32 @@ pub trait Framer: Send {
         scratch: &'a mut Vec<u8>,
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a;
 
+    /// Write one frame from an already length-prefixed buffer (4-byte BE
+    /// `u32` length + payload). For TCP this writes the buffer directly,
+    /// avoiding the memcpy that `write_frame_into` does to prepend the
+    /// length prefix. For transports that build their own buffer (WS) the
+    /// default impl strips the 4-byte prefix and delegates to
+    /// `write_frame_into`.
+    ///
+    /// `buf` must be `[4-byte BE u32 length][payload bytes]` with
+    /// `u32::from_be_bytes(buf[0..4]) == buf.len() - 4`.
+    fn write_frame_prereserved<'a>(
+        &'a mut self,
+        buf: &'a [u8],
+    ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
+        async move {
+            // Default: strip the 4-byte prefix and delegate.
+            if buf.len() < 4 {
+                return Err(FramerError::Decode(
+                    "write_frame_prereserved: buffer shorter than 4-byte length prefix".into(),
+                ));
+            }
+            let payload = &buf[4..];
+            let mut scratch = Vec::with_capacity(0);
+            self.write_frame_into(payload, &mut scratch).await
+        }
+    }
+
     /// Half-close the write side; best-effort, no error reporting.
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a;
 
@@ -187,6 +237,12 @@ where
         scratch: &mut Vec<u8>,
     ) -> Result<(), FramerError> {
         tcp_write_frame_into(&mut self.0, payload, scratch)
+            .await
+            .map_err(map_tcp_err)
+    }
+
+    async fn write_frame_prereserved(&mut self, buf: &[u8]) -> Result<(), FramerError> {
+        tcp_write_frame_prereserved(&mut self.0, buf)
             .await
             .map_err(map_tcp_err)
     }
@@ -235,6 +291,12 @@ where
         scratch: &mut Vec<u8>,
     ) -> Result<(), FramerError> {
         tcp_write_frame_into(&mut self.w, payload, scratch)
+            .await
+            .map_err(map_tcp_err)
+    }
+
+    async fn write_frame_prereserved(&mut self, buf: &[u8]) -> Result<(), FramerError> {
+        tcp_write_frame_prereserved(&mut self.w, buf)
             .await
             .map_err(map_tcp_err)
     }

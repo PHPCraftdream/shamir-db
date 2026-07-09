@@ -1,8 +1,8 @@
 //! Tests for length-prefix msgpack framing.
 
 use shamir_transport_tcp::framing::{
-    read_frame, read_frame_into, write_close, write_frame, write_frame_into, FrameError,
-    MAX_FRAME_SIZE_DEFAULT,
+    read_frame, read_frame_into, write_close, write_frame, write_frame_into,
+    write_frame_prereserved, FrameError, MAX_FRAME_SIZE_DEFAULT,
 };
 use tokio::io::duplex;
 
@@ -269,4 +269,56 @@ async fn write_frame_and_write_frame_into_produce_identical_bytes() {
 
     assert_eq!(frame1, frame2);
     assert_eq!(frame1, payload);
+}
+
+/// §3.4: write_frame_prereserved produces byte-identical wire output to
+/// write_frame_into — the only change is the memcpy to prepend the length
+/// prefix is eliminated (caller serializes directly into a pre-length-prefixed
+/// buffer).
+#[tokio::test]
+async fn write_frame_prereserved_produces_identical_bytes() {
+    // Test across several payload sizes including large ones (simulating
+    // multi-MB SELECT responses).
+    for &size in &[1usize, 64, 1024, 16 * 1024, 256 * 1024] {
+        let payload = vec![0xabu8; size];
+
+        // write_frame_into path (the old way: scratch + prepend).
+        let (mut a1, mut b1) = duplex(size + 1024);
+        let mut scratch = Vec::new();
+        write_frame_into(&mut a1, &payload, &mut scratch)
+            .await
+            .unwrap();
+        let frame1 = read_frame(&mut b1, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+
+        // write_frame_prereserved path (the new way: caller pre-prefixes).
+        let len = payload.len() as u32;
+        let mut buf = Vec::with_capacity(4 + payload.len());
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&payload);
+        let (mut a2, mut b2) = duplex(size + 1024);
+        write_frame_prereserved(&mut a2, &buf).await.unwrap();
+        let frame2 = read_frame(&mut b2, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+
+        assert_eq!(frame1, frame2, "size {size}: frames differ");
+        assert_eq!(frame1, payload, "size {size}: frame != payload");
+    }
+}
+
+/// §3.4: write_frame_prereserved rejects malformed buffers (wrong length
+/// prefix, buffer too small) with TooLarge — defensive contract check.
+#[tokio::test]
+async fn write_frame_prereserved_rejects_malformed_buffers() {
+    let (_a, _b) = duplex(1024);
+
+    // Buffer too small (< 4 bytes).
+    let (mut a1, _) = duplex(1024);
+    let result = write_frame_prereserved(&mut a1, &[0u8; 3]).await;
+    assert!(matches!(result, Err(FrameError::TooLarge { .. })));
+
+    // Declared length doesn't match actual payload.
+    let (mut a2, _) = duplex(1024);
+    let mut bad = vec![0u8; 4 + 100];
+    bad[0..4].copy_from_slice(&999u32.to_be_bytes()); // says 999, has 100
+    let result = write_frame_prereserved(&mut a2, &bad).await;
+    assert!(matches!(result, Err(FrameError::TooLarge { .. })));
 }
