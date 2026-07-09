@@ -552,7 +552,9 @@ impl TableManager {
                 .index_manager_ref()
                 .lookup_by_index(index_name, values)
                 .await?;
-            record_ids.extend(ids);
+            // Audit 1.5: `ids` is now `Arc<BTreeSet<RecordId>>` (O(1)
+            // cache-hit). Deref-iterate rather than moving the owned set.
+            record_ids.extend(ids.iter().copied());
         }
 
         // 2. Compile residual filter if present

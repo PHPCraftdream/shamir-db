@@ -205,6 +205,47 @@ async fn test_cache_invalidated_on_update_value_change() {
     );
 }
 
+/// Audit 1.5 — cache-HIT must return the SAME `Arc<BTreeSet<RecordId>>`
+/// backing allocation the cache stores, not a fresh deep clone. Pin this
+/// with `Arc::ptr_eq` so a regression to per-hit cloning fails loudly.
+#[tokio::test]
+async fn test_cache_hit_returns_same_arc() {
+    let (_, _, manager) = create_manager();
+    let def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(def).await.unwrap();
+
+    let id = RecordId::new();
+    let val = create_test_value(&[(1, InnerValue::Int(99))]);
+    manager.on_record_created(&id, &val).await.unwrap();
+
+    // First lookup — MISS, populates the cache.
+    let first = manager
+        .lookup_by_index(1001, &[InnerValue::Int(99)])
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+
+    // Second lookup — HIT, must be the same allocation as `first`.
+    let second = manager
+        .lookup_by_index(1001, &[InnerValue::Int(99)])
+        .await
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "cache HIT must return the same Arc allocation, not a clone"
+    );
+
+    // Third lookup — also a HIT, same allocation again.
+    let third = manager
+        .lookup_by_index(1001, &[InnerValue::Int(99)])
+        .await
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &third),
+        "repeated cache HITs must keep returning the same Arc allocation"
+    );
+}
+
 #[tokio::test]
 async fn test_concurrent_reads_with_index() {
     let (_, _, manager) = create_manager();

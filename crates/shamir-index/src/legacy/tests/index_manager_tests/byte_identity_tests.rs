@@ -167,8 +167,11 @@ async fn round_trip_single_field_every_type() {
             .await
             .unwrap();
         let expected: std::collections::BTreeSet<RecordId> = [rid].into_iter().collect();
+        // Audit 1.5: `lookup_by_index` now returns `Arc<BTreeSet<RecordId>>`;
+        // deref to compare against a plain `BTreeSet`.
         assert_eq!(
-            result, expected,
+            result.as_ref(),
+            &expected,
             "{}: round-trip lookup did not return the record",
             case.label
         );

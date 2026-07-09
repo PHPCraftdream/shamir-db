@@ -66,6 +66,10 @@ bench-scale-tool = { workspace = true }
 name = "sq8_hot_path"
 harness = false
 
+[[bench]]
+name = "posting_cache_hit"
+harness = false
+
 [lib]
 doctest = false
 
