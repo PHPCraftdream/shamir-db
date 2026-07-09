@@ -162,10 +162,31 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                 tbl.info_store().set(key.clone(), value.clone()).await?;
                 return Ok(());
             }
+            // Broadcast (table_id_interned == 0): the same key is set in
+            // every table's info_store. Audit §2.5: the old code swallowed
+            // errors asymmetrically (`let _ = ...set(...)`) while the
+            // neighboring IndexDel branch propagated them — a broadcast
+            // IndexPut failure during recovery was silently lost. Now we
+            // attempt EVERY table (best-effort: a failure on one does NOT
+            // skip the remaining tables) and capture the FIRST error to
+            // return, mirroring the `flush_buffers` / `seed_version_cache_
+            // for_entry` first-err pattern already used in this crate.
+            let mut first_err: Option<DbError> = None;
             for name in repo.list_table_names() {
                 if let Ok(tbl) = repo.get_table(&name).await {
-                    let _ = tbl.info_store().set(key.clone(), value.clone()).await;
+                    if let Err(e) = tbl.info_store().set(key.clone(), value.clone()).await {
+                        log::warn!(
+                            "replay_v2_op broadcast IndexPut: info_store.set failed for \
+                             table {name}: {e}"
+                        );
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
                 }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
             }
             Ok(())
         }
@@ -215,14 +236,31 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // already exists returns the existing id. (Pre-Stage-I this
             // looped over every table because each had its own interner;
             // now they all share one.)
-            if let Ok(repo_interner) = repo.repo_interner().await {
-                if let Ok(interner) = repo_interner.get().await {
-                    for (_overlay_id, key_str) in entries {
-                        let _ = interner.touch_ind(key_str);
-                    }
-                    let _ = repo_interner.persist().await;
-                }
+            //
+            // Audit §2.5: the old code swallowed every error here
+            // (`if let Ok(...)`, `let _ = touch_ind`, `let _ = persist`)
+            // — an interner-merge failure during recovery was silently
+            // lost, with the same consequences as CRIT-2 / audit §1.2
+            // (history records referencing ids the persistent interner
+            // never absorbed). Now every error propagates: a failed
+            // `touch_ind` or `persist` fails recovery (the caller
+            // `recover_inflight_v2` already has an A11 persist gate, but
+            // this op-level merge must also surface failures so a
+            // mid-replay interner error is not silently absorbed).
+            let repo_interner = repo.repo_interner().await?;
+            let interner = repo_interner.get().await?;
+            for (_overlay_id, key_str) in entries {
+                interner.touch_ind(key_str).map_err(|e| {
+                    DbError::Internal(format!(
+                        "replay InternerOverlayMerge: touch_ind({key_str:?}) failed: {e}"
+                    ))
+                })?;
             }
+            repo_interner.persist().await.map_err(|e| {
+                DbError::Internal(format!(
+                    "replay InternerOverlayMerge: interner persist failed: {e}"
+                ))
+            })?;
             Ok(())
         }
     }

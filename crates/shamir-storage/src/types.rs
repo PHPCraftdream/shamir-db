@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 pub type RecordKey = Bytes;
 
-type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+pub(crate) type RecordStream =
+    Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
 /// A single mixed-op for `Store::transact`. Represents either a
 /// `set` or a `remove` against a `RecordKey`.

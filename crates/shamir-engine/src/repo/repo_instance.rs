@@ -89,6 +89,17 @@ pub struct RepoInstance {
     /// NOT keep the repo alive. The drain loop holds a `Weak<()>` of this and
     /// exits when the strong count reaches zero.
     live: Option<Arc<()>>,
+    /// Audit §1.7: serializes `persist_markers`' disk write of the recovery
+    /// marker. `gate.last_committed()` is already a monotonic in-memory
+    /// max, but two concurrent Phase 6.5 committers writing to the
+    /// info_store with no ordering between their `Store::set` calls could
+    /// still land the SMALLER value last on disk (a benign-looking write
+    /// race, not a read-staleness bug). This mutex serializes the
+    /// read-current/write-if-greater sequence in `persist_markers` so the
+    /// on-disk marker is genuinely monotonic, not just the in-memory value
+    /// passed to it. Shared across clones (one mutex per underlying repo,
+    /// not per handle).
+    marker_write_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -121,6 +132,7 @@ impl Clone for RepoInstance {
             // itself the background clone (`None`) this stays `None` — a clone
             // of the background handle must not resurrect liveness.
             live: self.live.clone(),
+            marker_write_mutex: Arc::clone(&self.marker_write_mutex),
         }
     }
 }
@@ -171,7 +183,14 @@ impl RepoInstance {
             drainer: Arc::new(std::sync::OnceLock::new()),
             repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
+            marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
+    /// field doc on [`marker_write_mutex`](Self) for why this exists.
+    pub(crate) fn marker_write_mutex(&self) -> &Arc<tokio::sync::Mutex<()>> {
+        &self.marker_write_mutex
     }
 
     /// D2 P1d-2b: produce a BACKGROUND clone for the drain task to own.

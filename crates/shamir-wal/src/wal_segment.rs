@@ -28,6 +28,52 @@ use tokio::task::spawn_blocking;
 
 use crate::wal_entry_v2::WalEntryV2;
 
+/// Fsync the parent directory of `path` so a freshly-created file's
+/// directory entry is durable (audit §1.9). On ext4/xfs, `sync_all()` on
+/// the file does NOT guarantee the directory entry survives power loss — a
+/// newly-created segment can vanish from the listing, losing every acked
+/// write in it. Unix-only; a no-op stub on Windows (where directory fsync
+/// is not required for this durability guarantee). Failures are logged but
+/// do NOT fail the open: a missing dir-fsync degrades the power-loss window
+/// but does not corrupt data (the file's own `sync_all` still applies), and
+/// refusing to open a perfectly good segment over a non-fatal dir-fsync
+/// would be worse than the degraded window.
+#[cfg(unix)]
+fn fsync_parent_dir(path: &std::path::Path) -> DbResult<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => return Ok(()), // no parent (root) — nothing to fsync
+    };
+    match std::fs::File::open(parent) {
+        Ok(dir_f) => {
+            if let Err(e) = dir_f.sync_all() {
+                log::warn!(
+                    "WalSegment dir fsync of {parent:?} failed ({e}); \
+                     directory entry durability is not guaranteed on power loss \
+                     (audit §1.9) — file data fsync still applies",
+                    parent = parent
+                );
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "WalSegment dir open for fsync of {parent:?} failed ({e}); \
+                 directory entry durability is not guaranteed on power loss \
+                 (audit §1.9)",
+                parent = parent
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn fsync_parent_dir(_path: &std::path::Path) -> DbResult<()> {
+    // Windows / non-unix: directory fsync is not required for the durability
+    // guarantee that matters here. No-op.
+    Ok(())
+}
+
 /// Append-only, file-backed WAL segment. Splits durability:
 ///   - `append_batch` → `write()` to the OS page cache (level 2:
 ///     survives a process crash, lost only on power loss before `sync`).
@@ -86,15 +132,35 @@ pub struct WalSegment {
 #[allow(dead_code)]
 impl WalSegment {
     /// Open (creating if absent) an append-only segment at `path`.
+    ///
+    /// **Audit §1.9 (Linux directory fsync):** when the segment file is
+    /// NEWLY created (did not exist before this call), the parent directory
+    /// is fsync'd so the directory entry itself is durable. Without this, on
+    /// ext4/xfs a freshly-created segment can be missing from the directory
+    /// listing after power loss — even Synced-acked writes in it are lost and
+    /// replay won't see the file existed. `sync_all()` on the file does NOT
+    /// guarantee the directory entry is durable. On Windows this is a no-op
+    /// (directory fsync is not required for durability semantics there).
     pub async fn open(path: PathBuf) -> DbResult<Self> {
         let p = path.clone();
         let (file, existing_len) = spawn_blocking(move || -> DbResult<(File, u64)> {
+            // Detect NEW creation (file did not exist) so we can fsync the
+            // parent directory only when a new entry was actually added.
+            let existed_before = p.exists();
             let f = OpenOptions::new()
                 .create(true)
                 .read(true)
                 .append(true)
                 .open(&p)
                 .map_err(|e| DbError::Storage(format!("WalSegment open {p:?}: {e}")))?;
+            // Audit §1.9: on first creation, fsync the parent directory so the
+            // directory entry is durable. Without this, a power loss on
+            // ext4/xfs can lose the freshly-created segment entirely even
+            // though its data was fsync'd. Harmless on reopen (the entry is
+            // already durable). No-op on Windows (#[cfg(unix)] gate).
+            if !existed_before {
+                fsync_parent_dir(&p)?;
+            }
             // Seed bytes_written from the on-disk size so a reopened (non-empty)
             // segment reports its true length for rotation decisions.
             let len = f
@@ -383,15 +449,78 @@ impl WalSegment {
     /// (which counts a `PermissionDenied` unlink as reclaimed because a
     /// concurrent replay may still hold the file open).
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
+        self.replay_inner(false, true).await
+    }
+
+    /// Replay a SEALED segment, treating a CRC mismatch as a LOUD recovery
+    /// error (audit §1.8). A sealed segment is fully fsync'd before sealing
+    /// (invariant I4), so a torn tail is impossible by construction — a CRC
+    /// mismatch mid-segment means on-disk corruption, not a crash tail.
+    /// Silently discarding the valid tail after a corrupt frame (the old
+    /// `replay()` behaviour) would hide durable records from recovery; worse,
+    /// the frame format `[len][payload][crc]` has no magic/seq, so
+    /// resynchronization after a single corrupt frame is impossible. An
+    /// operator must decide (restore from backup, run doctor, etc.) — this
+    /// is NOT a silent skip.
+    ///
+    /// `NotFound` / `PermissionDenied` are still tolerated (the concurrent-
+    /// truncate race described on `replay()` applies equally to sealed
+    /// segments).
+    pub async fn replay_sealed(&self) -> DbResult<Vec<WalEntryV2>> {
+        self.replay_inner(true, true).await
+    }
+
+    /// Replay a segment at STARTUP / open, where `PermissionDenied` must be
+    /// a HARD error (audit §2.4). At startup there is no concurrent
+    /// `truncate_below`, so a `PermissionDenied` means a real ACL denial or
+    /// a file held by an antivirus/backup process — silently treating it as
+    /// an empty WAL would skip durable records. `NotFound` is still tolerated
+    /// (a sealed segment may have been truncated by a prior clean shutdown).
+    pub async fn replay_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
+        self.replay_inner(false, false).await
+    }
+
+    /// Like [`replay_sealed`](Self::replay_sealed) but for the startup path:
+    /// `PermissionDenied` is a hard error (audit §2.4), and a CRC mismatch in
+    /// a sealed segment is a loud corruption error (audit §1.8).
+    pub async fn replay_sealed_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
+        self.replay_inner(true, false).await
+    }
+
+    /// Shared replay core.
+    ///
+    /// - `sealed == true`: a CRC mismatch is a loud `Err` (corruption in a
+    ///   fully-fsync'd sealed segment — audit §1.8), not a silent warn+break.
+    ///   A torn TRAILING frame is still a silent break for both (crash tail).
+    /// - `tolerate_permission_denied == true`: `PermissionDenied` returns
+    ///   `Ok(vec![])` (the Windows delete-pending race during a concurrent
+    ///   `truncate_below`). When `false` (startup/open), `PermissionDenied`
+    ///   is a hard error (audit §2.4) — a real ACL denial or antivirus-held
+    ///   file must not silently become "empty WAL".
+    async fn replay_inner(
+        &self,
+        sealed: bool,
+        tolerate_permission_denied: bool,
+    ) -> DbResult<Vec<WalEntryV2>> {
         let path = self.path.clone();
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
             let mut f = match File::open(&path) {
                 Ok(f) => f,
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::NotFound
-                        || e.kind() == std::io::ErrorKind::PermissionDenied =>
-                {
-                    return Ok(Vec::new())
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Vec::new());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    if tolerate_permission_denied {
+                        return Ok(Vec::new());
+                    }
+                    // Audit §2.4: at startup there is no concurrent
+                    // truncation, so PermissionDenied is a real ACL denial
+                    // or an antivirus/backup-held file — NOT an empty WAL.
+                    return Err(DbError::Storage(format!(
+                        "WalSegment replay open {path:?}: PermissionDenied \
+                         (startup — no concurrent truncation expected; likely \
+                         ACL denial or file held by another process): {e}"
+                    )));
                 }
                 Err(e) => return Err(DbError::Storage(format!("WalSegment replay open: {e}"))),
             };
@@ -405,7 +534,7 @@ impl WalSegment {
                     as usize;
                 let frame_end = pos + 4 + len + 4;
                 if frame_end > buf.len() {
-                    break; // torn tail
+                    break; // torn tail — always a silent break (crash tail)
                 }
                 let payload = &buf[pos + 4..pos + 4 + len];
                 let crc_stored = u32::from_le_bytes([
@@ -415,6 +544,24 @@ impl WalSegment {
                     buf[pos + 7 + len],
                 ]);
                 if crc32fast::hash(payload) != crc_stored {
+                    if sealed {
+                        // Audit §1.8: a sealed segment is fully fsync'd
+                        // (I4), so a CRC mismatch is disk corruption, not
+                        // a crash tail. Silently discarding the valid tail
+                        // hides durable records. The frame format has no
+                        // magic/seq for resync, so this is a hard error —
+                        // an operator must decide. (Adding magic+seq for
+                        // single-frame-skip resync is a deferred follow-up:
+                        // it requires a WAL format version bump.)
+                        return Err(DbError::Storage(format!(
+                            "WalSegment replay (sealed) {:?}: CRC mismatch at byte \
+                             offset {pos} — on-disk corruption in a fully-fsync'd \
+                             sealed segment; the valid tail after this frame cannot \
+                             be trusted (no magic/seq for resync). Operator action \
+                             required (restore from backup / run doctor).",
+                            path
+                        )));
+                    }
                     log::warn!(
                         "WalSegment replay: CRC mismatch at byte offset {pos} \
                          (full frame present but payload corrupted); \

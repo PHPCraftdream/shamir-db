@@ -138,63 +138,73 @@ impl InternerManager {
         Arc::clone(&self.interner)
     }
 
-    /// Get interner, loading it lazily on first access
+    /// Get interner, loading it lazily on first access.
+    ///
+    /// **Audit §2.6 (corruption is fatal):** any decode failure while
+    /// loading the interner (legacy blob OR delta chunk) is a FATAL error
+    /// — the open must fail rather than continuing with a truncated
+    /// dictionary. A truncated dictionary means minting new ids over
+    /// already-occupied ones = silent corruption of every old record
+    /// referencing those ids. The earlier CRIT-2 / A5 / A11 work ensures
+    /// chunks are durably flushed before `last_persisted_len` advances, so
+    /// a decode failure here is genuine corruption (not a partial write) —
+    /// treating it as fatal does not interact badly with those invariants.
     pub async fn get(&self) -> DbResult<&Interner> {
         if self.interner.get().is_some() {
             return Ok(self.interner.get().unwrap());
         }
 
         let info_store = Arc::clone(&self.info_store);
-        let interner_cell = &self.interner;
         let last_persisted_len = Arc::clone(&self.last_persisted_len);
         let next_chunk_idx = Arc::clone(&self.next_chunk_idx);
 
-        interner_cell
-            .get_or_init(|| async move {
+        self.interner
+            .get_or_try_init(|| async move {
                 // 1) Legacy single-blob seed — repos written by older
                 //    code stored the whole dictionary under
                 //    `MetaKey::Internals`. New code never writes here,
                 //    but must still read it to upgrade old data in
-                //    place. If absent (or unreadable / corrupt), we
-                //    fall through to the chunk scan.
+                //    place. If absent we fall through to the chunk scan;
+                //    a corrupt blob is a FATAL open error (audit §2.6).
                 let internals_id = MetaKey::Internals.as_record_id().to_bytes();
                 let mut entries: Vec<(InternerKey, UserKey)> =
                     match info_store.get(internals_id).await {
-                        Ok(bytes) => bincode::from_bytes(&bytes).unwrap_or_else(|e| {
-                            log::error!("Failed to deserialize legacy interner blob: {}", e);
-                            Vec::new()
-                        }),
-                        Err(_) => Vec::new(),
+                        Ok(bytes) => bincode::from_bytes(&bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize legacy interner blob (audit §2.6 — \
+                                 corruption is fatal, not skippable): {e}"
+                            ))
+                        })?,
+                        Err(shamir_storage::error::DbError::NotFound(_)) => Vec::new(),
+                        Err(e) => return Err(e),
                     };
 
                 // 2) Apply append-only delta chunks in order. The
                 //    `scan_prefix_stream` API yields records in
                 //    lexicographic key order; the 9-digit
                 //    zero-padded decimal index ensures
-                //    lexicographic order == numeric order.
+                //    lexicographic order == numeric order. A corrupt
+                //    chunk or a scan error is FATAL (audit §2.6).
                 let prefix = chunk_scan_prefix();
                 let mut stream = info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
                 let mut chunk_count: usize = 0;
                 while let Some(batch_res) = stream.next().await {
-                    match batch_res {
-                        Ok(batch) => {
-                            for (_key, val) in batch {
-                                match bincode::from_bytes::<Vec<(InternerKey, UserKey)>>(&val) {
-                                    Ok(chunk) => entries.extend(chunk),
-                                    Err(e) => {
-                                        log::error!(
-                                            "Failed to deserialize interner delta chunk: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                                chunk_count += 1;
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("Error scanning interner delta chunks: {}", e);
-                            break;
-                        }
+                    let batch = batch_res.map_err(|e| {
+                        shamir_storage::error::DbError::Storage(format!(
+                            "Error scanning interner delta chunks (audit §2.6 — \
+                             fatal, not skippable): {e}"
+                        ))
+                    })?;
+                    for (_key, val) in batch {
+                        let chunk: Vec<(InternerKey, UserKey)> = bincode::from_bytes(&val)
+                            .map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "Failed to deserialize interner delta chunk (audit §2.6 — \
+                                     corruption is fatal, not skippable): {e}"
+                                ))
+                            })?;
+                        entries.extend(chunk);
+                        chunk_count += 1;
                     }
                 }
 
@@ -206,9 +216,9 @@ impl InternerManager {
                 last_persisted_len.store(total, Ordering::Release);
                 next_chunk_idx.store(chunk_count, Ordering::Release);
 
-                Interner::with_state(entries)
+                Ok(Interner::with_state(entries))
             })
-            .await;
+            .await?;
 
         Ok(self.interner.get().unwrap())
     }

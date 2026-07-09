@@ -91,24 +91,28 @@ impl RepoWalManager {
         self.group.append(encoded, commit_version, durability).await
     }
 
-    /// Batch WAL begin — appends each entry through the group at the
-    /// requested tier (one append per entry; this path is the non-hot
-    /// AsyncIndex leader, correctness over batching). Accepts any
-    /// iterator of `&WalEntryV2` so callers holding `Arc<WalEntryV2>` can
-    /// serialize from borrows instead of cloning into a `Vec`.
+    /// Batch WAL begin — appends ALL entries through the group in ONE leader
+    /// window (a single `append_batch` to the sink), so the batch is atomic
+    /// at the segment level: either every entry is written in one `write()`
+    /// syscall or, on a write/sync failure, the segment is quarantined (§1.3)
+    /// and every caller gets the same error. This closes the audit §1.6
+    /// partial-append resurrection: a mid-batch ENOSPC can no longer leave
+    /// entries #1-2 durable while the caller is told the whole batch failed —
+    /// recovery would replay them as committed. With one `append_batch`, a
+    /// partial write quarantines the segment and rolls back ALL frames, so no
+    /// entry survives a partial batch. Accepts any iterator of `&WalEntryV2`.
     pub async fn begin_grouped_many(
         &self,
         entries: impl IntoIterator<Item = &WalEntryV2>,
         durability: WalDurability,
     ) -> DbResult<()> {
+        // Encode all entries up front so a serialization error fails BEFORE
+        // any append (no partial batch pushed to the queue).
+        let mut encoded: Vec<(Vec<u8>, u64)> = Vec::new();
         for entry in entries {
-            let commit_version = entry.commit_version;
-            let encoded = entry.encode()?;
-            self.group
-                .append(encoded, commit_version, durability)
-                .await?;
+            encoded.push((entry.encode()?, entry.commit_version));
         }
-        Ok(())
+        self.group.append_many(encoded, durability).await
     }
 
     /// Force a durable `fsync` of the WAL (level 2 → level 3). For the

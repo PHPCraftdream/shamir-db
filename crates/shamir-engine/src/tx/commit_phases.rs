@@ -697,14 +697,51 @@ pub(crate) async fn apply_vector_delta_batch(
 
 /// Persist `last_committed_version` + `next_tx_id` recovery markers
 /// (Phase 6.5).
+///
+/// **Audit §1.7 (marker monotonicity):** this writes `gate.last_committed()`
+/// (the monotonic maximum across ALL committers), NOT the raw `commit_version`
+/// of this single tx. Parallel Phase 6.5 writers that each wrote their OWN
+/// version could regress the marker (committer A writes 10, then committer B
+/// writes 9) — on a crash the gate would seed from the regressed marker and
+/// `assign_next_version()` could re-issue a version a truncated segment
+/// already used. Writing the monotonic max guarantees the marker never goes
+/// backwards regardless of commit interleaving.
 pub(crate) async fn persist_markers(
     repo: &RepoInstance,
     gate: &shamir_tx::RepoTxGate,
-    commit_version: u64,
+    _commit_version: u64,
 ) -> Result<(), DbError> {
-    use crate::meta::recovery_marker::{save_last_committed, save_next_tx_id_snapshot};
+    use crate::meta::recovery_marker::{
+        load_last_committed, save_last_committed, save_next_tx_id_snapshot,
+    };
     let info_store = repo.tx_info_store().await?;
-    save_last_committed(&info_store, commit_version).await?;
+    // Write the monotonic max, not the raw commit_version — see the §1.7
+    // doc above. `gate.last_committed()` is >= this tx's commit_version at
+    // this point (the version was published before Phase 6.5 runs).
+    //
+    // §1.7 residual (found in @sh review): `gate.last_committed()` is a
+    // monotonic in-memory max, but with NO serialization here, two
+    // concurrent Phase 6.5 committers' `Store::set` calls have no
+    // ordering guarantee relative to each other — committer A (max=10)
+    // and committer B (max=9, read before A's commit published) could
+    // still land B's write LAST on disk, regressing the marker exactly
+    // as this finding describes, just narrowing the window instead of
+    // closing it. Serializing the read-current/write-if-greater sequence
+    // under `marker_write_mutex` makes the on-disk marker genuinely
+    // monotonic: whichever writer takes the lock second observes the
+    // first writer's already-persisted value and refuses to regress it.
+    {
+        let _guard = repo.marker_write_mutex().lock().await;
+        let candidate = gate.last_committed();
+        let current = load_last_committed(&info_store).await?;
+        let should_write = match current {
+            Some(c) => candidate > c,
+            None => true,
+        };
+        if should_write {
+            save_last_committed(&info_store, candidate).await?;
+        }
+    }
     save_next_tx_id_snapshot(&info_store, gate.peek_next_tx_id()).await?;
     Ok(())
 }
