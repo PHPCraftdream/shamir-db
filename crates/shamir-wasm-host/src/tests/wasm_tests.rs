@@ -160,6 +160,7 @@ async fn wasm_memory_limit_enforced() {
         fuel: 1_000_000_000,
         // Allow only 3 pages (192 KiB) total — less than the 2+4=6 the guest wants.
         max_memory_bytes: 3 * 64 * 1024,
+        ..WasmLimits::default()
     };
     let wf = Arc::new(WasmFunction::from_wat(engine, MEMORY_GROW_WAT, limits).unwrap());
 
@@ -167,4 +168,36 @@ async fn wasm_memory_limit_enforced() {
     params.set("k", QueryValue::Int(1));
     let result = wf.call(&FnCtx::new(), &FnBatch::new(), &params).await;
     assert!(result.is_err(), "grow beyond limit should trap");
+}
+
+#[tokio::test]
+async fn wasm_wall_clock_deadline_interrupts_cpu_bound_guest() {
+    // Finding: WASM aggregate fuel fan-out. A pure-CPU guest with a huge fuel
+    // budget (so fuel would NOT stop it in any reasonable time) must still be
+    // interrupted by the wall-clock deadline / epoch interruption instead of
+    // pinning the worker indefinitely.
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let limits = WasmLimits {
+        fuel: u64::MAX, // effectively never exhausts within the test window
+        wall_clock_deadline: std::time::Duration::from_millis(300),
+        ..WasmLimits::default()
+    };
+    let wf = Arc::new(WasmFunction::from_wat(engine, INFINITE_LOOP_WAT, limits).unwrap());
+
+    let start = std::time::Instant::now();
+    let result = wf
+        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        result.is_err(),
+        "cpu-bound guest must be interrupted, not run to completion"
+    );
+    // Must terminate well before the (default 30s) fuel/time budget — a few
+    // seconds of headroom over the 300ms deadline + epoch tick slack.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "guest ran {elapsed:?}; wall-clock deadline / epoch did not interrupt it"
+    );
 }

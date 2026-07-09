@@ -51,6 +51,16 @@ pub mod instance_defaults {
     /// declares the consumer "slow" and tears down the subscription.
     pub const SLOW_CONSUMER_THRESHOLD: u32 = 100;
 
+    /// Maximum number of concurrently-active subscriptions per connection.
+    ///
+    /// Each active subscription owns a spawned bridge task plus one
+    /// broadcast receiver per subscribed repo (finding 2b-i). Without a cap
+    /// a single connection can spawn unbounded bridge tasks / receivers and
+    /// exhaust runtime resources. `Subscribe` ops beyond this many active
+    /// subscriptions on one connection are rejected. `256` is generous for
+    /// legitimate reactive workloads while bounding the fan-out.
+    pub const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 256;
+
     /// Maximum number of journal events to backfill when a subscription
     /// resumes from a specific `from_version`.
     pub const JOURNAL_BACKFILL_LIMIT: usize = 10_000;

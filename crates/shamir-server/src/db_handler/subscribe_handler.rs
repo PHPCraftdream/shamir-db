@@ -52,7 +52,31 @@ pub(super) fn activate_subscriptions(
     for (alias, entry) in &batch.queries {
         match &entry.op {
             BatchOp::Subscribe(op) => {
+                // Per-connection subscription cap (finding 2b-i). Reserve a
+                // slot BEFORE spawning the bridge; if the connection is
+                // already at its cap, reject this Subscribe (surface the
+                // rejection in the alias result) instead of spawning an
+                // unbounded bridge task + broadcast receiver.
+                if let Err(cap) = registry.try_reserve() {
+                    if let Some(qr) = response.results.get_mut(alias) {
+                        if let Some(QueryValue::Map(map)) = &mut qr.value {
+                            map.insert(
+                                "error".to_string(),
+                                QueryValue::Str(format!(
+                                    "subscription limit reached ({cap} per connection)"
+                                )),
+                            );
+                        }
+                    }
+                    tracing::warn!(cap, "subscription rejected: per-connection limit reached");
+                    continue;
+                }
                 let sub_id = registry.next_id();
+                // Operator-configured query limits (finding 2b-ii): the batch
+                // limits here are already capped to the operator maximums in
+                // `handler::execute`. Reactive `Batch`/`Call` deliveries run
+                // under the SUBSCRIBING actor's identity, so they must be
+                // bounded by these same limits rather than `BatchLimits::default()`.
                 let handle = tokio::spawn(bridge::bridge_task(
                     sub_id,
                     Arc::clone(db),
@@ -63,6 +87,7 @@ pub(super) fn activate_subscriptions(
                     Arc::clone(push),
                     op.from_version,
                     op.initial,
+                    batch.limits.clone(),
                 ));
                 registry.insert(
                     sub_id,

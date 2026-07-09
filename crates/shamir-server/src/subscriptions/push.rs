@@ -7,6 +7,7 @@ use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
+use shamir_query_types::batch::BatchLimits;
 use shamir_query_types::subscribe::deliver_mode::DeliverMode;
 use shamir_tunables::instance_defaults::SLOW_CONSUMER_THRESHOLD;
 
@@ -30,6 +31,7 @@ struct PushEnvelopeRef<'a> {
 }
 
 /// Build deliver payload for a single change, dispatching on `DeliverMode`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn make_deliver_data(
     deliver: &DeliverMode,
     db: &ShamirDb,
@@ -38,15 +40,34 @@ pub(super) async fn make_deliver_data(
     change: &shamir_tx::changefeed::RecordChange,
     value_qv: Option<&QueryValue>,
     commit_version: u64,
+    query_limits: &BatchLimits,
 ) -> Vec<u8> {
     match deliver {
         DeliverMode::Records => make_event_data(change, value_qv, commit_version),
         DeliverMode::Keys => make_keys_data(&change.table, &change.op, &change.key, commit_version),
         DeliverMode::Batch(sub_batch) => {
-            execute_reactive_batch(db, db_name, actor, sub_batch, change, commit_version).await
+            execute_reactive_batch(
+                db,
+                db_name,
+                actor,
+                sub_batch,
+                change,
+                commit_version,
+                query_limits,
+            )
+            .await
         }
         DeliverMode::Call(call_op) => {
-            execute_reactive_call(db, db_name, actor, call_op, change, commit_version).await
+            execute_reactive_call(
+                db,
+                db_name,
+                actor,
+                call_op,
+                change,
+                commit_version,
+                query_limits,
+            )
+            .await
         }
     }
 }

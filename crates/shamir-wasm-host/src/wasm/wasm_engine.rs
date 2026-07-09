@@ -40,6 +40,16 @@ impl WasmEngine {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
 
+        // Epoch interruption (finding: WASM fuel fan-out). Fuel alone cannot
+        // pre-empt a pure-CPU guest that never hits a host-await, nor charge
+        // for host-await wall-clock time — a CPU-bound guest with only fuel
+        // limits pins its tokio worker for the whole fuel budget. With epoch
+        // interruption a background ticker (see `spawn_epoch_ticker`) bumps
+        // the engine epoch on a fixed cadence, and each Store's epoch deadline
+        // traps a guest that overruns its wall-clock budget regardless of how
+        // fuel is consumed or reset across nested calls.
+        config.epoch_interruption(true);
+
         // Explicitly enable copy-on-write memory initialisation so
         // linear-memory data segments are mapped from a CoW image
         // instead of being copied byte-by-byte on each instantiation.
@@ -116,7 +126,40 @@ impl WasmEngine {
             log::info!("Wasmtime pooling allocator disabled via SHAMIR_WASM_NO_POOL env var");
             Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?
         };
+        Self::spawn_epoch_ticker(&engine);
         Ok(Self { engine })
+    }
+
+    /// Cadence at which the background task increments the engine epoch.
+    /// A Store's epoch deadline is expressed in ticks; wall-clock ÷ this
+    /// cadence gives the deadline count. 100 ms bounds the worst-case
+    /// over-run of a CPU-bound guest to ~one tick past its budget while
+    /// keeping the background wakeup rate negligible.
+    pub const EPOCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
+
+    /// Spawn a detached OS thread that increments the engine epoch on a fixed
+    /// cadence, driving epoch-based interruption of over-budget guests.
+    ///
+    /// This MUST be a dedicated OS thread, NOT a tokio task: a pure-CPU guest
+    /// pins its tokio worker for its whole run, so an epoch ticker scheduled on
+    /// the same runtime would never get to run and the trap would never fire.
+    /// A standalone thread ticks regardless of runtime saturation, which is the
+    /// entire point of epoch interruption (it is what lets a CPU-bound guest be
+    /// pre-empted when neither fuel nor the cooperative `timeout` can).
+    ///
+    /// `Engine` is internally reference-counted (cheap to clone). The thread
+    /// runs for the process lifetime; engines here are long-lived singletons,
+    /// so leaking one background ticker per engine is acceptable and matches
+    /// wasmtime's documented epoch-ticker pattern.
+    fn spawn_epoch_ticker(engine: &Engine) {
+        let engine = engine.clone();
+        std::thread::Builder::new()
+            .name("wasm-epoch-ticker".into())
+            .spawn(move || loop {
+                std::thread::sleep(Self::EPOCH_TICK);
+                engine.increment_epoch();
+            })
+            .ok();
     }
 
     /// Build a [`PoolingAllocationConfig`] whose limits are compatible
@@ -173,6 +216,15 @@ pub struct WasmLimits {
     pub fuel: u64,
     /// Maximum linear-memory size in bytes.
     pub max_memory_bytes: usize,
+    /// Wall-clock deadline for one logical request (finding: WASM aggregate
+    /// fuel fan-out). Fuel is reset per nested `Store`, so nested `ctx.call`
+    /// invocations can burn `(nested count) × fuel` instructions with no
+    /// aggregate ceiling; worse, fuel does not charge for time spent in
+    /// host-awaits, so a guest that mostly awaits (or a pure-CPU guest with
+    /// no epoch interruption) can pin a worker indefinitely. This deadline
+    /// bounds the TOTAL wall-clock of a request across all nested calls,
+    /// enforced at the top-level (depth 0) call site.
+    pub wall_clock_deadline: std::time::Duration,
 }
 
 impl Default for WasmLimits {
@@ -180,6 +232,10 @@ impl Default for WasmLimits {
         Self {
             fuel: 1_000_000_000,
             max_memory_bytes: 64 * 1024 * 1024,
+            // 30 s matches the batch execution-time default; generous for a
+            // single function invocation while preventing a runaway guest (or
+            // fan-out chain) from pinning a worker forever.
+            wall_clock_deadline: std::time::Duration::from_secs(30),
         }
     }
 }

@@ -41,7 +41,9 @@ pub use env_policy::EnvPolicy;
 pub use error::{FnResult, FunctionError};
 pub use fn_adapter::FnAdapter;
 pub use meta::{CreateFunctionOptions, FunctionMeta, Security, Visibility};
-pub use net_gateway::{check_url_allowed, HttpRequest, HttpResponse, NetGateway};
+pub use net_gateway::{
+    check_url_allowed, check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway,
+};
 pub use params::Params;
 pub use registry::FunctionRegistry;
 pub use scalar::{builtin_aggs, builtin_scalars};

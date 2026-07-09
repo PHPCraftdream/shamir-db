@@ -126,7 +126,16 @@ pub struct Session {
     /// Binding mode at session creation.
     pub binding_mode: BindingMode,
     /// `tls_exporter_or_zeros` snapshotted at handshake — used by
-    /// `changePassword` for `auth_message_cp` and by future ticket bindings.
+    /// `changePassword` for `auth_message_cp`.
+    ///
+    /// NOT compared against the resuming connection's current exporter in
+    /// `process_resume` (an earlier attempt at this — audit finding 1d,
+    /// 2026-07-06-security-network-surface.md — was reverted: TLS exporter
+    /// values are unique per-connection even across session resumption per
+    /// RFC 9266, so raw equality between this value and a NEW connection's
+    /// exporter breaks every legitimate ticket-based reconnect, not just
+    /// stolen-ticket replay; see `resume.rs`'s `process_resume` for the full
+    /// reasoning and the follow-up task tracking a correct fix).
     pub channel_binding_at_auth: [u8; 32],
     /// In-flight changePassword challenge state.
     ///

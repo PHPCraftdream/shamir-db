@@ -44,6 +44,7 @@ pub(super) async fn execute_reactive_batch(
     sub_batch: &SubBatchOp,
     change: &shamir_tx::changefeed::RecordChange,
     commit_version: u64,
+    query_limits: &BatchLimits,
 ) -> Vec<u8> {
     let mut merged_bind = sub_batch.bind.clone();
     inject_event_bindings(&mut merged_bind, change, commit_version);
@@ -70,7 +71,10 @@ pub(super) async fn execute_reactive_batch(
         queries,
         return_all: true,
         return_only: None,
-        limits: BatchLimits::default(),
+        // Finding 2b-ii: honour the operator-configured limits, not the
+        // hardcoded `BatchLimits::default()` — reactive re-queries run under
+        // the subscribing actor and must obey that actor's configured caps.
+        limits: query_limits.clone(),
         interner_epochs: Default::default(),
         result_encoding: ResultEncoding::default(),
     };
@@ -94,6 +98,7 @@ pub(super) async fn execute_reactive_call(
     call_op: &shamir_query_types::call::CallOp,
     change: &shamir_tx::changefeed::RecordChange,
     commit_version: u64,
+    query_limits: &BatchLimits,
 ) -> Vec<u8> {
     // Wrap the call inside a sub-batch so $event.* params are available
     // to the function via the bind map → FilterContext.params resolution.
@@ -119,7 +124,8 @@ pub(super) async fn execute_reactive_call(
         queries: inner_queries,
         return_all: true,
         return_only: None,
-        limits: BatchLimits::default(),
+        // Finding 2b-ii: operator limits, not the hardcoded default.
+        limits: query_limits.clone(),
         interner_epochs: Default::default(),
         result_encoding: ResultEncoding::default(),
     };
@@ -145,7 +151,8 @@ pub(super) async fn execute_reactive_call(
         queries: outer_queries,
         return_all: true,
         return_only: None,
-        limits: BatchLimits::default(),
+        // Finding 2b-ii: operator limits, not the hardcoded default.
+        limits: query_limits.clone(),
         interner_epochs: Default::default(),
         result_encoding: ResultEncoding::default(),
     };
