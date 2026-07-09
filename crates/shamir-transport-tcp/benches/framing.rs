@@ -21,7 +21,8 @@ use std::hint::black_box;
 
 use bench_scale_tool::Harness;
 use shamir_transport_tcp::framing::{
-    read_frame, read_frame_into, write_frame, MAX_FRAME_SIZE_DEFAULT,
+    read_frame, read_frame_into, write_frame, write_frame_into, write_frame_prereserved,
+    MAX_FRAME_SIZE_DEFAULT,
 };
 use tokio::io::duplex;
 
@@ -95,6 +96,60 @@ fn main() {
                 // destructuring pattern in the same expression) keeps the
                 // pipe open until the routine returns.
                 write_frame(&mut w, &p).await.unwrap();
+                black_box(&r);
+            },
+        );
+    }
+
+    // --- framing/write_only/write_frame_into/<size> -------------------------
+    // §3.4: write_frame_into copies the payload into a scratch buffer to
+    // prepend the 4-byte length prefix. Compare against write_frame_prereserved
+    // which writes an already-length-prefixed buffer directly (no memcpy).
+    for size in [1024usize, 16 * 1024, 256 * 1024, 1024 * 1024] {
+        let payload = vec![0xcdu8; size];
+        let id = format!("framing/write_only/write_frame_into/{size}");
+        h.bench_batched_async(
+            &id,
+            move || {
+                let payload = payload.clone();
+                async move {
+                    (
+                        payload,
+                        Vec::<u8>::with_capacity(size + 16),
+                        duplex(size + 1024),
+                    )
+                }
+            },
+            move |(p, mut scratch, (mut w, r))| async move {
+                write_frame_into(&mut w, &p, &mut scratch).await.unwrap();
+                black_box(&r);
+            },
+        );
+    }
+
+    // --- framing/write_only/write_frame_prereserved/<size> ------------------
+    // §3.4: the prereserved path skips the memcpy — the caller serializes
+    // directly into a length-prefixed buffer, and the writer just does
+    // write_all. The setup builds the prereserved buffer (untimed), the
+    // routine does only the write.
+    for size in [1024usize, 16 * 1024, 256 * 1024, 1024 * 1024] {
+        let payload = vec![0xcdu8; size];
+        let id = format!("framing/write_only/write_frame_prereserved/{size}");
+        h.bench_batched_async(
+            &id,
+            move || {
+                let payload = payload.clone();
+                async move {
+                    // Build the prereserved buffer (untimed setup).
+                    let len = payload.len() as u32;
+                    let mut buf = Vec::with_capacity(4 + payload.len());
+                    buf.extend_from_slice(&len.to_be_bytes());
+                    buf.extend_from_slice(&payload);
+                    (buf, duplex(size + 1024))
+                }
+            },
+            move |(buf, (mut w, r))| async move {
+                write_frame_prereserved(&mut w, &buf).await.unwrap();
                 black_box(&r);
             },
         );
