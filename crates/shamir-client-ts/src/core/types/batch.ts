@@ -25,7 +25,7 @@
  */
 
 import type { WireValue } from './write.js';
-import type { ReadQuery } from './query.js';
+import type { ReadQuery, ExplainPlan } from './query.js';
 import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
 import type { DdlOp } from './ddl.js';
 import type { AdminOp } from './admin.js';
@@ -80,8 +80,16 @@ export type QueryEntry = BatchOpInput & {
 /** Isolation level for transactional batches. */
 export type IsolationLevel = 'snapshot' | 'serializable';
 
-/** Per-request durability level. */
-export type DurabilityLevel = 'buffered' | 'synced';
+/**
+ * Per-request durability level (`batch_request.rs::durability`).
+ *
+ * - `'buffered'` (default) — ack after the in-memory MemBuffer.
+ * - `'synced'` — flush durable backing of every touched repo before ack.
+ * - `'async_index'` — ack after WAL fsync + data apply + MVCC publish; index
+ *   posting apply / recovery markers / WAL cleanup / HNSW promote run on a
+ *   background task. Only meaningful for `transactional: true` batches.
+ */
+export type DurabilityLevel = 'buffered' | 'synced' | 'async_index';
 
 // ── BatchLimits ─────────────────────────────────────────────────────
 
@@ -125,14 +133,6 @@ export interface BatchRequest {
   interner_epochs?: Record<string, number | bigint>;
 
   /**
-   * Id-keyed msgpack-encoded record payloads for INSERT ops (Stage 5-wire).
-   * Set by `executeWithTouch` on v2 servers — field names are replaced by
-   * their interned u64 ids and the record is msgpack-encoded.
-   * Present per query-entry, not at batch level (the entry carries it).
-   */
-  records_idmsgpack?: Uint8Array[];
-
-  /**
    * Desired result encoding. `"id"` requests id-keyed result rows from the
    * server (v2+); the client de-interns them transparently.
    */
@@ -172,6 +172,12 @@ export interface QueryResult {
   stats?: QueryStats;
   pagination?: PaginationInfo;
   value?: WireValue;
+  /**
+   * EXPLAIN plan preview — present only when the source `ReadQuery` set
+   * `explain: true`. Mirrors `query_result.rs::QueryResult.explain`
+   * (`skip_serializing_if = "Option::is_none"`).
+   */
+  explain?: ExplainPlan;
 }
 
 /** Transaction metadata (present on transactional batches). */

@@ -26,6 +26,14 @@ export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
 }
 
 export { ShamirClient };
+// Typed error surface (Finding 2.1 / 2.2): callers branch on `.code` /
+// `.retryable` instead of regexing message strings.
+export {
+  ShamirDbError,
+  ShamirTimeoutError,
+  isRetryableCode,
+  RETRYABLE_ERROR_CODES,
+} from './core/errors.js';
 export type { TxOpened, ScramUserCreated } from './core/client.js';
 export { SubscriptionRouter } from './core/subscription-router.js';
 export type { SubscriptionEvent } from './core/subscription-router.js';

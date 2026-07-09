@@ -24,12 +24,13 @@
  *   [4]: server_query_version (u8; 0 when none)
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Socket, Platform } from '../platform.js';
 import { encode, decode } from '../framing.js';
 import { ShamirClient } from '../client.js';
 import type { ResumeOptions } from '../types/index.js';
 import { CURRENT_QUERY_LANG_VERSION } from '../scram.js';
+import { ShamirDbError, ShamirTimeoutError } from '../errors.js';
 
 // Track opened clients so afterEach can close them — otherwise the persistent
 // readLoop keeps the socket handle alive and vitest hangs on exit.
@@ -290,5 +291,140 @@ describe('ShamirClient request envelopes carry CURRENT_QUERY_LANG_VERSION', () =
     expect(req['op']).toBe('tx_execute');
     expect(req['query_version']).toBe(CURRENT_QUERY_LANG_VERSION);
     expect(req['query_version']).not.toBe(1);
+  });
+});
+
+// ─── Finding 2.1: typed error surface (ShamirDbError) ────────────────────────
+
+describe('ShamirClient — typed DbResponse::Error surface (Finding 2.1)', () => {
+  async function resumeV2Client(): Promise<{
+    client: ShamirClient;
+    socket: FakeSocket;
+  }> {
+    const { platform, socket } = platformWithSocket();
+    socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+    const client = await ShamirClient.resume(platform, makeResumeOpts());
+    openedClients.push(client);
+    return { client, socket };
+  }
+
+  it('rejects with a typed ShamirDbError carrying code + retryable=false for a fatal code', async () => {
+    const { client, socket } = await resumeV2Client();
+    // Server returns DbResponse::Error { kind:"error", code, message }.
+    pushDbResponse(socket, 1, {
+      kind: 'error',
+      code: 'validation',
+      message: 'unknown alias',
+    });
+
+    const err = await client
+      .execute('mydb', { id: 1, queries: {} })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e) => e,
+      );
+
+    expect(err).toBeInstanceOf(ShamirDbError);
+    expect(err.code).toBe('validation');
+    expect(err.retryable).toBe(false);
+    // Message continuity: still carries the [code]: message form.
+    expect(err.message).toContain('[validation]');
+    expect(err.message).toContain('unknown alias');
+  });
+
+  it('classifies transient codes as retryable=true', async () => {
+    const { client, socket } = await resumeV2Client();
+    pushDbResponse(socket, 1, {
+      kind: 'error',
+      code: 'tx_conflict',
+      message: 'write-write conflict',
+    });
+
+    const err = await client
+      .execute('mydb', { id: 1, queries: {} })
+      .then(
+        () => {
+          throw new Error('expected rejection');
+        },
+        (e) => e,
+      );
+
+    expect(err).toBeInstanceOf(ShamirDbError);
+    expect(err.code).toBe('tx_conflict');
+    expect(err.retryable).toBe(true);
+  });
+});
+
+// ─── Finding 2.2: request / connect timeouts ─────────────────────────────────
+
+describe('ShamirClient — request/connect timeouts (Finding 2.2)', () => {
+  it('rejects a never-answered request with a retryable ShamirTimeoutError', async () => {
+    vi.useFakeTimers();
+    try {
+      const { platform, socket } = platformWithSocket();
+      socket.pushFrame(resumeOkFrame({ serverQueryVersion: 2 }));
+      const client = await ShamirClient.resume(platform, {
+        ...makeResumeOpts(),
+        requestTimeoutMs: 50,
+      });
+      openedClients.push(client);
+
+      // ping() never gets a response — the client-side deadline must fire.
+      const p = client.ping();
+      // Attach a catch synchronously so the eventual rejection is not
+      // "unhandled" while we advance timers.
+      const settled = p.then(
+        () => {
+          throw new Error('expected timeout rejection');
+        },
+        (e) => e,
+      );
+
+      await vi.advanceTimersByTimeAsync(60);
+      const err = await settled;
+
+      expect(err).toBeInstanceOf(ShamirTimeoutError);
+      expect(err.code).toBe('client_timeout');
+      expect(err.retryable).toBe(true);
+      expect(err.phase).toBe('request');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a hanging connect with a ShamirTimeoutError(phase=connect)', async () => {
+    vi.useFakeTimers();
+    try {
+      // openSocket never resolves → the connect-timeout race must reject.
+      const platform: Platform = {
+        hmacSha256: () => new Uint8Array(32),
+        sha256: () => new Uint8Array(32),
+        randomBytes: (n) => new Uint8Array(n),
+        timingSafeEqual: (a, b) => a.length === b.length,
+        argon2id: async () => new Uint8Array(32),
+        openSocket: () => new Promise<Socket>(() => {}), // never resolves
+      };
+
+      const attempt = ShamirClient.resume(platform, {
+        ...makeResumeOpts(),
+        connectTimeoutMs: 40,
+      }).then(
+        () => {
+          throw new Error('expected connect timeout');
+        },
+        (e) => e,
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      const err = await attempt;
+
+      expect(err).toBeInstanceOf(ShamirTimeoutError);
+      expect(err.phase).toBe('connect');
+      expect(err.retryable).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

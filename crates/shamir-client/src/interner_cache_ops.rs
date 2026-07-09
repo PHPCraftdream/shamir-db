@@ -24,8 +24,9 @@ use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse, ResultEncoding};
+use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{QueryRecord, QueryResult};
-use shamir_query_types::write::{InsertOp, SetOp, UpdateOp};
+use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::codecs::interned::{query_value_to_storage_bytes, record_view_deintern_with};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordView;
@@ -408,8 +409,19 @@ impl Client {
                     op.values = remaining;
                 }
             }
-            // Request id-keyed result rows; client de-interns below.
-            batch.result_encoding = ResultEncoding::Id;
+            // Request id-keyed result rows ONLY when the batch has no
+            // cross-query references. Finding 1.4: a batch carrying a `$query`
+            // / `$param` ref or a sub-batch relies on the server's INTERMEDIATE
+            // results staying name-keyed — under `ResultEncoding::Id` those
+            // intermediates become opaque `QueryRecord::IdBytes` rows whose
+            // `as_value()` is `Null`, so ref path-resolution (`@dep[i].field`)
+            // silently breaks (proven by
+            // `shamir-engine … query_ref_does_not_resolve_under_id_encoding`).
+            // This mirrors the TS client's `batchHasRefs` guard — keeping the
+            // two clients aligned on the smart-write path.
+            if !batch_has_refs(&batch) {
+                batch.result_encoding = ResultEncoding::Id;
+            }
         }
 
         let response = self.execute(db, batch).await?;
@@ -486,6 +498,94 @@ fn qv_has_fn_marker(v: &QueryValue) -> bool {
         Value::List(items) => items.iter().any(qv_has_fn_marker),
         Value::Set(items) => items.iter().any(qv_has_fn_marker),
         // Scalars: no $fn possible.
+        _ => false,
+    }
+}
+
+/// Finding 1.4: returns `true` if the batch carries any cross-query reference
+/// that requires the server's INTERMEDIATE results to stay name-keyed — namely
+/// a `$query` / `$param` [`FilterValue`] anywhere in a Read/Update/Delete
+/// filter, or a sub-batch op (whose `bind` map and inner queries can carry
+/// refs). Such batches must NOT request `ResultEncoding::Id`, because id-keyed
+/// (`QueryRecord::IdBytes`) intermediates are opaque to path resolution.
+///
+/// Mirrors the TS client's `batchHasRefs`.
+pub(crate) fn batch_has_refs(batch: &BatchRequest) -> bool {
+    batch.queries.values().any(|entry| op_has_refs(&entry.op))
+}
+
+/// `true` if a single [`BatchOp`] carries a `$query`/`$param` ref or a
+/// sub-batch. Recurses into nested sub-batches.
+fn op_has_refs(op: &BatchOp) -> bool {
+    match op {
+        BatchOp::Read(q) => q.r#where.as_ref().is_some_and(filter_has_refs),
+        BatchOp::Update(UpdateOp { where_clause, .. }) => {
+            where_clause.as_ref().is_some_and(filter_has_refs)
+        }
+        BatchOp::Delete(DeleteOp { where_clause, .. }) => filter_has_refs(where_clause),
+        // A sub-batch always depends on server-side name-keyed intermediates
+        // (its `bind` map + inner queries reference the outer scope), so treat
+        // any sub-batch as ref-bearing unconditionally.
+        BatchOp::Batch(_) => true,
+        _ => false,
+    }
+}
+
+/// `true` if a filter tree contains a `$query`/`$param` [`FilterValue`].
+fn filter_has_refs(f: &Filter) -> bool {
+    match f {
+        Filter::Eq { value, .. }
+        | Filter::Ne { value, .. }
+        | Filter::Gt { value, .. }
+        | Filter::Gte { value, .. }
+        | Filter::Lt { value, .. }
+        | Filter::Lte { value, .. }
+        | Filter::Contains { value, .. }
+        | Filter::FieldEq { value, .. } => fv_has_refs(value),
+        Filter::In { values, .. }
+        | Filter::NotIn { values, .. }
+        | Filter::ContainsAny { values, .. }
+        | Filter::ContainsAll { values, .. } => values.iter().any(fv_has_refs),
+        Filter::Between { from, to, .. } => fv_has_refs(from) || fv_has_refs(to),
+        Filter::And { filters } | Filter::Or { filters } => filters.iter().any(filter_has_refs),
+        Filter::Not { filter } => filter_has_refs(filter),
+        Filter::Computed {
+            expr_args, value, ..
+        } => {
+            fv_has_refs(value)
+                || expr_args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(fv_has_refs))
+        }
+        // Pattern / null / existence / index-accel operators carry no
+        // FilterValue positions that can hold a $query / $param ref.
+        _ => false,
+    }
+}
+
+/// `true` if a [`FilterValue`] is (or recursively contains) a `$query` /
+/// `$param` reference.
+///
+/// Recurses into `$fn`/`$expr`/`$cond` argument positions (found in @fl
+/// review of task #497): `execute_with_touch` is a public API accepting an
+/// arbitrary caller-built `BatchRequest` — `FilterValue::query_ref()` +
+/// `FnCall::complex()`/`FilterExpr::new()`/`Cond::new()` are all public
+/// builder constructors, so a caller can legally construct a
+/// `$fn`/`$expr`/`$cond`-wrapped `$query`/`$param` ref. A flat (non-
+/// recursing) check would silently reintroduce the finding-1.4 bug for that
+/// shape. Mirrors the TS client's `hasQueryRef`, which recurses into every
+/// nested object.
+fn fv_has_refs(fv: &FilterValue) -> bool {
+    match fv {
+        FilterValue::QueryRef { .. } | FilterValue::Param { .. } => true,
+        FilterValue::Array(items) => items.iter().any(fv_has_refs),
+        FilterValue::FnCall { call } => call.args().iter().any(fv_has_refs),
+        FilterValue::Expr { expr } => expr.args.iter().any(fv_has_refs),
+        FilterValue::Cond { cond } => {
+            filter_has_refs(&cond.condition)
+                || fv_has_refs(&cond.then)
+                || fv_has_refs(&cond.or_else)
+        }
         _ => false,
     }
 }

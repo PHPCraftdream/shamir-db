@@ -23,6 +23,18 @@ export interface ResumeOptions {
    * Origin header sent on the WS upgrade. Defaults to `https://${host}`.
    */
   origin?: string;
+  /**
+   * Per-request deadline in ms (Finding 2.2). A pending request that gets no
+   * server response within this budget rejects with a {@link ShamirTimeoutError}
+   * instead of hanging forever. Defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}.
+   * Pass `0` to disable.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Deadline in ms for the initial connection attempt (Finding 2.2). Defaults
+   * to {@link DEFAULT_CONNECT_TIMEOUT_MS}. Pass `0` to disable.
+   */
+  connectTimeoutMs?: number;
 }
 
 /** Connection parameters (mirrors the napi `ConnectOptions`). */
@@ -40,4 +52,27 @@ export interface ConnectOptions {
   origin?: string;
   acceptNewHost?: boolean;
   trustedPin?: Uint8Array;
+  /**
+   * Per-request deadline in ms (Finding 2.2). A pending request that gets no
+   * server response within this budget rejects with a {@link ShamirTimeoutError}
+   * instead of hanging forever. Defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}.
+   * Pass `0` to disable.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Deadline in ms for the initial connection attempt (Finding 2.2). Defaults
+   * to {@link DEFAULT_CONNECT_TIMEOUT_MS}. Pass `0` to disable.
+   */
+  connectTimeoutMs?: number;
 }
+
+/**
+ * Default per-request deadline. Chosen comfortably above the server's default
+ * `max_execution_time_secs` (30 s) so a legitimately slow `Execute` is bounded
+ * by the SERVER, and this client timer only fires for genuinely stuck ops
+ * (`Ping`, `TxCommit`, a lost response id) — see Finding 2.2.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 35_000;
+
+/** Default deadline for the initial connection attempt. */
+export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;

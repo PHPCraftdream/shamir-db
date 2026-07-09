@@ -159,4 +159,41 @@ export interface ReadQuery {
   count_total?: boolean;
   temporal?: Temporal;
   with_version?: boolean;
+  /**
+   * EXPLAIN / dry-run: run only the planner (index selection, plan type)
+   * and return a plan preview WITHOUT materialising any rows. Mirrors
+   * `read_query.rs::explain` (`#[serde(default, skip_serializing_if = is_false)]`
+   * → omitted at its `false` default; emitted only when `true`). The result
+   * lands in {@link QueryResult.explain}.
+   */
+  explain?: boolean;
+}
+
+// ── EXPLAIN plan preview ─────────────────────────────────────────────
+
+/**
+ * Plan type chosen by the read planner (`query_result.rs::PlanType`,
+ * externally tagged — the Rust enum has NO `rename_all`, so the wire
+ * discriminant keeps the PascalCase variant names verbatim).
+ */
+export type PlanType =
+  | 'KeysetSeek'
+  | 'OrderLimitFast'
+  | 'Index2'
+  | 'IndexScan'
+  | 'SortedIndexScan'
+  | 'AndRangeIndexScan'
+  | 'CounterShortcut'
+  | 'MinMaxIndex'
+  | 'FullScan';
+
+/**
+ * EXPLAIN plan preview — present on {@link QueryResult.explain} only when the
+ * query set `explain: true`. Mirrors `query_result.rs::ExplainPlan`;
+ * `index_used` / `estimated_rows` are skip-if-none.
+ */
+export interface ExplainPlan {
+  plan_type: PlanType;
+  index_used?: string;
+  estimated_rows?: number;
 }

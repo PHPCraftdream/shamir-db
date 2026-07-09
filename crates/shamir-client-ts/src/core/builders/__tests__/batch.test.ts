@@ -13,7 +13,10 @@ import { Handle, RowRef } from '../handle.js';
 import type {
   BatchResponse,
   BatchRequest,
+  QueryResult,
 } from '../../types/batch.js';
+import type { InsertOp } from '../../types/write.js';
+import type { ExplainPlan } from '../../types/query.js';
 
 // ── minimal batch ───────────────────────────────────────────────────
 
@@ -121,6 +124,16 @@ describe('Batch — durability, name, returnOnly, limits', () => {
       .durability('synced')
       .build();
     expect(req.durability).toBe('synced');
+  });
+
+  it('durability("async_index") is accepted (Finding 1.3 — was missing)', () => {
+    // `'async_index'` is a first-class DurabilityLevel in Rust
+    // (batch_request.rs); it must type-check AND round-trip through the builder.
+    const req = Batch.create()
+      .add('u', Query.from('users'))
+      .durability('async_index')
+      .build();
+    expect(req.durability).toBe('async_index');
   });
 
   it('name emits name field', () => {
@@ -524,5 +537,45 @@ describe('Batch — tryBuild (G4)', () => {
       a: { from: 'users' },
       b: { from: 'orders' },
     });
+  });
+});
+
+// ── Finding 1.3: wire-type drift ─────────────────────────────────────
+
+describe('Finding 1.3 — wire-type drift fixes', () => {
+  it('records_idmsgpack is typed on InsertOp (per-op), not on BatchRequest', () => {
+    // Correct home: InsertOp (Rust write/types.rs::InsertOp.records_idmsgpack).
+    const op: InsertOp = {
+      insert_into: 'users',
+      values: [],
+      records_idmsgpack: [new Uint8Array([1, 2, 3])],
+    };
+    expect(op.records_idmsgpack?.[0]).toBeInstanceOf(Uint8Array);
+
+    // And it is NO LONGER a batch-level field: a BatchRequest carrying it must
+    // fail to type-check. `@ts-expect-error` turns a regression (re-adding the
+    // batch-level field) into a compile error.
+    const req: BatchRequest = {
+      id: 1,
+      queries: {},
+      // @ts-expect-error records_idmsgpack is per-op, not batch-level
+      records_idmsgpack: [new Uint8Array([9])],
+    };
+    expect(req.id).toBe(1);
+  });
+
+  it('QueryResult carries an optional explain plan (Finding 1.3)', () => {
+    const plan: ExplainPlan = {
+      plan_type: 'IndexScan',
+      index_used: 'users_by_status',
+      estimated_rows: 42,
+    };
+    const result: QueryResult = { records: [], explain: plan };
+    expect(result.explain?.plan_type).toBe('IndexScan');
+    expect(result.explain?.index_used).toBe('users_by_status');
+
+    // A result without explain is still valid (skip-if-none).
+    const bare: QueryResult = { records: [] };
+    expect(bare.explain).toBeUndefined();
   });
 });
