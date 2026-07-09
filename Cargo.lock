@@ -3487,6 +3487,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "base64",
+ "bench-scale-tool",
  "blake3",
  "chrono",
  "data-encoding",

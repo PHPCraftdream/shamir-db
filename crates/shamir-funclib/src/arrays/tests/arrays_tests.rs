@@ -197,6 +197,109 @@ fn distinct_preserves_first_order() {
 }
 
 #[test]
+fn distinct_all_dupes_and_no_dupes() {
+    let r = reg();
+    // All dupes → single first occurrence.
+    assert_eq!(
+        r.call("distinct", &[ints(&[7, 7, 7, 7, 7])]).unwrap(),
+        ints(&[7])
+    );
+    // No dupes → unchanged, first-order preserved.
+    assert_eq!(
+        r.call("distinct", &[ints(&[5, 3, 9, 1, 4])]).unwrap(),
+        ints(&[5, 3, 9, 1, 4])
+    );
+    // Single element.
+    assert_eq!(r.call("distinct", &[ints(&[42])]).unwrap(), ints(&[42]));
+}
+
+#[test]
+fn distinct_mixed_types_first_order() {
+    let r = reg();
+    // Mixed-type dedup: each distinct `QueryValue` kept on first sight,
+    // regardless of variant. (Distinct discriminants never collide.)
+    let input = list(vec![
+        QueryValue::Int(1),
+        QueryValue::Str("a".into()),
+        QueryValue::Int(1),
+        QueryValue::Bool(true),
+        QueryValue::Str("a".into()),
+        QueryValue::Null,
+        QueryValue::Bool(true),
+        QueryValue::Int(2),
+    ]);
+    let expected = list(vec![
+        QueryValue::Int(1),
+        QueryValue::Str("a".into()),
+        QueryValue::Bool(true),
+        QueryValue::Null,
+        QueryValue::Int(2),
+    ]);
+    assert_eq!(r.call("distinct", &[input]).unwrap(), expected);
+}
+
+#[test]
+fn distinct_nan_same_bit_pattern() {
+    let r = reg();
+    // Two NaN values with the SAME bit pattern hash-equal AND PartialEq-equal,
+    // so they are deduped exactly as the legacy linear-scan did.
+    let nan = f64::from_bits(0x7FF8000000000001u64);
+    let input = list(vec![
+        QueryValue::F64(nan),
+        QueryValue::F64(1.5),
+        QueryValue::F64(nan),
+    ]);
+    let out = r.call("distinct", &[input]).unwrap();
+    let arr = out.as_array().expect("list out");
+    assert_eq!(arr.len(), 2, "two distinct F64 values survive");
+}
+
+#[test]
+fn distinct_nan_different_bit_patterns_still_dedup() {
+    let r = reg();
+    // `PartialEq` treats ALL NaN as equal regardless of bit pattern (see
+    // `impl PartialEq for Value`), so two NaN values with DIFFERENT bit
+    // patterns must still collapse to one under `distinct()`, matching the
+    // legacy O(N²) `==`-based behavior. Regression test for the Hash/Eq
+    // consistency bug found during @sh review of this fix: `Hash` used to
+    // hash the raw bit pattern, so differently-NaN-bit-patterned values
+    // hashed into different HashSet buckets and both survived distinct()
+    // even though `PartialEq` said they were equal.
+    let nan_a = f64::from_bits(0x7FF8000000000001u64);
+    let nan_b = f64::from_bits(0x7FF8000000000002u64);
+    let input = list(vec![
+        QueryValue::F64(nan_a),
+        QueryValue::F64(1.5),
+        QueryValue::F64(nan_b),
+    ]);
+    let out = r.call("distinct", &[input]).unwrap();
+    let arr = out.as_array().expect("list out");
+    assert_eq!(
+        arr.len(),
+        2,
+        "differing-bit-pattern NaN values must still dedup to one, \
+         matching PartialEq semantics"
+    );
+}
+
+#[test]
+fn distinct_large_unique_matches_naive() {
+    let r = reg();
+    // Reference: the legacy O(N²) path returns first-sight uniques. The
+    // hash-based path must match it element-for-element on a large unique
+    // input (worst case for the old code).
+    let n = 500i64;
+    let input: Vec<QueryValue> = (0..n).map(QueryValue::Int).collect();
+    let out = r.call("distinct", &[list(input.clone())]).unwrap();
+    let arr = out.as_array().expect("list out");
+    // Every element appears exactly once, in original order.
+    assert_eq!(arr.len(), n as usize);
+    for (i, v) in arr.iter().enumerate() {
+        assert_eq!(*v, input[i]);
+    }
+}
+
+#[test]
 fn sort_numeric_and_non_numeric_error() {
     let r = reg();
     assert_eq!(
