@@ -3,7 +3,7 @@
 use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::InMemoryStore;
 use crate::tests::types_tests::collect_stream;
-use crate::types::{RecordKey, Store};
+use crate::types::{KvOp, RecordKey, Store};
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_types::types::record_id::RecordId;
@@ -395,4 +395,399 @@ async fn test_cached_async_mode_persists_after_flush() {
         collect_stream(inner.iter_stream(1000)).await.unwrap().len(),
         5
     );
+}
+
+// ============================================================================
+// transact: populate-on-Set (audit 2026-07-06-perf-radical-o-notation §1.4)
+// ============================================================================
+
+/// `transact` with a `Set` op must POPULATE the cache with the fresh
+/// value (not invalidate it), so a subsequent read-after-write hits the
+/// cache (RAM) instead of the (disk) backend. The previous code removed
+/// every touched key post-commit, systematically keeping the cache cold
+/// on just-written data — a ×10-100 read-after-write cost multiplier.
+///
+/// We assert via the cache's own internal state: immediately after
+/// `transact` commits, the just-written key must be present in the
+/// cache (proving the populate path ran, not the invalidate path).
+#[tokio::test]
+async fn test_transact_set_populates_cache() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+    assert_eq!(cached.cache_size(), 0);
+
+    let key = Bytes::from_static(b"raw-key");
+    let value = Bytes::from_static(b"fresh-value");
+
+    cached
+        .transact(vec![KvOp::Set(key.clone(), value.clone())])
+        .await
+        .unwrap();
+
+    // The cache MUST now hold the just-written value (populate, not
+    // invalidate). `cache_size` is 1 and a direct cache lookup returns
+    // the fresh bytes — proof the entry is in RAM, not evicted.
+    assert_eq!(cached.cache_size(), 1);
+    let from_cache = cached
+        .cache()
+        .peek_with(&key, |_, v| v.clone())
+        .expect("Set op must populate the cache, not invalidate it");
+    assert_eq!(from_cache, value);
+
+    // And `get` (which checks cache first) returns the fresh value
+    // without needing a backend round-trip.
+    let got = cached.get(key.clone()).await.unwrap();
+    assert_eq!(got, value);
+}
+
+/// `transact` with a `Set` op on a key that ALREADY exists in the
+/// cache must UPDATE the cached value in place (size unchanged) — the
+/// populate path uses the same upsert discipline as the single-key
+/// `set`, so a stale cached value is replaced with the fresh one
+/// rather than the entry being removed.
+#[tokio::test]
+async fn test_transact_set_updates_existing_cached_entry() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    let key = Bytes::from_static(b"upsert-key");
+    let old = Bytes::from_static(b"old-value");
+    let fresh = Bytes::from_static(b"fresh-value");
+
+    // Seed the cache with the old value.
+    cached.set(key.clone(), old.clone()).await.unwrap();
+    assert_eq!(cached.cache_size(), 1);
+
+    // transact a Set on the SAME key → must replace, not evict.
+    cached
+        .transact(vec![KvOp::Set(key.clone(), fresh.clone())])
+        .await
+        .unwrap();
+
+    // Size unchanged (upsert, not remove-then-nothing).
+    assert_eq!(cached.cache_size(), 1);
+    let from_cache = cached
+        .cache()
+        .peek_with(&key, |_, v| v.clone())
+        .expect("key still cached after transact Set");
+    assert_eq!(
+        from_cache, fresh,
+        "cached value must reflect the committed update, not stay stale"
+    );
+}
+
+/// `transact` with a `Remove` op must STILL evict the cache entry —
+/// this is the correct behaviour for deletes and must NOT change.
+/// Regression guard for the populate-on-Set fix (the Remove path
+/// stays an invalidate).
+#[tokio::test]
+async fn test_transact_remove_evicts_cache() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    let key = Bytes::from_static(b"del-key");
+    cached
+        .set(key.clone(), Bytes::from_static(b"v"))
+        .await
+        .unwrap();
+    assert_eq!(cached.cache_size(), 1);
+
+    cached
+        .transact(vec![KvOp::Remove(key.clone())])
+        .await
+        .unwrap();
+
+    // Remove MUST evict — cache is now empty, and the key is gone.
+    assert_eq!(cached.cache_size(), 0);
+    assert!(
+        cached.cache().peek_with(&key, |_, _| ()).is_none(),
+        "Remove op must evict the cache entry"
+    );
+    assert!(cached.get(key).await.is_err());
+}
+
+/// Mixed `transact` batch (Set + Remove): each op applies its own
+/// cache action. The Set populates; the Remove evicts. Confirms the
+/// `CacheAction` enum correctly distinguishes the two within a single
+/// batch.
+#[tokio::test]
+async fn test_transact_mixed_set_remove() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    let keep_key = Bytes::from_static(b"keep-key");
+    let del_key = Bytes::from_static(b"del-key");
+
+    // Seed both.
+    cached
+        .set(keep_key.clone(), Bytes::from_static(b"k-old"))
+        .await
+        .unwrap();
+    cached
+        .set(del_key.clone(), Bytes::from_static(b"d-old"))
+        .await
+        .unwrap();
+    assert_eq!(cached.cache_size(), 2);
+
+    cached
+        .transact(vec![
+            KvOp::Set(keep_key.clone(), Bytes::from_static(b"k-fresh")),
+            KvOp::Remove(del_key.clone()),
+        ])
+        .await
+        .unwrap();
+
+    // keep_key: populated with the fresh value (size stable at 1 — one
+    // removed, one updated-in-place).
+    assert_eq!(cached.cache_size(), 1);
+    let keep_val = cached
+        .cache()
+        .peek_with(&keep_key, |_, v| v.clone())
+        .expect("keep_key populated by Set");
+    assert_eq!(keep_val, Bytes::from_static(b"k-fresh"));
+
+    // del_key: evicted by Remove.
+    assert!(
+        cached.cache().peek_with(&del_key, |_, _| ()).is_none(),
+        "del_key evicted by Remove"
+    );
+}
+
+/// A multi-key Set batch populates ALL keys into the cache (no cap on
+/// how much of a batch gets cached — matching the single-key `set`
+/// path's "always cache on write" behaviour). Size bumps by the number
+/// of genuinely-new keys.
+#[tokio::test]
+async fn test_transact_set_many_populates_all() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    let ops: Vec<KvOp> = (0..50)
+        .map(|i| {
+            KvOp::Set(
+                Bytes::from(format!("batch-key-{:#04}", i)),
+                Bytes::from(format!("val-{}", i)),
+            )
+        })
+        .collect();
+
+    cached.transact(ops).await.unwrap();
+
+    // All 50 keys are now in the cache (populate, not invalidate).
+    assert_eq!(cached.cache_size(), 50);
+    for i in 0..50 {
+        let k = Bytes::from(format!("batch-key-{:#04}", i));
+        let v = cached
+            .cache()
+            .peek_with(&k, |_, v| v.clone())
+            .unwrap_or_else(|| panic!("key {} must be cached after transact Set", i));
+        assert_eq!(v, Bytes::from(format!("val-{}", i)));
+    }
+}
+
+// ============================================================================
+// iter_stream / scan_prefix_stream: incremental correctness preserved
+// (audit 2026-07-06-perf-radical-o-notation §1.3)
+// ============================================================================
+
+/// `iter_stream` after the incrementalization must still yield the
+/// FULL result set, in ascending TreeIndex key order, across multiple
+/// batches. Correctness guard for the cursor/resume rework.
+#[tokio::test]
+async fn test_iter_stream_full_results_sorted() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    // Seed 23 keys with sortable byte keys (pad so lex order is stable).
+    for i in 0..23u32 {
+        let key = Bytes::from(format!("key-{:05}", i));
+        cached
+            .set(key, Bytes::from(i.to_be_bytes().to_vec()))
+            .await
+            .unwrap();
+    }
+    assert_eq!(cached.cache_size(), 23);
+
+    // batch_size = 5 → expect 5 batches (5,5,5,5,3).
+    let collected = collect_stream(cached.iter_stream(5)).await.unwrap();
+
+    assert_eq!(collected.len(), 23, "all 23 entries must be yielded");
+
+    // Verify ascending key order across the whole stream.
+    for w in collected.windows(2) {
+        assert!(
+            w[0].0 < w[1].0,
+            "iter_stream must yield ascending key order"
+        );
+    }
+
+    // Verify the first and last keys are the expected min/max.
+    assert_eq!(collected.first().unwrap().0, Bytes::from("key-00000"));
+    assert_eq!(collected.last().unwrap().0, Bytes::from("key-00022"));
+}
+
+/// `iter_stream` with batch_size larger than the corpus yields a
+/// single (short) batch — the cursor must terminate correctly when the
+/// first batch is short (no off-by-one infinite loop).
+#[tokio::test]
+async fn test_iter_stream_batch_larger_than_corpus() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    for i in 0..3u32 {
+        cached
+            .set(Bytes::from(format!("k{}", i)), Bytes::from_static(b"v"))
+            .await
+            .unwrap();
+    }
+
+    // batch_size 1000 >> 3 entries → one batch of 3, then terminate.
+    let collected = collect_stream(cached.iter_stream(1000)).await.unwrap();
+    assert_eq!(collected.len(), 3);
+}
+
+/// `iter_stream` on an EMPTY cache yields nothing (no empty batches,
+/// no panic).
+#[tokio::test]
+async fn test_iter_stream_empty_cache() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+    assert_eq!(cached.cache_size(), 0);
+
+    let collected = collect_stream(cached.iter_stream(10)).await.unwrap();
+    assert!(collected.is_empty());
+}
+
+/// `iter_stream` with batch_size == corpus size (exact multiple)
+/// terminates correctly — the last full batch is followed by an empty
+/// re-query that ends the stream. Guards against the
+/// "multiple-of-batch-size" off-by-one that a naive cursor can hit.
+#[tokio::test]
+async fn test_iter_stream_exact_batch_multiple() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    for i in 0..10u32 {
+        cached
+            .set(Bytes::from(format!("k{:02}", i)), Bytes::from_static(b"v"))
+            .await
+            .unwrap();
+    }
+
+    // 10 entries, batch_size 5 → two full batches, then an empty re-query.
+    let collected = collect_stream(cached.iter_stream(5)).await.unwrap();
+    assert_eq!(collected.len(), 10);
+
+    // batch_size 10 → exactly one full batch.
+    let collected = collect_stream(cached.iter_stream(10)).await.unwrap();
+    assert_eq!(collected.len(), 10);
+
+    // batch_size 2 → five full batches.
+    let collected = collect_stream(cached.iter_stream(2)).await.unwrap();
+    assert_eq!(collected.len(), 10);
+}
+
+/// `scan_prefix_stream` after the incrementalization must still yield
+/// the FULL prefix-matching subset, in ascending key order, and STOP
+/// at the prefix boundary (no leakage of non-matching keys).
+#[tokio::test]
+async fn test_scan_prefix_stream_full_results_sorted_and_bounded() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    // Seed keys under two prefixes plus some non-matching keys that
+    // sort AFTER the prefix range (to catch boundary leakage).
+    for i in 0..7u32 {
+        cached
+            .set(
+                Bytes::from(format!("pfxA-{:03}", i)),
+                Bytes::from_static(b"v"),
+            )
+            .await
+            .unwrap();
+    }
+    for i in 0..4u32 {
+        cached
+            .set(
+                Bytes::from(format!("pfxB-{:03}", i)),
+                Bytes::from_static(b"v"),
+            )
+            .await
+            .unwrap();
+    }
+    // `pfxC` sorts after `pfxA` — must NOT leak into the pfxA scan.
+    cached
+        .set(Bytes::from_static(b"pfxC-000"), Bytes::from_static(b"v"))
+        .await
+        .unwrap();
+
+    let collected = collect_stream(cached.scan_prefix_stream(Bytes::from_static(b"pfxA"), 3))
+        .await
+        .unwrap();
+
+    // Exactly the 7 pfxA keys, in ascending order.
+    assert_eq!(collected.len(), 7);
+    for w in collected.windows(2) {
+        assert!(
+            w[0].0 < w[1].0,
+            "scan_prefix_stream must yield ascending key order"
+        );
+    }
+    for (k, _) in &collected {
+        assert!(
+            k.starts_with(b"pfxA"),
+            "no non-matching keys may leak past the prefix boundary"
+        );
+    }
+}
+
+/// `scan_prefix_stream` early-termination: a consumer that drops the
+/// stream after the first batch must only pay for that batch. We
+/// confirm the stream yields a correct first batch and stops cleanly
+/// when the consumer stops polling.
+#[tokio::test]
+async fn test_scan_prefix_stream_early_termination_first_batch() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    // Seed 100 matching keys.
+    for i in 0..100u32 {
+        cached
+            .set(
+                Bytes::from(format!("pfx-{:04}", i)),
+                Bytes::from_static(b"v"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut stream = cached.scan_prefix_stream(Bytes::from_static(b"pfx"), 10);
+    // Consume ONLY the first batch, then drop the stream.
+    let first = stream.next().await.expect("first batch").unwrap();
+    assert_eq!(first.len(), 10);
+    // The first 10 keys in ascending order.
+    for w in first.windows(2) {
+        assert!(w[0].0 < w[1].0);
+    }
+    assert_eq!(first.first().unwrap().0, Bytes::from("pfx-0000"));
+    // Dropping the stream here must not panic or hang.
+    drop(stream);
+}
+
+/// `scan_prefix_stream` on a prefix with NO matches yields nothing
+/// (no empty batches, no infinite loop on the resume cursor).
+#[tokio::test]
+async fn test_scan_prefix_stream_no_matches() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+    cached
+        .set(Bytes::from_static(b"aaa"), Bytes::from_static(b"v"))
+        .await
+        .unwrap();
+
+    let collected = collect_stream(cached.scan_prefix_stream(Bytes::from_static(b"zzz"), 10))
+        .await
+        .unwrap();
+    assert!(collected.is_empty());
 }
