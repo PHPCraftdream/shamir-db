@@ -7,7 +7,7 @@ use crate::table::persistable::Persistable;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{Interner, InternerKey, UserKey};
@@ -166,9 +166,10 @@ impl InternerManager {
                 //    but must still read it to upgrade old data in
                 //    place. If absent we fall through to the chunk scan;
                 //    a corrupt blob is a FATAL open error (audit §2.6).
-                let internals_id = MetaKey::Internals.as_record_id().to_bytes();
+                let internals_id =
+                    RecordKey::from_slice(MetaKey::Internals.as_record_id().as_bytes());
                 let mut entries: Vec<(InternerKey, UserKey)> =
-                    match info_store.get(internals_id.into()).await {
+                    match info_store.get(internals_id).await {
                         Ok(bytes) => bincode::from_bytes(&bytes).map_err(|e| {
                             shamir_storage::error::DbError::Codec(format!(
                                 "Failed to deserialize legacy interner blob (audit §2.6 — \
@@ -248,7 +249,7 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(chunk_record_id(idx).to_bytes().into(), bytes)
+            .set(RecordKey::from_slice(chunk_record_id(idx).as_bytes()), bytes)
             .await?;
         self.next_chunk_idx.store(idx + 1, Ordering::Release);
         // `last_persisted_len` is advanced by `persist()` callers based
@@ -342,7 +343,7 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(chunk_record_id(idx).to_bytes().into(), bytes)
+            .set(RecordKey::from_slice(chunk_record_id(idx).as_bytes()), bytes)
             .await?;
         // CRIT-2 (#436): flush the chunk write BEFORE advancing
         // `last_persisted_len`. `Store::set` above lands in a write-back

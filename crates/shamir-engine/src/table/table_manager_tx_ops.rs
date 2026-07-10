@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::KvOp;
+use shamir_storage::types::{KvOp, RecordKey};
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -394,7 +394,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(rid.to_bytes().into(), bytes),
+                data_op: KvOp::Set(RecordKey::from_slice(rid.as_bytes()), bytes),
                 index_ops,
                 counter_delta: 1,
             },
@@ -814,7 +814,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(id.to_bytes().into(), bytes),
+                data_op: KvOp::Set(RecordKey::from_slice(id.as_bytes()), bytes),
                 index_ops,
                 counter_delta,
             },
@@ -926,7 +926,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(id.to_bytes().into(), new_bytes),
+                data_op: KvOp::Set(RecordKey::from_slice(id.as_bytes()), new_bytes),
                 index_ops,
                 counter_delta,
             },
@@ -1011,7 +1011,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Remove(id.to_bytes().into()),
+                data_op: KvOp::Remove(RecordKey::from_slice(id.as_bytes())),
                 index_ops,
                 counter_delta: -1,
             },

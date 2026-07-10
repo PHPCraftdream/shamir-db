@@ -4,6 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::RecordKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -521,7 +522,12 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store.as_ref() {
             return mvcc.get_current_bytes(id.as_bytes()).await;
         }
-        match self.table.data_store().get(id.to_bytes().into()).await {
+        match self
+            .table
+            .data_store()
+            .get(RecordKey::from_slice(id.as_bytes()))
+            .await
+        {
             Ok(bytes) => Ok(Some(bytes)),
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),

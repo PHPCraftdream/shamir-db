@@ -7,7 +7,7 @@ use crate::meta::MetaEnvelope;
 use crate::validator::PersistedValidators;
 use bytes::Bytes;
 use shamir_storage::error::DbError;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
 
 /// Persist the given validator bindings into the table's info-twin
@@ -25,7 +25,7 @@ pub async fn save_validators_metadata(
         .map_err(|e| DbError::Internal(e.to_string()))?;
     let key = crate::meta::MetaKey::Validators.as_record_id();
     info_store
-        .set(key.to_bytes().into(), Bytes::from(bytes))
+        .set(RecordKey::from_slice(key.as_bytes()), Bytes::from(bytes))
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?;
     Ok(())
@@ -37,7 +37,7 @@ pub async fn load_validators_metadata(
     info_store: &Arc<dyn Store>,
 ) -> Result<Option<PersistedValidators>, DbError> {
     let key = crate::meta::MetaKey::Validators.as_record_id();
-    match info_store.get(key.to_bytes().into()).await {
+    match info_store.get(RecordKey::from_slice(key.as_bytes())).await {
         Ok(bytes) => {
             let p: PersistedValidators =
                 MetaEnvelope::open(&bytes).map_err(|e| DbError::Internal(e.to_string()))?;

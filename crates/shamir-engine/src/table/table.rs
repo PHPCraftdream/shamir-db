@@ -74,7 +74,10 @@ impl Table {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let keys: Vec<RecordKey> = ids.iter().map(|id| id.to_bytes().into()).collect();
+        let keys: Vec<RecordKey> = ids
+            .iter()
+            .map(|id| RecordKey::from_slice(id.as_bytes()))
+            .collect();
         let raw = self.data_store.get_many(keys).await?;
         let mut out = Vec::with_capacity(raw.len());
         for bytes_opt in raw {
@@ -120,11 +123,12 @@ impl Table {
     /// §5b floor (#61): owned point-read — returns a deserialized
     /// `InnerValue` the caller owns. See `docs/perf/innervalue-floor.md`.
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
-        // Convert RecordId to Bytes
-        let key_bytes = id.to_bytes();
+        // Alloc-free key construction: inline the 16-byte RecordId into a
+        // `RecordKey` (`KeyBytes`) instead of a heap `Bytes::copy_from_slice`.
+        let key = RecordKey::from_slice(id.as_bytes());
 
         // Read from data store
-        let bytes = self.data_store.get(key_bytes.into()).await?;
+        let bytes = self.data_store.get(key).await?;
 
         // Deserialize InnerValue
         InnerValue::from_bytes(bytes)
@@ -135,11 +139,11 @@ impl Table {
     ///
     /// No interning or conversion - expects already-interned InnerValue
     pub async fn update(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
-        // Convert RecordId to Bytes
-        let key_bytes = id.to_bytes();
+        // Alloc-free key construction: inline the 16-byte RecordId.
+        let key = RecordKey::from_slice(id.as_bytes());
 
         // Check if exists
-        let exists = self.data_store.get(key_bytes.clone().into()).await.is_ok();
+        let exists = self.data_store.get(key.clone()).await.is_ok();
         if !exists {
             return Ok(false);
         }
@@ -148,7 +152,7 @@ impl Table {
         let inner_bytes = value
             .to_bytes()
             .map_err(|e| DbError::Codec(e.to_string()))?;
-        self.data_store.set(key_bytes.into(), inner_bytes).await?;
+        self.data_store.set(key, inner_bytes).await?;
         Ok(true)
     }
 
@@ -158,17 +162,17 @@ impl Table {
     /// Returns true if created, false if updated
     /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
-        // Convert RecordId to Bytes
-        let key_bytes = id.to_bytes();
+        // Alloc-free key construction: inline the 16-byte RecordId.
+        let key = RecordKey::from_slice(id.as_bytes());
 
         // Check if exists
-        let exists = self.data_store.get(key_bytes.clone().into()).await.is_ok();
+        let exists = self.data_store.get(key.clone()).await.is_ok();
 
         // Serialize and set
         let inner_bytes = value
             .to_bytes()
             .map_err(|e| DbError::Codec(e.to_string()))?;
-        self.data_store.set(key_bytes.into(), inner_bytes).await?;
+        self.data_store.set(key, inner_bytes).await?;
 
         Ok(!exists)
     }
@@ -176,9 +180,10 @@ impl Table {
     /// Delete a record by RecordId
     /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
-        // Convert RecordId to Bytes
-        let key_bytes = id.to_bytes();
-        self.data_store.remove(key_bytes.into()).await
+        // Alloc-free key construction: inline the 16-byte RecordId.
+        self.data_store
+            .remove(RecordKey::from_slice(id.as_bytes()))
+            .await
     }
 
     /// Stream records in batches, returning InnerValues

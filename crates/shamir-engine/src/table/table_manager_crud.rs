@@ -109,7 +109,7 @@ impl TableManager {
         } else {
             self.table
                 .data_store()
-                .set(id.to_bytes().into(), bytes)
+                .set(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?;
             0
         };
@@ -383,7 +383,7 @@ impl TableManager {
         } else {
             self.table
                 .data_store()
-                .set(id.to_bytes().into(), bytes)
+                .set(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?;
             0
         };
@@ -482,7 +482,12 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store_ref() {
             mvcc.get_current_bytes(id.as_bytes()).await
         } else {
-            match self.table.data_store().get(id.to_bytes().into()).await {
+            match self
+                .table
+                .data_store()
+                .get(RecordKey::from_slice(id.as_bytes()))
+                .await
+            {
                 Ok(b) => Ok(Some(b)),
                 Err(DbError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
@@ -504,7 +509,10 @@ impl TableManager {
             let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
             mvcc.get_current_many(&batch_keys).await
         } else {
-            let keys: Vec<RecordKey> = ids.iter().map(|id| id.to_bytes().into()).collect();
+            let keys: Vec<RecordKey> = ids
+                .iter()
+                .map(|id| RecordKey::from_slice(id.as_bytes()))
+                .collect();
             self.table.data_store().get_many(keys).await
         }
     }

@@ -11,7 +11,7 @@
 
 use crate::meta::{MetaEnvelope, MetaError, MetaKey};
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
 
 fn convert(err: MetaError) -> DbError {
@@ -46,7 +46,10 @@ pub async fn save_next_tx_id_snapshot(info_store: &Arc<dyn Store>, value: u64) -
 }
 
 pub(crate) async fn load_u64(info_store: &Arc<dyn Store>, key: MetaKey) -> DbResult<Option<u64>> {
-    match info_store.get(key.as_record_id().to_bytes().into()).await {
+    match info_store
+        .get(RecordKey::from_slice(key.as_record_id().as_bytes()))
+        .await
+    {
         Ok(bytes) => {
             let val: u64 = MetaEnvelope::open(&bytes).map_err(convert)?;
             Ok(Some(val))
@@ -65,7 +68,7 @@ pub(crate) async fn save_u64(
     let bytes = envelope.encode().map_err(convert)?;
     info_store
         .set(
-            key.as_record_id().to_bytes().into(),
+            RecordKey::from_slice(key.as_record_id().as_bytes()),
             bytes::Bytes::from(bytes),
         )
         .await
