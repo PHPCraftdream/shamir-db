@@ -237,9 +237,14 @@ fn main() {
     // previously deep-copied every `String` slot.
     //
     // Run alongside `interner_concurrent` to confirm read-path is unchanged.
-    // N capped so each call stays near the ~10ms per-call target (measured
-    // ~26µs/touch, so N=300 lands around 8ms).
-    for &n in &[100usize, 200, 300] {
+    // N=100/200/300 keep each call near the ~10ms per-call target on the OLD
+    // O(N²) path (measured ~26µs/touch, so N=300 lands around 8ms). #501: a
+    // larger N=2000 case is added to make the O(N²)→O(N) shape visible at a
+    // scale closer to the audit's "10k+ fields" scenario — on the fixed
+    // (doubling-growth) path this is cheap (O(N) total), and even on the old
+    // path the fixed-iteration harness self-calibrates iteration count, so a
+    // heavier per-call cost just yields fewer samples rather than hanging.
+    for &n in &[100usize, 200, 300, 2000] {
         h.bench(
             &format!("interner_touch_ind_cold_growth/touch_ind_{n}"),
             move || {
