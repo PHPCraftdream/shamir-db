@@ -126,6 +126,10 @@ impl ShamirClient {
             password: Zeroizing::new(opts.password.into_bytes()),
             accept_new_host: opts.accept_new_host.unwrap_or(false),
             trusted_pin,
+            // Timeouts not yet surfaced through the napi ConnectOptions
+            // (tracked separately) — preserve prior unbounded-wait behaviour.
+            connect_timeout: None,
+            request_timeout: None,
         };
 
         let client = core::Client::connect(core_opts)

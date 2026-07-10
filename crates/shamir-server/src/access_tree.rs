@@ -207,6 +207,9 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Query
         password: Zeroizing::new(password.into_bytes()),
         accept_new_host: true,
         trusted_pin: None,
+        // Interactive admin CLI — keep the prior unbounded-wait behaviour.
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .map_err(|e| anyhow!("connect/authenticate: {e}"))?;

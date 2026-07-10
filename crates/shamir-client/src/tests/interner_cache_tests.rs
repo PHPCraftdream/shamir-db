@@ -96,6 +96,8 @@ where
         password: Zeroizing::new(password),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("connect");

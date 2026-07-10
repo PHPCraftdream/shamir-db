@@ -28,6 +28,8 @@ async fn quickstart_kv_in_default_store() {
         password: Zeroizing::new(admin_pw),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("connect");
