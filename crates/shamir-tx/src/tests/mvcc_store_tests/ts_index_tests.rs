@@ -11,6 +11,7 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use super::helpers::{make_gate, make_mvcc};
 use crate::mvcc_store::MvccStore;
 use crate::repo_tx_gate::RepoTxGate;
+use shamir_storage::types::RecordKey;
 
 /// Basic: write N versions with distinct timestamps, query returns correct max version.
 #[tokio::test]
@@ -19,19 +20,19 @@ async fn ts_index_basic() {
     // Freeze clock and write versions at distinct timestamps.
     mvcc.set_test_now(1000);
     let v1 = mvcc
-        .set_versioned(Bytes::from("k1"), Bytes::from("val1"))
+        .set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("val1"))
         .await
         .unwrap();
 
     mvcc.set_test_now(2000);
     let v2 = mvcc
-        .set_versioned(Bytes::from("k2"), Bytes::from("val2"))
+        .set_versioned(RecordKey::from(Bytes::from("k2")), Bytes::from("val2"))
         .await
         .unwrap();
 
     mvcc.set_test_now(3000);
     let v3 = mvcc
-        .set_versioned(Bytes::from("k3"), Bytes::from("val3"))
+        .set_versioned(RecordKey::from(Bytes::from("k3")), Bytes::from("val3"))
         .await
         .unwrap();
 
@@ -69,7 +70,7 @@ async fn ts_index_byte_identical_to_scan() {
     for (i, &ts) in timestamps.iter().enumerate() {
         mvcc.set_test_now(ts);
         let key = format!("key-{}", i);
-        mvcc.set_versioned(Bytes::from(key), Bytes::from("v"))
+        mvcc.set_versioned(RecordKey::from(Bytes::from(key)), Bytes::from("v"))
             .await
             .unwrap();
     }
@@ -124,19 +125,19 @@ async fn ts_index_rebuilds_on_open() {
     // Write versions with distinct timestamps.
     mvcc.set_test_now(1000);
     let _v1 = mvcc
-        .set_versioned(Bytes::from("k1"), Bytes::from("val1"))
+        .set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("val1"))
         .await
         .unwrap();
 
     mvcc.set_test_now(2000);
     let v2 = mvcc
-        .set_versioned(Bytes::from("k2"), Bytes::from("val2"))
+        .set_versioned(RecordKey::from(Bytes::from("k2")), Bytes::from("val2"))
         .await
         .unwrap();
 
     mvcc.set_test_now(3000);
     let v3 = mvcc
-        .set_versioned(Bytes::from("k3"), Bytes::from("val3"))
+        .set_versioned(RecordKey::from(Bytes::from("k3")), Bytes::from("val3"))
         .await
         .unwrap();
 
@@ -174,7 +175,7 @@ async fn ts_index_pruned_by_vacuum_fast_path() {
     let writes = 200u64;
     for i in 0..writes {
         mvcc.set_test_now(1000 + i);
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -219,7 +220,7 @@ async fn ts_index_concurrent_safe() {
                 mvcc_clone.set_test_now(ts);
                 let key = format!("w{}-k{}", w, i);
                 mvcc_clone
-                    .set_versioned(Bytes::from(key), Bytes::from("data"))
+                    .set_versioned(RecordKey::from(Bytes::from(key)), Bytes::from("data"))
                     .await
                     .unwrap();
             }

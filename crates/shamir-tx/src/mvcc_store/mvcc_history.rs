@@ -2,6 +2,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
+use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::HISTORY_SCAN_BATCH;
 
 use super::version_entry::VersionEntry;
@@ -248,7 +249,7 @@ impl MvccStore {
     /// SSI conflicts). A re-replay of the same key with an equal or lower
     /// version is a no-op; the VACANT branch always seeds at the offered
     /// version.
-    pub async fn seed_version(&self, key: Bytes, version: u64) {
+    pub async fn seed_version(&self, key: RecordKey, version: u64) {
         match self.cells.entry_async(key).await {
             scc::hash_map::Entry::Occupied(mut e) => {
                 if version > e.get().version {
@@ -358,9 +359,9 @@ impl MvccStore {
                     KvOp::Set(k, _) => k.clone(),
                     KvOp::Remove(k) => k.clone(),
                 };
-                // Boundary: KvOp keys are `RecordKey`; `publish_cell` /
-                // the cell map are `Bytes`-keyed (byte-identical conversion).
-                self.publish_cell(key.into(), v).await;
+                // KvOp keys and the cell map are both `RecordKey`-keyed
+                // (task #532) — pass straight through, no conversion.
+                self.publish_cell(key, v).await;
             }
         }
 
@@ -437,12 +438,12 @@ impl MvccStore {
         // `Set`, an empty `Bytes` tombstone for `Remove`.
         for op in ops {
             match op {
-                KvOp::Set(k, v) => self
-                    .overlay
-                    .insert(k.clone().into(), commit_version, v.clone()),
+                // KvOp keys and the overlay are both `RecordKey`-keyed
+                // (task #532) — clone straight through, no conversion.
+                KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
                 KvOp::Remove(k) => {
                     self.overlay
-                        .insert(k.clone().into(), commit_version, Bytes::new())
+                        .insert(k.clone(), commit_version, Bytes::new())
                 }
             }
         }
@@ -470,9 +471,9 @@ impl MvccStore {
             // finalize_reservation is synchronous (scc `entry`, no I/O) — the
             // ack-path stays off `.await` (same rationale as the prior
             // publish_cell_sync).
-            // Boundary: KvOp keys are `RecordKey`; the reservation / cell
-            // map are `Bytes`-keyed (byte-identical conversion).
-            self.finalize_reservation(key.into(), commit_version);
+            // KvOp keys and the reservation / cell map are both `RecordKey`-
+            // keyed (task #532) — pass straight through, no conversion.
+            self.finalize_reservation(key, commit_version);
         }
 
         // R3: advance the reader-visible floor so subsequent `get_current` /
@@ -568,7 +569,9 @@ impl MvccStore {
                 KvOp::Set(k, _) => k.clone(),
                 KvOp::Remove(k) => k.clone(),
             };
-            self.publish_cell(key.into(), commit_version).await;
+            // KvOp keys and the cell map are both `RecordKey`-keyed
+            // (task #532) — pass straight through, no conversion.
+            self.publish_cell(key, commit_version).await;
         }
 
         // R3: advance the reader-visible floor (monotonic fetch_max). On the

@@ -15,6 +15,7 @@ use shamir_storage::types::KvOp;
 
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::version_codec::encode_version_key;
+use shamir_storage::types::RecordKey;
 
 /// Read the raw value stored in history under `encode_version_key(key, v)`.
 async fn history_raw(mvcc: &crate::mvcc_store::MvccStore, key: &[u8], v: u64) -> Option<Bytes> {
@@ -37,7 +38,7 @@ async fn drain_empties_overlay_and_lands_in_history() {
 
     // Write a key — populates overlay AND history (non-tx inline dual-write).
     let v = mvcc
-        .set_versioned(Bytes::from_static(b"k1"), Bytes::from_static(b"v1"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"k1")), Bytes::from_static(b"v1"))
         .await
         .unwrap();
 
@@ -69,15 +70,15 @@ async fn drain_lands_multiple_keys() {
     let mvcc = make_mvcc();
 
     let _v1 = mvcc
-        .set_versioned(Bytes::from_static(b"a"), Bytes::from_static(b"val-a"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"a")), Bytes::from_static(b"val-a"))
         .await
         .unwrap();
     let _v2 = mvcc
-        .set_versioned(Bytes::from_static(b"b"), Bytes::from_static(b"val-b"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"b")), Bytes::from_static(b"val-b"))
         .await
         .unwrap();
     let v3 = mvcc
-        .set_versioned(Bytes::from_static(b"c"), Bytes::from_static(b"val-c"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"c")), Bytes::from_static(b"val-c"))
         .await
         .unwrap();
 
@@ -108,7 +109,7 @@ async fn drain_lands_multiple_keys() {
 async fn drain_is_idempotent() {
     let mvcc = make_mvcc();
 
-    mvcc.set_versioned(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v"))
         .await
         .unwrap();
 
@@ -151,14 +152,14 @@ async fn drain_on_empty_store_is_noop() {
 async fn get_current_works_after_drain() {
     let mvcc = make_mvcc();
 
-    mvcc.set_versioned(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v1"))
         .await
         .unwrap();
 
     mvcc.drain_to_history().await.unwrap();
 
     // Read path must still resolve correctly from history after overlay GC.
-    let val = mvcc.get_current(Bytes::from_static(b"k")).await.unwrap();
+    let val = mvcc.get_current(RecordKey::from(Bytes::from_static(b"k"))).await.unwrap();
     assert_eq!(val, Some(Bytes::from_static(b"v1")));
 }
 
@@ -167,7 +168,7 @@ async fn get_current_works_after_drain() {
 async fn drain_advances_durable_watermark() {
     let mvcc = make_mvcc();
 
-    mvcc.set_versioned(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v"))
         .await
         .unwrap();
 
@@ -281,7 +282,7 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
         "table B's overlay entry must survive table A's drain untouched"
     );
     let b_val = table_b
-        .get_current(Bytes::from_static(b"b-key"))
+        .get_current(RecordKey::from(Bytes::from_static(b"b-key")))
         .await
         .unwrap();
     assert_eq!(

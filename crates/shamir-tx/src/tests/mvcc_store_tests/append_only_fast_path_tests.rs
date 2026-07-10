@@ -5,6 +5,7 @@ use bytes::Bytes;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use shamir_storage::types::RecordKey;
 
 /// Helper: build an MvccStore backed by a CountingStore so we can
 /// assert scan_prefix_stream call counts.
@@ -34,7 +35,7 @@ async fn append_only_batch_skips_current_version_lookup() {
         })
         .collect();
 
-    mvcc.set_versioned_many_append_only(items).await.unwrap();
+    mvcc.set_versioned_many_append_only(items.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
 
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
@@ -64,9 +65,9 @@ async fn append_only_byte_identical_to_many() {
         })
         .collect();
 
-    mvcc_a.set_versioned_many(items.clone()).await.unwrap();
+    mvcc_a.set_versioned_many(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
     mvcc_b
-        .set_versioned_many_append_only(items.clone())
+        .set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
         .await
         .unwrap();
 
@@ -87,8 +88,8 @@ async fn append_only_byte_identical_to_many() {
 
     // Both must resolve the same values via get_current.
     for (key, expected_val) in &items {
-        let val_a = mvcc_a.get_current(key.clone()).await.unwrap();
-        let val_b = mvcc_b.get_current(key.clone()).await.unwrap();
+        let val_a = mvcc_a.get_current(RecordKey::from(key.clone())).await.unwrap();
+        let val_b = mvcc_b.get_current(RecordKey::from(key.clone())).await.unwrap();
         assert_eq!(
             val_a,
             Some(expected_val.clone()),
@@ -113,7 +114,7 @@ async fn append_only_under_snapshot_safe() {
 
     // Write some initial data (creates a baseline).
     let key_pre = Bytes::from("pre_snap_key");
-    mvcc.set_versioned(key_pre.clone(), Bytes::from("pre_val"))
+    mvcc.set_versioned(RecordKey::from(key_pre.clone()), Bytes::from("pre_val"))
         .await
         .unwrap();
     let pre_v = mvcc.version_of(&key_pre);
@@ -131,13 +132,13 @@ async fn append_only_under_snapshot_safe() {
             )
         })
         .collect();
-    mvcc.set_versioned_many_append_only(items.clone())
+    mvcc.set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
         .await
         .unwrap();
 
     // The fresh keys must be readable at current.
     for (key, expected_val) in &items {
-        let val = mvcc.get_current(key.clone()).await.unwrap();
+        let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
         assert_eq!(
             val,
             Some(expected_val.clone()),
@@ -158,10 +159,10 @@ async fn append_only_under_snapshot_safe() {
 
     // A normal set_versioned on an existing key after snapshot drop should
     // trigger the scan path (vacuum_needs_scan was set during the snapshot).
-    mvcc.set_versioned(key_pre.clone(), Bytes::from("post_snap"))
+    mvcc.set_versioned(RecordKey::from(key_pre.clone()), Bytes::from("post_snap"))
         .await
         .unwrap();
-    let val = mvcc.get_current(key_pre).await.unwrap();
+    let val = mvcc.get_current(RecordKey::from(key_pre)).await.unwrap();
     assert_eq!(val, Some(Bytes::from("post_snap")));
 }
 
@@ -190,7 +191,7 @@ async fn append_only_with_keep_history_retention() {
             )
         })
         .collect();
-    mvcc.set_versioned_many_append_only(items.clone())
+    mvcc.set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
         .await
         .unwrap();
 
@@ -203,7 +204,7 @@ async fn append_only_with_keep_history_retention() {
 
     // All values readable.
     for (key, expected_val) in &items {
-        let val = mvcc.get_current(key.clone()).await.unwrap();
+        let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
         assert_eq!(val, Some(expected_val.clone()));
     }
 }

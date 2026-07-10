@@ -273,18 +273,24 @@ async fn purge_respects_live_snapshot() {
 
     // Write v1 at ts=1 (use 1 not 0 — 0 is the "real clock" sentinel).
     mvcc.set_test_now(1);
-    mvcc.set_versioned(make_bytes("key1"), make_bytes("v1"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        shamir_storage::types::RecordKey::from(make_bytes("key1")),
+        make_bytes("v1"),
+    )
+    .await
+    .unwrap();
 
     // Open a snapshot — this pins the current version as min_alive.
     let _snapshot_guard = gate.open_snapshot().await;
 
     // Write v2 at ts=200_000 so there is a second version in history.
     mvcc.set_test_now(200_000);
-    mvcc.set_versioned(make_bytes("key1"), make_bytes("v2"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        shamir_storage::types::RecordKey::from(make_bytes("key1")),
+        make_bytes("v2"),
+    )
+    .await
+    .unwrap();
 
     // Purge everything older than ts=100_000.  v1@ts=1 would be covered by
     // the predicate, but the snapshot pins it — so it must survive.

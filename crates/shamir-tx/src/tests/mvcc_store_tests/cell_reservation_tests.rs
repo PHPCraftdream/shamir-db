@@ -17,6 +17,7 @@ use crate::cell_reservation_guard::CellReservationGuard;
 use crate::mvcc_store::MvccStore;
 
 use super::helpers::make_mvcc;
+use shamir_storage::types::RecordKey;
 
 /// Read `(version, reserved_by)` straight out of the cell for assertions.
 /// Returns `None` when the key has no cell.
@@ -36,7 +37,7 @@ async fn try_reserve_wins_on_free_cell() {
     // Vacant cell — never published. A claim against any snapshot wins and
     // inserts a `version: 0` cell owned by the claimant.
     assert!(
-        mvcc.try_reserve(key.clone(), 0, 7),
+        mvcc.try_reserve(RecordKey::from(key.clone()), 0, 7),
         "vacant cell must be claimable"
     );
     assert_eq!(cell_state(&mvcc, &key), Some((0, 7)));
@@ -48,9 +49,9 @@ async fn try_reserve_wins_on_published_unclaimed_cell_within_snapshot() {
     let key = Bytes::from_static(b"k");
 
     // Publish version 5 (Occupied, reserved_by == 0).
-    mvcc.publish_cell(key.clone(), 5).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 5).await;
     // Snapshot at 10 >= 5 and unclaimed → win.
-    assert!(mvcc.try_reserve(key.clone(), 10, 3));
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 10, 3));
     assert_eq!(cell_state(&mvcc, &key), Some((5, 3)));
 }
 
@@ -58,12 +59,12 @@ async fn try_reserve_wins_on_published_unclaimed_cell_within_snapshot() {
 async fn try_reserve_conflicts_when_already_reserved() {
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
-    mvcc.publish_cell(key.clone(), 1).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 1).await;
 
     // First claimant wins.
-    assert!(mvcc.try_reserve(key.clone(), 5, 100));
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 5, 100));
     // Second claimant on the SAME (claimed) cell loses — no block, no steal.
-    assert!(!mvcc.try_reserve(key.clone(), 5, 200));
+    assert!(!mvcc.try_reserve(RecordKey::from(key.clone()), 5, 200));
     // Still owned by the first claimant, version untouched.
     assert_eq!(cell_state(&mvcc, &key), Some((1, 100)));
 }
@@ -74,10 +75,10 @@ async fn try_reserve_conflicts_on_stale_snapshot() {
     let key = Bytes::from_static(b"k");
 
     // Cell has advanced to version 9 (someone published since our snapshot).
-    mvcc.publish_cell(key.clone(), 9).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 9).await;
     // Our snapshot is 4 < 9 → stale-write detection → conflict, even though
     // the cell is unclaimed (`reserved_by == 0`).
-    assert!(!mvcc.try_reserve(key.clone(), 4, 55));
+    assert!(!mvcc.try_reserve(RecordKey::from(key.clone()), 4, 55));
     // Unchanged: not claimed.
     assert_eq!(cell_state(&mvcc, &key), Some((9, 0)));
 }
@@ -88,10 +89,10 @@ async fn finalize_sets_version_and_clears_reservation() {
     let key = Bytes::from_static(b"k");
 
     // Claim a vacant cell, then finalize to commit-version 42.
-    assert!(mvcc.try_reserve(key.clone(), 0, 9));
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 0, 9));
     assert_eq!(cell_state(&mvcc, &key), Some((0, 9)));
 
-    mvcc.finalize_reservation(key.clone(), 42);
+    mvcc.finalize_reservation(RecordKey::from(key.clone()), 42);
     assert_eq!(
         cell_state(&mvcc, &key),
         Some((42, 0)),
@@ -105,7 +106,7 @@ async fn finalize_on_vacant_cell_inserts_published_version() {
     let key = Bytes::from_static(b"k");
 
     // Defensive path: finalize a never-claimed, never-published key.
-    mvcc.finalize_reservation(key.clone(), 7);
+    mvcc.finalize_reservation(RecordKey::from(key.clone()), 7);
     assert_eq!(cell_state(&mvcc, &key), Some((7, 0)));
 }
 
@@ -113,11 +114,11 @@ async fn finalize_on_vacant_cell_inserts_published_version() {
 async fn release_only_clears_own_reservation() {
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
-    mvcc.publish_cell(key.clone(), 2).await;
-    assert!(mvcc.try_reserve(key.clone(), 5, 100));
+    mvcc.publish_cell(RecordKey::from(key.clone()), 2).await;
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 5, 100));
 
     // A foreign txn_id must NOT clear our claim.
-    mvcc.release_reservation(key.clone(), 999);
+    mvcc.release_reservation(RecordKey::from(key.clone()), 999);
     assert_eq!(
         cell_state(&mvcc, &key),
         Some((2, 100)),
@@ -125,7 +126,7 @@ async fn release_only_clears_own_reservation() {
     );
 
     // The owner releases it.
-    mvcc.release_reservation(key.clone(), 100);
+    mvcc.release_reservation(RecordKey::from(key.clone()), 100);
     assert_eq!(
         cell_state(&mvcc, &key),
         Some((2, 0)),
@@ -133,7 +134,7 @@ async fn release_only_clears_own_reservation() {
     );
 
     // Idempotent: releasing again (now reserved_by == 0) is a no-op.
-    mvcc.release_reservation(key.clone(), 100);
+    mvcc.release_reservation(RecordKey::from(key.clone()), 100);
     assert_eq!(cell_state(&mvcc, &key), Some((2, 0)));
 }
 
@@ -144,10 +145,10 @@ async fn release_after_finalize_is_noop() {
     // version.
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
-    assert!(mvcc.try_reserve(key.clone(), 0, 11));
-    mvcc.finalize_reservation(key.clone(), 30);
+    assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 0, 11));
+    mvcc.finalize_reservation(RecordKey::from(key.clone()), 30);
 
-    mvcc.release_reservation(key.clone(), 11);
+    mvcc.release_reservation(RecordKey::from(key.clone()), 11);
     assert_eq!(cell_state(&mvcc, &key), Some((30, 0)));
 }
 
@@ -159,8 +160,8 @@ async fn guard_drop_releases_held() {
     {
         let mut guard = CellReservationGuard::new(Arc::clone(&mvcc), 77);
         for k in &keys {
-            assert!(mvcc.try_reserve(k.clone(), 0, 77));
-            guard.add(k.clone());
+            assert!(mvcc.try_reserve(RecordKey::from(k.clone()), 0, 77));
+            guard.add(RecordKey::from(k.clone()));
         }
         assert_eq!(guard.len(), 5);
         // Every cell is claimed by txn 77 while the guard is live.
@@ -186,11 +187,11 @@ async fn guard_disarm_skips_release() {
 
     {
         let mut guard = CellReservationGuard::new(Arc::clone(&mvcc), 8);
-        assert!(mvcc.try_reserve(key.clone(), 0, 8));
-        guard.add(key.clone());
+        assert!(mvcc.try_reserve(RecordKey::from(key.clone()), 0, 8));
+        guard.add(RecordKey::from(key.clone()));
         // Simulate the success path: publisher finalized the claim, then we
         // disarm so Drop is a no-op.
-        mvcc.finalize_reservation(key.clone(), 12);
+        mvcc.finalize_reservation(RecordKey::from(key.clone()), 12);
         guard.disarm();
         // guard drops here (disarmed) → no release.
     }
@@ -225,9 +226,9 @@ async fn crash_drops_reservation_recovery_leaves_cell_claimable() {
     // store_a: a committer reserved K (snapshot u64::MAX so the claim hinges
     // only on the reservation marker), then the process "crashes".
     let store_a = make_mvcc();
-    store_a.publish_cell(key.clone(), 5).await; // K had a committed version 5.
+    store_a.publish_cell(RecordKey::from(key.clone()), 5).await; // K had a committed version 5.
     assert!(
-        store_a.try_reserve(key.clone(), u64::MAX, 4242),
+        store_a.try_reserve(RecordKey::from(key.clone()), u64::MAX, 4242),
         "the dying committer holds K's reservation"
     );
     assert_eq!(
@@ -249,7 +250,7 @@ async fn crash_drops_reservation_recovery_leaves_cell_claimable() {
         None,
         "the reopened store starts with NO cells — no reserved_by survived"
     );
-    store_b.finalize_reservation(key.clone(), 5); // recovery rebuilds the cell.
+    store_b.finalize_reservation(RecordKey::from(key.clone()), 5); // recovery rebuilds the cell.
     assert_eq!(
         cell_state(&store_b, &key),
         Some((5, 0)),
@@ -258,7 +259,7 @@ async fn crash_drops_reservation_recovery_leaves_cell_claimable() {
 
     // A fresh committer claims K and WINS — the cell was never wedged.
     assert!(
-        store_b.try_reserve(key.clone(), u64::MAX, 9001),
+        store_b.try_reserve(RecordKey::from(key.clone()), u64::MAX, 9001),
         "post-recovery K must be claimable — no leaked reservation"
     );
     assert_eq!(cell_state(&store_b, &key), Some((5, 9001)));
@@ -294,7 +295,7 @@ async fn concurrent_try_reserve_exactly_one_wins() {
                 // reservation marker, not stale-write detection — every
                 // claimant is "fresh enough", so exactly one must win on the
                 // `reserved_by == 0` check alone.
-                if mvcc.try_reserve(key, u64::MAX, txn_id) {
+                if mvcc.try_reserve(RecordKey::from(key), u64::MAX, txn_id) {
                     wins.fetch_add(1, Ordering::AcqRel);
                 }
             }));

@@ -5,6 +5,7 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 
 use super::helpers::{make_gate, make_mvcc, make_mvcc_with_gate};
+use shamir_storage::types::RecordKey;
 
 /// Helper: call get_current_many and get_current_bytes per-key, assert equal.
 async fn assert_many_matches_individual(mvcc: &crate::mvcc_store::MvccStore, keys: &[Bytes]) {
@@ -27,18 +28,18 @@ async fn get_current_many_warm_absent_tombstone() {
     let k_absent = Bytes::from_static(b"absent");
 
     // Write k1, k2, k3.
-    mvcc.set_versioned(k1.clone(), Bytes::from_static(b"v1"))
+    mvcc.set_versioned(RecordKey::from(k1.clone()), Bytes::from_static(b"v1"))
         .await
         .unwrap();
-    mvcc.set_versioned(k2.clone(), Bytes::from_static(b"v2"))
+    mvcc.set_versioned(RecordKey::from(k2.clone()), Bytes::from_static(b"v2"))
         .await
         .unwrap();
-    mvcc.set_versioned(k3.clone(), Bytes::from_static(b"v3"))
+    mvcc.set_versioned(RecordKey::from(k3.clone()), Bytes::from_static(b"v3"))
         .await
         .unwrap();
 
     // Delete k2 (tombstone).
-    mvcc.delete_versioned(k2.clone()).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(k2.clone())).await.unwrap();
 
     let keys = vec![k1.clone(), k2.clone(), k3.clone(), k_absent.clone()];
     let result = mvcc.get_current_many(&keys).await.unwrap();
@@ -61,7 +62,7 @@ async fn get_current_many_preserves_order() {
         .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
         .collect();
     for (k, v) in &keys_data {
-        mvcc.set_versioned(k.clone(), v.clone()).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone()).await.unwrap();
     }
 
     // Read in reverse order.
@@ -97,11 +98,11 @@ async fn get_current_many_floor_cap() {
     let k = Bytes::from_static(b"floor_key");
 
     // Write v1 at version 1.
-    mvcc.set_versioned(k.clone(), Bytes::from_static(b"val1"))
+    mvcc.set_versioned(RecordKey::from(k.clone()), Bytes::from_static(b"val1"))
         .await
         .unwrap();
     // Write v2 at version 2.
-    mvcc.set_versioned(k.clone(), Bytes::from_static(b"val2"))
+    mvcc.set_versioned(RecordKey::from(k.clone()), Bytes::from_static(b"val2"))
         .await
         .unwrap();
 
@@ -159,10 +160,10 @@ async fn get_current_many_tombstone_in_miss_set() {
     let k = Bytes::from_static(b"tomb");
 
     // Write then delete.
-    mvcc.set_versioned(k.clone(), Bytes::from_static(b"alive"))
+    mvcc.set_versioned(RecordKey::from(k.clone()), Bytes::from_static(b"alive"))
         .await
         .unwrap();
-    mvcc.delete_versioned(k.clone()).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(k.clone())).await.unwrap();
 
     let result = mvcc
         .get_current_many(std::slice::from_ref(&k))

@@ -25,6 +25,7 @@ use std::hint::black_box;
 
 use bench_scale_tool::Harness;
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 use shamir_tx::VersionedOverlay;
 
 /// The full scaling-curve ladder. Gated behind `BENCH_OVERLAY_GC_SCALING` so
@@ -50,7 +51,7 @@ fn build_overlay(depth: usize) -> VersionedOverlay {
         let key = Bytes::copy_from_slice(&(i as u64).to_be_bytes());
         let value = Bytes::from_static(b"v");
         // One distinct version per entry — gc_upto(depth) must scan ALL.
-        ov.insert(key, (i + 1) as u64, value);
+        ov.insert(RecordKey::from(key), (i + 1) as u64, value);
     }
     ov
 }

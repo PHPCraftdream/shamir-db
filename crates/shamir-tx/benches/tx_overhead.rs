@@ -22,6 +22,7 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_tx::{MvccStore, RepoTxGate, StagingStore};
 
@@ -48,7 +49,7 @@ fn main() {
                 }
             },
             move |(mvcc, key, value)| async move {
-                mvcc.set_versioned(key, value).await.unwrap();
+                mvcc.set_versioned(RecordKey::from(key), value).await.unwrap();
             },
         );
     }
@@ -68,7 +69,7 @@ fn main() {
         setup_rt.block_on(async {
             for i in 0..1000u32 {
                 mvcc.set_versioned(
-                    Bytes::copy_from_slice(&i.to_be_bytes()),
+                    RecordKey::from_slice(&i.to_be_bytes()),
                     Bytes::from_static(b"v"),
                 )
                 .await

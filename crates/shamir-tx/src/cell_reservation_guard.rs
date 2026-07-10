@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 use crate::mvcc_store::MvccStore;
 
@@ -43,8 +43,9 @@ pub struct CellReservationGuard {
     store: Arc<MvccStore>,
     txn_id: u64,
     /// Keys claimed by this committer (each a won [`MvccStore::try_reserve`]).
-    /// `Drop` releases exactly these.
-    keys: Vec<Bytes>,
+    /// `Drop` releases exactly these. `RecordKey`-keyed (task #532) to match
+    /// the cell-reservation registry, so no `Bytes` round-trip on add/release.
+    keys: Vec<RecordKey>,
     armed: bool,
 }
 
@@ -66,7 +67,7 @@ impl CellReservationGuard {
     /// Record `key` as claimed by this committer — call after a `try_reserve`
     /// for `key` returned `true`. On abort (`Drop` while armed) the claim on
     /// `key` is released.
-    pub fn add(&mut self, key: Bytes) {
+    pub fn add(&mut self, key: RecordKey) {
         self.keys.push(key);
     }
 

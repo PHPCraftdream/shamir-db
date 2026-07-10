@@ -806,11 +806,12 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
         return;
     }
     // Group keys by table_token so each MvccStore is hit once. `locked_keys`
-    // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
-    // synchronous visitor cannot await inside).
+    // is an `scc::HashMap<(u64, RecordKey), ()>` (task #532); scan into a std
+    // map (the synchronous visitor cannot await inside). Keys are `RecordKey`
+    // throughout — `release_locks` is `RecordKey`-keyed, no `Bytes` round-trip.
     // O(N) ack: per-tx locked-keys sizing, bounded by this tx's footprint.
     #[allow(clippy::disallowed_methods)]
-    let mut by_table: TFxMap<u64, Vec<bytes::Bytes>> =
+    let mut by_table: TFxMap<u64, Vec<shamir_storage::types::RecordKey>> =
         TFxMap::with_capacity_and_hasher(tx.locked_keys.len(), THasher::default());
     tx.locked_keys.scan(|(token, key), _| {
         by_table.entry(*token).or_default().push(key.clone());

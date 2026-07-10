@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 
 use super::key_lock::{Holder, KeyLock, LockMode};
 use super::MvccStore;
@@ -43,7 +43,7 @@ impl MvccStore {
     /// construction — no detector needed).
     pub async fn lock_key(
         &self,
-        key: Bytes,
+        key: RecordKey,
         tx_version: u64,
         wounded: Arc<AtomicBool>,
         wound_notify: Arc<tokio::sync::Notify>,
@@ -201,7 +201,7 @@ impl MvccStore {
     /// locks the state, removes all holders with the given `tx_version`,
     /// recomputes the mode, and wakes waiters. Leftover empty entries are
     /// kept in the map (cheap; GC is intentionally not done here).
-    pub async fn release_locks(&self, tx_version: u64, keys: &[Bytes]) {
+    pub async fn release_locks(&self, tx_version: u64, keys: &[RecordKey]) {
         for key in keys {
             let Some(lock) = self.locks.get(key).map(|e| Arc::clone(e.get())) else {
                 continue;

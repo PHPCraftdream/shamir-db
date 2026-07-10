@@ -163,10 +163,9 @@ impl TableManager {
         while let Some(batch) = stream.next().await {
             let items = batch?;
             if !items.is_empty() {
-                // Boundary: `iter_stream` yields `RecordKey` keys; the mvcc
-                // API is `Bytes`-keyed (byte-identical conversion).
-                let items: Vec<(bytes::Bytes, bytes::Bytes)> =
-                    items.into_iter().map(|(k, v)| (k.into(), v)).collect();
+                // task #532: `iter_stream` yields `RecordKey` keys and
+                // `set_versioned_many` is now `RecordKey`-keyed too — feed the
+                // batch straight through, no `RecordKey`→`Bytes` round-trip.
                 mvcc.set_versioned_many(items).await?;
             }
         }

@@ -128,7 +128,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
-use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
@@ -361,7 +361,7 @@ fn main() {
 
     {
         let mvcc = make_mvcc();
-        let key = Bytes::from_static(b"hot_key");
+        let key = RecordKey::from_slice(b"hot_key");
         let ctr = Arc::new(AtomicU64::new(1_000_000));
         h.bench_batched_async(
             "pess_lock_uncontended/acquire_release_single_key",
@@ -411,7 +411,7 @@ fn main() {
                 let ctr = Arc::clone(&ctr);
                 move || {
                     let mvcc = make_mvcc();
-                    let key = Bytes::from_static(b"contended_key");
+                    let key = RecordKey::from_slice(b"contended_key");
                     let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
                     async move { (mvcc, key, iter_i) }
                 }
@@ -475,7 +475,7 @@ fn main() {
                 let ctr = Arc::clone(&ctr);
                 move || {
                     let mvcc = make_mvcc();
-                    let key = Bytes::from_static(b"contended_key");
+                    let key = RecordKey::from_slice(b"contended_key");
                     let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
                     async move { (mvcc, key, iter_i) }
                 }
@@ -539,7 +539,7 @@ fn main() {
                 let ctr = Arc::clone(&ctr);
                 move || {
                     let mvcc = make_mvcc();
-                    let key = Bytes::from_static(b"contended_key");
+                    let key = RecordKey::from_slice(b"contended_key");
                     let barrier = Arc::new(tokio::sync::Barrier::new(n));
                     let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
                     async move { (mvcc, key, barrier, iter_i) }
@@ -606,7 +606,7 @@ fn main() {
                 let ctr = Arc::clone(&ctr);
                 move || {
                     let mvcc = make_mvcc();
-                    let key = Bytes::from_static(b"contended_key");
+                    let key = RecordKey::from_slice(b"contended_key");
                     let barrier = Arc::new(tokio::sync::Barrier::new(n));
                     let iter_i = ctr.fetch_add(1, Ordering::Relaxed);
                     async move { (mvcc, key, barrier, iter_i) }

@@ -24,6 +24,7 @@ use crate::mvcc_store::MvccStore;
 use bytes::Bytes;
 use shamir_storage::types::Store;
 use std::sync::Arc;
+use shamir_storage::types::RecordKey;
 
 // ================================================================
 // Test 1 — Core race closed: OLD broken ordering no longer loses the
@@ -48,7 +49,7 @@ async fn a10_anchor_deferral_survives_broken_ordering() {
 
     let key = Bytes::from("anchor_survives");
     // Write v1 — current version, also the floor.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -61,7 +62,7 @@ async fn a10_anchor_deferral_survives_broken_ordering() {
     // (the reader hasn't registered yet). The fast path fires but DEFERS
     // v1's deletion (stores it as vacuum_anchor) instead of deleting it.
     assert!(gate.active_snapshots_empty());
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -128,7 +129,7 @@ async fn a10_concurrent_vacuum_during_open_snapshot() {
     ));
 
     // Seed OLD (v1) — no pause.
-    mvcc.set_versioned(key.clone(), Bytes::from("OLD"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("OLD"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -179,7 +180,7 @@ async fn a10_concurrent_vacuum_during_open_snapshot() {
         let mvcc = Arc::clone(&mvcc);
         let key = key.clone();
         async move {
-            mvcc.set_versioned(key, Bytes::from("NEW")).await.unwrap();
+            mvcc.set_versioned(RecordKey::from(key), Bytes::from("NEW")).await.unwrap();
         }
     });
     write_handle.await.unwrap();
@@ -213,7 +214,7 @@ async fn a10_refcount_concurrent_same_version() {
     let mvcc = make_mvcc_with_gate(gate.clone());
 
     let key = Bytes::from("refcount_key");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -230,7 +231,7 @@ async fn a10_refcount_concurrent_same_version() {
         "dropping one of two same-version snapshots must NOT remove the entry"
     );
 
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     assert_eq!(
@@ -254,7 +255,7 @@ async fn a10_register_then_verify_tracks_moving_floor() {
     let mvcc = make_mvcc_with_gate(gate.clone());
 
     let key = Bytes::from("moving_floor");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -262,7 +263,7 @@ async fn a10_register_then_verify_tracks_moving_floor() {
     let snap = gate.open_snapshot().await;
     assert_eq!(snap.version(), v1);
 
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     let v2 = mvcc.version_of(&key);
@@ -297,7 +298,7 @@ async fn a10_regression_common_case_bounds_history() {
 
     let key = Bytes::from("regression_key");
     for i in 1..=10u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -324,23 +325,23 @@ async fn a10_regression_reclaims_after_snapshot_drop() {
 
     let key = Bytes::from("post_snap_reclaim");
 
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let snap = gate.open_snapshot().await;
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
 
     drop(snap);
 
     // Write v3 — scan path clears vacuum_needs_scan.
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
 
     // Write v4 — fast path fires with anchor deferral.
-    mvcc.set_versioned(key.clone(), Bytes::from("v4"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v4"))
         .await
         .unwrap();
 
@@ -360,7 +361,7 @@ async fn a10_regression_anchor_does_not_leak() {
 
     let key = Bytes::from("no_leak");
     for i in 1..=100u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -396,7 +397,7 @@ async fn a10_barrier_multi_generation_stall() {
     let key = Bytes::from("multi_gen");
 
     // Write v1 — the version the stalled reader will target.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -411,7 +412,7 @@ async fn a10_barrier_multi_generation_stall() {
     // anchor-deferral-only fix, v1 would be deleted on the v3 write
     // (deferred on v2's call, physically deleted on v3's call).
     for i in 2..=4u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -437,7 +438,7 @@ async fn a10_barrier_multi_generation_stall() {
 
     // Now writes can resume reclaiming. One more write triggers vacuum
     // which can finally delete old versions.
-    mvcc.set_versioned(key.clone(), Bytes::from("v5"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v5"))
         .await
         .unwrap();
 
@@ -505,7 +506,7 @@ async fn a10_barrier_protects_gc_through_min_alive() {
     mvcc.set_retention(crate::mvcc_store::Retention::keep_history())
         .unwrap();
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }

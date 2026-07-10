@@ -105,7 +105,12 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
         let version = if let Some(mvcc) = &self.mvcc_store {
-            mvcc.set_versioned(id.to_bytes(), bytes).await?
+            // task #532: `set_versioned` is `RecordKey`-keyed — build the key
+            // inline from the rid (alloc-free for the 16-byte shape) instead of
+            // the prior `id.to_bytes()` heap `Bytes` that the store then had to
+            // convert back to `RecordKey` internally.
+            mvcc.set_versioned(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?
         } else {
             self.table
                 .data_store()
@@ -224,7 +229,10 @@ impl TableManager {
                         e
                     ))
                 })?;
-                items.push((rid.to_bytes(), bytes));
+                // task #532: `set_versioned_many_append_only` is keyed on
+                // `RecordKey` — build the key inline (alloc-free) rather than
+                // `rid.to_bytes()` → store-internal `Bytes`→`RecordKey`.
+                items.push((RecordKey::from_slice(rid.as_bytes()), bytes));
                 ids.push(rid);
             }
             let ver = mvcc.set_versioned_many_append_only(items).await?;
@@ -300,7 +308,10 @@ impl TableManager {
         // is bumped.
         let (removed, version) = if let Some(mvcc) = &self.mvcc_store {
             if old_value.is_some() {
-                let v = mvcc.delete_versioned(id.to_bytes()).await?;
+                // task #532: `delete_versioned` is `RecordKey`-keyed — inline.
+                let v = mvcc
+                    .delete_versioned(RecordKey::from_slice(id.as_bytes()))
+                    .await?;
                 (true, v)
             } else {
                 (false, 0)
@@ -379,7 +390,12 @@ impl TableManager {
         })?;
         let created = old_value.is_none();
         let version = if let Some(mvcc) = &self.mvcc_store {
-            mvcc.set_versioned(id.to_bytes(), bytes).await?
+            // task #532: `set_versioned` is `RecordKey`-keyed — build the key
+            // inline from the rid (alloc-free for the 16-byte shape) instead of
+            // the prior `id.to_bytes()` heap `Bytes` that the store then had to
+            // convert back to `RecordKey` internally.
+            mvcc.set_versioned(RecordKey::from_slice(id.as_bytes()), bytes)
+                .await?
         } else {
             self.table
                 .data_store()

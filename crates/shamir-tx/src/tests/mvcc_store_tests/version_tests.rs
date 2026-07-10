@@ -2,6 +2,7 @@ use super::helpers::{make_gate, make_mvcc, make_mvcc_with_gate};
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::types::KvOp;
+use shamir_storage::types::RecordKey;
 
 #[tokio::test]
 async fn version_cache_populated_on_set() {
@@ -10,11 +11,11 @@ async fn version_cache_populated_on_set() {
 
     let _guard = gate.open_snapshot().await;
     let key = Bytes::from("k1");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
 
-    let cached = mvcc.cells.read(&key, |_, c| c.version);
+    let cached = mvcc.cells.read(key.as_ref(), |_, c| c.version);
     assert!(
         cached.is_some(),
         "version_cache should contain key after set"
@@ -35,7 +36,7 @@ async fn version_of_returns_cached_version_after_versioned_set() {
     let mvcc = make_mvcc_with_gate(gate.clone());
     let _guard = gate.open_snapshot().await;
     let key = Bytes::from("kx");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v = mvcc.version_of(&key);
@@ -55,7 +56,7 @@ async fn apply_committed_ops_updates_version_cache() {
     assert_eq!(mvcc.version_of(&key), 42);
 
     // Value is in the log.
-    let val = mvcc.get_current(key.clone()).await.unwrap();
+    let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
     assert_eq!(val, Some(Bytes::from("val")));
 }
 
@@ -71,7 +72,7 @@ async fn apply_committed_ops_archives_old_value() {
     mvcc.apply_committed_ops(ops, 10).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
-    let via_seam = mvcc.get_current(key.clone()).await.unwrap();
+    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
     assert_eq!(via_seam, Some(Bytes::from("new")));
 
     // The log contains the new value at the commit version.
@@ -103,7 +104,7 @@ async fn apply_committed_ops_remove_archives_and_deletes() {
     mvcc.apply_committed_ops(ops, 20).await.unwrap();
 
     // Remove writes a tombstone to the log; get_current reads it as None.
-    let via_seam = mvcc.get_current(key.clone()).await.unwrap();
+    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
     assert!(
         via_seam.is_none(),
         "FINAL-A: Remove tombstone → None from seam"
@@ -136,7 +137,7 @@ async fn apply_committed_ops_no_snapshots_skips_history() {
     mvcc.apply_committed_ops(ops, 5).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
-    let via_seam = mvcc.get_current(key.clone()).await.unwrap();
+    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
     assert_eq!(via_seam, Some(Bytes::from("new")));
 
     assert_eq!(mvcc.version_of(&key), 5);
@@ -249,13 +250,13 @@ async fn version_of_borrow_probe_matches_arbitrary_length_keys() {
     let long = Bytes::from(vec![7u8; 40]);
     let empty = Bytes::new();
 
-    mvcc.set_versioned(short.clone(), Bytes::from("s"))
+    mvcc.set_versioned(RecordKey::from(short.clone()), Bytes::from("s"))
         .await
         .unwrap();
-    mvcc.set_versioned(long.clone(), Bytes::from("l"))
+    mvcc.set_versioned(RecordKey::from(long.clone()), Bytes::from("l"))
         .await
         .unwrap();
-    mvcc.set_versioned(empty.clone(), Bytes::from("e"))
+    mvcc.set_versioned(RecordKey::from(empty.clone()), Bytes::from("e"))
         .await
         .unwrap();
 
@@ -293,7 +294,7 @@ async fn live_version_tracks_fast_path_write() {
 
     // Every write is a single log append; publish_cell always fires.
     let v = mvcc
-        .set_versioned(key.clone(), Bytes::from("val"))
+        .set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
 
@@ -326,7 +327,7 @@ async fn live_version_tracks_slow_path_write() {
     let key = Bytes::from("k_hwm_slow");
 
     let v = mvcc
-        .set_versioned(key.clone(), Bytes::from("val"))
+        .set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
 
@@ -358,10 +359,10 @@ async fn live_version_advances_on_delete() {
     let key = Bytes::from("k_hwm_del");
 
     let v1 = mvcc
-        .set_versioned(key.clone(), Bytes::from("val"))
+        .set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
-    let vd = mvcc.delete_versioned(key.clone()).await.unwrap();
+    let vd = mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
 
     assert!(vd > v1, "delete version must be greater than write version");
     assert_eq!(
@@ -390,7 +391,7 @@ async fn set_versioned_many_sets_hwm_fast_path() {
         (Bytes::from("bk2"), Bytes::from("v2")),
         (Bytes::from("bk3"), Bytes::from("v3")),
     ];
-    let max_v = mvcc.set_versioned_many(items.clone()).await.unwrap();
+    let max_v = mvcc.set_versioned_many(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
     assert!(max_v > 0);
 
     // Every key gets its own monotonic version (one per record);
@@ -449,7 +450,7 @@ async fn mvcc2_fast_path_version_cache_not_updated() {
 
     // Write with no snapshot active — single log append.
     let v = mvcc
-        .set_versioned(key.clone(), Bytes::from("v1"))
+        .set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     assert!(v > 0);
@@ -498,7 +499,7 @@ async fn mvcc2_simulated_toctou_snapshot_sees_phantom() {
     // Step 1: seed OLD with no snapshot active. A single log entry is written.
     let old_val = Bytes::from("OLD");
     let v_old = mvcc
-        .set_versioned(key.clone(), old_val.clone())
+        .set_versioned(RecordKey::from(key.clone()), old_val.clone())
         .await
         .unwrap();
     assert!(v_old > 0);
@@ -514,7 +515,7 @@ async fn mvcc2_simulated_toctou_snapshot_sees_phantom() {
     // archive). OLD is now archived to history; the cell advances.
     let new_val = Bytes::from("NEW");
     let v_new = mvcc
-        .set_versioned(key.clone(), new_val.clone())
+        .set_versioned(RecordKey::from(key.clone()), new_val.clone())
         .await
         .unwrap();
     assert!(v_new > v_old);
@@ -567,7 +568,7 @@ async fn mvcc2_stress_race_not_triggered_with_in_memory_store() {
         let key_w = key.clone();
         let write_handle = tokio::spawn(async move {
             let _ = mvcc_w
-                .set_versioned(key_w, Bytes::from("written"))
+                .set_versioned(RecordKey::from(key_w), Bytes::from("written"))
                 .await
                 .unwrap();
         });

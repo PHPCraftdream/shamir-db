@@ -252,7 +252,12 @@ pub struct TxContext {
     /// is `(table_token, key)` so release can route to the right table's
     /// `MvccStore`. Interior-mutable (`scc::HashMap`) so the read path
     /// (which holds `&TxContext`) can record locks without `&mut`.
-    pub locked_keys: scc::HashMap<(u64, Bytes), (), THasher>,
+    ///
+    /// Keyed on [`RecordKey`](shamir_storage::types::RecordKey) (task #532):
+    /// the pessimistic-lock cell registry (`MvccStore::locks`) is
+    /// `RecordKey`-keyed, so recording / releasing a lock passes the key
+    /// straight through with no `Bytes` round-trip.
+    pub locked_keys: scc::HashMap<(u64, shamir_storage::types::RecordKey), (), THasher>,
 }
 
 impl TxContext {
@@ -357,7 +362,11 @@ impl TxContext {
     /// tx-aware read path (which holds `&TxContext`) can record locks without
     /// `&mut`. The map's dedup (same `(token, key)` inserted twice is a
     /// no-op) mirrors `lock_key`'s re-entrant idempotency.
-    pub fn record_locked_key(&self, table_token: u64, key: Bytes) {
+    pub fn record_locked_key(
+        &self,
+        table_token: u64,
+        key: shamir_storage::types::RecordKey,
+    ) {
         // entry_async requires await; use the sync entry on a non-async
         // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
         // the unconditional insert path.

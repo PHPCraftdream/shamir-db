@@ -355,7 +355,7 @@ impl TableManager {
         // is on the FUTURE key (the rid is fresh) so this never blocks on
         // existing data, but it serializes against a concurrent tx that
         // might read-then-write the same freshly-allocated rid.
-        self.acquire_pessimistic_write_lock(rid.to_bytes(), tx)
+        self.acquire_pessimistic_write_lock(RecordKey::from_slice(rid.as_bytes()), tx)
             .await?;
 
         // HIGH-6: stage-time unique validation (read-only against
@@ -477,9 +477,13 @@ impl TableManager {
         let id_bytes: Vec<bytes::Bytes> = ids.iter().map(|rid| rid.to_bytes()).collect();
 
         // Level-3: acquire Exclusive locks on every new rid before
-        // staging. No-op for Snapshot / Serializable (self-gates).
+        // staging. No-op for Snapshot / Serializable (self-gates). task #532:
+        // the lock registry is `RecordKey`-keyed; `id_bytes` is reused as
+        // `Bytes` by `set_many_live` below, so convert per lock call
+        // (inline-cheap for the 16-byte rid shape).
         for key in &id_bytes {
-            self.acquire_pessimistic_write_lock(key.clone(), tx).await?;
+            self.acquire_pessimistic_write_lock(RecordKey::from(key.clone()), tx)
+                .await?;
         }
 
         // 3. Record UniqueGuards per row per unique index it claims.
@@ -647,8 +651,12 @@ impl TableManager {
         let id_bytes: Vec<Bytes> = ids.iter().map(|rid| rid.to_bytes()).collect();
 
         // Level-3: acquire Exclusive locks on every new rid before staging.
+        // task #532: the lock registry is `RecordKey`-keyed; `id_bytes` is
+        // reused as `Bytes` by `set_many` below, so convert per lock call
+        // (inline-cheap for the 16-byte rid shape).
         for key in &id_bytes {
-            self.acquire_pessimistic_write_lock(key.clone(), tx).await?;
+            self.acquire_pessimistic_write_lock(RecordKey::from(key.clone()), tx)
+                .await?;
         }
 
         // 3. Record UniqueGuards per row per unique index it claims.
@@ -754,7 +762,7 @@ impl TableManager {
         // write. `read_one_tx` above already took a Shared lock for a
         // Pessimistic tx; this re-entrant acquire upgrades it to Exclusive
         // (same tx — never self-deadlocks). No-op for Snapshot / Serializable.
-        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+        self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
             .await?;
 
         // HIGH-6: stage-time unique validation (read-only). For an
@@ -843,7 +851,7 @@ impl TableManager {
         tx: &mut shamir_tx::TxContext,
     ) -> DbResult<()> {
         // Level-3: acquire an Exclusive lock on the key before staging.
-        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+        self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
             .await?;
 
         // Build RecordView lenses for old and new. For non-map records
@@ -970,7 +978,7 @@ impl TableManager {
         // Level-3: acquire an Exclusive lock on the key before staging the
         // delete. Re-entrant upgrade from the Shared lock `read_one_tx_bytes`
         // took. No-op for Snapshot / Serializable.
-        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+        self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
             .await?;
 
         // Plan index-removal ops. Try the zero-copy RecordView lens first

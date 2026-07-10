@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use shamir_storage::error::DbError;
+use shamir_storage::types::RecordKey;
 use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::InnerValue;
@@ -82,7 +82,10 @@ async fn claim_write_set(
         };
         let mut guard = CellReservationGuard::new(store.clone(), txn_id);
         for key in staging.keys() {
-            let key: Bytes = key.clone().into();
+            // task #532: `try_reserve` / the guard / the cell registry are all
+            // `RecordKey`-keyed now — pass the staged `RecordKey` straight
+            // through, no `Bytes` round-trip on the hot claim path.
+            let key: RecordKey = key.clone();
             if store.try_reserve(key.clone(), snapshot, txn_id) {
                 // Won — register immediately so an abort on a later key (this
                 // table or a subsequent one) releases this claim on drop.
@@ -91,9 +94,11 @@ async fn claim_write_set(
                 // Contended or stale cell → this committer LOST the race.
                 // Returning drops `guard` (releasing this table's won keys) and
                 // every earlier table's guard in `guards`, then the tx aborts
-                // BEFORE Phase 4 — no WAL is written for a loser.
+                // BEFORE Phase 4 — no WAL is written for a loser. The
+                // `SsiConflict` error carries `Bytes`; convert once here on the
+                // cold abort path (a necessary boundary conversion).
                 repo.tx_metrics().on_tx_aborted_ssi();
-                return Err(TxError::SsiConflict { key });
+                return Err(TxError::SsiConflict { key: key.into() });
             }
         }
         guards.push(guard);

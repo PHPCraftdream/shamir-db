@@ -3,6 +3,7 @@
 
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 #[tokio::test]
 async fn gc_below_removes_old_versions_keeps_anchor() {
@@ -13,7 +14,7 @@ async fn gc_below_removes_old_versions_keeps_anchor() {
     let key = Bytes::from("gc_test");
     // Write 5 versions
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -39,10 +40,10 @@ async fn gc_below_zero_deletes_nothing() {
     let _guard = gate.open_snapshot().await;
 
     let key = Bytes::from("gc_noop");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -57,7 +58,7 @@ async fn gc_convenience_uses_min_alive() {
 
     // No snapshots open → min_alive = last_committed = 0
     // Write some data without snapshot (no history archived)
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v"))
         .await
         .unwrap();
 
@@ -85,10 +86,10 @@ async fn gc_evicts_stale_version_cache_entries() {
     // Two "old" keys, written early (low versions).
     let old_a = Bytes::from("old_a");
     let old_b = Bytes::from("old_b");
-    mvcc.set_versioned(old_a.clone(), Bytes::from("a_val"))
+    mvcc.set_versioned(RecordKey::from(old_a.clone()), Bytes::from("a_val"))
         .await
         .unwrap();
-    mvcc.set_versioned(old_b.clone(), Bytes::from("b_val"))
+    mvcc.set_versioned(RecordKey::from(old_b.clone()), Bytes::from("b_val"))
         .await
         .unwrap();
     let v_old_a = mvcc.version_of(&old_a);
@@ -101,7 +102,7 @@ async fn gc_evicts_stale_version_cache_entries() {
     for _ in 0..10 {
         gate.assign_next_version();
     }
-    mvcc.set_versioned(fresh.clone(), Bytes::from("f_val"))
+    mvcc.set_versioned(RecordKey::from(fresh.clone()), Bytes::from("f_val"))
         .await
         .unwrap();
     let v_fresh = mvcc.version_of(&fresh);
@@ -170,7 +171,7 @@ async fn gc_keeps_version_cache_entry_at_min_alive_boundary() {
     let guard = gate.open_snapshot().await;
 
     let key = Bytes::from("boundary");
-    mvcc.set_versioned(key.clone(), Bytes::from("v"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v"))
         .await
         .unwrap();
     let cv = mvcc.version_of(&key);
@@ -209,7 +210,7 @@ async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
     let key = Bytes::from("vis");
 
     // v1 committed.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -224,7 +225,7 @@ async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
 
     // v2 overwrites; v1 is archived to history (the reader snapshot at v1
     // is still active).
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     let v2 = mvcc.version_of(&key);
@@ -280,10 +281,10 @@ async fn gc_evicted_key_read_at_boundary_snapshot_returns_main() {
 
     let key = Bytes::from("evict_then_read");
     // Two versions: v1 (prior entry) and v2 (current entry), both in the log.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     let v2 = mvcc.version_of(&key);
@@ -324,7 +325,7 @@ async fn c1_vacuum_never_reclaims_current() {
     let mut latest_val = Bytes::new();
     for i in 1..=5u32 {
         latest_val = Bytes::from(format!("v{i}"));
-        mvcc.set_versioned(key.clone(), latest_val.clone())
+        mvcc.set_versioned(RecordKey::from(key.clone()), latest_val.clone())
             .await
             .unwrap();
     }
@@ -357,10 +358,10 @@ async fn c1_vacuum_keeps_tombstone_current() {
     let mvcc = make_mvcc(); // CurrentOnly
 
     let key = Bytes::from("c1_tomb");
-    mvcc.set_versioned(key.clone(), Bytes::from("val"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
-    let del_v = mvcc.delete_versioned(key.clone()).await.unwrap();
+    let del_v = mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
 
     // The tombstone is the current version for this key — it must survive.
     let tombstone = mvcc

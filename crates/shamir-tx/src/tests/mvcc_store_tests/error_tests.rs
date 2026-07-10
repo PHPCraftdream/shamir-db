@@ -2,6 +2,7 @@ use super::helpers::make_gate;
 use super::test_stores::make_failing_history_mvcc;
 use bytes::Bytes;
 use std::sync::atomic::Ordering;
+use shamir_storage::types::RecordKey;
 
 // ================================================================
 // Regression tests — I/O error propagation (fault injection).
@@ -20,7 +21,7 @@ async fn delete_versioned_propagates_remove_error() {
     // Arm: the next `set` call on history will fail (tombstone write).
     history.fail_set.store(true, Ordering::Relaxed);
 
-    let result = mvcc.delete_versioned(Bytes::from("k")).await;
+    let result = mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await;
     assert!(
         result.is_err(),
         "delete_versioned must propagate history.set() I/O error"
@@ -45,7 +46,7 @@ async fn set_versioned_propagates_archive_read_error() {
     history.fail_set.store(true, Ordering::Relaxed);
 
     let result = mvcc
-        .set_versioned(Bytes::from("k"), Bytes::from("new_val"))
+        .set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("new_val"))
         .await;
     assert!(
         result.is_err(),
@@ -59,7 +60,7 @@ async fn set_versioned_propagates_archive_read_error() {
 
     // Nothing was written — get_current returns None.
     history.fail_set.store(false, Ordering::Relaxed);
-    let via_seam = mvcc.get_current(Bytes::from("k")).await.unwrap();
+    let via_seam = mvcc.get_current(RecordKey::from(Bytes::from("k"))).await.unwrap();
     assert!(
         via_seam.is_none(),
         "FINAL-A: key must be absent when history.set() fails"
@@ -78,7 +79,7 @@ async fn delete_versioned_propagates_archive_read_error() {
     // Arm: next history write fails → tombstone can't land.
     history.fail_set.store(true, Ordering::Relaxed);
 
-    let result = mvcc.delete_versioned(Bytes::from("k")).await;
+    let result = mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await;
     assert!(
         result.is_err(),
         "delete_versioned must propagate history.set() I/O error (tombstone)"
