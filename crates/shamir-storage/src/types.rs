@@ -205,6 +205,20 @@ pub trait Store: Send + Sync {
     ///
     /// Like `iter_stream()` but filtered by prefix. More efficient than loading all results into memory.
     ///
+    /// # Ordering guarantee
+    ///
+    /// Keys within and across batches are yielded in ascending
+    /// lexicographic byte order, and each batch resumes strictly past
+    /// the previous batch's last key (`Bound::Excluded`) — every
+    /// implementor MUST uphold this (see `storage_in_memory.rs`,
+    /// `storage_fjall.rs`, `storage_cached.rs`, `storage_membuffer.rs`
+    /// for the reference pattern). Callers rely on this for
+    /// correctness, not just performance — e.g.
+    /// `IndexManager::lookup_by_index`'s posting-list cache
+    /// (`Arc<[RecordId]>`, audit 3.2 / task #499) depends on the scan
+    /// already being sorted and duplicate-free instead of re-sorting
+    /// via an intermediate `BTreeSet`.
+    ///
     /// # Arguments
     /// * `prefix` - The prefix to search for
     /// * `batch_size` - Number of records per batch

@@ -519,8 +519,9 @@ impl TableManager {
                 .index_manager_ref()
                 .lookup_by_index(index_name, values)
                 .await?;
-            // Audit 1.5: `ids` is now `Arc<BTreeSet<RecordId>>` (O(1)
-            // cache-hit). Deref-iterate rather than moving the owned set.
+            // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` — a sorted
+            // slice (O(1) cache-hit). Iterate the contiguous buffer to
+            // union into the result set.
             record_ids.extend(ids.iter().copied());
         }
 

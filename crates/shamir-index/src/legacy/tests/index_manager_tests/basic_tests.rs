@@ -1000,3 +1000,122 @@ async fn test_create_index_streaming_matches_materialized() {
     // postings. Null is also a valid posting value.
     // Both managers should report the same count for every lookup.
 }
+
+// ============================================================================
+// Audit 3.2 / task #499 — sorted-slice posting representation regression tests
+// ============================================================================
+
+/// Reference oracle: recompute the posting set the way the OLD `BTreeSet`
+/// path did — collect the ids and let `BTreeSet` sort+dedup them — from an
+/// independent enumeration of the created records. `lookup_by_index` (new
+/// `Arc<[RecordId]>` path) must return EXACTLY the same elements, in sorted
+/// order, with no duplicates.
+fn btreeset_oracle(ids: &[RecordId]) -> std::collections::BTreeSet<RecordId> {
+    ids.iter().copied().collect()
+}
+
+/// The returned slice must equal the `BTreeSet` oracle: identical membership,
+/// sorted ascending by `RecordId::Ord`, duplicate-free. Covers empty, single,
+/// disjoint (query value with no records), fully-overlapping (all records
+/// share one value), and a 10k low-cardinality bucket.
+#[tokio::test]
+async fn test_sorted_slice_matches_btreeset_oracle() {
+    let (_, _, manager) = create_manager();
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Insert record ids in DESCENDING creation order but with ASCENDING
+    // record-id bytes shuffled, so a naive "scan order == insert order"
+    // assumption would fail — only true sorted-by-RecordId output passes.
+    let batch_ts = RecordId::now_micros();
+    let mut hot_ids: Vec<RecordId> = Vec::new();
+    // 10_000 postings under the single hot value "active" (low cardinality).
+    for i in 0..10_000u32 {
+        // Interleave seq tails so ids are not monotonic in insertion order.
+        let seq = if i % 2 == 0 { 20_000 - i } else { i };
+        let rid = RecordId::from_ts_seq(batch_ts, seq);
+        hot_ids.push(rid);
+        let value = create_test_value(&[(1, InnerValue::Str("active".to_string()))]);
+        manager.on_record_created(&rid, &value).await.unwrap();
+    }
+
+    // ── Fully-overlapping / 10k bucket ──────────────────────────────────
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("active".to_string())])
+        .await
+        .unwrap();
+    let oracle = btreeset_oracle(&hot_ids);
+    // Same membership as the BTreeSet oracle.
+    let result_set: std::collections::BTreeSet<RecordId> = result.iter().copied().collect();
+    assert_eq!(
+        result_set, oracle,
+        "sorted-slice membership must equal the BTreeSet oracle"
+    );
+    // Sorted ascending — the slice equals the oracle drained in order.
+    let oracle_sorted: Vec<RecordId> = oracle.iter().copied().collect();
+    assert_eq!(
+        result.as_ref(),
+        oracle_sorted.as_slice(),
+        "posting slice must be sorted ascending by RecordId::Ord"
+    );
+    // Duplicate-free: sorted slice has no equal adjacent pair.
+    assert!(
+        result.windows(2).all(|w| w[0] < w[1]),
+        "posting slice must be strictly ascending (duplicate-free)"
+    );
+    // Explicitly the length the oracle expects (no lost/extra postings).
+    assert_eq!(result.len(), 10_000);
+
+    // ── Disjoint: a value with no records → empty slice ─────────────────
+    let empty = manager
+        .lookup_by_index(1001, &[InnerValue::Str("nonexistent".to_string())])
+        .await
+        .unwrap();
+    assert!(empty.is_empty(), "disjoint query must return empty slice");
+    assert_eq!(
+        empty.as_ref(),
+        btreeset_oracle(&[])
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+            .as_slice()
+    );
+}
+
+/// Single-element and repeated-lookup (cache HIT) both return the identical
+/// sorted slice — the cache does not perturb ordering or membership.
+#[tokio::test]
+async fn test_sorted_slice_single_and_cache_hit_identical() {
+    let (_, _, manager) = create_manager();
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let rid = RecordId::new();
+    let value = create_test_value(&[(1, InnerValue::Int(7))]);
+    manager.on_record_created(&rid, &value).await.unwrap();
+
+    // MISS → build; HIT → cached Arc. Both must be the identical slice.
+    let miss = manager
+        .lookup_by_index(1001, &[InnerValue::Int(7)])
+        .await
+        .unwrap();
+    let hit = manager
+        .lookup_by_index(1001, &[InnerValue::Int(7)])
+        .await
+        .unwrap();
+    assert_eq!(
+        miss.as_ref(),
+        &[rid][..],
+        "single-element slice must hold exactly the one id"
+    );
+    assert_eq!(
+        miss.as_ref(),
+        hit.as_ref(),
+        "cache HIT must return the same slice as MISS"
+    );
+    // The HIT shares the cached allocation (O(1), no re-derivation).
+    assert!(
+        Arc::ptr_eq(&miss, &hit),
+        "cache HIT must be the same Arc allocation"
+    );
+}

@@ -71,6 +71,10 @@ name = "posting_cache_hit"
 harness = false
 
 [[bench]]
+name = "posting_repr_iterate"
+harness = false
+
+[[bench]]
 name = "create_index_streaming"
 harness = false
 

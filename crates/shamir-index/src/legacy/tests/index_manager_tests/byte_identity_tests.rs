@@ -166,12 +166,12 @@ async fn round_trip_single_field_every_type() {
             .lookup_by_index(name_interned, &lookup_values)
             .await
             .unwrap();
-        let expected: std::collections::BTreeSet<RecordId> = [rid].into_iter().collect();
-        // Audit 1.5: `lookup_by_index` now returns `Arc<BTreeSet<RecordId>>`;
-        // deref to compare against a plain `BTreeSet`.
+        // Audit 3.2: `lookup_by_index` now returns `Arc<[RecordId]>` — a
+        // sorted, duplicate-free slice; compare against the expected slice.
+        let expected: Vec<RecordId> = vec![rid];
         assert_eq!(
             result.as_ref(),
-            &expected,
+            expected.as_slice(),
             "{}: round-trip lookup did not return the record",
             case.label
         );
