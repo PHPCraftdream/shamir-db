@@ -561,6 +561,16 @@ impl SegmentSet {
             .any(|m| m.max_version > 0 && m.max_version <= durable_version)
     }
 
+    /// Test-only (task #531): clone the active segment's `Arc<WalSegment>` so
+    /// a test can drive the poison path — e.g. `mark_poisoned()` it, then call
+    /// `append_batch` to trigger `rotate_after_poison`. Not compiled into a
+    /// production build.
+    #[cfg(test)]
+    pub(crate) fn active_segment_for_test(&self) -> Arc<WalSegment> {
+        let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
+        Arc::clone(&g.active)
+    }
+
     /// fsync the active segment (sealed segments are already fully on disk).
     pub async fn sync(&self) -> DbResult<()> {
         let active = {
