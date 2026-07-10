@@ -13,11 +13,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_membuffer::MemBufferConfig;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 
-/// System record-id used to persist the per-table buffer config.
-fn buffer_config_key() -> Bytes {
-    MetaKey::BufferConfig.as_record_id().to_bytes()
+/// System record-key used to persist the per-table buffer config.
+/// Built alloc-free via [`RecordKey::from_slice`] — the 16-byte system
+/// `RecordId` inlines (no heap `Bytes::copy_from_slice`).
+fn buffer_config_key() -> RecordKey {
+    RecordKey::from_slice(MetaKey::BufferConfig.as_record_id().as_bytes())
 }
 
 /// Read the persisted buffer config for the table whose
@@ -26,7 +28,7 @@ fn buffer_config_key() -> Bytes {
 /// factory).
 pub async fn load(info_store: &Arc<dyn Store>) -> DbResult<Option<MemBufferConfig>> {
     let key = buffer_config_key();
-    match info_store.get(key.into()).await {
+    match info_store.get(key).await {
         Ok(bytes) => {
             let cfg: MemBufferConfig = bincode::deserialize(&bytes)
                 .map_err(|e| DbError::Codec(format!("buffer_config decode: {e}")))?;
@@ -45,7 +47,7 @@ pub async fn save(info_store: &Arc<dyn Store>, cfg: &MemBufferConfig) -> DbResul
     let bytes = bincode::serialize(cfg)
         .map_err(|e| DbError::Codec(format!("buffer_config encode: {e}")))?;
     info_store
-        .set(buffer_config_key().into(), Bytes::from(bytes))
+        .set(buffer_config_key(), Bytes::from(bytes))
         .await?;
     Ok(())
 }

@@ -95,7 +95,7 @@ impl TableManager {
                 // Read the AS-OF value — this is NOT the current value; it is
                 // the value the record had at `version` (or None if it did not
                 // exist yet / was already deleted at that point).
-                let asof_bytes = mvcc.get_at(&id.to_bytes(), version).await?;
+                let asof_bytes = mvcc.get_at(id.as_bytes(), version).await?;
                 let Some(bytes) = asof_bytes else {
                     // Record did not exist at this version — exclude it.
                     continue;
@@ -291,7 +291,7 @@ impl TableManager {
         // Row shape: (record_id, version, ts, value_bytes).
         let mut rows: Vec<(RecordId, u64, Option<u64>, bytes::Bytes)> = Vec::new();
         for id in &matched_ids {
-            let timeline = mvcc.history_of(&id.to_bytes()).await?;
+            let timeline = mvcc.history_of(id.as_bytes()).await?;
             for entry in timeline {
                 if in_range(entry.version, entry.ts_millis, from, to) {
                     rows.push((*id, entry.version, entry.ts_millis, entry.value));

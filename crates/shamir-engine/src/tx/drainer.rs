@@ -69,7 +69,7 @@ const DEFAULT_WINDOW_HIGH_WATERMARK: usize = 64 * 1024;
 use scc::TreeIndex;
 use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::KvOp;
+use shamir_storage::types::{KvOp, RecordKey};
 use shamir_wal::{WalEntryV2, WalOpV2};
 use tokio::sync::Notify;
 
@@ -430,12 +430,15 @@ impl Drainer {
                         body,
                     } => (
                         *table_id_interned,
-                        KvOp::Set(rid.to_bytes().into(), body.clone()),
+                        KvOp::Set(RecordKey::from_slice(rid.as_bytes()), body.clone()),
                     ),
                     WalOpV2::Delete {
                         table_id_interned,
                         rid,
-                    } => (*table_id_interned, KvOp::Remove(rid.to_bytes().into())),
+                    } => (
+                        *table_id_interned,
+                        KvOp::Remove(RecordKey::from_slice(rid.as_bytes())),
+                    ),
                     _ => continue,
                 };
                 by_table.entry(table_id).or_default().push(kvop);

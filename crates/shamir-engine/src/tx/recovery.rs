@@ -14,7 +14,7 @@
 
 use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::KvOp;
+use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::CompletionState;
 use shamir_wal::WalOpV2;
 
@@ -79,7 +79,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // MvccStore — system/test) still materialize into `data_store`.
             if tbl.mvcc_store().is_none() {
                 tbl.data_store()
-                    .set(rid.to_bytes().into(), body.clone())
+                    .set(RecordKey::from_slice(rid.as_bytes()), body.clone())
                     .await?;
             }
             Ok(())
@@ -557,12 +557,15 @@ async fn seed_version_cache_for_entry(
                 body,
             } => (
                 *table_id_interned,
-                KvOp::Set(rid.to_bytes().into(), body.clone()),
+                KvOp::Set(RecordKey::from_slice(rid.as_bytes()), body.clone()),
             ),
             WalOpV2::Delete {
                 table_id_interned,
                 rid,
-            } => (*table_id_interned, KvOp::Remove(rid.to_bytes().into())),
+            } => (
+                *table_id_interned,
+                KvOp::Remove(RecordKey::from_slice(rid.as_bytes())),
+            ),
             _ => continue,
         };
         by_table.entry(table_id).or_default().push(kvop);

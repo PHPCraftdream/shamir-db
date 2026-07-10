@@ -112,7 +112,7 @@ impl TableManager {
                                 match decode_covering_projection(pv) {
                                     Some((v, proj))
                                         if mvcc
-                                            .live_version(&id.to_bytes())
+                                            .live_version(id.as_bytes())
                                             .is_none_or(|hwm| hwm == v) =>
                                     {
                                         // Posting is fresh — reconstruct the row.

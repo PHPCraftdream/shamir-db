@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use crate::meta::MetaKey;
 use crate::table::persistable::Persistable;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::codecs::basic::bincode;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -171,8 +171,8 @@ impl RecordCounter {
         let cell = &self.cache;
         let _ = cell
             .get_or_init(|| async move {
-                let key_bytes = count_key().to_bytes();
-                let initial: u64 = match info_store.get(key_bytes.into()).await {
+                let key = RecordKey::from_slice(count_key().as_bytes());
+                let initial: u64 = match info_store.get(key).await {
                     Ok(bytes) => bincode::from_bytes(&bytes).unwrap_or(0),
                     Err(_) => 0,
                 };
@@ -195,10 +195,10 @@ impl Persistable for RecordCounter {
 
 impl RecordCounter {
     async fn write_through(&self, count: u64) -> DbResult<()> {
-        let key_bytes = count_key().to_bytes();
+        let key = RecordKey::from_slice(count_key().as_bytes());
         let bytes = bincode::to_bytes(&count)
             .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
-        self.info_store.set(key_bytes.into(), bytes).await?;
+        self.info_store.set(key, bytes).await?;
         Ok(())
     }
 }
