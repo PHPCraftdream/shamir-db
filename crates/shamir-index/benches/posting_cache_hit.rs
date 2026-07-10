@@ -124,7 +124,7 @@ fn main() {
                 .block_on(manager_ref.lookup_by_index(1001, &lookup_values))
                 .unwrap();
             // `len()` forces the `Arc` to be materialised (not DCE'd) but
-            // is itself O(1) via `BTreeSet::len` through the deref.
+            // is itself O(1) via the slice's `len` through the deref.
             black_box(ids.len());
         });
     }

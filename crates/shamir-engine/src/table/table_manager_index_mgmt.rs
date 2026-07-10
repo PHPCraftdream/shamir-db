@@ -334,13 +334,13 @@ impl TableManager {
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<RecordId>> {
         let name_id = self.intern_string(name).await?;
-        // Audit 1.5: the internal `IndexManager::lookup_by_index` now
-        // returns `Arc<BTreeSet<RecordId>>` (O(1) cache-hit). This public
-        // wrapper keeps the legacy `BTreeSet<RecordId>` signature for API
-        // stability; the one-time deref-clone here is at the boundary,
+        // Audit 1.5/3.2: the internal `IndexManager::lookup_by_index` now
+        // returns `Arc<[RecordId]>` (sorted slice, O(1) cache-hit). This
+        // public wrapper keeps the legacy `BTreeSet<RecordId>` signature
+        // for API stability; the one-time collect here is at the boundary,
         // NOT on the internal hot path (engine-internal callers go through
         // `index_manager_ref().lookup_by_index` directly and consume the
-        // `Arc` without cloning).
+        // `Arc<[RecordId]>` slice without collecting).
         //
         // ACCEPTED TRADE-OFF (task #488 review): this boundary clone
         // reintroduces the audit's O(|postings|) cost for whoever reaches
@@ -359,7 +359,13 @@ impl TableManager {
         // path, propagate `Arc<BTreeSet<RecordId>>` out through this
         // wrapper (and `RepoInstance`/`DbInstance`) instead of adding a
         // second clone-avoidance layer here.
-        Ok((*self.index_manager.lookup_by_index(name_id, values).await?).clone())
+        Ok(self
+            .index_manager
+            .lookup_by_index(name_id, values)
+            .await?
+            .iter()
+            .copied()
+            .collect())
     }
 
     /// Check if a regular index exists.

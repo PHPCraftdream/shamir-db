@@ -1351,9 +1351,9 @@ impl TableManager {
                                         .lookup_by_index(idx_name, values)
                                         .await
                                     {
-                                        // Audit 1.5: `ids` is now
-                                        // `Arc<BTreeSet<RecordId>>` — deref-iterate
-                                        // instead of the old owned-`BTreeSet` move.
+                                        // Audit 1.5/3.2: `ids` is now
+                                        // `Arc<[RecordId]>` (sorted slice) —
+                                        // iterate the contiguous buffer.
                                         rids.extend(ids.iter().copied());
                                     }
                                 }

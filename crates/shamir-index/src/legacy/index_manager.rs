@@ -28,7 +28,6 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -71,10 +70,11 @@ pub struct IndexManager {
 
     /// **Opt G** — in-memory cache for posting lists. Keys are the
     /// raw physical index keys (`build_index_key(...).to_bytes()`);
-    /// values are `Arc<BTreeSet<RecordId>>` — shared between hits so
-    /// the lookup hot path is `HashMap::get` + `Arc::clone` + a final
-    /// `BTreeSet::clone` at the boundary (caller already takes the
-    /// set by value).
+    /// values are `Arc<[RecordId]>` — a sorted, duplicate-free,
+    /// immutable slice (audit 3.2 / task #499). Shared between hits so
+    /// the lookup hot path is `HashMap::get` + `Arc::clone` (O(1)); the
+    /// consumer then iterates a contiguous, cache-friendly buffer
+    /// instead of chasing `BTreeSet` tree-node pointers.
     ///
     /// Invalidated by every write hook on the affected
     /// `(index_name, value)` key. Bounded — when full we evict an
@@ -86,7 +86,7 @@ pub struct IndexManager {
     /// is independently lockable and the read path on a cache hit is
     /// fully lock-free against unrelated index keys. Cache hits on
     /// the same shard still take the per-shard read lock.
-    pub(super) posting_cache: Arc<DashMap<Bytes, Arc<BTreeSet<RecordId>>, THasher>>,
+    pub(super) posting_cache: Arc<DashMap<Bytes, Arc<[RecordId]>, THasher>>,
 }
 
 impl Clone for IndexManager {
@@ -687,26 +687,36 @@ impl IndexManager {
     ///
     /// # Возвращает
     ///
-    /// - `Ok(Arc<BTreeSet<RecordId>>)` — множество идентификаторов записей
-    ///   за рефкаунт-дугой (O(1) копирование — см. ниже)
-    /// - `Ok(empty)` — если нет записей с таким значением индекса
+    /// - `Ok(Arc<[RecordId]>)` — сортированный, дедуплицированный срез
+    ///   идентификаторов записей за рефкаунт-дугой (O(1) копирование —
+    ///   см. ниже). Инвариант: элементы отсортированы по `RecordId::Ord`
+    ///   (байт-лексикографически) и не содержат дубликатов.
+    /// - `Ok(empty slice)` — если нет записей с таким значением индекса
     /// - `Err` — ошибка чтения из хранилища
     ///
-    /// # Audit 1.5 — Arc вместо полного клона на cache-hit
+    /// # Audit 1.5 + 3.2 — Arc-срез вместо `BTreeSet`
     ///
-    /// Раньше возвращался владеющий `BTreeSet<RecordId>`, и на HIT в
-    /// `posting_cache` делался полный node-by-node клон дерева на КАЖДЫЙ
-    /// equality-lookup (для низкокардинального индекса с 100k постингов
-    /// это 100k аллокаций узлов). Теперь возвращается `Arc<BTreeSet<_>>`:
-    /// cache-HIT = `Arc::clone` (атомарный refcount-bump, O(1)), cache-MISS
-    /// строит `BTreeSet` ровно один раз, оборачивает в `Arc` и возвращает
-    /// `Arc::clone` того же `Arc`, что хранится в кэше (никаких лишних
-    /// клонов).
+    /// Раньше на HIT в `posting_cache` делался полный node-by-node клон
+    /// дерева на КАЖДЫЙ equality-lookup (для низкокардинального индекса с
+    /// 100k постингов это 100k аллокаций узлов); задача #488 заменила это
+    /// на `Arc<BTreeSet<_>>` (HIT = O(1) `Arc::clone`). Задача #499 меняет
+    /// само ПРЕДСТАВЛЕНИЕ: `Arc<[RecordId]>` вместо `Arc<BTreeSet<_>>`.
+    ///
+    /// Префикс-скан по `index_key` уже отдаёт постинги в порядке
+    /// возрастания хвостовых байт `record_id` — а `RecordId::Ord` и есть
+    /// байт-лексикографический порядок над `[u8; 16]`, — и ровно по одному
+    /// постингу на `(index_key, record_id)`. Значит скан уже отсортирован и
+    /// дедуплицирован: `BTreeSet::insert` на каждый элемент был чистыми
+    /// накладными расходами (аллокация узла + ребалансировка). Теперь
+    /// MISS-путь собирает `Vec<RecordId>` в порядке скана (push, без
+    /// per-node аллокаций) и оборачивает в `Arc<[RecordId]>`, а потребитель
+    /// итерирует непрерывный кэш-дружелюбный буфер вместо погони за
+    /// указателями дерева.
     pub async fn lookup_by_index(
         &self,
         name_interned: u64,
         values: &[InnerValue],
-    ) -> DbResult<Arc<BTreeSet<RecordId>>> {
+    ) -> DbResult<Arc<[RecordId]>> {
         use futures::StreamExt;
 
         let index_key = build_index_key(false, name_interned, values).to_bytes();
@@ -721,9 +731,14 @@ impl IndexManager {
         }
 
         // Scan the 25-byte index prefix; every match is a posting
-        // entry whose final 16 bytes are the record_id.
+        // entry whose final 16 bytes are the record_id. The scan visits
+        // postings in ascending order of the trailing record_id bytes,
+        // which is exactly `RecordId::Ord` (byte-lexicographic over
+        // `[u8; 16]`), and there is at most one posting per record_id —
+        // so `record_ids` is built already-sorted and duplicate-free by
+        // plain `push`, no `BTreeSet` insert/rebalance needed (audit 3.2).
         // tunables: one-off prefix-scan batch (512); fold into a named knob under /opti.
-        let mut record_ids: BTreeSet<RecordId> = BTreeSet::new();
+        let mut record_ids: Vec<RecordId> = Vec::new();
         let mut stream = self.info_store.scan_prefix_stream(index_key.clone(), 512);
         while let Some(batch) = stream.next().await {
             for (k, _) in batch? {
@@ -731,7 +746,7 @@ impl IndexManager {
                 if kb.len() >= index_key.len() + 16 {
                     let mut id_bytes = [0u8; 16];
                     id_bytes.copy_from_slice(&kb[index_key.len()..index_key.len() + 16]);
-                    record_ids.insert(RecordId(id_bytes));
+                    record_ids.push(RecordId(id_bytes));
                 }
             }
         }
@@ -741,10 +756,9 @@ impl IndexManager {
         // small). Empty results are cached too — the next identical
         // lookup short-circuits without re-scanning.
         //
-        // Audit 1.5 (miss path): обернуть построенный `BTreeSet` в `Arc`
-        // ровно один раз, вставить в кэш `Arc::clone` того же `Arc` и
-        // вернуть исходный `Arc` вызывающему — вместо прежней схемы
-        // «один клон в кэш + один клон вызывающему».
+        // Audit 1.5/3.2 (miss path): построить `Arc<[RecordId]>` ровно
+        // один раз, вставить в кэш `Arc::clone` того же `Arc` и вернуть
+        // исходный `Arc` вызывающему — без лишних клонов.
         if self.posting_cache.len() >= POSTING_CACHE_CAP {
             // `iter().next()` on DashMap acquires a single shard's
             // read lock — bounded; evicting an arbitrary entry is
@@ -755,7 +769,7 @@ impl IndexManager {
                 self.posting_cache.remove(&k);
             }
         }
-        let record_ids_arc = Arc::new(record_ids);
+        let record_ids_arc: Arc<[RecordId]> = Arc::from(record_ids);
         self.posting_cache
             .insert(index_key, Arc::clone(&record_ids_arc));
 

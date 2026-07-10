@@ -382,7 +382,7 @@ impl TableManager {
                 .index_manager_ref()
                 .lookup_by_index(idx_name, &values)
                 .await?;
-            // Audit 1.5: `ids` is now `Arc<BTreeSet<RecordId>>`; deref-iterate.
+            // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` (sorted slice); iterate.
             record_ids.extend(ids.iter().copied());
         }
 

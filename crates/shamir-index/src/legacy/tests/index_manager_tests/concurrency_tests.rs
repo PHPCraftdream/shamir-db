@@ -205,7 +205,7 @@ async fn test_cache_invalidated_on_update_value_change() {
     );
 }
 
-/// Audit 1.5 — cache-HIT must return the SAME `Arc<BTreeSet<RecordId>>`
+/// Audit 1.5/3.2 — cache-HIT must return the SAME `Arc<[RecordId]>`
 /// backing allocation the cache stores, not a fresh deep clone. Pin this
 /// with `Arc::ptr_eq` so a regression to per-hit cloning fails loudly.
 #[tokio::test]
