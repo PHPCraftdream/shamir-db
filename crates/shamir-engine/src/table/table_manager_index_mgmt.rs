@@ -240,6 +240,20 @@ impl TableManager {
             }
         };
 
+        // Backfill the new backend from records that already exist in the
+        // table BEFORE it was registered. Without this, a functional / fts /
+        // vector index created on a non-empty table silently omits every
+        // pre-existing row: only rows written AFTER the index exists get a
+        // posting via the `index2_on_insert` write-hook. (The legacy btree
+        // path backfills via `create_index` → `create_index_from_records`;
+        // the index2 pipeline had no equivalent, so `create_index_v2` was the
+        // divergence — a query using the index would then miss every row that
+        // predated it.) We backfill the single new `backend` here rather than
+        // re-running `bulk_populate_index2` over ALL backends: postings are
+        // idempotent, but re-touching already-populated backends is needless
+        // O(N·backends) work on every CREATE INDEX.
+        self.backfill_index2_backend(backend.as_ref()).await?;
+
         self.index2_registry
             .insert(backend)
             .await
@@ -248,6 +262,54 @@ impl TableManager {
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await?;
 
+        Ok(())
+    }
+
+    /// Populate a single freshly-created index2 backend from the records that
+    /// already exist in this table, by streaming the current record set and
+    /// running `plan_insert` + `apply_index_ops` for each row.
+    ///
+    /// This is the index2 analogue of the legacy btree
+    /// `create_index_from_records` backfill. It is scoped to ONE backend (the
+    /// one just created) so a CREATE INDEX on a table that already carries
+    /// other index2 backends does not needlessly re-touch them.
+    ///
+    /// Runs BEFORE the backend is registered, which avoids a double-write
+    /// (the live `index2_on_insert` hook can't yet route to an unregistered
+    /// backend). **This does NOT close the lost-write window** — `@fl`
+    /// review flagged this honestly rather than papering over it: a row
+    /// written after this backfill's stream cursor has passed its key
+    /// position, but before `index2_registry.insert` below completes, is
+    /// observed by NEITHER this backfill (already past it) NOR the live hook
+    /// (backend not registered yet) — that row is missing from the new index
+    /// until a future write happens to touch it again. This is a strict
+    /// improvement over the pre-fix state (where EVERY pre-existing row was
+    /// unconditionally missing), not a fully closed race. A register-first
+    /// ordering (matching the legacy btree path's audit-A9 fix for the
+    /// identical class of gap) is NOT simply portable here without further
+    /// work: index2's `fts` backend applies non-idempotent `BumpFtsStats`
+    /// counter ops via `apply_in_memory`, so naively flipping the order would
+    /// double-count stats for a racing row instead. See the follow-up task
+    /// for a proper write-barrier / dedup fix.
+    async fn backfill_index2_backend(
+        &self,
+        backend: &dyn crate::index2::backend::IndexBackend,
+    ) -> DbResult<()> {
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (rid, cow) in batch {
+                let val = cow.into_inner()?;
+                let ops = backend
+                    .plan_insert(rid, &val)
+                    .await
+                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                crate::index2::apply_index_ops(&ops, &self.info_store, backend)
+                    .await
+                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            }
+        }
         Ok(())
     }
 

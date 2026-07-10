@@ -395,6 +395,34 @@ async fn filtered_ann_no_match_terminates_with_empty() {
 /// records on the first ANN pass, while oversample=10× widens the net
 /// enough to catch them in one shot. We assert the high-oversample query
 /// returns ≥ the low-oversample count, and fills k.
+///
+/// # Determinism (audit G4 / #528)
+///
+/// The subject under test is the ENGINE-level oversample-retry loop
+/// (`read_filtered_vector_scan`: request `k′ = k × oversample` candidates,
+/// post-filter by the residual, widen `k′` and retry when short). That loop
+/// is orthogonal to whether the backend answers via the exact brute-force
+/// scan or the approximate HNSW graph.
+///
+/// An earlier version scattered 306 vectors — above `BRUTE_FORCE_MAX` (256),
+/// so the query ran on `hnsw_rs`'s approximate graph. `hnsw_rs` 0.3.x assigns
+/// node layers from an **unseedable** internal RNG (see the `BRUTE_FORCE_MAX`
+/// doc-comment in `hnsw_adapter.rs`), so recall — and thus which of the 6
+/// rare records surface, and in what order — varied build-to-build regardless
+/// of this test's `Pcg` data seed. That made both the `high >= low` inequality
+/// (two independent approximate runs could legitimately tie or invert) and the
+/// `high == k` fill (a rare record could be graph-unreachable) flaky under
+/// load. The test's own comment ("may miss rare records initially") was in
+/// fact describing that inherent ANN-approximation noise.
+///
+/// The fix keeps the dataset at or below `BRUTE_FORCE_MAX` (206 ≤ 256) so the
+/// backend answers via the EXACT deterministic brute-force scan. The
+/// oversample-retry loop is still fully exercised (low oversample starts with
+/// a tight `k′` and must widen to reach the rare records; high oversample
+/// starts wide), but its result no longer rides on an unseedable RNG — so
+/// `high >= low` and `high == k` hold deterministically. This removes the
+/// source of non-determinism rather than retrying-until-lucky or loosening the
+/// assertion to hide it.
 #[tokio::test]
 #[serial_test::serial]
 async fn oversample_higher_yields_at_least_as_many() {
@@ -407,9 +435,12 @@ async fn oversample_higher_yields_at_least_as_many() {
     let tag_id = field_id(&tbl, "tag").await;
 
     let mut rng = Pcg(7);
-    // 300 common + 6 rare, all scattered around the same query point so ANN
-    // ordering interleaves them.
-    for _ in 0..300 {
+    // 200 common + 6 rare = 206 total (≤ BRUTE_FORCE_MAX = 256), all scattered
+    // around the same query point so distance ranking interleaves them and the
+    // oversample-retry loop must widen k′ to surface the rare records. Staying
+    // on the exact brute-force path keeps the ranking deterministic (no
+    // unseedable HNSW layer RNG).
+    for _ in 0..200 {
         let mut v = [0.0f32; 8];
         v[0] = 1.0;
         for slot in &mut v[1..] {
