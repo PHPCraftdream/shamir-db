@@ -90,7 +90,7 @@ async fn verify_detects_orphan_regular_index_entry() {
     let mut posting_key = key.to_vec();
     posting_key.extend_from_slice(fake_record_id.as_bytes());
     info_store
-        .set(bytes::Bytes::from(posting_key), bytes::Bytes::new())
+        .set(bytes::Bytes::from(posting_key).into(), bytes::Bytes::new())
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn repair_heals_orphan_index_entry() {
     let mut posting_key = key.to_vec();
     posting_key.extend_from_slice(fake.as_bytes());
     info_store
-        .set(bytes::Bytes::from(posting_key), bytes::Bytes::new())
+        .set(bytes::Bytes::from(posting_key).into(), bytes::Bytes::new())
         .await
         .unwrap();
 
@@ -436,7 +436,7 @@ async fn doctor_lens_parity_mixed_indexed_types() {
         let mut posting_key = key.to_vec();
         posting_key.extend_from_slice(fake.as_bytes());
         info_store
-            .set(bytes::Bytes::from(posting_key), bytes::Bytes::new())
+            .set(bytes::Bytes::from(posting_key).into(), bytes::Bytes::new())
             .await
             .unwrap();
     }

@@ -126,7 +126,7 @@ async fn old_full_blob_persist(
     }
     let bytes = bincode::to_bytes(&entries).unwrap();
     store
-        .set(MetaKey::Internals.as_record_id().to_bytes(), bytes)
+        .set(MetaKey::Internals.as_record_id().to_bytes().into(), bytes)
         .await?;
     Ok(())
 }

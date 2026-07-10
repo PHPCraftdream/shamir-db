@@ -48,7 +48,7 @@ async fn commit_advances_last_committed() {
     let mut tx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
+    staging.set(Bytes::from_static(b"k").into(), Bytes::from_static(b"v"));
     tx.write_set.insert(2, staging);
     let outcome = commit_tx(tx, &repo).await.unwrap();
 
@@ -71,7 +71,7 @@ async fn commit_writes_wal_entry() {
     let mut tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
+    staging.set(Bytes::from_static(b"k").into(), Bytes::from_static(b"v"));
     tx.write_set.insert(3, staging);
     let _ = commit_tx(tx, &repo).await.unwrap();
 
@@ -95,7 +95,7 @@ async fn commit_two_txs_monotonic_versions() {
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut s = StagingStore::new(data_store);
         let kb = Bytes::from_static(k);
-        s.set(kb, Bytes::from_static(b"v"));
+        s.set(kb.into(), Bytes::from_static(b"v"));
         s
     };
 
@@ -157,18 +157,27 @@ async fn commit_phase5_applies_write_set_to_base_store() {
     let mut tx = TxContext::new(TxId::new(100), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"rid_1"), Bytes::from_static(b"payload"));
+    staging.set(
+        Bytes::from_static(b"rid_1").into(),
+        Bytes::from_static(b"payload"),
+    );
     tx.write_set.insert(42, staging);
 
     assert!(
-        data_store.get(Bytes::from_static(b"rid_1")).await.is_err(),
+        data_store
+            .get(Bytes::from_static(b"rid_1").into())
+            .await
+            .is_err(),
         "data_store must not have the key before commit"
     );
 
     let outcome = commit_tx(tx, &repo).await.unwrap();
     assert!(outcome.commit_version > 0);
 
-    let got = data_store.get(Bytes::from_static(b"rid_1")).await.unwrap();
+    let got = data_store
+        .get(Bytes::from_static(b"rid_1").into())
+        .await
+        .unwrap();
     assert_eq!(got, Bytes::from_static(b"payload"));
 }
 
@@ -181,21 +190,21 @@ async fn commit_applies_multiple_tables_atomically() {
     let s2: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     let mut st1 = StagingStore::new(Arc::clone(&s1));
-    st1.set(Bytes::from_static(b"a"), Bytes::from_static(b"1"));
+    st1.set(Bytes::from_static(b"a").into(), Bytes::from_static(b"1"));
     tx.write_set.insert(1, st1);
 
     let mut st2 = StagingStore::new(Arc::clone(&s2));
-    st2.set(Bytes::from_static(b"b"), Bytes::from_static(b"2"));
+    st2.set(Bytes::from_static(b"b").into(), Bytes::from_static(b"2"));
     tx.write_set.insert(2, st2);
 
     let _ = commit_tx(tx, &repo).await.unwrap();
 
     assert_eq!(
-        s1.get(Bytes::from_static(b"a")).await.unwrap(),
+        s1.get(Bytes::from_static(b"a").into()).await.unwrap(),
         Bytes::from_static(b"1")
     );
     assert_eq!(
-        s2.get(Bytes::from_static(b"b")).await.unwrap(),
+        s2.get(Bytes::from_static(b"b").into()).await.unwrap(),
         Bytes::from_static(b"2")
     );
 }
@@ -349,8 +358,8 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
 
     let rid_set = RecordId::new();
     let rid_del = RecordId::new();
-    staging.set(rid_set.to_bytes(), Bytes::from_static(b"v"));
-    staging.remove(rid_del.to_bytes());
+    staging.set(rid_set.to_bytes().into(), Bytes::from_static(b"v"));
+    staging.remove(rid_del.to_bytes().into());
     tx.write_set.insert(7, staging);
 
     let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
@@ -565,7 +574,7 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     let staged = |k: &'static [u8]| {
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut s = StagingStore::new(data_store);
-        s.set(Bytes::from_static(k), Bytes::from_static(b"v"));
+        s.set(Bytes::from_static(k).into(), Bytes::from_static(b"v"));
         s
     };
 
@@ -698,7 +707,7 @@ async fn p2c_disjoint_table_commits_run_in_parallel() {
         let mut tx = TxContext::new(TxId::new(tx_id), 0, 0, IsolationLevel::Snapshot);
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut staging = StagingStore::new(data_store);
-        staging.set(Bytes::from_static(key), Bytes::from_static(b"v"));
+        staging.set(Bytes::from_static(key).into(), Bytes::from_static(b"v"));
         tx.write_set.insert(table_token, staging);
         tx
     };
@@ -731,7 +740,7 @@ async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
         let mut tx = TxContext::new(TxId::new(tx_id), 0, 0, IsolationLevel::Snapshot);
         let mut staging = StagingStore::new(Arc::clone(&data_store));
         staging.set(
-            Bytes::from_static(b"same_key"),
+            Bytes::from_static(b"same_key").into(),
             Bytes::from(format!("v{}", tx_id)),
         );
         tx.write_set.insert(42, staging);
@@ -751,7 +760,7 @@ async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
 
     // The data store has one of the two values (last-writer-wins).
     let got = data_store
-        .get(Bytes::from_static(b"same_key"))
+        .get(Bytes::from_static(b"same_key").into())
         .await
         .unwrap();
     assert!(

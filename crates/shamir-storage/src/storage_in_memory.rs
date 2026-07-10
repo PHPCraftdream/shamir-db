@@ -103,7 +103,7 @@ impl Default for InMemoryStore {
 impl Store for InMemoryStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let id = RecordId::new();
-        let key = RecordKey::copy_from_slice(id.as_bytes());
+        let key = RecordKey::from_slice(id.as_bytes());
 
         // TreeIndex::insert returns Err((k, v)) on duplicate key.
         match self.data.insert(key.clone(), value) {
@@ -189,7 +189,12 @@ impl Store for InMemoryStore {
                     let g = scc::ebr::Guard::new();
                     let iter: Box<dyn Iterator<Item = (&RecordKey, &Bytes)> + '_> =
                         match &resume_key {
-                            Some(lo) => Box::new(data.range(lo.clone().., &g)),
+                            // Query type is `RecordKey` (the tree's key type);
+                            // convert the `Bytes` resume cursor into a
+                            // byte-identical `RecordKey` lower bound.
+                            Some(lo) => {
+                                Box::new(data.range(RecordKey::from(lo.clone()).., &g))
+                            }
                             None => Box::new(data.iter(&g)),
                         };
                     let mut collected = Vec::with_capacity(batch_size);
@@ -217,7 +222,9 @@ impl Store for InMemoryStore {
                     break;
                 }
                 // Set resume key to last entry in this batch for next iteration.
-                resume_key = Some(batch.last().unwrap().0.clone());
+                // Boundary conversion KeyBytes -> Bytes to feed the next range's
+                // lower bound (resume_key is the Bytes-typed range cursor).
+                resume_key = Some(Bytes::from(batch.last().unwrap().0.clone()));
                 first_batch = false;
                 yield Ok(batch);
             }
@@ -233,7 +240,7 @@ impl Store for InMemoryStore {
         let entries: Vec<(RecordKey, Bytes)> = {
             let g = scc::ebr::Guard::new();
             self.data
-                .range(prefix.clone().., &g)
+                .range(RecordKey::from(prefix.clone()).., &g)
                 .take_while(|(k, _)| k.starts_with(&prefix[..]))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()

@@ -104,7 +104,7 @@ fn bench_get_cache_hit(h: &mut Harness, store: Arc<CachedStore>) {
     // Seed one key via transact(Set) — the exact write path the audit
     // flags. After the commit the key is in the cache (the fix).
     let key = rt().block_on(async {
-        let k = RecordKey::from_static(b"raw-hit-key");
+        let k = RecordKey::from_slice(b"raw-hit-key");
         store_dyn
             .transact(vec![KvOp::Set(k.clone(), make_value(0))])
             .await

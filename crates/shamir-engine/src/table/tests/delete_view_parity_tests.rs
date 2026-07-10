@@ -62,7 +62,7 @@ async fn seed_indexed_record(tbl: &TableManager) -> (RecordId, Bytes) {
     m.insert(score_k.clone(), InnerValue::Int(42));
 
     let rid = tbl.insert(&InnerValue::Map(m)).await.unwrap();
-    let raw_bytes = tbl.data_store().get(rid.to_bytes()).await.unwrap();
+    let raw_bytes = tbl.data_store().get(rid.to_bytes().into()).await.unwrap();
     (rid, raw_bytes)
 }
 
@@ -384,10 +384,10 @@ async fn delete_tx_stages_remove_posting_for_legacy_index() {
     for (_, op) in tx.index_write_set {
         match op {
             shamir_tx::IndexWriteOp::SetPosting { key, value } => {
-                tbl.info_store().set(key, value).await.unwrap();
+                tbl.info_store().set(key.into(), value).await.unwrap();
             }
             shamir_tx::IndexWriteOp::RemovePosting { key } => {
-                let _ = tbl.info_store().remove(key).await;
+                let _ = tbl.info_store().remove(key.into()).await;
             }
             shamir_tx::IndexWriteOp::BumpFtsStats { .. } => {}
         }

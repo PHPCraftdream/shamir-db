@@ -66,7 +66,7 @@ async fn async_commit_data_visible_immediately() {
         .unwrap();
 
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body);
+    staging.set(rid.to_bytes().into(), body);
 
     let mut tx = TxContext::new(
         TxId::new(ASYNC_INJECT_TX_ID),
@@ -118,7 +118,7 @@ async fn async_commit_index_converges_after_tail() {
         .to_bytes()
         .unwrap();
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body);
+    staging.set(rid.to_bytes().into(), body);
 
     let posting_key = Bytes::from_static(b"async_posting_k");
     let posting_val = Bytes::from_static(b"async_posting_v");
@@ -155,7 +155,7 @@ async fn async_commit_index_converges_after_tail() {
 
     let observed = tbl
         .info_store()
-        .get(posting_key)
+        .get(posting_key.into())
         .await
         .expect("secondary-index posting must be present after the tail finishes");
     assert_eq!(observed, posting_val);
@@ -178,7 +178,7 @@ async fn async_commit_background_failure_is_recovered() {
         .to_bytes()
         .unwrap();
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body);
+    staging.set(rid.to_bytes().into(), body);
 
     let posting_key = Bytes::from_static(b"async_recover_posting_k");
     let posting_val = Bytes::from_static(b"async_recover_posting_v");
@@ -240,7 +240,7 @@ async fn async_commit_background_failure_is_recovered() {
     let _count = repo.recover_v2_inflight().await.unwrap();
     let recovered = tbl
         .info_store()
-        .get(posting_key)
+        .get(posting_key.into())
         .await
         .expect("recovery must materialize the deferred index posting");
     assert_eq!(recovered, posting_val);
@@ -260,7 +260,7 @@ async fn sync_default_mode_returns_no_background_handle() {
     let rid = RecordId::new();
     let body = InnerValue::Str("sync-default".into()).to_bytes().unwrap();
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body);
+    staging.set(rid.to_bytes().into(), body);
 
     let posting_key = Bytes::from_static(b"sync_default_posting_k");
     let posting_val = Bytes::from_static(b"sync_default_posting_v");
@@ -300,7 +300,7 @@ async fn sync_default_mode_returns_no_background_handle() {
         .expect("data must be visible immediately in sync mode");
     let posted = tbl
         .info_store()
-        .get(posting_key)
+        .get(posting_key.into())
         .await
         .expect("index posting must be visible immediately in sync mode");
     assert_eq!(posted, posting_val);

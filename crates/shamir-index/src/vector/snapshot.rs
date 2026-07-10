@@ -158,14 +158,15 @@ fn chunk_key(keyspace: &str, gen: u32, section: &str, idx: usize) -> RecordKey {
         idx = idx,
         width = CHUNK_IDX_WIDTH,
     ))
+    .into()
 }
 
 fn sidecar_key(keyspace: &str, gen: u32) -> RecordKey {
-    Bytes::from(format!("{ks}.g{gen}.sidecar", ks = keyspace))
+    Bytes::from(format!("{ks}.g{gen}.sidecar", ks = keyspace)).into()
 }
 
 fn manifest_key(keyspace: &str) -> RecordKey {
-    Bytes::from(format!("{ks}.manifest", ks = keyspace))
+    Bytes::from(format!("{ks}.manifest", ks = keyspace)).into()
 }
 
 // `pub(crate)` test-only accessors — the codec owns the keyspace layout, so
@@ -1153,13 +1154,14 @@ fn delta_chunk_key(keyspace: &str, idx: u64) -> RecordKey {
         idx = idx,
         width = DELTA_CHUNK_IDX_WIDTH,
     ))
+    .into()
 }
 
 /// Prefix used by `scan_prefix_stream` to enumerate every delta chunk in a
 /// keyspace (across all generations — the manifest's `delta_applied_upto`
 /// filters which ones to apply). `<keyspace>.delta.`
 fn delta_scan_prefix(keyspace: &str) -> RecordKey {
-    Bytes::from(format!("{ks}.delta.", ks = keyspace))
+    Bytes::from(format!("{ks}.delta.", ks = keyspace)).into()
 }
 
 /// Append a delta chunk (`Vec<DeltaOp>`) to the info store under `keyspace`
@@ -1218,10 +1220,10 @@ pub async fn replay_delta(
 ) -> Result<u64, SnapshotError> {
     use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
     let prefix = delta_scan_prefix(keyspace);
-    let mut stream = store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+    let mut stream = store.scan_prefix_stream(prefix.into(), MAINT_SCAN_BATCH);
     let mut highest_seen: u64 = delta_applied_upto;
     while let Some(batch_res) = stream.next().await {
-        let batch: Vec<(Bytes, Bytes)> = batch_res?;
+        let batch: Vec<(RecordKey, Bytes)> = batch_res?;
         for (key, val) in batch {
             // Parse the trailing decimal index off the key. The key layout
             // is `<keyspace>.delta.NNNNNNNNNN`; the chunk index is the
@@ -1337,10 +1339,10 @@ pub async fn highest_delta_index(
 ) -> Result<u64, SnapshotError> {
     use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
     let prefix = delta_scan_prefix(keyspace);
-    let mut stream = store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+    let mut stream = store.scan_prefix_stream(prefix.into(), MAINT_SCAN_BATCH);
     let mut highest: u64 = 0;
     while let Some(batch_res) = stream.next().await {
-        let batch: Vec<(Bytes, Bytes)> = batch_res?;
+        let batch: Vec<(RecordKey, Bytes)> = batch_res?;
         for (key, _val) in batch {
             let key_bytes: &[u8] = key.as_ref();
             let key_str = match std::str::from_utf8(key_bytes) {

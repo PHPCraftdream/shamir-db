@@ -26,7 +26,11 @@ use crate::version_codec::encode_version_key;
 /// Returns the bytes as written (empty `Bytes` for a tombstone), or `None`
 /// when the physical key is absent from the durable log.
 async fn history_raw(mvcc: &crate::mvcc_store::MvccStore, key: &[u8], v: u64) -> Option<Bytes> {
-    match mvcc.history_store().get(encode_version_key(key, v)).await {
+    match mvcc
+        .history_store()
+        .get(encode_version_key(key, v).into())
+        .await
+    {
         Ok(val) => Some(val),
         Err(shamir_storage::error::DbError::NotFound(_)) => None,
         Err(e) => panic!("unexpected history error: {e:?}"),
@@ -124,9 +128,15 @@ async fn tx_apply_committed_overlay_matches_history() {
     let commit_version = gate.assign_next_version();
 
     let ops = vec![
-        KvOp::Set(Bytes::from_static(b"s1"), Bytes::from_static(b"set-1")),
-        KvOp::Set(Bytes::from_static(b"s2"), Bytes::from_static(b"set-2")),
-        KvOp::Remove(Bytes::from_static(b"d1")),
+        KvOp::Set(
+            Bytes::from_static(b"s1").into(),
+            Bytes::from_static(b"set-1"),
+        ),
+        KvOp::Set(
+            Bytes::from_static(b"s2").into(),
+            Bytes::from_static(b"set-2"),
+        ),
+        KvOp::Remove(Bytes::from_static(b"d1").into()),
     ];
     mvcc.apply_committed_ops(ops.clone(), commit_version)
         .await
@@ -169,7 +179,7 @@ async fn overlay_serves_read_after_history_removed() {
     // Yank the durable entry straight out of history. If the read path still
     // consulted history it would now see nothing; the overlay must cover it.
     mvcc.history_store()
-        .remove(encode_version_key(b"k", v))
+        .remove(encode_version_key(b"k", v).into())
         .await
         .unwrap();
     // Sanity: history really is empty for this version now.
@@ -201,14 +211,14 @@ async fn overlay_serves_tx_read_after_history_removed() {
     let commit_version = gate.assign_next_version();
     let val = Bytes::from_static(b"tx-overlay-only");
     mvcc.apply_committed_ops(
-        vec![KvOp::Set(Bytes::from_static(b"tk"), val.clone())],
+        vec![KvOp::Set(Bytes::from_static(b"tk").into(), val.clone())],
         commit_version,
     )
     .await
     .unwrap();
 
     mvcc.history_store()
-        .remove(encode_version_key(b"tk", commit_version))
+        .remove(encode_version_key(b"tk", commit_version).into())
         .await
         .unwrap();
     assert!(
@@ -239,7 +249,7 @@ async fn overlay_serves_tombstone_after_history_removed() {
 
     // Remove the durable tombstone. The overlay tombstone must still suppress.
     mvcc.history_store()
-        .remove(encode_version_key(b"k", dv))
+        .remove(encode_version_key(b"k", dv).into())
         .await
         .unwrap();
     assert!(

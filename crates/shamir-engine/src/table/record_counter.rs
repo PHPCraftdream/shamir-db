@@ -172,7 +172,7 @@ impl RecordCounter {
         let _ = cell
             .get_or_init(|| async move {
                 let key_bytes = count_key().to_bytes();
-                let initial: u64 = match info_store.get(key_bytes).await {
+                let initial: u64 = match info_store.get(key_bytes.into()).await {
                     Ok(bytes) => bincode::from_bytes(&bytes).unwrap_or(0),
                     Err(_) => 0,
                 };
@@ -198,7 +198,7 @@ impl RecordCounter {
         let key_bytes = count_key().to_bytes();
         let bytes = bincode::to_bytes(&count)
             .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
-        self.info_store.set(key_bytes, bytes).await?;
+        self.info_store.set(key_bytes.into(), bytes).await?;
         Ok(())
     }
 }

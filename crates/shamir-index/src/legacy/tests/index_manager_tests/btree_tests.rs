@@ -148,7 +148,7 @@ async fn test_delete_last_record_removes_index_key() {
     let index_key = IndexRecordKey::new(false, 1001)
         .with_values(&[&InnerValue::Str("unique_value".to_string())])
         .to_bytes();
-    let store_result = info_store.get(index_key).await;
+    let store_result = info_store.get(index_key.into()).await;
     assert!(
         matches!(
             store_result,

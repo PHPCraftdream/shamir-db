@@ -74,7 +74,7 @@ async fn a8_referenced_id_above_hwm_recorded_in_delta() {
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     let staged_bytes = map_bytes_with_key(foo_id);
-    staging.set(Bytes::from_static(b"k"), staged_bytes);
+    staging.set(Bytes::from_static(b"k").into(), staged_bytes);
     let mut tx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
     tx.write_set.insert(token, staging);
 
@@ -120,7 +120,7 @@ async fn a8_fast_path_first_interner_still_recorded() {
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     let staged_bytes = map_bytes_with_key(overlay_id);
-    staging.set(Bytes::from_static(b"k"), staged_bytes);
+    staging.set(Bytes::from_static(b"k").into(), staged_bytes);
     let mut tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
     tx.interner_overlay
         .insert("brand_new".to_string(), overlay_id)
@@ -176,7 +176,7 @@ async fn a8_no_spurious_delta_for_persisted_ids() {
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     let staged_bytes = map_bytes_with_key(persisted_id);
-    staging.set(Bytes::from_static(b"k"), staged_bytes);
+    staging.set(Bytes::from_static(b"k").into(), staged_bytes);
     let mut tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
     tx.write_set.insert(token, staging);
 

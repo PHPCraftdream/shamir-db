@@ -34,11 +34,11 @@ async fn test_create_unique_index_with_unique_data() {
     let id2 = RecordId::new();
 
     data_store
-        .set(id1.to_bytes(), value1.to_bytes().unwrap())
+        .set(id1.to_bytes().into(), value1.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value2.to_bytes().unwrap())
+        .set(id2.to_bytes().into(), value2.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -60,15 +60,15 @@ async fn test_create_unique_index_with_duplicate_data_fails() {
     let id3 = RecordId::new();
 
     data_store
-        .set(id1.to_bytes(), value.to_bytes().unwrap())
+        .set(id1.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value.to_bytes().unwrap())
+        .set(id2.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id3.to_bytes(), value.to_bytes().unwrap())
+        .set(id3.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -630,11 +630,11 @@ async fn test_composite_unique_index_creation_fails_with_duplicates() {
     let id1 = RecordId::new();
     let id2 = RecordId::new();
     data_store
-        .set(id1.to_bytes(), value.to_bytes().unwrap())
+        .set(id1.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value.to_bytes().unwrap())
+        .set(id2.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -676,7 +676,7 @@ async fn test_composite_unique_index_creation_succeeds_with_unique_data() {
     for v in [&value1, &value2, &value3] {
         let id = RecordId::new();
         data_store
-            .set(id.to_bytes(), v.to_bytes().unwrap())
+            .set(id.to_bytes().into(), v.to_bytes().unwrap())
             .await
             .unwrap();
     }

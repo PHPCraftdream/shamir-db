@@ -71,7 +71,7 @@ async fn set_versioned_writes_ts_atomically() {
     assert_eq!(ts_entries[0].1, frozen_ts);
 
     // Cross-check via direct history.get on the ts_key.
-    let raw_ts = mvcc.history_store().get(ts_key(v)).await.unwrap();
+    let raw_ts = mvcc.history_store().get(ts_key(v).into()).await.unwrap();
     let ts_bytes: [u8; 8] = raw_ts.as_ref().try_into().unwrap();
     assert_eq!(u64::from_le_bytes(ts_bytes), frozen_ts);
 }
@@ -167,8 +167,14 @@ async fn write_committed_to_history_ts_atomic() {
 
     let commit_version = gate.assign_next_version();
     let ops = vec![
-        KvOp::Set(Bytes::from_static(b"hk1"), Bytes::from_static(b"hv1")),
-        KvOp::Set(Bytes::from_static(b"hk2"), Bytes::from_static(b"hv2")),
+        KvOp::Set(
+            Bytes::from_static(b"hk1").into(),
+            Bytes::from_static(b"hv1"),
+        ),
+        KvOp::Set(
+            Bytes::from_static(b"hk2").into(),
+            Bytes::from_static(b"hv2"),
+        ),
     ];
 
     // Simulate the ack path stamping the pending ts.

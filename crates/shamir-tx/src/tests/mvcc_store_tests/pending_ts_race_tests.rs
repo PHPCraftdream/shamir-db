@@ -31,7 +31,11 @@ fn make_mvcc() -> (MvccStore, Arc<RepoTxGate>) {
 /// Read the durable commit-ts recorded for `version` in the history store.
 /// Returns `None` if no ts-key entry exists for that version.
 async fn durable_ts_of(mvcc: &MvccStore, version: u64) -> Option<u64> {
-    let raw = mvcc.history_store().get(ts_key(version)).await.ok()?;
+    let raw = mvcc
+        .history_store()
+        .get(ts_key(version).into())
+        .await
+        .ok()?;
     if raw.len() != 8 {
         return None;
     }
@@ -77,7 +81,7 @@ async fn race_batch_then_single_keeps_commit_ts() {
 
     let v = gate.assign_next_version();
     let ops = vec![KvOp::Set(
-        Bytes::from_static(b"rk"),
+        Bytes::from_static(b"rk").into(),
         Bytes::from_static(b"rv"),
     )];
 
@@ -123,7 +127,7 @@ async fn race_single_then_batch_keeps_commit_ts() {
 
     let v = gate.assign_next_version();
     let ops = vec![KvOp::Set(
-        Bytes::from_static(b"rk2"),
+        Bytes::from_static(b"rk2").into(),
         Bytes::from_static(b"rv2"),
     )];
 
@@ -163,7 +167,7 @@ async fn cold_recovery_unstamped_version_falls_back_to_now() {
 
     let v = gate.assign_next_version();
     let ops = vec![KvOp::Set(
-        Bytes::from_static(b"ck"),
+        Bytes::from_static(b"ck").into(),
         Bytes::from_static(b"cv"),
     )];
 
@@ -180,7 +184,7 @@ async fn cold_recovery_unstamped_version_falls_back_to_now() {
     // And the same holds for the batched path.
     let v2 = gate.assign_next_version();
     let ops2 = vec![KvOp::Set(
-        Bytes::from_static(b"ck2"),
+        Bytes::from_static(b"ck2").into(),
         Bytes::from_static(b"cv2"),
     )];
     let recovery_ts2: u64 = recovery_ts + 5_000;
@@ -208,7 +212,7 @@ async fn single_drain_consumes_then_gc_reclaims_stamp() {
 
     let v = gate.assign_next_version();
     let ops = vec![KvOp::Set(
-        Bytes::from_static(b"sk"),
+        Bytes::from_static(b"sk").into(),
         Bytes::from_static(b"sv"),
     )];
     mvcc.apply_committed_visible(&ops, v);
@@ -245,7 +249,7 @@ async fn race_then_gc_reclaims_stamp() {
 
     let v = gate.assign_next_version();
     let ops = vec![KvOp::Set(
-        Bytes::from_static(b"gk"),
+        Bytes::from_static(b"gk").into(),
         Bytes::from_static(b"gv"),
     )];
     mvcc.apply_committed_visible(&ops, v);

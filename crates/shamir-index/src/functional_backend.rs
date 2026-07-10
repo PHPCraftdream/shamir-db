@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use fxhash::FxHasher;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
@@ -114,7 +115,7 @@ impl FunctionalBackend {
     async fn scan_postings_by_prefix(
         &self,
         prefix: &[u8],
-    ) -> Result<Vec<(Bytes, Bytes)>, IndexError> {
+    ) -> Result<Vec<(RecordKey, Bytes)>, IndexError> {
         let mut stream = self
             .store
             .scan_prefix_stream(Bytes::copy_from_slice(prefix), 1024);

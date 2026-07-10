@@ -29,7 +29,7 @@ async fn test_cached_store_flush_via_dyn_store() {
     // we issue many in a tight loop to widen the window.
     let mut keys = Vec::new();
     for _ in 0..200 {
-        let k = RecordKey::copy_from_slice(RecordId::new().as_bytes());
+        let k = RecordKey::from_slice(RecordId::new().as_bytes());
         cached_dyn
             .set(k.clone(), Bytes::from_static(b"async-write"))
             .await
@@ -93,7 +93,10 @@ async fn test_cached_store_async_pending_writes() {
     for i in 0..10 {
         let key = format!("key_{}", i);
         let value = Bytes::from(key.clone());
-        cached.set(key.into(), value).await.unwrap();
+        cached
+            .set(RecordKey::from(key.into_bytes()), value)
+            .await
+            .unwrap();
     }
 
     // Should have some pending writes
@@ -117,7 +120,7 @@ async fn test_cached_store_sync_no_pending() {
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
     cached
-        .set(Bytes::from("key"), Bytes::from("value"))
+        .set(Bytes::from("key").into(), Bytes::from("value"))
         .await
         .unwrap();
 
@@ -206,7 +209,7 @@ async fn test_cached_set_mirrors_to_inner() {
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
     // Set new value
-    let key = Bytes::from(b"test_key".to_vec());
+    let key = RecordKey::from(b"test_key".to_vec());
     let value1 = InnerValue::Str("new_value".to_string());
     let created = cached
         .set(key.clone(), value1.to_bytes().unwrap())
@@ -322,7 +325,10 @@ async fn test_cached_concurrent_access() {
         join_set.spawn(async move {
             let key = format!("key_{}", i);
             let value = Bytes::from(key.clone());
-            store.set(key.into(), value).await.unwrap();
+            store
+                .set(RecordKey::from(key.into_bytes()), value)
+                .await
+                .unwrap();
         });
     }
 
@@ -331,7 +337,7 @@ async fn test_cached_concurrent_access() {
         let store = cached.clone();
         join_set.spawn(async move {
             let key = format!("key_{}", i);
-            let _ = store.get(key.into()).await;
+            let _ = store.get(RecordKey::from(key.into_bytes())).await;
         });
     }
 
@@ -350,7 +356,7 @@ async fn test_cached_concurrent_access() {
 
 #[tokio::test]
 async fn raw_backend_unwraps_cached() {
-    let seed_key = Bytes::from_static(b"cached-seed-key");
+    let seed_key = RecordKey::from_slice(b"cached-seed-key");
     let seed_val = Bytes::from_static(b"cached-seed-val");
 
     let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -379,7 +385,10 @@ async fn test_cached_async_mode_persists_after_flush() {
     for i in 0..5 {
         let key = format!("key_{}", i);
         let value = Bytes::from(key.clone());
-        cached.set(key.into(), value).await.unwrap();
+        cached
+            .set(RecordKey::from(key.into_bytes()), value)
+            .await
+            .unwrap();
     }
 
     // Data is in cache.
@@ -416,7 +425,7 @@ async fn test_transact_set_populates_cache() {
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
     assert_eq!(cached.cache_size(), 0);
 
-    let key = Bytes::from_static(b"raw-key");
+    let key = RecordKey::from_slice(b"raw-key");
     let value = Bytes::from_static(b"fresh-value");
 
     cached
@@ -450,7 +459,7 @@ async fn test_transact_set_updates_existing_cached_entry() {
     let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
-    let key = Bytes::from_static(b"upsert-key");
+    let key = RecordKey::from_slice(b"upsert-key");
     let old = Bytes::from_static(b"old-value");
     let fresh = Bytes::from_static(b"fresh-value");
 
@@ -485,7 +494,7 @@ async fn test_transact_remove_evicts_cache() {
     let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
-    let key = Bytes::from_static(b"del-key");
+    let key = RecordKey::from_slice(b"del-key");
     cached
         .set(key.clone(), Bytes::from_static(b"v"))
         .await
@@ -515,8 +524,8 @@ async fn test_transact_mixed_set_remove() {
     let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
-    let keep_key = Bytes::from_static(b"keep-key");
-    let del_key = Bytes::from_static(b"del-key");
+    let keep_key = RecordKey::from_slice(b"keep-key");
+    let del_key = RecordKey::from_slice(b"del-key");
 
     // Seed both.
     cached
@@ -565,7 +574,7 @@ async fn test_transact_set_many_populates_all() {
     let ops: Vec<KvOp> = (0..50)
         .map(|i| {
             KvOp::Set(
-                Bytes::from(format!("batch-key-{:#04}", i)),
+                Bytes::from(format!("batch-key-{:#04}", i)).into(),
                 Bytes::from(format!("val-{}", i)),
             )
         })
@@ -576,7 +585,7 @@ async fn test_transact_set_many_populates_all() {
     // All 50 keys are now in the cache (populate, not invalidate).
     assert_eq!(cached.cache_size(), 50);
     for i in 0..50 {
-        let k = Bytes::from(format!("batch-key-{:#04}", i));
+        let k: RecordKey = Bytes::from(format!("batch-key-{:#04}", i)).into();
         let v = cached
             .cache()
             .peek_with(&k, |_, v| v.clone())
@@ -600,7 +609,7 @@ async fn test_iter_stream_full_results_sorted() {
 
     // Seed 23 keys with sortable byte keys (pad so lex order is stable).
     for i in 0..23u32 {
-        let key = Bytes::from(format!("key-{:05}", i));
+        let key: RecordKey = Bytes::from(format!("key-{:05}", i)).into();
         cached
             .set(key, Bytes::from(i.to_be_bytes().to_vec()))
             .await
@@ -636,7 +645,10 @@ async fn test_iter_stream_batch_larger_than_corpus() {
 
     for i in 0..3u32 {
         cached
-            .set(Bytes::from(format!("k{}", i)), Bytes::from_static(b"v"))
+            .set(
+                Bytes::from(format!("k{}", i)).into(),
+                Bytes::from_static(b"v"),
+            )
             .await
             .unwrap();
     }
@@ -669,7 +681,10 @@ async fn test_iter_stream_exact_batch_multiple() {
 
     for i in 0..10u32 {
         cached
-            .set(Bytes::from(format!("k{:02}", i)), Bytes::from_static(b"v"))
+            .set(
+                Bytes::from(format!("k{:02}", i)).into(),
+                Bytes::from_static(b"v"),
+            )
             .await
             .unwrap();
     }
@@ -700,7 +715,7 @@ async fn test_scan_prefix_stream_full_results_sorted_and_bounded() {
     for i in 0..7u32 {
         cached
             .set(
-                Bytes::from(format!("pfxA-{:03}", i)),
+                Bytes::from(format!("pfxA-{:03}", i)).into(),
                 Bytes::from_static(b"v"),
             )
             .await
@@ -709,7 +724,7 @@ async fn test_scan_prefix_stream_full_results_sorted_and_bounded() {
     for i in 0..4u32 {
         cached
             .set(
-                Bytes::from(format!("pfxB-{:03}", i)),
+                Bytes::from(format!("pfxB-{:03}", i)).into(),
                 Bytes::from_static(b"v"),
             )
             .await
@@ -717,7 +732,10 @@ async fn test_scan_prefix_stream_full_results_sorted_and_bounded() {
     }
     // `pfxC` sorts after `pfxA` — must NOT leak into the pfxA scan.
     cached
-        .set(Bytes::from_static(b"pfxC-000"), Bytes::from_static(b"v"))
+        .set(
+            Bytes::from_static(b"pfxC-000").into(),
+            Bytes::from_static(b"v"),
+        )
         .await
         .unwrap();
 
@@ -754,7 +772,7 @@ async fn test_scan_prefix_stream_early_termination_first_batch() {
     for i in 0..100u32 {
         cached
             .set(
-                Bytes::from(format!("pfx-{:04}", i)),
+                Bytes::from(format!("pfx-{:04}", i)).into(),
                 Bytes::from_static(b"v"),
             )
             .await
@@ -782,7 +800,7 @@ async fn test_scan_prefix_stream_no_matches() {
     let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
     cached
-        .set(Bytes::from_static(b"aaa"), Bytes::from_static(b"v"))
+        .set(Bytes::from_static(b"aaa").into(), Bytes::from_static(b"v"))
         .await
         .unwrap();
 

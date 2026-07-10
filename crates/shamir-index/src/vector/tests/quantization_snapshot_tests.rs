@@ -361,11 +361,14 @@ async fn migration_v1_snapshot_loads_back_compat() {
 
     // Also patch the manifest's format_version to 1.
     let manifest_k: bytes::Bytes = format!("{}.manifest", KEYSPACE).into();
-    let manifest_bytes = store.get(manifest_k.clone()).await.unwrap();
+    let manifest_bytes = store.get(manifest_k.clone().into()).await.unwrap();
     let mut manifest: snapshot::SnapshotManifest = MetaEnvelope::open(&manifest_bytes).unwrap();
     manifest.format_version = 1;
     let new_manifest = MetaEnvelope::new(manifest).encode().unwrap();
-    store.set(manifest_k, new_manifest.into()).await.unwrap();
+    store
+        .set(manifest_k.into(), new_manifest.into())
+        .await
+        .unwrap();
 
     // Load must succeed (back-compat) — NOT a VersionMismatch.
     let loaded = load_snapshot(&store, KEYSPACE).await.expect("v1 must load");

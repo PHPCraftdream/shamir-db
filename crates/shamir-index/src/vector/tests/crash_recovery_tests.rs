@@ -279,7 +279,7 @@ async fn corrupt_manifest_falls_back_to_rebuild_without_panic() {
     let manifest_k = format!("{}.manifest", keyspace);
     info_store
         .set(
-            manifest_k.into(),
+            bytes::Bytes::from(manifest_k).into(),
             bytes::Bytes::from_static(b"not-a-valid-snapshot-manifest-payload-garbage"),
         )
         .await
@@ -331,7 +331,7 @@ async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
     // to the loader (snapshot.rs:621). Both must route through
     // `restore_on_open`'s warn+rebuild arm.
     let manifest_bytes = info_store
-        .get(format!("{}.manifest", keyspace).into())
+        .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
         .await
         .unwrap();
     let manifest: snapshot::SnapshotManifest = MetaEnvelope::open(&manifest_bytes).unwrap();

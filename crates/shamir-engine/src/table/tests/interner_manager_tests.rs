@@ -147,7 +147,7 @@ async fn test_interner_legacy_blob_loads_under_new_code() {
     ];
     let bytes = bincode::to_bytes(&legacy_entries).unwrap();
     store
-        .set(MetaKey::Internals.as_record_id().to_bytes(), bytes)
+        .set(MetaKey::Internals.as_record_id().to_bytes().into(), bytes)
         .await
         .unwrap();
 
@@ -232,7 +232,10 @@ async fn corrupt_delta_chunk_is_fatal() {
     let valid_chunk = vec![(InternerKey::new(1), UserKey::from_str("alpha"))];
     let chunk_key = RecordId::system("i.d000000000").to_bytes();
     store
-        .set(chunk_key.clone(), bincode::to_bytes(&valid_chunk).unwrap())
+        .set(
+            chunk_key.clone().into(),
+            bincode::to_bytes(&valid_chunk).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -240,7 +243,7 @@ async fn corrupt_delta_chunk_is_fatal() {
     let corrupt_key = RecordId::system("i.d000000001").to_bytes();
     store
         .set(
-            corrupt_key,
+            corrupt_key.into(),
             Bytes::from_static(b"NOT_VALID_BINCODE_GARBAGE"),
         )
         .await
@@ -272,7 +275,7 @@ async fn corrupt_legacy_blob_is_fatal() {
     // Write a corrupt legacy blob under MetaKey::Internals.
     store
         .set(
-            MetaKey::Internals.as_record_id().to_bytes(),
+            MetaKey::Internals.as_record_id().to_bytes().into(),
             Bytes::from_static(b"CORRUPT_LEGACY_BLOB_GARBAGE"),
         )
         .await

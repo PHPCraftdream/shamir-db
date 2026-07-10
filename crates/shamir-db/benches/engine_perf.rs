@@ -854,13 +854,13 @@ fn main() {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
+                let v = bytes::Bytes::copy_from_slice(&[0xAAu8; 80]);
                 (store, v)
             },
             |(store, v)| async move {
                 for _ in 0..2_000 {
                     let id = RecordId::new();
-                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    let k = RecordKey::from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
                 drop(store);
@@ -879,13 +879,13 @@ fn main() {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
+                let v = bytes::Bytes::copy_from_slice(&[0xAAu8; 80]);
                 (store, v)
             },
             |(store, v)| async move {
                 for _ in 0..2_000 {
                     let id = RecordId::new();
-                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    let k = RecordKey::from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
                 drop(store);
@@ -919,10 +919,10 @@ fn main() {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
+                let v = bytes::Bytes::copy_from_slice(&[0xAAu8; 80]);
                 for _ in 0..1_800 {
                     let id = RecordId::new();
-                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    let k = RecordKey::from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
                 (store, v)
@@ -932,7 +932,7 @@ fn main() {
                 // pushes past the byte cap and forces an eviction.
                 for _ in 0..200 {
                     let id = RecordId::new();
-                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    let k = RecordKey::from_slice(id.as_bytes());
                     store.set(k, v.clone()).await.unwrap();
                 }
                 drop(store);
@@ -983,9 +983,8 @@ fn main() {
                     let mut keys = Vec::with_capacity(n);
                     for i in 0..n {
                         let id = RecordId::new();
-                        let key =
-                            shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
-                        let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
+                        let key = shamir_db::storage::types::RecordKey::from_slice(id.as_bytes());
+                        let value = bytes::Bytes::from(format!("v{i}"));
                         store.set(key.clone(), value).await.unwrap();
                         keys.push(key);
                     }

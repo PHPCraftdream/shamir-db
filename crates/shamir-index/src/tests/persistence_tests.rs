@@ -67,7 +67,10 @@ async fn round_trip_with_descriptors() {
     let envelope = MetaEnvelope::new(p);
     let bytes = envelope.encode().unwrap();
     let key = meta_key_indexes();
-    store.set(key.to_bytes(), Bytes::from(bytes)).await.unwrap();
+    store
+        .set(key.to_bytes().into(), Bytes::from(bytes))
+        .await
+        .unwrap();
 
     let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
     assert_eq!(loaded.next_id, 3);
@@ -128,7 +131,10 @@ async fn legacy_rebuild_when_old_version() {
     let key = RecordId::system("_m.idx.lfv");
     let old_ver: u32 = 1;
     store
-        .set(key.to_bytes(), Bytes::from(old_ver.to_le_bytes().to_vec()))
+        .set(
+            key.to_bytes().into(),
+            Bytes::from(old_ver.to_le_bytes().to_vec()),
+        )
         .await
         .unwrap();
     assert!(

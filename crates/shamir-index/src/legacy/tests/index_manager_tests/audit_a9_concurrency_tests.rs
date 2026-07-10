@@ -44,7 +44,10 @@ async fn create_index_register_first_indexes_concurrent_write() {
     // Write it to the data store so it appears in the snapshot.
     manager
         .data_store
-        .set(existing_id.to_bytes(), existing_val.to_bytes().unwrap())
+        .set(
+            existing_id.to_bytes().into(),
+            existing_val.to_bytes().unwrap(),
+        )
         .await
         .unwrap();
 
@@ -93,7 +96,7 @@ async fn create_index_register_first_indexes_concurrent_write() {
         if let Some(irk) = build_index_key_from_record(false, name_interned, val, &index_def.paths)
         {
             let pk = build_posting_key(&irk.to_bytes(), rid);
-            posting_writes.push((pk, bytes::Bytes::new()));
+            posting_writes.push((pk.into(), bytes::Bytes::new()));
         }
     }
     if !posting_writes.is_empty() {
@@ -136,7 +139,10 @@ async fn create_index_backfill_then_register_loses_concurrent_write() {
     let existing_id = RecordId::new();
     manager
         .data_store
-        .set(existing_id.to_bytes(), existing_val.to_bytes().unwrap())
+        .set(
+            existing_id.to_bytes().into(),
+            existing_val.to_bytes().unwrap(),
+        )
         .await
         .unwrap();
 
@@ -161,7 +167,7 @@ async fn create_index_backfill_then_register_loses_concurrent_write() {
         if let Some(irk) = build_index_key_from_record(false, name_interned, val, &index_def.paths)
         {
             let pk = build_posting_key(&irk.to_bytes(), rid);
-            posting_writes.push((pk, bytes::Bytes::new()));
+            posting_writes.push((pk.into(), bytes::Bytes::new()));
         }
     }
     if !posting_writes.is_empty() {
@@ -205,7 +211,7 @@ async fn create_index_from_records_full_concurrent_write_survives() {
         let id = RecordId::new();
         manager
             .data_store
-            .set(id.to_bytes(), val.to_bytes().unwrap())
+            .set(id.to_bytes().into(), val.to_bytes().unwrap())
             .await
             .unwrap();
     }

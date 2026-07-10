@@ -127,7 +127,7 @@ async fn apply_id_remap_rewrites_write_set_bytes() {
     let mut m = TMap::default();
     m.insert(InternerKey::new(100), InnerValue::Str("v".into()));
     let val = InnerValue::Map(m);
-    let key: RecordKey = Bytes::from_static(b"k1");
+    let key: RecordKey = Bytes::from_static(b"k1").into();
     staging.set(key.clone(), val.to_bytes().unwrap());
 
     tx.write_set.insert(7, staging);
@@ -254,7 +254,7 @@ async fn staged_bytes_accumulates_across_fields() {
     // Add a write_set entry: Set("k1", "val") → 2 + 3 = 5 bytes.
     let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let staging = tx.ensure_table_staging(42, "users", base);
-    staging.set(Bytes::from_static(b"k1"), Bytes::from_static(b"val"));
+    staging.set(Bytes::from_static(b"k1").into(), Bytes::from_static(b"val"));
     let after_write = tx.staged_bytes();
     assert!(after_write > 0, "write_set should contribute");
     assert_eq!(after_write, 5);
@@ -327,7 +327,7 @@ fn make_tx_with_writes(token: u64, keys: &[&[u8]]) -> TxContext {
     let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let staging = tx.ensure_table_staging(token, "t", base);
     for k in keys {
-        staging.set(Bytes::copy_from_slice(k), Bytes::from_static(b"v"));
+        staging.set(Bytes::copy_from_slice(k).into(), Bytes::from_static(b"v"));
     }
     tx
 }

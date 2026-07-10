@@ -130,19 +130,25 @@ async fn batch_multiple_versions_single_transact() {
     // Simulate the ack-path stamping pending_ts.
     mvcc.apply_committed_visible(
         &[
-            KvOp::Set(Bytes::from_static(b"k1"), Bytes::from_static(b"v1_1")),
-            KvOp::Set(Bytes::from_static(b"k2"), Bytes::from_static(b"v2_1")),
+            KvOp::Set(
+                Bytes::from_static(b"k1").into(),
+                Bytes::from_static(b"v1_1"),
+            ),
+            KvOp::Set(
+                Bytes::from_static(b"k2").into(),
+                Bytes::from_static(b"v2_1"),
+            ),
         ],
         v1,
     );
     mvcc.apply_committed_visible(
         &[KvOp::Set(
-            Bytes::from_static(b"k1"),
+            Bytes::from_static(b"k1").into(),
             Bytes::from_static(b"v1_2"),
         )],
         v2,
     );
-    mvcc.apply_committed_visible(&[KvOp::Remove(Bytes::from_static(b"k2"))], v3);
+    mvcc.apply_committed_visible(&[KvOp::Remove(Bytes::from_static(b"k2").into())], v3);
 
     assert_eq!(store.transact_count(), 0, "no transact before batch write");
 
@@ -150,18 +156,24 @@ async fn batch_multiple_versions_single_transact() {
         (
             v1,
             vec![
-                KvOp::Set(Bytes::from_static(b"k1"), Bytes::from_static(b"v1_1")),
-                KvOp::Set(Bytes::from_static(b"k2"), Bytes::from_static(b"v2_1")),
+                KvOp::Set(
+                    Bytes::from_static(b"k1").into(),
+                    Bytes::from_static(b"v1_1"),
+                ),
+                KvOp::Set(
+                    Bytes::from_static(b"k2").into(),
+                    Bytes::from_static(b"v2_1"),
+                ),
             ],
         ),
         (
             v2,
             vec![KvOp::Set(
-                Bytes::from_static(b"k1"),
+                Bytes::from_static(b"k1").into(),
                 Bytes::from_static(b"v1_2"),
             )],
         ),
-        (v3, vec![KvOp::Remove(Bytes::from_static(b"k2"))]),
+        (v3, vec![KvOp::Remove(Bytes::from_static(b"k2").into())]),
     ];
 
     mvcc.write_committed_batch_to_history(&pass).await.unwrap();
@@ -230,12 +242,15 @@ async fn batch_matches_per_version_write() {
     let v1 = gate_batch.assign_next_version();
     let v2 = gate_batch.assign_next_version();
     let ops1 = vec![KvOp::Set(
-        Bytes::from_static(b"k1"),
+        Bytes::from_static(b"k1").into(),
         Bytes::from_static(b"val1"),
     )];
     let ops2 = vec![
-        KvOp::Set(Bytes::from_static(b"k2"), Bytes::from_static(b"val2")),
-        KvOp::Remove(Bytes::from_static(b"k1")),
+        KvOp::Set(
+            Bytes::from_static(b"k2").into(),
+            Bytes::from_static(b"val2"),
+        ),
+        KvOp::Remove(Bytes::from_static(b"k1").into()),
     ];
 
     mvcc_batch.apply_committed_visible(&ops1, v1);
@@ -275,7 +290,7 @@ async fn batch_matches_per_version_write() {
         let mut items: Vec<(Bytes, Bytes)> = Vec::new();
         while let Some(batch) = stream.next().await {
             for (k, v) in batch.unwrap() {
-                items.push((k, v));
+                items.push((k.into(), v));
             }
         }
         items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -310,14 +325,14 @@ async fn batch_seeds_cells_correctly() {
         (
             v1,
             vec![KvOp::Set(
-                Bytes::from_static(b"k1"),
+                Bytes::from_static(b"k1").into(),
                 Bytes::from_static(b"val1"),
             )],
         ),
         (
             v2,
             vec![KvOp::Set(
-                Bytes::from_static(b"k1"),
+                Bytes::from_static(b"k1").into(),
                 Bytes::from_static(b"val2"),
             )],
         ),

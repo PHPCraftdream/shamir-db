@@ -168,7 +168,7 @@ impl InternerManager {
                 //    a corrupt blob is a FATAL open error (audit §2.6).
                 let internals_id = MetaKey::Internals.as_record_id().to_bytes();
                 let mut entries: Vec<(InternerKey, UserKey)> =
-                    match info_store.get(internals_id).await {
+                    match info_store.get(internals_id.into()).await {
                         Ok(bytes) => bincode::from_bytes(&bytes).map_err(|e| {
                             shamir_storage::error::DbError::Codec(format!(
                                 "Failed to deserialize legacy interner blob (audit §2.6 — \
@@ -248,7 +248,7 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(chunk_record_id(idx).to_bytes(), bytes)
+            .set(chunk_record_id(idx).to_bytes().into(), bytes)
             .await?;
         self.next_chunk_idx.store(idx + 1, Ordering::Release);
         // `last_persisted_len` is advanced by `persist()` callers based
@@ -342,7 +342,7 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(chunk_record_id(idx).to_bytes(), bytes)
+            .set(chunk_record_id(idx).to_bytes().into(), bytes)
             .await?;
         // CRIT-2 (#436): flush the chunk write BEFORE advancing
         // `last_persisted_len`. `Store::set` above lands in a write-back

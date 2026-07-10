@@ -25,7 +25,7 @@ pub async fn save_validators_metadata(
         .map_err(|e| DbError::Internal(e.to_string()))?;
     let key = crate::meta::MetaKey::Validators.as_record_id();
     info_store
-        .set(key.to_bytes(), Bytes::from(bytes))
+        .set(key.to_bytes().into(), Bytes::from(bytes))
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?;
     Ok(())
@@ -37,7 +37,7 @@ pub async fn load_validators_metadata(
     info_store: &Arc<dyn Store>,
 ) -> Result<Option<PersistedValidators>, DbError> {
     let key = crate::meta::MetaKey::Validators.as_record_id();
-    match info_store.get(key.to_bytes()).await {
+    match info_store.get(key.to_bytes().into()).await {
         Ok(bytes) => {
             let p: PersistedValidators =
                 MetaEnvelope::open(&bytes).map_err(|e| DbError::Internal(e.to_string()))?;

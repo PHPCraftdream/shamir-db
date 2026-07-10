@@ -261,15 +261,15 @@ async fn rebuild_from_store() {
     let rec2 = make_rec(&i, &[0.0, 1.0, 0.0]);
     let rec3 = make_rec(&i, &[0.9, 0.1, 0.0]);
     store
-        .set(r1.to_bytes(), rec1.to_bytes().unwrap())
+        .set(r1.to_bytes().into(), rec1.to_bytes().unwrap())
         .await
         .unwrap();
     store
-        .set(r2.to_bytes(), rec2.to_bytes().unwrap())
+        .set(r2.to_bytes().into(), rec2.to_bytes().unwrap())
         .await
         .unwrap();
     store
-        .set(r3.to_bytes(), rec3.to_bytes().unwrap())
+        .set(r3.to_bytes().into(), rec3.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -312,7 +312,7 @@ async fn rebuild_from_store_batched_all_records_present() {
         let rid = RecordId::new();
         let rec = make_rec(&i, &[(j as f64) * 0.01, 1.0 - (j as f64) * 0.01, 0.5]);
         store
-            .set(rid.to_bytes(), rec.to_bytes().unwrap())
+            .set(rid.to_bytes().into(), rec.to_bytes().unwrap())
             .await
             .unwrap();
         rids.push(rid);

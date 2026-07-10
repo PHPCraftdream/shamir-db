@@ -38,6 +38,7 @@ use scc::TreeIndex;
 use shamir_collections::THasher;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 
 use crate::repo_tx_gate::RepoTxGate;
@@ -635,7 +636,11 @@ impl MvccStore {
             if let Some(val) = self.overlay.get(key, cur_v) {
                 return Ok(if val.is_empty() { None } else { Some(val) });
             }
-            return match self.history.get(encode_version_key(key, cur_v)).await {
+            return match self
+                .history
+                .get(encode_version_key(key, cur_v).into())
+                .await
+            {
                 Ok(val) if val.is_empty() => Ok(None),
                 Ok(val) => Ok(Some(val)),
                 Err(DbError::NotFound(_)) => Ok(None),
@@ -705,8 +710,11 @@ impl MvccStore {
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         self.history
             .transact(vec![
-                KvOp::Set(encode_version_key(&key_snapshot, new_v), value.clone()),
-                KvOp::Set(ts_key(new_v), ts_val),
+                KvOp::Set(
+                    encode_version_key(&key_snapshot, new_v).into(),
+                    value.clone(),
+                ),
+                KvOp::Set(ts_key(new_v).into(), ts_val),
             ])
             .await?;
         // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
@@ -798,8 +806,11 @@ impl MvccStore {
             new_versions.push(new_v);
             guards.push(guard);
             max_v = new_v;
-            history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
-            history_ops.push(KvOp::Set(ts_key(new_v), ts_val.clone()));
+            history_ops.push(KvOp::Set(
+                encode_version_key(key, new_v).into(),
+                value.clone(),
+            ));
+            history_ops.push(KvOp::Set(ts_key(new_v).into(), ts_val.clone()));
         }
 
         // Single batched write to the log (data + ts, atomic).
@@ -896,8 +907,11 @@ impl MvccStore {
             new_versions.push(new_v);
             guards.push(guard);
             max_v = new_v;
-            history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
-            history_ops.push(KvOp::Set(ts_key(new_v), ts_val.clone()));
+            history_ops.push(KvOp::Set(
+                encode_version_key(key, new_v).into(),
+                value.clone(),
+            ));
+            history_ops.push(KvOp::Set(ts_key(new_v).into(), ts_val.clone()));
         }
 
         // Single batched write to the log (data + ts, atomic).
@@ -963,8 +977,8 @@ impl MvccStore {
             .transact(vec![
                 // Tombstone (empty value — MessagePack records are never
                 // zero-length, so empty is unambiguously a delete).
-                KvOp::Set(encode_version_key(&key, new_v), Bytes::new()),
-                KvOp::Set(ts_key(new_v), ts_val),
+                KvOp::Set(encode_version_key(&key, new_v).into(), Bytes::new()),
+                KvOp::Set(ts_key(new_v).into(), ts_val),
             ])
             .await?;
         // Phase 3: maintain the in-memory ts-index for O(log N) as-of queries.
@@ -1083,7 +1097,7 @@ impl MvccStore {
         if let Some(val) = self.overlay.get(key, v) {
             return Ok(if val.is_empty() { None } else { Some(val) });
         }
-        match self.history.get(encode_version_key(key, v)).await {
+        match self.history.get(encode_version_key(key, v).into()).await {
             Ok(val) if val.is_empty() => Ok(None),
             Ok(val) => Ok(Some(val)),
             Err(DbError::NotFound(_)) => Ok(None),
@@ -1138,7 +1152,16 @@ impl MvccStore {
                         floor,
                         overlay,
                     } => {
-                        let stream = history.iter_stream(batch_size);
+                        // Boundary: the store now yields `RecordKey` keys; the
+                        // group-by state machine is `Bytes`-keyed throughout, so
+                        // convert each batch key back to `Bytes` (byte-identical)
+                        // at the stream boundary.
+                        let stream =
+                            futures::StreamExt::map(history.iter_stream(batch_size), |batch| {
+                                batch.map(|rows| {
+                                    rows.into_iter().map(|(k, v)| (Bytes::from(k), v)).collect()
+                                })
+                            });
                         let pin = Box::pin(stream);
                         let s = StreamingGroupByState::Streaming {
                             stream: pin,
@@ -1254,7 +1277,9 @@ impl MvccStore {
         }
 
         let mut slots: Vec<Slot> = Vec::with_capacity(len);
-        let mut miss_keys: Vec<Bytes> = Vec::new();
+        // `RecordKey` (the store `get_many` key type); `encode_version_key`
+        // produces `Bytes`, converted byte-identically at each push.
+        let mut miss_keys: Vec<RecordKey> = Vec::new();
 
         for key in keys {
             let cur_v = self.current_version(key);
@@ -1277,7 +1302,7 @@ impl MvccStore {
             // Warm miss — needs history lookup.
             let vk = encode_version_key(key, cur_v);
             let miss_idx = miss_keys.len();
-            miss_keys.push(vk);
+            miss_keys.push(vk.into());
             slots.push(Slot::HistoryMiss { miss_idx });
         }
 
@@ -1320,7 +1345,7 @@ impl MvccStore {
     /// Returns `None` if no ts entry exists (treated as "unknown age" → the
     /// age axis conservatively keeps the version).
     pub(super) async fn lookup_ts(&self, version: u64) -> Option<u64> {
-        match self.history.get(ts_key(version)).await {
+        match self.history.get(ts_key(version).into()).await {
             Ok(val) => {
                 if val.len() == 8 {
                     let bytes: [u8; 8] = val.as_ref().try_into().ok()?;

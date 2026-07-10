@@ -68,8 +68,8 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     // Mix: update existing 2, create new 2.
     let new_id1 = RecordId::new();
     let new_id2 = RecordId::new();
-    let new_k1 = Bytes::copy_from_slice(new_id1.as_bytes());
-    let new_k2 = Bytes::copy_from_slice(new_id2.as_bytes());
+    let new_k1 = RecordKey::from_slice(new_id1.as_bytes());
+    let new_k2 = RecordKey::from_slice(new_id2.as_bytes());
 
     let items = vec![
         (keys[0].clone(), Bytes::from_static(b"updated-0")),
@@ -96,7 +96,7 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
 
     // ---- remove_many --------------------------------------------------
     let missing_id = RecordId::new();
-    let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
+    let missing_k = RecordKey::from_slice(missing_id.as_bytes());
     let to_remove = vec![keys[2].clone(), keys[3].clone(), missing_k];
     let remove_flags = store.remove_many(to_remove).await.expect("remove_many");
     assert_eq!(remove_flags, vec![true, true, false]);
@@ -124,7 +124,7 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     // Mix of hits (the just-set keys) and a missing key. Result must
     // preserve input order: Some(bytes) per hit, None per miss.
     let missing_id = RecordId::new();
-    let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
+    let missing_k = RecordKey::from_slice(missing_id.as_bytes());
     let probe_keys = vec![
         keys[0].clone(),   // hit — was set to "updated-0"
         missing_k.clone(), // miss
@@ -149,7 +149,7 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     // fjall / persy / canopy / nebari) and the native overrides on
     // sled / redb.
     let mut rev_keys: Vec<RecordKey> = (0u8..8)
-        .map(|i| RecordKey::copy_from_slice(&[0xCC, i]))
+        .map(|i| RecordKey::from_slice(&[0xCC, i]))
         .collect();
     for (i, k) in rev_keys.iter().enumerate() {
         store

@@ -394,7 +394,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(rid.to_bytes(), bytes),
+                data_op: KvOp::Set(rid.to_bytes().into(), bytes),
                 index_ops,
                 counter_delta: 1,
             },
@@ -560,7 +560,12 @@ impl TableManager {
             }
             out
         };
-        staging.set_many(id_bytes.into_iter().zip(staged_bytes.into_iter()));
+        staging.set_many(
+            id_bytes
+                .into_iter()
+                .zip(staged_bytes.into_iter())
+                .map(|(k, v)| (k.into(), v)),
+        );
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
@@ -705,7 +710,12 @@ impl TableManager {
         // 6. Single ensure_table_staging, then set_many with the staged
         //    bytes (NOT set_many_live — bytes are already encoded).
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-        staging.set_many(id_bytes.into_iter().zip(staged.iter().cloned()));
+        staging.set_many(
+            id_bytes
+                .into_iter()
+                .zip(staged.iter().cloned())
+                .map(|(k, v)| (k.into(), v)),
+        );
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
@@ -804,7 +814,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(id.to_bytes(), bytes),
+                data_op: KvOp::Set(id.to_bytes().into(), bytes),
                 index_ops,
                 counter_delta,
             },
@@ -916,7 +926,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Set(id.to_bytes(), new_bytes),
+                data_op: KvOp::Set(id.to_bytes().into(), new_bytes),
                 index_ops,
                 counter_delta,
             },
@@ -1001,7 +1011,7 @@ impl TableManager {
 
         self.stage_mutation(
             StagedMutation {
-                data_op: KvOp::Remove(id.to_bytes()),
+                data_op: KvOp::Remove(id.to_bytes().into()),
                 index_ops,
                 counter_delta: -1,
             },

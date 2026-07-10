@@ -30,7 +30,7 @@ async fn run_store_tests(store: Arc<dyn Store>) {
 
     // Test set (create)
     let id2 = RecordId::new();
-    let key2 = Bytes::copy_from_slice(id2.as_bytes());
+    let key2 = RecordKey::from_slice(id2.as_bytes());
     let value3 = InnerValue::Int(123);
     let created2 = store
         .set(key2.clone(), value3.to_bytes().unwrap())
@@ -133,7 +133,7 @@ async fn test_inmemory_iter_range_stream_inclusive_bounds() {
     // Seed deterministic keys: "k00".."k19" — sortable bytes.
     let store = InMemoryStore::new();
     for i in 0..20 {
-        let key = Bytes::from(format!("k{:02}", i));
+        let key: RecordKey = Bytes::from(format!("k{:02}", i)).into();
         let value = Bytes::from(format!("v{}", i));
         store.set(key, value).await.unwrap();
     }
@@ -159,7 +159,7 @@ async fn test_inmemory_iter_range_stream_inclusive_bounds() {
 async fn test_inmemory_iter_range_stream_unbounded_lower() {
     let store = InMemoryStore::new();
     for i in 0..10 {
-        let key = Bytes::from(format!("k{:02}", i));
+        let key: RecordKey = Bytes::from(format!("k{:02}", i)).into();
         store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
     }
     let stream = store.iter_range_stream(None, Some(Bytes::from("k02")), 100);
@@ -178,7 +178,7 @@ async fn test_inmemory_iter_range_stream_unbounded_lower() {
 async fn test_inmemory_iter_range_stream_unbounded_upper() {
     let store = InMemoryStore::new();
     for i in 0..5 {
-        let key = Bytes::from(format!("k{:02}", i));
+        let key: RecordKey = Bytes::from(format!("k{:02}", i)).into();
         store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
     }
     let stream = store.iter_range_stream(Some(Bytes::from("k02")), None, 100);
@@ -197,7 +197,7 @@ async fn test_inmemory_iter_range_stream_unbounded_upper() {
 async fn test_inmemory_iter_range_stream_unbounded_both() {
     let store = InMemoryStore::new();
     for i in 0..3 {
-        let key = Bytes::from(format!("k{i}"));
+        let key: RecordKey = Bytes::from(format!("k{i}")).into();
         store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
     }
     let stream = store.iter_range_stream(None, None, 100);
@@ -217,7 +217,7 @@ async fn test_inmemory_iter_range_stream_empty_range() {
     let store = InMemoryStore::new();
     for i in 0..5 {
         store
-            .set(Bytes::from(format!("k{i}")), Bytes::from("v"))
+            .set(Bytes::from(format!("k{i}")).into(), Bytes::from("v"))
             .await
             .unwrap();
     }
@@ -237,7 +237,7 @@ async fn test_inmemory_iter_range_stream_batching() {
     for i in 0..50 {
         store
             .set(
-                Bytes::from(format!("k{i:03}")),
+                Bytes::from(format!("k{i:03}")).into(),
                 Bytes::from(format!("v{i}")),
             )
             .await
@@ -272,7 +272,10 @@ async fn test_inmemory_concurrent_access() {
         join_set.spawn(async move {
             let key = format!("key_{}", i);
             let value = Bytes::from(key.clone());
-            store_clone.set(key.into(), value).await.unwrap();
+            store_clone
+                .set(RecordKey::from(key.into_bytes()), value)
+                .await
+                .unwrap();
         });
     }
 
@@ -281,7 +284,7 @@ async fn test_inmemory_concurrent_access() {
         let store_clone = store.clone();
         join_set.spawn(async move {
             let key = format!("key_{}", i);
-            let _ = store_clone.get(key.into()).await;
+            let _ = store_clone.get(RecordKey::from(key.into_bytes())).await;
         });
     }
 

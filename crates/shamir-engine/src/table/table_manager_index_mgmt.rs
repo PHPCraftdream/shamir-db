@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::TouchInd;
@@ -655,8 +656,9 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
         let stream = info_store.scan_prefix_stream(old_prefix.clone(), FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        let mut to_write: Vec<(Bytes, Bytes)> = Vec::new();
-        let mut to_remove: Vec<Bytes> = Vec::new();
+        // `RecordKey` keys — fed to the store `set_many` / `remove_many`.
+        let mut to_write: Vec<(RecordKey, Bytes)> = Vec::new();
+        let mut to_remove: Vec<RecordKey> = Vec::new();
 
         while let Some(batch) = stream.next().await {
             for (key, value) in batch? {
@@ -665,7 +667,7 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
                 }
                 let mut new_key = key.to_vec();
                 new_key[1..9].copy_from_slice(&new_id_bytes);
-                to_write.push((Bytes::from(new_key), value));
+                to_write.push((Bytes::from(new_key).into(), value));
                 to_remove.push(key);
             }
         }

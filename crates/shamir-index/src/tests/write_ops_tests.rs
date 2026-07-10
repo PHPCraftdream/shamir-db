@@ -77,7 +77,7 @@ async fn apply_set_posting_writes_to_store() {
     }];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
     let val = store
-        .get(Bytes::from_static(b"posting_key_1"))
+        .get(Bytes::from_static(b"posting_key_1").into())
         .await
         .unwrap();
     assert_eq!(val.as_ref(), b"posting_val");
@@ -87,7 +87,7 @@ async fn apply_set_posting_writes_to_store() {
 async fn apply_remove_posting_removes_from_store() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     store
-        .set(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+        .set(Bytes::from_static(b"k").into(), Bytes::from_static(b"v"))
         .await
         .unwrap();
     let backend = MockBackend::new();
@@ -95,7 +95,7 @@ async fn apply_remove_posting_removes_from_store() {
         key: Bytes::from_static(b"k"),
     }];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
-    assert!(store.get(Bytes::from_static(b"k")).await.is_err());
+    assert!(store.get(Bytes::from_static(b"k").into()).await.is_err());
 }
 
 #[tokio::test]
@@ -176,10 +176,14 @@ async fn apply_mixed_ops_in_order() {
     ];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
     // "a" was set then removed -> not found
-    assert!(store.get(Bytes::from_static(b"a")).await.is_err());
+    assert!(store.get(Bytes::from_static(b"a").into()).await.is_err());
     // "b" set -> found
     assert_eq!(
-        store.get(Bytes::from_static(b"b")).await.unwrap().as_ref(),
+        store
+            .get(Bytes::from_static(b"b").into())
+            .await
+            .unwrap()
+            .as_ref(),
         b"2"
     );
     // bump called once
@@ -204,7 +208,7 @@ async fn apply_index_ops_tx_none_forwards() {
         .await
         .unwrap();
 
-    let got = store.get(Bytes::from_static(b"k1")).await.unwrap();
+    let got = store.get(Bytes::from_static(b"k1").into()).await.unwrap();
     assert_eq!(got.as_ref(), b"v1");
     assert_eq!(backend.bump_count.load(Ordering::Relaxed), 1);
 }
@@ -231,7 +235,7 @@ async fn apply_index_ops_tx_some_stages_into_tx() {
         .unwrap();
 
     // Nothing written to the live store / backend in tx mode.
-    assert!(store.get(Bytes::from_static(b"k2")).await.is_err());
+    assert!(store.get(Bytes::from_static(b"k2").into()).await.is_err());
     assert_eq!(backend.bump_count.load(Ordering::Relaxed), 0);
 
     // All ops appear in tx.index_write_set under the supplied token.
@@ -269,7 +273,10 @@ async fn apply_index_ops_tx_drop_leaves_no_postings() {
         // tx dropped here.
     }
     assert!(
-        store.get(Bytes::from_static(b"ghost")).await.is_err(),
+        store
+            .get(Bytes::from_static(b"ghost").into())
+            .await
+            .is_err(),
         "rolled-back tx must not leave postings in store (HIGH-6)"
     );
     assert_eq!(

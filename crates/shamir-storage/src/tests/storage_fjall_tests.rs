@@ -30,7 +30,7 @@ async fn run_store_tests(store: Arc<dyn Store>) {
 
     // Test set (create)
     let id2 = RecordId::new();
-    let key2 = Bytes::copy_from_slice(id2.as_bytes());
+    let key2 = RecordKey::from_slice(id2.as_bytes());
     let value3 = InnerValue::Int(123);
     let created2 = store
         .set(key2.clone(), value3.to_bytes().unwrap())
@@ -101,9 +101,9 @@ async fn test_fjall_transact_atomic() {
     let store = repo.store_get("transact_test").await.unwrap();
 
     // Seed
-    let k1: RecordKey = Bytes::from_static(b"k1");
-    let k2: RecordKey = Bytes::from_static(b"k2");
-    let k3: RecordKey = Bytes::from_static(b"k3");
+    let k1: RecordKey = Bytes::from_static(b"k1").into();
+    let k2: RecordKey = Bytes::from_static(b"k2").into();
+    let k3: RecordKey = Bytes::from_static(b"k3").into();
     store
         .set(k1.clone(), Bytes::from_static(b"old1"))
         .await
@@ -172,13 +172,16 @@ async fn test_fjall_deleted_cursor_no_truncation() {
 
     // Insert four keys with deterministic ordering
     for i in 1..=4 {
-        let key = Bytes::from(format!("k{i}"));
+        let key: RecordKey = Bytes::from(format!("k{i}")).into();
         let val = Bytes::from(format!("v{i}"));
         store.set(key, val).await.unwrap();
     }
 
     // Delete k2 — this key would be the batch-1 cursor with batch_size=2
-    store.remove(Bytes::from_static(b"k2")).await.unwrap();
+    store
+        .remove(Bytes::from_static(b"k2").into())
+        .await
+        .unwrap();
 
     // Drain with batch_size=2.  Without the exclusive-bound fix the
     // stream would end after k1 because the cursor (k2) is gone and

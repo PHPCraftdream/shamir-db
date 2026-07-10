@@ -113,7 +113,7 @@ impl Store for FjallStore {
             // would require a transaction (extra round-trip per write,
             // regressing hot-path throughput). The check is removed entirely.
             let id = RecordId::new();
-            let key = RecordKey::copy_from_slice(id.as_bytes());
+            let key = RecordKey::from_slice(id.as_bytes());
 
             keyspace
                 .insert(&key[..], &*value)
@@ -212,7 +212,7 @@ impl Store for FjallStore {
                 let lower_init = start_bytes.clone();
                 let upper_init = end_bytes.clone();
 
-                let batch: DbResult<Vec<(Bytes, Bytes)>> = task::spawn_blocking(move || {
+                let batch: DbResult<Vec<(RecordKey, Bytes)>> = task::spawn_blocking(move || {
                     use std::ops::Bound;
                     let lower: Bound<Vec<u8>> = match &lower_init {
                         Some(s) => Bound::Included(s.clone()),
@@ -230,7 +230,7 @@ impl Store for FjallStore {
                             .into_inner()
                             .map_err(|e| DbError::Storage(e.to_string()))?;
                         // §1.1: zero-copy conversion (see `get`).
-                        items.push((Bytes::from(key), Bytes::from(val)));
+                        items.push((RecordKey::from(Bytes::from(key)), Bytes::from(val)));
                     }
                     Ok(items)
                 })
@@ -380,7 +380,7 @@ impl Store for FjallStore {
                         last_batch_key = Some(key.to_vec());
                         // §1.1: zero-copy conversion for both key and value
                         // (see `get`).
-                        items.push((Bytes::from(key), Bytes::from(value_slice)));
+                        items.push((RecordKey::from(Bytes::from(key)), Bytes::from(value_slice)));
                     }
 
                     Ok((items, last_batch_key))
@@ -457,7 +457,7 @@ impl Store for FjallStore {
                         last_batch_key = Some(key.to_vec());
                         // §1.1: zero-copy conversion for both key and value
                         // (see `get`).
-                        items.push((Bytes::from(key), Bytes::from(value_slice)));
+                        items.push((RecordKey::from(Bytes::from(key)), Bytes::from(value_slice)));
                     }
 
                     Ok((items, last_batch_key))

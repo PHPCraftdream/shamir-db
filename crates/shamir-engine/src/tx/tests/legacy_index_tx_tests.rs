@@ -71,10 +71,13 @@ async fn apply_staged_index_ops(info_store: &Arc<dyn Store>, tx: &TxContext) {
     for (_token, op) in &tx.index_write_set {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                info_store.set(key.clone(), value.clone()).await.unwrap();
+                info_store
+                    .set(key.clone().into(), value.clone())
+                    .await
+                    .unwrap();
             }
             IndexWriteOp::RemovePosting { key } => {
-                let _ = info_store.remove(key.clone()).await;
+                let _ = info_store.remove(key.clone().into()).await;
             }
             IndexWriteOp::BumpFtsStats { .. } => {}
         }

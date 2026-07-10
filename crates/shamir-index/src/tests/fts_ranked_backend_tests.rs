@@ -200,7 +200,7 @@ async fn rebuild_restores_stats_from_data_store() {
     for rec in &recs {
         let rid = RecordId::new();
         data_store
-            .set(rid.to_bytes(), rec.to_bytes().unwrap())
+            .set(rid.to_bytes().into(), rec.to_bytes().unwrap())
             .await
             .unwrap();
         // Also feed into FTS so postings exist (rebuild only updates stats).

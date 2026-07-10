@@ -17,7 +17,7 @@ async fn test_create_index_with_null_value() {
     let value = create_test_value(&[(1, InnerValue::Null)]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -44,7 +44,7 @@ async fn test_create_index_with_list_value() {
     let value = create_test_value(&[(1, list.clone())]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -67,7 +67,7 @@ async fn test_create_index_with_map_value() {
     let value = create_test_value(&[(1, map.clone())]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 

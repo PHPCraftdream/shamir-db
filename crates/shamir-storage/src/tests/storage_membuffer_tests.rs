@@ -5,7 +5,7 @@ use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use crate::storage_membuffer::{MemBufferConfig, MemBufferStore};
 use crate::tests::types_tests::run_batch_store_tests;
-use crate::types::{fully_unwrap_store, Repo, Store};
+use crate::types::{fully_unwrap_store, RecordKey, Repo, Store};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -350,7 +350,7 @@ async fn flush_drains_then_calls_inner_flush() {
 
 #[tokio::test]
 async fn raw_backend_unwraps_membuffer() {
-    let seed_key = Bytes::from_static(b"seed-key");
+    let seed_key = RecordKey::from_slice(b"seed-key");
     let seed_val = Bytes::from_static(b"seed-value");
 
     let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -368,7 +368,7 @@ async fn raw_backend_unwraps_membuffer() {
 
 #[tokio::test]
 async fn fully_unwrap_drills_through_chain() {
-    let seed_key = Bytes::from_static(b"chain-key");
+    let seed_key = RecordKey::from_slice(b"chain-key");
     let seed_val = Bytes::from_static(b"chain-val");
 
     // Build Cached → MemBuffer → InMemory
@@ -535,7 +535,7 @@ mod audit_2_3 {
         let inner_repo = InMemoryRepo::new();
         let real_inner: Arc<dyn Store> = inner_repo.store_get("t").await.unwrap();
 
-        let key = RecordKey::copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let key = RecordKey::from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
         let inject_value = Bytes::from_static(b"concurrent");
 
         let wrapper = Arc::new(ConcurrentWriterInner {

@@ -101,7 +101,7 @@ fn main() {
                 let base = Arc::clone(&base);
                 async move {
                     let key: shamir_storage::types::RecordKey =
-                        Bytes::copy_from_slice(&n.to_be_bytes());
+                        Bytes::copy_from_slice(&n.to_be_bytes()).into();
                     (base, key)
                 }
             },

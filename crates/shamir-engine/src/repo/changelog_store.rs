@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 
 /// Per-repo durable changelog journal backed by a `Store`.
@@ -27,7 +28,7 @@ impl StoreChangelog {
 impl shamir_tx::ChangelogStore for StoreChangelog {
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
         self.store
-            .set(key, value)
+            .set(key.into(), value)
             .await
             .map(|_created| ())
             .map_err(|e| format!("changelog store set: {e}"))
@@ -41,7 +42,9 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
         let batch = limit.clamp(1, 1024);
         let mut stream = self.store.iter_range_stream(Some(from_key), None, batch);
 
-        let mut pairs: Vec<(Bytes, Bytes)> = Vec::new();
+        // `RecordKey` keys — the stream now yields them; only values are
+        // returned, keys are used solely for the defensive numeric sort.
+        let mut pairs: Vec<(RecordKey, Bytes)> = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
             pairs.extend(chunk);

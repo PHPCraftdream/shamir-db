@@ -214,7 +214,7 @@ async fn purge_below_ts_keeps_unknown_ts_versions() {
 
     // Surgically remove v1's ts-key so its age becomes unknown.
     let v1 = mvcc.version_of(b"k") - 1; // v1 is one below the current version
-    let _ = mvcc.history_store().remove(ts_key(v1)).await;
+    let _ = mvcc.history_store().remove(ts_key(v1).into()).await;
 
     // Even an aggressive cutoff can't reclaim v1 — unknown age.
     let deleted = mvcc.purge_below_ts(u64::MAX / 2).await.unwrap();

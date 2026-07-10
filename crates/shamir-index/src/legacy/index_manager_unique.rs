@@ -10,6 +10,7 @@ use crate::legacy::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
@@ -167,7 +168,7 @@ impl IndexManager {
 
     /// Check a unique constraint by its pre-computed index key bytes.
     async fn check_unique_key(&self, index_key: &Bytes) -> DbResult<Option<RecordId>> {
-        match self.info_store.get(index_key.clone()).await {
+        match self.info_store.get(index_key.clone().into()).await {
             Ok(bytes) => {
                 if bytes.len() == 16 {
                     let arr: [u8; 16] = bytes.as_ref().try_into().unwrap();
@@ -200,13 +201,15 @@ impl IndexManager {
         index_key: Bytes,
         record_id: &RecordId,
     ) -> DbResult<()> {
-        self.info_store.set(index_key, record_id.to_bytes()).await?;
+        self.info_store
+            .set(index_key.into(), record_id.to_bytes())
+            .await?;
         Ok(())
     }
 
     /// Удаляет запись из уникального индекса by pre-computed key.
     async fn remove_unique_entry_by_key(&self, index_key: Bytes) -> DbResult<()> {
-        self.info_store.remove(index_key).await?;
+        self.info_store.remove(index_key.into()).await?;
         Ok(())
     }
 
@@ -400,9 +403,14 @@ impl IndexManager {
         }
 
         let count = entries.len();
-        let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
+        // `RecordKey` keys (fed to the store `set_many`); index keys are
+        // built as `Bytes` and converted byte-identically at each push.
+        let mut writes: Vec<(RecordKey, Bytes)> = Vec::with_capacity(count);
         for (record_id, index_key) in entries {
-            writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
+            writes.push((
+                index_key.into(),
+                Bytes::copy_from_slice(record_id.as_bytes()),
+            ));
         }
         if !writes.is_empty() {
             self.info_store.set_many(writes).await?;
@@ -436,7 +444,8 @@ impl IndexManager {
         // транзакционный коммит вместо N×fsync.
         let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
         use futures::StreamExt;
-        let mut to_remove: Vec<Bytes> = Vec::new();
+        // `RecordKey` (scan yields store keys, consumed by `remove_many`).
+        let mut to_remove: Vec<RecordKey> = Vec::new();
         // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
         let mut stream = self.info_store.scan_prefix_stream(prefix, FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
@@ -466,7 +475,9 @@ impl IndexManager {
         let indexes_key = RecordId::system("indexes_unique").to_bytes();
         let bytes = bincode::serialize(&*self.indexes_unique)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-        self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
+        self.info_store
+            .set(indexes_key.into(), Bytes::from(bytes))
+            .await?;
         Ok(())
     }
 

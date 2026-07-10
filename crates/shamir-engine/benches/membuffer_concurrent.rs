@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bench_scale_tool::Harness;
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 use shamir_storage::types::{RecordKey, Store};
@@ -41,8 +42,8 @@ fn build_warm_store() -> (Arc<dyn Store>, Vec<RecordKey>) {
         let mut ks = Vec::with_capacity(1000);
         for _ in 0..1000 {
             let id = RecordId::new();
-            let k = RecordKey::copy_from_slice(id.as_bytes());
-            let v = RecordKey::copy_from_slice(b"value-100-bytes-...-padding-padding-padding-padding-padding-padding-padding-padding-padding-pad");
+            let k = RecordKey::from_slice(id.as_bytes());
+            let v = Bytes::copy_from_slice(b"value-100-bytes-...-padding-padding-padding-padding-padding-padding-padding-padding-padding-pad");
             s.set(k.clone(), v).await.unwrap();
             ks.push(k);
         }
@@ -95,7 +96,7 @@ fn main() {
                 handles.push(std::thread::spawn(move || {
                     let local_rt = tokio::runtime::Runtime::new().unwrap();
                     local_rt.block_on(async move {
-                        let v = RecordKey::copy_from_slice(b"new-value-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding");
+                        let v = Bytes::copy_from_slice(b"new-value-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding");
                         let mut n = 0usize;
                         let mut cursor = 7usize;
                         while !stop_flag.load(Ordering::Relaxed) {

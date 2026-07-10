@@ -22,7 +22,7 @@ use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::{KvOp, Store};
+use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
@@ -127,7 +127,7 @@ impl IndexManager {
         let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
 
         // Загружаем обычные индексы или создаём пустую структуру
-        let indexes = match info_store.get(indexes_key.clone()).await {
+        let indexes = match info_store.get(indexes_key.clone().into()).await {
             Ok(bytes) => {
                 // Десериализуем метаданные; при ошибке начинаем с пустого набора
                 bincode::deserialize::<IndexInfo>(&bytes).unwrap_or_else(|_| IndexInfo::new())
@@ -137,7 +137,7 @@ impl IndexManager {
         };
 
         // Загружаем уникальные индексы или создаём пустую структуру
-        let indexes_unique = match info_store.get(indexes_unique_key.clone()).await {
+        let indexes_unique = match info_store.get(indexes_unique_key.clone().into()).await {
             Ok(bytes) => {
                 bincode::deserialize::<IndexInfo>(&bytes).unwrap_or_else(|_| IndexInfo::new())
             }
@@ -265,6 +265,12 @@ impl IndexManager {
                 }
             }
             if !posting_writes.is_empty() {
+                // Boundary: posting keys are built as `Bytes`; the store
+                // `set_many` now takes `RecordKey` (byte-identical conversion).
+                let posting_writes: Vec<(RecordKey, Bytes)> = posting_writes
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v))
+                    .collect();
                 self.info_store.set_many(posting_writes).await?;
             }
             for ik in cache_index_keys {
@@ -335,6 +341,12 @@ impl IndexManager {
             }
         }
         if !posting_writes.is_empty() {
+            // Boundary: posting keys are built as `Bytes`; the store
+            // `set_many` now takes `RecordKey` (byte-identical conversion).
+            let posting_writes: Vec<(RecordKey, Bytes)> = posting_writes
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect();
             self.info_store.set_many(posting_writes).await?;
         }
         for ik in cache_index_keys {
@@ -373,7 +385,8 @@ impl IndexManager {
         // commit'нутая транзакция вместо N×fsync.
         let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
         use futures::StreamExt;
-        let mut to_remove: Vec<Bytes> = Vec::new();
+        // `RecordKey` (the scan yields store keys, consumed by `remove_many`).
+        let mut to_remove: Vec<RecordKey> = Vec::new();
         // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
         let mut stream = self
             .info_store
@@ -414,7 +427,9 @@ impl IndexManager {
         let indexes_key = RecordId::system("indexes").to_bytes();
         let bytes = bincode::serialize(&*self.indexes)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-        self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
+        self.info_store
+            .set(indexes_key.into(), Bytes::from(bytes))
+            .await?;
         Ok(())
     }
 
@@ -657,10 +672,10 @@ impl IndexManager {
         for op in ops {
             match op {
                 IndexWriteOp::SetPosting { key, value } => {
-                    kv_ops.push(KvOp::Set(key.clone(), value.clone()));
+                    kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
                 }
                 IndexWriteOp::RemovePosting { key } => {
-                    kv_ops.push(KvOp::Remove(key.clone()));
+                    kv_ops.push(KvOp::Remove(key.clone().into()));
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
                     // Not relevant for legacy IndexManager.

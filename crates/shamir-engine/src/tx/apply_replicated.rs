@@ -176,9 +176,9 @@ pub async fn apply_replicated(
                         change.table, change.key
                     )));
                 };
-                KvOp::Set(change.key.clone(), value.clone())
+                KvOp::Set(change.key.clone().into(), value.clone())
             }
-            ChangeOp::Delete => KvOp::Remove(change.key.clone()),
+            ChangeOp::Delete => KvOp::Remove(change.key.clone().into()),
         };
         by_table.entry(change.table.clone()).or_default().push(op);
     }

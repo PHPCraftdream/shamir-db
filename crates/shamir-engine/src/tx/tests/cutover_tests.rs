@@ -93,7 +93,10 @@ async fn durable_lags_visibility_but_overlay_serves_read() {
         .expect("mvcc store registered for table t");
     let hist_key = encode_version_key(&rid.to_bytes(), outcome.commit_version);
     assert!(
-        mvcc.history_store().get(hist_key.clone()).await.is_err(),
+        mvcc.history_store()
+            .get(hist_key.clone().into())
+            .await
+            .is_err(),
         "value must NOT be in history before drain (overlay holds the only copy)"
     );
 
@@ -113,7 +116,7 @@ async fn durable_lags_visibility_but_overlay_serves_read() {
 
     let in_history = mvcc
         .history_store()
-        .get(hist_key)
+        .get(hist_key.into())
         .await
         .expect("value must be durable in history after drain");
     let expected = InnerValue::Str("v1".into()).to_bytes().unwrap();
@@ -158,7 +161,7 @@ async fn commit_then_drain_all_makes_value_durable_in_history() {
         .unwrap();
     let in_history = mvcc
         .history_store()
-        .get(encode_version_key(&rid.to_bytes(), outcome.commit_version))
+        .get(encode_version_key(&rid.to_bytes(), outcome.commit_version).into())
         .await
         .expect("value durable in history after drain_all");
     let expected = InnerValue::Str("durable".into()).to_bytes().unwrap();
@@ -237,7 +240,7 @@ async fn reopen_recovery_without_drain_reconstructs_history() {
         .unwrap();
     let in_history = mvcc
         .history_store()
-        .get(encode_version_key(&rid.to_bytes(), gate2.last_committed()))
+        .get(encode_version_key(&rid.to_bytes(), gate2.last_committed()).into())
         .await
         .expect("recovered value durable in history");
     let expected = InnerValue::Str("crash-safe".into()).to_bytes().unwrap();
@@ -305,7 +308,7 @@ async fn async_index_tail_must_not_truncate_drainer_converges() {
         .unwrap();
     let in_history = mvcc
         .history_store()
-        .get(encode_version_key(&rid.to_bytes(), commit_version))
+        .get(encode_version_key(&rid.to_bytes(), commit_version).into())
         .await
         .expect("AsyncIndex value must be durable in history after drain");
     let expected = InnerValue::Str("async-v".into()).to_bytes().unwrap();

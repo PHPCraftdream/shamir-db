@@ -333,7 +333,7 @@ async fn c1_vacuum_never_reclaims_current() {
     let cur_v = mvcc.version_of(&key);
     let log_val = mvcc
         .history_store()
-        .get(encode_version_key(&key, cur_v))
+        .get(encode_version_key(&key, cur_v).into())
         .await
         .unwrap();
     assert_eq!(
@@ -365,7 +365,7 @@ async fn c1_vacuum_keeps_tombstone_current() {
     // The tombstone is the current version for this key — it must survive.
     let tombstone = mvcc
         .history_store()
-        .get(encode_version_key(&key, del_v))
+        .get(encode_version_key(&key, del_v).into())
         .await
         .unwrap();
     assert_eq!(

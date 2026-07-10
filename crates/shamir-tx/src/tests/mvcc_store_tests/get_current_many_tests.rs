@@ -128,13 +128,13 @@ async fn get_current_many_cold_start() {
     // whose cell was evicted).
     let vk = crate::version_codec::encode_version_key(b"cold", 1);
     history
-        .set(vk, Bytes::from_static(b"cold_val"))
+        .set(vk.into(), Bytes::from_static(b"cold_val"))
         .await
         .unwrap();
     // Also write the ts entry so the gate doesn't trip.
     let ts = crate::mvcc_store::ts_key(1);
     history
-        .set(ts, Bytes::from(1u64.to_le_bytes().to_vec()))
+        .set(ts.into(), Bytes::from(1u64.to_le_bytes().to_vec()))
         .await
         .unwrap();
 
