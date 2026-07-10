@@ -43,6 +43,7 @@ pub use fn_adapter::FnAdapter;
 pub use meta::{CreateFunctionOptions, FunctionMeta, Security, Visibility};
 pub use net_gateway::{
     check_url_allowed, check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway,
+    ResolvedPin,
 };
 pub use params::Params;
 pub use registry::FunctionRegistry;

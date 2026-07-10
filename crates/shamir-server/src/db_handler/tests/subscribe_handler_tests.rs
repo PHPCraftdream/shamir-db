@@ -235,3 +235,119 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
     assert_eq!(granted, 2, "two subscriptions granted");
     assert_eq!(rejected, 1, "one subscription rejected at the cap");
 }
+
+/// Regression (finding 2b / former #513): when a bridge task exits on its OWN
+/// — natural completion, internal error, or the CRIT-5 all-sources-denied
+/// abort — WITHOUT any explicit client `Unsubscribe`, its registry slot must
+/// be released. Before the RAII `SubscriptionSlotGuard` fix the `active`
+/// counter and `subs` entry were only ever decremented by `remove()` /
+/// `close_all()`, so a self-exiting bridge permanently leaked its slot for the
+/// life of the connection.
+///
+/// We drive the self-exit deterministically via an EMPTY `subscribe` list:
+/// `bridge_task` builds no authorized sources and returns early
+/// (`authorized_sources.is_empty()`), so the bridge finishes almost
+/// immediately with no dependency on a live changefeed. Synchronisation avoids
+/// a flaky fixed `sleep`: we poll `registry.count()` in a bounded
+/// `yield_now()` retry loop — the guard's `Drop` fires as soon as the spawned
+/// task is scheduled and completes, and yielding hands the runtime back to it.
+#[tokio::test]
+async fn bridge_self_exit_releases_registry_slot() {
+    let db = Arc::new(ShamirDb::init_memory().await.unwrap());
+
+    let registry = Arc::new(SubscriptionRegistry::new());
+    let push: Arc<dyn PushSink> = Arc::new(NoopPush);
+
+    let conn = ConnectionServices {
+        conn_id: 1,
+        push: Some(push),
+        extensions: Some(registry.clone() as Arc<dyn std::any::Any + Send + Sync>),
+    };
+
+    // Empty `subscribe` list → the bridge authorizes zero sources and returns
+    // early. No explicit Unsubscribe is ever sent.
+    let subscribe_op = SubscribeOp {
+        subscribe: vec![],
+        deliver: DeliverMode::Records,
+        initial: false,
+        from_version: None,
+    };
+
+    let mut queries: TMap<String, QueryEntry> = Default::default();
+    queries.insert(
+        "self_exit".to_string(),
+        QueryEntry {
+            op: BatchOp::Subscribe(subscribe_op),
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+
+    let batch = BatchRequest {
+        id: QueryValue::Int(1),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let mut response = BatchResponse {
+        id: QueryValue::Int(1),
+        results: Default::default(),
+        execution_plan: vec![],
+        execution_time_us: 0,
+        transaction: None,
+        interner_delta: Default::default(),
+    };
+    let mut v = new_map();
+    v.insert("subscription_grant".to_string(), QueryValue::Bool(true));
+    response.results.insert(
+        "self_exit".to_string(),
+        QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: Some(QueryValue::Map(v)),
+            explain: None,
+        },
+    );
+
+    super::super::subscribe_handler::activate_subscriptions(
+        &conn,
+        &db,
+        "test_db",
+        &batch,
+        &mut response,
+        Actor::System,
+    );
+
+    // The slot was reserved + inserted synchronously; the spawned bridge task
+    // has not been polled yet (spawn does not run the body inline).
+    assert_eq!(
+        registry.count(),
+        1,
+        "slot reserved synchronously before the bridge task is scheduled"
+    );
+
+    // Yield repeatedly until the bridge's guard has released the slot. Bounded
+    // so a genuine leak surfaces as a test failure rather than an infinite
+    // loop; no fixed sleep, so it is neither flaky nor slow.
+    let mut released = false;
+    for _ in 0..10_000 {
+        if registry.count() == 0 {
+            released = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        released,
+        "self-exiting bridge task must release its registry slot (count back to 0)"
+    );
+}

@@ -6,7 +6,6 @@ use shamir_db::ShamirDb;
 use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse};
 use shamir_types::types::value::QueryValue;
 
-use crate::subscriptions::registry::ActiveSubscription;
 use crate::subscriptions::{bridge, SubscriptionRegistry};
 
 /// Activates/deactivates subscriptions after a successful batch execute.
@@ -39,12 +38,19 @@ pub(super) fn activate_subscriptions(
         return; // No push channel — can't activate subscriptions.
     };
 
-    // Downcast extensions to SubscriptionRegistry.
-    let registry = conn
+    // Downcast extensions to an OWNED, independently-cloneable
+    // `Arc<SubscriptionRegistry>`: `extensions` is already an
+    // `Arc<dyn Any + Send + Sync>`, so `Arc::downcast` yields an
+    // `Arc<SubscriptionRegistry>` without any type changes. The owned Arc lets
+    // us (a) drive the registry here and (b) hand a clone to each spawned
+    // bridge task so it can release its own slot on self-exit (finding 2b /
+    // former #513). On downcast failure the original Arc is returned in `Err`
+    // and discarded.
+    let Some(registry) = conn
         .extensions
-        .as_ref()
-        .and_then(|ext| ext.downcast_ref::<SubscriptionRegistry>());
-    let Some(registry) = registry else {
+        .clone()
+        .and_then(|ext| ext.downcast::<SubscriptionRegistry>().ok())
+    else {
         tracing::debug!("no subscription registry on connection");
         return;
     };
@@ -72,6 +78,13 @@ pub(super) fn activate_subscriptions(
                     continue;
                 }
                 let sub_id = registry.next_id();
+                // Reserve a real (handle-less) map entry BEFORE spawning —
+                // closes a race `@fl` review found where a fast-exiting
+                // bridge task's self-cleanup guard could run before this
+                // handler got around to inserting the entry, leaving a
+                // permanently-dangling slot once the entry was inserted
+                // afterward. See `SubscriptionRegistry::reserve_pending`.
+                registry.reserve_pending(sub_id);
                 // Operator-configured query limits (finding 2b-ii): the batch
                 // limits here are already capped to the operator maximums in
                 // `handler::execute`. Reactive `Batch`/`Call` deliveries run
@@ -88,13 +101,9 @@ pub(super) fn activate_subscriptions(
                     op.from_version,
                     op.initial,
                     batch.limits.clone(),
+                    Arc::clone(&registry),
                 ));
-                registry.insert(
-                    sub_id,
-                    ActiveSubscription {
-                        bridge_handle: handle,
-                    },
-                );
+                registry.attach_handle(sub_id, handle);
                 if let Some(qr) = response.results.get_mut(alias) {
                     if let Some(QueryValue::Map(map)) = &mut qr.value {
                         map.insert("sub".to_string(), QueryValue::Int(sub_id as i64));
