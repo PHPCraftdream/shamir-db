@@ -153,12 +153,15 @@ struct MemBufferState {
     ///   loops with frequent eviction it dominated the cost.
     dirty: Arc<DashMap<RecordKey, Slot, THasher>>,
     /// Fast-path sentinel: true iff dirty is (likely) non-empty.
-    /// Set with Release before each dirty.insert so any subsequent
-    /// Acquire-load in get() that sees `false` is guaranteed to see
-    /// a fully drained map. False positives (flag true, map empty)
-    /// are harmless — they cause one extra DashMap lookup that
-    /// returns None. False negatives are impossible: we always set
-    /// before insert (Release → Acquire ordering).
+    /// Set with Release both BEFORE and immediately AFTER each
+    /// `dirty.insert()` (task #535 round 2 — the before-only store does NOT
+    /// prevent `drain_once`'s clear from racing into the gap between the
+    /// before-store and the insert; see `insert()`'s doc comment for the
+    /// happens-before argument for why the after-store closes it) so any
+    /// subsequent Acquire-load in `get()` / `snapshot_overlay_sorted()` that
+    /// sees `false` is guaranteed to see a fully drained map. False
+    /// positives (flag true, map empty) are harmless — they cause one extra
+    /// DashMap lookup that returns None.
     dirty_nonempty: AtomicBool,
     /// Atomic-config — read on hot paths so DDL changes apply
     /// without rewrapping the store.
@@ -173,6 +176,21 @@ struct MemBufferState {
     /// an error so disk-full / I/O failures are observable (otherwise dirty
     /// grows unboundedly with zero signal).
     flush_errors: AtomicU64,
+    /// Task #535: deterministic test seam for the `dirty_nonempty` clear-race.
+    /// Fired inside `drain_once` in the clear window — BETWEEN the
+    /// `is_empty()` observation and the `store(false)` that follows it — so a
+    /// regression test can force a racing writer insert into the exact gap
+    /// the bug depends on. `None` in production (zero overhead).
+    #[cfg(test)]
+    clear_race_hook: crate::membuffer_clear_race_hook::ClearRaceHook,
+    /// Task #535 round 2: deterministic test seam for the narrower
+    /// stall-across-`.await` gap in `insert_many`'s batch loop. See
+    /// `membuffer_clear_race_hook::BatchInsertPauseHook`. `None`/absent
+    /// callback in production (zero overhead — the hook is only ever
+    /// installed by the round-2 regression test).
+    #[cfg(test)]
+    batch_pause_hook:
+        arc_swap::ArcSwapOption<crate::membuffer_clear_race_hook::BatchInsertPauseHook>,
 }
 
 impl MemBufferState {
@@ -221,6 +239,45 @@ fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, Slot> {
 
 impl MemBufferStore {
     pub fn new(inner: Arc<dyn Store>, config: MemBufferConfig) -> Self {
+        #[cfg(test)]
+        {
+            Self::new_inner(inner, config, Default::default())
+        }
+        #[cfg(not(test))]
+        {
+            Self::new_inner(inner, config)
+        }
+    }
+
+    /// Task #535: test-only constructor that installs a `ClearRaceHook` fired
+    /// inside `drain_once` at the sentinel-clear window, so a regression test
+    /// can deterministically drive the racing writer insert into the gap.
+    #[cfg(test)]
+    pub(crate) fn new_with_clear_race_hook(
+        inner: Arc<dyn Store>,
+        config: MemBufferConfig,
+        hook: crate::membuffer_clear_race_hook::ClearRaceHook,
+    ) -> Self {
+        Self::new_inner(inner, config, hook)
+    }
+
+    /// Task #535 round 2: install a `BatchInsertPauseHook` fired between
+    /// `insert_many`'s first and second loop iteration, so a regression test
+    /// can drive a real `drain_once` into the stall-across-`.await` gap the
+    /// round-2 writer-side republish-after-insert fix closes.
+    #[cfg(test)]
+    pub(crate) fn set_batch_pause_hook(
+        &self,
+        hook: Option<Arc<crate::membuffer_clear_race_hook::BatchInsertPauseHook>>,
+    ) {
+        self.state.batch_pause_hook.store(hook);
+    }
+
+    fn new_inner(
+        inner: Arc<dyn Store>,
+        config: MemBufferConfig,
+        #[cfg(test)] clear_race_hook: crate::membuffer_clear_race_hook::ClearRaceHook,
+    ) -> Self {
         let dirty: Arc<DashMap<RecordKey, Slot, THasher>> =
             Arc::new(DashMap::with_hasher(THasher::default()));
         let cache = Arc::new(build_cache(&config));
@@ -235,6 +292,10 @@ impl MemBufferStore {
             flush_interval_ms: AtomicU64::new(config.flush_interval_ms),
             flush_batch_size: AtomicUsize::new(config.flush_batch_size),
             flush_errors: AtomicU64::new(0),
+            #[cfg(test)]
+            clear_race_hook,
+            #[cfg(test)]
+            batch_pause_hook: arc_swap::ArcSwapOption::empty(),
         });
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -351,6 +412,62 @@ impl MemBufferStore {
         self.state.dirty.is_empty()
     }
 
+    /// Read the `dirty_nonempty` fast-path sentinel. For tests only (#535).
+    #[cfg(test)]
+    pub(crate) fn dirty_nonempty_flag(&self) -> bool {
+        self.state.dirty_nonempty.load(Ordering::Acquire)
+    }
+
+    /// Task #535 test seam: perform the SYNCHRONOUS writer publish+insert in
+    /// the round-1-era shape (`store(true, Release)` strictly before
+    /// `dirty.insert`, with NO post-insert republish — `insert`/`set`/
+    /// `remove` now also republish `true` immediately after, per round 2),
+    /// WITHOUT touching the moka cache or notifying the flusher. Used by the
+    /// clear-race regression test's hook to simulate a writer whose insert
+    /// lands in the sentinel-clear gap inside `drain_once`.
+    #[cfg(test)]
+    pub(crate) fn inject_racing_dirty_write(&self, key: RecordKey, value: Bytes) {
+        self.state.dirty_nonempty.store(true, Ordering::Release);
+        self.state.dirty.insert(key, Slot::Live(value));
+    }
+
+    /// Task #535 test seam: run a SINGLE `drain_once` pass (not the drain-loop
+    /// `flush`/`drain_all` runs), so a regression test can observe the buffer
+    /// state at the instant right after ONE drain — while a hook-injected entry
+    /// is still in `dirty` and has NOT yet reached `inner`.
+    #[cfg(test)]
+    pub(crate) async fn drain_once_for_test(&self, batch_size: usize) -> DbResult<usize> {
+        Self::drain_once(&self.state, self.inner.as_ref(), batch_size).await
+    }
+
+    /// Task #535 round 2 test seam: pre-empt the background flusher task
+    /// before it ever runs. Call this IMMEDIATELY after construction, with
+    /// no intervening `.await` — the flusher's loop checks `shutdown` at the
+    /// very top, before its first `select!`, so setting this before the
+    /// flusher gets its first poll guarantees it never drains anything and
+    /// can never race with a test that deliberately drives `drain_once`
+    /// manually via [`drain_once_for_test`]. Needed because a test that
+    /// genuinely suspends (e.g. on a `Notify`) gives the runtime its first
+    /// real opportunity to schedule the previously-spawned-but-never-yet-
+    /// polled flusher task, which would otherwise legitimately (not a bug)
+    /// race a manually-driven drain and make the test's assertions
+    /// insensitive to the very bug it targets.
+    #[cfg(test)]
+    pub(crate) fn disable_background_flusher_for_test(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Task #535 round 2 test seam: force-evict `key` from the moka cache.
+    /// `get()` checks the cache FIRST and only falls through to the
+    /// `dirty_nonempty`-gated `dirty` probe on a cache miss — so a
+    /// regression test proving the flag's masking bug must evict the cache
+    /// entry first, otherwise `get()` trivially succeeds via the cache hit
+    /// regardless of whether the sentinel is correct.
+    #[cfg(test)]
+    pub(crate) async fn evict_from_cache_for_test(&self, key: &RecordKey) {
+        self.state.cache.load().invalidate(key).await;
+    }
+
     /// Drain up to `batch_size` dirty entries into the inner
     /// store. Snapshot-then-`remove_if` pattern protects against
     /// races where a concurrent write to the same key shouldn't
@@ -398,13 +515,102 @@ impl MemBufferStore {
             state.dirty.remove_if(&k, |_, current| *current == snapshot);
         }
         // If dirty is now fully drained, clear the fast-path sentinel so
-        // get() can skip the dirty lookup. Relaxed is fine here: if a
-        // concurrent writer just set the flag (Release) and inserted, we
-        // may clear it erroneously — but that thread's Release+our Relaxed
-        // forms a race. To avoid the race we only clear when dirty is
-        // actually empty, which is a stable post-drain observation.
+        // get() can skip the dirty lookup.
+        //
+        // Task #535 — verify-after-clear, restore-on-mismatch (round 1), PLUS
+        // a writer-side republish-after-insert (round 2, closing a gap an
+        // `@fl` adversarial pass found in round 1's proof). The naive
+        // `is_empty()` → `store(false)` sequence is TWO separate, non-atomic
+        // steps: a writer's `dirty.insert` can land in the gap between the
+        // check observing `true` (empty) and the store executing, leaving a
+        // real, ACKed entry in `dirty` while the sentinel wrongly reads
+        // `false` — masking that write from every subsequent `get()` /
+        // `snapshot_overlay_sorted` fast-path check until some later,
+        // unrelated write flips the flag back.
+        //
+        // Round 1 fix: after storing `false`, re-check `dirty.is_empty()`.
+        // If a writer raced an insert into the gap, `dirty` is now non-empty
+        // → restore the sentinel to `true`. This closes the case where the
+        // writer's insert completes BEFORE our re-check runs.
+        //
+        // Round 1's proof claimed this was airtight because "the writer
+        // always does `store(true)` before `dirty.insert()`, so any entry
+        // the re-check observes belongs to a writer that already published
+        // `true`" — TRUE, but incomplete: it does not cover a writer that
+        // publishes `store(true)`, STALLS (an `.await` yield, e.g. every
+        // iteration of `insert_many`/`set_many`/`remove_many`'s per-item
+        // loop), and only completes its `dirty.insert()` AFTER our re-check
+        // has ALREADY run and found dirty empty. In that interleaving,
+        // nothing left `true` behind for us to see, and the writer's insert
+        // still lands afterward with the sentinel stuck at `false` — the
+        // exact masked-write bug, just narrowed to a smaller (but very much
+        // real, non-hypothetical for the batch methods) window.
+        //
+        // Round 2 fix (writer side, see `insert`/`set`/`remove`/
+        // `insert_many`/`set_many`/`remove_many`): every writer republishes
+        // `dirty_nonempty.store(true, Release)` immediately AFTER each
+        // `dirty.insert()`, not just before. This closes the gap: if our
+        // re-check here did NOT observe a given entry, then (via DashMap's
+        // own shard-lock acquire/release) our clear happened-before that
+        // entry's insert, which happens-before (same thread, program order)
+        // that writer's POST-insert `store(true)` — so that `store(true)`
+        // strictly follows our `store(false)` in real time and is the value
+        // every subsequent reader observes. Combined with round 1's
+        // verify-after-clear (which still covers the "insert observable by
+        // the re-check" case), the sentinel always SETTLES to the correct
+        // final value for any entry that persists in `dirty`.
+        //
+        // Residual (found by a THIRD `@fl` adversarial pass, deliberately
+        // left open rather than papered over — see the follow-up task this
+        // finding was filed as): "settles correctly" is not the same as
+        // "never reads wrong in between". A reader's `get()`/
+        // `snapshot_overlay_sorted` Acquire-load can still observe `false`
+        // in the narrow window between THIS `store(false)` and the re-check
+        // just below, even for an entry that's about to be restored — if a
+        // concurrent `get()` on that exact key lands in that window, it
+        // stale-misses (falls through to `inner`, which may not have the
+        // entry yet). Worse, `get()`'s NotFound path caches a `Slot::
+        // Tombstone` for the key, which can mask it on every SUBSEQUENT
+        // `get()` (via the cache-hit path, ahead of this sentinel entirely)
+        // until that tombstone is evicted or overwritten — i.e. the miss can
+        // outlive the sentinel healing itself. This window requires OS
+        // preemption landing at a specific few-instruction point plus a
+        // concurrent reader of that exact key plus a cache eviction of it —
+        // real but far narrower than the interleaving rounds 1 and 2 close
+        // (which needed only a routine `.await` yield, not raw thread
+        // preemption, and were both deterministically reproduced by this
+        // file's regression tests). The properly correct fix replaces this
+        // boolean with an `AtomicUsize` cardinality mirror (increment on a
+        // genuinely-new key, decrement on a successful removal) — the
+        // CLAUDE.md-prescribed pattern for O(1) cardinality tracking — which
+        // eliminates the check-then-clear shape entirely rather than
+        // patching around it further. Tracked as a follow-up, not
+        // implemented here.
+        //
+        // Ordering: all stores here and on the writer side use `Release`
+        // (round 1 changed the clear-side stores from the original `Relaxed`
+        // — a real but SEPARATE ordering gap, not the root cause of the
+        // masked-write bug itself, which is a plain check-then-act logic
+        // race that Relaxed vs Release does not affect). `Release` gives the
+        // reader's `Acquire` load in `get()`/`snapshot_overlay_sorted` a real
+        // happens-before edge to the drainer's completed flush, which
+        // `Relaxed` did not.
         if state.dirty.is_empty() {
-            state.dirty_nonempty.store(false, Ordering::Relaxed);
+            // Test seam (#535): fire the racing writer insert HERE — in the gap
+            // BETWEEN the `is_empty()` check above (observed `true`) and the
+            // `store(false)` below — reproducing the exact interleaving the bug
+            // depends on: a writer's `store(true) + dirty.insert` landing before
+            // our clear, so our clear clobbers the writer's `true`. No-op in
+            // production.
+            #[cfg(test)]
+            state.clear_race_hook.at_clear_window();
+
+            state.dirty_nonempty.store(false, Ordering::Release);
+            // Verify-after-clear: if a writer raced an insert into the gap, the
+            // re-check now observes a non-empty `dirty` → restore the sentinel.
+            if !state.dirty.is_empty() {
+                state.dirty_nonempty.store(true, Ordering::Release);
+            }
         }
         Ok(n)
     }
@@ -601,6 +807,18 @@ impl Store for MemBufferStore {
         // set if dirty is non-empty. False positives are harmless.
         self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), slot.clone());
+        // Task #535 (round 2, @fl-found gap): republish `true` immediately
+        // after the insert too, not just before. The before-store alone does
+        // NOT prevent this interleaving: writer stores `true`, stalls;
+        // `drain_once` observes `dirty` empty (insert hasn't landed),
+        // clears to `false`, re-checks — still empty, stays `false`; THEN
+        // this writer's insert lands, with nothing left to re-announce
+        // `true`. The post-insert store closes it: if `drain_once`'s
+        // re-check did not observe this insert, its clear happened-before
+        // this insert (via DashMap's own shard-lock acquire/release), which
+        // happened-before this store (program order) — so this `true`
+        // strictly follows that `false` in real time and wins.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.cache.load().insert(key.clone(), slot).await;
         self.notify.notify_one();
         Ok(key)
@@ -625,6 +843,9 @@ impl Store for MemBufferStore {
         // Release before dirty.insert — see insert() for ordering rationale.
         self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), slot.clone());
+        // Task #535 (round 2) — republish after insert too; see insert()'s
+        // comment for why the before-store alone is insufficient.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.cache.load().insert(key, slot).await;
         self.notify.notify_one();
         Ok(!existed)
@@ -681,6 +902,9 @@ impl Store for MemBufferStore {
         // Release before dirty.insert — see insert() for ordering rationale.
         self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), Slot::Tombstone);
+        // Task #535 (round 2) — republish after insert too; see insert()'s
+        // comment for why the before-store alone is insufficient.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.cache.load().insert(key, Slot::Tombstone).await;
         self.notify.notify_one();
         Ok(existed)
@@ -858,13 +1082,38 @@ impl Store for MemBufferStore {
         // probe (lines ~480), and stale-misses an insert_many'd key whose
         // cache slot has already been evicted by moka but not yet flushed.
         self.state.dirty_nonempty.store(true, Ordering::Release);
+        #[cfg(test)]
+        let mut first_iteration = true;
         for v in values {
             let id = RecordId::new();
             let key = RecordKey::from_slice(id.as_bytes());
             let slot = Slot::Live(v);
             self.state.dirty.insert(key.clone(), slot.clone());
+            // Task #535 (round 2): republish `true` after EACH per-item
+            // insert, not just once before the loop. A single before-loop
+            // store cannot protect items inserted later in the loop — a
+            // `drain_once` racing between two iterations (this loop yields
+            // at `cache.insert(...).await` every iteration) can observe
+            // `dirty` empty-of-later-items and clear the sentinel with
+            // nothing left to re-announce `true` for THIS item. See
+            // `insert()`'s comment for the happens-before argument for why
+            // an immediate post-insert store closes it.
+            self.state.dirty_nonempty.store(true, Ordering::Release);
             cache.insert(key.clone(), slot).await;
             keys.push(key);
+            // Task #535 round 2 test seam: park here (after the FIRST item
+            // is fully committed — dirty+cache+republish done) so a
+            // regression test can drive a real `drain_once` into the exact
+            // stall-across-`.await` gap the round-2 fix closes, before the
+            // NEXT item's `dirty.insert` runs. No-op in production (the
+            // hook is `None` unless a test installs one).
+            #[cfg(test)]
+            if first_iteration {
+                first_iteration = false;
+                if let Some(hook) = self.state.batch_pause_hook.load_full() {
+                    hook.wait_after_first_item().await;
+                }
+            }
         }
         self.notify.notify_one();
         Ok(keys)
@@ -896,6 +1145,8 @@ impl Store for MemBufferStore {
             };
             let slot = Slot::Live(v);
             self.state.dirty.insert(k.clone(), slot.clone());
+            // Task #535 (round 2) — republish per-item; see insert_many().
+            self.state.dirty_nonempty.store(true, Ordering::Release);
             cache.insert(k, slot).await;
             flags.push(!existed);
         }
@@ -925,6 +1176,8 @@ impl Store for MemBufferStore {
                 },
             };
             self.state.dirty.insert(k.clone(), Slot::Tombstone);
+            // Task #535 (round 2) — republish per-item; see insert_many().
+            self.state.dirty_nonempty.store(true, Ordering::Release);
             cache.insert(k, Slot::Tombstone).await;
             flags.push(existed);
         }
