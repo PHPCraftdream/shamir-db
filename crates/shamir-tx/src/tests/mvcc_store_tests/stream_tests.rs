@@ -1,6 +1,7 @@
 use super::helpers::{make_gate, make_mvcc};
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_storage::types::RecordKey;
 
 // ========================================================================
 // "MVCC owns current state" read-seam (get_current / current_stream).
@@ -23,7 +24,7 @@ async fn current_stream_lists_all_current() {
         (Bytes::from("s-c"), Bytes::from("vc")),
     ];
     for (k, v) in pairs {
-        mvcc.set_versioned(k.clone(), v.clone()).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone()).await.unwrap();
     }
 
     // Collect the seam stream into a map.
@@ -62,16 +63,16 @@ async fn c2_current_stream_reads_log_not_main() {
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
     // k1 written twice (consecutively) → log holds v1(old) AND v2(current).
-    mvcc.set_versioned(Bytes::from("k1"), Bytes::from("a"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("a"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::from("k1"), Bytes::from("b"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k1")), Bytes::from("b"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::from("k2"), Bytes::from("c"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k2")), Bytes::from("c"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::from("k3"), Bytes::from("d"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k3")), Bytes::from("d"))
         .await
         .unwrap();
 
@@ -107,7 +108,7 @@ async fn c2_current_stream_exceeds_batch_no_panic() {
     // 5 distinct current keys, streamed with batch_size = 2 (3 output
     // batches: 2 + 2 + 1). The buggy code paniced on the 2nd pull.
     for i in 0..5u32 {
-        mvcc.set_versioned(Bytes::from(format!("bk{i}")), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(Bytes::from(format!("bk{i}"))), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -166,7 +167,7 @@ async fn mvcc2_real_interleaving_toctou_characterization() {
 
     // Seed: write OLD with no snapshots open. The cell IS published with
     // the seed version and OLD lands in the log.
-    mvcc.set_versioned(key.clone(), old_val.clone())
+    mvcc.set_versioned(RecordKey::from(key.clone()), old_val.clone())
         .await
         .unwrap();
     let v_seed = mvcc.version_of(&key);
@@ -202,7 +203,7 @@ async fn mvcc2_real_interleaving_toctou_characterization() {
 
     // --- Spawn write task ---
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
     });
 
     // --- Wait for write to be inside the pause ---

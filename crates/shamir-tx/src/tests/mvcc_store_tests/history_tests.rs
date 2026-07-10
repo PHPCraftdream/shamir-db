@@ -1,6 +1,7 @@
 use super::helpers::{archived_count, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::mvcc_store::Retention;
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 // ========================================================================
 // T4-history — history_of
@@ -26,15 +27,15 @@ async fn history_of_three_writes_full_timeline_with_ts() {
 
     // Freeze the clock so each version gets a distinct, known ts.
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
     mvcc.set_test_now(3_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -71,14 +72,14 @@ async fn history_of_deleted_key_keeps_prior_versions() {
     let mvcc = make_mvcc();
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
     // C1: delete writes a tombstone (empty value) into the log.
-    mvcc.delete_versioned(Bytes::from("k")).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await.unwrap();
 
     let timeline = mvcc.history_of(b"k").await.unwrap();
     // v1 + v2 (prior log entries) + v3 (tombstone, also in the log).
@@ -96,10 +97,10 @@ async fn history_of_isolates_prefix_collisions() {
     let mvcc = make_mvcc();
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("a"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("a"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::from("kk"), Bytes::from("b"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("kk")), Bytes::from("b"))
         .await
         .unwrap();
 
@@ -126,15 +127,15 @@ async fn purge_below_ts_reclaims_only_older_than_cutoff() {
 
     // v1 @ ts=1_000, v2 @ ts=2_000, v3 @ ts=3_000 (all same key).
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
     mvcc.set_test_now(3_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -165,7 +166,7 @@ async fn purge_below_ts_respects_live_snapshot_floor() {
 
     // v1 @ ts=1_000.
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     // Open a snapshot NOW (at version 1) → min_alive = 1. Every
@@ -174,7 +175,7 @@ async fn purge_below_ts_respects_live_snapshot_floor() {
 
     // v2 @ ts=2_000 archives v1 into history.
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -204,11 +205,11 @@ async fn purge_below_ts_keeps_unknown_ts_versions() {
 
     // v1, v2 (history archives v1; both get ts-keys via record_ts).
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -239,15 +240,15 @@ async fn purge_below_ts_keeps_anchor_reclaims_older() {
     // After three writes: log = {v1, v2, v3 (current)},
     // min_alive = last_committed = 3 (no snapshot).
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
     mvcc.set_test_now(3_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -271,11 +272,11 @@ async fn purge_below_ts_zero_cutoff_reclaims_nothing() {
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
     mvcc.set_test_now(1_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc.set_test_now(2_000);
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v2"))
         .await
         .unwrap();
 

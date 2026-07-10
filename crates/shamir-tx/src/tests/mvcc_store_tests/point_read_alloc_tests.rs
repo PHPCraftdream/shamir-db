@@ -6,6 +6,7 @@
 
 use super::helpers::make_mvcc;
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 /// Hot-path: key is present in history, cell is cached.
 #[tokio::test]
@@ -13,7 +14,7 @@ async fn get_current_ref_present() {
     let mvcc = make_mvcc();
     let key = b"present-key";
     let val = Bytes::from("value-1");
-    mvcc.set_versioned(Bytes::copy_from_slice(key), val.clone())
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), val.clone())
         .await
         .unwrap();
 
@@ -27,10 +28,10 @@ async fn get_current_ref_present() {
 async fn get_current_ref_tombstoned() {
     let mvcc = make_mvcc();
     let key = b"tomb-key";
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("alive"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("alive"))
         .await
         .unwrap();
-    mvcc.delete_versioned(Bytes::copy_from_slice(key))
+    mvcc.delete_versioned(RecordKey::from(Bytes::copy_from_slice(key)))
         .await
         .unwrap();
 
@@ -54,13 +55,13 @@ async fn get_current_ref_absent() {
 async fn get_current_ref_latest_version_wins() {
     let mvcc = make_mvcc();
     let key = b"multi-ver";
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v1"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v2"))
         .await
         .unwrap();
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -74,7 +75,7 @@ async fn get_current_ref_latest_version_wins() {
 async fn get_current_bytes_coercion() {
     let mvcc = make_mvcc();
     let key = Bytes::from("coerce-key");
-    mvcc.set_versioned(key.clone(), Bytes::from("val"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
 
@@ -95,7 +96,7 @@ async fn get_current_ref_floor_cap() {
     let key = b"floor-key";
 
     // First write — auto-advances gate.
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("committed"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("committed"))
         .await
         .unwrap();
 
@@ -104,7 +105,7 @@ async fn get_current_ref_floor_cap() {
     assert!(floor > 0);
 
     // Second write — also auto-advances gate.
-    mvcc.set_versioned(Bytes::copy_from_slice(key), Bytes::from("later"))
+    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("later"))
         .await
         .unwrap();
 

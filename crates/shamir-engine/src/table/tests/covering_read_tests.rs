@@ -11,12 +11,12 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use shamir_query_types::filter::{FieldPath, Filter, FilterValue};
 use shamir_query_types::read::select::Select;
 use shamir_query_types::read::OrderBy;
 use shamir_query_types::read::ReadQuery;
 use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_tx::{MvccStore, RepoTxGate};
 use shamir_types::types::common::new_map;
@@ -199,7 +199,7 @@ async fn covering_index_only_rejects_stale_posting_no_phantom() {
     // Delete the record directly through the MvccStore.  This advances the
     // hwm to V2 and removes the record from `main`, but does NOT remove the
     // sorted-index posting (V1 projection is still there — the stale window).
-    mvcc.delete_versioned(Bytes::copy_from_slice(&stale_id.to_bytes()))
+    mvcc.delete_versioned(RecordKey::from_slice(stale_id.as_bytes()))
         .await
         .unwrap();
 

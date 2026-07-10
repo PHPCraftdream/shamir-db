@@ -47,7 +47,7 @@ impl MvccStore {
     /// BEFORE the current write (`current_version(key)` captured before
     /// `publish_cell`). `0` means append-only (no prior version) → vacuum is
     /// a no-op.
-    pub(super) async fn vacuum_key(&self, key: &Bytes, old_v: u64) {
+    pub(super) async fn vacuum_key(&self, key: &[u8], old_v: u64) {
         let policy = self.retention();
         // No upper bound on either axis → nothing to reclaim.
         if policy.max_count.is_none() && policy.max_age_secs.is_none() {

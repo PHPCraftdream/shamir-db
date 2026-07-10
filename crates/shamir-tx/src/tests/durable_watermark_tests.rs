@@ -27,6 +27,7 @@ use shamir_storage::types::Store;
 
 use crate::mvcc_store::MvccStore;
 use crate::repo_tx_gate::RepoTxGate;
+use shamir_storage::types::RecordKey;
 
 fn make_store_with_gate() -> (Arc<MvccStore>, Arc<RepoTxGate>) {
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -66,7 +67,7 @@ async fn nontx_set_versioned_advances_durable_in_lockstep() {
     for i in 0..5u8 {
         let key = Bytes::from(vec![b'k', i]);
         let val = Bytes::from(vec![b'v', i]);
-        let v = store.set_versioned(key, val).await.unwrap();
+        let v = store.set_versioned(RecordKey::from(key), val).await.unwrap();
         let dur = gate.durable_watermark();
         let vis = gate.last_committed();
         // Invariant: durable never leads visibility.
@@ -91,7 +92,7 @@ async fn nontx_set_versioned_many_advances_durable_to_batch_max() {
     let batch: Vec<(Bytes, Bytes)> = (0..4u8)
         .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
         .collect();
-    let max_v = store.set_versioned_many(batch).await.unwrap();
+    let max_v = store.set_versioned_many(batch.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
     assert_eq!(max_v, 4);
     assert_eq!(gate.last_committed(), max_v);
     assert_eq!(
@@ -108,7 +109,7 @@ async fn nontx_set_versioned_many_advances_durable_to_batch_max() {
 async fn nontx_delete_versioned_advances_durable() {
     let (store, gate) = make_store_with_gate();
     let _ = store
-        .set_versioned(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v1"))
         .await
         .unwrap();
     let prev_dur = gate.durable_watermark();
@@ -116,7 +117,7 @@ async fn nontx_delete_versioned_advances_durable() {
     assert_eq!(prev_dur, prev_vis);
 
     let v = store
-        .delete_versioned(Bytes::from_static(b"k"))
+        .delete_versioned(RecordKey::from(Bytes::from_static(b"k")))
         .await
         .unwrap();
     assert!(v > prev_vis);
@@ -145,28 +146,28 @@ async fn nontx_mixed_sequence_durable_le_visibility_throughout() {
     };
 
     let _ = store
-        .set_versioned(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"a")), Bytes::from_static(b"1"))
         .await
         .unwrap();
     observe(&gate, "after set a=1");
 
     let _ = store
         .set_versioned_many(vec![
-            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
-            (Bytes::from_static(b"c"), Bytes::from_static(b"3")),
+            (RecordKey::from_slice(b"b"), Bytes::from_static(b"2")),
+            (RecordKey::from_slice(b"c"), Bytes::from_static(b"3")),
         ])
         .await
         .unwrap();
     observe(&gate, "after batched set {b,c}");
 
     let _ = store
-        .delete_versioned(Bytes::from_static(b"a"))
+        .delete_versioned(RecordKey::from(Bytes::from_static(b"a")))
         .await
         .unwrap();
     observe(&gate, "after delete a");
 
     let _ = store
-        .set_versioned(Bytes::from_static(b"d"), Bytes::from_static(b"4"))
+        .set_versioned(RecordKey::from(Bytes::from_static(b"d")), Bytes::from_static(b"4"))
         .await
         .unwrap();
     let (d, v) = observe(&gate, "final");

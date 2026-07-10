@@ -19,6 +19,7 @@ use shamir_query_types::read::select::Select;
 use shamir_query_types::read::{At, OrderDirection, ReadQuery, Temporal};
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_tx::{MvccStore, RepoTxGate, Retention};
 use shamir_types::types::common::new_map;
@@ -88,7 +89,9 @@ async fn insert_first(tbl: &TableManager, rec: &InnerValue) -> RecordId {
 /// serialised InnerValue (same layout `Table::insert` writes).
 async fn overwrite(mvcc: &MvccStore, id: RecordId, rec: &InnerValue) {
     let bytes = rec.to_bytes().unwrap();
-    mvcc.set_versioned(id.to_bytes(), bytes).await.unwrap();
+    mvcc.set_versioned(RecordKey::from_slice(id.as_bytes()), bytes)
+        .await
+        .unwrap();
 }
 
 /// `WHERE name == "alice"` — matches our subject record.

@@ -366,8 +366,11 @@ impl TableManager {
             // Level-3: acquire a Shared lock on the key before reading.
             // No-op for Snapshot / Serializable (the helper self-gates).
             // A wound-wait abort surfaces as DbError::Conflict and the tx
-            // must abort (the executor / commit path handles it).
-            self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
+            // must abort (the executor / commit path handles it). task #532:
+            // the lock registry is `RecordKey`-keyed — build the key inline
+            // from the rid (alloc-free) rather than round-tripping `Bytes`.
+            self.acquire_pessimistic_read_lock(RecordKey::from_slice(id.as_bytes()), tx)
+                .await?;
             // A3: record the version of the value ACTUALLY READ, not the
             // cell's current version. `read_one_tx` reads via
             // `get_at(key, tx.snapshot_version)` (snapshot-gated), so the
@@ -485,7 +488,9 @@ impl TableManager {
             let key = id.to_bytes();
             // Level-3: acquire a Shared lock on the key before reading.
             // No-op for Snapshot / Serializable (the helper self-gates).
-            self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
+            // task #532: lock registry is `RecordKey`-keyed — build inline.
+            self.acquire_pessimistic_read_lock(RecordKey::from_slice(id.as_bytes()), tx)
+                .await?;
             // A3: record the version of the value ACTUALLY READ, not the
             // cell's current version. See `read_one_tx` for the full
             // rationale on the `.min(snapshot_version)` clamp. No-op for
@@ -669,8 +674,11 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch) = stream.next().await {
                     for (rid, _cow) in batch? {
-                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
-                            .await?;
+                        self.acquire_pessimistic_read_lock(
+                            RecordKey::from_slice(rid.as_bytes()),
+                            tx,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -679,8 +687,11 @@ impl TableManager {
                 futures::pin_mut!(stream);
                 while let Some(batch) = stream.next().await {
                     for (rid, _cow) in batch? {
-                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
-                            .await?;
+                        self.acquire_pessimistic_read_lock(
+                            RecordKey::from_slice(rid.as_bytes()),
+                            tx,
+                        )
+                        .await?;
                     }
                 }
             }

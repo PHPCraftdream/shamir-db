@@ -18,13 +18,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use scc::TreeIndex;
+use shamir_storage::types::RecordKey;
 
 /// Composite key for the overlay B+ tree: `(record_key, version)`.
 ///
-/// `Bytes` implements `Ord` lexicographically, and tuple `Ord` compares
-/// component-wise (first `Bytes`, then `u64`), so all versions of a single
-/// key are contiguous in the tree and ordered by ascending version.
-type OverlayKey = (Bytes, u64);
+/// [`RecordKey`] implements `Ord` lexicographically over the byte slice
+/// (a hand-written impl — never a derive over the SSO `Repr`), and tuple
+/// `Ord` compares component-wise (first `RecordKey`, then `u64`), so all
+/// versions of a single key are contiguous in the tree and ordered by
+/// ascending version. Keying on `RecordKey` (not `Bytes`) lets an already
+/// alloc-free `RecordKey` value from the commit path land in the tree with
+/// zero heap round-trip (task #532; the `RecordId` shape — 16 bytes — stays
+/// inline). Composing the tuple `Ord`/`Eq` derive over `RecordKey`'s own
+/// hand-written impls is sound: it does NOT derive over `KeyBytes`'s inner
+/// `Repr` (#503 rule).
+type OverlayKey = (RecordKey, u64);
 
 /// In-memory versioned overlay.
 ///
@@ -68,7 +76,7 @@ impl VersionedOverlay {
     /// version) is treated as an idempotent replay and silently ignored.
     /// The first writer wins; this is correct because the same version
     /// always carries the same payload (WAL determinism).
-    pub fn insert(&self, key: Bytes, version: u64, value: Bytes) {
+    pub fn insert(&self, key: RecordKey, version: u64, value: Bytes) {
         let entry_bytes = key.len() + value.len() + PER_ENTRY_OVERHEAD;
         let composite = (key, version);
         if self.tree.insert(composite, value).is_ok() {
@@ -98,8 +106,9 @@ impl VersionedOverlay {
     /// Idempotent: removing an absent entry is a no-op (the value was already
     /// drained or never inserted). Lock-free.
     pub fn remove(&self, key: &[u8], version: u64) {
-        let key_bytes = Bytes::copy_from_slice(key);
-        let composite = (key_bytes, version);
+        // Inline-cheap for the 16-byte `RecordId` shape (no heap alloc);
+        // constructs the tree's `(RecordKey, version)` probe key.
+        let composite = (RecordKey::from_slice(key), version);
         // `peek` the value first to recover its byte length for the counters,
         // then remove. The window between peek and remove is benign: counters
         // are advisory (Relaxed) and a concurrent insert of the same version is
@@ -123,9 +132,11 @@ impl VersionedOverlay {
     /// read used when cells report a version that may have been GC'd or
     /// when a snapshot needs the latest committed value.
     pub fn newest_visible(&self, key: &[u8], max_version: u64) -> Option<(u64, Bytes)> {
-        let key_bytes = Bytes::copy_from_slice(key);
-        let lo = (key_bytes.clone(), 0u64);
-        let hi = (key_bytes, max_version);
+        // Inline-cheap for the 16-byte `RecordId` shape; the range bounds are
+        // `(RecordKey, version)` tuples over the tree's key type.
+        let key_rk = RecordKey::from_slice(key);
+        let lo = (key_rk.clone(), 0u64);
+        let hi = (key_rk, max_version);
 
         let guard = scc::ebr::Guard::new();
         // TreeIndex::range returns entries in ascending key order.
@@ -203,8 +214,8 @@ impl VersionedOverlay {
     /// the bootstrap/recovery semantics of the read seams (floor 0 ⇒ no
     /// visibility restriction is applied by `current_stream`, which then never
     /// consults the overlay winner).
-    pub fn snapshot_le(&self, floor: u64) -> Vec<(Bytes, u64, Bytes)> {
-        let mut out: Vec<(Bytes, u64, Bytes)> = Vec::new();
+    pub fn snapshot_le(&self, floor: u64) -> Vec<(RecordKey, u64, Bytes)> {
+        let mut out: Vec<(RecordKey, u64, Bytes)> = Vec::new();
         if floor == 0 {
             return out;
         }
@@ -243,7 +254,7 @@ impl VersionedOverlay {
     /// Entries are yielded in ascending `(key, version)` order (the B+ tree's
     /// natural sort), which groups all versions of one key contiguously — ideal
     /// for the drain's per-version grouping. Lock-free iteration.
-    pub fn iter_all_le(&self, floor: u64) -> Vec<(Bytes, u64, Bytes)> {
+    pub fn iter_all_le(&self, floor: u64) -> Vec<(RecordKey, u64, Bytes)> {
         if floor == 0 {
             return Vec::new();
         }
@@ -284,8 +295,10 @@ impl VersionedOverlay {
 
     /// Peek at a specific `(key, version)` entry.
     fn peek(&self, key: &[u8], version: u64) -> Option<Bytes> {
-        let key_bytes = Bytes::copy_from_slice(key);
-        self.tree.peek_with(&(key_bytes, version), |_, v| v.clone())
+        // Inline-cheap for the 16-byte `RecordId` shape; probes the tree with
+        // a `(RecordKey, version)` key.
+        self.tree
+            .peek_with(&(RecordKey::from_slice(key), version), |_, v| v.clone())
     }
 }
 

@@ -20,6 +20,7 @@ use bytes::Bytes;
 use crate::mvcc_store::MvccStore;
 
 use super::helpers::make_mvcc;
+use shamir_storage::types::RecordKey;
 
 /// Read `(version, reserved_by)` straight out of the cell for assertions.
 /// Returns `None` when the key has no cell (mirrors the probe pattern in
@@ -43,13 +44,13 @@ async fn publish_cell_never_regresses_version() {
 
     // 1. Transaction B commits k at version 11 (the newer in-memory commit
     //    wins the cell via Phase 5a / finalize_reservation -> publish_cell).
-    mvcc.publish_cell(key.clone(), 11).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 11).await;
     assert_eq!(cell_state(&mvcc, &key), Some((11, 0)));
 
     // 2. The suspended drainer now resumes and finishes its STALE
     //    seed-from-durable-write for transaction A's version 10. This MUST
     //    NOT overwrite the cell's version back down to 10.
-    mvcc.publish_cell(key.clone(), 10).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 10).await;
 
     assert_eq!(
         cell_state(&mvcc, &key),
@@ -69,15 +70,15 @@ async fn publish_cell_still_advances_on_greater_version() {
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
 
-    mvcc.publish_cell(key.clone(), 5).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 5).await;
     assert_eq!(cell_state(&mvcc, &key), Some((5, 0)));
 
     // Strictly greater advances.
-    mvcc.publish_cell(key.clone(), 8).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 8).await;
     assert_eq!(cell_state(&mvcc, &key), Some((8, 0)));
 
     // Equal is a no-op (NOT a regression — but also not an advance).
-    mvcc.publish_cell(key.clone(), 8).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 8).await;
     assert_eq!(cell_state(&mvcc, &key), Some((8, 0)));
 }
 
@@ -89,7 +90,7 @@ async fn publish_cell_seeds_vacant_cell() {
     let key = Bytes::from_static(b"cold");
     assert_eq!(cell_state(&mvcc, &key), None);
 
-    mvcc.publish_cell(key.clone(), 42).await;
+    mvcc.publish_cell(RecordKey::from(key.clone()), 42).await;
     assert_eq!(cell_state(&mvcc, &key), Some((42, 0)));
 }
 
@@ -107,12 +108,12 @@ async fn seed_version_never_regresses_version() {
     let key = Bytes::from_static(b"k");
 
     // 1. Transaction B commits k at version 11 in-memory (cell advanced).
-    mvcc.seed_version(key.clone(), 11).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 11).await;
     assert_eq!(cell_state(&mvcc, &key), Some((11, 0)));
 
     // 2. A cold read races in and seeds the cell from a STALE history-derived
     //    version 10 (older durable anchor). This MUST NOT regress the cell.
-    mvcc.seed_version(key.clone(), 10).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 10).await;
 
     assert_eq!(
         cell_state(&mvcc, &key),
@@ -130,14 +131,14 @@ async fn seed_version_still_advances_on_greater_version() {
     let mvcc = make_mvcc();
     let key = Bytes::from_static(b"k");
 
-    mvcc.seed_version(key.clone(), 5).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 5).await;
     assert_eq!(cell_state(&mvcc, &key), Some((5, 0)));
 
-    mvcc.seed_version(key.clone(), 9).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 9).await;
     assert_eq!(cell_state(&mvcc, &key), Some((9, 0)));
 
     // Equal is a no-op.
-    mvcc.seed_version(key.clone(), 9).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 9).await;
     assert_eq!(cell_state(&mvcc, &key), Some((9, 0)));
 }
 
@@ -149,6 +150,6 @@ async fn seed_version_seeds_vacant_cell() {
     let key = Bytes::from_static(b"cold");
     assert_eq!(cell_state(&mvcc, &key), None);
 
-    mvcc.seed_version(key.clone(), 42).await;
+    mvcc.seed_version(RecordKey::from(key.clone()), 42).await;
     assert_eq!(cell_state(&mvcc, &key), Some((42, 0)));
 }

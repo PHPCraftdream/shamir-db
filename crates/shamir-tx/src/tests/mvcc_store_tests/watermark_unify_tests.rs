@@ -15,6 +15,7 @@
 
 use super::helpers::{make_gate, make_mvcc_with_gate};
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 /// A single non-tx `set_versioned` advances the tracker watermark to the
 /// assigned version — not just the `last_committed` atomic.
@@ -27,7 +28,7 @@ async fn nontx_set_advances_completion_watermark() {
     let mvcc = make_mvcc_with_gate(gate.clone());
 
     let new_v = mvcc
-        .set_versioned(Bytes::from("k"), Bytes::from("v"))
+        .set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v"))
         .await
         .unwrap();
 
@@ -51,11 +52,11 @@ async fn two_nontx_writes_no_watermark_hole() {
     let mvcc = make_mvcc_with_gate(gate.clone());
 
     let v_a = mvcc
-        .set_versioned(Bytes::from("a"), Bytes::from("va"))
+        .set_versioned(RecordKey::from(Bytes::from("a")), Bytes::from("va"))
         .await
         .unwrap();
     let v_b = mvcc
-        .set_versioned(Bytes::from("b"), Bytes::from("vb"))
+        .set_versioned(RecordKey::from(Bytes::from("b")), Bytes::from("vb"))
         .await
         .unwrap();
 
@@ -67,11 +68,11 @@ async fn two_nontx_writes_no_watermark_hole() {
 
     // Both writes are visible at the current floor.
     assert_eq!(
-        mvcc.get_current(Bytes::from("a")).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from("a"))).await.unwrap(),
         Some(Bytes::from("va")),
     );
     assert_eq!(
-        mvcc.get_current(Bytes::from("b")).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from("b"))).await.unwrap(),
         Some(Bytes::from("vb")),
     );
 }
@@ -88,7 +89,7 @@ async fn marked_version_above_nontx_becomes_visible() {
 
     // Non-tx write of key A → V_n.
     let v_n = mvcc
-        .set_versioned(Bytes::from("A"), Bytes::from("a"))
+        .set_versioned(RecordKey::from(Bytes::from("A")), Bytes::from("a"))
         .await
         .unwrap();
     assert_eq!(gate.last_committed(), v_n);
@@ -96,7 +97,7 @@ async fn marked_version_above_nontx_becomes_visible() {
     // A subsequent marked version V_t > V_n (here: a second non-tx write,
     // which post-P0b goes through the same CompletionTracker).
     let v_t = mvcc
-        .set_versioned(Bytes::from("B"), Bytes::from("b"))
+        .set_versioned(RecordKey::from(Bytes::from("B")), Bytes::from("b"))
         .await
         .unwrap();
     assert!(v_t > v_n);
@@ -124,7 +125,7 @@ async fn nontx_batch_advances_watermark_to_max() {
         (Bytes::from("k2"), Bytes::from("v2")),
         (Bytes::from("k3"), Bytes::from("v3")),
     ];
-    let max_v = mvcc.set_versioned_many(items).await.unwrap();
+    let max_v = mvcc.set_versioned_many(items.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
 
     assert_eq!(gate.completion().watermark(), max_v);
     assert_eq!(gate.completion().watermark(), gate.last_committed());
@@ -136,10 +137,10 @@ async fn nontx_delete_advances_completion_watermark() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
 
-    mvcc.set_versioned(Bytes::from("k"), Bytes::from("v"))
+    mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v"))
         .await
         .unwrap();
-    let del_v = mvcc.delete_versioned(Bytes::from("k")).await.unwrap();
+    let del_v = mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await.unwrap();
 
     assert_eq!(gate.completion().watermark(), del_v);
     assert_eq!(gate.completion().watermark(), gate.last_committed());

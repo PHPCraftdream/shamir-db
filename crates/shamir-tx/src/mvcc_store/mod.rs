@@ -127,12 +127,20 @@ pub struct MvccStore {
     pub(super) gate: Arc<RepoTxGate>,
     /// In-memory coordination state: key → record cell (latest committed version).
     /// Cold start: first `get_at` for a key does a range scan, populates cache.
-    pub(super) cells: SccHashMap<Bytes, RecordCell, THasher>,
+    ///
+    /// Keyed on [`RecordKey`] (task #532): the commit / publish / reservation
+    /// paths already hold a `RecordKey`, so this avoids the redundant
+    /// `RecordKey → Bytes → RecordKey` heap round-trip that a `Bytes` key
+    /// forced on every op. `RecordKey` hashes / compares byte-identically to
+    /// the equivalent `Bytes` (both go through the raw slice), so `&[u8]`
+    /// probes (`current_version` / `live_version`) still work via
+    /// `Borrow<[u8]>`.
+    pub(super) cells: SccHashMap<RecordKey, RecordCell, THasher>,
     /// Level-3 pessimistic lock registry. Populated ONLY for keys locked by a
     /// `Pessimistic` tx; stays empty otherwise → zero overhead on the snapshot
     /// / serializable read/write hot paths. Each entry is an `Arc<KeyLock>`
     /// shared between concurrent requesters of the same key.
-    pub(super) locks: SccHashMap<Bytes, Arc<KeyLockInner>, THasher>,
+    pub(super) locks: SccHashMap<RecordKey, Arc<KeyLockInner>, THasher>,
     /// T1b.2: history-retention policy (lock-free `ArcSwap<Retention>`).
     /// Defaults to [`Retention::current_only`] (eager vacuum). Set via
     /// [`Self::set_retention`].
@@ -464,7 +472,7 @@ impl MvccStore {
     /// cell always seeds at the offered version). The NORMAL non-racing
     /// drain path always offers `<=` the current version, so this guard is a
     /// no-op there.
-    pub(super) async fn publish_cell(&self, key: Bytes, version: u64) {
+    pub(super) async fn publish_cell(&self, key: RecordKey, version: u64) {
         match self.cells.entry_async(key).await {
             scc::hash_map::Entry::Occupied(mut e) => {
                 if version > e.get().version {
@@ -489,7 +497,9 @@ impl MvccStore {
     /// the deferred-anchor optimisation only applies when the cell is
     /// resident.
     pub(crate) fn swap_vacuum_anchor(&self, key: &[u8], new_anchor: u64) -> Option<u64> {
-        match self.cells.entry(Bytes::copy_from_slice(key)) {
+        // Inline-cheap for the 16-byte `RecordId` shape; builds the cell map's
+        // `RecordKey` entry key without the prior `Bytes` heap copy.
+        match self.cells.entry(RecordKey::from_slice(key)) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
                 let prev = cell.vacuum_anchor;
@@ -547,7 +557,7 @@ impl MvccStore {
     /// commit path can call it to claim each write-set key. The claim is the
     /// explicit serialization point that makes "exactly one committer wins" hold
     /// for non-unique tables under true parallelism.
-    pub fn try_reserve(&self, key: Bytes, snapshot_version: u64, txn_id: u64) -> bool {
+    pub fn try_reserve(&self, key: RecordKey, snapshot_version: u64, txn_id: u64) -> bool {
         match self.cells.entry(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
@@ -581,7 +591,7 @@ impl MvccStore {
     /// S2 wires this into the publish path (`apply_committed_visible`,
     /// Phase 5a) in place of the prior `publish_cell_sync` — it is a strict
     /// superset (sets `version` AND clears `reserved_by`).
-    pub(crate) fn finalize_reservation(&self, key: Bytes, version: u64) {
+    pub(crate) fn finalize_reservation(&self, key: RecordKey, version: u64) {
         match self.cells.entry(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
@@ -607,7 +617,7 @@ impl MvccStore {
     /// steal it) and "our claim was already finalized" (`reserved_by` is
     /// already `0`). This makes the RAII guard's `Drop` safe to fire after a
     /// successful `finalize_reservation`.
-    pub(crate) fn release_reservation(&self, key: Bytes, txn_id: u64) {
+    pub(crate) fn release_reservation(&self, key: RecordKey, txn_id: u64) {
         if let scc::hash_map::Entry::Occupied(mut e) = self.cells.entry(key) {
             let cell = e.get_mut();
             if cell.reserved_by == txn_id {
@@ -683,7 +693,7 @@ impl MvccStore {
     ///
     /// Returns the monotonic version assigned to this write (from the
     /// shared `RepoTxGate` counter).
-    pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<u64> {
+    pub async fn set_versioned(&self, key: RecordKey, value: Bytes) -> DbResult<u64> {
         // Single log append: every prior version is already in the log from
         // when it was written as current. No other store is written.
         //
@@ -770,7 +780,7 @@ impl MvccStore {
     /// Returns the maximum version assigned across the batch (one
     /// version per record). The returned value is the commit-version a
     /// changefeed event should carry.
-    pub async fn set_versioned_many(&self, items: Vec<(Bytes, Bytes)>) -> DbResult<u64> {
+    pub async fn set_versioned_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<u64> {
         if items.is_empty() {
             // No records written — return 0. The caller should not emit
             // a changefeed event for an empty batch.
@@ -797,7 +807,7 @@ impl MvccStore {
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         // capacity: one data-op + one ts-op per item.
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
-        let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
+        let keys: Vec<RecordKey> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             old_versions.push(self.current_version(key));
             let guard = self.gate.assign_next_version_guarded();
@@ -884,7 +894,7 @@ impl MvccStore {
     ///     for that key: the old version accumulates until the next full scan.
     pub async fn set_versioned_many_append_only(
         &self,
-        items: Vec<(Bytes, Bytes)>,
+        items: Vec<(RecordKey, Bytes)>,
     ) -> DbResult<u64> {
         if items.is_empty() {
             return Ok(0);
@@ -899,7 +909,7 @@ impl MvccStore {
         let ts_ms = self.now_millis();
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
-        let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
+        let keys: Vec<RecordKey> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             let guard = self.gate.assign_next_version_guarded();
             let new_v = guard.version();
@@ -952,7 +962,7 @@ impl MvccStore {
     ///
     /// Returns the monotonic version assigned to this delete (always
     /// allocated — see [`set_versioned`] for rationale).
-    pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
+    pub async fn delete_versioned(&self, key: RecordKey) -> DbResult<u64> {
         // Single log append: a tombstone (empty value) is written for the
         // delete version. The prior version is already in the log from when
         // it was written as current.
@@ -1036,10 +1046,10 @@ impl MvccStore {
     /// lands (out-of-order materialize) this prevents observing
     /// uncommitted versions.
     ///
-    /// Accepts owned `Bytes` for backward-compatibility. Delegates to
-    /// [`get_current_bytes`](Self::get_current_bytes) — prefer that
-    /// method on hot paths to avoid a 16-byte key allocation.
-    pub async fn get_current(&self, key: Bytes) -> DbResult<Option<Bytes>> {
+    /// Accepts an owned [`RecordKey`] for the keyed call convention.
+    /// Delegates to [`get_current_bytes`](Self::get_current_bytes) — prefer
+    /// that borrowing method on hot paths where only a `&[u8]` is in hand.
+    pub async fn get_current(&self, key: RecordKey) -> DbResult<Option<Bytes>> {
         self.get_current_bytes(&key).await
     }
 
@@ -1061,19 +1071,19 @@ impl MvccStore {
             let ov_cap = if floor > 0 { floor } else { u64::MAX };
             let hist_v = self.seek_latest_version(key).await?;
             let ov_v = self.overlay.newest_visible(key, ov_cap).map(|(ver, _)| ver);
-            // Cold path: `seed_version` needs an owned `Bytes`. Allocate once
-            // and reuse for both the seed call and the downstream probes.
-            // This allocation only happens on cold-start (cell absent) which
-            // is rare on the hot read path.
+            // Cold path: `seed_version` takes an owned `RecordKey`. Build it
+            // inline from the borrowed slice (alloc-free for the ≤23-byte
+            // `RecordId` shape). This only happens on cold-start (cell absent),
+            // rare on the hot read path.
             match (hist_v, ov_v) {
                 (Some(h), Some(o)) => {
                     // Seed the cell from history's max (the durable anchor);
                     // the overlay value, if newer, wins in resolve_read below.
-                    self.seed_version(Bytes::copy_from_slice(key), h).await;
+                    self.seed_version(RecordKey::from_slice(key), h).await;
                     h.max(o)
                 }
                 (Some(h), None) => {
-                    self.seed_version(Bytes::copy_from_slice(key), h).await;
+                    self.seed_version(RecordKey::from_slice(key), h).await;
                     h
                 }
                 // Overlay-only key: no durable history yet. Do NOT seed the
@@ -1127,11 +1137,16 @@ impl MvccStore {
         // it into a map and merging during the history group-by is cheap.
         // `floor == 0` (bootstrap) → `snapshot_le` returns empty → overlay
         // contributes nothing and the stream is byte-identical to history-only.
+        // Boundary: `snapshot_le` yields `RecordKey` keys; the group-by state
+        // machine (`OverlayWinners`) is `Bytes`-keyed and merges against the
+        // `Bytes` `orig` recovered from each history version-key. Convert the
+        // overlay side ONCE here at stream-open (byte-identical) — it is the
+        // small, bounded side of the merge, not a per-row hot-path cost.
         let overlay: shamir_collections::TMap<Bytes, (u64, Bytes)> = self
             .overlay
             .snapshot_le(floor)
             .into_iter()
-            .map(|(k, v, val)| (k, (v, val)))
+            .map(|(k, v, val)| (Bytes::from(k), (v, val)))
             .collect();
         // Box::pin so the returned stream is `Unpin` — callers (e.g.
         // `TableManager::list_stream`) consume it via `.next()` without

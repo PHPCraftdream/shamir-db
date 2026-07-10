@@ -1,4 +1,5 @@
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 
 use super::table_manager::TableManager;
 
@@ -10,7 +11,7 @@ impl TableManager {
     /// wound-wait abort surfaces as `DbError::Conflict`.
     pub async fn acquire_pessimistic_read_lock(
         &self,
-        key: bytes::Bytes,
+        key: RecordKey,
         tx: &shamir_tx::TxContext,
     ) -> DbResult<()> {
         if tx.isolation != shamir_tx::IsolationLevel::Pessimistic {
@@ -38,7 +39,7 @@ impl TableManager {
     /// tx. Same contract as [`acquire_pessimistic_read_lock`] but exclusive.
     pub async fn acquire_pessimistic_write_lock(
         &self,
-        key: bytes::Bytes,
+        key: RecordKey,
         tx: &shamir_tx::TxContext,
     ) -> DbResult<()> {
         if tx.isolation != shamir_tx::IsolationLevel::Pessimistic {

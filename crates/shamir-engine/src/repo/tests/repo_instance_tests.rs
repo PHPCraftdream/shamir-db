@@ -471,7 +471,7 @@ async fn l5_vacuum_does_not_resurrect_from_cache() {
     })
     .expect("valid retention policy");
 
-    let key = bytes::Bytes::from_static(b"mykey");
+    let key = shamir_storage::types::RecordKey::from_slice(b"mykey");
 
     // Write version 1.
     let _v1 = mvcc

@@ -1,6 +1,7 @@
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::mvcc_store::Retention;
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 
 // ================================================================
 // T1b.1 — eager vacuum (CurrentOnly default) tests.
@@ -16,7 +17,7 @@ async fn eager_vacuum_currentonly_bounds_history() {
 
     let key = Bytes::from("vacuum_key");
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -51,7 +52,7 @@ async fn eager_vacuum_keeps_versions_pinned_by_live_snapshot() {
     let key = Bytes::from("pinned_key");
 
     // Write v1 (no snapshot) — publishes last_committed = v1.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -63,7 +64,7 @@ async fn eager_vacuum_keeps_versions_pinned_by_live_snapshot() {
 
     // Overwrite with v2. Eager vacuum runs but min_alive == v1 protects
     // the v1 history entry (gc_below only removes < min_alive).
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -78,7 +79,7 @@ async fn eager_vacuum_keeps_versions_pinned_by_live_snapshot() {
     // Drop the snapshot → min_alive advances. A further write's eager
     // vacuum can now reclaim the unpinned old version.
     drop(snap);
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -121,7 +122,7 @@ async fn eager_vacuum_race_open_snapshot() {
     ));
 
     // Seed OLD (no snapshot) — lands in the log (sole write), cell published.
-    mvcc.set_versioned(key.clone(), old_val.clone())
+    mvcc.set_versioned(RecordKey::from(key.clone()), old_val.clone())
         .await
         .unwrap();
     let v_seed = mvcc.version_of(&key);
@@ -138,7 +139,7 @@ async fn eager_vacuum_race_open_snapshot() {
     let key_w = key.clone();
     let new_val_w = new_val.clone();
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
     });
 
     // Wait until the write is paused inside history.set — cell already
@@ -183,7 +184,7 @@ async fn keephistory_no_eager_vacuum() {
 
     let key = Bytes::from("keep_key");
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -224,7 +225,7 @@ async fn retention_count_only_keeps_last_n() {
     let key = Bytes::from("count_key");
     let mut versions = Vec::new();
     for i in 1..=6u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
         versions.push(mvcc.version_of(&key));
@@ -260,7 +261,7 @@ async fn retention_current_only_is_max_count_zero() {
 
     let key = Bytes::from("co_key");
     for i in 1..=4u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -295,7 +296,7 @@ async fn retention_min_count_standalone_keeps_all() {
 
     let key = Bytes::from("floor_key");
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -320,7 +321,7 @@ async fn retention_keeps_pinned_and_anchor_with_snapshot() {
 
     let key = Bytes::from("pin_key");
     // Write v1 — log has v1 as the current entry, last_committed=v1.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -332,10 +333,10 @@ async fn retention_keeps_pinned_and_anchor_with_snapshot() {
 
     // Overwrite to v2, v3. Each vacuum runs with min_alive=v1: v1 (then
     // v1,v2) are `>= min_alive` → sacred (branch b), never reclaimed.
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -351,7 +352,7 @@ async fn retention_keeps_pinned_and_anchor_with_snapshot() {
     // write's vacuum now reclaims every old version (no anchor: no live
     // snapshot remains).
     drop(snap);
-    mvcc.set_versioned(key.clone(), Bytes::from("v4"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v4"))
         .await
         .unwrap();
 
@@ -380,7 +381,7 @@ async fn retention_anchor_below_min_alive() {
     // Write 10 times → log has all 10 versions (v1..v10),
     // last_committed=10.
     for i in 1..=10u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -409,7 +410,7 @@ async fn retention_anchor_below_min_alive() {
     //   v10: >= min_alive → kept (b)
     //   v9: == anchor → kept (c)
     //   v8..v1: reclaimed
-    mvcc.set_versioned(key.clone(), Bytes::from("v11"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v11"))
         .await
         .unwrap();
 
@@ -484,7 +485,7 @@ async fn retention_race_open_snapshot_with_count() {
     .unwrap();
 
     // Seed OLD — lands in the log (sole write), cell published.
-    mvcc.set_versioned(key.clone(), old_val.clone())
+    mvcc.set_versioned(RecordKey::from(key.clone()), old_val.clone())
         .await
         .unwrap();
     let v_seed = mvcc.version_of(&key);
@@ -499,7 +500,7 @@ async fn retention_race_open_snapshot_with_count() {
     let key_w = key.clone();
     let new_val_w = new_val.clone();
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
     });
 
     // Wait for the write to pause inside history.set (after publish_cell,
@@ -587,17 +588,17 @@ async fn max_age_reclaims_old_versions() {
     let key = Bytes::from("age_key");
     // v1 at an early frozen time (1ms — 0 is the "real clock" sentinel).
     mvcc.set_test_now(1);
-    mvcc.set_versioned(key.clone(), Bytes::from("old"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("old"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
 
     // 100s later (100_001ms) — v1 (ts=1) is now 100s old (> 60s cap).
     mvcc.set_test_now(100_001);
-    mvcc.set_versioned(key.clone(), Bytes::from("new1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("new1"))
         .await
         .unwrap();
-    mvcc.set_versioned(key.clone(), Bytes::from("new2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("new2"))
         .await
         .unwrap();
 
@@ -640,7 +641,7 @@ async fn min_count_floor_overrides_age() {
     // reclaimed yet — history accumulates v1..v4.
     mvcc.set_test_now(1);
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -648,7 +649,7 @@ async fn min_count_floor_overrides_age() {
     // Advance the clock to 10s (10x the 1s cap) and write once more to
     // trigger a vacuum. Now v1..v5 (ts=1) are all past the 1s cap.
     mvcc.set_test_now(10_000);
-    mvcc.set_versioned(key.clone(), Bytes::from("v6"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v6"))
         .await
         .unwrap();
 
@@ -684,7 +685,7 @@ async fn age_and_count_intersect_tighter_prunes() {
     // everything and the count cap alone can't reclaim (AND semantics).
     mvcc.set_test_now(50_000);
     for i in 1..=3u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("a{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("a{i}")))
             .await
             .unwrap();
     }
@@ -709,13 +710,13 @@ async fn age_and_count_intersect_tighter_prunes() {
     // v1 at frozen ts=1 (0 is the "real clock" sentinel).
     mvcc2.set_test_now(1);
     mvcc2
-        .set_versioned(key2.clone(), Bytes::from("old"))
+        .set_versioned(RecordKey::from(key2.clone()), Bytes::from("old"))
         .await
         .unwrap();
     // 100s later: overwrite. v1 (ts=1) is now 100s old (> 60s cap).
     mvcc2.set_test_now(100_001);
     mvcc2
-        .set_versioned(key2.clone(), Bytes::from("new"))
+        .set_versioned(RecordKey::from(key2.clone()), Bytes::from("new"))
         .await
         .unwrap();
     // C1: v2 (current, cur_v guard) + v1 (count-protected) = 2 entries.
@@ -738,16 +739,16 @@ async fn age_and_count_intersect_tighter_prunes() {
     // v1, v2 at ts=1 (old); v3 at ts=100_001.
     mvcc3.set_test_now(1);
     mvcc3
-        .set_versioned(key3.clone(), Bytes::from("v1"))
+        .set_versioned(RecordKey::from(key3.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     mvcc3
-        .set_versioned(key3.clone(), Bytes::from("v2"))
+        .set_versioned(RecordKey::from(key3.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     mvcc3.set_test_now(100_001);
     mvcc3
-        .set_versioned(key3.clone(), Bytes::from("v3"))
+        .set_versioned(RecordKey::from(key3.clone()), Bytes::from("v3"))
         .await
         .unwrap();
     // After v3: entries desc = [v2(ts=1), v1(ts=1)].
@@ -786,7 +787,7 @@ async fn age_keeps_pinned_and_anchor() {
     mvcc.set_retention(Retention::keep_history()).unwrap();
     mvcc.set_test_now(1);
     for i in 1..=5u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -805,7 +806,7 @@ async fn age_keeps_pinned_and_anchor() {
     })
     .unwrap();
     mvcc.set_test_now(10_000); // 10s later — v1..v4 all past the 1s cap.
-    mvcc.set_versioned(key.clone(), Bytes::from("v6"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v6"))
         .await
         .unwrap();
 
@@ -845,11 +846,11 @@ async fn unknown_ts_not_reclaimed_by_age() {
     let key = Bytes::from("no_ts_key");
     // Write v1, v2 with a frozen clock so they get real ts entries.
     mvcc.set_test_now(1);
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
 
@@ -858,7 +859,7 @@ async fn unknown_ts_not_reclaimed_by_age() {
 
     // Advance the clock well past the age cap and write once more.
     mvcc.set_test_now(10_000);
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
 
@@ -887,7 +888,7 @@ async fn ts_recorded_on_write() {
     mvcc.set_test_now(4242);
 
     let key = Bytes::from("ts_record_key");
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);

@@ -5,6 +5,7 @@ use bytes::Bytes;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use shamir_storage::types::RecordKey;
 
 /// Helper: build an MvccStore backed by a CountingStore so we can
 /// assert scan_prefix_stream call counts.
@@ -30,7 +31,7 @@ async fn currentonly_rewrite_no_prefix_scan() {
 
     let key = Bytes::from("targeted");
     // First write — append-only, old_v == 0 → vacuum is a no-op, no scan.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     assert_eq!(
@@ -40,7 +41,7 @@ async fn currentonly_rewrite_no_prefix_scan() {
     );
 
     // Second write — old_v > 0, targeted remove fires, no scan.
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     assert_eq!(
@@ -50,7 +51,7 @@ async fn currentonly_rewrite_no_prefix_scan() {
     );
 
     // Third write — same.
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
     assert_eq!(
@@ -77,7 +78,7 @@ async fn snapshot_pins_old_version_no_targeted_remove() {
 
     let key = Bytes::from("snap_pin");
     // Write v1.
-    mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v1"))
         .await
         .unwrap();
     let v1 = mvcc.version_of(&key);
@@ -89,7 +90,7 @@ async fn snapshot_pins_old_version_no_targeted_remove() {
 
     // Overwrite with v2. Targeted fast path must NOT fire (snapshot active).
     // The scan path runs instead.
-    mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v2"))
         .await
         .unwrap();
     assert!(
@@ -108,13 +109,13 @@ async fn snapshot_pins_old_version_no_targeted_remove() {
     // Drop snapshot, write v3 — the first write after snapshot drop uses the
     // scan path (to clean up accumulated old versions from the snapshot epoch).
     drop(snap);
-    mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v3"))
         .await
         .unwrap();
 
     // After the scan-path cleanup, subsequent writes use targeted remove.
     let prev_count = store.scan_prefix_count.load(Ordering::Relaxed);
-    mvcc.set_versioned(key.clone(), Bytes::from("v4"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("v4"))
         .await
         .unwrap();
     assert_eq!(
@@ -141,7 +142,7 @@ async fn anchor_preserved_with_keep_history_and_snapshot() {
     let key = Bytes::from("anchor_key");
     // Write v1..v3.
     for i in 1..=3u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -153,7 +154,7 @@ async fn anchor_preserved_with_keep_history_and_snapshot() {
 
     // Write v4..v8 (exceeds max_count=5 with some versions).
     for i in 4..=8u32 {
-        mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+        mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from(format!("v{i}")))
             .await
             .unwrap();
     }
@@ -176,7 +177,7 @@ async fn append_only_no_vacuum_scan() {
     // Write distinct keys — each is an append (old_v == 0).
     for i in 0..5u32 {
         let key = Bytes::from(format!("new_key_{i}"));
-        mvcc.set_versioned(key, Bytes::from("val")).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(key), Bytes::from("val")).await.unwrap();
     }
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
@@ -199,14 +200,14 @@ async fn delete_versioned_currentonly_reclaims_old() {
 
     let key = Bytes::from("del_key");
     // Write v1.
-    mvcc.set_versioned(key.clone(), Bytes::from("data"))
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("data"))
         .await
         .unwrap();
     assert_eq!(count_history_entries(&mvcc).await, 1);
 
     // Delete — fast path fires (no scan). A10: v1 is deferred as anchor,
     // the tombstone becomes current.
-    mvcc.delete_versioned(key.clone()).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
         0,
@@ -221,6 +222,6 @@ async fn delete_versioned_currentonly_reclaims_old() {
     );
 
     // get_current returns None (tombstone).
-    let result = mvcc.get_current(key).await.unwrap();
+    let result = mvcc.get_current(RecordKey::from(key)).await.unwrap();
     assert!(result.is_none(), "deleted key must return None");
 }

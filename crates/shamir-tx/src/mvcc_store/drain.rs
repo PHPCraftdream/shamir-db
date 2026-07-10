@@ -65,12 +65,12 @@ impl MvccStore {
         // durable watermark advances contiguously).
         let mut by_version: BTreeMap<u64, Vec<KvOp>> = BTreeMap::new();
         for (key, version, value) in entries {
+            // Overlay keys and KvOp are both `RecordKey`-keyed (task #532) —
+            // move straight through, no conversion.
             let op = if value.is_empty() {
-                // Boundary: overlay keys are `Bytes`; KvOp now carries a
-                // `RecordKey` (byte-identical conversion).
-                KvOp::Remove(key.into())
+                KvOp::Remove(key)
             } else {
-                KvOp::Set(key.into(), value)
+                KvOp::Set(key, value)
             };
             by_version.entry(version).or_default().push(op);
         }
