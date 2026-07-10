@@ -459,19 +459,52 @@ impl TableManager {
         // old O(remaining table) fetch → project → full-sort → truncate.
         // The index returns IDs already in ORDER BY direction, so no
         // post-fetch sort is needed.
+        //
+        // G2 (#526): the index returns the first `limit` PHYSICAL entries,
+        // but some may be STALE — the posting still lists a record id whose
+        // body has been deleted / superseded, so `get_many_bytes` yields
+        // `None` and the row is dropped. Naively that under-fills the page
+        // even though more LIVE rows exist further in the range. Fix: loop —
+        // keep pulling ordered pages (each resumed strictly past the previous
+        // one via the index cursor) until we have `limit` LIVE rows OR the
+        // index reports the range exhausted (`cursor == None`, a genuine last
+        // page). Ordering is preserved because every page continues the same
+        // value-ordered walk; the loop can never spin forever because an
+        // exhausted range always returns `cursor == None`.
         let forward = matches!(direction, OrderDirection::Asc);
-        let id_vec = self
-            .sorted_indexes()
-            .lookup_range_first_k(index_name, encoded_key, limit, forward)
-            .await?;
 
-        // Fetch record bytes (already value-ordered, already ≤ limit).
-        let raw = self.get_many_bytes(&id_vec).await?;
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(limit);
+        let mut after_key: Option<Bytes> = None;
 
-        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(id_vec.len());
-        for (id, opt) in id_vec.iter().zip(raw) {
-            if let Some(bytes) = opt {
-                matched.push((*id, bytes));
+        loop {
+            let need = limit - matched.len();
+            let (id_vec, cursor) = self
+                .sorted_indexes()
+                .lookup_range_first_k_page(
+                    index_name,
+                    encoded_key,
+                    after_key.as_deref(),
+                    need,
+                    forward,
+                )
+                .await?;
+
+            // Fetch record bytes (already value-ordered, already ≤ need).
+            let raw = self.get_many_bytes(&id_vec).await?;
+            for (id, opt) in id_vec.iter().zip(raw) {
+                if let Some(bytes) = opt {
+                    matched.push((*id, bytes));
+                    if matched.len() == limit {
+                        break;
+                    }
+                }
+            }
+
+            // Stop when the page filled `limit`, or the index range is truly
+            // exhausted (no resume cursor) — a genuine short last page.
+            match cursor {
+                Some(c) if matched.len() < limit => after_key = Some(c),
+                _ => break,
             }
         }
 
