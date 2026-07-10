@@ -309,14 +309,23 @@ pub fn process_resume(
     // `shamir-server/tests/`) when this check was added.
     //
     // The audit's underlying concern (a stolen ticket is portable across
-    // TLS sessions/networks) is real, but the fix needs a DIFFERENT
-    // mechanism than exporter-value equality — e.g. binding to something
-    // that legitimately persists across a reconnect (a client certificate
-    // identity, a PSK derived consistently across resumption, or an
-    // explicit accepted-risk decision that ticket resume trades off
-    // channel-binding strength for reconnect ergonomics, documented as
-    // such). This requires a proper design pass, not a one-line equality
-    // check — filed as follow-up task (see commit message / TaskList).
+    // TLS sessions/networks) is real, but exporter-value equality can
+    // never be the fix: per RFC 9266, that value is unique per-connection
+    // BY DESIGN even across legitimate resumption, so it cannot
+    // distinguish "legitimate reconnect" from "stolen ticket replayed on
+    // attacker's connection" — both produce a fresh, non-matching value.
+    // A real fix would need mutual TLS with client-certificate-anchored
+    // ticket binding, a substantial new capability this codebase does not
+    // have (`BindingMode` has no persistent-identity variant). Task #512
+    // investigated this fully and concluded no code change is warranted
+    // here: the existing monotonic per-(user, family) ticket-rotation
+    // counter below (`try_advance`) already bounds stolen-ticket blast
+    // radius (first-use-wins; the legitimate party's subsequent resume
+    // loudly fails instead of silently coexisting), and
+    // `check_anti_downgrade` above already covers the adjacent
+    // binding-strength-downgrade concern. See
+    // `docs/design/resumption-ticket-channel-binding-512-decision.md`
+    // for the full RFC 9266 reasoning and threat-model analysis.
 
     // Step 11: atomic per-(user, family) counter CAS.
     // Optim #2: `plain.ticket_family_id` is `ByteArray<16>` — no copy/parse.
