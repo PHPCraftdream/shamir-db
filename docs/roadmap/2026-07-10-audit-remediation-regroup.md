@@ -42,28 +42,43 @@
 - trusted_pure_scalar_backs_functional_index (падение, #495);
 - argon2id_concurrency_cap_bounds_parallel_calls (флейк под нагрузкой, #498).
 
+### G5 — vector-index perf residual, оба деferred из #496 (бывшие #515 + #516)
+Одна тематика ANN/vector-index:
+- MemBuffer merge-overlay scan (finding 5);
+- fused SQ8 rescore + weighted-SIMD distance kernels (finding 4 a/b).
+
+### G6 — WAL test-hardening (бывшие #508 + #522)
+Обе задачи усиливают тестовое покрытие shamir-wal:
+- fault-injection тест на all-or-nothing семантику `WalGroupCommit::append_many`
+  (finding 1.6 residual);
+- усилить `reactivated_segment_sheds_stale_sidecar`, чтобы проходить и через
+  `rotate_after_poison`, а не только через mid-test assertion (найдено во
+  втором @fl-ревью задачи #500).
+
 ## Остаются одиночными
 
 - #503 — in-progress (alias cutover, у @oh).
-- #506 — optional/measure-first INLINE_CAP (блокирован G1).
-- #507 — CLEANUP typos read_exec.rs (тривиальная, можно приклеить к финальному пакету).
+- #506 — optional/measure-first INLINE_CAP (блокирован G1/#525).
 - #512 — SECURITY design (channel-binding) — исследовательская.
-- #515 — MemBuffer merge-overlay scan.
-- #516 — SQ8 fused rescore + weighted-SIMD.
 - #519 — CLIENT typed errors (требует бамп napi-rs 3.x → нужно явное
-  разрешение пользователя на бамп версии; до этого — отложена).
+  разрешение пользователя на бамп версии; до этого — отложена, НЕ блокирует
+  FINAL-GATE).
 - #520 — CLIENT Rust roundtrip timeout.
-- #522 — TEST усиление reactivated_segment_sheds_stale_sidecar.
 - #523 — PERF fjall-бенч (prerequisite).
 - #524 — PERF worker-loop batching (блокирован #523).
 
+`#507` (тривиальные backslash-typos в read_exec.rs) удалён как отдельная
+задача — уже прописан внутри FINAL-GATE («заодно закрыть, если ещё открыт»).
+
 ## Новая задача-финализатор
 
-**FINAL-GATE**: в самом конце серии — полный fmt/clippy/test --full по
-workspace + фикс всего найденного. Все остальные задачи должны быть
-завершены до неё.
+**FINAL-GATE** (#529): в самом конце серии — полный fmt/clippy/test --full
+по workspace + фикс всего найденного (+ заодно #507 typos). Блокирован
+всеми остальными задачами КРОМЕ #519 (её решение зависит от отдельного
+разговора о бампе napi-rs и не должно стопорить финальный гейт).
 
 ## Порядок исполнения (примерный)
 
-#503 → G1 → G2 → G3 → #515 → #516 → #520 → #522 → #523 → #524 → G4 →
-#506(по бенчам) → #507 → #512 → (#519 после решения по napi-rs) → FINAL-GATE.
+#503 → G1(#525) → G2(#526) → G3(#527) → G5(#530) → G6(#531) → #520 →
+#523 → #524 → G4(#528) → #506(по бенчам) → #512 → (#519 после решения по
+napi-rs, вне очереди) → FINAL-GATE(#529).
