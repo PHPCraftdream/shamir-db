@@ -8,7 +8,7 @@
 //! compensate for filtered-out tombstones.
 
 use super::adapter::{SearchOpts, VectorAdapter, VectorError};
-use super::quantized_dist::{rescore_f32, ShamirDistU8};
+use super::quantized_dist::{RescoreCtx, ShamirDistU8};
 use super::simd::{dot_product, l2_squared};
 use super::sq8::Sq8Quantizer;
 use crate::kind::{VectorMetric, VectorQuantization};
@@ -1720,13 +1720,17 @@ impl HnswAdapter {
             .expect("quantized_active but quantizer unset");
         let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
         self.vectors_u8.scan(|i, c| pairs.push((*i, c.clone())));
+        // Audit finding 4.1 (task #530): build the fused rescore context ONCE
+        // per query (precomputes `qm`/`qs`/`q_norm`), then score each candidate
+        // with zero per-candidate dequant allocation.
+        let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
         for (internal, codes) in pairs {
             if self.deleted.contains_async(&internal).await {
                 continue;
             }
             if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
-                let d = rescore_f32(self.metric, quantizer, query, &codes);
+                let d = ctx.score(&codes);
                 out.push((rid, d));
             }
         }
@@ -1762,6 +1766,9 @@ impl HnswAdapter {
                 .await
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
 
+        // Audit finding 4.1 (task #530): fused rescore context built ONCE per
+        // query, scored per candidate with no per-candidate dequant allocation.
+        let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
         for n in neighbors {
             if self.deleted.contains_async(&n.d_id).await {
@@ -1770,7 +1777,7 @@ impl HnswAdapter {
             let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
             if let Some(codes) = codes_opt {
                 if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                    let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                    let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
             }
@@ -1813,12 +1820,15 @@ impl HnswAdapter {
         .await
         .map_err(|e| VectorError::Internal(e.to_string()))?;
 
+        // Audit finding 4.1 (task #530): fused rescore context built ONCE per
+        // query, scored per candidate with no per-candidate dequant allocation.
+        let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
         for n in neighbors {
             let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
             if let Some(codes) = codes_opt {
                 if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                    let exact = rescore_f32(self.metric, quantizer, query, &codes);
+                    let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
             }
@@ -1901,6 +1911,11 @@ impl HnswAdapter {
             None
         };
 
+        // Audit finding 4.1 (task #530): when quantized, build the fused
+        // rescore context ONCE per query so the per-candidate loop scores u8
+        // codes with no per-candidate dequant allocation.
+        let rescore_ctx = quantizer.map(|q| RescoreCtx::new(self.metric, q, query));
+
         let mut scored: Vec<(RecordId, f32)> = Vec::with_capacity(candidates.len());
         for &rid in candidates {
             let internal = match self.rid_to_internal.read_async(&rid, |_, v| *v).await {
@@ -1910,14 +1925,14 @@ impl HnswAdapter {
             if self.deleted.contains_async(&internal).await {
                 continue;
             }
-            if let Some(q) = quantizer {
+            if let Some(ctx) = &rescore_ctx {
                 // Post-fit: read codes, dequant + exact rescore.
                 let codes_opt = self
                     .vectors_u8
                     .read_async(&internal, |_, c| c.clone())
                     .await;
                 if let Some(codes) = codes_opt {
-                    let d = rescore_f32(self.metric, q, query, &codes);
+                    let d = ctx.score(&codes);
                     scored.push((rid, d));
                 }
             } else {

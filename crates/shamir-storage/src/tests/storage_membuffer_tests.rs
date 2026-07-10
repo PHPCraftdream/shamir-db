@@ -389,6 +389,224 @@ async fn fully_unwrap_drills_through_chain() {
     assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
 }
 
+// ============================================================================
+// Audit finding 2.3 (task #530): merge-overlay scans — a scan must NOT drain
+// the dirty buffer to disk first (read-triggered write amplification). It must
+// still return CORRECT results: entries only in the dirty overlay are visible,
+// tombstoned keys are excluded, ordering is preserved, and dirty is left
+// UNFLUSHED after the scan.
+// ============================================================================
+
+/// Config with a long flush interval. `@fl` review nit (task #530): this
+/// alone does NOT stop the background flusher from firing — every
+/// `set`/`remove` calls `notify.notify_one()`, and the flusher's `select!`
+/// wakes on that notification regardless of `flush_interval_ms`. The `!
+/// is_dirty_empty()` assertions below only hold because these tests run on
+/// the current-thread `#[tokio::test]` runtime, where every `.await` in the
+/// test body resolves `Ready` without ever yielding to the spawned flusher
+/// task — so the flusher provably never gets scheduled during the test. This
+/// is intentionally test-only groundedness, not a runtime-flavor-independent
+/// guarantee; do not port these tests to a multi-thread runtime without
+/// re-deriving why the flusher still can't preempt them.
+fn no_flush_config() -> MemBufferConfig {
+    MemBufferConfig {
+        max_bytes: 64 * 1024 * 1024,
+        max_entries: 1_000_000,
+        ttl_ms: None,
+        flush_interval_ms: 600_000,
+        flush_batch_size: 256,
+    }
+}
+
+fn rk(b: &[u8]) -> RecordKey {
+    RecordKey::from_slice(b)
+}
+
+async fn collect_stream(
+    mut s: crate::types::RecordStream,
+) -> Vec<(RecordKey, Bytes)> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    while let Some(batch) = s.next().await {
+        out.extend(batch.unwrap());
+    }
+    out
+}
+
+#[tokio::test]
+async fn iter_stream_merges_overlay_without_draining() {
+    let inner_repo = InMemoryRepo::new();
+    let inner_store = inner_repo.store_get("t").await.unwrap();
+    // Seed inner directly with a durable key.
+    inner_store
+        .set(rk(b"k1"), Bytes::from_static(b"inner1"))
+        .await
+        .unwrap();
+
+    let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
+    // Overlay-only key (never flushed), an override of the inner key, and a
+    // tombstone masking a (would-be) inner key.
+    buffered
+        .set(rk(b"k2"), Bytes::from_static(b"overlay2"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"k1"), Bytes::from_static(b"overlay1"))
+        .await
+        .unwrap();
+    // Seed a stale inner key that the overlay tombstones.
+    inner_store
+        .set(rk(b"k3"), Bytes::from_static(b"stale3"))
+        .await
+        .unwrap();
+    buffered.remove(rk(b"k3")).await.unwrap();
+
+    let got = collect_stream(buffered.iter_stream(8)).await;
+    let map: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = got
+        .iter()
+        .map(|(k, v)| (k.as_ref().to_vec(), v.as_ref().to_vec()))
+        .collect();
+
+    // k1 → overlay wins over inner; k2 → overlay-only visible; k3 → tombstoned.
+    assert_eq!(map.get(b"k1".as_ref()).unwrap(), b"overlay1");
+    assert_eq!(map.get(b"k2".as_ref()).unwrap(), b"overlay2");
+    assert!(!map.contains_key(b"k3".as_ref()), "tombstoned key must be excluded");
+    assert_eq!(map.len(), 2, "exactly k1,k2 visible: {map:?}");
+
+    // The scan must NOT have drained the dirty buffer to disk.
+    assert!(
+        !buffered.is_dirty_empty(),
+        "scan drained the dirty buffer (write amplification) — merge-overlay expected"
+    );
+}
+
+#[tokio::test]
+async fn scan_prefix_stream_merges_overlay_sorted_and_in_prefix() {
+    let inner_repo = InMemoryRepo::new();
+    let inner_store = inner_repo.store_get("t").await.unwrap();
+    inner_store
+        .set(rk(b"pre:b"), Bytes::from_static(b"inner_b"))
+        .await
+        .unwrap();
+    inner_store
+        .set(rk(b"pre:d"), Bytes::from_static(b"inner_d"))
+        .await
+        .unwrap();
+    // Out-of-prefix inner key — must never surface under the prefix scan.
+    inner_store
+        .set(rk(b"zzz"), Bytes::from_static(b"other"))
+        .await
+        .unwrap();
+
+    let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
+    // Overlay: an in-prefix override, an in-prefix new key, an out-of-prefix
+    // key (must be filtered), and a tombstone on an inner in-prefix key.
+    buffered
+        .set(rk(b"pre:a"), Bytes::from_static(b"ov_a"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"pre:b"), Bytes::from_static(b"ov_b"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"zzz2"), Bytes::from_static(b"ov_out"))
+        .await
+        .unwrap();
+    buffered.remove(rk(b"pre:d")).await.unwrap();
+
+    let got = collect_stream(buffered.scan_prefix_stream(Bytes::from_static(b"pre:"), 2)).await;
+
+    // Ordering must be ascending lexicographic (callers rely on it).
+    let keys: Vec<Vec<u8>> = got.iter().map(|(k, _)| k.as_ref().to_vec()).collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "prefix scan must yield ascending order");
+
+    let map: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = got
+        .iter()
+        .map(|(k, v)| (k.as_ref().to_vec(), v.as_ref().to_vec()))
+        .collect();
+    assert_eq!(map.get(b"pre:a".as_ref()).unwrap(), b"ov_a");
+    assert_eq!(map.get(b"pre:b".as_ref()).unwrap(), b"ov_b"); // overlay wins
+    assert!(!map.contains_key(b"pre:d".as_ref()), "tombstone excludes pre:d");
+    assert!(!map.iter().any(|(k, _)| !k.starts_with(b"pre:")), "no out-of-prefix keys");
+    assert_eq!(map.len(), 2, "pre:a, pre:b only: {map:?}");
+
+    assert!(!buffered.is_dirty_empty(), "prefix scan must not drain dirty");
+}
+
+#[tokio::test]
+async fn iter_range_stream_merges_overlay_ascending() {
+    let inner_repo = InMemoryRepo::new();
+    let inner_store = inner_repo.store_get("t").await.unwrap();
+    for (k, v) in [(b"a" as &[u8], "ia"), (b"c", "ic"), (b"e", "ie"), (b"g", "ig")] {
+        inner_store
+            .set(rk(k), Bytes::copy_from_slice(v.as_bytes()))
+            .await
+            .unwrap();
+    }
+    let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
+    // Overlay keys interleaved in the range, plus a tombstone.
+    buffered.set(rk(b"b"), Bytes::from_static(b"ob")).await.unwrap();
+    buffered.set(rk(b"d"), Bytes::from_static(b"od")).await.unwrap();
+    buffered.set(rk(b"c"), Bytes::from_static(b"oc")).await.unwrap(); // override
+    buffered.remove(rk(b"e")).await.unwrap(); // tombstone
+
+    // Range [b ..= f].
+    let got = collect_stream(buffered.iter_range_stream(
+        Some(Bytes::from_static(b"b")),
+        Some(Bytes::from_static(b"f")),
+        2,
+    ))
+    .await;
+    let keys: Vec<Vec<u8>> = got.iter().map(|(k, _)| k.as_ref().to_vec()).collect();
+    // Expect ascending: b, c, d (a excluded < lo; e tombstoned; g excluded > hi).
+    assert_eq!(
+        keys,
+        vec![b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+        "range scan must be ascending + correctly merged"
+    );
+    let map: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = got
+        .iter()
+        .map(|(k, v)| (k.as_ref().to_vec(), v.as_ref().to_vec()))
+        .collect();
+    assert_eq!(map.get(b"c".as_ref()).unwrap(), b"oc", "overlay override wins");
+    assert!(!buffered.is_dirty_empty(), "range scan must not drain dirty");
+}
+
+#[tokio::test]
+async fn iter_range_stream_reverse_merges_overlay_descending() {
+    let inner_repo = InMemoryRepo::new();
+    let inner_store = inner_repo.store_get("t").await.unwrap();
+    for (k, v) in [(b"a" as &[u8], "ia"), (b"c", "ic"), (b"e", "ie"), (b"g", "ig")] {
+        inner_store
+            .set(rk(k), Bytes::copy_from_slice(v.as_bytes()))
+            .await
+            .unwrap();
+    }
+    let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
+    buffered.set(rk(b"b"), Bytes::from_static(b"ob")).await.unwrap();
+    buffered.set(rk(b"d"), Bytes::from_static(b"od")).await.unwrap();
+    buffered.set(rk(b"c"), Bytes::from_static(b"oc")).await.unwrap();
+    buffered.remove(rk(b"e")).await.unwrap();
+
+    let got = collect_stream(buffered.iter_range_stream_reverse(
+        Some(Bytes::from_static(b"b")),
+        Some(Bytes::from_static(b"f")),
+        2,
+    ))
+    .await;
+    let keys: Vec<Vec<u8>> = got.iter().map(|(k, _)| k.as_ref().to_vec()).collect();
+    // Descending: d, c, b (a < lo; e tombstoned; g > hi).
+    assert_eq!(
+        keys,
+        vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec()],
+        "reverse range scan must be descending + correctly merged"
+    );
+    assert!(!buffered.is_dirty_empty(), "reverse range scan must not drain dirty");
+}
+
 /// Op C regression: insert_many / set_many / remove_many must publish
 /// dirty_nonempty (Release) before populating the dirty overlay.
 ///

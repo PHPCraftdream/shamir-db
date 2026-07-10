@@ -21,7 +21,7 @@ use bench_scale_tool::Harness;
 use hnsw_rs::anndists::dist::distances::Distance;
 use shamir_bench_utils::vector_data::clustered_vectors;
 use shamir_index::kind::VectorMetric;
-use shamir_index::vector::quantized_dist::ShamirDistU8;
+use shamir_index::vector::quantized_dist::{RescoreCtx, ShamirDistU8};
 use shamir_index::vector::sq8::Sq8Quantizer;
 
 /// Embedding dimensionality for the bench (typical small-model shape).
@@ -83,6 +83,95 @@ fn main() {
                 }
                 black_box(acc);
             });
+        }
+    }
+
+    // --- rescore_old_dequant vs rescore_fused (audit finding 4.1, #530) -----
+    //
+    // Directly pits the OLD per-candidate `dequantize()`-then-SIMD-dot rescore
+    // against the NEW fused, allocation-free `RescoreCtx` over the SAME
+    // candidate pool. Both compute the exact f32 distance per candidate; the
+    // fused path precomputes `qm`/`qs`/`q_norm` ONCE and streams the u8 codes
+    // with zero per-candidate heap allocation. Cosine is the worst case (it
+    // also recomputed the query's own norm per candidate in the old path).
+    {
+        let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
+        let training: Vec<Vec<f32>> = ds.vectors.clone();
+        let q = Sq8Quantizer::fit(&training, DIM);
+        let pool_codes: Vec<Vec<u8>> = ds
+            .vectors
+            .iter()
+            .take(POOL)
+            .map(|v| q.quantize(v))
+            .collect();
+        // The rescore query is the ORIGINAL f32 vector (as in the search path).
+        let query_f32: Vec<f32> = ds.centroids[0].clone();
+
+        for metric in [VectorMetric::L2, VectorMetric::Dot, VectorMetric::Cosine] {
+            // OLD: dequantize each candidate into a fresh Vec, then score.
+            // The SIMD kernels are `pub(crate)` (not reachable from a bench
+            // target), so we mirror them with a plain scalar dot/L2 over the
+            // freshly-allocated dequant vector — the defining OLD cost is the
+            // per-candidate `dequantize()` heap allocation plus, for Cosine,
+            // the redundant per-candidate query-norm, both of which this
+            // reproduces faithfully.
+            {
+                let q = q.clone();
+                let pool = pool_codes.clone();
+                let query = query_f32.clone();
+                let id = format!("rescore_old_dequant/{metric:?}/dim_128");
+                let dot = |a: &[f32], b: &[f32]| -> f32 {
+                    let mut s = 0.0f32;
+                    for i in 0..a.len() {
+                        s += a[i] * b[i];
+                    }
+                    s
+                };
+                h.bench(&id, move || {
+                    let mut acc = 0.0f32;
+                    for cand in &pool {
+                        let dequant = q.dequantize(cand); // fresh Vec<f32> per candidate
+                        let d = match metric {
+                            VectorMetric::L2 => {
+                                let mut s = 0.0f32;
+                                for i in 0..query.len() {
+                                    let x = query[i] - dequant[i];
+                                    s += x * x;
+                                }
+                                s.sqrt()
+                            }
+                            VectorMetric::Dot => (1.0 - dot(&query, &dequant)).max(0.0),
+                            VectorMetric::Cosine => {
+                                let d = dot(&query, &dequant);
+                                let na = dot(&query, &query); // recomputed per candidate (OLD)
+                                let nb = dot(&dequant, &dequant);
+                                if na < 1e-18 || nb < 1e-18 {
+                                    1.0
+                                } else {
+                                    (1.0 - d / (na * nb).sqrt()).max(0.0)
+                                }
+                            }
+                        };
+                        acc += black_box(d);
+                    }
+                    black_box(acc);
+                });
+            }
+            // NEW: fused RescoreCtx built once, scored per candidate (no alloc).
+            {
+                let q = q.clone();
+                let pool = pool_codes.clone();
+                let query = query_f32.clone();
+                let id = format!("rescore_fused/{metric:?}/dim_128");
+                h.bench(&id, move || {
+                    let ctx = RescoreCtx::new(metric, &q, &query);
+                    let mut acc = 0.0f32;
+                    for cand in &pool {
+                        acc += black_box(ctx.score(black_box(cand)));
+                    }
+                    black_box(acc);
+                });
+            }
         }
     }
 

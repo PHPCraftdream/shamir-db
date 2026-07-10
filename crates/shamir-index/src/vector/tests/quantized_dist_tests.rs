@@ -14,7 +14,7 @@
 
 use crate::kind::VectorMetric;
 use crate::vector::hnsw_adapter::ShamirDist;
-use crate::vector::quantized_dist::{rescore_f32, ShamirDistU8};
+use crate::vector::quantized_dist::{rescore_f32, RescoreCtx, ShamirDistU8};
 use crate::vector::simd::{dot_product, l2_squared};
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
@@ -252,6 +252,77 @@ fn rescore_f32_matches_shamir_dist_on_dequant() {
                 err < 1e-4,
                 "rescore_f32({metric:?}) err {err} too large: got {got}, want {want}"
             );
+        }
+    }
+}
+
+// =========================================================================
+// Audit finding 4.1 (task #530): the fused, allocation-free rescore
+// (RescoreCtx::score) must be numerically equivalent to the old
+// dequant-then-dot reference across ALL three metrics. This is a DIRECT
+// comparison against a fresh-dequant reference, not just "existing tests
+// still pass".
+// =========================================================================
+
+/// Reference implementation of the OLD rescore: dequantize into a fresh Vec
+/// per candidate, then score with the SIMD kernels. This is exactly what
+/// `rescore_f32` did before the fused rewrite.
+fn old_rescore_reference(
+    metric: VectorMetric,
+    q: &Sq8Quantizer,
+    query: &[f32],
+    codes: &[u8],
+) -> f32 {
+    let dequant = q.dequantize(codes);
+    match metric {
+        VectorMetric::L2 => l2_squared(query, &dequant).sqrt(),
+        VectorMetric::Dot => {
+            let dot = dot_product(query, &dequant);
+            (1.0 - dot).max(0.0)
+        }
+        VectorMetric::Cosine => {
+            let dot = dot_product(query, &dequant);
+            let na_sq = dot_product(query, query);
+            let nb_sq = dot_product(&dequant, &dequant);
+            if na_sq < 1e-18 || nb_sq < 1e-18 {
+                return 1.0;
+            }
+            (1.0 - dot / (na_sq * nb_sq).sqrt()).max(0.0)
+        }
+    }
+}
+
+#[test]
+fn fused_rescore_matches_dequant_then_dot_reference() {
+    let dim = 128;
+    let train = clustered(512, dim, 32, 0.25, 99);
+    let q = Sq8Quantizer::fit(&train, dim);
+
+    for metric in [VectorMetric::L2, VectorMetric::Dot, VectorMetric::Cosine] {
+        // Build the fused context ONCE per query (as the hot path does).
+        for i in 0..40 {
+            let query = &train[i];
+            let ctx = RescoreCtx::new(metric, &q, query);
+            // Score several distinct candidates against the same query — this
+            // is exactly the amortised, alloc-free hot loop.
+            for j in [3usize, 17, 128, 300, 511] {
+                let codes = q.quantize(&train[j % train.len()]);
+                let want = old_rescore_reference(metric, &q, query, &codes);
+                let got = ctx.score(&codes);
+                let err = (got - want).abs();
+                assert!(
+                    err < 1e-3,
+                    "fused rescore({metric:?}) i={i} j={j}: err {err} too large \
+                     (got {got}, want {want})"
+                );
+                // The thin wrapper must agree with the context path too.
+                let via_fn = rescore_f32(metric, &q, query, &codes);
+                assert_eq!(
+                    via_fn.to_bits(),
+                    got.to_bits(),
+                    "rescore_f32 wrapper diverged from RescoreCtx::score"
+                );
+            }
         }
     }
 }

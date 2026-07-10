@@ -409,6 +409,39 @@ impl MemBufferStore {
         Ok(n)
     }
 
+    /// Audit finding 2.3 (task #530) — snapshot the dirty overlay for a scan,
+    /// filtered by `pred` (prefix / range membership) and sorted ascending by
+    /// key. This is the SMALL side of the merge-overlay scan: instead of
+    /// draining the whole dirty buffer to disk before every scan (read-
+    /// triggered write amplification), we materialise the (bounded) dirty map
+    /// once at stream-open and merge it on top of the sorted `inner` stream.
+    ///
+    /// The returned vector holds `(RecordKey, Slot)` — `Slot::Tombstone`
+    /// entries are RETAINED (not filtered out): during the merge a tombstone
+    /// masks any stale `inner` value for the same key, and during the overlay-
+    /// only tail an overlay tombstone for a key `inner` never had is simply
+    /// skipped (nothing to emit).
+    fn snapshot_overlay_sorted<F>(state: &MemBufferState, pred: F) -> Vec<(RecordKey, Slot)>
+    where
+        F: Fn(&RecordKey) -> bool,
+    {
+        // Fast-path: if the dirty buffer is (observably) empty the scan is a
+        // pure `inner` pass-through — skip the DashMap traversal + sort.
+        if !state.dirty_nonempty.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let mut snap: Vec<(RecordKey, Slot)> = state
+            .dirty
+            .iter()
+            .filter(|e| pred(e.key()))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        // Sorted ascending by key — matches the `inner` stream's ascending
+        // lexicographic ordering so the merge below is a single linear pass.
+        snap.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        snap
+    }
+
     /// Drain the entire dirty queue.
     async fn drain_all(&self) -> DbResult<()> {
         loop {
@@ -441,6 +474,122 @@ impl Drop for MemBufferStore {
 }
 
 type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+/// Audit finding 2.3 (task #530) — merge a sorted dirty-overlay snapshot on
+/// top of a sorted `inner` record stream, WITHOUT draining the overlay to
+/// disk first.
+///
+/// This is a classic 2-way sorted merge (mirrors
+/// `MvccStore::current_stream`'s overlay-vs-history merge): both the `overlay`
+/// snapshot and the `inner` stream are key-sorted (ascending when
+/// `reverse == false`, descending when `reverse == true` — the overlay is
+/// pre-sorted by the caller to match), so a single linear pass yields a merged
+/// key-ordered stream. Semantics:
+///
+/// * An overlay entry ALWAYS wins over `inner` for the same key (it is the
+///   newer, not-yet-flushed value). `Slot::Live` → emit the overlay value;
+///   `Slot::Tombstone` → EXCLUDE the key (even if `inner` still holds stale
+///   data for it).
+/// * Overlay-only keys (present in the dirty buffer but not yet in `inner`)
+///   are emitted in their sorted position during the merge, and any that sort
+///   after the last `inner` key are flushed in the overlay-only tail phase.
+/// * Ordering across the merged output is preserved, so range / prefix scans
+///   keep their ascending / descending guarantee.
+///
+/// `inner` MUST yield keys in the requested order (ascending, or descending
+/// for reverse) — every `Store` scan upholds this per the trait contract.
+fn merge_overlay_stream(
+    overlay: Vec<(RecordKey, Slot)>,
+    inner: RecordStream,
+    batch_size: usize,
+    reverse: bool,
+) -> RecordStream {
+    Box::pin(async_stream::stream! {
+        let batch_cap = batch_size.max(1);
+        let mut ov = overlay.into_iter().peekable();
+        let mut out: Vec<(RecordKey, Bytes)> = Vec::with_capacity(batch_cap);
+
+        // `ord(a, b)` is the "a should come before b in output order" test.
+        // Ascending: a < b. Descending: a > b.
+        let before = |a: &RecordKey, b: &RecordKey| -> bool {
+            if reverse {
+                a > b
+            } else {
+                a < b
+            }
+        };
+
+        futures::pin_mut!(inner);
+        while let Some(batch) = futures::StreamExt::next(&mut inner).await {
+            let batch = match batch {
+                Ok(b) => b,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+            for (ik, iv) in batch {
+                // Emit every overlay entry that sorts strictly before the
+                // current inner key (overlay-only keys interleaved in order).
+                while let Some((ok, _)) = ov.peek() {
+                    if before(ok, &ik) {
+                        let (ok, oslot) = ov.next().unwrap();
+                        if let Slot::Live(v) = oslot {
+                            out.push((ok, v));
+                            if out.len() >= batch_cap {
+                                yield Ok(std::mem::take(&mut out));
+                                out = Vec::with_capacity(batch_cap);
+                            }
+                        }
+                        // Tombstone-only overlay key: nothing to emit.
+                    } else {
+                        break;
+                    }
+                }
+                // Overlay entry for the EXACT inner key wins (newer write).
+                if let Some((ok, _)) = ov.peek() {
+                    if *ok == ik {
+                        let (ok, oslot) = ov.next().unwrap();
+                        match oslot {
+                            Slot::Live(v) => {
+                                out.push((ok, v));
+                                if out.len() >= batch_cap {
+                                    yield Ok(std::mem::take(&mut out));
+                                    out = Vec::with_capacity(batch_cap);
+                                }
+                            }
+                            // Tombstone masks the stale inner value → skip.
+                            Slot::Tombstone => {}
+                        }
+                        continue;
+                    }
+                }
+                // No overlay entry for this key → inner value stands.
+                out.push((ik, iv));
+                if out.len() >= batch_cap {
+                    yield Ok(std::mem::take(&mut out));
+                    out = Vec::with_capacity(batch_cap);
+                }
+            }
+        }
+
+        // Overlay-only tail: any remaining overlay entries (keys `inner` never
+        // yielded). Live entries are emitted; tombstones are dropped.
+        for (ok, oslot) in ov {
+            if let Slot::Live(v) = oslot {
+                out.push((ok, v));
+                if out.len() >= batch_cap {
+                    yield Ok(std::mem::take(&mut out));
+                    out = Vec::with_capacity(batch_cap);
+                }
+            }
+        }
+
+        if !out.is_empty() {
+            yield Ok(out);
+        }
+    })
+}
 
 #[async_trait]
 impl Store for MemBufferStore {
@@ -538,58 +687,30 @@ impl Store for MemBufferStore {
     }
 
     fn iter_stream(&self, batch_size: usize) -> RecordStream {
-        // Drain dirty first so the inner stream is a consistent view.
-        let state = Arc::clone(&self.state);
-        let inner = Arc::clone(&self.inner);
-        let batch = batch_size;
-        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
-        Box::pin(async_stream::stream! {
-            // Audit §2.2: propagate the drain error as a stream item instead
-            // of swallowing it via `unwrap_or(0)`. A flush failure left the
-            // dirty tail unflushed; silently serving `inner` WITHOUT that tail
-            // (full scans, index rebuilds, doctor, copy_store during RENAME)
-            // would return stale data.
-            loop {
-                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
-                }
-            }
-            let inner_stream = inner.iter_stream(batch);
-            futures::pin_mut!(inner_stream);
-            while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
-                yield b;
-            }
-        })
+        // Audit finding 2.3 (task #530): DON'T drain-before-scan (read-
+        // triggered write amplification that defeats the 500ms fsync-batching
+        // interval on EVERY scan). Instead snapshot the SMALL dirty overlay
+        // and MERGE it on top of the sorted `inner` stream — a full flush is
+        // no longer required just to read. The `inner` stream is key-sorted
+        // (every backend upholds ascending order), so this is a linear
+        // 2-way sorted merge; tombstones mask stale inner values and
+        // overlay-only keys are yielded in the tail. See `merge_overlay_stream`.
+        let overlay = Self::snapshot_overlay_sorted(&self.state, |_| true);
+        let inner_stream = self.inner.iter_stream(batch_size);
+        merge_overlay_stream(overlay, inner_stream, batch_size, false)
     }
 
     fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
-        let state = Arc::clone(&self.state);
-        let inner = Arc::clone(&self.inner);
-        let p = prefix;
-        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
-        Box::pin(async_stream::stream! {
-            // Audit §2.2: propagate drain errors (see iter_stream).
-            loop {
-                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
-                }
-            }
-            let inner_stream = inner.scan_prefix_stream(p, batch_size);
-            futures::pin_mut!(inner_stream);
-            while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
-                yield b;
-            }
-        })
+        // Merge-overlay scan (task #530) — see `iter_stream`. The overlay is
+        // filtered to keys under `prefix` so the overlay-only tail can't emit
+        // out-of-prefix keys, and the ascending order is preserved (callers of
+        // the prefix scan — e.g. the posting-list cache — rely on sorted,
+        // in-prefix output).
+        let prefix_bytes = prefix.clone();
+        let overlay =
+            Self::snapshot_overlay_sorted(&self.state, |k| k.as_ref().starts_with(&prefix_bytes));
+        let inner_stream = self.inner.scan_prefix_stream(prefix, batch_size);
+        merge_overlay_stream(overlay, inner_stream, batch_size, false)
     }
 
     fn iter_range_stream(
@@ -598,27 +719,30 @@ impl Store for MemBufferStore {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
-        let state = Arc::clone(&self.state);
-        let inner = Arc::clone(&self.inner);
-        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
-        Box::pin(async_stream::stream! {
-            // Audit §2.2: propagate drain errors (see iter_stream).
-            loop {
-                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
+        // Merge-overlay scan (task #530) — see `iter_stream`. The overlay is
+        // filtered to `[start_inclusive ..= end_inclusive]` and sorted
+        // ascending, then merged with the sorted `inner` range stream so the
+        // ascending key order is preserved across the merge (sorted-index
+        // range/order/min queries depend on it).
+        let lo = start_inclusive.clone();
+        let hi = end_inclusive.clone();
+        let overlay = Self::snapshot_overlay_sorted(&self.state, |k| {
+            if let Some(ref s) = lo {
+                if k.as_ref() < s.as_ref() {
+                    return false;
                 }
             }
-            let inner_stream = inner.iter_range_stream(start_inclusive, end_inclusive, batch_size);
-            futures::pin_mut!(inner_stream);
-            while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
-                yield b;
+            if let Some(ref e) = hi {
+                if k.as_ref() > e.as_ref() {
+                    return false;
+                }
             }
-        })
+            true
+        });
+        let inner_stream = self
+            .inner
+            .iter_range_stream(start_inclusive, end_inclusive, batch_size);
+        merge_overlay_stream(overlay, inner_stream, batch_size, false)
     }
 
     fn iter_range_stream_reverse(
@@ -627,28 +751,32 @@ impl Store for MemBufferStore {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
-        let state = Arc::clone(&self.state);
-        let inner = Arc::clone(&self.inner);
-        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
-        Box::pin(async_stream::stream! {
-            // Audit §2.2: propagate drain errors (see iter_stream).
-            loop {
-                match MemBufferStore::drain_once(&state, inner.as_ref(), bs).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) => {
-                        yield Err(e);
-                        return;
-                    }
+        // Merge-overlay scan (task #530) — reverse variant. The overlay is
+        // filtered to the same `[start ..= end]` range but sorted DESCENDING
+        // to match the reverse `inner` stream, so the merge preserves the
+        // high→low order (`lookup_last_k` / `lookup_max` / `ORDER BY … DESC`).
+        let lo = start_inclusive.clone();
+        let hi = end_inclusive.clone();
+        let mut overlay = Self::snapshot_overlay_sorted(&self.state, |k| {
+            if let Some(ref s) = lo {
+                if k.as_ref() < s.as_ref() {
+                    return false;
                 }
             }
-            let inner_stream =
-                inner.iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size);
-            futures::pin_mut!(inner_stream);
-            while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
-                yield b;
+            if let Some(ref e) = hi {
+                if k.as_ref() > e.as_ref() {
+                    return false;
+                }
             }
-        })
+            true
+        });
+        // `snapshot_overlay_sorted` sorts ascending; the reverse merge needs
+        // descending order to line up with the reverse `inner` stream.
+        overlay.reverse();
+        let inner_stream =
+            self.inner
+                .iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size);
+        merge_overlay_stream(overlay, inner_stream, batch_size, true)
     }
 
     async fn flush(&self) -> DbResult<()> {
