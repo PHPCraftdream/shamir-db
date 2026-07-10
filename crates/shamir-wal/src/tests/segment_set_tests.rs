@@ -821,3 +821,117 @@ async fn reactivated_segment_sheds_stale_sidecar() {
          mislead a future truncation decision"
     );
 }
+
+/// Task #531 (former #522, found in task #500's second `@fl` review):
+/// strengthen the `reactivated_segment_sheds_stale_sidecar` coverage through
+/// the OTHER sidecar-shedding call site defensively hardened in task #500 —
+/// `SegmentSet::rotate_after_poison`. The existing test exercises the shed in
+/// `SegmentSet::open`; its end-to-end tail is NOT load-bearing for THIS path
+/// (replay ignores sidecars, and `seal_and_rotate` always rewrites the sidecar
+/// correctly). This test drives the poison-rotation disaster path directly.
+///
+/// Scenario reproduced: a segment that already carries a STALE on-disk
+/// max_version sidecar (too-low, from a prior incarnation that sealed it, then
+/// re-activated it after a crash) accumulates real data PAST the stale claim,
+/// then gets POISONED (a live write/sync failure) and rotated out via
+/// `rotate_after_poison`. If that path did NOT shed the stale sidecar, the
+/// poisoned-and-sealed segment would keep its too-low `.meta` on disk, and a
+/// future `open` would trust it — computing max_version=10 instead of the true
+/// 60, so `truncate_below(50)` would delete a segment still holding v=60 data:
+/// silent data loss. The `remove_blocking` call in `rotate_after_poison`
+/// (added in task #500) prevents exactly this.
+///
+/// Load-bearing distinctly from the mid-test assertion in the sibling test:
+/// here the stale sidecar is planted AFTER `open` (so `open`'s own shed cannot
+/// account for it), and it is `rotate_after_poison` — not `open`, not
+/// `seal_and_rotate` — that must remove it. Without task #500's fix the final
+/// reopen would report max_committed()==10 (the stale claim), not 60.
+#[tokio::test]
+async fn poison_rotation_sheds_stale_sidecar() {
+    let dir = TempDir::new().unwrap();
+
+    // Large cap → no size-based rotation; segment 0 stays active and holds the
+    // real data.
+    let set = SegmentSet::open(dir.path().to_path_buf(), 1 << 20)
+        .await
+        .unwrap();
+
+    // Append the TRUE data (commit_version 60) and sync it durable.
+    set.append_batch(vec![entry(1, 60).encode().unwrap()], 60)
+        .await
+        .unwrap();
+    set.sync().await.unwrap();
+
+    // Plant a STALE sidecar on the ACTIVE segment (seq 0) claiming max=10 —
+    // AFTER open, so `open`'s own re-activation shed cannot be what removes it.
+    // Only `rotate_after_poison` (below) can shed it now.
+    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
+    assert!(
+        meta_path(dir.path(), 0).exists(),
+        "stale sidecar planted on the active segment"
+    );
+
+    // Poison the active segment (simulate a live write/sync failure) so the
+    // NEXT append drives the `rotate_after_poison` branch.
+    set.active_segment_for_test().mark_poisoned();
+
+    // Trigger the poison rotation: `append_batch` sees the active segment is
+    // poisoned, calls `rotate_after_poison` (sealing seq 0, opening seq 1),
+    // then writes the new batch to the fresh segment. This is the path under
+    // test — segment 0 is sealed-as-poisoned here.
+    set.append_batch(vec![entry(2, 70).encode().unwrap()], 70)
+        .await
+        .unwrap();
+
+    // THE load-bearing assertion for the rotate_after_poison shed: the
+    // poisoned-and-sealed segment 0 must NOT keep its stale sidecar. Without
+    // task #500's `remove_blocking` in `rotate_after_poison`, `0.meta` (max=10)
+    // survives here.
+    assert!(
+        !meta_path(dir.path(), 0).exists(),
+        "rotate_after_poison must shed the poisoned segment's stale sidecar; \
+         a surviving too-low sidecar would mislead a future open's truncation"
+    );
+
+    set.sync().await.unwrap();
+    drop(set);
+
+    // Reopen: segment 0 is sealed. With the fix, no sidecar survived, so `open`
+    // replays segment 0 and derives the TRUE max_version (60). Without the fix,
+    // `open` would read the stale sidecar and trust max_version=10 — the
+    // silent-under-truncation vector.
+    //
+    // (The freshly-reopened active segment 1 rebuilds its watermark lazily —
+    // its in-memory `max_committed` is 0 until the next append — so the
+    // cross-segment max_committed() here is exactly the SEALED seg-0 max: 60
+    // with the fix, 10 without it. This is the clean fixed-vs-unfixed signal.)
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.max_committed(),
+        60,
+        "reopen must derive sealed seg 0's TRUE max_version (60) from a genuine \
+         replay — never the stale sidecar's claim (10); a `10` here means the \
+         poisoned segment kept its stale sidecar (rotate_after_poison shed missing)"
+    );
+
+    // Sharpen the disaster proof: a truncate at the stale watermark (10) must
+    // NOT delete segment 0, because its true max_version (60) exceeds 10. If a
+    // stale `.meta` had survived, `open` would have recorded seg 0's
+    // max_version as 10 and this truncate would delete a segment holding v=60
+    // data (silent loss). Truncating below 55 leaves seg 0 (max 60) intact.
+    let deleted = reopened.truncate_below(55).await.unwrap();
+    assert_eq!(
+        deleted, 0,
+        "sealed segment 0 (true max 60) must NOT be reclaimable below 55; a \
+         surviving stale sidecar (max 10) would have wrongly deleted it"
+    );
+    let replayed = reopened.replay().await.unwrap();
+    let versions: Vec<u64> = replayed.iter().map(|e| e.commit_version).collect();
+    assert!(
+        versions.contains(&60),
+        "the v=60 record in the poisoned-then-sealed segment 0 must survive \
+         truncate_below(55), got {versions:?}"
+    );
+}

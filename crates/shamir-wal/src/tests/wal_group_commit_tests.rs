@@ -341,6 +341,67 @@ async fn append_many_is_atomic_all_entries_land() {
     assert_eq!(got, want);
 }
 
+/// Audit §1.6 regression (task #531): `append_many` claims all-or-nothing
+/// atomicity — a write failure mid-batch quarantines the whole batch so NO
+/// entry survives to be resurrected by recovery as a "committed" transaction
+/// the caller was told failed. The pre-existing happy-path test only proved
+/// the success side (all land). This test injects a GENUINE failure through
+/// the real Mem write path (`WalSink::append_batch` returns `Err` before any
+/// frame is pushed — not a manually-asserted rollback), drives it through the
+/// group-commit leader's single `append_batch` call in `lead_until_drained`,
+/// and confirms:
+///   1. `append_many` returns `Err` to the caller (circuit breaker fired);
+///   2. a SUBSEQUENT replay sees ZERO of the batch's N>1 entries — no partial
+///      survival, the actual property the doc comment guarantees.
+#[tokio::test]
+async fn append_many_write_failure_leaves_zero_entries() {
+    let sink = Arc::new(WalSink::mem());
+    let gc = WalGroupCommit::new(Arc::clone(&sink));
+
+    // Arm the NEXT append_batch (the batch's single leader write) to fail.
+    sink.arm_fail_next_append();
+
+    // A batch of 4 entries (N>1) — the whole batch flows through ONE
+    // append_batch call, which the armed knob fails at the real write path.
+    let entries: Vec<(Vec<u8>, u64)> = (1..=4u64)
+        .map(|i| (entry(i, i * 10).encode().unwrap(), i * 10))
+        .collect();
+    let res = gc.append_many(entries, WalDurability::Buffered).await;
+
+    assert!(
+        res.is_err(),
+        "append_many must surface the mid-batch write failure to the caller"
+    );
+
+    // The all-or-nothing claim: recovery must never replay a subset of a
+    // failed batch. ZERO frames were pushed, so a fresh replay is empty.
+    let replayed = sink.replay().await.unwrap();
+    assert!(
+        replayed.is_empty(),
+        "a failed batch must leave NO entries behind (all-or-nothing); \
+         replay saw {} — partial survival would resurrect a 'failed' commit",
+        replayed.len()
+    );
+
+    // The injection is one-shot: the sink is healthy again, so a follow-up
+    // batch of DIFFERENT entries lands whole — proving the failure quarantined
+    // only the first batch, not the sink.
+    let entries2: Vec<(Vec<u8>, u64)> = (10..=12u64)
+        .map(|i| (entry(i, i * 10).encode().unwrap(), i * 10))
+        .collect();
+    gc.append_many(entries2, WalDurability::Buffered)
+        .await
+        .unwrap();
+    let replayed2 = sink.replay().await.unwrap();
+    let got: HashSet<u64> = replayed2.iter().map(|e| e.txn_id).collect();
+    let want: HashSet<u64> = (10..=12u64).collect();
+    assert_eq!(
+        got, want,
+        "after the one-shot injected failure the sink recovers; only the \
+         SECOND batch's entries are present, never the first's"
+    );
+}
+
 /// Audit §1.6 regression: an empty batch is a no-op (no append, no error).
 #[tokio::test]
 async fn append_many_empty_is_noop() {
