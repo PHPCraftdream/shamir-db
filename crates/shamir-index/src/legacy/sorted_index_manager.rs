@@ -692,33 +692,104 @@ impl SortedIndexManager {
         k: usize,
         forward: bool,
     ) -> DbResult<Vec<RecordId>> {
+        // First page only; the continuation cursor is discarded. Callers
+        // that must survive stale index entries (dead postings whose record
+        // body is gone) use `lookup_range_first_k_page` to resume the walk.
+        let (ids, _cursor) = self
+            .lookup_range_first_k_page(name_interned, seek_encoded, None, k, forward)
+            .await?;
+        Ok(ids)
+    }
+
+    /// Continuation-aware sibling of [`lookup_range_first_k`]: collects the
+    /// next `k` **physical** index entries in value order and also returns a
+    /// resume cursor so the caller can drive a live-row-aware page loop.
+    ///
+    /// Returns `(ids, cursor)`:
+    /// * `ids` — up to `k` record ids in ORDER BY direction, skipping every
+    ///   entry whose indexed value equals `seek_encoded` (the page boundary).
+    /// * `cursor` — `Some(last_physical_key)` when the walk stopped because it
+    ///   reached `k` survivors (there may be MORE range beyond); `None` when
+    ///   the underlying stream was exhausted (the range is truly done — a
+    ///   genuine last page, never resume past this).
+    ///
+    /// `after_key`:
+    /// * `None` → first page: walk the half-plane bounded by `seek_encoded`.
+    /// * `Some(prev_cursor)` → resume STRICTLY after (ASC) / before (DESC) the
+    ///   physical key returned as the previous page's cursor, so already-seen
+    ///   entries are never re-emitted.
+    ///
+    /// This keeps the index layer purely about ordered physical traversal:
+    /// liveness (fetching record bodies, dropping dead ids) lives entirely in
+    /// the engine's read path, which loops here until it has `limit` LIVE rows
+    /// or this method reports the range exhausted (`cursor == None`).
+    pub async fn lookup_range_first_k_page(
+        &self,
+        name_interned: u64,
+        seek_encoded: &[u8],
+        after_key: Option<&[u8]>,
+        k: usize,
+        forward: bool,
+    ) -> DbResult<(Vec<RecordId>, Option<Bytes>)> {
         if k == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         let prefix = self.entry_prefix(name_interned);
         let value_start = prefix.len();
+
+        // Bounds. On a continuation page the moving bound is `after_key`
+        // itself (inclusive in the store API); we drop the entry equal to it
+        // below so the resume is STRICTLY past the previous cursor.
         let (lower, upper) = if forward {
-            self.range_bounds(&prefix, Some(seek_encoded), None)
+            match after_key {
+                // `after_key` is a full physical key → use it verbatim as the
+                // (inclusive) lower bound; the open upper is the same
+                // `prefix||0xFF*64` as the first page. We do NOT re-wrap
+                // through `range_bounds`, which carries seek-value semantics.
+                Some(ak) => {
+                    let (_, up) = self.range_bounds(&prefix, None, None);
+                    (Bytes::copy_from_slice(ak), up)
+                }
+                None => self.range_bounds(&prefix, Some(seek_encoded), None),
+            }
         } else {
-            self.range_bounds(&prefix, None, Some(seek_encoded))
+            match after_key {
+                // Resume high→low: `after_key` becomes the inclusive upper
+                // bound; the lower stays the prefix (start of this index).
+                Some(ak) => (prefix.clone(), Bytes::copy_from_slice(ak)),
+                None => self.range_bounds(&prefix, None, Some(seek_encoded)),
+            }
         };
 
         let mut out = Vec::with_capacity(k);
+        let mut cursor: Option<Bytes> = None;
+        let mut exhausted = true;
         let batch = k.min(MAINT_SCAN_BATCH);
+
         if forward {
             let stream = self
                 .info_store
                 .iter_range_stream(Some(lower), Some(upper), batch);
             futures::pin_mut!(stream);
-            while let Some(b) = stream.next().await {
+            'outer: while let Some(b) = stream.next().await {
                 for (key, _) in b? {
-                    if key_value_slice(key.as_ref(), value_start) == seek_encoded {
+                    let kb = key.as_ref();
+                    // Resume strictly-after: skip the entry equal to the
+                    // previous cursor (inclusive lower bound).
+                    if let Some(ak) = after_key {
+                        if kb == ak {
+                            continue;
+                        }
+                    }
+                    if key_value_slice(kb, value_start) == seek_encoded {
                         continue;
                     }
-                    if let Some(id) = decode_record_id_suffix(key.as_ref()) {
+                    if let Some(id) = decode_record_id_suffix(kb) {
                         out.push(id);
                         if out.len() == k {
-                            return Ok(out);
+                            cursor = Some(Bytes::copy_from_slice(kb));
+                            exhausted = false;
+                            break 'outer;
                         }
                     }
                 }
@@ -728,21 +799,35 @@ impl SortedIndexManager {
                 .info_store
                 .iter_range_stream_reverse(Some(lower), Some(upper), batch);
             futures::pin_mut!(stream);
-            while let Some(b) = stream.next().await {
+            'outer: while let Some(b) = stream.next().await {
                 for (key, _) in b? {
-                    if key_value_slice(key.as_ref(), value_start) == seek_encoded {
+                    let kb = key.as_ref();
+                    if let Some(ak) = after_key {
+                        if kb == ak {
+                            continue;
+                        }
+                    }
+                    if key_value_slice(kb, value_start) == seek_encoded {
                         continue;
                     }
-                    if let Some(id) = decode_record_id_suffix(key.as_ref()) {
+                    if let Some(id) = decode_record_id_suffix(kb) {
                         out.push(id);
                         if out.len() == k {
-                            return Ok(out);
+                            cursor = Some(Bytes::copy_from_slice(kb));
+                            exhausted = false;
+                            break 'outer;
                         }
                     }
                 }
             }
         }
-        Ok(out)
+
+        // If the stream ran dry before we hit `k`, the range is exhausted and
+        // there is nothing to resume from → cursor stays `None`.
+        if exhausted {
+            cursor = None;
+        }
+        Ok((out, cursor))
     }
 
     /// First K record ids under the sorted prefix, in value-asc order.

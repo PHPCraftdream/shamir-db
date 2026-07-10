@@ -337,3 +337,145 @@ async fn keyset_seek_scans_only_limit_not_whole_tail() {
          a bounded ~limit walk, not the whole remaining tail"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// G2 (#526) — short page on STALE sorted-index entries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Plant a STALE sorted-index entry: a posting for `score` → `fake_id`
+/// where `fake_id` has NO record body in the data store. `get_many_bytes`
+/// will return `None` for it, so it must be treated as a dead entry that
+/// the keyset walk skips over while still continuing further into the range.
+async fn plant_stale_sorted_entry(tbl: &TableManager, score: i64) -> RecordId {
+    let interner = tbl.interner().get().await.unwrap();
+    let score_key = interner.touch_ind("score").unwrap().into_key();
+    tbl.interner().persist().await.unwrap();
+
+    let mut m = new_map();
+    m.insert(score_key, InnerValue::Int(score));
+    let fake_rec = InnerValue::Map(m);
+
+    let fake_id = RecordId::new();
+    // Writes a sorted-index posting (score → fake_id) but no record body,
+    // so the read path's get_many_bytes yields None for this id.
+    tbl.sorted_indexes()
+        .on_record_created(&fake_id, &fake_rec, 1)
+        .await
+        .unwrap();
+    fake_id
+}
+
+/// REGRESSION (#526): the first `limit` PHYSICAL index entries beyond the
+/// seek boundary include stale postings (record bodies gone). Naively
+/// collecting the first-`limit`-physical-entries and dropping the dead ones
+/// under-fills the page. The fix must keep advancing through the range until
+/// `limit` LIVE rows are collected.
+///
+/// Layout (score ASC): live 11, STALE 12, live 13, STALE 14, live 15,
+/// live 16, live 17, … Seek at 10, limit 3.
+/// Pre-fix: physical first-3 = [11(live), 12(stale), 13(live)] → after
+/// dropping the stale 12, only [11, 13] survive → SHORT page of 2.
+/// Post-fix: [11, 13, 15] — three LIVE rows, in order.
+#[tokio::test]
+async fn keyset_seek_asc_stale_entries_still_fill_full_page() {
+    let tbl = make_table().await;
+    // Live rows.
+    for s in [11, 13, 15, 16, 17] {
+        insert_record(&tbl, s, &format!("r{s}")).await;
+    }
+    // Interleaved stale postings that under-fill the naive first-k page.
+    plant_stale_sorted_entry(&tbl, 12).await;
+    plant_stale_sorted_entry(&tbl, 14).await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::asc("score"))
+        .pagination(Pagination::after(vec![QueryValue::Int(10)], Some(3)));
+
+    let result = tbl.read(&query, &ctx).await.unwrap();
+
+    // Full page of 3 LIVE rows, in ascending order — the stale 12/14 are
+    // skipped and the walk continued to 15 to fill the page.
+    assert_eq!(
+        scores_in_order(&result),
+        vec![11, 13, 15],
+        "stale index entries must not shorten the page when live rows remain"
+    );
+
+    let label = result
+        .stats
+        .as_ref()
+        .and_then(|s| s.index_used.as_deref())
+        .unwrap_or("<none>");
+    assert!(
+        label.ends_with("_keyset"),
+        "expected the keyset index path, got index_used = {label:?}"
+    );
+}
+
+/// DESC mirror of the above: seek high, walk down, stale entries interleaved.
+///
+/// Layout (score DESC from seek 100): live 50, STALE 49, live 48, STALE 47,
+/// live 46, live 45. Seek at 100, limit 3 → [50, 48, 46].
+#[tokio::test]
+async fn keyset_seek_desc_stale_entries_still_fill_full_page() {
+    let tbl = make_table().await;
+    for s in [50, 48, 46, 45] {
+        insert_record(&tbl, s, &format!("r{s}")).await;
+    }
+    plant_stale_sorted_entry(&tbl, 49).await;
+    plant_stale_sorted_entry(&tbl, 47).await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::desc("score"))
+        .pagination(Pagination::after(vec![QueryValue::Int(100)], Some(3)));
+
+    let result = tbl.read(&query, &ctx).await.unwrap();
+
+    assert_eq!(
+        scores_in_order(&result),
+        vec![50, 48, 46],
+        "DESC: stale entries must not shorten the page when live rows remain"
+    );
+}
+
+/// A GENUINE last-page short return: the range really IS exhausted with
+/// fewer than `limit` live rows (some of them stale). The read path must
+/// return exactly the live rows that exist and MUST NOT loop forever
+/// re-seeking an exhausted range.
+#[tokio::test]
+async fn keyset_seek_asc_genuine_short_last_page_terminates() {
+    let tbl = make_table().await;
+    // Only two live rows beyond the seek, plus a couple of stale postings.
+    insert_record(&tbl, 11, "a").await;
+    insert_record(&tbl, 13, "b").await;
+    plant_stale_sorted_entry(&tbl, 12).await;
+    plant_stale_sorted_entry(&tbl, 14).await; // trailing stale — nothing live after.
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // limit 5 but only 2 live rows exist beyond seek 10 → return [11, 13],
+    // and the loop terminates (range exhausted) rather than spinning.
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::asc("score"))
+        .pagination(Pagination::after(vec![QueryValue::Int(10)], Some(5)));
+
+    // If the fix regressed into an unbounded re-seek loop this test would
+    // hang; nextest's per-test timeout turns that into a visible failure.
+    let result = tbl.read(&query, &ctx).await.unwrap();
+
+    assert_eq!(
+        scores_in_order(&result),
+        vec![11, 13],
+        "genuine last page must return exactly the live rows and stop"
+    );
+}
