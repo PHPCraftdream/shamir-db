@@ -99,6 +99,20 @@ harness = false
 name = "storage_fjall_pump"
 harness = false
 
+# Cold-cache, high-fan-out fjall bench for the write-worker redesign (task
+# #536). Seeds ~256 MiB (8× fjall's 32 MiB block cache) then measures
+# concurrent-writer contention for both `insert` (routed through the write
+# worker — the expected win) and `set` (deliberately NOT routed through the
+# worker, kept as a regression-guard control — its embedded `contains_key`
+# read measured a net loss when serialized onto the worker), alongside
+# cold-cache scattered concurrent reads (which stay on the untouched
+# `spawn_blocking` path and MUST show no regression). Deliberately heavier than
+# `storage_fjall_pump`, whose small memtable-resident corpus can't expose write
+# contention or cold reads — see `docs/design/fjall-worker-loop-524-findings.md`.
+[[bench]]
+name = "storage_fjall_write_worker"
+harness = false
+
 # Dedicated CachedStore pump — isolates the two audit
 # `2026-07-06-perf-radical-o-notation` findings on the cache layer:
 #   §1.4 — `transact` with `Set` must POPULATE the cache (not
