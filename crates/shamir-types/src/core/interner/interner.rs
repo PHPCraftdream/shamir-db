@@ -1,26 +1,55 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::{InternerKey, TouchInd, UserKey};
 
 /// A thread-safe, two-way map for interning strings into compact binary IDs.
 ///
-/// **Reverse-lookup layout (Opt G + Op B):** the `id → str` direction is
-/// an `ArcSwap<Vec<Option<Arc<str>>>>`. Readers do a single atomic
-/// load (no shared-lock acquire/release atomic-counter bouncing
-/// across cores). The growing-vec semantics are preserved: on
-/// insert we clone the current vec, append, and `store` the new
-/// Arc. Writes are rare relative to reads (one insert per first
-/// touch of a fresh string vs. many reads from filter/projection
-/// hot paths), so the clone-and-swap cost is amortised heavily.
+/// **Reverse-lookup layout (Opt G + Op B + #501):** the `id → str`
+/// direction is an `ArcSwap<Vec<OnceLock<Arc<str>>>>`. Readers do a
+/// single atomic load (no shared-lock acquire/release atomic-counter
+/// bouncing across cores) then read the leaf `OnceLock` — a flat,
+/// single-index (`rev[id]`) lookup, unchanged from the previous
+/// `Option<Arc<str>>` shape. **The read path never takes a lock of any
+/// kind** — this property is unaffected by the rest of this note.
 ///
-/// **Op B (Arc<str> spine):** each slot now holds `Option<Arc<str>>`
-/// instead of `Option<UserKey(String)>`. Cloning a slot bumps the
-/// Arc refcount — O(1) — rather than copying the owned bytes.
-/// For N cold first-touches the total clone work drops from
-/// O(N²) byte copies to O(N) refcount bumps.
+/// **#501 (doubling growth + single-writer critical section):** the
+/// reverse spine no longer clones the WHOLE vec on every first-touch.
+/// Growth is *doubling* (only when `id >= cur.len()`, cloning the
+/// current vec into a bigger one), so total clone work across N
+/// first-touches is a geometric series ≈ 2N — **O(N)**, not the old
+/// **O(N²)**. Once capacity exists, landing a value is a single
+/// `OnceLock::set` with no clone at all.
+///
+/// A first attempt at this made growth-and-set fully lock-free via a
+/// two-phase "ensure capacity, then set, then confirm-and-retry-if-
+/// orphaned" CAS protocol — it had a genuine, reproducible data-loss
+/// race: a grower's clone-forward reads each cell one at a time (a
+/// non-atomic window over N cells), so a concurrent writer's in-place
+/// `set` on the SAME still-live vec can land, pass its own "am I still
+/// live" confirmation check (because the grow's swap hadn't happened
+/// *yet*), and then be silently dropped moments later when the grow's
+/// swap lands using a clone that was read *before* that `set`. Making
+/// this airtight lock-free needs a seqlock-style generation counter
+/// around every grow; instead, `reverse_write_lock` serializes ALL
+/// reverse-spine WRITES (first-touch population, both from `touch_ind`
+/// and `touch_with_id`) behind a single, rarely-contended
+/// `std::sync::Mutex` — a low-frequency/setup-only exception, per this
+/// repo's own concurrency ideology (writes here happen once per
+/// distinct field NAME ever seen, never on the read-hot decode path).
+/// The single-writer invariant eliminates the race class outright: with
+/// no concurrent mutation of `reverse` possible while the lock is held,
+/// ensure-capacity + set is one atomic step, no CAS-retry/confirm dance
+/// needed. Every read (`get_str`/`with_str`/`reverse_snapshot`/
+/// `all_entries`/`entries_after`/`entries_in_id_range`) never touches
+/// this lock — reads stay 100% lock-free via `ArcSwap::load`,
+/// unaffected by write contention.
+///
+/// **Op B (Arc<str> spine):** each slot holds `Arc<str>` rather than
+/// an owned `UserKey(String)`; capacity-ensure clones bump the Arc
+/// refcount — O(1) per slot — rather than copying owned bytes.
 ///
 /// The forward direction (`UserKey → id`) stays a `TDashMap` —
 /// it's sharded and already scales nearly linearly with thread
@@ -28,12 +57,25 @@ use super::{InternerKey, TouchInd, UserKey};
 #[derive(Debug)]
 pub struct Interner {
     map_user_to_interned: TDashMap<UserKey, InternerKey>,
-    /// Reverse direction — `vec[id as usize] = Some(Arc<str>)`. Indexed
-    /// by raw `id`; entry `0` is always `None` (sentinel, ids start at 1).
+    /// Reverse direction — `vec[id as usize]` holds an `Arc<str>` once
+    /// set. Indexed by raw `id`; entry `0` is always an unset
+    /// `OnceLock` (sentinel, ids start at 1). An unset slot reads as
+    /// `None` via `.get()` — this covers both "reserved-but-unswapped"
+    /// and "grown-but-not-yet-filled" ids with the same collapsed
+    /// semantics the previous `Option<Arc<str>>` design had (a
+    /// resized-but-unset slot was plain `None` there too).
     ///
-    /// Op B: `Arc<str>` slots so CAS-loop clone is O(1) per slot instead
-    /// of O(len(key)) per slot.
-    reverse: ArcSwap<Vec<Option<Arc<str>>>>,
+    /// #501: doubling-growth capacity-ensure + `OnceLock::set` so a
+    /// first-touch that finds capacity already present clones nothing.
+    /// All MUTATION of this field is serialized by `reverse_write_lock`;
+    /// reads never touch that lock.
+    reverse: ArcSwap<Vec<OnceLock<Arc<str>>>>,
+    /// #501: serializes reverse-spine WRITES only (first-touch
+    /// population from `touch_ind`/`touch_with_id`, including growth).
+    /// See the struct doc for why a single-writer critical section
+    /// replaced an earlier fully-lock-free attempt that had a data-loss
+    /// race. Never taken by any read path.
+    reverse_write_lock: std::sync::Mutex<()>,
     current_id: AtomicU64,
 }
 
@@ -48,7 +90,9 @@ impl Interner {
     pub fn new() -> Interner {
         Interner {
             map_user_to_interned: new_dash_map_wc(64),
-            reverse: ArcSwap::from_pointee(vec![None]), // index 0 reserved
+            // index 0 reserved (sentinel) — a single unset OnceLock.
+            reverse: ArcSwap::from_pointee(vec![OnceLock::new()]),
+            reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(0),
         }
     }
@@ -69,19 +113,23 @@ impl Interner {
             }
         }
         // +1 because vec is sized to hold index `max_id` (which is
-        // the highest id assigned), plus the sentinel at 0.
-        let mut reverse: Vec<Option<Arc<str>>> = vec![None; (max_id as usize) + 1];
+        // the highest id assigned), plus the sentinel at 0. Unassigned
+        // ids stay as unset `OnceLock`s (read as `None` — a gap).
+        let mut reverse: Vec<OnceLock<Arc<str>>> = Vec::with_capacity((max_id as usize) + 1);
+        reverse.resize_with((max_id as usize) + 1, OnceLock::new);
 
         for (interned_key, user_key) in initial_data {
             let id = interned_key.id();
             let arc: Arc<str> = Arc::from(user_key.as_str());
             map_user_to_interned.insert(user_key, interned_key);
-            reverse[id as usize] = Some(arc);
+            // Fresh vec, exclusive `&mut` — set is guaranteed to succeed.
+            let _ = reverse[id as usize].set(arc);
         }
 
         Interner {
             map_user_to_interned,
             reverse: ArcSwap::from_pointee(reverse),
+            reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(max_id),
         }
     }
@@ -119,26 +167,12 @@ impl Interner {
             }
             Entry::Vacant(vacant) => {
                 vacant.insert(new_key.clone());
-                // CAS-loop: grow and populate the reverse vec without a mutex.
-                // Multiple concurrent insertions each retry until their slot
-                // lands, so no writer's update is lost.
-                //
-                // Op B: cloning `arc` bumps the Arc refcount — O(1) —
-                // rather than deep-copying owned String bytes. Total
-                // clone work across N first-touches: O(N) vs O(N²).
-                loop {
-                    let cur = self.reverse.load_full();
-                    let mut new_rev = (*cur).clone();
-                    if (new_id as usize) >= new_rev.len() {
-                        new_rev.resize((new_id as usize) + 1, None);
-                    }
-                    new_rev[new_id as usize] = Some(arc.clone());
-                    let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
-                    if Arc::ptr_eq(&prev, &cur) {
-                        break;
-                    }
-                    // Another writer's swap landed first — reload and retry.
-                }
+                // #501: two-phase reverse-spine population — ensure
+                // capacity by doubling (rare, O(N) total across N
+                // touches) then `OnceLock::set` the slot in place
+                // (common, no vec clone). Because ids are strictly
+                // monotonic, `new_id` is owned exclusively by this call.
+                self.set_reverse_slot(new_id as usize, arc);
                 Ok(TouchInd::New(new_key))
             }
         }
@@ -157,7 +191,72 @@ impl Interner {
     pub fn get_str(&self, id: &InternerKey) -> Option<Arc<str>> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
-        rev.get(idx).and_then(|slot| slot.clone())
+        rev.get(idx).and_then(|slot| slot.get().cloned())
+    }
+
+    /// #501: populate the reverse spine at `idx` with `arc` for
+    /// `touch_ind`'s fresh-insert path. `idx` comes from strictly
+    /// monotonic `current_id` allocation, so it's uniquely owned by
+    /// this call **with respect to other `touch_ind` callers** — the
+    /// `debug_assert!` below only holds under that assumption. It is
+    /// NOT exclusive with respect to `touch_with_id` (WAL-recovery path,
+    /// which assigns caller-supplied ids and does its own collision
+    /// detection inline rather than calling this method) — a `touch_ind`
+    /// racing a concurrent `touch_with_id` for the same id is a
+    /// pre-existing, out-of-scope hazard (WAL recovery is not expected
+    /// to run concurrently with live `touch_ind` traffic).
+    ///
+    /// Holds `reverse_write_lock` for the whole ensure-capacity-then-set
+    /// step — see the struct doc for why this replaced an earlier
+    /// fully-lock-free two-phase attempt that had a data-loss race.
+    /// Growth (rare — only when `idx >= cur.len()`) doubles capacity, so
+    /// total clone work across N monotonic touches is a geometric
+    /// series ≈ 2N — O(N), not the old O(N²). The common case (capacity
+    /// already present) is a single `OnceLock::set`, no clone.
+    fn set_reverse_slot(&self, idx: usize, arc: Arc<str>) {
+        let _guard = self
+            .reverse_write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cur = self.reverse.load_full();
+        if idx < cur.len() {
+            let set_ok = cur[idx].set(arc).is_ok();
+            debug_assert!(
+                set_ok,
+                "touch_ind: slot {idx} already set — a concurrent touch_with_id \
+                 raced this id, which the recovery model assumes cannot happen"
+            );
+            return;
+        }
+        self.reverse
+            .store(Arc::new(Self::grown_reverse(&cur, idx, arc)));
+    }
+
+    /// Build a new reverse vec doubled in capacity to cover `idx`,
+    /// carrying every already-set cell of `cur` forward, then setting
+    /// `idx` to `arc`. Cells are built explicitly (not via
+    /// `OnceLock: Clone`, stabilized late) so this doesn't depend on a
+    /// specific MSRV.
+    ///
+    /// MUST be called only while holding `reverse_write_lock` — no
+    /// concurrent mutation of `cur` is possible while iterating it here.
+    fn grown_reverse(
+        cur: &[OnceLock<Arc<str>>],
+        idx: usize,
+        arc: Arc<str>,
+    ) -> Vec<OnceLock<Arc<str>>> {
+        let new_len = (cur.len() * 2).max(idx + 1);
+        let mut new_rev: Vec<OnceLock<Arc<str>>> = Vec::with_capacity(new_len);
+        for old_cell in cur.iter() {
+            let cell = OnceLock::new();
+            if let Some(v) = old_cell.get() {
+                let _ = cell.set(v.clone());
+            }
+            new_rev.push(cell);
+        }
+        new_rev.resize_with(new_len, OnceLock::new);
+        let _ = new_rev[idx].set(arc);
+        new_rev
     }
 
     /// Snapshots the reverse-vec via a single `ArcSwap` load and
@@ -168,8 +267,9 @@ impl Interner {
     ///
     /// Op B: slot type changed to `Arc<str>` — no semantic change
     /// for presence checks; callers that read the string dereference
-    /// the Arc directly.
-    pub fn reverse_snapshot(&self) -> Arc<Vec<Option<Arc<str>>>> {
+    /// the Arc directly. #501: slot cell is now `OnceLock<Arc<str>>` —
+    /// callers read via `slot.get()` (an unset slot = an unresolved id).
+    pub fn reverse_snapshot(&self) -> Arc<Vec<OnceLock<Arc<str>>>> {
         self.reverse.load_full()
     }
 
@@ -177,9 +277,7 @@ impl Interner {
     pub fn with_str<R>(&self, id: &InternerKey, f: impl FnOnce(&str) -> R) -> Option<R> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
-        rev.get(idx)
-            .and_then(|slot| slot.as_ref())
-            .map(|arc| f(arc))
+        rev.get(idx).and_then(|slot| slot.get()).map(|arc| f(arc))
     }
 
     /// Gets the interned key corresponding to a user key.
@@ -232,7 +330,7 @@ impl Interner {
         rev.iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
-                slot.as_ref()
+                slot.get()
                     .map(|arc| (InternerKey::new(idx as u64), UserKey::from_str(&**arc)))
             })
             .collect()
@@ -272,7 +370,7 @@ impl Interner {
         // Check reverse map for id collision before inserting.
         {
             let rev = self.reverse.load();
-            if let Some(Some(existing_arc)) = rev.get(id as usize) {
+            if let Some(existing_arc) = rev.get(id as usize).and_then(|c| c.get()) {
                 if &**existing_arc != name {
                     return Err(format!(
                         "touch_with_id: id {} already used by '{}', cannot assign to '{}'",
@@ -305,30 +403,47 @@ impl Interner {
                 let new_key = InternerKey::new(id);
                 vacant.insert(new_key);
 
-                // Grow and populate the reverse vec via CAS loop.
-                loop {
+                // #501: ensure capacity (doubling) then `OnceLock::set`
+                // the slot in place, under `reverse_write_lock`'s
+                // single-writer critical section — no whole-vec clone
+                // per touch, and no CAS-retry/confirm race (see the
+                // struct doc). Unlike `touch_ind`, `id` here is
+                // arbitrary (WAL-supplied), so a *different* name may
+                // race us for the SAME id: with the lock held, the
+                // slot's state at the moment we look is authoritative —
+                // if a different name already occupies it, roll back
+                // our forward-map entry and report the collision.
+                let idx = id as usize;
+                let collision = {
+                    let _guard = self
+                        .reverse_write_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     let cur = self.reverse.load_full();
-                    let mut new_rev = (*cur).clone();
-                    if (id as usize) >= new_rev.len() {
-                        new_rev.resize((id as usize) + 1, None);
-                    }
-                    // Check for collision in the snapshot we're about to swap.
-                    if let Some(Some(existing_arc)) = new_rev.get(id as usize) {
-                        if &**existing_arc != name {
-                            // Another thread raced and placed a different name at this id.
-                            // The forward map already has our entry — remove it.
-                            self.map_user_to_interned.remove(name);
-                            return Err(format!(
-                                "touch_with_id: id {} raced to '{}', cannot assign '{}'",
-                                id, &**existing_arc, name
-                            ));
+                    if idx < cur.len() {
+                        match cur[idx].get() {
+                            None => {
+                                let _ = cur[idx].set(arc.clone());
+                                None
+                            }
+                            Some(existing) if &**existing == name => None, // idempotent replay
+                            Some(existing) => Some(existing.clone()),
                         }
+                    } else {
+                        self.reverse
+                            .store(Arc::new(Self::grown_reverse(&cur, idx, arc.clone())));
+                        None
                     }
-                    new_rev[id as usize] = Some(arc.clone());
-                    let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
-                    if Arc::ptr_eq(&prev, &cur) {
-                        break;
-                    }
+                };
+                if let Some(existing) = collision {
+                    // A different name won this id. Roll back our
+                    // forward-map insert and report the collision.
+                    let msg = format!(
+                        "touch_with_id: id {} raced to '{}', cannot assign '{}'",
+                        id, &*existing, name
+                    );
+                    self.map_user_to_interned.remove(name);
+                    return Err(msg);
                 }
 
                 // Bump current_id so subsequent touch_ind won't reuse this id.
@@ -374,7 +489,7 @@ impl Interner {
         }
         let mut out = Vec::with_capacity(hi + 1 - lo);
         for idx in lo..=hi {
-            if let Some(Some(arc)) = rev.get(idx) {
+            if let Some(arc) = rev.get(idx).and_then(|c| c.get()) {
                 out.push((InternerKey::new(idx as u64), UserKey::from_str(&**arc)));
             }
         }
@@ -391,21 +506,26 @@ impl Interner {
     /// window. Using the reverse-vec high-water mark guarantees we
     /// never advance past unwritten entries.
     ///
-    /// Gaps: a `Some(None)` slot (reserved-but-unswapped id, or a
-    /// permanently leaked id) does **not** stop the scan — populated
-    /// entries above the gap are still captured so they are not lost
-    /// on restart. However, the high-water mark is frozen at the id
-    /// just before the first gap, so the next `entries_after` call
-    /// re-captures the gap slot once (if) it fills.
+    /// Gaps: an unset slot — `Some(cell)` where `cell.get()` is `None`
+    /// (reserved-but-unswapped id mid-`touch_ind`, a permanently leaked
+    /// id, OR trailing doubling-growth capacity that no id has filled
+    /// yet) — does **not** stop the scan; populated entries above it are
+    /// still captured so they are not lost on restart. However, the
+    /// high-water mark is frozen at the id just before the first gap, so
+    /// the next `entries_after` call re-captures the gap slot once (if)
+    /// it fills. #501: with doubling growth the vec length now exceeds
+    /// the highest touched id, so the tail is a run of unset cells — the
+    /// freeze logic already handles them exactly like any other gap
+    /// (they contribute no entries and never advance new_high).
     ///
     /// UserKey is reconstructed from `Arc<str>` — cold path.
     pub fn entries_after(&self, start_exclusive: usize) -> (Vec<(InternerKey, UserKey)>, usize) {
         let rev = self.reverse.load();
         // `rev.len() - 1` is the highest id that has a slot. Some
-        // slots in the captured range may still be `None` if we're
-        // reading mid-insert from another thread — but those will
-        // be picked up by the NEXT persist, since we don't advance
-        // `last_persisted_len` past them.
+        // slots in the captured range may still be unset if we're
+        // reading mid-insert from another thread (or they are trailing
+        // capacity) — but those will be picked up by the NEXT persist,
+        // since we don't advance `last_persisted_len` past them.
         let hi_full = rev.len().saturating_sub(1);
         let lo = start_exclusive.saturating_add(1);
         if lo > hi_full {
@@ -415,7 +535,7 @@ impl Interner {
         let mut new_high = start_exclusive;
         let mut gapped = false;
         for idx in lo..=hi_full {
-            match rev.get(idx) {
+            match rev.get(idx).map(|c| c.get()) {
                 Some(Some(arc)) => {
                     out.push((InternerKey::new(idx as u64), UserKey::from_str(&**arc)));
                     // Only advance the high-water mark while the range is still
@@ -426,10 +546,11 @@ impl Interner {
                     }
                 }
                 Some(None) => {
-                    // Reserved-but-unswapped (concurrent touch_ind) or a leaked
-                    // id. Keep scanning so populated higher ids are still
-                    // captured, but freeze new_high so the next persist
-                    // re-captures this slot once (if) it fills.
+                    // Unset slot: reserved-but-unswapped (concurrent touch_ind),
+                    // a leaked id, or trailing doubling-growth capacity. Keep
+                    // scanning so populated higher ids are still captured, but
+                    // freeze new_high so the next persist re-captures this slot
+                    // once (if) it fills.
                     gapped = true;
                 }
                 None => break, // past the end of the reverse vec
