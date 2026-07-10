@@ -83,7 +83,10 @@ impl TableManager {
         &self,
         value: &InnerValue,
     ) -> DbResult<(RecordId, u64)> {
-        let _guard = if self.index_manager.has_unique_indexes() {
+        // #534 finding 1: `needs_write_barrier()` is also `true` while an
+        // index2 `create_index_v2` is in flight, so this insert can't slip
+        // into the backfill→register window and get lost by the new index.
+        let _guard = if self.needs_write_barrier() {
             Some(self.unique_write_lock.lock().await)
         } else {
             None
@@ -167,6 +170,17 @@ impl TableManager {
         if values.is_empty() {
             return Ok((Vec::new(), 0));
         }
+
+        // #534 finding 1: hold the barrier across validate→write→index while an
+        // index2 create_index_v2 backfill is in flight (also across the whole
+        // batch's unique validation + posting writes when a unique index
+        // exists, matching the single-row path's atomicity). Without an index2
+        // create in flight and without a unique index, this stays lock-free.
+        let _guard = if self.needs_write_barrier() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
 
         // 1. Validate unique indexes for every value first. Two
         //    layers of check: persisted state (via
@@ -301,6 +315,15 @@ impl TableManager {
     /// alignment). Returns `0` when no `MvccStore` is attached or the
     /// record did not exist.
     pub(crate) async fn delete_returning_version(&self, id: RecordId) -> DbResult<(bool, u64)> {
+        // #534 finding 1: hold the barrier across the whole delete→index-cleanup
+        // sequence while an index2 create_index_v2 backfill is in flight, so the
+        // new index's backfill and this delete's posting removal can't interleave
+        // (the backfill could otherwise re-add a posting for a just-deleted row).
+        let _guard = if self.needs_write_barrier() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
         // Get old value before deletion for index cleanup
         let old_value = self.get(id).await.ok();
         // Route through MvccStore when attached so the old bytes are
@@ -361,7 +384,9 @@ impl TableManager {
         id: RecordId,
         value: &InnerValue,
     ) -> DbResult<(bool, u64)> {
-        let _guard = if self.index_manager.has_unique_indexes() {
+        // #534 finding 1: also lock while an index2 create_index_v2 backfill
+        // is in flight, so a concurrent update isn't lost by the new index.
+        let _guard = if self.needs_write_barrier() {
             Some(self.unique_write_lock.lock().await)
         } else {
             None

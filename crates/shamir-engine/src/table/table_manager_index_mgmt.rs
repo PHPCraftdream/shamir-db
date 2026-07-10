@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -45,6 +46,41 @@ impl TableManager {
             };
         }
 
+        // #534 finding 1 (write-barrier, Option B — mirrors
+        // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
+        // `unique_write_lock` across the ENTIRE reserve-id → backfill →
+        // register → persist sequence for the index2 branch.
+        // `index2_create_barrier` (set below, under this guard) flips
+        // `needs_write_barrier()` to `true` on every NON-TX writer path
+        // (`insert`/`insert_many_returning_version`/`delete_returning_version`/
+        // `set` in `table_manager_crud.rs`) — so even an index2-only table
+        // (no legacy unique index, normally lock-free) now serializes THOSE
+        // writers against this create.
+        //
+        // PARTIAL FIX, honestly scoped (see `backfill_index2_backend`'s doc
+        // comment below for the full writeup, added after an `@fl`
+        // adversarial pass): this barrier does NOT reach the tx-commit path
+        // (`execute_insert_tx`/`execute_update_tx`/`execute_delete_tx`/
+        // `execute_set_tx` → the commit pipeline), which is how every real
+        // client DML statement is actually served — that path plans index2
+        // ops against an `all_backends()` snapshot at STAGE time and
+        // materializes the row later at commit Phase 5a, neither of which
+        // consults this flag. Closing that gap needs the commit pipeline's
+        // own prelock/materialize ordering to respect the barrier — tracked
+        // as a separate follow-up task, not implemented here. What IS
+        // correctly closed by this guard: the non-tx write paths (used by
+        // replication-apply and directly by tests).
+        //
+        // Callers of `create_index_v2` (grep-verified: DDL admin path in
+        // shamir-db + engine tests) never already hold `unique_write_lock`, so
+        // acquiring it here cannot self-deadlock (`tokio::sync::Mutex` is NOT
+        // reentrant).
+        let _uwl_guard = self.unique_write_lock.lock().await;
+        // RAII: clear the barrier on EVERY exit path (including the `?`
+        // early-returns in the backend-build match and the backfill), so a
+        // failed create never leaves writers stuck on the barrier forever.
+        let _barrier = Index2CreateBarrierGuard::set(&self.index2_create_barrier);
+
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
         for field_path in &op.fields {
@@ -62,6 +98,26 @@ impl TableManager {
         }
 
         let id = self.index2_registry.allocate_id();
+
+        // #534 finding 2 (crash-orphan-id-reuse). `allocate_id()` is a plain
+        // in-memory `AtomicU32::fetch_add` with NO durability — the id only
+        // becomes durable when the FINAL `save_index2_metadata` (after backfill
+        // + register) succeeds. A crash between here and that final save would
+        // leave postings written under an id that was never persisted; on
+        // restart `next_id` resets to the last persisted watermark and the SAME
+        // id could be reallocated to a DIFFERENT index definition that then
+        // inherits the crashed attempt's orphan postings. Durably advance the
+        // persisted `next_id` watermark NOW, before backfill: at this point
+        // `all_descriptors()` still returns the PRE-existing set (the new
+        // backend is not yet inserted), so this does NOT expose the
+        // not-yet-backfilled index to any reader of `descriptors` — it only
+        // reserves the id so a crash can never reallocate it. The orphan
+        // postings under the dead id become inert, permanently-unreachable
+        // garbage (no future index can collide with an id nothing will ever
+        // allocate again).
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
+
         let name_key = match interner
             .touch_ind(&op.create_index)
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
@@ -254,6 +310,15 @@ impl TableManager {
         // O(N·backends) work on every CREATE INDEX.
         self.backfill_index2_backend(backend.as_ref()).await?;
 
+        // #534 finding-1 regression hook: park here (backfill done, backend NOT
+        // yet registered) if a test installed a pause hook. Zero cost in the
+        // real path (`None`), compiled out of non-test builds. See
+        // `index2_backfill_hook`.
+        #[cfg(test)]
+        if let Some(hook) = self.create_index2_backfill_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
         self.index2_registry
             .insert(backend)
             .await
@@ -276,21 +341,57 @@ impl TableManager {
     ///
     /// Runs BEFORE the backend is registered, which avoids a double-write
     /// (the live `index2_on_insert` hook can't yet route to an unregistered
-    /// backend). **This does NOT close the lost-write window** — `@fl`
-    /// review flagged this honestly rather than papering over it: a row
-    /// written after this backfill's stream cursor has passed its key
-    /// position, but before `index2_registry.insert` below completes, is
-    /// observed by NEITHER this backfill (already past it) NOR the live hook
-    /// (backend not registered yet) — that row is missing from the new index
-    /// until a future write happens to touch it again. This is a strict
-    /// improvement over the pre-fix state (where EVERY pre-existing row was
-    /// unconditionally missing), not a fully closed race. A register-first
-    /// ordering (matching the legacy btree path's audit-A9 fix for the
-    /// identical class of gap) is NOT simply portable here without further
-    /// work: index2's `fts` backend applies non-idempotent `BumpFtsStats`
-    /// counter ops via `apply_in_memory`, so naively flipping the order would
-    /// double-count stats for a racing row instead. See the follow-up task
-    /// for a proper write-barrier / dedup fix.
+    /// backend).
+    ///
+    /// # Lost-write race — CLOSED for the non-tx write path, OPEN on the
+    /// # tx-commit path (#534 finding 1 — partial fix, `@fl`-reviewed)
+    ///
+    /// The caller (`create_index_v2`) holds `unique_write_lock` AND has set
+    /// `index2_create_barrier` across this backfill → the subsequent
+    /// `index2_registry.insert`. While that barrier is up, every **non-tx**
+    /// writer path (`TableManager::insert`/`insert_many_returning_version`/
+    /// `delete_returning_version`/`set`, gated by `needs_write_barrier()`)
+    /// also takes `unique_write_lock`, so no row reaching the store through
+    /// those methods can land in the window between this backfill's stream
+    /// cursor passing a key and the backend becoming live-registered. Two
+    /// residuals a later `@fl` adversarial pass found, honestly recorded
+    /// rather than papered over:
+    ///
+    /// 1. **The tx-commit path (the primary production DML route) is NOT
+    ///    covered.** Every client INSERT/UPDATE/DELETE/SET runs through an
+    ///    implicit or interactive tx (`execute_insert_tx` et al. in
+    ///    `write_exec.rs` → `insert_tx_many_bytes`/`update_tx_bytes`/
+    ///    `delete_tx` in `table_manager_tx_ops.rs` → the commit pipeline's
+    ///    Phase 2.5 prelock / Phase 5a-5c materialize). Index2 ops are
+    ///    PLANNED against an `all_backends()` snapshot at STAGE time (inside
+    ///    `insert_tx_many_bytes` etc.), and the row's actual physical write
+    ///    happens later, at commit Phase 5a — neither step consults
+    ///    `needs_write_barrier()` or `index2_create_barrier`, and the
+    ///    commit-time prelock (`pre_commit.rs` Phase 2.5) only takes
+    ///    `unique_write_lock` for tables in `tx.unique_guards` (i.e. tables
+    ///    with a legacy UNIQUE index), not for an index2-only table under an
+    ///    in-flight `create_index_v2`. A tx write to an index2-only table can
+    ///    therefore still race exactly as described below, unblocked by this
+    ///    fix. Closing this properly needs the commit pipeline itself
+    ///    (Phase 2.5's lock predicate AND Phase 5a/5c's materialize
+    ///    ordering) to respect the barrier — a substantially larger change
+    ///    than this task's scope; tracked as its own follow-up (see TaskList
+    ///    for the id) rather than rushed into this diff.
+    /// 2. **Even on the covered non-tx path, this is check-then-act, not a
+    ///    drain.** A writer that loads `needs_write_barrier() == false`
+    ///    (before `create_index_v2` has set the flag) proceeds fully
+    ///    lock-free; nothing here waits for such an already-in-flight writer
+    ///    to finish before the backfill takes its snapshot. This narrows the
+    ///    original whole-backfill-duration race down to the duration of one
+    ///    writer's already-in-flight validate+write step — a real
+    ///    improvement, not a full close.
+    ///
+    /// Net effect: this fix is strictly better than the pre-#534 state
+    /// (which had no barrier of any kind), and fully correct for the
+    /// non-tx/replication-apply write path, but is **not** a complete fix
+    /// for finding 1 on the path real client queries take. Do not read this
+    /// comment as "the lost-write race is closed" without the two
+    /// qualifications above.
     async fn backfill_index2_backend(
         &self,
         backend: &dyn crate::index2::backend::IndexBackend,
@@ -748,6 +849,34 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
     }
 
     Ok(())
+}
+
+/// RAII guard that raises the `index2_create_barrier` flag for the duration
+/// of an index2 `create_index_v2` and clears it on drop — including the `?`
+/// early-return paths inside the create. While the flag is up, every writer's
+/// [`needs_write_barrier`](TableManager::needs_write_barrier) returns `true`,
+/// so writers serialize on `unique_write_lock` against the create (#534
+/// finding 1). Clearing on drop guarantees a failed create can never leave
+/// writers permanently forced onto the barrier.
+///
+/// The flag is set/cleared while the caller holds `unique_write_lock`, so the
+/// `Release` store here pairs with the writer's `Acquire` load in
+/// `needs_write_barrier`.
+struct Index2CreateBarrierGuard<'a> {
+    flag: &'a AtomicBool,
+}
+
+impl<'a> Index2CreateBarrierGuard<'a> {
+    fn set(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Release);
+        Self { flag }
+    }
+}
+
+impl Drop for Index2CreateBarrierGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 /// Resolve interned path ids back to dot-separated string paths.

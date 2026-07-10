@@ -47,6 +47,20 @@ pub struct TableManager {
     /// (no lock). `tokio::sync::Mutex` because the guard lives across
     /// `.await` points.
     pub(super) unique_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Set to `true` (under `unique_write_lock`) for the duration of an
+    /// index2 (`fts`/`functional`/`vector`) `create_index_v2` backfill →
+    /// register sequence. While it is `true`, EVERY writer path also
+    /// acquires `unique_write_lock`, so no row can be written in the
+    /// backfill→register window where it would be seen by NEITHER the
+    /// backfill snapshot (cursor already past it) NOR the live
+    /// `index2_on_insert` hook (backend not yet registered) — the
+    /// lost-write race (#534, finding 1) that `unique_write_lock` alone
+    /// does not close because writers only take that lock when a legacy
+    /// unique index exists (`has_unique_indexes()`), and an index2-only
+    /// table has none. Shared across clones via `Arc` so a create on any
+    /// clone is observed by writers on every clone (same rationale as
+    /// `bindings_len`). Loaded `Acquire` on the writer fast-path skip.
+    pub(super) index2_create_barrier: Arc<std::sync::atomic::AtomicBool>,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
@@ -92,6 +106,16 @@ pub struct TableManager {
     /// Used by `create_index_v2` for the `.trusted_pure()` index-safety gate.
     pub(super) scalar_resolver:
         Arc<arc_swap::ArcSwap<shamir_funclib::scalar_resolver::ScalarResolver>>,
+    /// Test-only deterministic pause point for `create_index_v2`, installed
+    /// between the index2 backfill and the `index2_registry.insert`. Lets a
+    /// #534-finding-1 regression test drive a concurrent writer INTO the exact
+    /// lost-write window (backfill done, backend not yet registered) so the
+    /// test fails deterministically against the pre-fix (barrier-less) code and
+    /// passes after. `None` in every non-test build and by default in tests —
+    /// zero cost on the real create path.
+    #[cfg(test)]
+    pub(super) create_index2_backfill_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -127,6 +151,9 @@ impl Clone for TableManager {
             write_counter: Arc::clone(&self.write_counter),
             verify_running: Arc::clone(&self.verify_running),
             unique_write_lock: Arc::clone(&self.unique_write_lock),
+            // Shared across clones so a `create_index_v2` in flight on any
+            // clone forces writers on every clone onto the barrier.
+            index2_create_barrier: Arc::clone(&self.index2_create_barrier),
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
@@ -139,6 +166,8 @@ impl Clone for TableManager {
             validator_registry: self.validator_registry.clone(),
             changefeed: self.changefeed.clone(),
             scalar_resolver: Arc::clone(&self.scalar_resolver),
+            #[cfg(test)]
+            create_index2_backfill_hook: Arc::clone(&self.create_index2_backfill_hook),
         }
     }
 }
@@ -191,6 +220,7 @@ impl TableManager {
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
@@ -200,6 +230,8 @@ impl TableManager {
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
                 shamir_funclib::scalar_resolver::ScalarResolver::builtins_only(),
             ))),
+            #[cfg(test)]
+            create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -338,6 +370,7 @@ impl TableManager {
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
@@ -347,6 +380,8 @@ impl TableManager {
             scalar_resolver: Arc::new(arc_swap::ArcSwap::new(std::sync::Arc::new(
                 shamir_funclib::scalar_resolver::ScalarResolver::builtins_only(),
             ))),
+            #[cfg(test)]
+            create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -461,6 +496,16 @@ impl TableManager {
         &self.index2_registry
     }
 
+    /// Test-only: install (or clear with `None`) the deterministic
+    /// `create_index_v2` backfill→register pause hook (#534 finding 1).
+    #[cfg(test)]
+    pub(crate) fn set_create_index2_backfill_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.create_index2_backfill_hook.store(hook);
+    }
+
     /// Clone the handle to this table's unique-write serialisation lock.
     ///
     /// **Physical authority for uniqueness (HIGH-A) — defense-in-depth contract
@@ -501,6 +546,31 @@ impl TableManager {
             || self.index_manager.has_indexes()
             || self.index_manager.has_unique_indexes()
             || self.sorted_indexes.has_indexes()
+    }
+
+    /// O(1) predicate: must this writer acquire `unique_write_lock` before
+    /// its validate→write→index sequence?
+    ///
+    /// `true` when EITHER the table has a legacy unique index (the original
+    /// reason the barrier exists — atomic unique-check + posting-write) OR an
+    /// index2 `create_index_v2` is currently in flight (#534 finding 1). The
+    /// barrier flag is loaded `Acquire` to pair with the `Release` store the
+    /// create path makes under the lock. Tables with neither condition keep
+    /// the lock-free fast path.
+    ///
+    /// Consulted ONLY by the non-tx writer methods in `table_manager_crud.rs`
+    /// (`insert`/`insert_many_returning_version`/`delete_returning_version`/
+    /// `set`) — the tx-commit path (`execute_*_tx` → the commit pipeline)
+    /// does NOT check this predicate, so an in-flight `create_index_v2` does
+    /// NOT yet serialize against real client DML (which always goes through
+    /// a tx, implicit or interactive). See `TableManager::backfill_index2_backend`'s
+    /// doc comment for the full accounting of what #534's fix does and does
+    /// not close.
+    pub(super) fn needs_write_barrier(&self) -> bool {
+        self.index_manager.has_unique_indexes()
+            || self
+                .index2_create_barrier
+                .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn name(&self) -> &str {
