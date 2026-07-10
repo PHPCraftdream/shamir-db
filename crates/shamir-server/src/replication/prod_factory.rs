@@ -114,6 +114,13 @@ impl LazyWireSource {
             // 386-c. Persisting a leader pin is future work (#388).
             accept_new_host: true,
             trusted_pin: None,
+            // Production inter-node replication traffic: bound both the
+            // connect attempt and each pull round-trip so an unresponsive or
+            // partitioned upstream surfaces as a transient `ReplError` (the
+            // supervisor loop then retries with backoff) instead of wedging
+            // the replication worker forever on an unbounded await.
+            connect_timeout: Some(std::time::Duration::from_secs(10)),
+            request_timeout: Some(std::time::Duration::from_secs(35)),
         };
         let client = Client::connect(opts).await.map_err(|e| {
             warn!(upstream = %self.upstream, error = %e, "supervisor: upstream connect failed");

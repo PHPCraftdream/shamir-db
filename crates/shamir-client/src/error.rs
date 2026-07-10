@@ -42,6 +42,16 @@ pub enum ClientError {
     /// before the response arrived.
     #[error("connection closed")]
     ConnectionClosed,
+
+    /// The TCP connection to the server did not complete within the
+    /// configured `ConnectOptions::connect_timeout` budget.
+    #[error("connect timed out after {0:?}")]
+    ConnectTimeout(std::time::Duration),
+
+    /// A request was sent but no response arrived within the configured
+    /// `ConnectOptions::request_timeout` budget.
+    #[error("request timed out after {0:?}")]
+    RequestTimeout(std::time::Duration),
 }
 
 impl From<rustls::Error> for ClientError {

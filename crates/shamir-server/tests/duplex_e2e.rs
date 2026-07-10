@@ -47,6 +47,8 @@ async fn concurrent_pings_resolve_all() {
         password: Zeroizing::new(password),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("connect");
@@ -85,6 +87,8 @@ async fn concurrent_executes_return_correct_results() {
         password: Zeroizing::new(password),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("connect");
@@ -172,6 +176,8 @@ async fn lock_step_mode_still_works() {
         password: Zeroizing::new(password),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("connect");
@@ -212,6 +218,8 @@ async fn resume_then_concurrent() {
         password: Zeroizing::new(password),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("initial connect");

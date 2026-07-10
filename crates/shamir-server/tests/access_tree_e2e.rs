@@ -84,6 +84,8 @@ async fn access_tree_over_the_wire_as_admin() {
         password: Zeroizing::new(admin_pw),
         accept_new_host: true,
         trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
     })
     .await
     .expect("admin connect");

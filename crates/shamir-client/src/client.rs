@@ -71,6 +71,21 @@ pub struct ConnectOptions {
     /// `accept_new_host = true` and captures the pin during handshake;
     /// retrieve it via [`Client::server_pub_key_pin`] for persistence.
     pub trusted_pin: Option<[u8; 32]>,
+    /// Deadline for establishing the underlying TCP connection
+    /// ([`TcpStream::connect`]). `Some(d)` bounds the connect attempt and
+    /// returns [`ClientError::ConnectTimeout`] if the socket does not
+    /// connect within `d`. `None` (the default for existing callers)
+    /// preserves the prior unbounded-wait behaviour — the OS TCP stack's
+    /// own timeout is the only bound. Mirrors the TS SDK's
+    /// `connectTimeoutMs`.
+    pub connect_timeout: Option<std::time::Duration>,
+    /// Deadline for a single request/response round-trip in
+    /// [`Client::execute`]/[`Client::ping`]/etc. `Some(d)` bounds the
+    /// response await and returns [`ClientError::RequestTimeout`] if no
+    /// response arrives within `d`. `None` (the default) preserves the
+    /// prior unbounded-wait behaviour. Mirrors the TS SDK's
+    /// `requestTimeoutMs`.
+    pub request_timeout: Option<std::time::Duration>,
 }
 
 /// Options for fast session resumption via a previously-issued ticket.
@@ -119,10 +134,73 @@ fn decode_frame(buf: &[u8]) -> Option<DemuxResult> {
     None
 }
 
+/// Establish the underlying TCP connection, optionally bounded by a
+/// connect deadline.
+///
+/// `timeout` is `None` → unbounded wait (the OS TCP stack is the only
+/// bound), preserving the client's original behaviour for callers that do
+/// not set [`ConnectOptions::connect_timeout`]. `Some(d)` bounds the
+/// attempt via [`tokio::time::timeout`]; if the socket does not connect
+/// within `d`, [`ClientError::ConnectTimeout`] is returned.
+pub(crate) async fn connect_tcp(
+    addr: SocketAddr,
+    timeout: Option<std::time::Duration>,
+) -> Result<TcpStream, ClientError> {
+    match timeout {
+        None => Ok(TcpStream::connect(addr).await?),
+        Some(d) => match tokio::time::timeout(d, TcpStream::connect(addr)).await {
+            Ok(res) => Ok(res?),
+            Err(_elapsed) => Err(ClientError::ConnectTimeout(d)),
+        },
+    }
+}
+
 /// Per-pending-request slot: either resolved with response bytes or with a
 /// transport-level error.
 pub(crate) type PendingSender = oneshot::Sender<Result<Vec<u8>, ClientError>>;
 pub(crate) type PendingMap = Arc<StdMutex<TFxMap<u32, PendingSender>>>;
+
+/// Await the reader task's response for `rid`, optionally bounded by a
+/// per-request deadline.
+///
+/// - `timeout == None` → unbounded await (the original behaviour): resolve
+///   only when the reader task delivers the payload, a transport error, or
+///   drops the sender (connection closed).
+/// - `timeout == Some(d)` → bound the await via [`tokio::time::timeout`]. On
+///   elapse, the now-orphaned pending entry for `rid` is removed (so a late
+///   response is cleanly dropped instead of leaking a dead sender) and
+///   [`ClientError::RequestTimeout`] is returned.
+///
+/// Collapses the three success/error outcomes into a single
+/// `Result<Vec<u8>, ClientError>`: `Ok(payload)` on success, the reader
+/// task's `ClientError` on a delivered error, `ConnectionClosed` if the
+/// sender was dropped, or `RequestTimeout` on deadline elapse.
+pub(crate) async fn await_pending_response(
+    rx: oneshot::Receiver<Result<Vec<u8>, ClientError>>,
+    timeout: Option<std::time::Duration>,
+    pending: &PendingMap,
+    rid: u32,
+) -> Result<Vec<u8>, ClientError> {
+    let recv = match timeout {
+        None => rx.await,
+        Some(d) => match tokio::time::timeout(d, rx).await {
+            Ok(res) => res,
+            Err(_elapsed) => {
+                // Drop the now-orphaned pending entry so a late response for
+                // this rid is cleanly dropped instead of leaking a dead
+                // sender in the map.
+                let mut map = pending.lock().unwrap_or_else(|p| p.into_inner());
+                map.remove(&rid);
+                return Err(ClientError::RequestTimeout(d));
+            }
+        },
+    };
+    match recv {
+        Ok(inner) => inner,
+        // oneshot sender was dropped — reader task died.
+        Err(_) => Err(ClientError::ConnectionClosed),
+    }
+}
 
 /// Background reader loop.  Owns `ReadHalf`; demuxes frames to pending waiters.
 ///
@@ -287,6 +365,10 @@ pub struct Client {
     /// `resume_ok`. `0` when the server did not send the field (pre-v2 server).
     /// Set once on connect/resume; never mutated afterward.
     server_query_version: AtomicU8,
+    /// Per-request response deadline carried over from
+    /// [`ConnectOptions::request_timeout`]. `None` = unbounded wait
+    /// (prior behaviour). Applied in [`Self::roundtrip`].
+    request_timeout: Option<std::time::Duration>,
 }
 
 impl Client {
@@ -304,7 +386,7 @@ impl Client {
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
-        let tcp = TcpStream::connect(opts.addr).await?;
+        let tcp = connect_tcp(opts.addr, opts.connect_timeout).await?;
         let tls = connector.connect(server_name, tcp).await?;
         let exporter = extract_tls_exporter(&tls)
             .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
@@ -489,6 +571,7 @@ impl Client {
             reader_handle: Some(reader_handle),
             interner_cache: Arc::new(InternerCacheRegistry::new()),
             server_query_version: AtomicU8::new(ok_wire.server_query_version),
+            request_timeout: opts.request_timeout,
         })
     }
 
@@ -510,7 +593,9 @@ impl Client {
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
-        let tcp = TcpStream::connect(opts.addr).await?;
+        // ResumeOptions carries no timeout knobs — resumption preserves the
+        // prior unbounded-wait connect behaviour (None).
+        let tcp = connect_tcp(opts.addr, None).await?;
         let tls = connector.connect(server_name, tcp).await?;
         // Verify TLS exporter is available (required for channel-binding). The
         // exporter value will be used by the server to verify binding; the
@@ -587,6 +672,7 @@ impl Client {
             reader_handle: Some(reader_handle),
             interner_cache: Arc::new(InternerCacheRegistry::new()),
             server_query_version: AtomicU8::new(ok_wire.server_query_version),
+            request_timeout: None,
         })
     }
 
@@ -824,23 +910,20 @@ impl Client {
         }
 
         // Await our oneshot.  The reader task delivers Ok(payload) or Err.
-        match rx.await {
-            Ok(Ok(payload)) => {
-                let response: DbResponse = rmp_serde::from_slice(&payload)?;
-                if let DbResponse::Error { code, message } = &response {
-                    return Err(ClientError::Db {
-                        code: code.clone(),
-                        message: message.clone(),
-                    });
-                }
-                Ok(response)
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // oneshot sender was dropped — reader task died.
-                Err(ClientError::ConnectionClosed)
-            }
+        // When `request_timeout` is set, bound the wait: a server that
+        // accepts the connection but never answers this rid must not hang
+        // the caller forever. `None` preserves the original unbounded await.
+        let payload =
+            await_pending_response(rx, self.request_timeout, &self.pending, rid).await?;
+
+        let response: DbResponse = rmp_serde::from_slice(&payload)?;
+        if let DbResponse::Error { code, message } = &response {
+            return Err(ClientError::Db {
+                code: code.clone(),
+                message: message.clone(),
+            });
         }
+        Ok(response)
     }
 
     /// Close the TLS write half cleanly and abort the reader task.
