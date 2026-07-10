@@ -44,6 +44,7 @@
 mod tests;
 
 pub mod active_key;
+pub mod segment_meta;
 pub mod segment_set;
 pub mod wal_entry_v2;
 pub mod wal_group_commit;

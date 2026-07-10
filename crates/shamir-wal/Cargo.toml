@@ -26,6 +26,10 @@ bench-scale-tool = { workspace = true, features = ["async"] }
 name = "wal_append"
 harness = false
 
+[[bench]]
+name = "wal_startup_open"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.

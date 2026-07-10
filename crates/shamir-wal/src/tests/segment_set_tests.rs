@@ -507,3 +507,317 @@ async fn group_commit_threads_version_to_segment() {
         sink.max_committed()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task #500: sealed-segment max_version sidecar (skip full replay on open).
+// ---------------------------------------------------------------------------
+
+/// Path of the sidecar for segment seq `n` in `dir` (`NNNNNNNN.meta`).
+fn meta_path(dir: &std::path::Path, n: u64) -> std::path::PathBuf {
+    dir.join(format!("{n:08}.meta"))
+}
+
+/// Path of segment seq `n` in `dir` (`NNNNNNNN.wal`).
+fn wal_path(dir: &std::path::Path, n: u64) -> std::path::PathBuf {
+    dir.join(format!("{n:08}.wal"))
+}
+
+/// Sealing a segment writes a `.meta` sidecar next to its `.wal`, and a reopen
+/// picks up the same `max_version` from that sidecar.
+#[tokio::test]
+async fn seal_writes_sidecar_and_reopen_uses_it() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    // Two versioned appends force a rotation -> seq 0 gets sealed with a sidecar.
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+
+    assert!(
+        meta_path(dir.path(), 0).exists(),
+        "sealing seq 0 must write its .meta sidecar"
+    );
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert_eq!(reopened.max_committed(), 22);
+}
+
+/// PROOF the fast path skips replay: corrupt the sealed segment's DATA (so a
+/// full replay would HARD-FAIL as a sealed CRC error) but leave the sidecar
+/// intact. If `open` still succeeds with the right `max_version`, it proves it
+/// read the sidecar and never replayed the corrupt `.wal`.
+#[tokio::test]
+async fn valid_sidecar_skips_replay_of_corrupt_data() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    drop(set);
+
+    let meta = meta_path(dir.path(), 0);
+    assert!(meta.exists(), "precondition: sidecar exists");
+
+    // Corrupt the DATA of the sealed segment (flip a payload byte mid-frame).
+    // A `replay_sealed_at_startup` over this would return a hard CRC error.
+    {
+        let seg = wal_path(dir.path(), 0);
+        let mut bytes = std::fs::read(&seg).unwrap();
+        assert!(bytes.len() > 6, "segment must have a frame to corrupt");
+        bytes[4] ^= 0xFF; // first payload byte (after the 4-byte len header)
+        std::fs::write(&seg, &bytes).unwrap();
+    }
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.max_committed(),
+        22,
+        "open must use the sidecar's max_version and skip replaying corrupt data"
+    );
+}
+
+/// Compatibility: an OLD-format segment (no sidecar) opens correctly via the
+/// full-replay fallback, yielding the SAME max_version as a sidecar path would.
+#[tokio::test]
+async fn absent_sidecar_falls_back_to_replay() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    drop(set);
+
+    // Simulate a segment sealed by a pre-#500 build: delete the sidecar.
+    let meta = meta_path(dir.path(), 0);
+    assert!(meta.exists(), "precondition: sidecar exists");
+    std::fs::remove_file(&meta).unwrap();
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert_eq!(reopened.max_committed(), 22);
+    let replayed = reopened.replay().await.unwrap();
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|e| e.commit_version)
+            .collect::<Vec<_>>(),
+        vec![11, 22]
+    );
+}
+
+/// A CORRUPTED sidecar (bad CRC) must fall back to replay — NOT be trusted and
+/// NOT crash. The intact `.wal` yields the correct max_version.
+#[tokio::test]
+async fn corrupt_sidecar_falls_back_to_replay() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    drop(set);
+
+    // Flip a byte in the sidecar's max_version field WITHOUT fixing the CRC.
+    let meta = meta_path(dir.path(), 0);
+    let mut bytes = std::fs::read(&meta).unwrap();
+    bytes[5] ^= 0xFF;
+    std::fs::write(&meta, &bytes).unwrap();
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.max_committed(),
+        22,
+        "a bad-CRC sidecar must be ignored and the .wal replayed"
+    );
+}
+
+/// A truncated (torn) sidecar must also fall back, not crash.
+#[tokio::test]
+async fn truncated_sidecar_falls_back_to_replay() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 11).encode().unwrap()], 11)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 22).encode().unwrap()], 22)
+        .await
+        .unwrap();
+    drop(set);
+
+    let meta = meta_path(dir.path(), 0);
+    let bytes = std::fs::read(&meta).unwrap();
+    std::fs::write(&meta, &bytes[..3]).unwrap();
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert_eq!(reopened.max_committed(), 22);
+}
+
+/// Crash-safety: a crash BETWEEN the data fsync and the sidecar write leaves
+/// the segment sealed (data durable) with NO sidecar. Open degrades to the
+/// replay fallback — no corruption, correct max_version. The on-disk state is
+/// byte-identical to a crash right before the sidecar's atomic rename.
+#[tokio::test]
+async fn crash_between_data_fsync_and_sidecar_degrades_to_replay() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    for k in 1..=4u64 {
+        let v = k * 10;
+        set.append_batch(vec![entry(k, v).encode().unwrap()], v)
+            .await
+            .unwrap();
+    }
+    set.sync().await.unwrap();
+    drop(set);
+
+    // Simulate the crash window for EVERY sealed segment: remove all sidecars,
+    // leaving the .wal data fully durable (as it was after its fsync).
+    for entry_res in std::fs::read_dir(dir.path()).unwrap() {
+        let p = entry_res.unwrap().path();
+        if p.extension().and_then(|e| e.to_str()) == Some("meta") {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    let replayed = reopened.replay().await.unwrap();
+    assert_eq!(
+        replayed
+            .iter()
+            .map(|e| e.commit_version)
+            .collect::<Vec<_>>(),
+        vec![10, 20, 30, 40],
+        "no-sidecar crash window must degrade to a correct full replay"
+    );
+    assert_eq!(reopened.max_committed(), 40);
+}
+
+/// Truncation removes the sidecar alongside its `.wal` — no leaked `.meta`.
+#[tokio::test]
+async fn truncate_removes_sidecar() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    for k in 1..=4u64 {
+        let v = k * 10;
+        set.append_batch(vec![entry(k, v).encode().unwrap()], v)
+            .await
+            .unwrap();
+    }
+    assert!(meta_path(dir.path(), 0).exists());
+
+    set.truncate_below(u64::MAX).await.unwrap();
+
+    assert!(
+        !meta_path(dir.path(), 0).exists(),
+        "truncation must remove the sealed segment's sidecar too"
+    );
+    assert!(
+        !wal_path(dir.path(), 0).exists(),
+        "truncation must remove the sealed segment's .wal"
+    );
+}
+
+/// Task #500 (found in `@fl` review): a segment can be RE-ACTIVATED — a
+/// prior process sealed it (writing a durable max_version sidecar), then
+/// crashed before the NEXT segment's file was durably created, so on reopen
+/// the highest seq on disk (the already-sealed segment) is chosen as active
+/// again. Further appends push its true max_version PAST what the stale
+/// sidecar claims. If that sidecar survived, a LATER open would trust the
+/// stale (too-low) value instead of the true content — this test proves
+/// `open` sheds the re-activated segment's stale sidecar immediately, so a
+/// later reseal computes the correct max_version from a genuine replay
+/// (segment 0 has no sidecar and must be replayed), not the stale number.
+#[tokio::test]
+async fn reactivated_segment_sheds_stale_sidecar() {
+    let dir = TempDir::new().unwrap();
+
+    // Plant only a lone segment 0 with SOME data — simulate "this segment
+    // was sealed once with max=10" by writing a stale sidecar directly,
+    // without ever having actually sealed it in this process.
+    {
+        let set = SegmentSet::open(dir.path().to_path_buf(), 1 << 20)
+            .await
+            .unwrap();
+        set.append_batch(vec![entry(1, 10).encode().unwrap()], 10)
+            .await
+            .unwrap();
+        set.sync().await.unwrap();
+        drop(set);
+    }
+    // Plant a stale sidecar next to segment 0 claiming max_version=10 (as if
+    // a prior incarnation sealed it, then this incarnation re-activated it).
+    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
+    assert!(meta_path(dir.path(), 0).exists(), "stale sidecar planted");
+
+    // Reopen: segment 0 (highest seq = only seq) becomes active again.
+    let set = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    assert!(
+        !meta_path(dir.path(), 0).exists(),
+        "open must remove the re-activated segment's stale sidecar \
+         immediately, before any new append can make it stale"
+    );
+
+    // Push its true max_version well past the stale sidecar's claim (10),
+    // and past `max_bytes` (32) so it seals for real on the next append.
+    for k in 2..=6u64 {
+        let v = k * 10; // 20, 30, 40, 50, 60
+        set.append_batch(vec![entry(k, v).encode().unwrap()], v)
+            .await
+            .unwrap();
+    }
+    set.sync().await.unwrap();
+    drop(set);
+
+    // Reopen once more: segment 0 must now be SEALED (rotation happened),
+    // with its max_version derived from a genuine replay (no sidecar to
+    // trust — the "open sheds the stale one" step ensured none survived),
+    // reflecting the TRUE max (60), not the stale claim (10).
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 32)
+        .await
+        .unwrap();
+    let replayed = reopened.replay().await.unwrap();
+    let max_seen = replayed.iter().map(|e| e.commit_version).max().unwrap_or(0);
+    assert_eq!(
+        max_seen, 60,
+        "replay must see the true max_version (60), not the stale \
+         sidecar's claim (10) — proves no stale sidecar survived to \
+         mislead a future truncation decision"
+    );
+}

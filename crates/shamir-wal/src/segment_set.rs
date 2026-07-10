@@ -130,14 +130,32 @@ impl SegmentSet {
         let mut sealed = Vec::with_capacity(seqs.len());
         for seq in seqs {
             let path = dir.join(seg_file_name(seq));
-            // Compute max_version once via a one-shot replay (rare, open-time).
-            // Audit §1.8: sealed segments use replay_sealed_at_startup so a CRC
-            // failure (corruption in a fully-fsync'd segment) is a loud open
-            // error. Audit §2.4: PermissionDenied is a hard error at startup
-            // (no concurrent truncation expected).
-            let seg = WalSegment::open(path.clone()).await?;
-            let entries = seg.replay_sealed_at_startup().await?;
-            let max_version = entries.iter().map(|e| e.commit_version).max().unwrap_or(0);
+            // Fast path (task #500): a sealed segment written by this build has
+            // a `NNNNNNNN.meta` sidecar recording its `max_version`. Read it
+            // (a ~17-byte read) and skip the full replay entirely. `None`
+            // means absent OR corrupt/torn (both fall back identically — a
+            // corrupt sidecar is never trusted, and never fatal); only a hard
+            // I/O error surfaces.
+            let meta_probe = {
+                let probe_path = path.clone();
+                spawn_blocking(move || crate::segment_meta::read_blocking(&probe_path))
+                    .await
+                    .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
+            };
+            let max_version = match meta_probe {
+                Some(mv) => mv,
+                None => {
+                    // Fallback: compute max_version via a one-shot replay
+                    // (old-format segment, or an interrupted sidecar write).
+                    // Audit §1.8: sealed segments use replay_sealed_at_startup
+                    // so a CRC failure (corruption in a fully-fsync'd segment)
+                    // is a loud open error. Audit §2.4: PermissionDenied is a
+                    // hard error at startup (no concurrent truncation expected).
+                    let seg = WalSegment::open(path.clone()).await?;
+                    let entries = seg.replay_sealed_at_startup().await?;
+                    entries.iter().map(|e| e.commit_version).max().unwrap_or(0)
+                }
+            };
             sealed.push(SealedMeta {
                 seq,
                 path,
@@ -145,7 +163,7 @@ impl SegmentSet {
             });
         }
         let active_path = dir.join(seg_file_name(active_seq));
-        let active = Arc::new(WalSegment::open(active_path).await?);
+        let active = Arc::new(WalSegment::open(active_path.clone()).await?);
         // Self-heal the active segment (audit §1.3): a prior process crash
         // mid-write (or a partial write that could not be rolled back) may
         // have left a torn tail. Sealed segments are fsync'd before sealing
@@ -153,6 +171,28 @@ impl SegmentSet {
         // only one that can have one. Removing it now keeps the next
         // `append_batch` window from being stranded behind it on replay.
         active.repair_torn_tail().await?;
+
+        // Task #500 (found in @fl review): a segment can be RE-ACTIVATED —
+        // a prior process sealed it (writing a durable max_version sidecar),
+        // then crashed before the NEW active segment's file was durably
+        // created, so on this reopen the highest seq on disk (this
+        // already-sealed segment) is chosen as active again. Any further
+        // appends into it will push its true max_version past what the
+        // stale sidecar claims. If that sidecar survives (this segment later
+        // gets poisoned-and-rotated, or re-sealed with a sidecar-write
+        // failure), a future open would trust the stale (too-low) value and
+        // `truncate_below` could delete not-yet-durable data — silent data
+        // loss. A re-activated segment MUST shed its old sidecar now, before
+        // any new append can make it stale.
+        spawn_blocking(move || {
+            crate::segment_meta::remove_blocking(
+                &active_path,
+                "re-activated segment kept a stale max_version sidecar; a future \
+                 open may under-truncate on it until this is cleaned up",
+            )
+        })
+        .await
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
 
         Ok(Self {
             dir,
@@ -253,6 +293,27 @@ impl SegmentSet {
             (g.active_seq, g.active.max_committed(), g.active_seq + 1)
         };
         let sealed_path = self.dir.join(seg_file_name(sealed_seq));
+        // Task #500 (found in @fl review): this segment may carry a STALE
+        // on-disk max_version sidecar from a prior incarnation (e.g. it was
+        // sealed-with-sidecar once, then re-activated after a crash before
+        // the next segment's file existed — see the matching comment in
+        // `open`). We record the correct `sealed_max` (read live from memory
+        // above) in `SealedMeta` for THIS process's in-memory state, but a
+        // stale on-disk sidecar would still mislead a FUTURE `open` into
+        // trusting the old, too-low value instead of replaying. Drop it here
+        // — a poisoned segment must never carry a sidecar (fresh or stale).
+        {
+            let stale_meta_path = sealed_path.clone();
+            spawn_blocking(move || {
+                crate::segment_meta::remove_blocking(
+                    &stale_meta_path,
+                    "poisoned segment must not keep a stale sidecar; a future open \
+                     may under-truncate on it until this is cleaned up",
+                )
+            })
+            .await
+            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+        }
         let new_active = Arc::new(WalSegment::open(self.dir.join(seg_file_name(next_seq))).await?);
         let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
         // Re-check: another rotation may have advanced active past us.
@@ -304,6 +365,27 @@ impl SegmentSet {
         // crash-safety (F6c): a sealed segment's records are crash-durable, so
         // a power-loss before they are drained to `history` still replays them.
         sealing.sync().await?;
+
+        // Task #500: now that the segment's data is durably fsync'd, write its
+        // `max_version` sidecar so a future `open` skips the full replay. This
+        // is ordered strictly AFTER the data fsync so the sidecar can never
+        // claim a durability the data lacks; and it is best-effort — a sidecar
+        // write failure is logged and swallowed, never failing the rotation
+        // (the segment is intact and `open` will just replay it as before).
+        {
+            let meta_seg_path = sealed_path.clone();
+            let write_res = spawn_blocking(move || {
+                crate::segment_meta::write_blocking(&meta_seg_path, sealed_max)
+            })
+            .await
+            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+            if let Err(e) = write_res {
+                log::warn!(
+                    "SegmentSet seal: max_version sidecar write for seq {sealed_seq} failed \
+                     ({e}); segment is intact, open will replay it (no fast path)"
+                );
+            }
+        }
 
         let new_active = Arc::new(WalSegment::open(self.dir.join(seg_file_name(next_seq))).await?);
 
@@ -403,6 +485,13 @@ impl SegmentSet {
         let deleted = spawn_blocking(move || -> DbResult<usize> {
             let mut n = 0usize;
             for p in &paths {
+                // Task #500: drop the max_version sidecar first (best-effort;
+                // a leaked `.meta` is harmless once its `.wal` is gone, since
+                // open only consults a `.meta` whose `.wal` it also scanned).
+                crate::segment_meta::remove_blocking(
+                    p,
+                    "harmless leaked sidecar (its .wal is gone too, so open ignores it)",
+                );
                 match remove_file(p) {
                     Ok(()) => n += 1,
                     // Already gone (idempotent re-truncate) — count as done.
