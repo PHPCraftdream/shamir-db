@@ -137,7 +137,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
             let mut tx = TxContext::new(TxId::new(i as u64 + 1000), 0, 0, IsolationLevel::Snapshot);
             let mut staging = StagingStore::new(Arc::clone(&ds));
             staging.set(
-                Bytes::from_static(b"contested_key"),
+                Bytes::from_static(b"contested_key").into(),
                 Bytes::from(format!("val_{i}")),
             );
             tx.write_set.insert(table_token_for("shared"), staging);
@@ -164,7 +164,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
 
     // Final value is one of the writes.
     let got = data_store
-        .get(Bytes::from_static(b"contested_key"))
+        .get(Bytes::from_static(b"contested_key").into())
         .await
         .unwrap();
     let got_str = String::from_utf8(got.to_vec()).unwrap();
@@ -223,7 +223,7 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
     let a_commit_version = {
         let mut tx_a = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
         let mut staging = StagingStore::new(Arc::clone(&a_data_store));
-        staging.set(raw_key.clone(), Bytes::from_static(b"a_writes"));
+        staging.set(raw_key.clone().into(), Bytes::from_static(b"a_writes"));
         tx_a.write_set.insert(table_token, staging);
         let outcome = commit_tx(tx_a, &repo).await.unwrap();
         outcome.commit_version
@@ -259,7 +259,7 @@ async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
             let b_data: Arc<dyn shamir_storage::types::Store> = Arc::new(InMemoryStore::new());
             let mut staging = StagingStore::new(b_data);
             staging.set(
-                Bytes::from(format!("b_key_{i}").into_bytes()),
+                Bytes::from(format!("b_key_{i}").into_bytes()).into(),
                 Bytes::from_static(b"b_val"),
             );
             tx.write_set.insert(table_token, staging);

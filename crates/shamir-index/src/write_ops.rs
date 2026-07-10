@@ -32,10 +32,10 @@ pub async fn apply_index_ops(
     for op in ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                kv_ops.push(KvOp::Set(key.clone(), value.clone()));
+                kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
             }
             IndexWriteOp::RemovePosting { key } => {
-                kv_ops.push(KvOp::Remove(key.clone()));
+                kv_ops.push(KvOp::Remove(key.clone().into()));
             }
             other => in_memory_ops.push(other.clone()),
         }
@@ -94,10 +94,10 @@ pub async fn apply_index_ops_at_commit(
     for op in ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                kv_ops.push(KvOp::Set(key.clone(), value.clone()));
+                kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
             }
             IndexWriteOp::RemovePosting { key } => {
-                kv_ops.push(KvOp::Remove(key.clone()));
+                kv_ops.push(KvOp::Remove(key.clone().into()));
             }
             other => in_memory_ops.push(other.clone()),
         }

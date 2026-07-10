@@ -46,7 +46,7 @@ pub async fn save_next_tx_id_snapshot(info_store: &Arc<dyn Store>, value: u64) -
 }
 
 pub(crate) async fn load_u64(info_store: &Arc<dyn Store>, key: MetaKey) -> DbResult<Option<u64>> {
-    match info_store.get(key.as_record_id().to_bytes()).await {
+    match info_store.get(key.as_record_id().to_bytes().into()).await {
         Ok(bytes) => {
             let val: u64 = MetaEnvelope::open(&bytes).map_err(convert)?;
             Ok(Some(val))
@@ -64,7 +64,10 @@ pub(crate) async fn save_u64(
     let envelope = MetaEnvelope::new(value);
     let bytes = envelope.encode().map_err(convert)?;
     info_store
-        .set(key.as_record_id().to_bytes(), bytes::Bytes::from(bytes))
+        .set(
+            key.as_record_id().to_bytes().into(),
+            bytes::Bytes::from(bytes),
+        )
         .await
         .map(|_| ())
 }

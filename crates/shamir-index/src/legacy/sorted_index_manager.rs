@@ -30,6 +30,7 @@ pub use crate::legacy::sorted_index_definition::SortedIndexDefinition;
 use crate::legacy::sorted_index_definition::{SortedIndexDefinitionV1, SORTED_TAG};
 use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -206,7 +207,8 @@ impl SortedIndexManager {
         let prefix = self.entry_prefix(name_interned);
         let stream = self.info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
-        let mut to_drop: Vec<Bytes> = Vec::new();
+        // `RecordKey` (scan yields store keys, consumed by `remove_many`).
+        let mut to_drop: Vec<RecordKey> = Vec::new();
         while let Some(batch) = stream.next().await {
             for (k, _) in batch? {
                 to_drop.push(k);
@@ -446,10 +448,12 @@ impl SortedIndexManager {
         for op in ops {
             match op {
                 IndexWriteOp::SetPosting { key, value } => {
-                    self.info_store.set(key.clone(), value.clone()).await?;
+                    self.info_store
+                        .set(key.clone().into(), value.clone())
+                        .await?;
                 }
                 IndexWriteOp::RemovePosting { key } => {
-                    let _ = self.info_store.remove(key.clone()).await?;
+                    let _ = self.info_store.remove(key.clone().into()).await?;
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
                     // Not relevant for SortedIndexManager.
@@ -501,7 +505,9 @@ impl SortedIndexManager {
             return Ok(());
         }
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
-        let mut writes: Vec<(Bytes, Bytes)> = Vec::new();
+        // `RecordKey` keys (fed to the store `set_many`); entry keys are
+        // built as `Bytes` and converted byte-identically at each push.
+        let mut writes: Vec<(RecordKey, Bytes)> = Vec::new();
         for def in &defs {
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
@@ -511,7 +517,7 @@ impl SortedIndexManager {
                     } else {
                         Bytes::new()
                     };
-                    writes.push((key, pv));
+                    writes.push((key.into(), pv));
                 }
             }
         }
@@ -994,14 +1000,14 @@ impl SortedIndexManager {
         })?;
         let sys_id = RecordId::system("sorted_indexes");
         self.info_store
-            .set(sys_id.to_bytes(), Bytes::from(bytes))
+            .set(sys_id.to_bytes().into(), Bytes::from(bytes))
             .await?;
         Ok(())
     }
 
     async fn load(&self) -> DbResult<()> {
         let sys_id = RecordId::system("sorted_indexes");
-        let bytes = match self.info_store.get(sys_id.to_bytes()).await {
+        let bytes = match self.info_store.get(sys_id.to_bytes().into()).await {
             Ok(b) => b,
             Err(_) => return Ok(()),
         };

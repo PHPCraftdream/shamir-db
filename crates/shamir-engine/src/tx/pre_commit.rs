@@ -82,7 +82,7 @@ async fn claim_write_set(
         };
         let mut guard = CellReservationGuard::new(store.clone(), txn_id);
         for key in staging.keys() {
-            let key: Bytes = key.clone();
+            let key: Bytes = key.clone().into();
             if store.try_reserve(key.clone(), snapshot, txn_id) {
                 // Won — register immediately so an abort on a later key (this
                 // table or a subsequent one) releases this claim on drop.
@@ -309,7 +309,7 @@ pub(super) async fn pre_commit_prelock(
     //   - Some != our owner  → another record owns it   → abort
     for g in &tx.unique_guards {
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
-            match tbl.info_store().get(g.index_key.clone()).await {
+            match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
                     if existing.as_ref() != g.owner.as_bytes().as_slice() {
                         repo.tx_metrics().on_tx_aborted_unique();

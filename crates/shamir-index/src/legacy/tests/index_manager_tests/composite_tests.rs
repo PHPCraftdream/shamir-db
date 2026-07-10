@@ -141,7 +141,7 @@ async fn test_deeply_nested_path_index() {
 
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), level1.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), level1.to_bytes().unwrap())
         .await
         .unwrap();
 

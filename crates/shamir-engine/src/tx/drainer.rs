@@ -428,11 +428,14 @@ impl Drainer {
                         table_id_interned,
                         rid,
                         body,
-                    } => (*table_id_interned, KvOp::Set(rid.to_bytes(), body.clone())),
+                    } => (
+                        *table_id_interned,
+                        KvOp::Set(rid.to_bytes().into(), body.clone()),
+                    ),
                     WalOpV2::Delete {
                         table_id_interned,
                         rid,
-                    } => (*table_id_interned, KvOp::Remove(rid.to_bytes())),
+                    } => (*table_id_interned, KvOp::Remove(rid.to_bytes().into())),
                     _ => continue,
                 };
                 by_table.entry(table_id).or_default().push(kvop);

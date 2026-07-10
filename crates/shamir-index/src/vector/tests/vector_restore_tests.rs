@@ -352,13 +352,19 @@ async fn restore_on_open_version_mismatch_warns_and_rebuilds() {
     // format bump does.
     let manifest_key = format!("{}.manifest", keyspace);
     let manifest: snapshot::SnapshotManifest = crate::meta_envelope::MetaEnvelope::open(
-        &info_store.get(manifest_key.into()).await.unwrap(),
+        &info_store
+            .get(bytes::Bytes::from(manifest_key).into())
+            .await
+            .unwrap(),
     )
     .unwrap();
     let gen = manifest.gen;
     let sidecar_key = format!("{}.g{}.sidecar", keyspace, gen);
     let sidecar: snapshot::SnapshotSidecar = crate::meta_envelope::MetaEnvelope::open(
-        &info_store.get(sidecar_key.clone().into()).await.unwrap(),
+        &info_store
+            .get(bytes::Bytes::from(sidecar_key.clone()).into())
+            .await
+            .unwrap(),
     )
     .unwrap();
     let mut tampered = sidecar;
@@ -367,7 +373,10 @@ async fn restore_on_open_version_mismatch_warns_and_rebuilds() {
         .encode()
         .unwrap();
     info_store
-        .set(sidecar_key.into(), tampered_bytes.into())
+        .set(
+            bytes::Bytes::from(sidecar_key).into(),
+            tampered_bytes.into(),
+        )
         .await
         .unwrap();
 

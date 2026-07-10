@@ -612,7 +612,7 @@ fn main() {
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
-                            staging.set(rid.to_bytes(), body);
+                            staging.set(rid.to_bytes().into(), body);
                         }
                         let mut tx = TxContext::new(
                             TxId::new(7_900_000 + n as u64),
@@ -667,7 +667,7 @@ fn main() {
                         for i in 0..n {
                             let rid = RecordId::new();
                             let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
-                            staging.set(rid.to_bytes(), body);
+                            staging.set(rid.to_bytes().into(), body);
                         }
                         let mut tx = TxContext::new(
                             TxId::new(7_900_500 + n as u64),

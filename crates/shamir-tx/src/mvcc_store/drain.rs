@@ -66,9 +66,11 @@ impl MvccStore {
         let mut by_version: BTreeMap<u64, Vec<KvOp>> = BTreeMap::new();
         for (key, version, value) in entries {
             let op = if value.is_empty() {
-                KvOp::Remove(key)
+                // Boundary: overlay keys are `Bytes`; KvOp now carries a
+                // `RecordKey` (byte-identical conversion).
+                KvOp::Remove(key.into())
             } else {
-                KvOp::Set(key, value)
+                KvOp::Set(key.into(), value)
             };
             by_version.entry(version).or_default().push(op);
         }

@@ -78,7 +78,9 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // them, so skip the redundant write. Only unattached tables (no
             // MvccStore — system/test) still materialize into `data_store`.
             if tbl.mvcc_store().is_none() {
-                tbl.data_store().set(rid.to_bytes(), body.clone()).await?;
+                tbl.data_store()
+                    .set(rid.to_bytes().into(), body.clone())
+                    .await?;
             }
             Ok(())
         }
@@ -108,7 +110,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // I/O error must propagate — swallowing it would report a
             // successful replay having NOT applied the delete.
             if tbl.mvcc_store().is_none() {
-                match tbl.data_store().remove(rid.to_bytes()).await {
+                match tbl.data_store().remove(rid.to_bytes().into()).await {
                     Ok(_) | Err(DbError::NotFound(_)) => {}
                     Err(e) => return Err(e),
                 }
@@ -159,7 +161,9 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                         return Ok(());
                     }
                 };
-                tbl.info_store().set(key.clone(), value.clone()).await?;
+                tbl.info_store()
+                    .set(key.clone().into(), value.clone())
+                    .await?;
                 return Ok(());
             }
             // Broadcast (table_id_interned == 0): the same key is set in
@@ -174,7 +178,11 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             let mut first_err: Option<DbError> = None;
             for name in repo.list_table_names() {
                 if let Ok(tbl) = repo.get_table(&name).await {
-                    if let Err(e) = tbl.info_store().set(key.clone(), value.clone()).await {
+                    if let Err(e) = tbl
+                        .info_store()
+                        .set(key.clone().into(), value.clone())
+                        .await
+                    {
                         log::warn!(
                             "replay_v2_op broadcast IndexPut: info_store.set failed for \
                              table {name}: {e}"
@@ -209,7 +217,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                 // Idempotent like Delete: a missing posting is benign,
                 // but a real storage error must propagate rather than be
                 // swallowed as a phantom success.
-                match tbl.info_store().remove(key.clone()).await {
+                match tbl.info_store().remove(key.clone().into()).await {
                     Ok(_) | Err(DbError::NotFound(_)) => {}
                     Err(e) => return Err(e),
                 }
@@ -221,7 +229,7 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // error on any table propagates.
             for name in repo.list_table_names() {
                 if let Ok(tbl) = repo.get_table(&name).await {
-                    match tbl.info_store().remove(key.clone()).await {
+                    match tbl.info_store().remove(key.clone().into()).await {
                         Ok(_) | Err(DbError::NotFound(_)) => {}
                         Err(e) => return Err(e),
                     }
@@ -547,11 +555,14 @@ async fn seed_version_cache_for_entry(
                 table_id_interned,
                 rid,
                 body,
-            } => (*table_id_interned, KvOp::Set(rid.to_bytes(), body.clone())),
+            } => (
+                *table_id_interned,
+                KvOp::Set(rid.to_bytes().into(), body.clone()),
+            ),
             WalOpV2::Delete {
                 table_id_interned,
                 rid,
-            } => (*table_id_interned, KvOp::Remove(rid.to_bytes())),
+            } => (*table_id_interned, KvOp::Remove(rid.to_bytes().into())),
             _ => continue,
         };
         by_table.entry(table_id).or_default().push(kvop);

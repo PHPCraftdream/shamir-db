@@ -1,11 +1,12 @@
 use crate::error::{DbError, DbResult};
+use crate::key_bytes::KeyBytes;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub type RecordKey = Bytes;
+pub type RecordKey = KeyBytes;
 
 pub(crate) type RecordStream =
     Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;

@@ -18,7 +18,11 @@ use crate::version_codec::encode_version_key;
 
 /// Read the raw value stored in history under `encode_version_key(key, v)`.
 async fn history_raw(mvcc: &crate::mvcc_store::MvccStore, key: &[u8], v: u64) -> Option<Bytes> {
-    match mvcc.history_store().get(encode_version_key(key, v)).await {
+    match mvcc
+        .history_store()
+        .get(encode_version_key(key, v).into())
+        .await
+    {
         Ok(val) => Some(val),
         Err(shamir_storage::error::DbError::NotFound(_)) => None,
         Err(e) => panic!("unexpected history error: {e:?}"),
@@ -217,7 +221,7 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
     let v_a = guard_a.version();
     table_a.apply_committed_visible(
         &[KvOp::Set(
-            Bytes::from_static(b"a-key"),
+            Bytes::from_static(b"a-key").into(),
             Bytes::from_static(b"a-val"),
         )],
         v_a,
@@ -231,7 +235,7 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
     let v_b = guard_b.version();
     table_b.apply_committed_visible(
         &[KvOp::Set(
-            Bytes::from_static(b"b-key"),
+            Bytes::from_static(b"b-key").into(),
             Bytes::from_static(b"b-val"),
         )],
         v_b,

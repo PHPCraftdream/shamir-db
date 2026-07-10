@@ -56,10 +56,10 @@ async fn tx_with_writes(tx_id: u64) -> TxContext {
     let mut staging = StagingStore::new(mem_base());
     // 16-byte record-id-shaped keys.
     staging.set(
-        Bytes::from_static(b"0123456789abcdef"),
+        Bytes::from_static(b"0123456789abcdef").into(),
         Bytes::from_static(b"alice"),
     );
-    staging.remove(Bytes::from_static(b"fedcba9876543210"));
+    staging.remove(Bytes::from_static(b"fedcba9876543210").into());
     let token = 42u64;
     tx.write_set.insert(token, staging);
     tx.table_tokens.insert(token, "users".to_string());

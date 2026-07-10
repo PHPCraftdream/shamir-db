@@ -80,7 +80,7 @@ async fn seed_record(
 ) -> (RecordId, Bytes, InnerValue) {
     let (tree, _) = make_record(tbl, fields).await;
     let rid = tbl.insert(&tree).await.unwrap();
-    let raw_bytes = tbl.data_store().get(rid.to_bytes()).await.unwrap();
+    let raw_bytes = tbl.data_store().get(rid.to_bytes().into()).await.unwrap();
     (rid, raw_bytes, tree)
 }
 

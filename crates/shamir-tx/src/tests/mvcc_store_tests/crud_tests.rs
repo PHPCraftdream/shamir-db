@@ -495,7 +495,7 @@ async fn c1_current_version_is_in_the_log() {
     // The log entry at encode_version_key(key, v) must hold val.
     let log_val = mvcc
         .history_store()
-        .get(encode_version_key(&key, v))
+        .get(encode_version_key(&key, v).into())
         .await
         .unwrap();
     assert_eq!(log_val, val, "C1: current version must be in the log");
@@ -515,7 +515,7 @@ async fn c1_delete_writes_tombstone() {
 
     let tombstone = mvcc
         .history_store()
-        .get(encode_version_key(&key, del_v))
+        .get(encode_version_key(&key, del_v).into())
         .await
         .unwrap();
     assert_eq!(

@@ -446,7 +446,7 @@ type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, Db
 impl Store for MemBufferStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let id = RecordId::new();
-        let key = RecordKey::copy_from_slice(id.as_bytes());
+        let key = RecordKey::from_slice(id.as_bytes());
         let slot = Slot::Live(value);
         // Release before dirty.insert so get()'s Acquire load sees the flag
         // set if dirty is non-empty. False positives are harmless.
@@ -732,7 +732,7 @@ impl Store for MemBufferStore {
         self.state.dirty_nonempty.store(true, Ordering::Release);
         for v in values {
             let id = RecordId::new();
-            let key = RecordKey::copy_from_slice(id.as_bytes());
+            let key = RecordKey::from_slice(id.as_bytes());
             let slot = Slot::Live(v);
             self.state.dirty.insert(key.clone(), slot.clone());
             cache.insert(key.clone(), slot).await;

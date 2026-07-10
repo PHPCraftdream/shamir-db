@@ -357,10 +357,11 @@ impl Store for CachedStore {
                 let cur_last = last_key.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
                     let g = scc::ebr::Guard::new();
-                    // Use the tuple `(Bound<Bytes>, Bound<Bytes>)` form so
-                    // scc infers `Q = Bytes` (which is `Comparable<Bytes>`);
-                    // an explicit `Bound<Bytes>..` range would make `Q =
-                    // Bound<Bytes>`, which isn't `Comparable<Bytes>`.
+                    // Use the tuple `(Bound<RecordKey>, Bound<RecordKey>)`
+                    // form so scc infers `Q = RecordKey` (which is
+                    // `Comparable<RecordKey>`); an explicit `Bound<..>..`
+                    // range would make `Q = Bound<RecordKey>`, which isn't
+                    // `Comparable<RecordKey>`.
                     let iter = match &cur_last {
                         Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
                         None => cache.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &g),
@@ -416,11 +417,13 @@ impl Store for CachedStore {
                 let pfx = prefix.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
                     let g = scc::ebr::Guard::new();
-                    // `Bound` type must be `Comparable<Bytes>` → use
-                    // owned `Bytes` for the bound key (see `iter_stream`).
+                    // `Bound` type must be `Comparable<RecordKey>` → use
+                    // owned `RecordKey` for the bound key (the prefix bound
+                    // converts the `Bytes` prefix into a `RecordKey`, a
+                    // byte-identical boundary conversion; see `iter_stream`).
                     let iter = match &cur_last {
                         Some(c) => cache.range((std::ops::Bound::Excluded(c.clone()), std::ops::Bound::Unbounded), &g),
-                        None => cache.range((std::ops::Bound::Included(pfx.clone()), std::ops::Bound::Unbounded), &g),
+                        None => cache.range((std::ops::Bound::Included(RecordKey::from(pfx.clone())), std::ops::Bound::Unbounded), &g),
                     };
                     let mut items = Vec::with_capacity(batch_size.min(256));
                     let mut batch_last: Option<RecordKey> = None;

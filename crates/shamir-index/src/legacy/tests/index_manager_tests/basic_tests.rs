@@ -30,7 +30,10 @@ async fn test_has_indexes_true_after_load() {
     let indexes = IndexInfo::from_definitions(vec![index_def]);
     let indexes_key = RecordId::system("indexes").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
-    info_store.set(indexes_key, bytes.into()).await.unwrap();
+    info_store
+        .set(indexes_key.into(), bytes.into())
+        .await
+        .unwrap();
 
     let manager = IndexManager::new(data_store, info_store).await.unwrap();
 
@@ -48,7 +51,7 @@ async fn test_has_unique_indexes_true_after_load() {
     let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store
-        .set(indexes_unique_key, bytes.into())
+        .set(indexes_unique_key.into(), bytes.into())
         .await
         .unwrap();
 
@@ -129,7 +132,7 @@ async fn test_create_index_with_data() {
     ]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -151,7 +154,7 @@ async fn test_create_composite_index() {
     ]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -175,7 +178,7 @@ async fn test_create_nested_field_index() {
 
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -194,7 +197,7 @@ async fn test_create_index_missing_field_skipped() {
     let value = create_test_value(&[(2, InnerValue::Int(42))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -261,7 +264,7 @@ async fn test_drop_index_with_data() {
     let value = create_test_value(&[(1, InnerValue::Str("test".to_string()))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -513,7 +516,7 @@ async fn test_empty_path_index() {
     let value = create_test_value(&[(1, InnerValue::Int(42))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes().unwrap())
+        .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -540,7 +543,7 @@ async fn test_various_value_types_in_index() {
         let value = create_test_value(&[(*key, val.clone())]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes().unwrap())
+            .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
             .await
             .unwrap();
     }
@@ -808,7 +811,7 @@ async fn test_create_index_actually_indexes_records() {
         let value = create_test_value(&[(1, InnerValue::Str(format!("value_{}", i)))]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes().unwrap())
+            .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
             .await
             .unwrap();
         record_ids.push(record_id);
@@ -843,7 +846,7 @@ async fn test_create_index_with_many_records() {
         let value = create_test_value(&[(1, InnerValue::Int(i))]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes().unwrap())
+            .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
             .await
             .unwrap();
         record_ids.push(record_id);
@@ -875,7 +878,7 @@ async fn test_create_index_with_duplicate_values() {
         let value = create_test_value(&[(1, shared_value.clone())]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes().unwrap())
+            .set(record_id.to_bytes().into(), value.to_bytes().unwrap())
             .await
             .unwrap();
         shared_ids.push(record_id);
@@ -944,7 +947,7 @@ async fn test_create_index_streaming_matches_materialized() {
         map.insert(InternerKey::new(FIELD_ID), v.clone());
         let stored = InnerValue::Map(map);
         data_store_a
-            .set(record_ids[i].to_bytes(), stored.to_bytes().unwrap())
+            .set(record_ids[i].to_bytes().into(), stored.to_bytes().unwrap())
             .await
             .unwrap();
     }

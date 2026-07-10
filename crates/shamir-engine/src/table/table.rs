@@ -3,6 +3,7 @@
 use async_stream::stream;
 use futures::stream::{Stream, StreamExt};
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -73,7 +74,7 @@ impl Table {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let keys: Vec<bytes::Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+        let keys: Vec<RecordKey> = ids.iter().map(|id| id.to_bytes().into()).collect();
         let raw = self.data_store.get_many(keys).await?;
         let mut out = Vec::with_capacity(raw.len());
         for bytes_opt in raw {
@@ -123,7 +124,7 @@ impl Table {
         let key_bytes = id.to_bytes();
 
         // Read from data store
-        let bytes = self.data_store.get(key_bytes).await?;
+        let bytes = self.data_store.get(key_bytes.into()).await?;
 
         // Deserialize InnerValue
         InnerValue::from_bytes(bytes)
@@ -138,7 +139,7 @@ impl Table {
         let key_bytes = id.to_bytes();
 
         // Check if exists
-        let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
+        let exists = self.data_store.get(key_bytes.clone().into()).await.is_ok();
         if !exists {
             return Ok(false);
         }
@@ -147,7 +148,7 @@ impl Table {
         let inner_bytes = value
             .to_bytes()
             .map_err(|e| DbError::Codec(e.to_string()))?;
-        self.data_store.set(key_bytes, inner_bytes).await?;
+        self.data_store.set(key_bytes.into(), inner_bytes).await?;
         Ok(true)
     }
 
@@ -161,13 +162,13 @@ impl Table {
         let key_bytes = id.to_bytes();
 
         // Check if exists
-        let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
+        let exists = self.data_store.get(key_bytes.clone().into()).await.is_ok();
 
         // Serialize and set
         let inner_bytes = value
             .to_bytes()
             .map_err(|e| DbError::Codec(e.to_string()))?;
-        self.data_store.set(key_bytes, inner_bytes).await?;
+        self.data_store.set(key_bytes.into(), inner_bytes).await?;
 
         Ok(!exists)
     }
@@ -177,7 +178,7 @@ impl Table {
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
-        self.data_store.remove(key_bytes).await
+        self.data_store.remove(key_bytes.into()).await
     }
 
     /// Stream records in batches, returning InnerValues
@@ -202,7 +203,13 @@ impl Table {
 
             // Transform each batch
             while let Some(batch_result) = storage_stream.next().await {
-                let batch_bytes = batch_result?;
+                // Boundary: `iter_stream` now yields `RecordKey` keys; the
+                // shared decode helper takes `Bytes` keys (also fed by the
+                // `Bytes`-keyed `current_stream`). Byte-identical conversion.
+                let batch_bytes = batch_result?
+                    .into_iter()
+                    .map(|(k, v)| (bytes::Bytes::from(k), v))
+                    .collect();
                 for decoded in Self::decode_raw_batch(batch_bytes) {
                     yield decoded;
                 }
@@ -227,7 +234,12 @@ impl Table {
         stream! {
             let mut storage_stream = table.data_store.iter_stream(batch_size);
             while let Some(batch_result) = storage_stream.next().await {
-                let batch_bytes = batch_result?;
+                // Boundary: convert `iter_stream`'s `RecordKey` keys back to
+                // `Bytes` for the shared decode helper (byte-identical).
+                let batch_bytes = batch_result?
+                    .into_iter()
+                    .map(|(k, v)| (bytes::Bytes::from(k), v))
+                    .collect();
                 for decoded in Self::decode_raw_batch_filtered(batch_bytes, &pre_filter) {
                     yield decoded;
                 }

@@ -89,7 +89,7 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
         .unwrap();
 
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body.clone());
+    staging.set(rid.to_bytes().into(), body.clone());
 
     // An index posting (Phase 5c). Recovery replays this as an IndexPut
     // against the table's info_store (table_id_interned = token).
@@ -142,7 +142,10 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
 
     // (3) The index posting did NOT materialize inline (Phase 5c failed).
     assert!(
-        tbl.info_store().get(posting_key.clone()).await.is_err(),
+        tbl.info_store()
+            .get(posting_key.clone().into())
+            .await
+            .is_err(),
         "index posting must be absent before recovery (Phase 5c was injected to fail)"
     );
 
@@ -153,7 +156,7 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
 
     let recovered_posting = tbl
         .info_store()
-        .get(posting_key)
+        .get(posting_key.into())
         .await
         .expect("recovery must materialize the index posting (IndexPut replay)");
     assert_eq!(recovered_posting, posting_val);
@@ -245,7 +248,7 @@ async fn deferred_materialization_increments_metric() {
         .to_bytes()
         .unwrap();
     let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body);
+    staging.set(rid.to_bytes().into(), body);
 
     let mut tx = TxContext::new(
         TxId::new(METRIC_INJECT_TX_ID),
@@ -325,7 +328,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     let rid_a = RecordId::new();
     let body_a = InnerValue::Str("table-a-row".into()).to_bytes().unwrap();
     let mut staging_a = StagingStore::new(Arc::clone(tbl_a.data_store()));
-    staging_a.set(rid_a.to_bytes(), body_a);
+    staging_a.set(rid_a.to_bytes().into(), body_a);
     let posting_a_key = Bytes::from_static(b"table_a_posting_key");
     let posting_a_val = Bytes::from_static(b"table_a_posting_value");
 
@@ -335,7 +338,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     let rid_b = RecordId::new();
     let body_b = InnerValue::Str("table-b-row".into()).to_bytes().unwrap();
     let mut staging_b = StagingStore::new(Arc::clone(tbl_b.data_store()));
-    staging_b.set(rid_b.to_bytes(), body_b);
+    staging_b.set(rid_b.to_bytes().into(), body_b);
 
     let mut tx = TxContext::new(
         TxId::new(MULTI_TABLE_INJECT_TX_ID),
@@ -391,7 +394,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     assert_eq!(
         tbl_a
             .info_store()
-            .get(posting_a_key.clone())
+            .get(posting_a_key.clone().into())
             .await
             .expect("table A index posting must be materialized inline"),
         posting_a_val,
@@ -422,7 +425,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     let a_row_after = tbl_a.get(rid_a).await.unwrap();
     assert!(matches!(a_row_after, InnerValue::Str(ref s) if s == "table-a-row"));
     assert_eq!(
-        tbl_a.info_store().get(posting_a_key).await.unwrap(),
+        tbl_a.info_store().get(posting_a_key.into()).await.unwrap(),
         posting_a_val
     );
 

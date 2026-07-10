@@ -328,14 +328,14 @@ impl MvccStore {
             // Data ops: version-key entries.
             for op in ops {
                 let h_op = match op {
-                    KvOp::Set(k, val) => KvOp::Set(encode_version_key(k, v), val.clone()),
-                    KvOp::Remove(k) => KvOp::Set(encode_version_key(k, v), Bytes::new()),
+                    KvOp::Set(k, val) => KvOp::Set(encode_version_key(k, v).into(), val.clone()),
+                    KvOp::Remove(k) => KvOp::Set(encode_version_key(k, v).into(), Bytes::new()),
                 };
                 history_ops.push(h_op);
             }
 
             // L2-style fold: ts entry rides in the SAME batch as data.
-            history_ops.push(KvOp::Set(ts_key(v), ts_val));
+            history_ops.push(KvOp::Set(ts_key(v).into(), ts_val));
         }
 
         // ONE batched write to history (all versions, all ops, atomic).
@@ -358,7 +358,9 @@ impl MvccStore {
                     KvOp::Set(k, _) => k.clone(),
                     KvOp::Remove(k) => k.clone(),
                 };
-                self.publish_cell(key, v).await;
+                // Boundary: KvOp keys are `RecordKey`; `publish_cell` /
+                // the cell map are `Bytes`-keyed (byte-identical conversion).
+                self.publish_cell(key.into(), v).await;
             }
         }
 
@@ -435,8 +437,13 @@ impl MvccStore {
         // `Set`, an empty `Bytes` tombstone for `Remove`.
         for op in ops {
             match op {
-                KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
-                KvOp::Remove(k) => self.overlay.insert(k.clone(), commit_version, Bytes::new()),
+                KvOp::Set(k, v) => self
+                    .overlay
+                    .insert(k.clone().into(), commit_version, v.clone()),
+                KvOp::Remove(k) => {
+                    self.overlay
+                        .insert(k.clone().into(), commit_version, Bytes::new())
+                }
             }
         }
 
@@ -463,7 +470,9 @@ impl MvccStore {
             // finalize_reservation is synchronous (scc `entry`, no I/O) — the
             // ack-path stays off `.await` (same rationale as the prior
             // publish_cell_sync).
-            self.finalize_reservation(key, commit_version);
+            // Boundary: KvOp keys are `RecordKey`; the reservation / cell
+            // map are `Bytes`-keyed (byte-identical conversion).
+            self.finalize_reservation(key.into(), commit_version);
         }
 
         // R3: advance the reader-visible floor so subsequent `get_current` /
@@ -528,13 +537,17 @@ impl MvccStore {
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(ops.len() + 1);
         for op in ops {
             let h_key = match op {
-                KvOp::Set(k, v) => KvOp::Set(encode_version_key(k, commit_version), v.clone()),
-                KvOp::Remove(k) => KvOp::Set(encode_version_key(k, commit_version), Bytes::new()),
+                KvOp::Set(k, v) => {
+                    KvOp::Set(encode_version_key(k, commit_version).into(), v.clone())
+                }
+                KvOp::Remove(k) => {
+                    KvOp::Set(encode_version_key(k, commit_version).into(), Bytes::new())
+                }
             };
             history_ops.push(h_key);
         }
         // L2: append the ts entry into the same atomic batch.
-        history_ops.push(KvOp::Set(ts_key(commit_version), ts_val));
+        history_ops.push(KvOp::Set(ts_key(commit_version).into(), ts_val));
 
         // One batched write to history (data + ts, atomic).
         if !history_ops.is_empty() {
@@ -555,7 +568,7 @@ impl MvccStore {
                 KvOp::Set(k, _) => k.clone(),
                 KvOp::Remove(k) => k.clone(),
             };
-            self.publish_cell(key, commit_version).await;
+            self.publish_cell(key.into(), commit_version).await;
         }
 
         // R3: advance the reader-visible floor (monotonic fetch_max). On the

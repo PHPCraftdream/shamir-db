@@ -228,7 +228,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
         .unwrap();
     let manifest_before: SnapshotManifest = MetaEnvelope::open(
         &info_store
-            .get(format!("{}.manifest", keyspace).into())
+            .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
             .await
             .unwrap(),
     )
@@ -249,7 +249,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     // Verify the delta chunks exist before the flip.
     for idx in 0..3u64 {
         let present = info_store
-            .get(format!("{}.delta.{:010}", keyspace, idx).into())
+            .get(bytes::Bytes::from(format!("{}.delta.{:010}", keyspace, idx)).into())
             .await;
         assert!(
             present.is_ok(),
@@ -282,7 +282,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     // then patch in `delta_applied_upto = 3` (3 chunks absorbed).
     let written: SnapshotManifest = MetaEnvelope::open(
         &info_store
-            .get(format!("{}.manifest", keyspace).into())
+            .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
             .await
             .unwrap(),
     )
@@ -316,7 +316,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     // The manifest must now point at gen 1.
     let manifest_after: SnapshotManifest = MetaEnvelope::open(
         &info_store
-            .get(format!("{}.manifest", keyspace).into())
+            .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
             .await
             .unwrap(),
     )
@@ -333,7 +333,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     // The old delta chunks must be pruned.
     for idx in 0..3u64 {
         let pruned = info_store
-            .get(format!("{}.delta.{:010}", keyspace, idx).into())
+            .get(bytes::Bytes::from(format!("{}.delta.{:010}", keyspace, idx)).into())
             .await;
         assert!(
             pruned.is_err(),
@@ -344,7 +344,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
 
     // The old gen-0 sidecar must also be pruned.
     let old_sidecar = info_store
-        .get(format!("{}.g0.sidecar", keyspace).into())
+        .get(bytes::Bytes::from(format!("{}.g0.sidecar", keyspace)).into())
         .await;
     assert!(
         old_sidecar.is_err(),
@@ -434,7 +434,7 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
     // what flip_generation would have set: both chunks absorbed).
     let written: SnapshotManifest = MetaEnvelope::open(
         &info_store
-            .get(format!("{}.manifest", keyspace).into())
+            .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
             .await
             .unwrap(),
     )
@@ -452,13 +452,16 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
     };
     let env_bytes = MetaEnvelope::new(crashed_manifest).encode().unwrap();
     info_store
-        .set(format!("{}.manifest", keyspace).into(), env_bytes.into())
+        .set(
+            bytes::Bytes::from(format!("{}.manifest", keyspace)).into(),
+            env_bytes.into(),
+        )
         .await
         .unwrap();
 
     // The orphan delta chunks 0/1 are still present (no prune ran).
     let orphan0 = info_store
-        .get(format!("{}.delta.{:010}", keyspace, 0u64).into())
+        .get(bytes::Bytes::from(format!("{}.delta.{:010}", keyspace, 0u64)).into())
         .await;
     assert!(
         orphan0.is_ok(),
@@ -512,7 +515,7 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         .unwrap();
     let written2: SnapshotManifest = MetaEnvelope::open(
         &info_store
-            .get(format!("{}.manifest", keyspace).into())
+            .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
             .await
             .unwrap(),
     )
@@ -542,7 +545,7 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
 
     // The orphans must now be pruned.
     let orphan0_after = info_store
-        .get(format!("{}.delta.{:010}", keyspace, 0u64).into())
+        .get(bytes::Bytes::from(format!("{}.delta.{:010}", keyspace, 0u64)).into())
         .await;
     assert!(
         orphan0_after.is_err(),
@@ -727,7 +730,7 @@ async fn threshold_crossing_spawns_background_snapshot_and_clears_flag() {
     for _ in 0..200 {
         let m: SnapshotManifest = MetaEnvelope::open(
             &info_store
-                .get(format!("{}.manifest", keyspace).into())
+                .get(bytes::Bytes::from(format!("{}.manifest", keyspace)).into())
                 .await
                 .unwrap(),
         )
@@ -829,7 +832,10 @@ async fn append_vector_delta_with_deleted_slice_persists_and_replays_delete() {
         "exactly one delta chunk (at index 1) must exist after the append"
     );
     let chunk_key = format!("{}.delta.{:010}", keyspace, chunk_idx);
-    let chunk_bytes = info_store.get(chunk_key.into()).await.unwrap();
+    let chunk_bytes = info_store
+        .get(bytes::Bytes::from(chunk_key).into())
+        .await
+        .unwrap();
     let ops: Vec<DeltaOp> = MetaEnvelope::open(&chunk_bytes).unwrap();
     assert_eq!(
         ops.len(),

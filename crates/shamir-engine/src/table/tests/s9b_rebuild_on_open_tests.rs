@@ -76,7 +76,7 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
     //    coupling is explicit.
     // -----------------------------------------------------------------------
     let marker_key = RecordId::system("_m.idx.lfv").to_bytes();
-    info.set(marker_key, Bytes::from(1u32.to_le_bytes().to_vec()))
+    info.set(marker_key.into(), Bytes::from(1u32.to_le_bytes().to_vec()))
         .await
         .unwrap();
 
@@ -100,7 +100,7 @@ async fn s9b_outdated_marker_triggers_rebuild_on_open() {
     let fake_rid = RecordId::new();
     let mut orphan_key = prefix.to_vec();
     orphan_key.extend_from_slice(fake_rid.as_bytes());
-    info.set(Bytes::from(orphan_key), Bytes::new())
+    info.set(Bytes::from(orphan_key).into(), Bytes::new())
         .await
         .unwrap();
 

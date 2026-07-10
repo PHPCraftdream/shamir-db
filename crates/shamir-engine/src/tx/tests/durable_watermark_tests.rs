@@ -36,7 +36,7 @@ fn staged_tx(tx_id: u64, table_token: u64, k: &'static [u8], v: &'static [u8]) -
     let mut tx = TxContext::new(TxId::new(tx_id), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(k), Bytes::from_static(v));
+    staging.set(Bytes::from_static(k).into(), Bytes::from_static(v));
     tx.write_set.insert(table_token, staging);
     tx
 }

@@ -161,7 +161,10 @@ impl MigrationCoordinator {
                 if records.is_empty() {
                     break;
                 }
-                let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
+                // Boundary: the mvcc stream yields `Bytes` keys; `set_many`
+                // takes `RecordKey` (byte-identical conversion).
+                let items: Vec<(RecordKey, Bytes)> =
+                    records.into_iter().map(|(k, v)| (k.into(), v)).collect();
                 let count = items.len() as u64;
                 self.dst_data.set_many(items).await?;
                 copied += count;
@@ -175,7 +178,9 @@ impl MigrationCoordinator {
                 if records.is_empty() {
                     break;
                 }
-                let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
+                // `iter_stream` already yields `RecordKey` keys — feed the
+                // batch straight to `set_many`.
+                let items: Vec<(RecordKey, Bytes)> = records;
                 let count = items.len() as u64;
                 self.dst_data.set_many(items).await?;
                 copied += count;

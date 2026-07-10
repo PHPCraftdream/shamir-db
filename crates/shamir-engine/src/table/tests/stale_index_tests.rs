@@ -27,7 +27,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::types::{Repo, Store};
+use shamir_storage::types::{RecordKey, Repo, Store};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
@@ -161,7 +161,7 @@ async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
 
 const SORTED_TAG: u8 = 0x80;
 
-type TestStream = Pin<Box<dyn Stream<Item = Result<Vec<(Bytes, Bytes)>, DbError>> + Send>>;
+type TestStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
 /// An info-store wrapper that, when armed, suspends the first `remove()` of a
 /// sorted-index posting (key prefixed with `SORTED_TAG`) until `release()` is
@@ -193,16 +193,16 @@ impl PausableInfoStore {
 
 #[async_trait]
 impl Store for PausableInfoStore {
-    async fn insert(&self, value: Bytes) -> DbResult<Bytes> {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         self.inner.insert(value).await
     }
-    async fn set(&self, key: Bytes, value: Bytes) -> DbResult<bool> {
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         self.inner.set(key, value).await
     }
-    async fn get(&self, key: Bytes) -> DbResult<Bytes> {
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         self.inner.get(key).await
     }
-    async fn remove(&self, key: Bytes) -> DbResult<bool> {
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         // Park exactly once, only on the sorted-posting removal.
         if key.first() == Some(&SORTED_TAG) && self.armed.swap(false, SeqCst) {
             self.entered.notify_one();

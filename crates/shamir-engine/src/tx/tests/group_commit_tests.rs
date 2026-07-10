@@ -53,7 +53,7 @@ async fn concurrent_disjoint_table_commits_monotonic_no_holes() {
             let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
             let mut staging = StagingStore::new(Arc::clone(&data_store));
             staging.set(
-                Bytes::from(format!("key_{i}")),
+                Bytes::from(format!("key_{i}")).into(),
                 Bytes::from(format!("val_{i}")),
             );
             tx.write_set.insert(table_token, staging);

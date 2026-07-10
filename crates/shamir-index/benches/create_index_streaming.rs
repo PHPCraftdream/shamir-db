@@ -49,7 +49,10 @@ async fn build_store_with_records(n: usize) -> (Arc<dyn Store>, IndexManager) {
         );
         let value = InnerValue::Map(map);
         let bytes = value.to_bytes().unwrap();
-        data_store.set(record_id.to_bytes(), bytes).await.unwrap();
+        data_store
+            .set(record_id.to_bytes().into(), bytes)
+            .await
+            .unwrap();
     }
 
     let manager = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))

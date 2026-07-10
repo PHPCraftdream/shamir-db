@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -106,7 +107,10 @@ impl TableManager {
         let version = if let Some(mvcc) = &self.mvcc_store {
             mvcc.set_versioned(id.to_bytes(), bytes).await?
         } else {
-            self.table.data_store().set(id.to_bytes(), bytes).await?;
+            self.table
+                .data_store()
+                .set(id.to_bytes().into(), bytes)
+                .await?;
             0
         };
         self.counter.increment(1).await?;
@@ -377,7 +381,10 @@ impl TableManager {
         let version = if let Some(mvcc) = &self.mvcc_store {
             mvcc.set_versioned(id.to_bytes(), bytes).await?
         } else {
-            self.table.data_store().set(id.to_bytes(), bytes).await?;
+            self.table
+                .data_store()
+                .set(id.to_bytes().into(), bytes)
+                .await?;
             0
         };
 
@@ -475,7 +482,7 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store_ref() {
             mvcc.get_current_bytes(id.as_bytes()).await
         } else {
-            match self.table.data_store().get(id.to_bytes()).await {
+            match self.table.data_store().get(id.to_bytes().into()).await {
                 Ok(b) => Ok(Some(b)),
                 Err(DbError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
@@ -497,7 +504,7 @@ impl TableManager {
             let batch_keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
             mvcc.get_current_many(&batch_keys).await
         } else {
-            let keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+            let keys: Vec<RecordKey> = ids.iter().map(|id| id.to_bytes().into()).collect();
             self.table.data_store().get_many(keys).await
         }
     }
@@ -554,7 +561,11 @@ impl TableManager {
                     let committed = if let Some(mvcc) = self.mvcc_store_ref() {
                         mvcc.get_current_many(&fallback_keys).await?
                     } else {
-                        self.table.data_store().get_many(fallback_keys).await?
+                        // Boundary: `fallback_keys` is `Bytes` (also fed by-ref
+                        // to the mvcc branch); `get_many` takes `RecordKey`.
+                        let keys: Vec<RecordKey> =
+                            fallback_keys.into_iter().map(Into::into).collect();
+                        self.table.data_store().get_many(keys).await?
                     };
                     for (slot, bytes) in fallback_idxs.into_iter().zip(committed.into_iter()) {
                         out[slot] = bytes;

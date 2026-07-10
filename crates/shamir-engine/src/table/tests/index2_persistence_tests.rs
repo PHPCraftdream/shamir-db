@@ -114,7 +114,7 @@ async fn vector_index_survives_reopen() {
             assert_eq!(ranked.len(), 2, "phase1: expected top-2, got {ranked:?}");
             let mut labels = Vec::new();
             for (rid, _score) in ranked {
-                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec_bytes = data_store.get(rid.to_bytes().into()).await.unwrap();
                 let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
                 let lbl = match &rec {
                     InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {
@@ -179,7 +179,7 @@ async fn vector_index_survives_reopen() {
             );
             let mut phase2_labels = Vec::new();
             for (rid, _score) in ranked {
-                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec_bytes = data_store.get(rid.to_bytes().into()).await.unwrap();
                 let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
                 let lbl = match &rec {
                     InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {
@@ -295,7 +295,7 @@ async fn fts_ranked_index_survives_reopen() {
             );
             let mut labels = Vec::new();
             for (rid, _score) in ranked {
-                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec_bytes = data_store.get(rid.to_bytes().into()).await.unwrap();
                 let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
                 let lbl = match &rec {
                     InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {
@@ -358,7 +358,7 @@ async fn fts_ranked_index_survives_reopen() {
             );
             let mut phase2_labels = Vec::new();
             for (rid, _score) in ranked {
-                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec_bytes = data_store.get(rid.to_bytes().into()).await.unwrap();
                 let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
                 let lbl = match &rec {
                     InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {

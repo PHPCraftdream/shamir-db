@@ -104,8 +104,11 @@ impl MvccStore {
                     // ts_key, so the ts-index entry can be pruned in lockstep.
                     let ts = self.lookup_ts(deferred).await;
                     // Physically delete the previously-deferred version.
-                    let _ = self.history.remove(encode_version_key(key, deferred)).await;
-                    let _ = self.history.remove(ts_key(deferred)).await;
+                    let _ = self
+                        .history
+                        .remove(encode_version_key(key, deferred).into())
+                        .await;
+                    let _ = self.history.remove(ts_key(deferred).into()).await;
                     if let Some(ts) = ts {
                         self.ts_index_remove(ts, deferred);
                     }
@@ -170,7 +173,9 @@ impl MvccStore {
         while let Some(batch) = stream.next().await {
             for (phys_key, _val) in batch.unwrap_or_default() {
                 if let Some((_, version)) = crate::version_codec::decode_version_key(&phys_key) {
-                    entries.push((version, phys_key));
+                    // Boundary: store keys are `RecordKey`; this local entries
+                    // vec is `Bytes` (byte-identical conversion).
+                    entries.push((version, phys_key.into()));
                 }
             }
         }
@@ -238,8 +243,8 @@ impl MvccStore {
             // All caps agree + not protected → reclaim the version AND its ts.
             // Audit 2.1: capture the ts first so the ts-index prunes in lockstep.
             let reclaimed_ts = self.lookup_ts(*version).await;
-            let _ = self.history.remove(phys_key.clone()).await;
-            let _ = self.history.remove(ts_key(*version)).await;
+            let _ = self.history.remove(phys_key.clone().into()).await;
+            let _ = self.history.remove(ts_key(*version).into()).await;
             if let Some(ts) = reclaimed_ts {
                 self.ts_index_remove(ts, *version);
             }
@@ -310,7 +315,7 @@ impl MvccStore {
                         per_key
                             .entry(orig.to_vec())
                             .or_default()
-                            .push((version, phys_key));
+                            .push((version, phys_key.into()));
                     }
                 }
             }
@@ -336,10 +341,10 @@ impl MvccStore {
                 }
                 // Audit 2.1: capture ts before removal to prune ts-index in lockstep.
                 let reclaimed_ts = self.lookup_ts(*version).await;
-                let _ = self.history.remove(phys_key.clone()).await;
+                let _ = self.history.remove(phys_key.clone().into()).await;
                 // T1c: remove the ts-key in lockstep so timestamps don't
                 // outlive their versions.
-                let _ = self.history.remove(ts_key(*version)).await;
+                let _ = self.history.remove(ts_key(*version).into()).await;
                 if let Some(ts) = reclaimed_ts {
                     self.ts_index_remove(ts, *version);
                 }
@@ -405,7 +410,7 @@ impl MvccStore {
                     per_key
                         .entry(orig.to_vec())
                         .or_default()
-                        .push((version, phys_key));
+                        .push((version, phys_key.into()));
                 }
             }
         }
@@ -452,8 +457,8 @@ impl MvccStore {
                     continue;
                 }
                 // All guards pass → reclaim the version AND its ts-key.
-                let _ = self.history.remove(phys_key.clone()).await;
-                let _ = self.history.remove(ts_key(*version)).await;
+                let _ = self.history.remove(phys_key.clone().into()).await;
+                let _ = self.history.remove(ts_key(*version).into()).await;
                 // Audit 2.1: prune the ts-index entry in lockstep (ts_val known).
                 self.ts_index_remove(ts_val, *version);
                 // P1c: drop the same (key, version) from the overlay in lockstep.

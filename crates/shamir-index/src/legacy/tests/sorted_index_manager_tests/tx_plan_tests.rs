@@ -142,10 +142,13 @@ async fn equivalence_plan_apply_vs_direct() {
     for op in &ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                store_b.set(key.clone(), value.clone()).await.unwrap();
+                store_b
+                    .set(key.clone().into(), value.clone())
+                    .await
+                    .unwrap();
             }
             IndexWriteOp::RemovePosting { key } => {
-                let _ = store_b.remove(key.clone()).await.unwrap();
+                let _ = store_b.remove(key.clone().into()).await.unwrap();
             }
             _ => {}
         }

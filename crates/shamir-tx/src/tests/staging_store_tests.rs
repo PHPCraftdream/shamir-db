@@ -12,7 +12,7 @@ fn mem_store() -> Arc<dyn Store> {
 async fn get_after_set_returns_staged_value() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     staging.set(k.clone(), Bytes::from_static(b"v1"));
     assert_eq!(staging.get(k).await.unwrap(), Bytes::from_static(b"v1"));
 }
@@ -20,7 +20,7 @@ async fn get_after_set_returns_staged_value() {
 #[tokio::test]
 async fn get_after_remove_returns_not_found_even_if_base_has_key() {
     let base = mem_store();
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     base.set(k.clone(), Bytes::from_static(b"original"))
         .await
         .unwrap();
@@ -33,7 +33,7 @@ async fn get_after_remove_returns_not_found_even_if_base_has_key() {
 #[tokio::test]
 async fn get_falls_through_to_base_if_not_staged() {
     let base = mem_store();
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     base.set(k.clone(), Bytes::from_static(b"from_base"))
         .await
         .unwrap();
@@ -49,7 +49,7 @@ async fn get_falls_through_to_base_if_not_staged() {
 async fn set_then_remove_collapses_to_remove() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
 
     staging.set(k.clone(), Bytes::from_static(b"v"));
     staging.remove(k.clone());
@@ -61,7 +61,7 @@ async fn set_then_remove_collapses_to_remove() {
 #[tokio::test]
 async fn remove_then_set_collapses_to_set() {
     let base = mem_store();
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     base.set(k.clone(), Bytes::from_static(b"original"))
         .await
         .unwrap();
@@ -77,9 +77,9 @@ async fn remove_then_set_collapses_to_set() {
 async fn drain_produces_kvop_batch() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k1: RecordKey = Bytes::from_static(b"k1");
-    let k2: RecordKey = Bytes::from_static(b"k2");
-    let k3: RecordKey = Bytes::from_static(b"k3");
+    let k1: RecordKey = Bytes::from_static(b"k1").into();
+    let k2: RecordKey = Bytes::from_static(b"k2").into();
+    let k3: RecordKey = Bytes::from_static(b"k3").into();
 
     staging.set(k1.clone(), Bytes::from_static(b"v1"));
     staging.remove(k2.clone());
@@ -104,7 +104,7 @@ async fn drain_produces_kvop_batch() {
 async fn len_tracks_unique_keys() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
 
     assert!(staging.is_empty());
     staging.set(k.clone(), Bytes::from_static(b"v1"));
@@ -117,7 +117,7 @@ async fn len_tracks_unique_keys() {
 async fn staged_op_returns_set_for_staged_value() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     staging.set(k.clone(), Bytes::from_static(b"v1"));
 
     assert_eq!(
@@ -131,7 +131,7 @@ async fn staged_op_returns_removed_for_staged_remove() {
     // Even when the base store has the key, a staged Remove reports
     // Removed (and never consults the base — that is `get`'s job).
     let base = mem_store();
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     base.set(k.clone(), Bytes::from_static(b"original"))
         .await
         .unwrap();
@@ -147,7 +147,7 @@ async fn staged_op_returns_none_when_not_staged_even_if_base_has_key() {
     // `staged_op` reports ONLY this tx's staging; a key that lives only
     // in the base is `None` (no fall-through), unlike `get`.
     let base = mem_store();
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
     base.set(k.clone(), Bytes::from_static(b"from_base"))
         .await
         .unwrap();
@@ -160,7 +160,7 @@ async fn staged_op_returns_none_when_not_staged_even_if_base_has_key() {
 async fn staged_op_reflects_last_write_wins() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
-    let k: RecordKey = Bytes::from_static(b"k1");
+    let k: RecordKey = Bytes::from_static(b"k1").into();
 
     staging.set(k.clone(), Bytes::from_static(b"v"));
     staging.remove(k.clone());
@@ -181,9 +181,9 @@ async fn staged_op_borrow_probe_matches_arbitrary_length_keys() {
     let base = mem_store();
     let mut staging = StagingStore::new(base);
 
-    let short: RecordKey = Bytes::from_static(b"ab"); // 2 bytes
-    let long: RecordKey = Bytes::from_static(b"this-key-is-forty-bytes-long-padding-here"); // > 16
-    let empty: RecordKey = Bytes::from_static(b""); // 0 bytes
+    let short: RecordKey = Bytes::from_static(b"ab").into(); // 2 bytes
+    let long: RecordKey = Bytes::from_static(b"this-key-is-forty-bytes-long-padding-here").into(); // > 16
+    let empty: RecordKey = Bytes::from_static(b"").into(); // 0 bytes
 
     staging.set(short.clone(), Bytes::from_static(b"s"));
     staging.remove(long.clone());
@@ -211,11 +211,14 @@ async fn staged_bytes_sums_keys_and_values() {
     assert_eq!(staging.staged_bytes(), 0);
 
     // One Set("ab", "12345") → key 2 + value 5 = 7 bytes.
-    staging.set(Bytes::from_static(b"ab"), Bytes::from_static(b"12345"));
+    staging.set(
+        Bytes::from_static(b"ab").into(),
+        Bytes::from_static(b"12345"),
+    );
     assert_eq!(staging.staged_bytes(), 7);
 
     // Add Remove("xyz") → key 3 bytes. Total = 7 + 3 = 10.
-    staging.remove(Bytes::from_static(b"xyz"));
+    staging.remove(Bytes::from_static(b"xyz").into());
     assert_eq!(staging.staged_bytes(), 10);
 }
 

@@ -53,7 +53,7 @@ fn put_event(value: &str, record: RecordId, leader_version: u64) -> shamir_tx::C
         Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
     let body = InnerValue::Str(value.into()).to_bytes().unwrap();
     tx.ensure_table_staging(items_token(), "items", data_store)
-        .set(record.to_bytes(), body);
+        .set(record.to_bytes().into(), body);
     shamir_tx::project_event(&tx, "leader", leader_version).unwrap()
 }
 
@@ -65,7 +65,7 @@ fn delete_event(record: RecordId, leader_version: u64) -> shamir_tx::ChangelogEv
     let data_store: Arc<dyn Store> =
         Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
     tx.ensure_table_staging(items_token(), "items", data_store)
-        .remove(record.to_bytes());
+        .remove(record.to_bytes().into());
     shamir_tx::project_event(&tx, "leader", leader_version).unwrap()
 }
 
@@ -337,7 +337,7 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
     staging.set(
-        Bytes::from_static(b"local-k"),
+        Bytes::from_static(b"local-k").into(),
         Bytes::from_static(b"local-v"),
     );
     // Use a DIFFERENT table token than `items` so this commit is independent
@@ -416,7 +416,7 @@ async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
     let mut local_tx = TxContext::new(TxId::new(99), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"fk"), Bytes::from_static(b"fv"));
+    staging.set(Bytes::from_static(b"fk").into(), Bytes::from_static(b"fv"));
     local_tx.write_set.insert(7777u64, staging);
     let outcome = crate::tx::commit_tx(local_tx, &follower).await.unwrap();
     let m = outcome.commit_version;

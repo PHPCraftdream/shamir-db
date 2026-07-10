@@ -361,7 +361,10 @@ async fn commit_offers_entry_to_drainer_window() {
         let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut staging = StagingStore::new(Arc::clone(&data_store));
-        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        staging.set(
+            Bytes::from(format!("k{i}")).into(),
+            Bytes::from(format!("v{i}")),
+        );
         tx.write_set.insert(i, staging);
         let outcome = commit_tx(tx, &repo).await.unwrap();
         versions.push(outcome.commit_version);
@@ -396,7 +399,10 @@ async fn commit_offered_entries_match_wal() {
     let mut tx = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
-    staging.set(Bytes::from_static(b"key"), Bytes::from_static(b"val"));
+    staging.set(
+        Bytes::from_static(b"key").into(),
+        Bytes::from_static(b"val"),
+    );
     tx.write_set.insert(10, staging);
     let outcome = commit_tx(tx, &repo).await.unwrap();
     let cv = outcome.commit_version;
@@ -443,7 +449,10 @@ async fn drain_step_still_drains_correctly_with_offer_wired() {
         let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut staging = StagingStore::new(Arc::clone(&data_store));
-        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        staging.set(
+            Bytes::from(format!("k{i}")).into(),
+            Bytes::from(format!("v{i}")),
+        );
         tx.write_set.insert(i, staging);
         let _ = commit_tx(tx, &repo).await.unwrap();
     }
@@ -791,7 +800,10 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
         let mut tx = TxContext::new(TxId::new(i), 0, 0, IsolationLevel::Snapshot);
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let mut staging = StagingStore::new(Arc::clone(&data_store));
-        staging.set(Bytes::from(format!("k{i}")), Bytes::from(format!("v{i}")));
+        staging.set(
+            Bytes::from(format!("k{i}")).into(),
+            Bytes::from(format!("v{i}")),
+        );
         tx.write_set.insert(i, staging);
         let _ = commit_tx(tx, &repo).await.unwrap();
     }

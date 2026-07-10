@@ -26,7 +26,7 @@ fn buffer_config_key() -> Bytes {
 /// factory).
 pub async fn load(info_store: &Arc<dyn Store>) -> DbResult<Option<MemBufferConfig>> {
     let key = buffer_config_key();
-    match info_store.get(key).await {
+    match info_store.get(key.into()).await {
         Ok(bytes) => {
             let cfg: MemBufferConfig = bincode::deserialize(&bytes)
                 .map_err(|e| DbError::Codec(format!("buffer_config decode: {e}")))?;
@@ -45,7 +45,7 @@ pub async fn save(info_store: &Arc<dyn Store>, cfg: &MemBufferConfig) -> DbResul
     let bytes = bincode::serialize(cfg)
         .map_err(|e| DbError::Codec(format!("buffer_config encode: {e}")))?;
     info_store
-        .set(buffer_config_key(), Bytes::from(bytes))
+        .set(buffer_config_key().into(), Bytes::from(bytes))
         .await?;
     Ok(())
 }

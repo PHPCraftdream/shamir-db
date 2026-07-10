@@ -521,7 +521,7 @@ impl TableManager {
         if let Some(mvcc) = self.mvcc_store.as_ref() {
             return mvcc.get_current_bytes(id.as_bytes()).await;
         }
-        match self.table.data_store().get(id.to_bytes()).await {
+        match self.table.data_store().get(id.to_bytes().into()).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),

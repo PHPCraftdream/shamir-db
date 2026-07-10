@@ -155,7 +155,7 @@ async fn overlay_ordering_reader_sees_version_implies_value_overlay_arm() {
             for _ in 0..ROUNDS {
                 for _ in 0..WRITES_PER_ROUND {
                     let v = gate.assign_next_version();
-                    let ops = vec![KvOp::Set(Bytes::copy_from_slice(KEY), val_for(v))];
+                    let ops = vec![KvOp::Set(Bytes::copy_from_slice(KEY).into(), val_for(v))];
                     // The exact production ack-path under proof: overlay.insert
                     // → cell publish → floor advance, synchronously.
                     mvcc.apply_committed_visible(&ops, v);
@@ -249,7 +249,7 @@ async fn overlay_ordering_reader_sees_version_implies_value_history_arm() {
             for _ in 0..ROUNDS {
                 for _ in 0..WRITES_PER_ROUND {
                     let v = gate.assign_next_version();
-                    let ops = vec![KvOp::Set(Bytes::copy_from_slice(KEY), val_for(v))];
+                    let ops = vec![KvOp::Set(Bytes::copy_from_slice(KEY).into(), val_for(v))];
                     // Ack-path: make the version visible (overlay + cell + floor).
                     mvcc.apply_committed_visible(&ops, v);
                     // Drain it to durable history (the value now lives in the log).

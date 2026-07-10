@@ -26,7 +26,7 @@ fn make_gate() -> Arc<RepoTxGate> {
 /// (version, value) pair without disturbing the gate counter).
 async fn put_history(mvcc: &crate::mvcc_store::MvccStore, key: &[u8], version: u64, val: Bytes) {
     mvcc.history_store()
-        .set(encode_version_key(key, version), val)
+        .set(encode_version_key(key, version).into(), val)
         .await
         .unwrap();
 }

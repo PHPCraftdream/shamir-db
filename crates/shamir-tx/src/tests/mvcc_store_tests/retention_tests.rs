@@ -854,7 +854,7 @@ async fn unknown_ts_not_reclaimed_by_age() {
         .unwrap();
 
     // Manually delete v1's ts entry — simulate a pre-T1c version with no ts.
-    let _ = mvcc.history_store().remove(ts_key(v1)).await;
+    let _ = mvcc.history_store().remove(ts_key(v1).into()).await;
 
     // Advance the clock well past the age cap and write once more.
     mvcc.set_test_now(10_000);
@@ -893,7 +893,7 @@ async fn ts_recorded_on_write() {
     let v1 = mvcc.version_of(&key);
 
     // The ts-key for v1 holds the frozen now (4242), little-endian u64.
-    let ts_val = mvcc.history_store().get(ts_key(v1)).await.unwrap();
+    let ts_val = mvcc.history_store().get(ts_key(v1).into()).await.unwrap();
     assert_eq!(ts_val.len(), 8, "ts value must be 8 bytes (u64 LE)");
     let ms = u64::from_le_bytes(ts_val.as_ref().try_into().unwrap());
     assert_eq!(ms, 4242, "recorded ts must equal the frozen now");

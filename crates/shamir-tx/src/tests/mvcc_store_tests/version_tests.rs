@@ -49,7 +49,7 @@ async fn apply_committed_ops_updates_version_cache() {
     let _guard = gate.open_snapshot().await;
 
     let key = Bytes::from("k_commit");
-    let ops = vec![KvOp::Set(key.clone(), Bytes::from("val"))];
+    let ops = vec![KvOp::Set(key.clone().into(), Bytes::from("val"))];
     mvcc.apply_committed_ops(ops, 42).await.unwrap();
 
     assert_eq!(mvcc.version_of(&key), 42);
@@ -67,7 +67,7 @@ async fn apply_committed_ops_archives_old_value() {
 
     let key = Bytes::from("k_archive");
 
-    let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
+    let ops = vec![KvOp::Set(key.clone().into(), Bytes::from("new"))];
     mvcc.apply_committed_ops(ops, 10).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
@@ -99,7 +99,7 @@ async fn apply_committed_ops_remove_archives_and_deletes() {
 
     let key = Bytes::from("k_del");
 
-    let ops = vec![KvOp::Remove(key.clone())];
+    let ops = vec![KvOp::Remove(key.clone().into())];
     mvcc.apply_committed_ops(ops, 20).await.unwrap();
 
     // Remove writes a tombstone to the log; get_current reads it as None.
@@ -132,7 +132,7 @@ async fn apply_committed_ops_no_snapshots_skips_history() {
 
     let key = Bytes::from("k_nohist");
 
-    let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
+    let ops = vec![KvOp::Set(key.clone().into(), Bytes::from("new"))];
     mvcc.apply_committed_ops(ops, 5).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
@@ -171,12 +171,12 @@ async fn version_cache_updates_on_repeated_writes_to_same_key() {
     let _guard = gate.open_snapshot().await;
     let key = Bytes::from("repeated");
 
-    mvcc.apply_committed_ops(vec![KvOp::Set(key.clone(), Bytes::from("v1"))], 100)
+    mvcc.apply_committed_ops(vec![KvOp::Set(key.clone().into(), Bytes::from("v1"))], 100)
         .await
         .unwrap();
     assert_eq!(mvcc.version_of(&key), 100);
 
-    mvcc.apply_committed_ops(vec![KvOp::Set(key.clone(), Bytes::from("v2"))], 200)
+    mvcc.apply_committed_ops(vec![KvOp::Set(key.clone().into(), Bytes::from("v2"))], 200)
         .await
         .unwrap();
     // CRITICAL: must be 200, was 100 before the fix.
@@ -205,9 +205,12 @@ async fn apply_committed_ops_archives_even_if_snapshot_opens_mid_call() {
     // Open a snapshot right before apply.
     let _g = gate.open_snapshot().await;
 
-    mvcc.apply_committed_ops(vec![KvOp::Set(Bytes::from("k"), Bytes::from("new"))], 50)
-        .await
-        .unwrap();
+    mvcc.apply_committed_ops(
+        vec![KvOp::Set(Bytes::from("k").into(), Bytes::from("new"))],
+        50,
+    )
+    .await
+    .unwrap();
 
     // The new value is written into the log at version 50
     // (single log append — the log is the universal timeline).

@@ -276,7 +276,7 @@ async fn recover_v2_inflight_replays_index_put_with_table_id() {
 
     repo.recover_v2_inflight().await.unwrap();
 
-    let read_back = info.get(key).await.unwrap();
+    let read_back = info.get(key.into()).await.unwrap();
     assert_eq!(read_back, value);
 }
 
@@ -308,8 +308,11 @@ async fn recover_v2_inflight_replays_index_put_broadcast() {
 
     repo.recover_v2_inflight().await.unwrap();
 
-    assert_eq!(ta.info_store().get(key.clone()).await.unwrap(), value);
-    assert_eq!(tb.info_store().get(key).await.unwrap(), value);
+    assert_eq!(
+        ta.info_store().get(key.clone().into()).await.unwrap(),
+        value
+    );
+    assert_eq!(tb.info_store().get(key.into()).await.unwrap(), value);
 }
 
 #[tokio::test]
@@ -320,10 +323,10 @@ async fn recover_v2_inflight_replays_index_del() {
     let info = tbl.info_store().clone();
 
     let key = bytes::Bytes::from_static(b"doomed");
-    info.set(key.clone(), bytes::Bytes::from_static(b"val"))
+    info.set(key.clone().into(), bytes::Bytes::from_static(b"val"))
         .await
         .unwrap();
-    assert!(info.get(key.clone()).await.is_ok());
+    assert!(info.get(key.clone().into()).await.is_ok());
 
     let wal = repo.repo_wal().await.unwrap();
     let token = table_token_for("t");
@@ -342,7 +345,10 @@ async fn recover_v2_inflight_replays_index_del() {
         .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
-    assert!(info.get(key).await.is_err(), "key removed by IndexDel");
+    assert!(
+        info.get(key.into()).await.is_err(),
+        "key removed by IndexDel"
+    );
 }
 
 // Renamed from `crash_simulation_inflight_recovery_replays_full_state`.

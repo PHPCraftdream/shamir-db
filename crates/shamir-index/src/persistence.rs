@@ -64,7 +64,7 @@ pub async fn save_index2_metadata(
         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
     let key = meta_key_indexes();
     info_store
-        .set(key.to_bytes(), Bytes::from(bytes))
+        .set(key.to_bytes().into(), Bytes::from(bytes))
         .await
         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
     Ok(())
@@ -74,7 +74,7 @@ pub async fn load_index2_metadata(
     info_store: &Arc<dyn Store>,
 ) -> Result<Option<PersistedIndexes>, shamir_storage::error::DbError> {
     let key = meta_key_indexes();
-    match info_store.get(key.to_bytes()).await {
+    match info_store.get(key.to_bytes().into()).await {
         Ok(bytes) => {
             let p: PersistedIndexes = MetaEnvelope::open(&bytes)
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
@@ -97,7 +97,7 @@ pub async fn save_legacy_index_version(
     let key = meta_key_legacy_index_version();
     let bytes = LEGACY_INDEX_FORMAT_VERSION.to_le_bytes();
     info_store
-        .set(key.to_bytes(), Bytes::from(bytes.to_vec()))
+        .set(key.to_bytes().into(), Bytes::from(bytes.to_vec()))
         .await
         .map(|_| ())
 }
@@ -108,7 +108,7 @@ pub async fn load_legacy_index_version(
     info_store: &Arc<dyn Store>,
 ) -> Result<u32, shamir_storage::error::DbError> {
     let key = meta_key_legacy_index_version();
-    match info_store.get(key.to_bytes()).await {
+    match info_store.get(key.to_bytes().into()).await {
         Ok(bytes) => {
             if bytes.len() >= 4 {
                 let arr: [u8; 4] = bytes[..4].try_into().unwrap_or([0; 4]);

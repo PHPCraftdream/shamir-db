@@ -71,8 +71,10 @@ async fn all_sorted_entries(
     futures::pin_mut!(stream);
     let mut out = Vec::new();
     while let Some(batch) = stream.next().await {
-        for kv in batch.unwrap() {
-            out.push(kv);
+        for (k, v) in batch.unwrap() {
+            // Boundary: stream keys are `RecordKey`; this helper returns
+            // `Bytes` keys (byte-identical conversion).
+            out.push((bytes::Bytes::from(k), v));
         }
     }
     out
@@ -146,7 +148,7 @@ async fn backward_compat_v1_defs_load_with_empty_included_fields() {
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let sys_id = RecordId::system("sorted_indexes");
     info_store
-        .set(sys_id.to_bytes(), Bytes::from(old_bytes))
+        .set(sys_id.to_bytes().into(), Bytes::from(old_bytes))
         .await
         .unwrap();
 

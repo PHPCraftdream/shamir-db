@@ -460,13 +460,15 @@ pub fn project_event(
             match kv {
                 shamir_storage::types::KvOp::Set(key, value) => changes.push(RecordChange {
                     table: table.clone(),
-                    key,
+                    // Boundary: KvOp keys are `RecordKey`; the changelog event
+                    // key is `Bytes` (byte-identical conversion).
+                    key: key.into(),
                     op: ChangeOp::Put,
                     value: Some(value),
                 }),
                 shamir_storage::types::KvOp::Remove(key) => changes.push(RecordChange {
                     table: table.clone(),
-                    key,
+                    key: key.into(),
                     op: ChangeOp::Delete,
                     value: None,
                 }),
