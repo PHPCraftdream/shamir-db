@@ -113,6 +113,16 @@ harness = false
 name = "storage_cached_pump"
 harness = false
 
+# MemBuffer scan-under-writes — audit finding 2.3 (task #530). Measures a full
+# scan running against a MemBuffer that still has a dirty write buffer. Before
+# the merge-overlay fix, EVERY scan force-drained the dirty buffer to the
+# (real, tempdir-backed fjall) inner store first — read-triggered write
+# amplification. `scan_with_dirty` (writes-then-scan) vs `scan_only`
+# (already-flushed control) isolates the amplification delta.
+[[bench]]
+name = "membuffer_scan_under_writes"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.

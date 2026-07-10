@@ -124,7 +124,7 @@
 //! follow-up can show its improvement.
 
 use crate::kind::VectorMetric;
-use crate::vector::simd::{dot_product, l2_squared};
+use crate::vector::simd::dot_product;
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
 use std::sync::Arc;
@@ -245,12 +245,171 @@ impl Distance<u8> for ShamirDistU8 {
 // `ShamirDist`, so a rescored candidate's distance is directly comparable
 // to an f32-path distance. The unit tests pin this equality.
 
+/// Audit finding 4.1 (task #530) — fused, allocation-free rescore context.
+///
+/// The old `rescore_f32` dequantized each candidate's codes into a FRESH
+/// `Vec<f32>` (dim × 4 bytes) per candidate and, for Cosine, recomputed the
+/// query's own norm `dot(query, query)` on EVERY candidate — even though it is
+/// identical across the whole search. With an overscan of `16k+64` candidates
+/// that is hundreds of heap allocations plus redundant query-norm passes per
+/// search.
+///
+/// This context precomputes the query-dependent constants ONCE per query:
+///
+/// * `qm  = Σ query[i] · min_i`     (the constant part of `dot(query, x)`)
+/// * `qs[i] = query[i] · scale_i`   (the per-dimension code multiplier)
+/// * `q_norm = Σ query[i]²`         (Cosine only — the query's own norm)
+///
+/// Then, per candidate, the dot product decomposes as
+/// `dot(query, dequant(codes)) = qm + Σ qs[i] · codes[i]` — a SINGLE pass over
+/// the u8 codes (u8→f32 convert + multiply-accumulate) with ZERO per-candidate
+/// heap allocation. L2 is computed the same way, `Σ (query[i] − min_i −
+/// codes[i]·s_i)²`, also in one alloc-free pass. The result is numerically
+/// equivalent (within f32 rounding) to the old dequant-then-SIMD path.
+pub struct RescoreCtx<'a> {
+    metric: VectorMetric,
+    params: &'a Sq8Quantizer,
+    /// `Σ query[i] · min_i` — the constant term of `dot(query, dequant)`.
+    qm: f32,
+    /// `query[i] · scale_i` — per-dimension code multiplier.
+    qs: Vec<f32>,
+    /// `Σ query[i]²` — the query's own squared norm (Cosine only; 0 otherwise).
+    q_norm: f32,
+    /// Cached `query` slice for the L2 single-pass (`query[i] − min_i − …`).
+    query: &'a [f32],
+}
+
+impl<'a> RescoreCtx<'a> {
+    /// Precompute the per-query constants ONCE. `O(dim)`, one allocation
+    /// (`qs`), reused across every candidate in the search.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `query.len() != params.dim()`.
+    pub fn new(metric: VectorMetric, params: &'a Sq8Quantizer, query: &'a [f32]) -> Self {
+        assert_eq!(
+            query.len(),
+            params.dim(),
+            "RescoreCtx::new: query len {} != dim {}",
+            query.len(),
+            params.dim()
+        );
+        let mins = params.mins();
+        let scales = params.scales();
+        let dim = params.dim();
+        let mut qm = 0.0f32;
+        let mut qs = Vec::with_capacity(dim);
+        // Cosine needs the query's own norm; skip the extra work otherwise.
+        let q_norm = if matches!(metric, VectorMetric::Cosine) {
+            dot_product(query, query)
+        } else {
+            0.0
+        };
+        // Indexes three parallel slices (query, mins, scales) by the same i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..dim {
+            qm += query[i] * mins[i];
+            qs.push(query[i] * scales[i]);
+        }
+        Self {
+            metric,
+            params,
+            qm,
+            qs,
+            q_norm,
+            query,
+        }
+    }
+
+    /// Score one candidate's u8 codes against the precomputed query, with NO
+    /// per-candidate heap allocation. Returns the exact f32 distance under the
+    /// context's metric convention (`sqrt` for L2, `1 − dot` for Dot,
+    /// `1 − dot/(‖x‖·‖y‖)` for Cosine), matching
+    /// [`ShamirDist`](super::hnsw_adapter::ShamirDist).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `codes.len() != params.dim()`.
+    pub fn score(&self, codes: &[u8]) -> f32 {
+        assert_eq!(
+            codes.len(),
+            self.params.dim(),
+            "RescoreCtx::score: codes len {} != dim {}",
+            codes.len(),
+            self.params.dim()
+        );
+        match self.metric {
+            VectorMetric::L2 => {
+                // Σ (query[i] − dequant_i)² where dequant_i = min_i + codes_i·s_i.
+                let mins = self.params.mins();
+                let scales = self.params.scales();
+                let mut acc = 0.0f32;
+                // Indexes parallel slices (query, mins, scales, codes) by i.
+                #[allow(clippy::needless_range_loop)]
+                for i in 0..codes.len() {
+                    let d = self.query[i] - mins[i] - (codes[i] as f32) * scales[i];
+                    acc += d * d;
+                }
+                acc.sqrt()
+            }
+            VectorMetric::Dot => {
+                let dot = self.fused_dot(codes);
+                (1.0 - dot).max(0.0)
+            }
+            VectorMetric::Cosine => {
+                let dot = self.fused_dot(codes);
+                let nb_sq = self.dequant_norm_sq(codes);
+                if self.q_norm < 1e-18 || nb_sq < 1e-18 {
+                    return 1.0;
+                }
+                (1.0 - dot / (self.q_norm * nb_sq).sqrt()).max(0.0)
+            }
+        }
+    }
+
+    /// `dot(query, dequant(codes)) = qm + Σ qs[i] · codes[i]` — single
+    /// alloc-free pass over the u8 codes.
+    #[inline]
+    fn fused_dot(&self, codes: &[u8]) -> f32 {
+        let mut acc = self.qm;
+        // Indexes parallel slices (qs, codes) by the same i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..codes.len() {
+            acc += self.qs[i] * (codes[i] as f32);
+        }
+        acc
+    }
+
+    /// `‖dequant(codes)‖² = Σ (min_i + codes_i·s_i)²` — single alloc-free pass
+    /// (Cosine denominator, candidate side).
+    #[inline]
+    fn dequant_norm_sq(&self, codes: &[u8]) -> f32 {
+        let mins = self.params.mins();
+        let scales = self.params.scales();
+        let mut acc = 0.0f32;
+        // Indexes parallel slices (mins, scales, codes) by the same i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..codes.len() {
+            let x = mins[i] + (codes[i] as f32) * scales[i];
+            acc += x * x;
+        }
+        acc
+    }
+}
+
 /// Exact f32 distance between a query vector and a dequantized code vector,
 /// using the SAME metric convention as [`ShamirDist`](super::hnsw_adapter::ShamirDist).
 ///
 /// Used by the rescoring path after a quantized graph traversal. The query
 /// is the original f32 vector from the client; `codes` are dequantized
 /// through `params` before scoring.
+///
+/// Audit finding 4.1 (task #530): this is now a thin wrapper over
+/// [`RescoreCtx`] — it builds the per-query context and scores a single
+/// candidate. Hot callers that rescore MANY candidates against one query
+/// should build a [`RescoreCtx`] ONCE and call [`RescoreCtx::score`] per
+/// candidate to amortise the `O(dim)` precompute and skip the per-candidate
+/// `dequantize` allocation entirely.
 ///
 /// # Panics
 ///
@@ -261,21 +420,5 @@ pub fn rescore_f32(
     query: &[f32],
     codes: &[u8],
 ) -> f32 {
-    let dequant = params.dequantize(codes);
-    match metric {
-        VectorMetric::L2 => l2_squared(query, &dequant).sqrt(),
-        VectorMetric::Dot => {
-            let dot = dot_product(query, &dequant);
-            (1.0 - dot).max(0.0)
-        }
-        VectorMetric::Cosine => {
-            let dot = dot_product(query, &dequant);
-            let na_sq = dot_product(query, query);
-            let nb_sq = dot_product(&dequant, &dequant);
-            if na_sq < 1e-18 || nb_sq < 1e-18 {
-                return 1.0;
-            }
-            (1.0 - dot / (na_sq * nb_sq).sqrt()).max(0.0)
-        }
-    }
+    RescoreCtx::new(metric, params, query).score(codes)
 }

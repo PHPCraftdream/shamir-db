@@ -194,6 +194,17 @@ pub trait Store: Send + Sync {
     /// Like PHP generators but with batching - yields Vec of size batch_size.
     /// Uses concurrent prefetching: while yielding current batch, fetches next batch in background.
     ///
+    /// # Ordering guarantee
+    ///
+    /// Keys within and across batches are yielded in ascending
+    /// lexicographic byte order — the SAME guarantee documented on
+    /// [`Store::scan_prefix_stream`], every implementor MUST uphold it.
+    /// Callers rely on this for correctness, not just performance —
+    /// `storage_membuffer.rs`'s merge-overlay scans (task #530) do a
+    /// linear 2-way sorted merge of the dirty overlay against this
+    /// stream and would silently resurrect a tombstoned or stale key if
+    /// an implementor ever yielded out of order.
+    ///
     /// # Arguments
     /// * `batch_size` - Number of records per batch
     ///
