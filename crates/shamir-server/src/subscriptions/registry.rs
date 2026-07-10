@@ -6,13 +6,22 @@ use shamir_tunables::instance_defaults::MAX_SUBSCRIPTIONS_PER_CONNECTION;
 use tokio::task::JoinHandle;
 
 /// An active subscription with its bridge task handle.
+///
+/// `bridge_handle` starts `None` — a slot is [`SubscriptionRegistry::reserve_pending`]'d
+/// (map entry present, no handle yet) BEFORE the bridge task is spawned, and
+/// [`SubscriptionRegistry::attach_handle`] fills it in right after
+/// `tokio::spawn` returns. See the struct doc on `SubscriptionRegistry` for
+/// why this split exists (closes a spawn-vs-insert race found in `@fl`
+/// review of task #527's self-exit slot-release fix).
 pub(crate) struct ActiveSubscription {
-    pub bridge_handle: JoinHandle<()>,
+    pub bridge_handle: Option<JoinHandle<()>>,
 }
 
 impl Drop for ActiveSubscription {
     fn drop(&mut self) {
-        self.bridge_handle.abort();
+        if let Some(handle) = self.bridge_handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -84,12 +93,43 @@ impl SubscriptionRegistry {
         }
     }
 
-    pub(crate) fn insert(&self, id: u64, sub: ActiveSubscription) {
-        if self.subs.insert(id, sub).is_err() {
+    /// Reserve a handle-less placeholder slot for `id` — call this BEFORE
+    /// `tokio::spawn`ing the bridge task, not after.
+    ///
+    /// `@fl` review of task #527's self-exit slot-release fix (an RAII guard
+    /// inside `bridge_task` that calls [`Self::remove`] on every exit path)
+    /// found a race: on a multi-thread runtime, a fast-exiting bridge task
+    /// (e.g. the all-sources-denied path, which returns before any `.await`)
+    /// can run to completion and fire its guard's `remove(id)` BEFORE the
+    /// caller gets around to inserting the entry — `remove` finds nothing to
+    /// remove (a no-op), and the caller's later insert then creates a
+    /// permanently-dangling entry with no way left to clean it up. Reserving
+    /// a real map entry HERE, before spawn, guarantees the guard's `remove`
+    /// always finds something real, no matter how the race resolves.
+    pub(crate) fn reserve_pending(&self, id: u64) {
+        if self
+            .subs
+            .insert(id, ActiveSubscription { bridge_handle: None })
+            .is_err()
+        {
             // Duplicate id (never expected: ids are monotonic) — release the
             // slot reserved for this insert so the counter stays accurate.
             self.active.fetch_sub(1, Ordering::AcqRel);
         }
+    }
+
+    /// Attach the real bridge-task handle to an already-`reserve_pending`'d
+    /// slot — call this immediately after `tokio::spawn` returns.
+    ///
+    /// If the slot is already gone (the bridge task raced ahead, self-exited,
+    /// and its guard already removed the placeholder), this is a no-op: the
+    /// task has already finished, so `handle` is simply dropped (a finished
+    /// `JoinHandle`'s `Drop` detaches without aborting anything — there is
+    /// nothing left to abort).
+    pub(crate) fn attach_handle(&self, id: u64, handle: JoinHandle<()>) {
+        self.subs.update(&id, move |_, sub| {
+            sub.bridge_handle = Some(handle);
+        });
     }
 
     pub fn remove(&self, id: u64) -> bool {

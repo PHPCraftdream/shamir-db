@@ -1,6 +1,7 @@
 use crate::net_gateway::{
-    check_host_allowed, check_url_allowed, check_url_allowed_resolved, parse_url,
+    canonicalize_ip, check_host_allowed, check_url_allowed, check_url_allowed_resolved, parse_url,
 };
+use std::net::{IpAddr, Ipv4Addr};
 
 #[test]
 fn allowlist_exact_match() {
@@ -150,4 +151,155 @@ async fn resolved_guard_allows_exact_loopback_entry() {
     let list = vec!["127.0.0.1".to_string()];
     let r = check_url_allowed_resolved("http://127.0.0.1:8080/x", &list).await;
     assert!(r.is_ok(), "exact loopback allowlist entry must be honoured");
+}
+
+// ── Finding 2c: DNS-rebind pin — ResolvedPin return contract ──────────────
+
+#[tokio::test]
+async fn resolved_guard_exact_loopback_returns_empty_pin() {
+    // The exact-allowlist-match path does NOT resolve DNS, so it returns an
+    // empty pin set (nothing to rebind) with the URL's host+port carried
+    // through for the caller.
+    let list = vec!["127.0.0.1".to_string()];
+    let pin = check_url_allowed_resolved("http://127.0.0.1:8080/x", &list)
+        .await
+        .expect("exact loopback entry honoured");
+    assert_eq!(pin.host, "127.0.0.1");
+    assert_eq!(pin.port, 8080);
+    assert!(
+        pin.pinned_ips.is_empty(),
+        "exact-allowlist path performs no DNS resolution, so nothing is pinned"
+    );
+}
+
+#[tokio::test]
+async fn resolved_guard_pins_resolved_public_ip() {
+    // A wildcard-allowed public literal resolves to itself; the guard must
+    // return that exact IP as the pin so curl connects to what was validated.
+    // Using a literal IP avoids any live-DNS dependency: `lookup_host` on a
+    // literal returns the literal.
+    let list = vec!["*".to_string()];
+    let pin = check_url_allowed_resolved("http://93.184.216.34:80/", &list)
+        .await
+        .expect("public literal must pass the resolved guard");
+    assert_eq!(pin.host, "93.184.216.34");
+    assert_eq!(pin.port, 80);
+    assert_eq!(
+        pin.pinned_ips,
+        vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        "the validated IP must be returned for pinning"
+    );
+}
+
+#[test]
+fn parse_url_defaults_port_from_scheme() {
+    assert_eq!(parse_url("http://example.com/").unwrap().port, 80);
+    assert_eq!(parse_url("https://example.com/").unwrap().port, 443);
+    assert_eq!(parse_url("http://example.com:8080/x").unwrap().port, 8080);
+    assert_eq!(parse_url("https://[::1]:9000/x").unwrap().port, 9000);
+    assert_eq!(parse_url("http://[::1]/x").unwrap().port, 80);
+}
+
+// ── Finding 2c: inet_aton octal / short IPv4 forms in canonicalize_ip ──────
+
+#[test]
+fn canonicalize_octal_per_octet_forms() {
+    // Leading `0` on a dotted component means octal (inet_aton). 0177 == 127.
+    assert_eq!(
+        canonicalize_ip("0177.0.0.1"),
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+        "octal 0177 must canonicalize to 127"
+    );
+    // Full octal loopback.
+    assert_eq!(
+        canonicalize_ip("0177.0.0.01"),
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+    );
+    // Octal IMDS link-local: 0251=169, 0376=254.
+    assert_eq!(
+        canonicalize_ip("0251.0376.0251.0376"),
+        Some(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
+    );
+}
+
+#[test]
+fn canonicalize_hex_per_octet_forms() {
+    // Hex per-octet (leading 0x on a dotted component). 0x7f == 127.
+    assert_eq!(
+        canonicalize_ip("0x7f.0.0.1"),
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+    );
+    assert_eq!(
+        canonicalize_ip("0xA9.0xFE.0xA9.0xFE"),
+        Some(IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)))
+    );
+}
+
+#[test]
+fn canonicalize_short_dotted_forms() {
+    // 2-component: last absorbs low 24 bits. 127.1 == 127.0.0.1.
+    assert_eq!(
+        canonicalize_ip("127.1"),
+        Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+        "127.1 must expand to 127.0.0.1"
+    );
+    // 3-component: last absorbs low 16 bits. 192.168.1 == 192.168.0.1.
+    assert_eq!(
+        canonicalize_ip("192.168.1"),
+        Some(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))),
+        "192.168.1 must expand to 192.168.0.1"
+    );
+    // 2-component where the last absorbs more than one byte: 10.65535 =>
+    // 10.0.255.255.
+    assert_eq!(
+        canonicalize_ip("10.65535"),
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 255, 255)))
+    );
+}
+
+#[test]
+fn canonicalize_rejects_malformed_inet_aton() {
+    // Octal digit out of range (8 is not an octal digit).
+    assert_eq!(canonicalize_ip("08.0.0.1"), None);
+    // Component > 255 in a non-terminal position.
+    assert_eq!(canonicalize_ip("256.0.0.1"), None);
+    // Terminal component too large for the bytes it must absorb (a.b => b is
+    // 24 bits max; 2^24 overflows).
+    assert_eq!(canonicalize_ip("127.16777216"), None);
+    // Too many components.
+    assert_eq!(canonicalize_ip("1.2.3.4.5"), None);
+    // Trailing dot.
+    assert_eq!(canonicalize_ip("127.0.0.1."), None);
+    // Not an IP at all.
+    assert_eq!(canonicalize_ip("api.example.com"), None);
+}
+
+#[test]
+fn octal_and_short_forms_rejected_by_ssrf_guard() {
+    // End-to-end: these non-canonical forms resolving to private/loopback
+    // addresses must be REJECTED under a wildcard allowlist (they were NOT
+    // recognised as IP literals before this fix).
+    let list = vec!["*".to_string()];
+    assert!(
+        check_host_allowed("0177.0.0.1", &list).is_err(),
+        "octal loopback must be blocked"
+    );
+    assert!(
+        check_host_allowed("127.1", &list).is_err(),
+        "short-form loopback must be blocked"
+    );
+    assert!(
+        check_host_allowed("192.168.1", &list).is_err(),
+        "short-form private must be blocked"
+    );
+    assert!(
+        check_host_allowed("0x7f.0.0.1", &list).is_err(),
+        "hex-per-octet loopback must be blocked"
+    );
+    assert!(
+        check_host_allowed("0251.0376.0251.0376", &list).is_err(),
+        "octal IMDS must be blocked"
+    );
+    // And via check_url_allowed (URL wrapper), too.
+    assert!(check_url_allowed("http://127.1/", &list).is_err());
 }

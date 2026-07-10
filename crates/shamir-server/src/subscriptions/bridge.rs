@@ -26,8 +26,37 @@ use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedByte
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
 use super::filter_eval::{bytes_to_arc, CompiledFilterSlot};
 use super::push::{make_deliver_data, try_push_event};
+use super::registry::SubscriptionRegistry;
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
 use arc_swap::ArcSwapOption;
+
+/// RAII drop-guard that removes a subscription's registry slot on EVERY
+/// bridge-task exit path — natural stream completion, an early error return,
+/// the CRIT-5 "all sources denied" abort, or external task cancellation via
+/// `JoinHandle::abort()` (tokio unwinds through in-scope locals at the next
+/// await point, firing this `Drop`).
+///
+/// Without this the `active` counter and `subs` map entry would leak whenever
+/// `bridge_task` finishes on its own (finding 2b / former #513): `remove()` /
+/// `close_all()` were the ONLY decrement sites, so a bridge that exited
+/// without an explicit client `Unsubscribe` permanently consumed a slot.
+///
+/// Idempotency: in the explicit-`Unsubscribe` path `registry.remove(id)` is
+/// already called by the handler *before* the abort lands, so this guard's
+/// later `remove` is a no-op — `scc::HashMap::remove` on an already-gone key
+/// returns `None`, and [`SubscriptionRegistry::remove`] only decrements
+/// `active` when the map entry was actually present, so the counter is never
+/// double-decremented.
+struct SubscriptionSlotGuard {
+    registry: Arc<SubscriptionRegistry>,
+    sub_id: u64,
+}
+
+impl Drop for SubscriptionSlotGuard {
+    fn drop(&mut self) {
+        self.registry.remove(self.sub_id);
+    }
+}
 
 /// Convert cached raw bytes + interner to a `QueryValue` for delivery.
 ///
@@ -64,7 +93,17 @@ pub(crate) async fn bridge_task(
     // deliveries run under the subscribing actor's identity and MUST be
     // bounded by these limits, not `BatchLimits::default()`.
     query_limits: BatchLimits,
+    // Per-connection registry (finding 2b / former #513): the guard below uses
+    // it to release this subscription's slot when the bridge exits on its own.
+    registry: Arc<SubscriptionRegistry>,
 ) {
+    // Release this subscription's registry slot on EVERY exit path. Bound
+    // before any `.await` so cancellation-unwind fires its `Drop` too.
+    let _slot_guard = SubscriptionSlotGuard {
+        registry,
+        sub_id,
+    };
+
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.

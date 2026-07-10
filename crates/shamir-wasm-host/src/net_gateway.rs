@@ -112,6 +112,24 @@ pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), String> 
     check_host_allowed(&parsed.host, allowlist)
 }
 
+/// The outcome of a successful [`check_url_allowed_resolved`] check: the exact
+/// host/port/IP(s) the guard validated, so the actual network call can be
+/// PINNED to them and cannot be re-resolved to a different address at
+/// connection time (finding 2c DNS-rebind TOCTOU fix).
+#[derive(Debug, Clone)]
+pub struct ResolvedPin {
+    /// The literal host from the URL authority (sent as `Host`/SNI).
+    pub host: String,
+    /// The connection port (explicit or scheme-defaulted).
+    pub port: u16,
+    /// The validated IP(s) to pin curl's connection to via
+    /// `--resolve host:port:ip`. EMPTY means "do not pin": this is the
+    /// exact-allowlist-match path, where no DNS resolution happened (the
+    /// operator opted into the literal host explicitly), so there is no
+    /// rebind window to close and pinning would be meaningless.
+    pub pinned_ips: Vec<IpAddr>,
+}
+
 /// Full egress guard for real network I/O (finding 2c / SSRF): runs the
 /// string-level allowlist check AND resolves the host via DNS, rejecting if
 /// ANY resolved address is a private/loopback IP unless the literal host was
@@ -126,24 +144,45 @@ pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), String> 
 /// `127.0.0.1` test target) is honoured — DNS resolution of a literal IP
 /// yields that IP and the exact-match escape hatch in [`check_host_allowed`]
 /// already applies.
-pub async fn check_url_allowed_resolved(url: &str, allowlist: &[String]) -> Result<(), String> {
+///
+/// # DNS-rebind TOCTOU (finding 2c)
+///
+/// Returns the validated [`ResolvedPin`] so the caller can pin its actual
+/// connection to the SAME address(es) the guard checked. Without this, the
+/// guard's resolution and curl's connection-time resolution are two
+/// independent DNS lookups: an attacker controlling authoritative DNS can
+/// answer "safe public IP" for the first and "internal IP" for the second.
+/// Pinning via curl `--resolve host:port:ip` removes curl's second lookup
+/// entirely, so what was validated is exactly what is connected to.
+pub async fn check_url_allowed_resolved(
+    url: &str,
+    allowlist: &[String],
+) -> Result<ResolvedPin, String> {
     let parsed = parse_url(url)?;
     // 1. String-level allowlist + SSRF-on-literal-host check.
     check_host_allowed(&parsed.host, allowlist)?;
 
     // 2. If the literal host is an EXACT allowlist entry, the operator has
     //    opted into it explicitly (incl. deliberately-internal targets); the
-    //    string check above already enforced private-IP hygiene for it.
+    //    string check above already enforced private-IP hygiene for it. No DNS
+    //    resolution happened, so there is nothing to pin (empty `pinned_ips`).
     if host_has_exact_match(&parsed.host, allowlist) {
-        return Ok(());
+        return Ok(ResolvedPin {
+            host: parsed.host,
+            port: parsed.port,
+            pinned_ips: Vec::new(),
+        });
     }
 
     // 3. Otherwise resolve DNS and reject if ANY address is private/loopback.
-    //    `lookup_host` needs a port; append a dummy one.
-    let addrs = tokio::net::lookup_host((parsed.host.as_str(), 0))
-        .await
-        .map_err(|e| format!("egress: DNS resolution failed for {}: {e}", parsed.host))?;
-    for addr in addrs {
+    //    `lookup_host` needs a port; use the real one so the pin matches.
+    let addrs: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((parsed.host.as_str(), parsed.port))
+            .await
+            .map_err(|e| format!("egress: DNS resolution failed for {}: {e}", parsed.host))?
+            .collect();
+    let mut pinned_ips: Vec<IpAddr> = Vec::with_capacity(addrs.len());
+    for addr in &addrs {
         if is_private_or_loopback_ip(addr.ip()) {
             return Err(format!(
                 "egress to {} not allowed (resolves to private/loopback IP {})",
@@ -151,8 +190,22 @@ pub async fn check_url_allowed_resolved(url: &str, allowlist: &[String]) -> Resu
                 addr.ip()
             ));
         }
+        // Dedup while preserving resolution order.
+        if !pinned_ips.contains(&addr.ip()) {
+            pinned_ips.push(addr.ip());
+        }
     }
-    Ok(())
+    if pinned_ips.is_empty() {
+        return Err(format!(
+            "egress: DNS resolution for {} returned no addresses",
+            parsed.host
+        ));
+    }
+    Ok(ResolvedPin {
+        host: parsed.host,
+        port: parsed.port,
+        pinned_ips,
+    })
 }
 
 /// Whether `host` is matched by at least one EXACT (non-wildcard) allowlist
@@ -166,6 +219,10 @@ fn host_has_exact_match(host: &str, allowlist: &[String]) -> bool {
 /// Parsed URL components relevant to the guard.
 pub(crate) struct ParsedUrl {
     pub(crate) host: String,
+    /// The connection port, taken from the authority when present or defaulted
+    /// from the scheme (80 for http, 443 for https). Needed to build curl's
+    /// `--resolve host:port:ip` pin (finding 2c DNS-rebind fix).
+    pub(crate) port: u16,
 }
 
 /// Minimal URL parser — extract scheme and host. Does not depend on the
@@ -181,6 +238,7 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
             "egress: scheme '{scheme}' not allowed (only http/https)"
         ));
     }
+    let default_port: u16 = if scheme == "https" { 443 } else { 80 };
 
     let rest = &url[scheme_end + 3..];
     // Host runs until '/', '?', '#', or end.
@@ -193,18 +251,23 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         None => authority,
     };
 
-    // Strip bracket-enclosed IPv6.
-    let host = if host_port.starts_with('[') {
+    // Strip bracket-enclosed IPv6, capturing an explicit port if present.
+    let (host, port_str) = if host_port.starts_with('[') {
         // IPv6: [::1]:port
         let close = host_port
             .find(']')
             .ok_or_else(|| format!("egress: invalid IPv6 host in URL: {url}"))?;
-        host_port[1..close].to_string()
+        let after = &host_port[close + 1..];
+        let port = after.strip_prefix(':');
+        (host_port[1..close].to_string(), port)
     } else {
-        // IPv4 or hostname — strip :port
+        // IPv4 or hostname — split off :port.
         match host_port.rfind(':') {
-            Some(colon) => host_port[..colon].to_string(),
-            None => host_port.to_string(),
+            Some(colon) => (
+                host_port[..colon].to_string(),
+                Some(&host_port[colon + 1..]),
+            ),
+            None => (host_port.to_string(), None),
         }
     };
 
@@ -212,7 +275,14 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         return Err(format!("egress: empty host in URL: {url}"));
     }
 
-    Ok(ParsedUrl { host })
+    let port = match port_str {
+        Some(p) if !p.is_empty() => p
+            .parse::<u16>()
+            .map_err(|_| format!("egress: invalid port in URL: {url}"))?,
+        _ => default_port,
+    };
+
+    Ok(ParsedUrl { host, port })
 }
 
 /// Whether the host string looks like a loopback or private IP address.
@@ -232,7 +302,7 @@ fn is_private_or_loopback_host(host: &str) -> bool {
 /// Normalise a host string that denotes an IP literal (in any of the
 /// non-canonical forms browsers/curl accept) into an [`IpAddr`]. Returns
 /// `None` for genuine hostnames (which are resolved via DNS elsewhere).
-fn canonicalize_ip(host: &str) -> Option<IpAddr> {
+pub(crate) fn canonicalize_ip(host: &str) -> Option<IpAddr> {
     // 1. Standard dotted-quad / RFC-5952 IPv6 (also handles `::ffff:1.2.3.4`).
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Some(unmap_v4(ip));
@@ -250,7 +320,118 @@ fn canonicalize_ip(host: &str) -> Option<IpAddr> {
         return Some(IpAddr::V4(Ipv4Addr::from(v)));
     }
 
+    // 3. Classic BSD `inet_aton`-compatible dotted forms that libc/curl still
+    //    accept and that bypass a naive `Ipv4Addr::from_str` allowlist check:
+    //      * octal per-octet   — `0177.0.0.1`   (0177 octal = 127) → 127.0.0.1
+    //      * hex   per-octet   — `0x7f.0.0.1`                       → 127.0.0.1
+    //      * short/shorthand   — `127.1` → 127.0.0.1, `192.168.1` → 192.168.0.1
+    //    See [`parse_inet_aton`] for the exact rules.
+    if let Some(v) = parse_inet_aton(host) {
+        return Some(IpAddr::V4(Ipv4Addr::from(v)));
+    }
+
     None
+}
+
+/// Parse an IPv4 address string using classic BSD `inet_aton` semantics and
+/// return it as a big-endian `u32`. Returns `None` if the string is not a
+/// valid `inet_aton` form.
+///
+/// `inet_aton` accepts 1 to 4 dot-separated numeric components; each component
+/// may be written in decimal, octal (leading `0`, e.g. `0177`), or hex (leading
+/// `0x`/`0X`). The number of components determines how the 32-bit address is
+/// packed — the LAST component absorbs all bytes not consumed by the leading
+/// single-byte components:
+///
+/// | form        | packing                                             |
+/// |-------------|-----------------------------------------------------|
+/// | `a`         | `a`               — a is the whole 32-bit value      |
+/// | `a.b`       | `a<<24  | b`       — b is the low 24 bits (`≤ 2^24-1`)|
+/// | `a.b.c`     | `a<<24 | b<<16 | c`— c is the low 16 bits (`≤ 2^16-1`)|
+/// | `a.b.c.d`   | `a<<24 | b<<16 | c<<8 | d` — each octet `≤ 255`      |
+///
+/// The bare 1-component case is already handled by step 2 of
+/// [`canonicalize_ip`]; it is included here for completeness/correctness so the
+/// helper matches `inet_aton` exactly, but the dotted (2–4 component) forms are
+/// the ones step 2 misses.
+fn parse_inet_aton(host: &str) -> Option<u32> {
+    // Reject empty and reject a trailing dot (`127.0.0.1.` is NOT valid).
+    if host.is_empty() || host.ends_with('.') || host.starts_with('.') {
+        return None;
+    }
+
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+
+    // Parse every component as a u64 first (a lone component can be up to
+    // 2^32-1; intermediate components up to 255 — bound-checked below).
+    let mut vals: Vec<u64> = Vec::with_capacity(parts.len());
+    for part in &parts {
+        vals.push(parse_inet_component(part)?);
+    }
+
+    let n = vals.len();
+    // Each leading component (all but the last) occupies exactly one byte.
+    for &v in &vals[..n - 1] {
+        if v > 0xff {
+            return None;
+        }
+    }
+
+    // The last component absorbs the remaining bytes: (5 - n) bytes worth.
+    // n=1 → 32 bits, n=2 → 24 bits, n=3 → 16 bits, n=4 → 8 bits.
+    let remaining_bytes = 4 - (n - 1);
+    let max_last: u64 = match remaining_bytes {
+        4 => u32::MAX as u64,
+        3 => 0x00ff_ffff,
+        2 => 0x0000_ffff,
+        1 => 0x0000_00ff,
+        _ => unreachable!("n is 1..=4 so remaining_bytes is 1..=4"),
+    };
+    let last = vals[n - 1];
+    if last > max_last {
+        return None;
+    }
+
+    // Pack: leading components into their high bytes, last absorbs the low bytes.
+    let mut result: u32 = last as u32;
+    for (i, &v) in vals[..n - 1].iter().enumerate() {
+        // Leading component i sits at byte position (3 - i) from the top.
+        let shift = 8 * (3 - i as u32);
+        result |= (v as u32) << shift;
+    }
+    Some(result)
+}
+
+/// Parse a single `inet_aton` numeric component: hex (`0x`/`0X` prefix), octal
+/// (leading `0`), or decimal. Returns `None` on any malformed component
+/// (empty, non-digit, or an invalid digit for the detected radix).
+fn parse_inet_component(part: &str) -> Option<u64> {
+    if part.is_empty() {
+        return None;
+    }
+    if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+        // Hex must have at least one digit and only hex digits.
+        if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    // Leading `0` (and length > 1) → octal. A lone `0` is decimal zero.
+    if part.len() > 1 && part.starts_with('0') {
+        let oct = &part[1..];
+        if !oct.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+            return None;
+        }
+        return u64::from_str_radix(oct, 8).ok();
+    }
+    // Decimal.
+    if !part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    part.parse::<u64>().ok()
 }
 
 /// Collapse an IPv4-mapped IPv6 address to its IPv4 form so the IPv4

@@ -9,7 +9,9 @@
 //! invocation.
 
 use async_trait::async_trait;
-use shamir_engine::function::{check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway};
+use shamir_engine::function::{
+    check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway, ResolvedPin,
+};
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
@@ -37,7 +39,14 @@ impl NetGateway for CurlNetGateway {
         //    `--location`, so it does not follow redirects — each redirect hop
         //    would require a fresh guarded request from the guest (no
         //    transparent redirect-following bypass exists here).
-        check_url_allowed_resolved(&req.url, &self.allowlist).await?;
+        //
+        //    The guard returns the exact host/port/IP(s) it validated. We pin
+        //    curl's connection to those IP(s) below via `--resolve` so curl
+        //    does NOT perform its own second DNS lookup at connection time —
+        //    closing the DNS-rebind TOCTOU where an attacker's authoritative
+        //    DNS could answer a safe IP to the guard and an internal IP to curl
+        //    moments later (finding 2c DNS-rebind).
+        let pin: ResolvedPin = check_url_allowed_resolved(&req.url, &self.allowlist).await?;
 
         // 2. Build temp directory for all temp files.
         let tmp_dir =
@@ -64,6 +73,12 @@ impl NetGateway for CurlNetGateway {
             "request = \"{}\"\n",
             escape_curl_value(&req.method)
         ));
+
+        // DNS-rebind pin (finding 2c): pin curl's connection to the EXACT IP(s)
+        // the SSRF guard validated via `--resolve host:port:ip`, so curl skips
+        // its own connection-time DNS lookup. curl still uses `pin.host` for the
+        // `Host` header / TLS SNI. See [`build_resolve_lines`].
+        cfg.push_str(&build_resolve_lines(&pin));
 
         for (name, value) in &req.headers {
             cfg.push_str(&format!(
@@ -167,6 +182,27 @@ impl NetGateway for CurlNetGateway {
 /// On Windows, curl interprets backslashes in config values as escape chars.
 fn path_to_forward_slash(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
+}
+
+/// Build curl config `resolve = "host:port:ip"` lines that pin the connection
+/// to the exact IP(s) the SSRF guard validated (finding 2c DNS-rebind fix).
+///
+/// One `resolve` entry per validated IP — curl accepts the flag repeatedly for
+/// the same `host:port` and tries the addresses in order. When `pinned_ips` is
+/// empty (the exact-allowlist-match path, where no DNS resolution happened and
+/// there is nothing to rebind) this returns an empty string, so no pin is
+/// emitted and curl resolves the exact operator-allowed host itself.
+pub(crate) fn build_resolve_lines(pin: &ResolvedPin) -> String {
+    let mut out = String::new();
+    for ip in &pin.pinned_ips {
+        out.push_str(&format!(
+            "resolve = \"{}:{}:{}\"\n",
+            escape_curl_value(&pin.host),
+            pin.port,
+            ip
+        ));
+    }
+    out
 }
 
 /// Escape a value for curl config file double-quoted strings.
