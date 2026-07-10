@@ -1,6 +1,8 @@
 pub mod buffer_config;
 pub mod doctor;
 mod filtered_vector;
+#[cfg(test)]
+pub mod index2_backfill_hook;
 pub mod interner_manager;
 pub mod persistable;
 mod read_exec;
