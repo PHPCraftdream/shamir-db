@@ -27,7 +27,18 @@ impl ShamirDb {
     /// - All other mode-bearing objects read from the persistent catalogue.
     /// - **FunctionNamespace** is stored as a settings entry keyed
     ///   `"fn_namespace_meta"`, defaulting to `open()`.
-    pub async fn resource_meta(&self, path: &ResourcePath) -> ResourceMeta {
+    ///
+    /// # Fail-closed guarantee
+    ///
+    /// A real catalogue-read error (`Err`) is distinguished from a
+    /// legitimate "record genuinely absent" (`Ok(None)`) and propagated as
+    /// `Err` — it must NEVER collapse into [`ResourceMeta::default`] (which
+    /// is [`ResourceMeta::open`], owner=System, mode `0o777`). Doing so
+    /// would turn a transient/structural storage failure into a full auth
+    /// bypass on the affected resource. The sole intentional `Ok(None)` →
+    /// `open()` fallback is `FunctionFolder` (#118, implicit folders that
+    /// were never explicitly `CREATE`d) — see that branch's comment.
+    pub async fn resource_meta(&self, path: &ResourcePath) -> DbResult<ResourceMeta> {
         let table_path = match path {
             // Record and Index inherit their Table's meta.
             ResourcePath::Record {
@@ -41,61 +52,89 @@ impl ShamirDb {
         };
 
         match &table_path {
-            ResourcePath::Database { db } => {
-                let rec = self.system_store.load_database(db).await;
-                rec.ok()
-                    .flatten()
-                    .map(|r| ResourceMeta::from_record(&r))
-                    .unwrap_or_default()
-            }
+            ResourcePath::Database { db } => match self.system_store.load_database(db).await {
+                Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
+                Err(e) => {
+                    log::warn!("resource_meta: failed to load database '{}' meta: {e}", db);
+                    Err(e)
+                }
+            },
             ResourcePath::Store { db, store } => {
-                let rec = self.system_store.load_repository(db, store).await;
-                rec.ok()
-                    .flatten()
-                    .map(|r| ResourceMeta::from_record(&r))
-                    .unwrap_or_default()
+                match self.system_store.load_repository(db, store).await {
+                    Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                    Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
+                    Err(e) => {
+                        log::warn!(
+                            "resource_meta: failed to load store '{}/{}' meta: {e}",
+                            db,
+                            store
+                        );
+                        Err(e)
+                    }
+                }
             }
             ResourcePath::Table { db, store, table } => {
-                let rec = self.system_store.load_table_record(db, store, table).await;
-                rec.ok()
-                    .flatten()
-                    .map(|r| ResourceMeta::from_record(&r))
-                    .unwrap_or_default()
+                match self.system_store.load_table_record(db, store, table).await {
+                    Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                    Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
+                    Err(e) => {
+                        log::warn!(
+                            "resource_meta: failed to load table '{}/{}/{}' meta: {e}",
+                            db,
+                            store,
+                            table
+                        );
+                        Err(e)
+                    }
+                }
             }
-            ResourcePath::Function { name } => {
-                let rec = self.system_store.load_function(name).await;
-                rec.ok()
-                    .flatten()
-                    .map(|r| ResourceMeta::from_record(&r))
-                    .unwrap_or_default()
-            }
+            ResourcePath::Function { name } => match self.system_store.load_function(name).await {
+                Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
+                Err(e) => {
+                    log::warn!(
+                        "resource_meta: failed to load function '{}' meta: {e}",
+                        name
+                    );
+                    Err(e)
+                }
+            },
             ResourcePath::FunctionFolder { path } => {
-                // Read persisted meta if the folder was explicitly created;
-                // fall back to open so functions with slash-names under
-                // implicit (never-created) folders are not denied (#118).
                 let path_key = path.join("/");
-                let rec = self.system_store.load_function_folder(&path_key).await;
-                rec.ok()
-                    .flatten()
-                    .map(|r| ResourceMeta::from_record(&r))
-                    .unwrap_or_default()
+                match self.system_store.load_function_folder(&path_key).await {
+                    Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                    // Read persisted meta if the folder was explicitly created;
+                    // fall back to open so functions with slash-names under
+                    // implicit (never-created) folders are not denied (#118).
+                    // This is a genuine "never created" case, NOT an error —
+                    // do not change this arm.
+                    Ok(None) => Ok(ResourceMeta::default()),
+                    Err(e) => {
+                        log::warn!(
+                            "resource_meta: failed to load function folder '{}' meta: {e}",
+                            path_key
+                        );
+                        Err(e)
+                    }
+                }
             }
             ResourcePath::FunctionNamespace => {
-                let val = self
-                    .system_store
-                    .load_setting("fn_namespace_meta")
-                    .await
-                    .ok()
-                    .flatten();
-                val.map(|v| ResourceMeta::from_record(&v))
-                    .unwrap_or_default()
+                match self.system_store.load_setting("fn_namespace_meta").await {
+                    Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
+                    Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
+                    Err(e) => {
+                        log::warn!("resource_meta: failed to load function namespace meta: {e}");
+                        Err(e)
+                    }
+                }
             }
             ResourcePath::Root | ResourcePath::User { .. } | ResourcePath::Group { .. } => {
-                ResourceMeta::open()
+                Ok(ResourceMeta::open())
             }
             // Record/Index already resolved to Table above; if something
             // slips through, return open.
-            ResourcePath::Record { .. } | ResourcePath::Index { .. } => ResourceMeta::open(),
+            ResourcePath::Record { .. } | ResourcePath::Index { .. } => Ok(ResourceMeta::open()),
         }
     }
 
@@ -366,7 +405,25 @@ impl ShamirDb {
 
         // Traversal: each ancestor needs Execute.
         for anc in path.ancestors() {
-            let anc_meta = self.resource_meta(&anc).await;
+            let anc_meta = match self.resource_meta(&anc).await {
+                Ok(m) => m,
+                Err(e) => {
+                    // Fail-closed: a real catalogue-read error on an
+                    // ancestor must deny unconditionally — never fall
+                    // through to a default-open `permits` check.
+                    log::warn!(
+                        "authorize_access: resource_meta failed for ancestor '{}' \
+                         (actor={actor}, action={}): {e}",
+                        anc,
+                        Action::Execute
+                    );
+                    return Err(AccessError {
+                        actor: actor.clone(),
+                        path: anc.to_string(),
+                        action: Action::Execute,
+                    });
+                }
+            };
             let in_group = self.resolve_in_group(user_id, &anc_meta).await;
             if !permits(actor, &anc_meta, Action::Execute, in_group) {
                 return Err(AccessError {
@@ -378,7 +435,24 @@ impl ShamirDb {
         }
 
         // Target check.
-        let meta = self.resource_meta(path).await;
+        let meta = match self.resource_meta(path).await {
+            Ok(m) => m,
+            Err(e) => {
+                // Fail-closed: a real catalogue-read error on the target
+                // must deny unconditionally — never fall through to a
+                // default-open `permits` check.
+                log::warn!(
+                    "authorize_access: resource_meta failed for target '{}' \
+                     (actor={actor}, action={action}): {e}",
+                    path
+                );
+                return Err(AccessError {
+                    actor: actor.clone(),
+                    path: path.to_string(),
+                    action,
+                });
+            }
+        };
         let in_group = self.resolve_in_group(user_id, &meta).await;
         if permits(actor, &meta, action, in_group) {
             Ok(())
@@ -571,7 +645,7 @@ impl ShamirDb {
 
         // ── resource hierarchy (Root → Database → Store → Table) ──
         let max_depth = depth.unwrap_or(3).min(3);
-        let root_meta = self.resource_meta(&ResourcePath::Root).await;
+        let root_meta = self.resource_meta(&ResourcePath::Root).await?;
         let mut root = access_node("/", "root", &root_meta, &name_of, &group_name_of);
 
         if max_depth >= 1 {
@@ -581,7 +655,7 @@ impl ShamirDb {
             };
             let mut db_children: Vec<QueryValue> = Vec::new();
             for dbname in dbs {
-                let dm = self.resource_meta(&ResourcePath::database(&dbname)).await;
+                let dm = self.resource_meta(&ResourcePath::database(&dbname)).await?;
                 let mut dbnode = access_node(&dbname, "database", &dm, &name_of, &group_name_of);
                 if max_depth >= 2 {
                     if let Some(inst) = self.get_db(&dbname) {
@@ -589,7 +663,7 @@ impl ShamirDb {
                         for store in inst.list_repos() {
                             let sm = self
                                 .resource_meta(&ResourcePath::store(&dbname, &store))
-                                .await;
+                                .await?;
                             let mut snode =
                                 access_node(&store, "store", &sm, &name_of, &group_name_of);
                             if max_depth >= 3 {
@@ -600,7 +674,7 @@ impl ShamirDb {
                                             .resource_meta(&ResourcePath::table(
                                                 &dbname, &store, &t,
                                             ))
-                                            .await;
+                                            .await?;
                                         tnodes.push(access_node(
                                             &t,
                                             "table",
@@ -631,7 +705,7 @@ impl ShamirDb {
         // ── functions (flat for now; folders land in a later slice) ──
         let mut functions: Vec<QueryValue> = Vec::new();
         for fname in self.list_functions().await? {
-            let fm = self.resource_meta(&ResourcePath::function(&fname)).await;
+            let fm = self.resource_meta(&ResourcePath::function(&fname)).await?;
             let mut fnode = access_node(&fname, "function", &fm, &name_of, &group_name_of);
             if let QueryValue::Map(ref mut m) = fnode {
                 m.swap_remove("children");

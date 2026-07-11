@@ -106,7 +106,8 @@ async fn create_function_folder_meta_owner_is_actor() {
         .resource_meta(&ResourcePath::FunctionFolder {
             path: vec!["owned_folder".to_string()],
         })
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::User(55),
@@ -137,7 +138,8 @@ async fn function_folder_meta_survives_reopen() {
         .resource_meta(&ResourcePath::FunctionFolder {
             path: vec!["persist_test".to_string()],
         })
-        .await;
+        .await
+        .unwrap();
     assert_eq!(meta.owner, Actor::System);
     // G.4c: new objects default to enforced owner-rwx (0o700).
     assert_eq!(meta.mode, 0o700);
@@ -164,7 +166,8 @@ async fn slash_named_function_works_without_explicit_folder() {
         .resource_meta(&ResourcePath::FunctionFolder {
             path: vec!["math".to_string()],
         })
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta,
         shamir_types::access::ResourceMeta::open(),

@@ -3412,6 +3412,7 @@ dependencies = [
  "bytes",
  "captrack",
  "dashmap",
+ "futures",
  "fxhash",
  "log",
  "mimalloc",

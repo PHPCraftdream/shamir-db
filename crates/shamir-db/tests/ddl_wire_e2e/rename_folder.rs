@@ -161,7 +161,8 @@ async fn rename_function_folder_preserves_resource_meta() {
         .resource_meta(&ResourcePath::FunctionFolder {
             path: vec!["meta".to_string(), "dst".to_string()],
         })
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         shamir_types::access::Actor::User(77),

@@ -76,7 +76,7 @@ async fn chmod_then_enforced() {
     assert_eq!(result.records[0].get_value_i64("mode"), Some(448));
 
     // Verify the meta was actually written
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(7));
     assert_eq!(meta.mode, 0o700);
 
@@ -147,7 +147,7 @@ async fn group_grant_via_ddl() {
     .await;
 
     // Verify meta
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(10));
     assert_eq!(meta.group, Some(group_id));
     assert_eq!(meta.mode, 0o750);
@@ -199,7 +199,7 @@ async fn chown_changes_owner() {
     let table_path = ResourcePath::table("testdb", "main", "users");
 
     // Default owner is System
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.owner, Actor::System);
 
     // chown to User(42)
@@ -209,7 +209,7 @@ async fn chown_changes_owner() {
     )
     .await;
 
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(42));
 
     // chown again to User(99)
@@ -219,7 +219,7 @@ async fn chown_changes_owner() {
     )
     .await;
 
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(99));
 }
 
@@ -242,7 +242,7 @@ async fn chgrp_clears_group() {
     )
     .await;
 
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert_eq!(meta.group, Some(gid));
 
     // Clear the group
@@ -252,7 +252,7 @@ async fn chgrp_clears_group() {
     )
     .await;
 
-    let meta = shamir.resource_meta(&table_path).await;
+    let meta = shamir.resource_meta(&table_path).await.unwrap();
     assert!(meta.group.is_none());
 }
 
@@ -343,7 +343,7 @@ async fn chmod_database_resource() {
 
     exec_op(&shamir, ddl::chmod(ddl::res::database("testdb"), 0o700)).await;
 
-    let meta = shamir.resource_meta(&db_path).await;
+    let meta = shamir.resource_meta(&db_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(1));
     assert_eq!(meta.mode, 0o700);
 

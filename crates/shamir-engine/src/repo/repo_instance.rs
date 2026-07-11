@@ -322,6 +322,39 @@ impl RepoInstance {
         .cloned()
     }
 
+    /// Test-only fault-injection seam: force-overwrite the cached
+    /// `TableManager` for `table_name` with a caller-supplied instance
+    /// (e.g. one built via [`TableManager::create`] on a fault-injecting
+    /// `Store` double), so subsequent [`get_table`](Self::get_table) calls
+    /// on THIS repo instance (and any clone sharing the same `tables` map)
+    /// observe it. Used by `shamir-db`'s resource_meta fail-closed
+    /// regression test (audit #540) to make a real catalogue read return
+    /// `Err` without a large `BoxRepo`/`BoxRepoFactory` fault-injection
+    /// rewrite.
+    ///
+    /// Gated by the `test-util` feature (NOT plain `#[cfg(test)]`) because
+    /// the caller is a downstream crate's test (`shamir-db`) — a
+    /// `#[cfg(test)]` item is private to the crate being compiled in test
+    /// mode and would not exist when `shamir-engine` is pulled in as a
+    /// normal (non-test) dependency. Never compiled into a production
+    /// build: no default feature enables `test-util`.
+    ///
+    /// **Caveat for reuse**: this only overwrites the `tables` cache, NOT
+    /// `configs`. Safe when `table_name` is already registered in `configs`
+    /// (true for every existing caller — e.g. `SystemStore::init` registers
+    /// `"databases"` before this is ever called). Calling this with a
+    /// table name that is NOT already in `configs` would desync
+    /// `has_table`/`list_table_names`/`token_names` from `tables` — if a
+    /// future caller needs that, register the table via the normal config
+    /// path first.
+    #[cfg(feature = "test-util")]
+    pub fn install_table_for_test(&self, table_name: &str, tbl: TableManager) {
+        self.tables.insert(
+            table_name.to_string(),
+            Arc::new(OnceCell::new_with(Some(tbl))),
+        );
+    }
+
     async fn create_table_context(&self, table_name: &str) -> DbResult<TableManager> {
         let data_store: Arc<dyn Store> = self
             .repo

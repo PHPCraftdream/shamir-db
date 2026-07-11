@@ -35,7 +35,11 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &path, Action::Manage)
             .await
             .map_err(err_access)?;
-        let mut meta = self.shamir.resource_meta(&path).await;
+        let mut meta = self
+            .shamir
+            .resource_meta(&path)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         meta.mode = op.mode;
         self.shamir
             .set_resource_meta(&path, &meta)
@@ -72,7 +76,11 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &path, Action::Manage)
             .await
             .map_err(err_access)?;
-        let mut meta = self.shamir.resource_meta(&path).await;
+        let mut meta = self
+            .shamir
+            .resource_meta(&path)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         meta.owner = Actor::from_owner_id(op.owner);
         self.shamir
             .set_resource_meta(&path, &meta)
@@ -109,7 +117,11 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &path, Action::Manage)
             .await
             .map_err(err_access)?;
-        let mut meta = self.shamir.resource_meta(&path).await;
+        let mut meta = self
+            .shamir
+            .resource_meta(&path)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         meta.group = op.group;
         self.shamir
             .set_resource_meta(&path, &meta)

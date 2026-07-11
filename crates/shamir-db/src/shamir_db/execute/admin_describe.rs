@@ -173,7 +173,8 @@ impl ShamirAdminExecutor {
                 repo.clone(),
                 table.clone(),
             ))
-            .await;
+            .await
+            .map_err(|e| err(e.to_string()))?;
         let owner_qv = match &meta.owner {
             crate::access::Actor::System => QueryValue::Str("System".to_string()),
             crate::access::Actor::User(id) => QueryValue::Int(*id as i64),

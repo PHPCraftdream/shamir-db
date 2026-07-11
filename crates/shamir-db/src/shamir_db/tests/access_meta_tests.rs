@@ -22,7 +22,8 @@ async fn database_resource_meta_defaults_to_enforced() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     // create_db defaults to Actor::System; enforced default is owner-rwx 0o700.
     let enforced = ResourceMeta::owned_enforced(Actor::System);
     assert_eq!(meta.owner, enforced.owner);
@@ -39,7 +40,8 @@ async fn store_resource_meta_defaults_to_enforced() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::store("testdb", "data"))
-        .await;
+        .await
+        .unwrap();
     // add_repo defaults to Actor::System; enforced default is owner-rwx 0o700.
     let enforced = ResourceMeta::owned_enforced(Actor::System);
     assert_eq!(meta.owner, enforced.owner);
@@ -57,7 +59,8 @@ async fn table_resource_meta_defaults_to_enforced() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::table("testdb", "data", "users"))
-        .await;
+        .await
+        .unwrap();
     // add_repo defaults to Actor::System; inline tables inherit the enforced
     // owner-rwx 0o700 default (Strategy A).
     let enforced = ResourceMeta::owned_enforced(Actor::System);
@@ -87,7 +90,8 @@ async fn set_database_meta_round_trip() {
 
     let loaded = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(loaded.owner, Actor::User(42));
     assert_eq!(loaded.group, Some(7));
     assert_eq!(loaded.mode, 0o750);
@@ -112,7 +116,8 @@ async fn set_store_meta_round_trip() {
 
     let loaded = shamir
         .resource_meta(&ResourcePath::store("testdb", "data"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(loaded.owner, Actor::User(10));
     assert_eq!(loaded.group, Some(3));
     assert_eq!(loaded.mode, 0o770);
@@ -138,7 +143,8 @@ async fn set_table_meta_round_trip() {
 
     let loaded = shamir
         .resource_meta(&ResourcePath::table("testdb", "data", "users"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(loaded.owner, Actor::User(1));
     assert_eq!(loaded.group, Some(2));
     assert_eq!(loaded.mode, 0o644);
@@ -158,7 +164,10 @@ async fn set_function_namespace_meta_round_trip() {
         .await
         .unwrap();
 
-    let loaded = shamir.resource_meta(&ResourcePath::FunctionNamespace).await;
+    let loaded = shamir
+        .resource_meta(&ResourcePath::FunctionNamespace)
+        .await
+        .unwrap();
     assert_eq!(loaded.owner, Actor::User(5));
     assert_eq!(loaded.group, Some(10));
     assert_eq!(loaded.mode, 0o755);
@@ -188,7 +197,8 @@ async fn record_inherits_table_meta() {
 
     let rec_meta = shamir
         .resource_meta(&ResourcePath::record("testdb", "data", "users", "key1"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(rec_meta.owner, Actor::User(99));
     assert_eq!(rec_meta.group, Some(5));
     assert_eq!(rec_meta.mode, 0o600);
@@ -214,7 +224,8 @@ async fn index_inherits_table_meta() {
 
     let idx_meta = shamir
         .resource_meta(&ResourcePath::index("testdb", "data", "users", "email_idx"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(idx_meta.owner, Actor::User(77));
     assert_eq!(idx_meta.group, Some(3));
     assert_eq!(idx_meta.mode, 0o740);
@@ -227,7 +238,7 @@ async fn index_inherits_table_meta() {
 #[tokio::test]
 async fn root_meta_defaults_to_open() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let meta = shamir.resource_meta(&ResourcePath::Root).await;
+    let meta = shamir.resource_meta(&ResourcePath::Root).await.unwrap();
     assert_eq!(meta, ResourceMeta::open());
 }
 
@@ -236,7 +247,8 @@ async fn unknown_database_defaults_to_open() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let meta = shamir
         .resource_meta(&ResourcePath::database("nonexistent"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(meta, ResourceMeta::open());
 }
 
@@ -438,7 +450,8 @@ async fn rename_group_does_not_break_resource_group_ref() {
     // Stamp a database resource with group = gid, then rename the group.
     let mut meta = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     meta.group = Some(gid);
     shamir
         .set_resource_meta(&ResourcePath::database("testdb"), &meta)
@@ -453,7 +466,8 @@ async fn rename_group_does_not_break_resource_group_ref() {
     // The resource still references the same (immutable) group id.
     let after = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(after.group, Some(gid));
 }
 
@@ -506,14 +520,16 @@ async fn resource_meta_survives_reopen() {
 
     let db_meta = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(db_meta.owner, Actor::User(42));
     assert_eq!(db_meta.group, Some(7));
     assert_eq!(db_meta.mode, 0o750);
 
     let tbl_meta = shamir
         .resource_meta(&ResourcePath::table("testdb", "data", "users"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(tbl_meta.owner, Actor::User(42));
     assert_eq!(tbl_meta.group, Some(7));
     assert_eq!(tbl_meta.mode, 0o750);
@@ -562,7 +578,8 @@ async fn mode_helpers_on_real_meta() {
 
     let loaded = shamir
         .resource_meta(&ResourcePath::database("testdb"))
-        .await;
+        .await
+        .unwrap();
     assert!(Mode::is_setuid(loaded.mode));
     assert!(Mode::is_set(
         loaded.mode,
@@ -595,4 +612,196 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .expect("system store still locked after retries")
+}
+
+// ============================================================================
+// Audit #540 — resource_meta / authorize_access fail-CLOSED on a real
+// catalogue-read error (not fail-open into ResourceMeta::default()==open()).
+//
+// A `Store` fault double armed to fail every read is spliced into the
+// SYSTEM_REPO's "databases" TableManager via
+// `RepoInstance::install_table_for_test` (a #[cfg(test)]-only seam added
+// alongside this fix — see `shamir-engine`'s `repo_instance.rs`). This lets
+// the test force `system_store.load_database` to return a REAL `Err`
+// (not `Ok(None)`) through the exact same code path `resource_meta` uses,
+// without a large `BoxRepo`/`BoxRepoFactory` fault-injection rewrite.
+// ============================================================================
+
+/// Fault-injecting `Store` double: wraps an in-memory store and, once
+/// armed, fails every read (`get`, `get_many`, `iter_stream`,
+/// `scan_prefix_stream`) with a `DbError::Storage` — simulating a real
+/// catalogue-page-corruption / I/O failure rather than "record absent".
+mod failing_store {
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use shamir_storage::error::{DbError, DbResult};
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::{KvOp, RecordKey, Store};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use futures::stream::Stream;
+
+    pub struct FailingStore {
+        inner: InMemoryStore,
+        pub armed: AtomicBool,
+    }
+
+    impl FailingStore {
+        pub fn new() -> Self {
+            Self {
+                inner: InMemoryStore::new(),
+                armed: AtomicBool::new(false),
+            }
+        }
+
+        fn injected_error() -> DbError {
+            DbError::Storage("injected I/O fault (audit #540 regression test)".into())
+        }
+
+        fn check(&self) -> DbResult<()> {
+            if self.armed.load(Ordering::SeqCst) {
+                Err(Self::injected_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Store for FailingStore {
+        async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+            self.inner.insert(value).await
+        }
+
+        async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+            self.inner.set(key, value).await
+        }
+
+        async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+            self.check()?;
+            self.inner.get(key).await
+        }
+
+        async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+            self.check()?;
+            self.inner.get_many(keys).await
+        }
+
+        async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+            self.inner.remove(key).await
+        }
+
+        async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+            self.inner.transact(ops).await
+        }
+
+        fn iter_stream(
+            &self,
+            batch_size: usize,
+        ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+            if self.armed.load(Ordering::SeqCst) {
+                let err = Self::injected_error();
+                return Box::pin(futures::stream::once(async move { Err(err) }));
+            }
+            self.inner.iter_stream(batch_size)
+        }
+
+        fn scan_prefix_stream(
+            &self,
+            prefix: Bytes,
+            batch_size: usize,
+        ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+            if self.armed.load(Ordering::SeqCst) {
+                let err = Self::injected_error();
+                return Box::pin(futures::stream::once(async move { Err(err) }));
+            }
+            self.inner.scan_prefix_stream(prefix, batch_size)
+        }
+    }
+}
+
+/// Build a `ShamirDb` whose SYSTEM_REPO "databases" table is backed by a
+/// `FailingStore`, returning the `ShamirDb` plus a handle to arm/disarm the
+/// injected fault. The table starts unarmed so normal catalogue writes
+/// (`create_db`) succeed; the test arms the fault right before the
+/// `resource_meta`/`authorize_access` call under test.
+async fn shamir_with_failing_databases_table(
+) -> (ShamirDb, std::sync::Arc<failing_store::FailingStore>) {
+    use crate::engine::table::TableManager;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let data_store = std::sync::Arc::new(failing_store::FailingStore::new());
+    let info_store: std::sync::Arc<dyn shamir_storage::types::Store> =
+        std::sync::Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
+    let tbl = TableManager::create(
+        "databases".to_string(),
+        data_store.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
+        info_store,
+    )
+    .await
+    .unwrap();
+
+    let system_repo = shamir.system_store().system_repo().unwrap();
+    system_repo.install_table_for_test("databases", tbl);
+
+    (shamir, data_store)
+}
+
+#[tokio::test]
+async fn resource_meta_fails_closed_on_storage_error() {
+    let (shamir, fault) = shamir_with_failing_databases_table().await;
+    shamir.create_db("testdb").await;
+
+    // Sanity: unarmed, the normal round-trip still works (Ok(Some(..))).
+    let meta = shamir
+        .resource_meta(&ResourcePath::database("testdb"))
+        .await
+        .unwrap();
+    assert_eq!(meta.owner, Actor::System);
+
+    // Arm the fault: the next catalogue read returns a REAL Err, not
+    // Ok(None). resource_meta must propagate it, NOT collapse it into
+    // ResourceMeta::default() (owner=System, mode 0o777).
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = shamir
+        .resource_meta(&ResourcePath::database("testdb"))
+        .await;
+    assert!(
+        result.is_err(),
+        "resource_meta must propagate a real storage error as Err, \
+         not fail-open into a default-open ResourceMeta"
+    );
+}
+
+#[tokio::test]
+async fn authorize_access_denies_when_resource_meta_errors() {
+    let (shamir, fault) = shamir_with_failing_databases_table().await;
+    shamir.create_db("testdb").await;
+
+    // Under the OLD fail-open code, a database whose meta read errors would
+    // collapse to ResourceMeta::default() == open() (owner=System,
+    // mode 0o777) — any Actor::User would then be PERMITTED Read via the
+    // Other-rwx bits. Confirm the actor is a non-owner (User(999) is not
+    // System, and default owner is System) so a fail-open bug would show
+    // up as `Ok(())` here.
+    let actor = Actor::User(999);
+
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = shamir
+        .authorize_access(
+            &actor,
+            &ResourcePath::database("testdb"),
+            crate::access::Action::Read,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "authorize_access must deny (Err) when resource_meta fails with a \
+         real storage error — a fail-open bug would return Ok(()) here \
+         because the old default-open ResourceMeta permits every actor"
+    );
 }

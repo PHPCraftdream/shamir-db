@@ -41,7 +41,8 @@ async fn owner_on_create_db_user_actor() {
     // Read back the owner from the catalogue via resource_meta.
     let meta = shamir
         .resource_meta(&ResourcePath::database("owned_db"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::User(42),
@@ -61,7 +62,8 @@ async fn owner_on_create_db_system_actor() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::database("sys_db"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::System,
@@ -99,7 +101,8 @@ async fn owner_on_create_repo_user_actor() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::store("testdb", "user_repo"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::User(99),
@@ -141,7 +144,8 @@ async fn owner_on_create_table_user_actor() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::table("testdb", "main", "owned_table"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::User(7),
@@ -182,7 +186,8 @@ async fn owner_on_create_function_user_actor() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::function("user_fn"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::User(13),
@@ -210,7 +215,8 @@ async fn owner_on_create_function_system_stays_system() {
 
     let meta = shamir
         .resource_meta(&ResourcePath::function("sys_fn"))
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         meta.owner,
         Actor::System,
