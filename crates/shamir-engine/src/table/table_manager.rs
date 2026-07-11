@@ -558,15 +558,20 @@ impl TableManager {
     /// create path makes under the lock. Tables with neither condition keep
     /// the lock-free fast path.
     ///
-    /// Consulted ONLY by the non-tx writer methods in `table_manager_crud.rs`
+    /// Consulted by the non-tx writer methods in `table_manager_crud.rs`
     /// (`insert`/`insert_many_returning_version`/`delete_returning_version`/
-    /// `set`) — the tx-commit path (`execute_*_tx` → the commit pipeline)
-    /// does NOT check this predicate, so an in-flight `create_index_v2` does
-    /// NOT yet serialize against real client DML (which always goes through
-    /// a tx, implicit or interactive). See `TableManager::backfill_index2_backend`'s
-    /// doc comment for the full accounting of what #534's fix does and does
-    /// not close.
-    pub(super) fn needs_write_barrier(&self) -> bool {
+    /// `set`), AND (task #538, Part A) by the tx-commit pipeline's Phase 2.5
+    /// prelock (`tx::pre_commit::pre_commit_prelock`), which now acquires
+    /// `unique_write_lock` for every table this tx wrote to that returns
+    /// `true` here — not just tables with legacy unique guards. This closes
+    /// the commit-time serialization gap for an index2-only table (no legacy
+    /// unique index) under an in-flight `create_index_v2`. It does NOT close
+    /// #538's Part B (stage-time index2 ops-plan staleness against a
+    /// create that starts/finishes entirely between this tx's stage and
+    /// commit) — see `TableManager::backfill_index2_backend`'s doc comment
+    /// for the full accounting of what #534 and #538 each close and leave
+    /// open.
+    pub(crate) fn needs_write_barrier(&self) -> bool {
         self.index_manager.has_unique_indexes()
             || self
                 .index2_create_barrier

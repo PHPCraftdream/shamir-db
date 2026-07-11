@@ -144,8 +144,10 @@ pub(super) struct PreLockResult {
 /// Performs:
 /// - Phase 1: interner overlay merge + remap (CAS-safe on DashMap).
 /// - Phase 2.5: acquire per-table `unique_write_lock` guards in sorted
-///   token order. These serialise against non-tx unique writers and against
-///   other committers touching the same unique-constrained tables.
+///   token order, for every table with a unique guard OR (#538 Part A) an
+///   in-flight `create_index_v2` barrier (`needs_write_barrier()`). These
+///   serialise against non-tx unique/barriered writers and against other
+///   committers touching the same table.
 /// - Phase 2.6: authoritative unique re-validation under the uwl_guards.
 ///   Decisive because the uwl_guard excludes both non-tx writers and other
 ///   committers for the same table (they block on the same guard). The guard
@@ -263,8 +265,8 @@ pub(super) async fn pre_commit_prelock(
         }
     }
 
-    // Phase 2.5 (HIGH-A): acquire each unique table's `unique_write_lock`
-    // and HOLD it across Phase 2.6 → 5c.
+    // Phase 2.5 (HIGH-A, extended by #538 Part A): acquire each barriered
+    // table's `unique_write_lock` and HOLD it across Phase 2.6 → 5c.
     //
     // The problem this closes: non-tx `insert` / `set` / `delete` take a
     // DIFFERENT mutex — the per-table `unique_write_lock` — and never touch
@@ -281,11 +283,56 @@ pub(super) async fn pre_commit_prelock(
     // the guard — at that point the loser's Phase 2.6 re-check sees the
     // winner's posting and correctly detects the conflict.
     //
+    // #538 Part A: the token set was originally built ONLY from
+    // `tx.unique_guards` (tables with a legacy UNIQUE index) — an
+    // index2-only table (fts/functional/vector, no legacy unique index)
+    // contributed nothing, so this tx's Phase 5a/5c could freely interleave
+    // with a concurrent `create_index_v2`'s backfill on that table (the same
+    // lost-write window #534 closed for the non-tx path, left open here).
+    // Fixed by additionally scanning every table this tx actually staged a
+    // write to (`tx.write_set` keys) and including its token whenever
+    // `TableManager::needs_write_barrier()` is `true` — which is exactly the
+    // predicate the non-tx writer methods gate on, so a table with an
+    // in-flight `create_index_v2` (index2_create_barrier up) now serializes
+    // its tx-commit materialization against that create too, via the SAME
+    // `unique_write_lock` `create_index_v2` holds for its full backfill
+    // duration. This does NOT close #538's Part B: the index2 ops-PLAN
+    // (`tx.index_write_set`) was already captured at STAGE time against an
+    // `all_backends()` snapshot, well before this prelock runs — see
+    // `TableManager::backfill_index2_backend`'s doc comment for the full
+    // accounting.
+    //
+    // `table_by_token_if_live` (NOT `table_by_token`) resolves the table
+    // WITHOUT forcing lazy instantiation: a table that was `add_table`d but
+    // never actually accessed via `get_table` stays dormant. This matters —
+    // instantiating a `TableManager` as a side effect of merely checking a
+    // barrier flag would register it in `per_table_mvcc`, changing
+    // `apply_data_batch`'s routing for that table from the direct-store
+    // fallback to MVCC-routed, a behavior change this check must not cause.
+    // It is also correct: `needs_write_barrier()` can only be `true` on an
+    // instance that was actually created (no code path can flip
+    // `index2_create_barrier` or register a legacy unique index without
+    // first holding a live `TableManager`), so a dormant table is
+    // equivalent to "no barrier" for this purpose.
+    //
     // We use `lock_owned()` so the guards can be collected into a `Vec`
     // without borrow-lifetime entanglement (each `OwnedMutexGuard` owns its
-    // `Arc<Mutex<()>>`). Tables without unique guards are untouched — the
-    // non-unique commit path keeps the lock-free fast path.
+    // `Arc<Mutex<()>>`). Tables needing neither a unique guard nor the
+    // index2-create barrier are untouched — the lock-free fast path is
+    // preserved for them.
     let mut unique_tokens: Vec<u64> = tx.unique_guards.iter().map(|g| g.table_token).collect();
+    for table_id in tx.write_set.keys() {
+        if let Some(tbl) = repo.table_by_token_if_live(*table_id).await {
+            if tbl.needs_write_barrier() {
+                unique_tokens.push(*table_id);
+            }
+        }
+    }
+    // Sorted + deduped BEFORE any lock is taken — this is the ABBA-freedom
+    // invariant the module doc above documents: two committers touching
+    // overlapping barriered tables always acquire the guards in the same
+    // token order, so no ordering cycle is possible regardless of which
+    // source (unique_guards vs. write_set-barrier) contributed the token.
     unique_tokens.sort_unstable();
     unique_tokens.dedup();
     let mut uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>> =

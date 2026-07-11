@@ -1153,6 +1153,38 @@ impl RepoInstance {
         }
     }
 
+    /// Non-instantiating peek: like [`table_by_token`](Self::table_by_token),
+    /// but returns `None` (rather than lazily creating and returning) for a
+    /// table that is registered (`add_table` was called) but has never been
+    /// touched via [`get_table`](Self::get_table) — the `OnceCell` is still
+    /// dormant.
+    ///
+    /// #538 Part A: `pre_commit_prelock`'s Phase 2.5 uses this instead of
+    /// `table_by_token` to check `needs_write_barrier()` for every table in
+    /// `tx.write_set`, specifically so that check-only lookup does NOT force
+    /// lazy table instantiation as a side effect. This matters because
+    /// instantiating a `TableManager` registers it in `per_table_mvcc`,
+    /// which flips `apply_data_batch`'s routing for that table's data writes
+    /// from the direct-store fallback to MVCC-routed — a behavior change
+    /// nothing in `pre_commit_prelock` should trigger merely by CHECKING a
+    /// barrier flag. Correctness is preserved: `needs_write_barrier()` can
+    /// only ever be `true` on an instance that was actually created — no
+    /// code path can flip `index2_create_barrier` or register a legacy
+    /// unique index without first holding a live `TableManager` (`get_table`
+    /// must have run at least once for a `create_index_v2` /
+    /// `create_unique_index` to even be callable) — so a dormant `OnceCell`
+    /// can only ever mean "this table has no in-flight barrier", making
+    /// `None` here exactly equivalent to "table needs no barrier" for this
+    /// check's purposes.
+    pub(crate) async fn table_by_token_if_live(&self, token: u64) -> Option<TableManager> {
+        let name = self
+            .token_names
+            .read_async(&token, |_, name| name.clone())
+            .await?;
+        let cell = self.tables.get(&name).map(|entry| Arc::clone(entry.value()))?;
+        cell.get().cloned()
+    }
+
     /// cancel-safe: NO — delegates to `recover_inflight_v2` which iterates
     /// entries and replays each one then removes its WAL marker. Mid-
     /// flight cancellation leaves the recovery sequence partially applied;
