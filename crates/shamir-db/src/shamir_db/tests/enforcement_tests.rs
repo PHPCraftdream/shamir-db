@@ -651,3 +651,132 @@ async fn effective_fn_actor_invoker_with_setuid_legacy_escalates() {
         "invoker + legacy setuid bit must still escalate (backward compat)"
     );
 }
+
+// ============================================================================
+// #541 — missing `owner` field on a present record must not escalate
+// ============================================================================
+//
+// `ResourceMeta::from_record` defaults a MISSING `owner` field to
+// `Actor::System` — correct for every other caller of `from_record`, but
+// wrong for `effective_fn_actor`'s escalation decision: a Definer (or
+// Invoker+setuid) function whose record loads but lacks an `owner` field
+// must NOT silently escalate the caller to System.
+
+/// Test helper: persist a function catalogue entry via
+/// `save_function_meta_record` (the raw-record seam, bypassing
+/// `ResourceMeta::inject_into`) so the resulting record can omit the
+/// `owner` field entirely — modeling a legacy or partially-written
+/// catalogue row. `mode`/`group` are still injected explicitly since the
+/// fix under test only concerns the `owner` field.
+async fn make_fn_without_owner_field(
+    shamir: &ShamirDb,
+    name: &str,
+    setuid: bool,
+    security: shamir_engine::function::Security,
+) {
+    use base64::Engine;
+    use shamir_types::types::common::new_map;
+    use shamir_types::types::value::QueryValue;
+
+    let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(b"\x00asm\x01\x00\x00\x00");
+    let mut fn_rec_map = new_map();
+    fn_rec_map.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fn_rec_map.insert("wasm_b64".to_string(), QueryValue::Str(wasm_b64));
+    // Deliberately NO "owner" key — models a legacy/corrupted record.
+    fn_rec_map.insert("group".to_string(), QueryValue::Null);
+    let mode = if setuid {
+        Mode::with_setuid(0o755, true)
+    } else {
+        0o755
+    };
+    fn_rec_map.insert("mode".to_string(), QueryValue::Int(mode as i64));
+    let mut fn_rec = QueryValue::Map(fn_rec_map);
+    shamir_engine::function::FunctionMeta::new(
+        shamir_engine::function::Visibility::Private,
+        security,
+        Vec::new(),
+    )
+    .inject_into(&mut fn_rec);
+
+    shamir
+        .system_store()
+        .save_function_meta_record(name, &fn_rec)
+        .await
+        .unwrap();
+}
+
+/// RED before the fix / GREEN after: a `Security::Definer` function whose
+/// record loads but has NO `owner` field must return the ORIGINAL CALLER,
+/// never `Actor::System` via `ResourceMeta::from_record`'s default.
+#[tokio::test]
+async fn effective_fn_actor_definer_missing_owner_returns_caller_not_system() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(42);
+
+    make_fn_without_owner_field(&shamir, "definer_no_owner_fn", false, Security::Definer).await;
+
+    let effective = shamir
+        .effective_fn_actor("definer_no_owner_fn", &caller)
+        .await;
+    assert_eq!(
+        effective, caller,
+        "missing owner field on a Definer function must fail closed to the caller"
+    );
+    assert_ne!(
+        effective,
+        Actor::System,
+        "must never escalate to System via from_record's default-open owner"
+    );
+}
+
+/// Same gap, `Invoker` + legacy setuid bit arm: a record with no `owner`
+/// field must not escalate even though the setuid bit is set.
+#[tokio::test]
+async fn effective_fn_actor_invoker_setuid_missing_owner_returns_caller_not_system() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(43);
+
+    make_fn_without_owner_field(&shamir, "invoker_suid_no_owner_fn", true, Security::Invoker)
+        .await;
+
+    let effective = shamir
+        .effective_fn_actor("invoker_suid_no_owner_fn", &caller)
+        .await;
+    assert_eq!(
+        effective, caller,
+        "missing owner field on an Invoker+setuid function must fail closed to the caller"
+    );
+    assert_ne!(
+        effective,
+        Actor::System,
+        "must never escalate to System via from_record's default-open owner"
+    );
+}
+
+/// Sibling test: a function record that DOES carry an explicit
+/// `owner: 0` (System) field must still legitimately escalate Definer
+/// callers to System — proving the fix distinguishes "explicitly System"
+/// from "absent", rather than failing closed on System ownership too.
+#[tokio::test]
+async fn effective_fn_actor_definer_explicit_system_owner_still_escalates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(44);
+
+    make_fn_with_security(
+        &shamir,
+        "definer_explicit_system_fn",
+        Actor::System,
+        false,
+        Security::Definer,
+    )
+    .await;
+
+    let effective = shamir
+        .effective_fn_actor("definer_explicit_system_fn", &caller)
+        .await;
+    assert_eq!(
+        effective,
+        Actor::System,
+        "an explicit owner=System field on a Definer function must still escalate"
+    );
+}

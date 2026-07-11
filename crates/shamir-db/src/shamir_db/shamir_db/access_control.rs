@@ -530,10 +530,21 @@ impl ShamirDb {
     /// # Fail-closed guarantee
     ///
     /// Privilege escalation only happens when the function record is
-    /// **definitively loaded** from the catalogue with a real (non-default)
-    /// owner stored. On any error or not-found the caller is returned
-    /// unchanged — never `Actor::System` via a `ResourceMeta::open()`
-    /// default.
+    /// **definitively loaded** from the catalogue AND carries an explicit,
+    /// present `owner` field. The caller is returned unchanged — never
+    /// `Actor::System` via a `ResourceMeta`/`from_record` default — in
+    /// EITHER of two cases:
+    ///
+    /// - the record itself is absent, or the load errors (`load_function`
+    ///   returns anything other than `Ok(Some(_))`); or
+    /// - the record loads but its `owner` field is missing (a legacy
+    ///   record predating the field, or a partially-written/corrupted
+    ///   one) — `ResourceMeta::from_record`'s `unwrap_or(Actor::System)`
+    ///   default is deliberately correct for every OTHER caller (DDL
+    ///   introspection, `access_tree`, `resource_meta`) but would silently
+    ///   escalate here, so escalation reads the owner via
+    ///   [`ResourceMeta::owner_field`] instead, which distinguishes
+    ///   "absent" (`None`) from "explicitly System" (`Some(Actor::System)`).
     pub async fn effective_fn_actor(&self, fn_name: &str, caller: &Actor) -> Actor {
         // Load the raw function record directly so we can distinguish
         // "record found" from "error / not present" (the latter must not
@@ -543,15 +554,19 @@ impl ShamirDb {
         };
         let res_meta = ResourceMeta::from_record(&rec);
         let fn_meta = FunctionMeta::from_record(&rec);
+        // Fail-closed owner lookup for escalation: `None` (owner field
+        // absent) must resolve to the caller, never to
+        // `from_record`'s System default. See the doc comment above.
+        let escalated_owner = || ResourceMeta::owner_field(&rec).unwrap_or_else(|| caller.clone());
         match fn_meta.security {
             // Explicit definer request → always run as the function owner,
             // irrespective of the legacy POSIX setuid mode bit.
-            Security::Definer => res_meta.owner,
+            Security::Definer => escalated_owner(),
             // Explicit (or defaulted) invoker: honour the legacy setuid
             // bit for backward compatibility — see the doc note above.
             Security::Invoker => {
                 if Mode::is_setuid(res_meta.mode) {
-                    res_meta.owner
+                    escalated_owner()
                 } else {
                     caller.clone()
                 }
