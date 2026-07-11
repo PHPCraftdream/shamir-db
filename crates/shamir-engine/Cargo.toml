@@ -70,6 +70,14 @@ all-backends = ["fjall"]
 # bounded.
 fts_indexed_long = []
 fjall  = ["shamir-storage/fjall"]
+# Exposes test-only fault-injection seams (currently
+# `RepoInstance::install_table_for_test`) to downstream crates whose OWN
+# tests need them — a plain `#[cfg(test)]` item is private to whichever
+# crate is being compiled in test mode and would not exist when
+# shamir-engine is pulled in as a normal dependency. Enabled by
+# `shamir-db`'s `[dev-dependencies]` (audit #540 regression test); never
+# enabled by default, so nothing ships in a production build.
+test-util = []
 
 [target.'cfg(unix)'.dev-dependencies]
 dhat = "0.3"

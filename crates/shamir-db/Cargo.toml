@@ -75,6 +75,10 @@ captrack = { workspace = true }
 bytes       = "1"
 tempfile    = "3.10.1"
 serial_test = "3.3.1"
+futures     = "0.3"            # audit #540 fault-injecting Store test double (iter_stream/scan_prefix_stream Stream impl)
+# Unifies in the `test-util` feature so `RepoInstance::install_table_for_test`
+# (audit #540 fault-injection seam) exists when shamir-db's own tests compile.
+shamir-engine = { path = "../shamir-engine", default-features = false, features = ["test-util"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
 wat         = "1.226"
 shamir-query-builder = { path = "../shamir-query-builder" }
