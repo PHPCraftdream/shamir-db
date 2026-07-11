@@ -220,6 +220,107 @@ async fn lookup_first_k_in_value_order() {
     assert_eq!(got, expected_ids);
 }
 
+// ── task #537: record-id tie-breaker on lookup_range_first_k_page ──────────
+
+/// Build a RecordId whose 16 bytes are all `b` — gives a deterministic,
+/// controllable byte ordering for tie-breaker tests (unlike time-based ids).
+fn rid_byte(b: u8) -> RecordId {
+    RecordId([b; 16])
+}
+
+/// ASC first page WITH a tie-breaker: rows tied on the seek value are skipped
+/// ONLY when their record_id is `<= after_id`; ties strictly past it are
+/// returned. Without a tie-breaker (`after_id = None`) ALL ties are skipped
+/// (backward-compatible behavior). This is the core #537 index-layer fix.
+#[tokio::test]
+async fn lookup_range_first_k_page_asc_tiebreaker_skips_only_up_to_id() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+
+    // Three rows tied at value 20 with controlled ascending ids, plus a 30.
+    let id20_a = rid_byte(0x10);
+    let id20_b = rid_byte(0x20);
+    let id20_c = rid_byte(0x30);
+    let id30 = rid_byte(0x40);
+    for (id, score) in [
+        (id20_a, 20i64),
+        (id20_b, 20),
+        (id20_c, 20),
+        (id30, 30),
+    ] {
+        mgr.on_record_created(&id, &record_with_int(201, score), 1)
+            .await
+            .unwrap();
+    }
+
+    let seek = enc_i64(20);
+
+    // No tie-breaker → skip ALL three 20s (today's behavior); only 30 left.
+    let (ids, _) = mgr
+        .lookup_range_first_k_page(101, &seek, None, None, 10, true)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![id30], "no tie-breaker must skip all ties");
+
+    // Tie-breaker = id20_b → skip 20a, 20b (<= b); return 20c then 30.
+    let (ids, _) = mgr
+        .lookup_range_first_k_page(101, &seek, None, Some(&id20_b), 10, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids,
+        vec![id20_c, id30],
+        "tie-breaker must return only ties strictly past after_id"
+    );
+}
+
+/// DESC mirror: ties skipped only when record_id `>= after_id`; ties strictly
+/// below it (walking high→low) are returned.
+#[tokio::test]
+async fn lookup_range_first_k_page_desc_tiebreaker_skips_only_from_id() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+
+    let id20_a = rid_byte(0x10);
+    let id20_b = rid_byte(0x20);
+    let id20_c = rid_byte(0x30);
+    let id10 = rid_byte(0x05);
+    for (id, score) in [
+        (id20_a, 20i64),
+        (id20_b, 20),
+        (id20_c, 20),
+        (id10, 10),
+    ] {
+        mgr.on_record_created(&id, &record_with_int(201, score), 1)
+            .await
+            .unwrap();
+    }
+
+    let seek = enc_i64(20);
+
+    // No tie-breaker → skip all three 20s; only 10 remains (DESC).
+    let (ids, _) = mgr
+        .lookup_range_first_k_page(101, &seek, None, None, 10, false)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![id10], "no tie-breaker must skip all ties (DESC)");
+
+    // Tie-breaker = id20_b → skip 20c, 20b (>= b); return 20a then 10 (DESC).
+    let (ids, _) = mgr
+        .lookup_range_first_k_page(101, &seek, None, Some(&id20_b), 10, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids,
+        vec![id20_a, id10],
+        "DESC tie-breaker must return only ties strictly below after_id"
+    );
+}
+
 #[tokio::test]
 async fn lookup_first_k_zero_returns_empty() {
     let (_, mgr) = fresh_mgr().await;

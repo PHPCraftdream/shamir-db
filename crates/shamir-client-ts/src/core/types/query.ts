@@ -110,11 +110,16 @@ export interface OrderBy {
  * `offset` is `#[serde(default)]` without skip → always present.
  * `After` is keyset/seek pagination: `key` is always present (an array
  * of {@link WireValue}); `limit` is skip-if-none → omitted when unset.
+ * `after_id` (task #537) is an optional record-id tie-breaker — the base58
+ * `_id` string of the last row the client received on the previous page.
+ * When present, the server resumes STRICTLY past that specific row, so rows
+ * tied on the same ORDER BY value across a page boundary are not silently
+ * dropped. Omitted (the default) → today's backward-compatible behavior.
  */
 export type Pagination =
   | { mode: 'LimitOffset'; limit?: number; offset: number }
   | { mode: 'Page'; page: number; page_size: number }
-  | { mode: 'After'; key: WireValue[]; limit?: number };
+  | { mode: 'After'; key: WireValue[]; limit?: number; after_id?: string };
 
 // ── Temporal ─────────────────────────────────────────────────────────
 

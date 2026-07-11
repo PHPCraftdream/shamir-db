@@ -695,8 +695,9 @@ impl SortedIndexManager {
         // First page only; the continuation cursor is discarded. Callers
         // that must survive stale index entries (dead postings whose record
         // body is gone) use `lookup_range_first_k_page` to resume the walk.
+        // No tie-breaker (`after_id = None`) → today's skip-all-ties behavior.
         let (ids, _cursor) = self
-            .lookup_range_first_k_page(name_interned, seek_encoded, None, k, forward)
+            .lookup_range_first_k_page(name_interned, seek_encoded, None, None, k, forward)
             .await?;
         Ok(ids)
     }
@@ -719,15 +720,43 @@ impl SortedIndexManager {
     ///   physical key returned as the previous page's cursor, so already-seen
     ///   entries are never re-emitted.
     ///
+    /// `after_id` (task #537 — the record-id tie-breaker):
+    /// * `None` → the boundary rows (value == `seek_encoded`) are ALL skipped —
+    ///   today's exact, backward-compatible behavior. Correct only for the one
+    ///   row that established the boundary; every OTHER row tied on the same
+    ///   ORDER BY value is silently dropped (the pre-existing #537 limitation
+    ///   an old client — one that doesn't echo a tie-breaker — still gets).
+    /// * `Some(id)` → the physical `(value, record_id)` order is used to skip
+    ///   ONLY the rows at the boundary value that are not-strictly-past `id`:
+    ///   for ASC, value == seek AND record_id <= id; for DESC, value == seek
+    ///   AND record_id >= id. Rows tied on the seek value but strictly past the
+    ///   client's last-seen id are RETURNED, so no tied row is ever lost.
+    ///
+    /// Note: the caller (`TableManager::read_keyset_seek`) passes the SAME
+    /// `after_id` on every internal-loop call this function drives across a
+    /// single client request (e.g. when a stale posting forces another
+    /// `after_key`-cursored page). This is safe and necessary: `after_id`
+    /// only ever affects rows whose encoded value still equals
+    /// `seek_encoded` — once `after_key` has moved the walk past the tied
+    /// value, `key_value_slice(kb) == seek_encoded` is false and the
+    /// boundary check never fires, so `after_id` is a no-op for those rows.
+    /// Dropping `after_id` to `None` on continuation calls (an earlier,
+    /// buggy version of the caller) made every remaining boundary-value row
+    /// unconditionally skipped, silently losing tied rows sitting behind a
+    /// stale posting on the SAME request — an adversarial review caught
+    /// this empirically before it shipped.
+    ///
     /// This keeps the index layer purely about ordered physical traversal:
     /// liveness (fetching record bodies, dropping dead ids) lives entirely in
     /// the engine's read path, which loops here until it has `limit` LIVE rows
     /// or this method reports the range exhausted (`cursor == None`).
+    #[allow(clippy::too_many_arguments)] // ordered-traversal cursor + tie-breaker params
     pub async fn lookup_range_first_k_page(
         &self,
         name_interned: u64,
         seek_encoded: &[u8],
         after_key: Option<&[u8]>,
+        after_id: Option<&RecordId>,
         k: usize,
         forward: bool,
     ) -> DbResult<(Vec<RecordId>, Option<Bytes>)> {
@@ -781,7 +810,12 @@ impl SortedIndexManager {
                             continue;
                         }
                     }
-                    if key_value_slice(kb, value_start) == seek_encoded {
+                    // Boundary-value skip (task #537): with a tie-breaker,
+                    // skip only the tied rows not-strictly-past `after_id`
+                    // (ASC: record_id <= after_id); without one, skip all.
+                    if key_value_slice(kb, value_start) == seek_encoded
+                        && skip_boundary_row(kb, after_id, true)
+                    {
                         continue;
                     }
                     if let Some(id) = decode_record_id_suffix(kb) {
@@ -807,7 +841,12 @@ impl SortedIndexManager {
                             continue;
                         }
                     }
-                    if key_value_slice(kb, value_start) == seek_encoded {
+                    // Boundary-value skip (task #537), DESC direction: skip
+                    // only tied rows not-strictly-before `after_id`
+                    // (record_id >= after_id); without one, skip all.
+                    if key_value_slice(kb, value_start) == seek_encoded
+                        && skip_boundary_row(kb, after_id, false)
+                    {
                         continue;
                     }
                     if let Some(id) = decode_record_id_suffix(kb) {
@@ -1294,6 +1333,38 @@ fn key_value_slice(key_bytes: &[u8], value_start: usize) -> &[u8] {
         return &[];
     }
     &key_bytes[value_start..key_bytes.len() - 16]
+}
+
+/// Decide whether a boundary-value physical entry (one whose encoded value
+/// equals the seek value) must be SKIPPED, given the optional record-id
+/// tie-breaker `after_id` (task #537).
+///
+/// * `after_id == None` → skip every boundary row (today's backward-compatible
+///   skip-all-ties behavior — an old client that sent no tie-breaker).
+/// * `after_id == Some(a)`, `forward == true` (ASC) → skip only rows whose
+///   record_id is `<= a` (already seen / the boundary row itself). Rows tied
+///   on the seek value with `record_id > a` are RETURNED.
+/// * `after_id == Some(a)`, `forward == false` (DESC) → skip only rows whose
+///   record_id is `>= a`. Rows tied on the seek value with `record_id < a`
+///   are RETURNED.
+///
+/// A key whose record-id suffix can't be decoded is skipped (malformed).
+fn skip_boundary_row(key_bytes: &[u8], after_id: Option<&RecordId>, forward: bool) -> bool {
+    match after_id {
+        None => true,
+        Some(a) => match decode_record_id_suffix(key_bytes) {
+            Some(rid) => {
+                if forward {
+                    // ASC: strictly past means record_id > a; skip otherwise.
+                    rid <= *a
+                } else {
+                    // DESC: strictly past means record_id < a; skip otherwise.
+                    rid >= *a
+                }
+            }
+            None => true,
+        },
+    }
 }
 
 fn decode_record_id_suffix(key_bytes: &[u8]) -> Option<RecordId> {

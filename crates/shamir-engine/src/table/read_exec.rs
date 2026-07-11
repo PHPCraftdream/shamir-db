@@ -556,7 +556,7 @@ impl TableManager {
         // Checked BEFORE #6 because `Pagination::After` also resolves to
         // a finite (skip=0, take=limit) pair — without this ordering the
         // generic ORDER BY + LIMIT path would shadow the seek.
-        if let Some((idx_name, encoded_key, limit, direction)) =
+        if let Some((idx_name, encoded_key, after_id, limit, direction)) =
             self.try_plan_keyset_seek(query, interner)
         {
             return self
@@ -566,6 +566,7 @@ impl TableManager {
                     interner,
                     idx_name,
                     &encoded_key,
+                    after_id.as_ref(),
                     limit,
                     direction,
                     start,
@@ -1943,7 +1944,7 @@ impl TableManager {
         }
 
         // 4. Keyset seek.
-        if let Some((idx_name, _encoded_key, _limit, _direction)) =
+        if let Some((idx_name, _encoded_key, _after_id, _limit, _direction)) =
             self.try_plan_keyset_seek(query, interner)
         {
             return ExplainPlan {

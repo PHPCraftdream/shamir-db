@@ -62,6 +62,25 @@ fn scores_in_order(result: &crate::query::read::QueryResult) -> Vec<i64> {
         .collect()
 }
 
+/// Extract each returned row's `_id` (task #537 tie-breaker channel) as a
+/// parsed `RecordId`, simulating the real client flow: the server serializes
+/// the row (injecting `_id` via the `InsertedRecord` wire pattern), the client
+/// deserializes it and reads the `_id` string back out.
+fn ids_in_order(result: &crate::query::read::QueryResult) -> Vec<RecordId> {
+    result
+        .records
+        .iter()
+        .filter_map(|r| {
+            // Round-trip through msgpack so `_id` lands in the row map exactly
+            // as a real client would receive it, then read + parse it.
+            let bytes = rmp_serde::to_vec_named(r).ok()?;
+            let back: crate::query::read::QueryRecord = rmp_serde::from_slice(&bytes).ok()?;
+            let id_str = back.get_value_str("_id")?.to_owned();
+            id_str.parse::<RecordId>().ok()
+        })
+        .collect()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Happy path — ASC seek
 // ─────────────────────────────────────────────────────────────────────────────
@@ -294,6 +313,212 @@ async fn keyset_seek_asc_excludes_all_rows_with_seek_value() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Task #537 — record-id tie-breaker for ties on the ORDER BY value
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// REGRESSION (#537): documents the CURRENT data-loss bug for a client that
+/// does NOT send the tie-breaker. Rows tied on the ORDER BY value that
+/// straddle a page boundary are silently and permanently dropped.
+///
+/// Rows (score ASC): 10, 20a, 20b, 20c, 30. Page 1 = `after([10], limit=2)`
+/// returns [20a, 20b]. A naive next page seeks past the bare value 20 —
+/// `after([20], limit=2)` — which skips ALL THREE 20s, so 20c is never
+/// returned on ANY page: the result jumps straight to [30]. 20c is lost.
+#[tokio::test]
+async fn keyset_seek_ties_lost_without_tiebreaker_regression() {
+    let tbl = make_table().await;
+    insert_record(&tbl, 10, "a").await;
+    insert_record(&tbl, 20, "b1").await;
+    insert_record(&tbl, 20, "b2").await;
+    insert_record(&tbl, 20, "b3").await;
+    insert_record(&tbl, 30, "c").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Page 1: two of the three tied-at-20 rows.
+    let page1 = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::asc("score"))
+                .pagination(Pagination::after(vec![QueryValue::Int(10)], Some(2))),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scores_in_order(&page1), vec![20, 20]);
+
+    // Page 2 the OLD way (bare value seek, no tie-breaker): the third 20 is
+    // gone — result jumps to [30]. This is the bug #537 fixes; the client
+    // that opts in (next test) recovers it.
+    let page2_buggy = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::asc("score"))
+                .pagination(Pagination::after(vec![QueryValue::Int(20)], Some(2))),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scores_in_order(&page2_buggy),
+        vec![30],
+        "documents the pre-#537 data-loss: the third tied 20 is dropped"
+    );
+}
+
+/// A client that echoes back the previous page's last `_id` as the tie-breaker
+/// gets EVERY tied row across pages — the third 20 is recovered, nothing lost.
+///
+/// Page 1 (`after([10], limit=2)`) → [20a, 20b]; client remembers 20b's `_id`.
+/// Page 2 (`after_with_id([20], limit=2, Some(id_of_20b))`) → [20c, 30].
+#[tokio::test]
+async fn keyset_seek_tiebreaker_recovers_all_ties_across_pages() {
+    let tbl = make_table().await;
+    insert_record(&tbl, 10, "a").await;
+    insert_record(&tbl, 20, "b1").await;
+    insert_record(&tbl, 20, "b2").await;
+    insert_record(&tbl, 20, "b3").await;
+    insert_record(&tbl, 30, "c").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Page 1: two of the three tied-at-20 rows.
+    let page1 = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::asc("score"))
+                .pagination(Pagination::after(vec![QueryValue::Int(10)], Some(2))),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scores_in_order(&page1), vec![20, 20]);
+
+    // The client echoes the LAST row's id (the 2nd of the tied 20s).
+    let page1_ids = ids_in_order(&page1);
+    assert_eq!(page1_ids.len(), 2, "each row must surface its _id");
+    let last_id = *page1_ids.last().unwrap();
+
+    // Page 2 WITH the tie-breaker: the third 20 is recovered, then 30.
+    let page2 = tbl
+        .read(
+            &ReadQuery::new("t").order_by(OrderBy::asc("score")).pagination(
+                Pagination::after_with_id(vec![QueryValue::Int(20)], Some(2), Some(last_id)),
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scores_in_order(&page2),
+        vec![20, 30],
+        "tie-breaker recovers the third tied 20 (lost without it), then 30"
+    );
+
+    // Full scroll must yield each distinct row exactly once — no loss, no dup.
+    let page2_ids = ids_in_order(&page2);
+    let mut all: Vec<RecordId> = Vec::new();
+    all.extend(page1_ids);
+    all.extend(page2_ids);
+    all.sort();
+    all.dedup();
+    assert_eq!(
+        all.len(),
+        4,
+        "the two 20a/20b + the recovered 20c + 30 = 4 distinct rows, no dups"
+    );
+}
+
+/// DESC mirror: tie-breaker recovers tied rows walking high→low.
+///
+/// Rows: 30, 20a, 20b, 20c, 10. Page 1 (`DESC after([30], limit=2)`) →
+/// [20a', 20b'] (the two largest-id 20s, since DESC orders record_id
+/// descending within the value). Page 2 with the tie-breaker → [20c', 10].
+#[tokio::test]
+async fn keyset_seek_desc_tiebreaker_recovers_all_ties_across_pages() {
+    let tbl = make_table().await;
+    insert_record(&tbl, 10, "a").await;
+    insert_record(&tbl, 20, "b1").await;
+    insert_record(&tbl, 20, "b2").await;
+    insert_record(&tbl, 20, "b3").await;
+    insert_record(&tbl, 30, "c").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let page1 = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::desc("score"))
+                .pagination(Pagination::after(vec![QueryValue::Int(30)], Some(2))),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scores_in_order(&page1), vec![20, 20]);
+    let last_id = *ids_in_order(&page1).last().unwrap();
+
+    let page2 = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::desc("score"))
+                .pagination(Pagination::after_with_id(
+                    vec![QueryValue::Int(20)],
+                    Some(2),
+                    Some(last_id),
+                )),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scores_in_order(&page2),
+        vec![20, 10],
+        "DESC tie-breaker recovers the third tied 20, then 10"
+    );
+}
+
+/// Old-client behavior is byte-identical: `after(..)` with no tie-breaker
+/// behaves EXACTLY as it did before #537 — all rows sharing the seek value
+/// are excluded (the pre-existing skip-all-ties limitation, unchanged).
+/// This guards against a regression that would silently change results for
+/// callers who never opt in.
+#[tokio::test]
+async fn keyset_seek_without_tiebreaker_unchanged_skip_all_ties() {
+    let tbl = make_table().await;
+    insert_record(&tbl, 10, "a").await;
+    insert_record(&tbl, 20, "b1").await;
+    insert_record(&tbl, 20, "b2").await;
+    insert_record(&tbl, 20, "b3").await;
+    insert_record(&tbl, 30, "c").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // No tie-breaker: seek past bare value 20 → all three 20s skipped, [30].
+    let result = tbl
+        .read(
+            &ReadQuery::new("t")
+                .order_by(OrderBy::asc("score"))
+                .pagination(Pagination::after(vec![QueryValue::Int(20)], Some(10))),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        scores_in_order(&result),
+        vec![30],
+        "old-client (no after_id) behavior must be unchanged: skip all ties"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Audit 1.2 — keyset seek must NOT fetch/decode the whole remaining table
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -477,5 +702,57 @@ async fn keyset_seek_asc_genuine_short_last_page_terminates() {
         scores_in_order(&result),
         vec![11, 13],
         "genuine last page must return exactly the live rows and stop"
+    );
+}
+
+/// REGRESSION (#537, found by adversarial review of the tie-breaker's first
+/// implementation): the tie-breaker must survive the internal stale-posting
+/// retry loop WITHIN A SINGLE request, not just across separate client
+/// requests. `read_keyset_seek`'s internal loop (G2/#526) resumes multiple
+/// times in one call whenever a stale posting forces another physical page;
+/// an earlier version of the fix dropped `after_id` to `None` on every
+/// iteration after the first, reopening the exact permanent-data-loss bug
+/// #537 exists to close for any tied row sitting behind a stale posting.
+///
+/// Layout (score ASC): 10 (anchor), then at value 20: live b1, a STALE
+/// posting, live b2, live b3 (record-ids increase with insertion order since
+/// `RecordId::new()` is timestamp-prefixed). Client already has b1 and sends
+/// `after_id = b1`, `limit = 2`. The internal walk's first physical page
+/// (need=2) collects [stale, b2] — `get_many_bytes` drops the stale entry,
+/// leaving only 1 live row, so a second internal page is needed. Pre-fix,
+/// that second page dropped the tie-breaker and skipped ALL boundary-value
+/// rows, permanently losing b3. Post-fix: [b2, b3], both live, both
+/// distinct from the stale entry and from b1.
+#[tokio::test]
+async fn keyset_seek_tiebreaker_survives_stale_posting_in_same_request() {
+    let tbl = make_table().await;
+    insert_record(&tbl, 10, "anchor").await;
+    let b1 = insert_record(&tbl, 20, "b1").await;
+    plant_stale_sorted_entry(&tbl, 20).await;
+    let b2 = insert_record(&tbl, 20, "b2").await;
+    let b3 = insert_record(&tbl, 20, "b3").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Single request: client already has b1, wants the next 2 tied rows.
+    let query = ReadQuery::new("t").order_by(OrderBy::asc("score")).pagination(
+        Pagination::after_with_id(vec![QueryValue::Int(20)], Some(2), Some(b1)),
+    );
+    let result = tbl.read(&query, &ctx).await.unwrap();
+
+    assert_eq!(
+        scores_in_order(&result),
+        vec![20, 20],
+        "both remaining tied rows must be returned in one request, even \
+         though a stale posting forced an internal retry page"
+    );
+    assert_eq!(
+        ids_in_order(&result),
+        vec![b2, b3],
+        "must be exactly b2 then b3 — not the stale entry, not b1 again, \
+         and b3 must NOT be silently dropped by a re-seek that forgot the \
+         tie-breaker on the internal retry"
     );
 }

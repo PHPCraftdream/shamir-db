@@ -72,12 +72,75 @@ fn after_deserializes_from_wire_shape() {
     });
     let p: Pagination = from_qv(qv);
     match p {
-        Pagination::After { key, limit } => {
+        Pagination::After {
+            key,
+            limit,
+            after_id,
+        } => {
             assert_eq!(key, vec![QueryValue::Str("z".to_string())]);
             assert_eq!(limit, Some(5));
+            // Old-client wire shape (no after_id) → None, byte-identical.
+            assert_eq!(after_id, None);
         }
         other => panic!("expected After, got {other:?}"),
     }
+}
+
+// ── task #537: record-id tie-breaker (after_id) ─────────────────────────────
+
+/// `after(key, limit)` (the backward-compatible constructor) leaves
+/// `after_id` as `None` and serializes to the EXACT same wire shape as
+/// before task #537 — no `after_id` key emitted. Old clients that never
+/// send a tie-breaker are byte-for-byte unchanged.
+#[test]
+fn after_without_tiebreaker_wire_shape_unchanged() {
+    let key = vec![QueryValue::Int(30)];
+    let p = Pagination::after(key.clone(), Some(2));
+    assert_eq!(p.after_id(), None);
+
+    let qv = to_qv(&p);
+    // No `after_id` key — identical to the pre-#537 shape.
+    assert_eq!(
+        qv,
+        mpack!({
+            "mode": "After",
+            "key": [ @ QueryValue::Int(30) ],
+            "limit": 2_i64
+        })
+    );
+
+    let back: Pagination = from_qv(qv);
+    assert_eq!(back, p);
+}
+
+/// `after_with_id(key, limit, Some(id))` emits an `after_id` field on the
+/// wire and round-trips it losslessly.
+#[test]
+fn after_with_tiebreaker_round_trip() {
+    use shamir_types::types::record_id::RecordId;
+
+    let id = RecordId::system("row-last-000");
+    let key = vec![QueryValue::Int(20)];
+    let p = Pagination::after_with_id(key.clone(), Some(3), Some(id));
+
+    assert_eq!(p.after_id(), Some(&id));
+
+    let qv = to_qv(&p);
+    let back: Pagination = from_qv(qv);
+    assert_eq!(back, p);
+    // The tie-breaker survives the round-trip.
+    assert_eq!(back.after_id(), Some(&id));
+}
+
+/// `after_with_id(.., None)` is equivalent to `after(..)` — no tie-breaker,
+/// backward-compatible wire shape.
+#[test]
+fn after_with_id_none_equals_plain_after() {
+    let key = vec![QueryValue::Int(7)];
+    let a = Pagination::after_with_id(key.clone(), Some(1), None);
+    let b = Pagination::after(key, Some(1));
+    assert_eq!(a, b);
+    assert_eq!(to_qv(&a), to_qv(&b));
 }
 
 /// `keyset()` returns the seek tuple and limit for `After`, and `None` for

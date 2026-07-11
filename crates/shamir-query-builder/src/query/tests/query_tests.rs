@@ -1004,3 +1004,53 @@ fn test_after_without_limit_omits_limit_key() {
         }),
     );
 }
+
+/// Task #537: `after_with_id(.., None)` must produce the EXACT same wire shape
+/// as `after(..)` — the `after_id` key is omitted, so old-client wire bytes
+/// are byte-identical.
+#[test]
+fn test_after_with_id_none_omits_after_id_key() {
+    let rq = Query::from("users")
+        .order_by_asc("score")
+        .after_with_id(
+            vec![shamir_types::types::value::QueryValue::Int(30)],
+            Some(2),
+            None,
+        )
+        .build();
+    assert_wire(
+        rq,
+        mpack!({
+            "from": "users",
+            "select": {"items": [{"type": "all"}], "distinct": false},
+            "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
+            "pagination": {"mode": "After", "key": [30_i64], "limit": 2}
+        }),
+    );
+}
+
+/// Task #537: `after_with_id(.., Some(id))` builds the tie-breaker into the
+/// query and round-trips it losslessly through the wire codec.
+#[test]
+fn test_after_with_id_round_trips_tiebreaker() {
+    use shamir_types::types::record_id::RecordId;
+
+    let id = RecordId::system("last-row-0000");
+    let rq = Query::from("users")
+        .order_by_asc("score")
+        .after_with_id(
+            vec![shamir_types::types::value::QueryValue::Int(30)],
+            Some(2),
+            Some(id),
+        )
+        .build();
+
+    // The builder set the tie-breaker on the pagination.
+    assert_eq!(rq.pagination.after_id(), Some(&id));
+
+    // Round-trip through the wire codec preserves it.
+    let bytes = rmp_serde::to_vec_named(&rq).expect("serialize");
+    let back: ReadQuery = rmp_serde::from_slice(&bytes).expect("round-trip");
+    assert_eq!(back, rq, "round-trip mismatch");
+    assert_eq!(back.pagination.after_id(), Some(&id));
+}
