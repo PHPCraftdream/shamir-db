@@ -23,8 +23,8 @@ pub mod types;
 #[cfg(feature = "fjall")]
 pub mod storage_fjall;
 
-/// Task #535: test-only deterministic seam for the `dirty_nonempty` clear-race
-/// in `MemBufferStore::drain_once`.
+/// Task #535/#539: test-only deterministic seam for `MemBufferStore::drain_once`
+/// (see `membuffer_clear_race_hook`'s module doc for the current shape).
 #[cfg(test)]
 mod membuffer_clear_race_hook;
 
