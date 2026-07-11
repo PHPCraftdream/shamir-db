@@ -30,8 +30,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_query_builder::write;
 use shamir_query_types::admin::types::CreateIndexOp;
+use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::mpack;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
@@ -354,5 +357,208 @@ async fn without_reserve_persist_crashed_id_would_be_reused() {
         reused, crashed_id,
         "documents the pre-fix hazard: without the reserve-persist the crashed \
          id is reallocated to a different index definition"
+    );
+}
+
+// ============================================================================
+// #538 — tx-commit-path sibling of #534's lost-write race test
+// ============================================================================
+//
+// #534's fix (`index2_create_barrier` + `needs_write_barrier()`) only reaches
+// the non-tx writer methods in `table_manager_crud.rs`. Every REAL client DML
+// statement instead runs through the tx-commit pipeline (`execute_insert_tx`
+// et al. in `write_exec.rs` → `insert_tx_many_bytes` et al. in
+// `table_manager_tx_ops.rs` for STAGING → `repo.commit_tx` for the Phase
+// 2.5-5c commit pipeline). #538 closes part of that gap:
+//
+// Part A (closed here): `pre_commit.rs`'s Phase 2.5 prelock now acquires
+// `unique_write_lock` for every table this tx wrote to that has
+// `needs_write_barrier() == true` (not just tables with a legacy unique
+// index) — so a tx's COMMIT now serializes against an in-flight
+// `create_index_v2` on an index2-only table, mirroring the non-tx fix.
+//
+// Part B (still open, honestly documented): the index2 ops-PLAN
+// (`tx.index_write_set`) is captured at STAGE time against an
+// `all_backends()` snapshot, which can be taken before the barrier ever goes
+// up. If staging completes before the new backend is registered, the plan
+// simply has no ops for it — Part A's commit-time serialization cannot
+// retroactively add ops to an already-built plan. So a tx that stages AND
+// commits entirely inside the backfill→register window still loses the row
+// from the NEW index, even with Part A applied: Phase 5a writes the row's
+// data as usual (that part was never at risk), but Phase 5c has nothing to
+// apply for the new backend. This is proven by
+// `stage_and_commit_inside_window_still_misses_new_index_part_b_open` below.
+
+/// tx-path sibling of #534's `insert_during_index2_create_is_not_lost`,
+/// scoped to prove Part A alone: a tx that STAGES before the barrier goes up
+/// (so its stage-time `all_backends()` snapshot cannot possibly be missing
+/// anything relevant to ITS OWN write — there is no index2 backend at all
+/// yet at stage time) but whose COMMIT lands inside the parked
+/// backfill→register window must have its commit BLOCK on the barrier
+/// (Part A), and — because staging happened before any index existed and
+/// therefore staged zero index2 ops for a still-nonexistent backend — this
+/// case does not depend on Part B at all: there is nothing for the new index
+/// to miss, since this tx's row was never written to a table with a
+/// same-type index2 backend at stage time. The point of this test is
+/// narrower and more mechanical than the ops-plan question: it proves the
+/// commit-time serialization itself (Part A) is real — pre-fix the commit
+/// races the parked create and finishes immediately; post-fix it blocks
+/// until the create releases the barrier.
+#[tokio::test]
+async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("people"));
+    let tbl = repo.get_table("people").await.unwrap();
+
+    let name_field = key_id(&tbl, "name").await;
+
+    // One pre-existing row so the backfill has something to stream.
+    let _pre = tbl
+        .insert(&record_with_str(name_field, "Alice"))
+        .await
+        .unwrap();
+
+    // Install the deterministic pause hook and spawn the create — it parks
+    // at the backfill→register window (backfill done, backend NOT yet
+    // registered, `unique_write_lock` + `index2_create_barrier` both up).
+    let hook = Arc::new(BackfillPauseHook::new());
+    tbl.set_create_index2_backfill_hook(Some(Arc::clone(&hook)));
+    let tbl_create = tbl.clone();
+    let create = tokio::spawn(async move {
+        tbl_create
+            .create_index_v2(&functional_lower_op("lower_name", "people", "name"))
+            .await
+    });
+    hook.wait_until_parked().await;
+
+    // Stage a tx-path insert of a NEW row via the real client DML entry
+    // point (`execute_insert_tx`), then spawn ITS COMMIT while the create is
+    // still parked. Staging happens here, BEFORE the spawned commit runs —
+    // at this instant the new functional backend does not exist yet in
+    // ANY form (not even mid-backfill), so `insert_tx_many_bytes`'s
+    // `all_backends()` snapshot is trivially complete for this tx (it simply
+    // has no functional backend to plan ops against). This isolates Part A's
+    // effect (commit-time serialization) from Part B's ops-plan-staleness
+    // question, which `stage_and_commit_inside_window_still_misses_new_index_part_b_open`
+    // exercises separately.
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let op = write::insert("people").rows([mpack!({ "name": "Bob" })]).build();
+    let result = tbl
+        .execute_insert_tx(&op, &mut tx, true, None)
+        .await
+        .unwrap();
+    assert_eq!(result.affected, 1);
+    let bob = result.records[0].id.expect("insert must assign an id");
+
+    let repo_commit = repo.clone();
+    let commit = tokio::spawn(async move { repo_commit.commit_tx(tx).await });
+
+    // Give the commit task time to reach — and (post-fix) block on — the
+    // barrier. Post-fix (Part A applied) it must still be running; pre-fix
+    // it would already have completed (Phase 2.5 never even looks at this
+    // index2-only table's barrier), demonstrating the commit-time gap #538
+    // exists to close.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(
+        !commit.is_finished(),
+        "post-fix (#538 Part A): the tx commit must BLOCK on the write-barrier \
+         held by the parked create_index_v2 (pre-fix it completes here, proving \
+         the tx-commit-path gap #534 left open was real)"
+    );
+
+    // Release the create — it registers the backend and drops the barrier.
+    hook.release();
+    create.await.unwrap().expect("create_index_v2 must succeed");
+    commit
+        .await
+        .unwrap()
+        .expect("tx commit must succeed once the barrier is released");
+
+    // Sanity: the row physically exists (Phase 5a always applies regardless
+    // of Part A/B — this was never the at-risk part).
+    let _ = tbl.get(bob).await.expect("row must be physically present");
+}
+
+/// Honest Part-B residual proof (explicitly requested by the #538 brief): a
+/// tx whose STAGE **and** COMMIT both land inside the backfill→register
+/// window still loses the row from the newly-created index, even with Part A
+/// applied. Part A only serializes the commit's TIMING against the barrier —
+/// it cannot retroactively add ops to `tx.index_write_set`, which was already
+/// built (empty for the new backend) back at stage time, before the barrier
+/// was ever consulted. This test is expected to FAIL the "row is indexed"
+/// assertion both before AND after Part A — it exists to prove Part B is a
+/// real, still-open gap rather than something silently fixed by Part A.
+///
+/// NOTE: This test is intentionally written to assert the CURRENT (still-gap)
+/// behavior — it passes by confirming the row is (still) missing from the new
+/// index, so the suite documents the open residual rather than silently
+/// bit-rotting into a false "everything is fixed" green run. If a future task
+/// closes Part B, this assertion must be inverted (and the test re-homed to
+/// the closed-gap section) as part of that fix.
+#[tokio::test]
+async fn stage_and_commit_inside_window_still_misses_new_index_part_b_open() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("people"));
+    let tbl = repo.get_table("people").await.unwrap();
+
+    let name_field = key_id(&tbl, "name").await;
+
+    let _pre = tbl
+        .insert(&record_with_str(name_field, "Alice"))
+        .await
+        .unwrap();
+
+    let hook = Arc::new(BackfillPauseHook::new());
+    tbl.set_create_index2_backfill_hook(Some(Arc::clone(&hook)));
+    let tbl_create = tbl.clone();
+    let create = tokio::spawn(async move {
+        tbl_create
+            .create_index_v2(&functional_lower_op("lower_name", "people", "name"))
+            .await
+    });
+    hook.wait_until_parked().await;
+
+    // Both STAGE and (spawned) COMMIT happen here, entirely inside the
+    // parked window — mirrors #534's non-tx test shape exactly, but via the
+    // tx-path entry point.
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let op = write::insert("people")
+        .rows([mpack!({ "name": "Carol" })])
+        .build();
+    let result = tbl
+        .execute_insert_tx(&op, &mut tx, true, None)
+        .await
+        .unwrap();
+    let carol = result.records[0].id.expect("insert must assign an id");
+
+    let repo_commit = repo.clone();
+    let commit = tokio::spawn(async move { repo_commit.commit_tx(tx).await });
+
+    // Let the commit block on the Part-A barrier, then release the create.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    hook.release();
+    create.await.unwrap().expect("create_index_v2 must succeed");
+    commit
+        .await
+        .unwrap()
+        .expect("tx commit must succeed (data write is never at risk)");
+
+    // The row IS physically present (Phase 5a is unconditional).
+    let _ = tbl.get(carol).await.expect("row must be physically present");
+
+    // But it is NOT queryable via the new functional index — Part B's
+    // guaranteed-miss residual, honestly reproduced: this tx's
+    // `insert_tx_many_bytes` staged its `index_write_set` against the
+    // `all_backends()` snapshot taken BEFORE the barrier was ever up (there
+    // was no functional backend, live or mid-backfill, at that instant), so
+    // no op for the new backend was ever planned — Part A's commit-time lock
+    // has nothing left to protect by the time it is acquired.
+    let owners = functional_lookup(&tbl, key_id(&tbl, "lower_name").await, "carol").await;
+    assert!(
+        !owners.contains(carol.as_bytes()),
+        "#538 Part B residual: this row is EXPECTED to still be missing from \
+         the new index even with Part A applied — if this assertion starts \
+         failing (row found), Part B has been closed by some other change \
+         and this test must be updated/re-homed to reflect the fix"
     );
 }

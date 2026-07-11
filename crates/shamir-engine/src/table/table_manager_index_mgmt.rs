@@ -343,8 +343,8 @@ impl TableManager {
     /// (the live `index2_on_insert` hook can't yet route to an unregistered
     /// backend).
     ///
-    /// # Lost-write race — CLOSED for the non-tx write path, OPEN on the
-    /// # tx-commit path (#534 finding 1 — partial fix, `@fl`-reviewed)
+    /// # Lost-write race — CLOSED for the non-tx write path (#534), PARTIALLY
+    /// # closed on the tx-commit path (#538 Part A), Part B still OPEN
     ///
     /// The caller (`create_index_v2`) holds `unique_write_lock` AND has set
     /// `index2_create_barrier` across this backfill → the subsequent
@@ -353,45 +353,65 @@ impl TableManager {
     /// `delete_returning_version`/`set`, gated by `needs_write_barrier()`)
     /// also takes `unique_write_lock`, so no row reaching the store through
     /// those methods can land in the window between this backfill's stream
-    /// cursor passing a key and the backend becoming live-registered. Two
-    /// residuals a later `@fl` adversarial pass found, honestly recorded
-    /// rather than papered over:
+    /// cursor passing a key and the backend becoming live-registered.
     ///
-    /// 1. **The tx-commit path (the primary production DML route) is NOT
-    ///    covered.** Every client INSERT/UPDATE/DELETE/SET runs through an
-    ///    implicit or interactive tx (`execute_insert_tx` et al. in
-    ///    `write_exec.rs` → `insert_tx_many_bytes`/`update_tx_bytes`/
-    ///    `delete_tx` in `table_manager_tx_ops.rs` → the commit pipeline's
-    ///    Phase 2.5 prelock / Phase 5a-5c materialize). Index2 ops are
-    ///    PLANNED against an `all_backends()` snapshot at STAGE time (inside
-    ///    `insert_tx_many_bytes` etc.), and the row's actual physical write
-    ///    happens later, at commit Phase 5a — neither step consults
-    ///    `needs_write_barrier()` or `index2_create_barrier`, and the
-    ///    commit-time prelock (`pre_commit.rs` Phase 2.5) only takes
-    ///    `unique_write_lock` for tables in `tx.unique_guards` (i.e. tables
-    ///    with a legacy UNIQUE index), not for an index2-only table under an
-    ///    in-flight `create_index_v2`. A tx write to an index2-only table can
-    ///    therefore still race exactly as described below, unblocked by this
-    ///    fix. Closing this properly needs the commit pipeline itself
-    ///    (Phase 2.5's lock predicate AND Phase 5a/5c's materialize
-    ///    ordering) to respect the barrier — a substantially larger change
-    ///    than this task's scope; tracked as its own follow-up (see TaskList
-    ///    for the id) rather than rushed into this diff.
-    /// 2. **Even on the covered non-tx path, this is check-then-act, not a
-    ///    drain.** A writer that loads `needs_write_barrier() == false`
-    ///    (before `create_index_v2` has set the flag) proceeds fully
-    ///    lock-free; nothing here waits for such an already-in-flight writer
-    ///    to finish before the backfill takes its snapshot. This narrows the
-    ///    original whole-backfill-duration race down to the duration of one
-    ///    writer's already-in-flight validate+write step — a real
-    ///    improvement, not a full close.
+    /// **#534 `@fl` adversarial pass** found the tx-commit path (the primary
+    /// production DML route) was NOT covered at all. **#538** closes part of
+    /// that gap and leaves the harder part honestly open:
     ///
-    /// Net effect: this fix is strictly better than the pre-#534 state
-    /// (which had no barrier of any kind), and fully correct for the
-    /// non-tx/replication-apply write path, but is **not** a complete fix
-    /// for finding 1 on the path real client queries take. Do not read this
-    /// comment as "the lost-write race is closed" without the two
-    /// qualifications above.
+    /// 1. **Part A — CLOSED.** Every client INSERT/UPDATE/DELETE/SET runs
+    ///    through an implicit or interactive tx (`execute_insert_tx` et al.
+    ///    in `write_exec.rs` → `insert_tx_many_bytes`/`update_tx_bytes`/
+    ///    `delete_tx` in `table_manager_tx_ops.rs` for STAGING → the commit
+    ///    pipeline's Phase 2.5 prelock / Phase 5a-5c for MATERIALIZE). The
+    ///    commit-time prelock (`pre_commit.rs`'s `pre_commit_prelock`, Phase
+    ///    2.5) originally took `unique_write_lock` only for tables in
+    ///    `tx.unique_guards` (tables with a legacy UNIQUE index) — an
+    ///    index2-only table under an in-flight `create_index_v2` contributed
+    ///    nothing, so that tx's commit could freely interleave with this
+    ///    backfill. #538 Part A extends Phase 2.5 to ALSO acquire
+    ///    `unique_write_lock` for every table the tx wrote to
+    ///    (`tx.write_set` keys) whose `needs_write_barrier()` is `true` — so
+    ///    a tx's COMMIT now serializes against this backfill exactly like
+    ///    the non-tx writers do, via the same lock held for this whole
+    ///    backfill → register sequence.
+    /// 2. **Part B — still OPEN, not attempted here.** Closing Part A only
+    ///    fixes the commit's TIMING; it does not fix WHAT gets committed.
+    ///    The index2 ops-PLAN (`tx.index_write_set`) is built at STAGE time
+    ///    (inside `insert_tx_many_bytes` etc.) against an `all_backends()`
+    ///    snapshot taken well before Phase 2.5 ever runs — in the worst case,
+    ///    before this `create_index_v2` even started. If a tx stages before
+    ///    this backend exists (in any form) and then commits after this
+    ///    backfill has already completed and registered it, that tx's row
+    ///    IS correctly serialized into the store by Part A's lock — but its
+    ///    ops-plan was built with zero ops for this backend, so Phase 5c has
+    ///    nothing to write for it. This is a GUARANTEED miss (not a rare
+    ///    race), independent of Part A: no amount of commit-time locking can
+    ///    retroactively add ops to an already-built plan. Closing it
+    ///    properly needs the ops-plan to be re-derived against the LIVE
+    ///    backend set at commit time (or an equivalent mechanism) — a change
+    ///    to the commit pipeline's phase structure (WAL entry construction /
+    ///    interner delta sequencing depend on the current staged-plan shape)
+    ///    that #538 deliberately did not risk; tracked as its own follow-up.
+    /// 3. **Check-then-act, not a drain (pre-existing #534 residual,
+    ///    unaffected by #538).** A writer/committer that observes
+    ///    `needs_write_barrier() == false` (before `create_index_v2` has set
+    ///    the flag) proceeds fully lock-free; nothing here waits for such an
+    ///    already-in-flight writer to finish before the backfill takes its
+    ///    snapshot. This narrows the original whole-backfill-duration race
+    ///    down to the duration of one writer's already-in-flight
+    ///    validate+write step — a real improvement, not a full close.
+    ///
+    /// Net effect: #534 was strictly better than the pre-#534 state, and
+    /// fully correct for the non-tx/replication-apply write path. #538 Part A
+    /// closes the commit-time serialization gap on the tx-commit path, but
+    /// Part B's stage-time ops-plan staleness means a tx whose STAGE and
+    /// COMMIT both land inside the backfill→register window can still miss
+    /// the new index — see
+    /// `crate::table::tests::index2_create_barrier_tests::stage_and_commit_inside_window_still_misses_new_index_part_b_open`
+    /// for the regression test that honestly reproduces (rather than papers
+    /// over) this residual. Do not read this comment as "the tx-commit-path
+    /// lost-write race is fully closed" without that qualification.
     async fn backfill_index2_backend(
         &self,
         backend: &dyn crate::index2::backend::IndexBackend,
