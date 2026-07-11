@@ -152,17 +152,31 @@ struct MemBufferState {
     ///   was firing per evicted entry (TTL/Size cause); on tight
     ///   loops with frequent eviction it dominated the cost.
     dirty: Arc<DashMap<RecordKey, Slot, THasher>>,
-    /// Fast-path sentinel: true iff dirty is (likely) non-empty.
-    /// Set with Release both BEFORE and immediately AFTER each
-    /// `dirty.insert()` (task #535 round 2 — the before-only store does NOT
-    /// prevent `drain_once`'s clear from racing into the gap between the
-    /// before-store and the insert; see `insert()`'s doc comment for the
-    /// happens-before argument for why the after-store closes it) so any
-    /// subsequent Acquire-load in `get()` / `snapshot_overlay_sorted()` that
-    /// sees `false` is guaranteed to see a fully drained map. False
-    /// positives (flag true, map empty) are harmless — they cause one extra
-    /// DashMap lookup that returns None.
-    dirty_nonempty: AtomicBool,
+    /// Task #539: O(1) cardinality mirror of `dirty`'s entry count — replaces
+    /// the earlier `AtomicBool dirty_nonempty` sentinel (task #535 rounds 1+2),
+    /// which could never be linearizable with `dirty` because it used a
+    /// separate check-then-store(false)-then-re-check sequence (see git
+    /// history / task #535 for the two rounds of narrowing patches applied
+    /// there, and task #539 for why a boolean structurally cannot close the
+    /// residual gap those rounds left open).
+    ///
+    /// Invariant: incremented exactly once at the SAME logical point a key is
+    /// newly added to `dirty` (i.e. `dirty.insert()` returns `None` — the key
+    /// was genuinely absent, not an overwrite); decremented exactly once at
+    /// the SAME logical point a key is actually removed from `dirty` (i.e. a
+    /// `remove_if` call whose predicate matched and the key was really taken
+    /// out). Because increment/decrement happen inline with the mutation
+    /// itself — not as a separate later "is it empty now" re-derivation —
+    /// the counter can never be observably zero while an entry it accounted
+    /// for still exists. This is the same O(1)-cardinality pattern used by
+    /// `Drainer::window_depth` / `VersionedOverlay::count` elsewhere in this
+    /// codebase (CLAUDE.md "O(x → 0)" pillar).
+    ///
+    /// Readers gate on `dirty_count.load(Acquire) > 0` in place of the old
+    /// boolean check. `Release`/`Acquire` pairing (unchanged from #535) gives
+    /// a happens-before edge from a writer's increment (or the drainer's
+    /// decrement) to a reader's subsequent load.
+    dirty_count: AtomicUsize,
     /// Atomic-config — read on hot paths so DDL changes apply
     /// without rewrapping the store.
     max_bytes: AtomicUsize,
@@ -176,11 +190,14 @@ struct MemBufferState {
     /// an error so disk-full / I/O failures are observable (otherwise dirty
     /// grows unboundedly with zero signal).
     flush_errors: AtomicU64,
-    /// Task #535: deterministic test seam for the `dirty_nonempty` clear-race.
-    /// Fired inside `drain_once` in the clear window — BETWEEN the
-    /// `is_empty()` observation and the `store(false)` that follows it — so a
-    /// regression test can force a racing writer insert into the exact gap
-    /// the bug depends on. `None` in production (zero overhead).
+    /// Task #535 (updated #539): deterministic test seam originally used to
+    /// reproduce the `dirty_nonempty` boolean's clear-race. Since #539
+    /// replaced that boolean with an inline `dirty_count` counter (no
+    /// separate clear step to race — the decrement happens at the same
+    /// point as the removal), this hook is now fired right before
+    /// `drain_once`'s removal loop purely to preserve the existing
+    /// regression tests' shape (they install a racing-writer-insert
+    /// callback here). `None` in production (zero overhead).
     #[cfg(test)]
     clear_race_hook: crate::membuffer_clear_race_hook::ClearRaceHook,
     /// Task #535 round 2: deterministic test seam for the narrower
@@ -285,7 +302,7 @@ impl MemBufferStore {
         let state = Arc::new(MemBufferState {
             cache: ArcSwap::from(cache),
             dirty,
-            dirty_nonempty: AtomicBool::new(false),
+            dirty_count: AtomicUsize::new(0),
             max_bytes: AtomicUsize::new(config.max_bytes),
             max_entries: AtomicUsize::new(config.max_entries),
             ttl_ms: AtomicU64::new(config.ttl_ms.unwrap_or(0)),
@@ -412,23 +429,26 @@ impl MemBufferStore {
         self.state.dirty.is_empty()
     }
 
-    /// Read the `dirty_nonempty` fast-path sentinel. For tests only (#535).
+    /// Read the `dirty_count` fast-path cardinality mirror as a boolean
+    /// ("is dirty observably non-empty"). For tests only (#535 / #539).
     #[cfg(test)]
     pub(crate) fn dirty_nonempty_flag(&self) -> bool {
-        self.state.dirty_nonempty.load(Ordering::Acquire)
+        self.state.dirty_count.load(Ordering::Acquire) > 0
     }
 
-    /// Task #535 test seam: perform the SYNCHRONOUS writer publish+insert in
-    /// the round-1-era shape (`store(true, Release)` strictly before
-    /// `dirty.insert`, with NO post-insert republish — `insert`/`set`/
-    /// `remove` now also republish `true` immediately after, per round 2),
-    /// WITHOUT touching the moka cache or notifying the flusher. Used by the
-    /// clear-race regression test's hook to simulate a writer whose insert
-    /// lands in the sentinel-clear gap inside `drain_once`.
+    /// Task #535 test seam (updated #539 for the counter redesign): perform
+    /// the SYNCHRONOUS writer publish+insert used by the clear-race
+    /// regression test's hook to simulate a writer whose insert lands in the
+    /// drainer's clear window, WITHOUT touching the moka cache or notifying
+    /// the flusher. `dirty.insert` returning `None` here is guaranteed (the
+    /// racing key is always fresh in these tests), so the increment is
+    /// unconditional — but still gated on the same `None` check every
+    /// production writer uses, for parity.
     #[cfg(test)]
     pub(crate) fn inject_racing_dirty_write(&self, key: RecordKey, value: Bytes) {
-        self.state.dirty_nonempty.store(true, Ordering::Release);
-        self.state.dirty.insert(key, Slot::Live(value));
+        if self.state.dirty.insert(key, Slot::Live(value)).is_none() {
+            self.state.dirty_count.fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Task #535 test seam: run a SINGLE `drain_once` pass (not the drain-loop
@@ -459,7 +479,7 @@ impl MemBufferStore {
 
     /// Task #535 round 2 test seam: force-evict `key` from the moka cache.
     /// `get()` checks the cache FIRST and only falls through to the
-    /// `dirty_nonempty`-gated `dirty` probe on a cache miss — so a
+    /// `dirty_count`-gated `dirty` probe on a cache miss — so a
     /// regression test proving the flag's masking bug must evict the cache
     /// entry first, otherwise `get()` trivially succeeds via the cache hit
     /// regardless of whether the sentinel is correct.
@@ -477,7 +497,7 @@ impl MemBufferStore {
         inner: &dyn Store,
         batch_size: usize,
     ) -> DbResult<usize> {
-        if state.dirty.is_empty() {
+        if state.dirty_count.load(Ordering::Acquire) == 0 {
             return Ok(0);
         }
         // Snapshot keys + their current slot values.
@@ -511,105 +531,31 @@ impl MemBufferStore {
         // CAS-style cleanup: remove from dirty ONLY if the value
         // is still what we just flushed. If a concurrent writer
         // overwrote the slot, leave it for the next drain.
+        //
+        // Task #539: `dirty_count` is decremented HERE, inline with the
+        // actual removal — not as a separate later "is it empty now"
+        // re-derivation (that shape is exactly what task #535's
+        // `AtomicBool dirty_nonempty` sentinel used, and what made it
+        // structurally unable to close its own residual reader-visible
+        // window — see the old multi-round comment this replaced, preserved
+        // in git history / task #539's narrative). `remove_if` only removes
+        // (and only then do we decrement) when the entry still holds the
+        // exact snapshot we just flushed; a concurrent writer's overwrite
+        // leaves the entry (and the counter) untouched for the next drain.
+        //
+        // Test seam (#535/#539): fire the racing-writer-insert hook HERE, in
+        // the same spot rounds 1/2 used to reproduce their interleavings —
+        // now a no-op-in-production hook point rather than a real "clear
+        // window", since there is no separate clear step left to race.
+        #[cfg(test)]
+        state.clear_race_hook.at_clear_window();
         for (k, snapshot) in snapshots {
-            state.dirty.remove_if(&k, |_, current| *current == snapshot);
-        }
-        // If dirty is now fully drained, clear the fast-path sentinel so
-        // get() can skip the dirty lookup.
-        //
-        // Task #535 — verify-after-clear, restore-on-mismatch (round 1), PLUS
-        // a writer-side republish-after-insert (round 2, closing a gap an
-        // `@fl` adversarial pass found in round 1's proof). The naive
-        // `is_empty()` → `store(false)` sequence is TWO separate, non-atomic
-        // steps: a writer's `dirty.insert` can land in the gap between the
-        // check observing `true` (empty) and the store executing, leaving a
-        // real, ACKed entry in `dirty` while the sentinel wrongly reads
-        // `false` — masking that write from every subsequent `get()` /
-        // `snapshot_overlay_sorted` fast-path check until some later,
-        // unrelated write flips the flag back.
-        //
-        // Round 1 fix: after storing `false`, re-check `dirty.is_empty()`.
-        // If a writer raced an insert into the gap, `dirty` is now non-empty
-        // → restore the sentinel to `true`. This closes the case where the
-        // writer's insert completes BEFORE our re-check runs.
-        //
-        // Round 1's proof claimed this was airtight because "the writer
-        // always does `store(true)` before `dirty.insert()`, so any entry
-        // the re-check observes belongs to a writer that already published
-        // `true`" — TRUE, but incomplete: it does not cover a writer that
-        // publishes `store(true)`, STALLS (an `.await` yield, e.g. every
-        // iteration of `insert_many`/`set_many`/`remove_many`'s per-item
-        // loop), and only completes its `dirty.insert()` AFTER our re-check
-        // has ALREADY run and found dirty empty. In that interleaving,
-        // nothing left `true` behind for us to see, and the writer's insert
-        // still lands afterward with the sentinel stuck at `false` — the
-        // exact masked-write bug, just narrowed to a smaller (but very much
-        // real, non-hypothetical for the batch methods) window.
-        //
-        // Round 2 fix (writer side, see `insert`/`set`/`remove`/
-        // `insert_many`/`set_many`/`remove_many`): every writer republishes
-        // `dirty_nonempty.store(true, Release)` immediately AFTER each
-        // `dirty.insert()`, not just before. This closes the gap: if our
-        // re-check here did NOT observe a given entry, then (via DashMap's
-        // own shard-lock acquire/release) our clear happened-before that
-        // entry's insert, which happens-before (same thread, program order)
-        // that writer's POST-insert `store(true)` — so that `store(true)`
-        // strictly follows our `store(false)` in real time and is the value
-        // every subsequent reader observes. Combined with round 1's
-        // verify-after-clear (which still covers the "insert observable by
-        // the re-check" case), the sentinel always SETTLES to the correct
-        // final value for any entry that persists in `dirty`.
-        //
-        // Residual (found by a THIRD `@fl` adversarial pass, deliberately
-        // left open rather than papered over — see the follow-up task this
-        // finding was filed as): "settles correctly" is not the same as
-        // "never reads wrong in between". A reader's `get()`/
-        // `snapshot_overlay_sorted` Acquire-load can still observe `false`
-        // in the narrow window between THIS `store(false)` and the re-check
-        // just below, even for an entry that's about to be restored — if a
-        // concurrent `get()` on that exact key lands in that window, it
-        // stale-misses (falls through to `inner`, which may not have the
-        // entry yet). Worse, `get()`'s NotFound path caches a `Slot::
-        // Tombstone` for the key, which can mask it on every SUBSEQUENT
-        // `get()` (via the cache-hit path, ahead of this sentinel entirely)
-        // until that tombstone is evicted or overwritten — i.e. the miss can
-        // outlive the sentinel healing itself. This window requires OS
-        // preemption landing at a specific few-instruction point plus a
-        // concurrent reader of that exact key plus a cache eviction of it —
-        // real but far narrower than the interleaving rounds 1 and 2 close
-        // (which needed only a routine `.await` yield, not raw thread
-        // preemption, and were both deterministically reproduced by this
-        // file's regression tests). The properly correct fix replaces this
-        // boolean with an `AtomicUsize` cardinality mirror (increment on a
-        // genuinely-new key, decrement on a successful removal) — the
-        // CLAUDE.md-prescribed pattern for O(1) cardinality tracking — which
-        // eliminates the check-then-clear shape entirely rather than
-        // patching around it further. Tracked as a follow-up, not
-        // implemented here.
-        //
-        // Ordering: all stores here and on the writer side use `Release`
-        // (round 1 changed the clear-side stores from the original `Relaxed`
-        // — a real but SEPARATE ordering gap, not the root cause of the
-        // masked-write bug itself, which is a plain check-then-act logic
-        // race that Relaxed vs Release does not affect). `Release` gives the
-        // reader's `Acquire` load in `get()`/`snapshot_overlay_sorted` a real
-        // happens-before edge to the drainer's completed flush, which
-        // `Relaxed` did not.
-        if state.dirty.is_empty() {
-            // Test seam (#535): fire the racing writer insert HERE — in the gap
-            // BETWEEN the `is_empty()` check above (observed `true`) and the
-            // `store(false)` below — reproducing the exact interleaving the bug
-            // depends on: a writer's `store(true) + dirty.insert` landing before
-            // our clear, so our clear clobbers the writer's `true`. No-op in
-            // production.
-            #[cfg(test)]
-            state.clear_race_hook.at_clear_window();
-
-            state.dirty_nonempty.store(false, Ordering::Release);
-            // Verify-after-clear: if a writer raced an insert into the gap, the
-            // re-check now observes a non-empty `dirty` → restore the sentinel.
-            if !state.dirty.is_empty() {
-                state.dirty_nonempty.store(true, Ordering::Release);
+            if state
+                .dirty
+                .remove_if(&k, |_, current| *current == snapshot)
+                .is_some()
+            {
+                state.dirty_count.fetch_sub(1, Ordering::Release);
             }
         }
         Ok(n)
@@ -633,7 +579,7 @@ impl MemBufferStore {
     {
         // Fast-path: if the dirty buffer is (observably) empty the scan is a
         // pure `inner` pass-through — skip the DashMap traversal + sort.
-        if !state.dirty_nonempty.load(Ordering::Acquire) {
+        if state.dirty_count.load(Ordering::Acquire) == 0 {
             return Vec::new();
         }
         let mut snap: Vec<(RecordKey, Slot)> = state
@@ -803,22 +749,12 @@ impl Store for MemBufferStore {
         let id = RecordId::new();
         let key = RecordKey::from_slice(id.as_bytes());
         let slot = Slot::Live(value);
-        // Release before dirty.insert so get()'s Acquire load sees the flag
-        // set if dirty is non-empty. False positives are harmless.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
+        // Task #539: `key` is a freshly-generated `RecordId`, so it can never
+        // already be in `dirty` — the increment is unconditional (no
+        // `insert()` return-value check needed, unlike `set`/`remove` where
+        // the key is caller-supplied and may already be dirty).
         self.state.dirty.insert(key.clone(), slot.clone());
-        // Task #535 (round 2, @fl-found gap): republish `true` immediately
-        // after the insert too, not just before. The before-store alone does
-        // NOT prevent this interleaving: writer stores `true`, stalls;
-        // `drain_once` observes `dirty` empty (insert hasn't landed),
-        // clears to `false`, re-checks — still empty, stays `false`; THEN
-        // this writer's insert lands, with nothing left to re-announce
-        // `true`. The post-insert store closes it: if `drain_once`'s
-        // re-check did not observe this insert, its clear happened-before
-        // this insert (via DashMap's own shard-lock acquire/release), which
-        // happened-before this store (program order) — so this `true`
-        // strictly follows that `false` in real time and wins.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
+        self.state.dirty_count.fetch_add(1, Ordering::Release);
         self.state.cache.load().insert(key.clone(), slot).await;
         self.notify.notify_one();
         Ok(key)
@@ -840,12 +776,12 @@ impl Store for MemBufferStore {
             },
         };
         let slot = Slot::Live(value);
-        // Release before dirty.insert — see insert() for ordering rationale.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
-        self.state.dirty.insert(key.clone(), slot.clone());
-        // Task #535 (round 2) — republish after insert too; see insert()'s
-        // comment for why the before-store alone is insufficient.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
+        // Task #539: increment `dirty_count` ONLY when `key` was genuinely
+        // new to `dirty` (`insert()` returned `None`) — an overwrite of an
+        // already-dirty key must not double-count.
+        if self.state.dirty.insert(key.clone(), slot.clone()).is_none() {
+            self.state.dirty_count.fetch_add(1, Ordering::Release);
+        }
         self.state.cache.load().insert(key, slot).await;
         self.notify.notify_one();
         Ok(!existed)
@@ -863,10 +799,11 @@ impl Store for MemBufferStore {
         }
         // Cache miss — check dirty before going to inner. Dirty
         // may hold a value that moka silently evicted from cache.
-        // Fast-path: when dirty_nonempty is false (Acquire), dirty is
-        // guaranteed empty — skip the DashMap probe entirely.
-        // Pairs with the Release store in insert/set/remove.
-        if self.state.dirty_nonempty.load(Ordering::Acquire) {
+        // Fast-path (task #539): when `dirty_count` reads 0 (Acquire), dirty
+        // is guaranteed empty — skip the DashMap probe entirely. Pairs with
+        // the Release increment in insert/set/remove (and their `_many`
+        // siblings) and the Release decrement in `drain_once`/`transact`.
+        if self.state.dirty_count.load(Ordering::Acquire) > 0 {
             if let Some(entry) = self.state.dirty.get(&key) {
                 return match entry.value() {
                     Slot::Live(v) => Ok(v.clone()),
@@ -876,6 +813,58 @@ impl Store for MemBufferStore {
         }
         // Fall through to inner; populate cache only (NOT dirty —
         // this is a clean read-fill).
+        //
+        // Task #539 tombstone-poisoning guard: a first attempt at this fix
+        // reasoned that a writer's post-insert cache republish (`insert`/
+        // `set`/`remove` and their `_many` siblings all re-publish `cache`
+        // immediately after their `dirty` write) would always clobber a
+        // reader-cached stale negative, because the republish happens
+        // "immediately after, same call, same thread". An adversarial review
+        // caught the flaw: "immediately after" is only PROGRAM order within
+        // the writer's own task — it gives no real-time ordering guarantee
+        // relative to a DIFFERENT, concurrently-running reader task's own
+        // later `cache.insert`. Concretely: a reader can observe a
+        // transiently stale `dirty_count == 0` for a brand-new key K (before
+        // a concurrent writer's `fetch_add` becomes visible), fall through to
+        // `inner.get(K)` (a slow async I/O round-trip), and only THEN run its
+        // own `cache.insert(K, Tombstone)` — by which point the writer's own
+        // (much faster, pure in-memory) `dirty.insert` + cache republish may
+        // already have completed. moka gives no ordering between two
+        // independent tasks' inserts to the same key beyond "last physical
+        // write wins", so the reader's stale Tombstone can land AFTER the
+        // writer's Live republish, masking the write on every subsequent
+        // `get()` (which hits the cache-first branch above, never reaching
+        // the `dirty_count`/`dirty` probe) until that cache entry is evicted
+        // or overwritten — a LASTING mask, not a fleeting one.
+        //
+        // Fix: immediately before caching this call's `inner`-fetched result,
+        // re-check `dirty` for the key. If a concurrent writer has landed an
+        // entry in the meantime, `dirty` is authoritative over our stale
+        // `inner` read — skip the cache-fill entirely rather than risk
+        // clobbering the writer's republish. This call's own RETURN VALUE can
+        // still be the stale answer (unavoidable without full
+        // linearizability — no different from any lock-free store's
+        // in-flight-write-vs-concurrent-read race, and #539's brief accepts
+        // this as a fleeting-miss trade-off), but nothing is cached to make
+        // that staleness outlive this one call: the very next `get()` on this
+        // key will cache-miss again, see `dirty_count > 0`, and correctly
+        // return the writer's value from `dirty`.
+        //
+        // Honest scope of what this closes: it collapses the race window from
+        // "the full duration of this call's `inner.get()` I/O round-trip"
+        // (large, practically hittable under real concurrent load) down to
+        // "between this recheck and the `cache.insert` call below". That
+        // residual window is NOT merely a handful of in-memory instructions —
+        // `cache.insert` is itself `async fn` and moka may yield internally
+        // (per-shard buffer/eviction-policy maintenance), so a writer can
+        // still land its `dirty` write + cache republish while this task is
+        // suspended at that `.await`, same as any other scheduler-dependent
+        // gap. This is a genuine, still-open (if much narrower) residual, not
+        // a claim of full closure — accepted for the same reason this
+        // cache's other known staleness windows are (see `build_cache`'s
+        // "purely a read accelerator" doc comment). Closing it fully would
+        // require holding a per-key lock across the recheck+insert pair,
+        // which this file deliberately avoids on the hot read path.
         let result = self.inner.get(key.clone()).await;
         let slot_to_insert = match &result {
             Ok(v) => Some(Slot::Live(v.clone())),
@@ -883,7 +872,11 @@ impl Store for MemBufferStore {
             Err(_) => None,
         };
         if let Some(slot) = slot_to_insert {
-            cache.insert(key, slot).await;
+            let raced = self.state.dirty_count.load(Ordering::Acquire) > 0
+                && self.state.dirty.get(&key).is_some();
+            if !raced {
+                cache.insert(key, slot).await;
+            }
         }
         result
     }
@@ -899,12 +892,16 @@ impl Store for MemBufferStore {
                 None => false,
             },
         };
-        // Release before dirty.insert — see insert() for ordering rationale.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
-        self.state.dirty.insert(key.clone(), Slot::Tombstone);
-        // Task #535 (round 2) — republish after insert too; see insert()'s
-        // comment for why the before-store alone is insufficient.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
+        // Task #539 — see `set` for the increment-only-on-genuinely-new-key
+        // rationale.
+        if self
+            .state
+            .dirty
+            .insert(key.clone(), Slot::Tombstone)
+            .is_none()
+        {
+            self.state.dirty_count.fetch_add(1, Ordering::Release);
+        }
         self.state.cache.load().insert(key, Slot::Tombstone).await;
         self.notify.notify_one();
         Ok(existed)
@@ -1056,17 +1053,32 @@ impl Store for MemBufferStore {
                     // write (the old unconditional `remove` did exactly
                     // this). `remove_if` with a value comparison is the
                     // same pattern `drain_once` uses.
-                    self.state
+                    //
+                    // Task #539: decrement `dirty_count` inline with the
+                    // actual removal (only when `remove_if` really removed
+                    // something) — the same rule as `drain_once`.
+                    if self
+                        .state
                         .dirty
-                        .remove_if(&k, |_, current| *current == slot);
+                        .remove_if(&k, |_, current| *current == slot)
+                        .is_some()
+                    {
+                        self.state.dirty_count.fetch_sub(1, Ordering::Release);
+                    }
                 }
                 super::types::KvOp::Remove(k) => {
                     let slot = Slot::Tombstone;
                     cache.insert(k.clone(), slot.clone()).await;
                     // Audit §2.3: same guarded removal as the Set branch.
-                    self.state
+                    // Task #539: same inline decrement rule as the Set branch.
+                    if self
+                        .state
                         .dirty
-                        .remove_if(&k, |_, current| *current == slot);
+                        .remove_if(&k, |_, current| *current == slot)
+                        .is_some()
+                    {
+                        self.state.dirty_count.fetch_sub(1, Ordering::Release);
+                    }
                 }
             }
         }
@@ -1076,29 +1088,23 @@ impl Store for MemBufferStore {
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
         let mut keys = Vec::with_capacity(values.len());
         let cache = self.state.cache.load();
-        // Publish dirty-nonempty BEFORE populating, matching sibling
-        // `insert` / `set` / `remove`. Without this, a concurrent `get()`
-        // reading dirty_nonempty (Acquire) sees `false`, skips the dirty
-        // probe (lines ~480), and stale-misses an insert_many'd key whose
-        // cache slot has already been evicted by moka but not yet flushed.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
         #[cfg(test)]
         let mut first_iteration = true;
         for v in values {
             let id = RecordId::new();
             let key = RecordKey::from_slice(id.as_bytes());
             let slot = Slot::Live(v);
+            // Task #539: `key` is a freshly-generated `RecordId` — always
+            // new to `dirty`, so the increment is unconditional and happens
+            // AT THE SAME LOGICAL POINT as the insert (inline, per-item, not
+            // hoisted before the loop as a single before/after `store` the
+            // old `dirty_nonempty` boolean used). Every item is individually
+            // accounted for the instant it lands, so a concurrent
+            // `drain_once` racing between iterations can never observe a
+            // count of 0 while an item this loop already inserted is still
+            // present.
             self.state.dirty.insert(key.clone(), slot.clone());
-            // Task #535 (round 2): republish `true` after EACH per-item
-            // insert, not just once before the loop. A single before-loop
-            // store cannot protect items inserted later in the loop — a
-            // `drain_once` racing between two iterations (this loop yields
-            // at `cache.insert(...).await` every iteration) can observe
-            // `dirty` empty-of-later-items and clear the sentinel with
-            // nothing left to re-announce `true` for THIS item. See
-            // `insert()`'s comment for the happens-before argument for why
-            // an immediate post-insert store closes it.
-            self.state.dirty_nonempty.store(true, Ordering::Release);
+            self.state.dirty_count.fetch_add(1, Ordering::Release);
             cache.insert(key.clone(), slot).await;
             keys.push(key);
             // Task #535 round 2 test seam: park here (after the FIRST item
@@ -1129,8 +1135,6 @@ impl Store for MemBufferStore {
         // SINGLE notify_one at the end. Last-write-wins within the
         // batch on duplicate keys (the dirty/cache inserts happen in
         // input order; the final state matches the per-element loop).
-        // Publish dirty-nonempty BEFORE populating, matching sibling `set`.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
         let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(items.len());
         for (k, v) in items {
@@ -1144,9 +1148,13 @@ impl Store for MemBufferStore {
                 },
             };
             let slot = Slot::Live(v);
-            self.state.dirty.insert(k.clone(), slot.clone());
-            // Task #535 (round 2) — republish per-item; see insert_many().
-            self.state.dirty_nonempty.store(true, Ordering::Release);
+            // Task #539 — increment inline, only on a genuinely-new key;
+            // see `set` for the rationale. A duplicate key within the same
+            // batch correctly increments at most once (the second
+            // occurrence's `insert()` returns `Some`, the first one's value).
+            if self.state.dirty.insert(k.clone(), slot.clone()).is_none() {
+                self.state.dirty_count.fetch_add(1, Ordering::Release);
+            }
             cache.insert(k, slot).await;
             flags.push(!existed);
         }
@@ -1161,8 +1169,6 @@ impl Store for MemBufferStore {
         // Batched mirror of `remove` — see `set_many` for the
         // batching shape. Tombstones replace Live slots; dirty/cache
         // dual-write preserved, ONE notify_one.
-        // Publish dirty-nonempty BEFORE populating, matching sibling `remove`.
-        self.state.dirty_nonempty.store(true, Ordering::Release);
         let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(keys.len());
         for k in keys {
@@ -1175,9 +1181,11 @@ impl Store for MemBufferStore {
                     None => false,
                 },
             };
-            self.state.dirty.insert(k.clone(), Slot::Tombstone);
-            // Task #535 (round 2) — republish per-item; see insert_many().
-            self.state.dirty_nonempty.store(true, Ordering::Release);
+            // Task #539 — increment inline, only on a genuinely-new key;
+            // see `set_many` above / `remove` for the rationale.
+            if self.state.dirty.insert(k.clone(), Slot::Tombstone).is_none() {
+                self.state.dirty_count.fetch_add(1, Ordering::Release);
+            }
             cache.insert(k, Slot::Tombstone).await;
             flags.push(existed);
         }
