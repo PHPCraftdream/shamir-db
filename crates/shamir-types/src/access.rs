@@ -248,6 +248,25 @@ impl ResourceMeta {
         Self { owner, group, mode }
     }
 
+    /// Returns `Some(owner)` iff the record has an explicit `owner` field;
+    /// `None` if the field is absent.
+    ///
+    /// Distinct from [`from_record`](Self::from_record), which collapses
+    /// "field absent" into `Actor::System` — the correct, deliberate default
+    /// for every OTHER caller (DDL introspection, `access_tree`,
+    /// `resource_meta`, etc., all of which treat a fresh/legacy record with
+    /// no owner as "open, owned by System"). That collapse is wrong for a
+    /// caller that uses the owner to make a privilege-ESCALATION decision
+    /// (e.g. `ShamirDb::effective_fn_actor`): such a caller must be able to
+    /// tell "explicitly owned by System" (owner field present, value `0`)
+    /// apart from "no owner recorded at all" (field absent) — the former is
+    /// a legitimate admin declaration, the latter must never escalate.
+    pub fn owner_field(rec: &QueryValue) -> Option<Actor> {
+        rec.get("owner")
+            .and_then(|v| v.as_u64())
+            .map(Actor::from_owner_id)
+    }
+
     /// Build a `QueryValue::Map` containing only the `owner`/`group`/`mode`
     /// fields. Convenience for constructing fresh catalogue records.
     pub fn to_query_value(&self) -> QueryValue {
