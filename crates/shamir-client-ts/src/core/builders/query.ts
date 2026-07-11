@@ -67,6 +67,7 @@ export class Query {
   private pageSize = 0;
   private afterKey: WireValue[] | null = null;
   private afterLimit: number | null = null;
+  private afterId: string | null = null;
 
   private countTotalFlag = false;
   private temporalValue: Temporal | null = null;
@@ -300,11 +301,19 @@ export class Query {
    * Keyset (seek) pagination: resume after the row identified by `key`
    * (the sort values of the last row seen). Pass an optional `limit` to
    * cap the page size.
+   *
+   * `afterId` (task #537) is an optional record-id tie-breaker: the base58
+   * `_id` string of the last row from the previous page (surfaced as `_id`
+   * in read results). Pass it so rows tied on the same ORDER BY value across
+   * a page boundary are not silently dropped — the server resumes STRICTLY
+   * past that specific row rather than past the bare sort value. Omitting it
+   * keeps today's backward-compatible behavior.
    */
-  after(key: WireValue[], limit?: number): this {
+  after(key: WireValue[], limit?: number, afterId?: string): this {
     this.paginationMode = 'after';
     this.afterKey = key;
     this.afterLimit = limit ?? null;
+    this.afterId = afterId ?? null;
     return this;
   }
 
@@ -458,6 +467,9 @@ export class Query {
           key: this.afterKey!,
         };
         if (this.afterLimit !== null) p.limit = this.afterLimit;
+        // Task #537: emit the tie-breaker only when set → old-client wire
+        // shape (no `after_id` key) stays byte-identical.
+        if (this.afterId !== null) p.after_id = this.afterId;
         return p;
       }
       default:

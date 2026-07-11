@@ -306,6 +306,35 @@ describe('pagination', () => {
     expect(p).toEqual({ mode: 'After', key: [30] });
     expect(p).not.toHaveProperty('limit');
   });
+
+  // ── task #537: record-id tie-breaker (after_id) ──
+  it('after(key, limit) without a tie-breaker omits after_id (old-client shape)', () => {
+    const p = Query.from('t').orderByAsc('score').after([30], 2).build().pagination;
+    expect(p).toEqual({ mode: 'After', key: [30], limit: 2 });
+    expect(p).not.toHaveProperty('after_id');
+  });
+
+  it('after(key, limit, id) emits the after_id tie-breaker', () => {
+    const p = Query.from('t')
+      .orderByAsc('score')
+      .after([20], 2, 'last-row-id-000')
+      .build().pagination;
+    expect(p).toEqual({
+      mode: 'After',
+      key: [20],
+      limit: 2,
+      after_id: 'last-row-id-000',
+    });
+  });
+
+  it('after(key, undefined, id) emits after_id without a limit', () => {
+    const p = Query.from('t')
+      .orderByAsc('score')
+      .after([20], undefined, 'row-id-xyz')
+      .build().pagination;
+    expect(p).toEqual({ mode: 'After', key: [20], after_id: 'row-id-xyz' });
+    expect(p).not.toHaveProperty('limit');
+  });
 });
 
 describe('temporal', () => {

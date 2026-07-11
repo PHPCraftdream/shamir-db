@@ -447,6 +447,7 @@ impl TableManager {
         interner: &Interner,
         index_name: u64,
         encoded_key: &[u8],
+        after_id: Option<&RecordId>,
         limit: usize,
         direction: shamir_query_types::read::OrderDirection,
         start: Instant,
@@ -478,12 +479,31 @@ impl TableManager {
 
         loop {
             let need = limit - matched.len();
+            // Task #537 (bug found by adversarial review, fixed here):
+            // `after_id` must be passed on EVERY internal-loop iteration, not
+            // just the first. This loop resumes multiple times WITHIN A
+            // SINGLE client request whenever a stale/dead posting forces
+            // another page (G2/#526); that is a different notion of "page"
+            // from the client-visible page-to-page cursor. `after_id` is a
+            // fixed reference (the row the CLIENT already has, from a
+            // PREVIOUS request) — it only ever affects rows whose encoded
+            // value still equals `seek_encoded` (`skip_boundary_row`'s `&&`
+            // guard), so re-passing it on later internal iterations cannot
+            // wrongly skip a row the walk has already moved past (its value
+            // no longer matches `seek_encoded`, so the boundary check never
+            // fires for it). Dropping it to `None` after the first internal
+            // iteration (the original, buggy version of this line) made
+            // `skip_boundary_row` unconditionally skip ALL remaining
+            // boundary-value rows on that later iteration — reopening the
+            // exact permanent-data-loss bug this task exists to fix, for any
+            // tied row that happens to sit behind a stale posting.
             let (id_vec, cursor) = self
                 .sorted_indexes()
                 .lookup_range_first_k_page(
                     index_name,
                     encoded_key,
                     after_key.as_deref(),
+                    after_id,
                     need,
                     forward,
                 )
@@ -514,7 +534,26 @@ impl TableManager {
 
         let records_scanned = matched.len() as u64;
         let records_returned = result_qv.len() as u64;
-        let result: Vec<QueryRecord> = result_qv.into_iter().map(QueryRecord::Direct).collect();
+
+        // Task #537: surface each row's stable identity so a client can echo
+        // it back as the `after_id` tie-breaker on the next page request.
+        // We inject `_id` via the existing `InsertedRecord` wire pattern —
+        // strictly additive: the `_id` key appears in the row map alongside
+        // the projected fields; clients that ignore it are unaffected. This
+        // is the ONLY read path that emits `_id`, and only because keyset
+        // pagination is precisely where a per-row cursor is needed.
+        // `result_qv` is in the same order as `matched`, so zip is aligned.
+        let result: Vec<QueryRecord> = matched
+            .iter()
+            .map(|(id, _)| *id)
+            .zip(result_qv)
+            .map(|(id, fields)| {
+                QueryRecord::Inserted(shamir_query_types::write::InsertedRecord {
+                    id: Some(id),
+                    fields,
+                })
+            })
+            .collect();
 
         Ok(QueryResult {
             records: result,

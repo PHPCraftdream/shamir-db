@@ -3,6 +3,7 @@ use shamir_query_types::read::{
     At, GroupBy, OrderBy, OrderByItem, OrderDirection, Pagination, ReadQuery, Select, Temporal,
 };
 use shamir_query_types::TableRef;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::filter::{self as f};
@@ -197,6 +198,27 @@ impl Query {
     /// overlap.
     pub fn after(mut self, key: Vec<QueryValue>, limit: Option<u64>) -> Self {
         self.pagination = Pagination::after(key, limit);
+        self
+    }
+
+    /// Keyset (seek) pagination WITH a record-id tie-breaker (task #537).
+    ///
+    /// Identical to [`after`](Self::after) but also carries `after_id` — the
+    /// `_id` of the last row the client received on the previous page (read
+    /// results surface `_id` for exactly this purpose). Passing it makes the
+    /// seek resume STRICTLY after that specific row, so rows tied on the same
+    /// ORDER BY value across a page boundary are no longer silently dropped.
+    ///
+    /// `after_id = None` is equivalent to `after(key, limit)` (the
+    /// backward-compatible default — reproduces today's skip-all-ties
+    /// behavior for callers that don't opt in).
+    pub fn after_with_id(
+        mut self,
+        key: Vec<QueryValue>,
+        limit: Option<u64>,
+        after_id: Option<RecordId>,
+    ) -> Self {
+        self.pagination = Pagination::after_with_id(key, limit, after_id);
         self
     }
 

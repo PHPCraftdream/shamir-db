@@ -1,6 +1,7 @@
 //! Pagination — LIMIT/OFFSET, page-based, and keyset (seek) pagination.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 /// Pagination mode for queries.
@@ -46,6 +47,34 @@ pub enum Pagination {
         /// Maximum records to return after the seek tuple.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
+        /// Optional record-id tie-breaker (task #537). When the ORDER BY
+        /// value(s) in `key` are shared by several rows across a page
+        /// boundary, `key` alone cannot distinguish "the row the client
+        /// already has" from "a different row tied on the same value" — so
+        /// the value-only skip drops every tied row permanently. A client
+        /// that echoes back the `_id` of the last row it received sets
+        /// `after_id` to resume STRICTLY past that specific row instead of
+        /// past the bare value.
+        ///
+        /// **Backward-compatible / additive.** `None` (the default, and what
+        /// every old client / old query-builder sends) reproduces today's
+        /// exact skip-all-ties behavior — a pre-existing known limitation for
+        /// those callers, never a new regression. Only clients that opt in by
+        /// echoing the id get correct tie-breaking. `skip_serializing_if`
+        /// keeps the wire shape byte-identical when absent.
+        ///
+        /// **Wire form is the base58 STRING** (same token the client received
+        /// as the row's `_id` in read results — `_id` is emitted as a base58
+        /// string by `InsertedRecord`). This lets a client echo the exact
+        /// `_id` value verbatim; `RecordId`'s own `Deserialize` expects 16
+        /// raw bytes, so we round-trip through `Display`/`FromStr` instead
+        /// (see [`opt_record_id_base58`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "opt_record_id_base58"
+        )]
+        after_id: Option<RecordId>,
     },
     /// No pagination
     #[default]
@@ -84,12 +113,14 @@ impl PartialEq for Pagination {
                 Pagination::After {
                     key: k1,
                     limit: lim1,
+                    after_id: aid1,
                 },
                 Pagination::After {
                     key: k2,
                     limit: lim2,
+                    after_id: aid2,
                 },
-            ) => lim1 == lim2 && key_bytes(k1) == key_bytes(k2),
+            ) => lim1 == lim2 && aid1 == aid2 && key_bytes(k1) == key_bytes(k2),
             (Pagination::None, Pagination::None) => true,
             _ => false,
         }
@@ -99,6 +130,43 @@ impl PartialEq for Pagination {
 /// Encode a seek-tuple slice to canonical MessagePack bytes for equality.
 fn key_bytes(key: &[QueryValue]) -> Vec<u8> {
     rmp_serde::to_vec_named(key).expect("serializing Vec<QueryValue> is infallible")
+}
+
+/// Serde `with`-module: represent `Option<RecordId>` on the wire as an
+/// optional base58 **string** (task #537).
+///
+/// The read-result `_id` a client echoes back is a base58 string (emitted by
+/// `InsertedRecord`); `RecordId`'s own `Serialize`/`Deserialize` uses 16 raw
+/// bytes, which would NOT accept that string. This module bridges the two so
+/// `after_id` round-trips the same token the client received.
+mod opt_record_id_base58 {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use shamir_types::types::record_id::RecordId;
+
+    pub(super) fn serialize<S: Serializer>(
+        v: &Option<RecordId>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        // `skip_serializing_if = Option::is_none` guarantees `Some` here, but
+        // stay total: emit the base58 string for `Some`, unit for `None`.
+        match v {
+            Some(id) => id.to_string().serialize(s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<RecordId>, D::Error> {
+        let opt = Option::<String>::deserialize(d)?;
+        match opt {
+            Some(s) => s
+                .parse::<RecordId>()
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
 }
 
 impl Pagination {
@@ -127,7 +195,22 @@ impl Pagination {
     /// strict-prefix range scan over the ORDER BY key space.
     pub fn keyset(&self) -> Option<(&[QueryValue], Option<u64>)> {
         match self {
-            Pagination::After { key, limit } => Some((key.as_slice(), *limit)),
+            Pagination::After { key, limit, .. } => Some((key.as_slice(), *limit)),
+            _ => None,
+        }
+    }
+
+    /// Record-id tie-breaker accessor for keyset pagination (task #537).
+    ///
+    /// Returns `Some(&record_id)` only when this is a [`Pagination::After`]
+    /// carrying an `after_id`, and `None` otherwise (including an `After` that
+    /// omitted the tie-breaker — an old client, reproducing today's
+    /// skip-all-ties behavior). The keyset-seek executor uses this to bound
+    /// the physical-key range scan by `(seek_value, after_id)` instead of the
+    /// approximate value-only filter.
+    pub fn after_id(&self) -> Option<&RecordId> {
+        match self {
+            Pagination::After { after_id, .. } => after_id.as_ref(),
             _ => None,
         }
     }
@@ -145,7 +228,33 @@ impl Pagination {
     /// Keyset / seek pagination: return up to `limit` rows ordered after the
     /// tuple `key`.
     pub fn after(key: Vec<QueryValue>, limit: Option<u64>) -> Self {
-        Pagination::After { key, limit }
+        Pagination::After {
+            key,
+            limit,
+            after_id: None,
+        }
+    }
+
+    /// Keyset / seek pagination WITH a record-id tie-breaker (task #537):
+    /// return up to `limit` rows ordered STRICTLY after the row identified by
+    /// `(key, after_id)`.
+    ///
+    /// `after_id` is the `_id` of the last row the client received on the
+    /// previous page (surfaced in read results — see `QueryRecord`). Passing
+    /// it lets the server resume past that exact row rather than past the bare
+    /// ORDER BY value, so rows tied on the same value across a page boundary
+    /// are no longer silently dropped. `after(key, limit)` (no tie-breaker)
+    /// stays the backward-compatible default.
+    pub fn after_with_id(
+        key: Vec<QueryValue>,
+        limit: Option<u64>,
+        after_id: Option<RecordId>,
+    ) -> Self {
+        Pagination::After {
+            key,
+            limit,
+            after_id,
+        }
     }
 
     /// Check if this is the default (no pagination)

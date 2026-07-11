@@ -9,6 +9,7 @@ use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, ReadQuery};
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::table_manager::TableManager;
@@ -465,6 +466,7 @@ impl TableManager {
     ) -> Option<(
         u64,
         Vec<u8>,
+        Option<RecordId>,
         usize,
         shamir_query_types::read::OrderDirection,
     )> {
@@ -505,7 +507,17 @@ impl TableManager {
         // Encode the single seek value.
         let encoded_key = encode_query_value_for_sort(&key[0])?;
 
-        Some((def.name_interned, encoded_key, limit, item.direction))
+        // Task #537: the optional record-id tie-breaker. `None` for old
+        // clients that don't echo it back → today's skip-all-ties behavior.
+        let after_id = query.pagination.after_id().copied();
+
+        Some((
+            def.name_interned,
+            encoded_key,
+            after_id,
+            limit,
+            item.direction,
+        ))
     }
 }
 
