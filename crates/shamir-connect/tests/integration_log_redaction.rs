@@ -153,7 +153,7 @@ fn pending_changepw_challenge_debug_redacts_nonces() {
 #[test]
 fn ticket_plain_debug_redacts_identifying_fields() {
     let t = TicketPlain {
-        version: 1,
+        version: 2,
         user_id: serde_bytes::ByteArray::new([0x21u8; 16]),
         username_nfc: "secret-username".into(),
         transport_kind_at_auth: 0x01,
@@ -163,7 +163,6 @@ fn ticket_plain_debug_redacts_identifying_fields() {
         original_auth_at_ns: 1000,
         expires_at_ns: 2000,
         family_counter: 5,
-        roles: vec!["superuser".into()],
         identity_key_version: 0,
     };
     let dbg = format!("{:?}", t);

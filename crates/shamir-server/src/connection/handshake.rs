@@ -412,11 +412,11 @@ async fn run_handshake<F: Framer>(
     // directory write boundary as of #557, so the persisted list never
     // contains it anyway).
     //
-    // The roles value threaded into the resumption ticket is the SAME
-    // `state.roles` snapshot — task #558 will drop roles from the ticket
-    // entirely and re-verify against the directory on resume; until then
-    // we keep the payload shape, just sourced from `state_by_user_id`
-    // instead of a second `lookup_roles` call.
+    // The roles value is no longer threaded into the resumption ticket
+    // (task #558 dropped `roles` from `TicketPlain`; resume re-verifies
+    // against the directory on every reconnect), so `user_state.roles` has
+    // exactly ONE consumer here — the freshly-built session. It is MOVED
+    // rather than cloned.
     let user_state = match ctx.user_dir.state_by_user_id(&user_id) {
         Some(s) => s,
         None => return Err(HandshakeError::UnknownUser),
@@ -424,7 +424,7 @@ async fn run_handshake<F: Framer>(
     let session = Session::new(
         user_id,
         username.as_str().to_string(),
-        SessionPermissions::new(user_state.superuser, user_state.roles.clone()),
+        SessionPermissions::new(user_state.superuser, user_state.roles),
         ctx.transport_kind,
         binding_mode,
         exporter,
@@ -458,7 +458,6 @@ async fn run_handshake<F: Framer>(
     // the client can reconnect without re-running Argon2id. TTL = 24h
     // matches the session max-age default in `SchedulerInputs::session_max_age_ns`.
     const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
-    let roles_for_ticket = user_state.roles;
     let (ticket_bytes, ticket_expires_at_ns) =
         match shamir_connect::server::resume::issue_initial_ticket(
             &ctx.resume_config.ticket_key,
@@ -467,7 +466,6 @@ async fn run_handshake<F: Framer>(
             ctx.transport_kind.as_u8(),
             binding_mode.as_u8(),
             exporter,
-            roles_for_ticket,
             ctx.identity.current_version(),
             now_ns,
             RESUMPTION_TICKET_TTL_NS,

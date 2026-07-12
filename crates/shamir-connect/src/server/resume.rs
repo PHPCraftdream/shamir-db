@@ -203,11 +203,35 @@ pub struct ResumeOk {
     pub resumption_expires_at_ns: Option<u64>,
 }
 
-/// Lookup hook: returns user's `tickets_invalid_before_ns` for the spec §5.4
-/// step 9 check. Caller wires this to its `__system__/users` lookup.
+/// Authoritative directory snapshot returned by a successful resume lookup —
+/// the CURRENT state, re-fetched on every resume, NOT trusted from the
+/// ticket's stale snapshot (task #558 / design doc §5).
+///
+/// `shamir-connect` cannot depend on `shamir-server`'s
+/// `FjallUserDirectory`/`UserDirectoryState`, so this is a parallel,
+/// independent struct that the `shamir-server` adapter maps INTO.
+#[derive(Debug, Clone)]
+pub struct ResumeUserState {
+    /// Current username (guards against stale-name resurrection via an old
+    /// ticket if the account is later renamed — resume must use THIS, not the
+    /// ticket's `username_nfc`).
+    pub username: String,
+    /// Current role set.
+    pub roles: Vec<String>,
+    /// Current superuser flag.
+    pub superuser: bool,
+    /// `tickets_invalid_before_ns` — unchanged mechanism, still consulted for
+    /// the spec §5.4 step 9 STRICT `>` epoch check.
+    pub tickets_invalid_before_ns: u64,
+}
+
+/// Lookup hook: returns the user's CURRENT authoritative directory state for
+/// the spec §5.4 step 8/9 checks AND for building the resumed session. Caller
+/// wires this to its `__system__/users` lookup.
 pub trait UserStateLookup: Send + Sync {
-    /// Returns `tickets_invalid_before_ns` if the user exists, `None` if not.
-    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64>;
+    /// Returns the account's current authoritative state, or `None` if the
+    /// `user_id` is unknown/removed (resume must reject — spec §5.4 step 8).
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<ResumeUserState>;
 }
 
 /// Process a resume request end-to-end. Returns `Ok(ResumeOk)` on success or
@@ -232,8 +256,8 @@ pub fn process_resume(
     // Step 1: parse envelope.
     let wire = TicketWire::from_bytes(request.ticket_wire_bytes).map_err(|_| Error::AuthFailed)?;
 
-    // Step 2: validate envelope.version (we only accept v1).
-    if wire.version != 1 {
+    // Step 2: validate envelope.version (we only accept v2).
+    if wire.version != 2 {
         return Err(Error::AuthFailed);
     }
 
@@ -264,13 +288,19 @@ pub fn process_resume(
         return Err(Error::AuthFailed);
     }
 
-    // Step 8: lookup user → get tickets_invalid_before_ns.
+    // Step 8: lookup user → get the CURRENT authoritative directory state
+    // (username, roles, superuser, tickets_invalid_before_ns). Resume
+    // re-verifies against the directory on every reconnect — it does NOT
+    // trust any authorization snapshot baked into the ticket (task #558 /
+    // design doc §5).
     // Optim #2: `plain.user_id` is `ByteArray<16>` — direct array deref.
     let user_id: [u8; 16] = *plain.user_id.as_ref();
-    let invalid_before = user_lookup.lookup(&user_id).ok_or(Error::AuthFailed)?;
+    let state = user_lookup.lookup(&user_id).ok_or(Error::AuthFailed)?;
 
-    // Step 9: STRICT > comparison (spec §5.4 step 9).
-    if plain.original_auth_at_ns <= invalid_before {
+    // Step 9: STRICT > comparison (spec §5.4 step 9). The epoch mechanism is
+    // UNCHANGED and RETAINED — it still kills live in-memory sessions on
+    // their next request; this lookup-based re-verification is complementary.
+    if plain.original_auth_at_ns <= state.tickets_invalid_before_ns {
         return Err(Error::AuthFailed);
     }
 
@@ -338,29 +368,32 @@ pub fn process_resume(
     let session_id = random_array::<{ limits::SESSION_ID_BYTES }>();
     let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
 
-    // Step 12 + 13 fused. Optim #6: avoid deep-cloning `plain.username_nfc`
-    // / `plain.roles` twice (once for Session, once for new ticket) by
-    // moving them between `plain` → `new_plain` → `Session` instead. We
-    // pay at most ONE String + ONE Vec<String> clone per resume regardless
-    // of whether a refresh ticket is issued (down from 2 + 2 = 4 in the
-    // previous version).
-
+    // Step 12 + 13 fused.
+    //
+    // Optim #6 re-derived for task #558: the session is now built from the
+    // directory's CURRENT state (`state`), while a refreshed ticket is built
+    // from the OLD ticket's own opaque fields (`plain`). Because `state` and
+    // `plain` no longer share any heap-owned value (roles is gone from the
+    // ticket entirely; the session's username comes from `state.username`,
+    // the ticket's `username_nfc` round-trips as the ticket's own field),
+    // there is NO double-consumption to avoid — each value has exactly one
+    // consumer and is MOVED, never cloned. The previous version's
+    // String/Vec<String> clone-pair bookkeeping is therefore moot and removed.
     let issue_refresh = plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS
         > now_ns + new_ticket_ttl_ns;
 
     let transport_at_auth = plain.transport_kind_at_auth;
     let session_transport = TransportKind::from_u8(transport_at_auth).unwrap_or(TransportKind::Tcp);
 
+    // Optional refresh ticket (step 13). Built from `plain`'s own opaque
+    // fields; carries NO authorization data. `username_nfc` round-trips as
+    // the ticket's internal field (opaque to clients, not an authorization
+    // read path) — the live Session below is built from `state`, not `plain`.
     let (resumption_ticket, resumption_expires_at_ns) = if issue_refresh {
-        // Refresh path: clone what Session also needs, MOVE everything else
-        // into new_plain (no clone for the heavy fields).
-        let session_username = plain.username_nfc.clone();
-        let session_roles = plain.roles.clone();
-
         let new_plain = TicketPlain {
-            version: 1,
-            user_id: plain.user_id,           // ByteArray<16>: Copy, free
-            username_nfc: plain.username_nfc, // moved
+            version: 2,
+            user_id: plain.user_id,           // ByteArray<16>: Copy
+            username_nfc: plain.username_nfc, // moved (ticket's own field)
             transport_kind_at_auth: transport_at_auth,
             binding_mode_at_auth: plain.binding_mode_at_auth,
             channel_binding_at_auth: plain.channel_binding_at_auth, // ByteArray<32>: Copy
@@ -368,39 +401,32 @@ pub fn process_resume(
             original_auth_at_ns: plain.original_auth_at_ns,
             expires_at_ns: now_ns.saturating_add(new_ticket_ttl_ns),
             family_counter: plain.family_counter.saturating_add(1),
-            roles: plain.roles, // moved
             identity_key_version: plain.identity_key_version,
         };
         // Optim #3: reuse cached current cipher for re-encrypt.
         let wire = encrypt_ticket_with_cipher(current_cipher, &new_plain)
             .map_err(|_| Error::AuthFailed)?;
 
-        let session = Session::new(
-            user_id,
-            session_username,
-            SessionPermissions::from_roles(session_roles),
-            session_transport,
-            request.binding_mode_now,
-            request.channel_binding_now,
-            now_ns,
-        );
-        session_store.insert(session_id, session);
-
         (Some(wire.to_bytes()), Some(new_plain.expires_at_ns))
     } else {
-        // No refresh: move plain directly into Session — zero clones.
-        let session = Session::new(
-            user_id,
-            plain.username_nfc,                          // moved
-            SessionPermissions::from_roles(plain.roles), // moved
-            session_transport,
-            request.binding_mode_now,
-            request.channel_binding_now,
-            now_ns,
-        );
-        session_store.insert(session_id, session);
         (None, None)
     };
+
+    // Step 12: build the Session from the directory's CURRENT state —
+    // `state.username` / `state.roles` / `state.superuser` — NOT from the
+    // ticket's stale snapshot (task #558 / design doc §5). Built once,
+    // outside the refresh decision: whether or not a refresh ticket is
+    // issued, the live session is always sourced from the directory.
+    let session = Session::new(
+        user_id,
+        state.username,
+        SessionPermissions::new(state.superuser, state.roles),
+        session_transport,
+        request.binding_mode_now,
+        request.channel_binding_now,
+        now_ns,
+    );
+    session_store.insert(session_id, session);
 
     Ok(ResumeOk {
         session_id,
@@ -415,10 +441,10 @@ pub fn process_resume(
 /// Used right after `auth_ok` when the server wants to issue a resumption
 /// token. `family_id = random(16)`, `family_counter = 1`, `original_auth_at_ns = now`.
 ///
-/// `roles` is the permissions snapshot from the just-completed handshake —
-/// SESSION_RESUMPTION §2.1 mandates that resume rebuild [`SessionPermissions`]
-/// from this list. `identity_key_version` lets later rotations reject
-/// pre-rotation tickets (spec §5.7 / diagram 12).
+/// Per task #558, the ticket carries NO authorization snapshot — resume
+/// re-fetches the account's CURRENT `(username, roles, superuser)` from the
+/// directory by `user_id` (design doc §5). `identity_key_version` lets later
+/// rotations reject pre-rotation tickets (spec §5.7 / diagram 12).
 #[allow(clippy::too_many_arguments)]
 pub fn issue_initial_ticket(
     ticket_key: &[u8; 32],
@@ -427,7 +453,6 @@ pub fn issue_initial_ticket(
     transport_kind_at_auth: u8,
     binding_mode_at_auth: u8,
     channel_binding_at_auth: [u8; 32],
-    roles: Vec<String>,
     identity_key_version: u64,
     now_ns: u64,
     ttl_ns: u64,
@@ -436,7 +461,7 @@ pub fn issue_initial_ticket(
     random_bytes(&mut family);
 
     let plain = TicketPlain {
-        version: 1,
+        version: 2,
         user_id: serde_bytes::ByteArray::new(user_id),
         username_nfc,
         transport_kind_at_auth,
@@ -446,7 +471,6 @@ pub fn issue_initial_ticket(
         original_auth_at_ns: now_ns,
         expires_at_ns: now_ns.saturating_add(ttl_ns),
         family_counter: 1,
-        roles,
         identity_key_version,
     };
     let wire = encrypt_ticket(ticket_key, &plain).map_err(|_| Error::AuthFailed)?;
@@ -456,15 +480,15 @@ pub fn issue_initial_ticket(
 /// Lookup adapter: implement [`UserStateLookup`] for any closure.
 impl<F> UserStateLookup for F
 where
-    F: Fn(&[u8; 16]) -> Option<u64> + Send + Sync,
+    F: Fn(&[u8; 16]) -> Option<ResumeUserState> + Send + Sync,
 {
-    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<ResumeUserState> {
         self(user_id)
     }
 }
 
 /// In-memory user store: simple hashmap-based [`UserStateLookup`].
-pub type InMemoryUserStateMap = Arc<DashMap<[u8; 16], u64, FxBuild>>;
+pub type InMemoryUserStateMap = Arc<DashMap<[u8; 16], ResumeUserState, FxBuild>>;
 
 /// Construct an empty in-memory user state map.
 pub fn new_user_state_map() -> InMemoryUserStateMap {
@@ -472,8 +496,10 @@ pub fn new_user_state_map() -> InMemoryUserStateMap {
 }
 
 impl UserStateLookup for InMemoryUserStateMap {
-    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
-        self.get(user_id).map(|v| *v)
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<ResumeUserState> {
+        // `DashMap::get` returns a `Ref` guard; clone the value out so the
+        // guard is released immediately (no lock held across the call).
+        self.get(user_id).map(|v| v.clone())
     }
 }
 

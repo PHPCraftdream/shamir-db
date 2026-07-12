@@ -518,7 +518,7 @@ fn main() {
     // Ticket encrypt + decrypt.
     let ticket_key = [0xddu8; 32];
     let plain = TicketPlain {
-        version: 1,
+        version: 2,
         user_id: serde_bytes::ByteArray::new([0x01u8; 16]),
         username_nfc: "alice".into(),
         transport_kind_at_auth: 0x01,
@@ -528,7 +528,6 @@ fn main() {
         original_auth_at_ns: 1_000_000,
         expires_at_ns: 2_000_000,
         family_counter: 1,
-        roles: vec!["read_write".into()],
         identity_key_version: 0,
     };
     let wire = encrypt_ticket(&ticket_key, &plain).unwrap();

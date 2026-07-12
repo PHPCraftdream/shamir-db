@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! ticket_wire = struct {
-//!   version: u8 = 1,
+//!   version: u8 = 2,
 //!   nonce: bytes(12),
 //!   ciphertext_len: u16_be,
 //!   ciphertext: bytes,
@@ -30,12 +30,14 @@ use crate::common::types::{BindingMode, TransportKind};
 use serde::{Deserialize, Serialize};
 
 /// Plaintext fields of the ticket. Encoded as msgpack (canonical form
-/// by msgpack-rs default — sufficient for v1 since AAD does not depend on
+/// by msgpack-rs default — sufficient for v2 since AAD does not depend on
 /// any inner field).
 ///
-/// Per SESSION_RESUMPTION §2.1 / diagram 02 step 12, `roles` is the
-/// permissions snapshot taken at full SCRAM time; resumed sessions MUST be
-/// constructed with these roles so admin sessions retain admin powers.
+/// Per task #558, the ticket no longer carries a `roles` snapshot: resume
+/// re-fetches the account's CURRENT `(username, roles, superuser)` from the
+/// directory by `user_id` and builds the session from that, not from any
+/// value baked into the ticket (design doc §5). A ticket proves continuity
+/// of authentication; it does not carry authorization.
 ///
 /// **Optim #2:** fixed-size byte fields (`user_id`, `channel_binding_at_auth`,
 /// `ticket_family_id`) use [`serde_bytes::ByteArray<N>`] instead of
@@ -68,10 +70,6 @@ pub struct TicketPlain {
     pub expires_at_ns: u64,
     /// Monotonic counter within the family.
     pub family_counter: u64,
-    /// Permissions snapshot at full SCRAM time (SESSION_RESUMPTION §2.1).
-    /// Resume rebuilds [`SessionPermissions`] from these so e.g. a `superuser`
-    /// session resumed via ticket retains admin authorization.
-    pub roles: Vec<String>,
     /// Identity-key version: which Ed25519 keypair was current when this
     /// ticket was issued. Allows server to reject tickets issued before a
     /// rotation overlap window (spec §5.7 NORMATIVE / diagram 12).
@@ -92,7 +90,6 @@ impl core::fmt::Debug for TicketPlain {
             .field("original_auth_at_ns", &self.original_auth_at_ns)
             .field("expires_at_ns", &self.expires_at_ns)
             .field("family_counter", &self.family_counter)
-            .field("roles", &"<REDACTED>")
             .field("identity_key_version", &self.identity_key_version)
             .finish()
     }
@@ -224,7 +221,7 @@ pub fn decrypt_ticket_with_ciphers(
     previous_cipher: Option<&Aes256GcmCipher>,
     wire: &TicketWire,
 ) -> Result<TicketPlain> {
-    if wire.version != 1 {
+    if wire.version != 2 {
         return Err(Error::InvalidInput("ticket: unsupported version"));
     }
     let aad = build_aad(wire.version);
