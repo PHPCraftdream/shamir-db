@@ -39,6 +39,23 @@ pub trait UserDirectory: Send + Sync {
 
     /// Look up `user_id` by username.
     fn user_id(&self, username: &str) -> Option<[u8; 16]>;
+
+    /// Persist new SCRAM credentials (salt/stored_key/server_key/kdf_params)
+    /// for an existing user, atomically bumping `tickets_invalid_before_ns`
+    /// in the same transaction (spec §12.5.3: proof-of-old-password success
+    /// must invalidate every outstanding resumption ticket for this user,
+    /// with no window where the new credentials are durable but the old
+    /// tickets are still honoured). Returns `true` if the user was found and
+    /// updated, `Err` if the user does not exist.
+    fn update_credentials(
+        &self,
+        username: &str,
+        new_salt: [u8; limits::SALT_BYTES],
+        new_stored_key: StoredKey,
+        new_server_key: [u8; 32],
+        new_kdf_params: KdfParams,
+        now_ns: u64,
+    ) -> Result<bool>;
 }
 
 /// Audit event hook — emitted for every admin command (spec IMPL §3.2).
@@ -343,6 +360,30 @@ impl UserDirectory for InMemoryUserDirectory {
 
     fn user_id(&self, username: &str) -> Option<[u8; 16]> {
         self.by_name.get(username).map(|r| r.value().0)
+    }
+
+    fn update_credentials(
+        &self,
+        username: &str,
+        new_salt: [u8; limits::SALT_BYTES],
+        new_stored_key: StoredKey,
+        new_server_key: [u8; 32],
+        new_kdf_params: KdfParams,
+        now_ns: u64,
+    ) -> Result<bool> {
+        if let Some(mut entry) = self.by_name.get_mut(username) {
+            let (_uid, record) = entry.value_mut();
+            record.salt = new_salt;
+            record.stored_key = new_stored_key;
+            record.server_key = Zeroizing::new(new_server_key);
+            record.kdf_params = new_kdf_params;
+            if now_ns > record.tickets_invalid_before_ns {
+                record.tickets_invalid_before_ns = now_ns;
+            }
+            Ok(true)
+        } else {
+            Err(Error::InvalidInput("user not found"))
+        }
     }
 }
 

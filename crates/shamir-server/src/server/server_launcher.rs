@@ -330,7 +330,8 @@ impl ServerLauncher {
             })
             .with_tx_limits(TxLimitsCap {
                 max_tx_bytes: config.security.tx.max_tx_bytes,
-            }),
+            })
+            .with_session_store(session_store.clone()),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete;

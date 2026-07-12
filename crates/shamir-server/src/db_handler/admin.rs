@@ -3,8 +3,14 @@ use std::sync::Arc;
 use shamir_connect::common::crypto::random_array;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::time::UnixNanos;
+use shamir_connect::common::types::limits;
 use shamir_connect::server::admin::UserDirectory;
-use shamir_connect::server::session::Session;
+use shamir_connect::server::changepw::{
+    finalize_change_password, start_change_password_challenge,
+    verify_change_password_request_with_sid, ChangePwRequest,
+};
+use shamir_connect::server::session::{Session, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 use shamir_db::query::batch::{BatchOp, BatchRequest};
 use zeroize::Zeroizing;
@@ -122,6 +128,183 @@ pub(super) async fn create_scram_user(
         name,
         user_id: user_id.to_vec(),
     }
+}
+
+/// `ChangePasswordChallenge` (spec §12.5 step 1) — issue a fresh
+/// server-side challenge bound to the caller's own session.
+///
+/// Authorization: none beyond "you hold a valid session" — the caller can
+/// only ever change their own password (proven by the SCRAM proof-of-old-
+/// password in [`change_password_verify`]), so there is nothing extra to
+/// gate here (per the task brief: adding a role/permission check would be
+/// redundant with, or could conflict with, the SCRAM verification itself).
+pub(super) async fn change_password_challenge(
+    admin: Option<&AdminGlue>,
+    session: &Session,
+    client_nonce_cp: Vec<u8>,
+) -> DbResponse {
+    let admin = match admin {
+        Some(a) => a,
+        None => {
+            return DbResponse::Error {
+                code: "not_supported".into(),
+                message: "handler built without AdminGlue (no user_dir)".into(),
+            }
+        }
+    };
+    let Some(nonce) = as_array_32(&client_nonce_cp) else {
+        return DbResponse::Error {
+            code: "validation".into(),
+            message: "client_nonce_cp must be 32 bytes".into(),
+        };
+    };
+
+    let Some(record) = admin.user_dir.lookup_by_name(&session.username) else {
+        // The session's own user vanished (e.g. concurrently deleted).
+        // Treat as auth failure rather than leaking existence info.
+        return DbResponse::Error {
+            code: "auth_failed".into(),
+            message: "user not found".into(),
+        };
+    };
+
+    let now_ns = UnixNanos::now().as_u64();
+    let view =
+        start_change_password_challenge(session, record.salt, record.kdf_params, nonce, now_ns);
+
+    DbResponse::ChangePasswordChallenge {
+        server_nonce_cp: view.server_nonce_cp.to_vec(),
+        salt: view.salt.to_vec(),
+        kdf_memory_kb: view.kdf_params.memory_kb,
+        kdf_time: view.kdf_params.time,
+        kdf_parallelism: view.kdf_params.parallelism,
+        kdf_argon2_version: view.kdf_params.argon2_version,
+    }
+}
+
+/// `ChangePasswordVerify` (spec §12.5 step 2) — verify the old-password
+/// SCRAM proof, and on success persist the new credentials, bump
+/// `tickets_invalid_before_ns`, and kill every other live session for this
+/// user (spec §12.5.3).
+///
+/// `session_store` is threaded in from [`super::handler::ShamirDbHandler`]'s
+/// own `Arc<SessionStore>` field (see `ShamirDbHandler::with_session_store`)
+/// — it is only needed here, for the session-kill half of this flow.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn change_password_verify(
+    admin: Option<&AdminGlue>,
+    session_store: Option<&Arc<SessionStore>>,
+    session: &Session,
+    client_proof_old: Vec<u8>,
+    new_salt: Vec<u8>,
+    new_stored_key: Vec<u8>,
+    new_server_key: Vec<u8>,
+) -> DbResponse {
+    let admin = match admin {
+        Some(a) => a,
+        None => {
+            return DbResponse::Error {
+                code: "not_supported".into(),
+                message: "handler built without AdminGlue (no user_dir)".into(),
+            }
+        }
+    };
+    let (Some(proof_old), Some(salt_new), Some(stored_key_new), Some(server_key_new)) = (
+        as_array_32(&client_proof_old),
+        as_array_16(&new_salt),
+        as_array_32(&new_stored_key),
+        as_array_32(&new_server_key),
+    ) else {
+        return DbResponse::Error {
+            code: "validation".into(),
+            message: "changePasswordVerify: wrong field length \
+                      (client_proof_old/new_stored_key/new_server_key=32 bytes, new_salt=16 bytes)"
+                .into(),
+        };
+    };
+
+    let Some(record) = admin.user_dir.lookup_by_name(&session.username) else {
+        return DbResponse::Error {
+            code: "auth_failed".into(),
+            message: "user not found".into(),
+        };
+    };
+
+    let request = ChangePwRequest {
+        client_proof_old: proof_old,
+        new_salt: salt_new,
+        new_stored_key: stored_key_new,
+        new_server_key: server_key_new,
+    };
+
+    let now_ns = UnixNanos::now().as_u64();
+    let apply = match verify_change_password_request_with_sid(
+        session,
+        &session.session_id,
+        record.salt,
+        &record.stored_key,
+        record.kdf_params,
+        &request,
+        // `current_kdf_params` is what gets persisted verbatim as the
+        // user's NEW `kdf_params` (see `ChangePwApply::kdf_params` doc
+        // comment). This MUST be the user's own current `record.kdf_params`
+        // — the same value echoed in the `ChangePasswordChallenge` response
+        // — NOT the server's global `admin.kdf` default for brand-new
+        // users. The two coincide today (single global KDF policy, no
+        // per-user override), but diverge the moment KDF params are
+        // rotated or tuned per-user: passing `admin.kdf` here would
+        // persist the WRONG kdf_params alongside stored_key/server_key
+        // that the client actually derived under `record.kdf_params`,
+        // corrupting the user's next login.
+        record.kdf_params,
+        now_ns,
+    ) {
+        Ok(apply) => apply,
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "changePasswordVerify: proof_old verification failed".into(),
+            };
+        }
+    };
+
+    // Persist the new credentials AND bump `tickets_invalid_before_ns` in
+    // the SAME read-modify-write transaction (see `FjallUserDirectory::
+    // update_credentials` doc comment for why this must be one atomic
+    // write rather than a credential write followed by a separate
+    // `bump_tickets_invalid` call).
+    if let Err(e) = admin.user_dir.update_credentials(
+        &session.username,
+        apply.salt,
+        apply.stored_key,
+        *apply.server_key,
+        apply.kdf_params,
+        now_ns,
+    ) {
+        return DbResponse::Error {
+            code: "query".into(),
+            message: format!("changePasswordVerify: persist failed: {e}"),
+        };
+    }
+
+    // Kill every other live session for this user (spec §12.5.3: "Все
+    // сессии юзера убиваются (включая текущую)"). Only reachable when the
+    // handler was constructed with a `SessionStore` (see Gap 2 in the task
+    // brief); if absent, the credential update above still lands — the
+    // ticket-revocation half is a documented partial-fix fallback.
+    if let Some(store) = session_store {
+        let _ = finalize_change_password(store, &session.user_id, now_ns);
+    }
+
+    DbResponse::ChangePasswordOk
+}
+
+fn as_array_32(bytes: &[u8]) -> Option<[u8; 32]> {
+    <[u8; 32]>::try_from(bytes).ok()
+}
+
+fn as_array_16(bytes: &[u8]) -> Option<[u8; limits::SALT_BYTES]> {
+    <[u8; limits::SALT_BYTES]>::try_from(bytes).ok()
 }
 
 /// Walk the batch and verify the `hmac` tag on every destructive op.
