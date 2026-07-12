@@ -20,26 +20,55 @@ use crate::types::value::QueryValue;
 /// `Actor::User(id)` serialises to the user's numeric id.
 pub const OWNER_SYSTEM: u64 = 0;
 
-/// Canonical principal id for a username.
+/// Fixed 63-bit projection of a directory-minted 16-byte user id into the
+/// catalogue's `i64`-safe integer space (owner / group-member encoding).
 ///
-/// Hashes the username with fxhash and masks to 63 bits so the id always
-/// fits an `i64`: the catalogue stores integers as `i64` (owner /
-/// group-member ids round-trip through the wire encoding→InnerValue→msgpack), and a
-/// `u64` above `i64::MAX` would be lost on read-back. The wire session
-/// layer and the access-tree resolver both call this, so an owner id on a
-/// resource resolves back to the same username everywhere. The reserved
-/// `System` actor keeps id `0` ([`OWNER_SYSTEM`]); a username hashing to
-/// `0` is astronomically unlikely and would merely alias the system id.
-pub fn principal_id(username: &str) -> u64 {
-    fxhash::hash64(username) & (i64::MAX as u64)
+/// Pure truncation — NOT a hash of anything attacker-chosen. Uniqueness and
+/// non-zero-ness are enforced once, at mint time, by the directory that
+/// produces the 16 bytes (`FjallUserDirectory`, task #556) — this function
+/// only projects. See `docs/design/identity-privilege-unification-548-549-decision.md`
+/// §2.2 for the full rationale (why 63-bit projection over widening the
+/// catalogue to 128 bits).
+pub fn principal64(user_id: [u8; 16]) -> u64 {
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&user_id[0..8]);
+    u64::from_be_bytes(buf) & (i64::MAX as u64)
+}
+
+/// Interim, username-keyed bridge into the `principal64` id space.
+///
+/// **NOT the real identity primitive** — it is a deterministic hash of a
+/// *name*, exactly what `principal64`'s real 16-byte projection is designed
+/// to replace (see `principal_id`'s deletion, this same commit). It exists
+/// ONLY for two classes of caller that cannot reach a real 16-byte
+/// directory-minted id today:
+///
+/// 1. Two production call sites in `shamir-db`'s `access_control.rs` that
+///    resolve a synthetic `/users/<name>` resource path (or list existing
+///    usernames for `access_tree`) with no live `Session`/directory lookup
+///    available — both are replaced by `PrincipalResolver` (task #559),
+///    which resolves a REAL principal64 id via the directory. Do not add
+///    new production call sites of this function; if you need a principal
+///    id in new production code, you have a `Session` (use
+///    `principal64(session.user_id)`) or you need `PrincipalResolver`.
+/// 2. Test/bench fixtures that need a stable, per-name, non-colliding id
+///    and do not care about mint-time randomness (they are not testing the
+///    recreate-inherits-identity bug — that property is tested against
+///    real `Session`/`user_id` bytes instead, see this task's red tests).
+pub fn principal64_from_username(username: &str) -> u64 {
+    let hash = fxhash::hash64(username);
+    let mut user_id = [0u8; 16];
+    user_id[0..8].copy_from_slice(&hash.to_be_bytes());
+    principal64(user_id)
 }
 
 impl Actor {
     /// Persist-friendly u64 encoding: `System` → [`OWNER_SYSTEM`],
-    /// `User(id)` → `id`.
+    /// `Admin(id)`/`User(id)` → `id`.
     pub fn to_owner_id(&self) -> u64 {
         match self {
             Actor::System => OWNER_SYSTEM,
+            Actor::Admin(id) => *id,
             Actor::User(id) => *id,
         }
     }
@@ -214,7 +243,7 @@ impl ResourceMeta {
         if let QueryValue::Map(map) = rec {
             map.insert(
                 "owner".to_string(),
-                // Store as i64: owner id is masked to i64::MAX in principal_id.
+                // Store as i64: owner id is masked to i64::MAX in principal64.
                 QueryValue::Int(self.owner.to_owner_id() as i64),
             );
             map.insert(
@@ -301,6 +330,15 @@ impl Default for ResourceMeta {
 pub enum Actor {
     #[default]
     System,
+    /// A superuser session. Bypasses `permits()` exactly like `System`, but
+    /// (unlike `System`) carries the real principal64 id, so
+    /// `ResourceMeta::owned_enforced`/`to_owner_id()` attributes
+    /// admin-created resources to their creator instead of collapsing them
+    /// to `owner = 0 = System`. NEVER produced by `from_owner_id` — admin-ness
+    /// is a live session property, never a persisted owner property; a
+    /// persisted owner id round-trips to `Actor::User`, never `Actor::Admin`,
+    /// even if that id happens to belong to an admin account.
+    Admin(u64),
     User(u64),
 }
 
@@ -308,6 +346,7 @@ impl fmt::Display for Actor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Actor::System => f.write_str("System"),
+            Actor::Admin(id) => write!(f, "Admin({id})"),
             Actor::User(id) => write!(f, "User({id})"),
         }
     }
@@ -644,13 +683,13 @@ pub fn class_of(actor: &Actor, meta: &ResourceMeta, in_group: bool) -> PermClass
 /// Callers supply the [`ResourceMeta`] and `in_group` flag; this function
 /// only evaluates the mode bits. Returns `true` if the action is allowed.
 ///
-/// * `Actor::System` → always `true` (admin bypass).
-/// * `Action::Manage` → `true` iff the actor is the owner (System already
+/// * `Actor::System` / `Actor::Admin(_)` → always `true` (admin bypass).
+/// * `Action::Manage` → `true` iff the actor is the owner (System/Admin already
 ///   returned above).
 /// * Otherwise → pick [`class_of`], map the action to a [`Perm`] via
 ///   [`action_perm`], and check [`Mode::is_set`].
 pub fn permits(actor: &Actor, meta: &ResourceMeta, action: Action, in_group: bool) -> bool {
-    if matches!(actor, Actor::System) {
+    if matches!(actor, Actor::System | Actor::Admin(_)) {
         return true;
     }
     if action == Action::Manage {

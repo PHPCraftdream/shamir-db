@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use shamir_db::access::{principal_id, Actor};
+use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -45,7 +45,7 @@ use crate::replication::supervisor::{ReplSourceFactory, Subscription, Subscripti
 /// owned by `alice`. Used for both leader and follower (independent data).
 async fn build_db() -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal_id("alice"));
+    let owner = Actor::User(principal64_from_username("alice"));
     shamir.create_db_as("app", owner.clone()).await;
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
@@ -59,7 +59,7 @@ async fn build_db() -> Arc<ShamirDb> {
 /// Write `n` rows into `app/main/items` on the leader, then poll until all `n`
 /// events are durable in the journal (the journal writer is async).
 async fn write_rows(leader: &ShamirDb, base: usize, n: usize) {
-    let owner = Actor::User(principal_id("alice"));
+    let owner = Actor::User(principal64_from_username("alice"));
     let before = leader
         .read_changelog_from_journal("app", "main", 0, 100_000)
         .await

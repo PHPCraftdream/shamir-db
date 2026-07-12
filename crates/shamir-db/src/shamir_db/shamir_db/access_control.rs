@@ -8,8 +8,8 @@ use shamir_types::types::value::QueryValue;
 use shamir_engine::function::{FunctionMeta, Security};
 
 use crate::access::{
-    permits, principal_id, trace_access, AccessError, Action, Actor, Mode, ResourceMeta,
-    ResourcePath, OWNER_SYSTEM,
+    permits, principal64_from_username, trace_access, AccessError, Action, Actor, Mode,
+    ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
 use crate::{DbError, DbResult};
 
@@ -157,10 +157,14 @@ impl ShamirDb {
             // persisting here would collide with the (separate, not-yet-
             // landed) directory-canonical-store decision.
             ResourcePath::User { name } => Ok(ResourceMeta {
-                // principal_id, NOT principal64 — task #555 (Actor::Admin/
-                // principal64) hasn't landed yet; this call site gets a
-                // one-line swap when it does.
-                owner: Actor::User(principal_id(name)),
+                // Interim: principal64_from_username, NOT a real directory lookup —
+                // there is no live Session/PrincipalResolver at this call site to
+                // resolve `name` to its real minted id. Replaced by a real
+                // PrincipalResolver-backed lookup in task #559; until then this
+                // preserves today's exact behavior (a name-keyed synthetic owner)
+                // just routed through the new principal64 projection instead of the
+                // now-deleted principal_id.
+                owner: Actor::User(principal64_from_username(name)),
                 group: None,
                 mode: 0o750,
             }),
@@ -672,14 +676,17 @@ impl ShamirDb {
         // NOT the enforcement gate; see `trace_access`'s doc comment.
         trace_access(actor, path, action)?;
 
-        // Admin bypass — the common live path.
-        if matches!(actor, Actor::System) {
+        // Admin bypass — the common live path. Both `System` (anonymous
+        // default) and `Admin(_)` (a real superuser session carrying its
+        // principal64 id) short-circuit the gate; `Admin` differs from
+        // `System` only in ownership attribution, not in gate semantics.
+        if matches!(actor, Actor::System | Actor::Admin(_)) {
             return Ok(());
         }
 
         let user_id = match actor {
             Actor::User(id) => *id,
-            Actor::System => unreachable!(),
+            Actor::System | Actor::Admin(_) => unreachable!(),
         };
 
         // Traversal: each ancestor needs Execute.
@@ -886,7 +893,9 @@ impl ShamirDb {
         let mut users_list: Vec<QueryValue> = Vec::new();
         for rec in self.system_store.load_users().await? {
             if let Some(uname) = rec.get("name").and_then(|v| v.as_str()) {
-                let id = principal_id(uname);
+                // Interim: principal64_from_username, NOT a real directory lookup
+                // — replaced by PrincipalResolver-backed resolution in task #559.
+                let id = principal64_from_username(uname);
                 name_of.insert(id, uname.to_string());
                 let mut m = new_map();
                 m.insert("id".to_string(), QueryValue::Int(id as i64));

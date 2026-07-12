@@ -797,9 +797,10 @@ async fn create_scram_user_success_then_duplicate() {
 
 /// Build a non-superuser session with a specific username.
 ///
-/// `principal_id()` = `fxhash::hash64(username) & (i64::MAX as u64)`, which
-/// must differ from the resource owner id set via `set_resource_meta` for the
-/// deny path to trigger.
+/// `principal64(session.user_id)` projects the session's directory-minted
+/// 16-byte user_id (`[0xCC; 16]` here) into a stable u64, which must differ
+/// from the resource owner id set via `set_resource_meta` for the deny path
+/// to trigger.
 fn named_user_session(username: &str) -> Session {
     Session::new(
         [0xCC; 16],
@@ -819,8 +820,8 @@ fn named_user_session(username: &str) -> Session {
 ///
 ///   1. Seed a table as System (superuser session).
 ///   2. `set_resource_meta` to owner=User(1), mode=0o700 (owner-only).
-///   3. A non-superuser session whose `principal_id()` != 1 is DENIED.
-///   4. A superuser session (Actor::System) is ALLOWED.
+///   3. A non-superuser session whose `principal64(user_id)` != 1 is DENIED.
+///   4. A superuser session (Actor::Admin) is ALLOWED.
 ///
 /// If `session_actor` were removed (always System) or `execute_as` skipped
 /// the `authorize_access` call, assertion (3) would fail.
@@ -858,12 +859,13 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     let handler = ShamirDbHandler::new(shamir);
 
     // --- Non-owner, non-superuser session → DENIED ---
-    // "eve" hashes to a principal_id that is NOT 1.
+    // "eve" projects (via principal64 over her session's directory-minted
+    // user_id bytes [0xCC;16]) to a principal id that is NOT 1.
     let eve = named_user_session("eve");
     assert_ne!(
-        eve.principal_id(),
+        shamir_types::access::principal64(eve.user_id),
         1,
-        "eve's principal_id must differ from owner 1"
+        "eve's principal64 must differ from owner 1"
     );
 
     let mut b = Batch::new();

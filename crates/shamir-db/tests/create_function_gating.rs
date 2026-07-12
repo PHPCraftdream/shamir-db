@@ -14,7 +14,7 @@
 use shamir_db::shamir_db::FunctionSource;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{CreateFunctionOptions, Security, Visibility};
-use shamir_types::access::{principal_id, Actor};
+use shamir_types::access::{principal64_from_username, Actor};
 
 /// Identity-echo WAT (same minimal slice-2 ABI module used in
 /// `functions_lifecycle.rs`) — compiled to WASM so we can create a real
@@ -52,7 +52,7 @@ async fn secret_grants_without_root_manage_denied() {
     // `Manage(Root)` fails. FunctionNamespace's default meta is
     // `ResourceMeta::open()` = { owner: System, mode: 0o777 }, so alice
     // (Other) has Create via the Write bit.
-    let alice = Actor::User(principal_id("alice"));
+    let alice = Actor::User(principal64_from_username("alice"));
 
     let opts = CreateFunctionOptions {
         replace: false,
@@ -91,7 +91,7 @@ async fn secret_grants_without_root_manage_denied() {
 #[tokio::test]
 async fn plain_create_without_root_manage_succeeds_for_non_system_actor() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let alice = Actor::User(principal_id("alice"));
+    let alice = Actor::User(principal64_from_username("alice"));
 
     let opts = CreateFunctionOptions {
         replace: false,

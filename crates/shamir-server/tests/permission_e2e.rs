@@ -717,12 +717,6 @@ fn replication_status_only_req(db_name: &str) -> DbRequest {
     )
 }
 
-/// Compute the stable principal id for a username (mirrors Session::principal_id).
-fn principal_id(username: &str) -> u64 {
-    // Must match Session::principal_id (masked to 63 bits so the id fits i64).
-    fxhash::hash64(username) & (i64::MAX as u64)
-}
-
 async fn cleanup(w: &mut (impl AsyncWriteExt + Unpin), r: &mut (impl AsyncReadExt + Unpin)) {
     let _ = w.shutdown().await;
     let mut tmp = [0u8; 1];
@@ -961,9 +955,13 @@ async fn permission_group_grant() {
         resp
     );
 
-    // Create two non-admin users: bob (member) and carol (non-member)
+    // Create two non-admin users: bob (member) and carol (non-member).
+    // Capture bob's directory-minted user_id bytes from the UserCreated
+    // response — under the principal64 identity model bob's real principal
+    // id is principal64(those bytes), NOT a hash of the string "bob".
     let bob_pw = b"bob-password".to_vec();
     let carol_pw = b"carol-password".to_vec();
+    let mut bob_user_id: Option<Vec<u8>> = None;
 
     for (name, pw) in [("bob", &bob_pw), ("carol", &carol_pw)] {
         let resp = roundtrip(
@@ -978,12 +976,14 @@ async fn permission_group_grant() {
             &mut admin_r,
         )
         .await;
-        assert!(
-            matches!(resp, DbResponse::UserCreated { .. }),
-            "create {}: {:?}",
-            name,
-            resp
-        );
+        match resp {
+            DbResponse::UserCreated { name: _, user_id } => {
+                if name == "bob" {
+                    bob_user_id = Some(user_id);
+                }
+            }
+            other => panic!("create {name}: unexpected response {other:?}"),
+        }
     }
 
     // --- Admin: create group ---
@@ -1012,8 +1012,14 @@ async fn permission_group_grant() {
         _ => panic!("unexpected"),
     };
 
-    // Add bob to the group (use principal_id = fxhash of username)
-    let bob_pid = principal_id("bob");
+    // Add bob to the group using bob's REAL principal64 id — projected from
+    // the directory-minted user_id bytes returned by CreateScramUser, NOT a
+    // hash of the username "bob" (which is what the old principal_id did).
+    let bob_user_id_bytes: [u8; 16] = bob_user_id
+        .expect("bob was created")
+        .try_into()
+        .expect("user_id is 16 bytes");
+    let bob_pid = shamir_types::access::principal64(bob_user_id_bytes);
     let resp = roundtrip(
         &add_group_member_req(admin_sid, db_name, "devs", bob_pid),
         admin_sid,

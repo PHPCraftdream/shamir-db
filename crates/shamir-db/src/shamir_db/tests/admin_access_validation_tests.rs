@@ -51,7 +51,9 @@ use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
 use crate::ShamirDb;
-use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath, OWNER_SYSTEM};
+use shamir_types::access::{
+    principal64_from_username, Actor, ResourceMeta, ResourcePath, OWNER_SYSTEM,
+};
 
 /// In-memory `ShamirDb` with `testdb` / `main` / `items`. Uses
 /// `ShamirDb::add_repo` (not `DbInstance::add_repo`) so the table
@@ -69,7 +71,7 @@ async fn setup() -> ShamirDb {
 
 /// Persist a real user record via the wire-facing `create_user` admin op
 /// (same shape used by `create_user_emits_system_changefeed_event`), and
-/// return its derived `principal_id`.
+/// return its derived `principal64_from_username`.
 async fn seed_user(shamir: &ShamirDb, name: &str) -> u64 {
     let mut b = Batch::new();
     b.id(1);
@@ -79,7 +81,7 @@ async fn seed_user(shamir: &ShamirDb, name: &str) -> u64 {
         .execute("testdb", &req)
         .await
         .unwrap_or_else(|e| panic!("seed_user({name}) failed: {e:?}"));
-    principal_id(name)
+    principal64_from_username(name)
 }
 
 // ============================================================================
@@ -202,6 +204,49 @@ async fn chown_to_system_by_system_actor_succeeds() {
         .execute("testdb", &req)
         .await
         .expect("System actor chowning a resource to System must succeed");
+
+    let meta = shamir
+        .resource_meta(&ResourcePath::table("testdb", "main", "items"))
+        .await
+        .unwrap();
+    assert_eq!(meta.owner, Actor::System);
+}
+
+/// `chown` to `OWNER_SYSTEM` by `Actor::Admin` (a real superuser wire
+/// session — `session_actor` maps every live superuser session to
+/// `Actor::Admin(principal64(..))`, never to bare `Actor::System`, task
+/// #555) must ALSO succeed — regression test for a gap found during #555's
+/// adversarial review: the lockout guard originally checked
+/// `self.actor != Actor::System` only, which made this legitimate path
+/// unconditionally rejected for every real admin session once
+/// `Actor::Admin` existed.
+#[tokio::test]
+async fn chown_to_system_by_admin_actor_succeeds() {
+    let shamir = setup().await;
+    let alice = seed_user(&shamir, "alice").await;
+
+    let meta = ResourceMeta {
+        owner: Actor::User(alice),
+        group: None,
+        mode: 0o700,
+    };
+    shamir
+        .set_resource_meta(&ResourcePath::table("testdb", "main", "items"), &meta)
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.chown(
+        "co",
+        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM),
+    );
+    let req = b.to_request_via_msgpack();
+
+    shamir
+        .execute_as(Actor::Admin(999), "testdb", &req)
+        .await
+        .expect("Admin actor chowning a resource to System must succeed");
 
     let meta = shamir
         .resource_meta(&ResourcePath::table("testdb", "main", "items"))

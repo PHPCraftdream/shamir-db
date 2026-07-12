@@ -108,11 +108,16 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
 
         // Forbid handing a resource to OWNER_SYSTEM unless the actor already
-        // IS System — otherwise a non-System owner (who only needed to hold
-        // Manage to reach this handler) could one-way lock themselves (or
-        // anyone else's resource they manage) out: only Actor::System can
-        // Manage a System-owned resource thereafter.
-        if op.owner == OWNER_SYSTEM && self.actor != Actor::System {
+        // bypasses the gate (System, or a real superuser session — Admin) —
+        // otherwise a non-admin owner (who only needed to hold Manage to
+        // reach this handler) could one-way lock themselves (or anyone
+        // else's resource they manage) out: only System/Admin can Manage a
+        // System-owned resource thereafter. `Actor::Admin` must be included
+        // here (not just `System`) because `session_actor` maps every real
+        // superuser wire session to `Actor::Admin(principal64(..))`, never
+        // to bare `Actor::System` (task #555) — without this, no live
+        // superuser session could ever legitimately chown to System.
+        if op.owner == OWNER_SYSTEM && !matches!(self.actor, Actor::System | Actor::Admin(_)) {
             return Err(err_code(
                 ERR_INVALID_OWNER,
                 "chown to the System owner is only permitted for the System actor".to_string(),

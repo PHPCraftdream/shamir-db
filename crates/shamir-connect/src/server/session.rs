@@ -233,24 +233,6 @@ impl Session {
         now_ns > self.created_at_ns + max_age_ns || now_ns > last + idle_ttl_ns
     }
 
-    /// Derive a stable `u64` principal id from the session's username.
-    ///
-    /// This is the id used for [`Actor::User(id)`] in the Shomer access
-    /// fabric. Deterministic: the same username always maps to the same
-    /// `u64`, so `chown`/`chgrp` DDL owner ids are consistent with the
-    /// wire principal. `fxhash::hash64` is used because it is fast,
-    /// collision-resistant for short username strings, and already a
-    /// dependency of this crate (used by `SessionStore`'s hasher).
-    /// Id `0` is reserved for `Actor::System`; the hash output is
-    /// non-zero for any non-empty input, so no collision with System.
-    pub fn principal_id(&self) -> u64 {
-        // Mask to 63 bits so the id always fits an i64: the catalogue stores
-        // integers as i64 (owner / group-member ids round-trip through
-        // InnerValue→msgpack), and a u64 above i64::MAX would be lost on
-        // read-back. 63 bits of fxhash is ample for principal identity.
-        fxhash::hash64(&self.username) & (i64::MAX as u64)
-    }
-
     /// Per-request session validity check per spec §7.5 [NORMATIVE].
     ///
     /// Returns `false` if `created_at_ns <= tickets_invalid_before_ns` —

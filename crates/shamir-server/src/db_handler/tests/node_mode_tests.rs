@@ -16,7 +16,7 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::session::{Session, SessionPermissions};
 
-use shamir_db::access::{principal_id, Actor};
+use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -35,8 +35,11 @@ use crate::version::CURRENT_QUERY_LANG_VERSION;
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/// A regular ("alice") session — resolves to `Actor::User(principal_id("alice"))`.
-/// Mirrors the bench fixture in `benches/wire_pipelining.rs`.
+/// A regular ("alice") session — `session_actor` resolves it to
+/// `Actor::User(principal64([0xAB; 16]))` (the projection of the session's
+/// directory-minted user_id bytes, NOT a username hash). Mirrors the bench
+/// fixture in `benches/wire_pipelining.rs`; `build_handler` below constructs
+/// the resource owner from the SAME bytes so the session owns what it creates.
 fn alice_session() -> Session {
     Session::new(
         [0xAB; 16],
@@ -56,7 +59,10 @@ async fn build_handler(mode: NodeMode) -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     // `create_db`/`add_repo` (System-owned) persist ResourceMeta::owned_enforced
     // (owner-only 0o700); alice owns the resources so her session passes the gate.
-    let owner = Actor::User(principal_id("alice"));
+    // The owner id is `principal64([0xAB; 16])` — the SAME projection
+    // `session_actor` computes for `alice_session()` above — so the
+    // non-superuser session is the recorded owner and the gate admits her.
+    let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));

@@ -11,7 +11,7 @@
 //!   when absent. `set_resource_meta` gains a matching write arm, guarded
 //!   against a non-System owner locking themselves out via a
 //!   traverse-clearing `chmod`.
-//! - **User**: a FIXED, computed 3-tier rule (`owner = Actor::User(principal_id(name))`,
+//! - **User**: a FIXED, computed 3-tier rule (`owner = Actor::User(principal64_from_username(name))`,
 //!   `mode = 0o750`) — never persisted, no `set_resource_meta` arm.
 //! - **Group**: persisted `owner` on the existing group record, computed
 //!   `mode = 0o750`, `group = Some(group_id)` (members are a real
@@ -20,7 +20,9 @@
 use crate::query::admin::GroupRef;
 use crate::shamir_db::ShamirDb;
 use crate::DbError;
-use shamir_types::access::{principal_id, Action, Actor, Mode, ResourceMeta, ResourcePath};
+use shamir_types::access::{
+    principal64_from_username, Action, Actor, Mode, ResourceMeta, ResourcePath,
+};
 
 /// Grant `actor` `Manage(Root)` by `chown`ing Root to them (via
 /// `Actor::System`, which always has the rights to do so). Test-only
@@ -84,7 +86,7 @@ async fn chown_root_to_non_system_owner_succeeds() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
     let custom = ResourceMeta {
-        owner: Actor::User(principal_id("alice")),
+        owner: Actor::User(principal64_from_username("alice")),
         group: None,
         mode: 0o755,
     };
@@ -94,7 +96,10 @@ async fn chown_root_to_non_system_owner_succeeds() {
         .expect("chown / to a non-System owner must succeed (new behavior)");
 
     let loaded = shamir.resource_meta(&ResourcePath::Root).await.unwrap();
-    assert_eq!(loaded.owner, Actor::User(principal_id("alice")));
+    assert_eq!(
+        loaded.owner,
+        Actor::User(principal64_from_username("alice"))
+    );
 }
 
 /// Guardrail: once Root is owned by a non-System actor, a `chmod` that
@@ -105,7 +110,7 @@ async fn chown_root_to_non_system_owner_succeeds() {
 async fn chmod_root_clearing_owner_execute_denied_for_non_system_owner() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    let alice = Actor::User(principal_id("alice"));
+    let alice = Actor::User(principal64_from_username("alice"));
     shamir
         .set_resource_meta(
             &ResourcePath::Root,
@@ -203,7 +208,7 @@ async fn chown_to_non_system_owner_after_prior_execute_clear_is_denied() {
         .set_resource_meta(
             &ResourcePath::Root,
             &ResourceMeta {
-                owner: Actor::User(principal_id("mallory")),
+                owner: Actor::User(principal64_from_username("mallory")),
                 group: None,
                 mode: 0o655, // still no owner-Execute
             },
@@ -237,7 +242,7 @@ async fn user_resource_meta_is_computed_owner_self_0o750() {
         .resource_meta(&ResourcePath::user("alice"))
         .await
         .unwrap();
-    assert_eq!(meta.owner, Actor::User(principal_id("alice")));
+    assert_eq!(meta.owner, Actor::User(principal64_from_username("alice")));
     assert_eq!(meta.group, None);
     assert_eq!(meta.mode, 0o750);
 }
@@ -258,7 +263,7 @@ async fn set_user_resource_meta_is_not_supported() {
 #[tokio::test]
 async fn user_can_read_own_user_path() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let alice = Actor::User(principal_id("alice"));
+    let alice = Actor::User(principal64_from_username("alice"));
     shamir
         .authorize_access(&alice, &ResourcePath::user("alice"), Action::Read)
         .await
@@ -270,7 +275,7 @@ async fn user_can_read_own_user_path() {
 #[tokio::test]
 async fn user_can_manage_own_user_path() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let alice = Actor::User(principal_id("alice"));
+    let alice = Actor::User(principal64_from_username("alice"));
     shamir
         .authorize_access(&alice, &ResourcePath::user("alice"), Action::Manage)
         .await
@@ -282,7 +287,7 @@ async fn user_can_manage_own_user_path() {
 #[tokio::test]
 async fn other_user_denied_read_on_foreign_user_path() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let bob = Actor::User(principal_id("bob"));
+    let bob = Actor::User(principal64_from_username("bob"));
     let err = shamir
         .authorize_access(&bob, &ResourcePath::user("alice"), Action::Read)
         .await
@@ -297,7 +302,7 @@ async fn other_user_denied_read_on_foreign_user_path() {
 #[tokio::test]
 async fn group_resource_meta_reports_persisted_owner_and_group_class() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("carol"));
+    let creator = Actor::User(principal64_from_username("carol"));
     grant_root_manage(&shamir, &creator).await;
     let gid = shamir.create_group_as("devs", &creator).await.unwrap();
 
@@ -352,7 +357,7 @@ async fn set_group_resource_meta_updates_owner_only() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_group("devs").await.unwrap();
 
-    let new_owner = Actor::User(principal_id("dave"));
+    let new_owner = Actor::User(principal64_from_username("dave"));
     shamir
         .set_resource_meta(
             &ResourcePath::group("devs"),
@@ -377,7 +382,7 @@ async fn set_group_resource_meta_updates_owner_only() {
 #[tokio::test]
 async fn rename_group_preserves_owner() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("carol"));
+    let creator = Actor::User(principal64_from_username("carol"));
     grant_root_manage(&shamir, &creator).await;
     shamir.create_group_as("devs", &creator).await.unwrap();
 
@@ -405,7 +410,7 @@ async fn rename_group_preserves_owner() {
 #[tokio::test]
 async fn add_and_remove_group_member_preserve_owner() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("carol"));
+    let creator = Actor::User(principal64_from_username("carol"));
     grant_root_manage(&shamir, &creator).await;
     let gid = shamir.create_group_as("devs", &creator).await.unwrap();
 
@@ -432,7 +437,7 @@ async fn add_and_remove_group_member_preserve_owner() {
 #[tokio::test]
 async fn create_group_as_stamps_acting_actor_as_owner() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("erin"));
+    let creator = Actor::User(principal64_from_username("erin"));
     grant_root_manage(&shamir, &creator).await;
     shamir.create_group_as("finance", &creator).await.unwrap();
 
@@ -453,7 +458,7 @@ async fn create_group_as_stamps_acting_actor_as_owner() {
 #[tokio::test]
 async fn group_creator_can_rename_own_group_without_root_manage() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("frank"));
+    let creator = Actor::User(principal64_from_username("frank"));
     // Bootstrap via System so creation itself doesn't need `frank` to hold
     // Manage(Root) — this test is about the *rename* gate, not creation.
     let gid = shamir
@@ -486,7 +491,7 @@ async fn group_creator_can_rename_own_group_without_root_manage() {
 #[tokio::test]
 async fn group_creator_can_add_member_to_own_group_without_root_manage() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("gina"));
+    let creator = Actor::User(principal64_from_username("gina"));
     grant_root_manage(&shamir, &creator).await;
     let gid = shamir.create_group_as("ops", &creator).await.unwrap();
 
@@ -502,7 +507,7 @@ async fn group_creator_can_add_member_to_own_group_without_root_manage() {
 #[tokio::test]
 async fn group_creator_can_remove_member_from_own_group_without_root_manage() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("henry"));
+    let creator = Actor::User(principal64_from_username("henry"));
     grant_root_manage(&shamir, &creator).await;
     let gid = shamir.create_group_as("ops2", &creator).await.unwrap();
     shamir.add_group_member(gid, 55).await.unwrap();
@@ -519,7 +524,7 @@ async fn group_creator_can_remove_member_from_own_group_without_root_manage() {
 #[tokio::test]
 async fn group_creator_can_drop_own_group_without_root_manage() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let creator = Actor::User(principal_id("iris"));
+    let creator = Actor::User(principal64_from_username("iris"));
     grant_root_manage(&shamir, &creator).await;
     let gid = shamir.create_group_as("temp-team", &creator).await.unwrap();
 
@@ -534,8 +539,8 @@ async fn group_creator_can_drop_own_group_without_root_manage() {
 #[tokio::test]
 async fn non_owner_non_superuser_denied_group_ops_on_foreign_group() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let owner = Actor::User(principal_id("julia"));
-    let stranger = Actor::User(principal_id("kyle"));
+    let owner = Actor::User(principal64_from_username("julia"));
+    let stranger = Actor::User(principal64_from_username("kyle"));
     grant_root_manage(&shamir, &owner).await;
     let gid = shamir.create_group_as("sales", &owner).await.unwrap();
 
@@ -566,7 +571,7 @@ async fn non_owner_non_superuser_denied_group_ops_on_foreign_group() {
 #[tokio::test]
 async fn create_group_as_still_requires_root_manage_regardless_of_asker() {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let stranger = Actor::User(principal_id("laura"));
+    let stranger = Actor::User(principal64_from_username("laura"));
 
     let err = shamir
         .create_group_as("new-team", &stranger)

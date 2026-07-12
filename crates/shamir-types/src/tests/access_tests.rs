@@ -1,5 +1,5 @@
 use crate::access::{
-    action_perm, class_of, permits, principal_id, trace_access, Action, Actor, Mode, Perm,
+    action_perm, class_of, permits, principal64, trace_access, Action, Actor, Mode, Perm,
     PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
 use crate::mpack;
@@ -116,42 +116,80 @@ fn actor_owner_round_trip() {
     assert_eq!(Actor::from_owner_id(OWNER_SYSTEM), Actor::System);
     assert_eq!(Actor::User(42).to_owner_id(), 42);
     assert_eq!(Actor::from_owner_id(42), Actor::User(42));
+    // Admin carries a real owner id (NOT collapsed to OWNER_SYSTEM like System).
+    assert_eq!(Actor::Admin(42).to_owner_id(), 42);
+    // Non-round-trip invariant: a persisted owner id ALWAYS decodes to
+    // `Actor::User`, NEVER `Actor::Admin` — admin-ness is a live session
+    // property, never a persisted owner property. See `Actor::Admin`'s doc
+    // comment in `access.rs`.
+    assert_eq!(Actor::from_owner_id(42), Actor::User(42));
+    assert_ne!(Actor::from_owner_id(42), Actor::Admin(42));
 }
 
 #[test]
-fn principal_id_is_deterministic_and_distinct() {
-    // Stable across calls for the same name.
-    assert_eq!(principal_id("alice"), principal_id("alice"));
-    // Distinct names hash apart (no trivial collision for these).
-    assert_ne!(principal_id("alice"), principal_id("bob"));
+fn admin_created_resource_owner_is_admin_id_not_zero() {
+    // An Admin-attributed resource stamps the real admin principal64 id as
+    // owner, NOT OWNER_SYSTEM/0 — the whole point of `Actor::Admin` over
+    // reusing `Actor::System` for superuser sessions. Contrast with System,
+    // which stays anonymous (owner = 0).
+    let admin_meta = ResourceMeta::owned_enforced(Actor::Admin(777));
+    assert_eq!(
+        admin_meta.owner.to_owner_id(),
+        777,
+        "Admin-owned resource must carry the real admin id, not OWNER_SYSTEM"
+    );
+    assert_ne!(admin_meta.owner.to_owner_id(), OWNER_SYSTEM);
+
+    let system_meta = ResourceMeta::owned_enforced(Actor::System);
+    assert_eq!(
+        system_meta.owner.to_owner_id(),
+        OWNER_SYSTEM,
+        "System-owned resource stays anonymous at OWNER_SYSTEM"
+    );
 }
 
 #[test]
-fn principal_id_always_fits_i64() {
+fn principal64_is_deterministic_and_distinct() {
+    // Stable across calls for the same 16-byte input.
+    assert_eq!(principal64([0xAB; 16]), principal64([0xAB; 16]));
+    // Distinct byte arrays project apart (different high bytes → different id).
+    assert_ne!(principal64([0xAB; 16]), principal64([0xCD; 16]));
+}
+
+#[test]
+fn principal64_always_fits_i64() {
     // The catalogue stores ids as i64; every principal id must be
     // <= i64::MAX so it survives the wire encoding→InnerValue→msgpack round-trip
     // (the root cause of the empty group-member bug in HIGH-7).
-    for name in [
-        "",
-        "a",
-        "admin",
-        "alice",
-        "bob",
-        "Σίσυφος",
-        "очень-длинное-имя-пользователя-1234567890",
-    ] {
+    // The high bit is always cleared by the `& i64::MAX` mask, so even an
+    // all-0xFF input (max possible u64) projects to a value that fits i64.
+    let candidates: [[u8; 16]; 6] = [
+        [0x00; 16],
+        [0xFF; 16],
+        [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        [0xAB; 16],
+        [
+            0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+        [0x01; 16],
+    ];
+    for user_id in candidates {
         assert!(
-            principal_id(name) <= i64::MAX as u64,
-            "principal_id({name:?}) overflowed i64"
+            principal64(user_id) <= i64::MAX as u64,
+            "principal64({user_id:?}) overflowed i64"
         );
     }
+    // Sanity: all-0xFF input projects to exactly i64::MAX (high bit cleared).
+    assert_eq!(principal64([0xFF; 16]), i64::MAX as u64);
 }
 
 #[test]
-fn principal_id_round_trips_through_actor_owner_id() {
-    // A user id derived from a name must decode back to the same
-    // `Actor::User`, never aliasing the reserved System id.
-    let id = principal_id("alice");
+fn principal64_round_trips_through_actor_owner_id() {
+    // A user id derived from 16 directory-minted bytes must decode back to
+    // the same `Actor::User`, never aliasing the reserved System id.
+    let id = principal64([0xAB; 16]);
     assert_ne!(id, OWNER_SYSTEM);
     assert_eq!(Actor::from_owner_id(id), Actor::User(id));
 }
