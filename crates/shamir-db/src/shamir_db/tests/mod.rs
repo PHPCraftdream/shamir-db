@@ -1,5 +1,6 @@
 mod access_meta_tests;
 mod access_tree_tests;
+mod admin_access_validation_tests;
 mod artifact_kind_tests;
 mod curl_gateway_tests;
 mod durability_levels_tests;
