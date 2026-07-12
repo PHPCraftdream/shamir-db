@@ -28,7 +28,7 @@ export {
   renameFunctionFolder,
   setRetention, purgeHistory, changesSince,
   listDatabases, listRepos, listTables, listIndexes,
-  listUsers, listRoles, listFunctions, listValidators_, listFunctionFolders,
+  listUsers, listFunctions, listValidators_, listFunctionFolders,
   dropDb, dropRepo, dropTable, dropIndex,
   startMigration, commitMigration, rollbackMigration,
   renameRepo, renameDb,

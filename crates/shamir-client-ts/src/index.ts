@@ -34,7 +34,7 @@ export {
   isRetryableCode,
   RETRYABLE_ERROR_CODES,
 } from './core/errors.js';
-export type { TxOpened, ScramUserCreated } from './core/client.js';
+export type { TxOpened, ScramUserCreated, SuperuserSet } from './core/client.js';
 export { SubscriptionRouter } from './core/subscription-router.js';
 export type { SubscriptionEvent } from './core/subscription-router.js';
 export { SubscriptionHandle } from './core/subscription-handle.js';

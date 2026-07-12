@@ -449,7 +449,6 @@ export type ListOp =
   | { list: 'tables'; repo: string }
   | { list: 'indexes'; table: string; repo: string }
   | { list: 'users' }
-  | { list: 'roles' }
   | { list: 'functions'; folder?: string }
   | { list: 'validators' }
   | { list: 'function_folders'; parent?: string };

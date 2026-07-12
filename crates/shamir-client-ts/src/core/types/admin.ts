@@ -222,26 +222,6 @@ export interface DropUserOp {
 }
 
 /**
- * Create a role (HMAC-gated). `hmac` canonical is the role name only
- * (permissions are not part of the canonical input, mirroring `drop_role`).
- */
-export interface CreateRoleOp {
-  create_role: string;
-  permissions: Permission[];
-  hmac?: string;
-}
-
-/**
- * Drop a role (HMAC-gated).
- * `hmac` is `Option<String>` with skip → present when signed.
- */
-export interface DropRoleOp {
-  drop_role: string;
-  hmac: string;
-  if_exists?: boolean;
-}
-
-/**
  * Grant a role to a user (HMAC-gated) — the single most dangerous op in
  * the system (e.g. granting `superuser` to an attacker-controlled account).
  */
@@ -258,9 +238,28 @@ export interface RevokeRoleOp {
   hmac?: string;
 }
 
-export interface RenameRoleOp {
-  rename_role: string;
-  to: string;
+// ── Top-level DbRequest ops (NOT BatchOps) ──────────────────────────
+//
+// These mirror `DbRequest` variants that are dispatched directly by the
+// server's connection layer rather than through the batch engine. On the
+// TS side they are built by the admin builder (`setSuperuser`) and sent
+// via `ShamirClient.sendDbRequest`, the same path `createScramUser` uses.
+// The serde discriminator key is `"op"` (`#[serde(tag = "op")]`).
+
+/**
+ * Grant or revoke superuser status on an existing SCRAM-directory account
+ * (top-level `DbRequest::SetSuperuser`). Requires an already-superuser
+ * session AND an HMAC confirmation tag. The tag is UNCONDITIONAL — always
+ * present, unlike the conditional gate on `CreateFunctionOp`.
+ *
+ * `hmac` is `Option<String>` on the Rust side; the client builder always
+ * supplies the signed tag, so it is typed `string` here.
+ */
+export interface SetSuperuserOp {
+  op: 'set_superuser';
+  user: string;
+  on: boolean;
+  hmac: string;
 }
 
 // ── Union ───────────────────────────────────────────────────────────
@@ -278,8 +277,5 @@ export type AdminOp =
   | AccessTreeOp
   | CreateUserOp
   | DropUserOp
-  | CreateRoleOp
-  | DropRoleOp
   | GrantRoleOp
-  | RevokeRoleOp
-  | RenameRoleOp;
+  | RevokeRoleOp;

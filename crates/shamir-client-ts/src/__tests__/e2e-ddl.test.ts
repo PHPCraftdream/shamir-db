@@ -597,13 +597,6 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .execute(client!, 'default'));
       expect(resp.results.l.records).toBeDefined();
     });
-
-    it('admin: listRoles returns without error', async () => {
-      const resp = br(await Batch.create('ls-roles')
-        .add('l', ddl.listRoles())
-        .execute(client!, 'default'));
-      expect(resp.results.l.records).toBeDefined();
-    });
   },
 );
 

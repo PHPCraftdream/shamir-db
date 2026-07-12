@@ -792,6 +792,36 @@ Response: { "ok": { "changes_applied": bool } }
 
 (Self-service смена пароля удалена в v1: admin пересоздаёт юзера через CLI delete + `createUser` (§12.1). Self-service password rotation — кандидат на v1.1.)
 
+### 12.5.1. `setSuperuser` (admin)
+
+```
+Request:  { "setSuperuser": {
+              "user": String,
+              "on": bool,
+              "hmac": Option<String>           // hex HMAC-SHA256 tag — UNCONDITIONAL
+           }}
+Response: { "superuser_set": { "user": String, "on": bool } }
+```
+
+Grant (`on=true`) or revoke (`on=false`) the superuser flag on an existing
+SCRAM-directory account. Requires an already-superuser session. The HMAC
+tag is **unconditional** — every call must supply it (the canonical form is
+`b"set_superuser\0<user>\0<on>"` with `<on>` as the literal `"true"`/`"false"`).
+
+This is a **top-level `DbRequest`** (not a `BatchOp`): it dispatches through
+the server's connection layer, which has direct access to the user directory
+— the batch engine does not. It mirrors `createUser`'s (§12.1) top-level
+shape for the same reason. After success the target's outstanding tickets
+are invalidated via `tickets_invalid_before_ns` so a stale ticket can never
+serve the old privilege state.
+
+**Note (task #557):** the literal `"superuser"` string is RESERVED at the
+directory write boundary — supplying it via `createUser`'s `roles` field
+surfaces a `query`-class error. Use this op (`setSuperuser`) to grant admin
+powers; ordinary role strings are attached via `updateUser` (§12.5) or the
+RBAC `grant_role`/`revoke_role` batch ops ("role" is a plain string label,
+task #549 — there is no "role object" to create/drop/rename/list).
+
 ### 12.6. Информационные команды
 
 `whoami`, `listSessions`, `serverInfo` — schemas и поведение в IMPLEMENTATION_GUIDE.md §13. Не security-критичны, не требуют superuser (кроме `listSessions` всех юзеров).

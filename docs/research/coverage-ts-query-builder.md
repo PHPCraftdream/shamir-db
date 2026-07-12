@@ -373,7 +373,7 @@ Wire source: `shamir-query-types/src/admin/` + `auth/`. Rust builder: `shamir-qu
 | 215 | `list_tables(repo)` | ✅ | ✅ `listTables()` | `builders/ddl.ts:404` |
 | 216 | `list_indexes(table, repo)` | ✅ | ✅ `listIndexes()` | `builders/ddl.ts:408` |
 | 217 | `list_users()` | ✅ | ✅ `listUsers()` | `builders/ddl.ts:415` |
-| 218 | `list_roles()` | ✅ | ✅ `listRoles()` | `builders/ddl.ts:419` |
+| ~~218~~ | ~~`list_roles()`~~ | ❌ Removed (task #549) | ❌ Removed (task #549) | "Role" is now a plain string label — no role objects to list. `ListOp::Roles` deleted from the Rust wire enum; `listRoles()` deleted from the TS client. |
 | 219 | `list_functions(folder)` | ✅ | ✅ `listFunctions()` | `builders/ddl.ts:423` |
 | 220 | `list_all_validators()` | ✅ `ddl::list_all_validators` | ✅ `listValidators_()` | `builders/ddl.ts:431` — TS name has trailing `_` to avoid clash with per-table `listValidators()`. |
 | 221 | `list_function_folders(parent)` | ✅ | ✅ `listFunctionFolders()` | `builders/ddl.ts:435` |
@@ -419,12 +419,13 @@ Wire source: `shamir-query-types/src/auth/types.rs`. Rust builder: `shamir-query
 | 242 | `.profile(p)` | ✅ `CreateUser::profile` | ✅ `{profile}` | `builders/admin.ts:194` |
 | 243 | `.database(d)` (scoped user) | ✅ `CreateUser::database` | ✅ `{database}` | `builders/admin.ts:195` |
 | 244 | `drop_user(name)` (HMAC) | ✅ | ✅ `dropUser()` | `builders/admin.ts:200` |
-| 245 | `create_role(name, permissions)` | ✅ | ✅ `createRole()` | `builders/admin.ts:211` |
-| 246 | `drop_role(name)` (HMAC) | ✅ | ✅ `dropRole()` | `builders/admin.ts:219` |
+| ~~245~~ | ~~`create_role(name, permissions)`~~ | ❌ Removed (task #549) | ❌ Removed (task #549) | `BatchOp::CreateRole` deleted from the Rust wire enum; `createRole()` deleted from the TS client. "Role" is a plain string label now. |
+| ~~246~~ | ~~`drop_role(name)` (HMAC)~~ | ❌ Removed (task #549) | ❌ Removed (task #549) | `BatchOp::DropRole` deleted; `dropRole()` + `canonicalDropRole()` deleted from the TS client. |
 | 247 | `grant_role(role, user)` | ✅ | ✅ `grantRole()` | `builders/admin.ts:230` |
 | 248 | `revoke_role(role, user)` | ✅ | ✅ `revokeRole()` | `builders/admin.ts:234` |
 | 249 | `Permission` (effect/actions/resource/where) | ✅ wire struct | ✅ `permission()` | `builders/admin.ts:168` |
 | 250 | `Resource` scope constructors (global/db/repo/table) | ❌ Rust builder has no helpers | ✅ `scopeGlobal()` / `scopeDatabase()` / `scopeRepo()` / `scopeTable()` | `builders/admin.ts:76-90` — **TS exceeds Rust**. |
+| NEW | `SetSuperuser` (top-level `DbRequest`, HMAC-gated) | ✅ task #557 | ✅ `setSuperuser()` (task #560) | `builders/admin.ts` — top-level `DbRequest::SetSuperuser` (NOT a `BatchOp`). TS builder + `ShamirClient.setSuperuser()` method + `canonicalSetSuperuser()` HMAC helper. canonical = `b"set_superuser\0<user>\0<on>"`. |
 
 ---
 

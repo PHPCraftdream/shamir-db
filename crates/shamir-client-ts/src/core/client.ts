@@ -28,6 +28,7 @@ import {
 } from './protocol.js';
 import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
 import { signCanonical } from './hmac.js';
+import { setSuperuser } from './builders/admin.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
 import type { PushEnvelope } from './types/subscribe.js';
@@ -56,6 +57,14 @@ export interface ScramUserCreated {
   name: string;
   /** Stable 16-byte user id assigned by the directory. */
   user_id: Uint8Array;
+}
+
+/** Result of {@link ShamirClient.setSuperuser} (`DbResponse::SuperuserSet`). */
+export interface SuperuserSet {
+  /** Echoed target username. */
+  user: string;
+  /** Echoed requested state (`true` = granted, `false` = revoked). */
+  on: boolean;
 }
 
 /** Pending request slot awaiting a server response. */
@@ -930,6 +939,26 @@ export class ShamirClient {
     }
     throw new Error(
       `unexpected DbResponse kind for create_scram_user: ${r.kind}`,
+    );
+  }
+
+  /**
+   * Grant or revoke superuser status on an existing SCRAM-directory user
+   * (top-level `DbRequest::SetSuperuser`, NOT a `BatchOp`). Requires an
+   * already-superuser session AND an HMAC confirmation tag — the tag is
+   * unconditional (every call signs it via this session's HMAC key).
+   * Mirrors `createScramUser`'s top-level shape; the signed wire op is
+   * built by the `setSuperuser` admin builder.
+   */
+  async setSuperuser(user: string, on: boolean): Promise<SuperuserSet> {
+    const r = await this.sendDbRequest(
+      setSuperuser(this, user, on),
+    );
+    if (r.kind === 'superuser_set') {
+      return { user: r.user as string, on: r.on as boolean };
+    }
+    throw new Error(
+      `unexpected DbResponse kind for set_superuser: ${r.kind}`,
     );
   }
 

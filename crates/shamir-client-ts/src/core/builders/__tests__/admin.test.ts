@@ -11,17 +11,16 @@
 import { describe, it, expect } from 'vitest';
 import { admin } from '../admin.js';
 import { principalId } from '../../principal-id.js';
-import type { Action } from '../../types/admin.js';
+import type { Action, SetSuperuserOp } from '../../types/admin.js';
 import {
   canonicalDropUser,
-  canonicalDropRole,
   canonicalChmod,
   canonicalChown,
   canonicalChgrp,
   canonicalCreateUser,
-  canonicalCreateRole,
   canonicalGrantRole,
   canonicalRevokeRole,
+  canonicalSetSuperuser,
   canonicalCreateGroup,
   canonicalDropGroup,
   canonicalRenameGroup,
@@ -444,36 +443,45 @@ describe('dropUser (HMAC)', () => {
   });
 });
 
-describe('createRole (HMAC)', () => {
-  it('emits {create_role, permissions, hmac}', () => {
-    const perms = [
-      admin.permission('allow', ['read'], admin.scopeDatabase('mydb')),
-    ];
-    const canonical = canonicalCreateRole('reader');
-    const op = admin.createRole(fakeSigner, 'reader', perms);
+// ── setSuperuser (top-level DbRequest, HMAC-gated) ──────────────────
+
+describe('setSuperuser (HMAC)', () => {
+  it('emits {op:"set_superuser", user, on, hmac} — grant (on=true)', () => {
+    const canonical = canonicalSetSuperuser('carol', true);
+    const op = admin.setSuperuser(fakeSigner, 'carol', true);
+    const expected: SetSuperuserOp = {
+      op: 'set_superuser',
+      user: 'carol',
+      on: true,
+      hmac: fakeSigner.hmacTagHex(canonical),
+    };
+    expect(op).toEqual(expected);
+  });
+
+  it('emits {op:"set_superuser", user, on, hmac} — revoke (on=false)', () => {
+    const canonical = canonicalSetSuperuser('dave', false);
+    const op = admin.setSuperuser(fakeSigner, 'dave', false);
     expect(op).toEqual({
-      create_role: 'reader',
-      permissions: [
-        {
-          effect: 'allow',
-          actions: ['read'],
-          resource: { scope: 'database', database: 'mydb' },
-        },
-      ],
+      op: 'set_superuser',
+      user: 'dave',
+      on: false,
       hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
-});
 
-describe('dropRole (HMAC)', () => {
-  it('hmac = signer over canonicalDropRole(role)', () => {
-    const role = 'admin';
-    const canonical = canonicalDropRole(role);
-    const op = admin.dropRole(fakeSigner, role);
-    expect(op).toEqual({
-      drop_role: 'admin',
-      hmac: fakeSigner.hmacTagHex(canonical),
-    });
+  it('hmac is unconditional — always present', () => {
+    expect(admin.setSuperuser(fakeSigner, 'eve', true).hmac).toBe(
+      fakeSigner.hmacTagHex(canonicalSetSuperuser('eve', true)),
+    );
+    expect(admin.setSuperuser(fakeSigner, 'eve', false).hmac).toBe(
+      fakeSigner.hmacTagHex(canonicalSetSuperuser('eve', false)),
+    );
+  });
+
+  it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
+    const grantTag = admin.setSuperuser(fakeSigner, 'frank', true).hmac;
+    const revokeTag = admin.setSuperuser(fakeSigner, 'frank', false).hmac;
+    expect(grantTag).not.toBe(revokeTag);
   });
 });
 
@@ -501,13 +509,6 @@ describe('revokeRole (HMAC)', () => {
   });
 });
 
-describe('renameRole', () => {
-  it('emits {rename_role, to}', () => {
-    const op = admin.renameRole('viewer', 'reader');
-    expect(op).toEqual({ rename_role: 'viewer', to: 'reader' });
-  });
-});
-
 // ── if_exists on admin drop ops ────────────────────────────────────
 
 describe('if_exists on admin drop ops', () => {
@@ -523,16 +524,6 @@ describe('if_exists on admin drop ops', () => {
 
   it('dropUser omits if_exists when not set', () => {
     const op = admin.dropUser(fakeSigner, 'alice');
-    expect(op).not.toHaveProperty('if_exists');
-  });
-
-  it('dropRole emits if_exists when true', () => {
-    const op = admin.dropRole(fakeSigner, 'reader', { if_exists: true });
-    expect(op.if_exists).toBe(true);
-  });
-
-  it('dropRole omits if_exists when not set', () => {
-    const op = admin.dropRole(fakeSigner, 'reader');
     expect(op).not.toHaveProperty('if_exists');
   });
 });

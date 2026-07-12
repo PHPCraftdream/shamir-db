@@ -5,11 +5,11 @@
  * `crates/shamir-query-types/src/auth/types.rs`.
  *
  * Non-HMAC ops are plain functions returning the wire object.
- * HMAC-gated ops (`drop_user`, `drop_role`, `chmod`, `chown`, `chgrp`,
- * `create_user`, `create_role`, `grant_role`, `revoke_role`,
+ * HMAC-gated ops (`drop_user`, `chmod`, `chown`, `chgrp`,
+ * `create_user`, `grant_role`, `revoke_role`,
  * `create_group`, `drop_group`, `rename_group`, `add_group_member`,
- * `remove_group_member`) take a `signer: HmacSigner`, build the canonical
- * input via `../hmac.ts`, and attach the HMAC tag.
+ * `remove_group_member`, `set_superuser`) take a `signer: HmacSigner`,
+ * build the canonical input via `../hmac.ts`, and attach the HMAC tag.
  *
  * PLATFORM-AGNOSTIC.
  */
@@ -33,11 +33,9 @@ import type {
   AccessTreeOp,
   CreateUserOp,
   DropUserOp,
-  CreateRoleOp,
-  DropRoleOp,
   GrantRoleOp,
   RevokeRoleOp,
-  RenameRoleOp,
+  SetSuperuserOp,
 } from '../types/admin.js';
 
 import type { Filter } from '../types/filter.js';
@@ -45,14 +43,13 @@ import type { WireValue } from '../types/write.js';
 
 import {
   canonicalDropUser,
-  canonicalDropRole,
   canonicalChmod,
   canonicalChown,
   canonicalChgrp,
   canonicalCreateUser,
-  canonicalCreateRole,
   canonicalGrantRole,
   canonicalRevokeRole,
+  canonicalSetSuperuser,
   canonicalCreateGroup,
   canonicalDropGroup,
   canonicalRenameGroup,
@@ -276,38 +273,37 @@ export function dropUser(
 }
 
 /**
- * Create a role (HMAC-gated). canonical = `canonicalCreateRole(name)` —
- * the permissions list is not part of the canonical input, mirroring
- * `dropRole`'s precedent of identifying by name only.
+ * Grant or revoke superuser status on an existing SCRAM-directory account
+ * (top-level `DbRequest::SetSuperuser`, NOT a `BatchOp`). Requires an
+ * already-superuser session. The HMAC tag is UNCONDITIONAL — every call
+ * signs it. canonical = `canonicalSetSuperuser(user, on)`.
+ *
+ * This is the first standalone (non-batch) admin op modelled as a builder
+ * in this module: the other top-level `DbRequest` variant the TS client
+ * handles (`create_scram_user`) lives only as a `ShamirClient` method.
+ * `setSuperuser` follows the SAME builder pattern as the HMAC-gated
+ * `BatchOp` builders here (signer + canonical + `.hmac` field), but
+ * emits the top-level wire shape `{ op: "set_superuser", ... }` rather
+ * than a single-key `BatchOp` object. `ShamirClient.setSuperuser` sends
+ * it via `sendDbRequest`.
  */
-export function createRole(
+export function setSuperuser(
   signer: HmacSigner,
-  name: string,
-  permissions: Permission[],
-): CreateRoleOp {
-  const canonical = canonicalCreateRole(name);
-  return { create_role: name, permissions, hmac: signer.hmacTagHex(canonical) };
-}
-
-/** Drop a role (HMAC-gated). canonical = `canonicalDropRole(role)`. */
-export function dropRole(
-  signer: HmacSigner,
-  role: string,
-  opts?: { if_exists?: boolean },
-): DropRoleOp {
-  const canonical = canonicalDropRole(role);
-  const op: DropRoleOp = {
-    drop_role: role,
-    hmac: signer.hmacTagHex(canonical),
-  };
-  if (opts?.if_exists) op.if_exists = true;
-  return op;
+  user: string,
+  on: boolean,
+): SetSuperuserOp {
+  const canonical = canonicalSetSuperuser(user, on);
+  return { op: 'set_superuser', user, on, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
  * Grant a role to a user (HMAC-gated) — the single most dangerous op in
  * the system (e.g. granting `superuser` to an attacker-controlled account).
  * canonical = `canonicalGrantRole(role, user)`.
+ *
+ * "Role" is now a plain string label attached to a directory user (task
+ * #549); there is no "role object" to create/drop/rename. `grantRole` /
+ * `revokeRole` are the only role-mutating ops.
  */
 export function grantRole(signer: HmacSigner, role: string, user: string): GrantRoleOp {
   const canonical = canonicalGrantRole(role, user);
@@ -318,14 +314,6 @@ export function grantRole(signer: HmacSigner, role: string, user: string): Grant
 export function revokeRole(signer: HmacSigner, role: string, user: string): RevokeRoleOp {
   const canonical = canonicalRevokeRole(role, user);
   return { revoke_role: role, user, hmac: signer.hmacTagHex(canonical) };
-}
-
-/**
- * Rename a role. Re-keys the role record and updates the `roles` list of
- * every user that holds the old name.
- */
-export function renameRole(from: string, to: string): RenameRoleOp {
-  return { rename_role: from, to };
 }
 
 /** Aggregate namespace — every admin constructor in one object. */
@@ -354,9 +342,7 @@ export const admin = {
   permission,
   createUser,
   dropUser,
-  createRole,
-  dropRole,
+  setSuperuser,
   grantRole,
   revokeRole,
-  renameRole,
 };
