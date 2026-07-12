@@ -66,6 +66,7 @@
 //! | add_group_member    | `b"add_group_member\0<group_ref>\0<user>"`                                   |
 //! | remove_group_member | `b"remove_group_member\0<group_ref>\0<user>"`                                |
 //! | create_function     | `b"create_function\0<name>\0<security>\0<secret_grants_csv>"`               |
+//! | set_superuser       | `b"set_superuser\0<user>\0<on>"` (`<on>` is the literal `"true"`/`"false"`)  |
 //!
 //! `<group_ref>` is produced by [`canonical_group_ref`] — a stable
 //! `"name:<name>"` / `"id:<id>"` rendering of `GroupRef`'s two variants
@@ -378,6 +379,24 @@ pub fn canonical_create_function(name: &str, security: &str, secret_grants: &[St
         name.as_bytes(),
         security.as_bytes(),
         secret_grants.join(",").as_bytes(),
+    ])
+}
+
+/// `b"set_superuser\0<user>\0<on>"`. `<on>` is the literal `"true"` or
+/// `"false"` string (not `"1"`/`"0"`), matching how the field round-trips
+/// through the wire's `bool` — the server and any client signer must agree
+/// on this exact literal.
+///
+/// HMAC on `set_superuser` is UNCONDITIONAL (unlike `create_function`'s
+/// conditional gate): every SetSuperuser op requires the tag, regardless of
+/// whether it's a grant or a revoke. See `set_superuser` handler's doc
+/// comment for the inline gate (it does NOT go through
+/// `check_destructive_hmacs`, which only covers `BatchOp`s inside a batch).
+pub fn canonical_set_superuser(user: &str, on: bool) -> Vec<u8> {
+    join_null(&[
+        b"set_superuser",
+        user.as_bytes(),
+        if on { b"true" } else { b"false" },
     ])
 }
 

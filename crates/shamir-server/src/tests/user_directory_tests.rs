@@ -7,16 +7,22 @@
 //!     near-impossible, so a deterministic fixture is the only practical
 //!     way to cover the branch),
 //!   - `#[serde(default)]` backward-compat for pre-#556 persisted blobs
-//!     that lack the `superuser` field entirely.
+//!     that lack the `superuser` field entirely,
+//!   - the relocated #556 normalization-idempotence test (task #557: the
+//!     `"superuser"` role string is now reserved at the `update_roles`
+//!     write boundary, so the legacy pre-migration shape can no longer be
+//!     seeded through the public API; this in-crate module can construct
+//!     `PersistedUser` directly via `pub(crate)` to seed the legacy blob).
 //!
-//! Behavioural coverage of normalization, `remove()`, and the
-//! `UserStateLookup` fix lives in `tests/user_directory.rs` (public API)
-//! and `src/tests/user_state_lookup_tests.rs` (the adapter).
+//! Behavioural coverage of `remove()`, the `UserStateLookup` fix, and the
+//! `set_superuser` / reservation behaviours lives in `tests/user_directory.rs`
+//! (public API).
 
 use serde::Serialize;
 
 use shamir_connect::common::crypto::StoredKey;
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -198,4 +204,115 @@ fn state_by_user_id_unknown_after_fresh_open() {
     let dir = TempDir::new().expect("tempdir");
     let store = FjallUserDirectory::open(dir.path().join("u.redb")).expect("open");
     assert!(store.state_by_user_id(&[0xFFu8; 16]).is_none());
+}
+
+/// **Red test #7 (task #557) — relocated #556 normalization-idempotence
+/// test, seeded via the in-crate `pub(crate) PersistedUser` bypass.**
+///
+/// Task #557 reserves the literal `"superuser"` role string at the
+/// `update_roles` write boundary, so the EXTERNAL integration test file
+/// (`tests/user_directory.rs`, a separate compilation unit) can no longer
+/// seed the legacy pre-migration on-disk shape through the public API.
+/// This in-crate test module CAN see `pub(crate) PersistedUser`, so it
+/// constructs the legacy blob directly:
+///
+///   - Persist a user whose `roles` list contains `"superuser"` AND whose
+///     `superuser` flag is `false` (the exact pre-#556 on-disk shape).
+///   - Reopen the directory → boot-time normalization migrates the string
+///     into the flag and removes it from `roles`.
+///   - Reopen again → nothing changes (idempotence).
+///
+/// This proves the same property the external test used to cover (boot-time
+/// migration of legacy on-disk data is idempotent), just seeded through the
+/// in-crate bypass now that the public seeding API is reserved.
+#[test]
+fn normalization_migrates_superuser_role_string_and_is_idempotent_in_crate() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    // Seed TWO users via the public insert path (so the user_id_index is
+    // populated), then OVERWRITE alice's blob with a hand-rolled legacy
+    // `PersistedUser` carrying the reserved role string + flag=false. The
+    // overwrite uses the same `users` keyspace + msgpack encoding the
+    // directory itself uses.
+    let (alice_uid, bob_uid) = {
+        let store = FjallUserDirectory::open(&path).expect("open");
+        let alice_uid = store.insert("alice".to_string(), sample_record()).unwrap();
+        let bob_uid = store.insert("bob".to_string(), sample_record()).unwrap();
+
+        // Construct the legacy pre-migration shape directly. This is the
+        // exact on-disk representation of an account created pre-#556 that
+        // had the "superuser" role string: roles=["superuser"], flag=false
+        // (the `superuser` field didn't exist on disk; #[serde(default)]
+        // makes absence deserialise to false).
+        let mut legacy = PersistedUser::from_record(alice_uid, &sample_record(), Vec::new(), false);
+        legacy.roles = vec!["superuser".to_string()];
+        let legacy_bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy blob");
+
+        // Write it into the same `users` keyspace the directory owns. We
+        // re-open the keyspace by name (the const is private to the crate
+        // — confirm by reading user_directory.rs).
+        // The directory's `users` keyspace name is `users_v1`; we reach it
+        // through fjall directly via the open Database handle. Since this
+        // is an in-crate test, we can reconstruct the handle by reopening.
+        drop(store); // release the fjall lock before the raw write.
+
+        // Re-open at the fjall level to get a raw keyspace handle.
+        {
+            let db = fjall::Database::builder(&path).open().expect("fjall open");
+            let users = db
+                .keyspace("users_v1", fjall::KeyspaceCreateOptions::default)
+                .expect("users keyspace");
+            users
+                .insert("alice".as_bytes(), legacy_bytes.as_slice())
+                .expect("fjall insert legacy blob");
+            db.persist(fjall::PersistMode::SyncAll)
+                .expect("fjall persist legacy blob");
+        }
+        (alice_uid, bob_uid)
+    };
+
+    // First normalization pass on reopen: the string is migrated into the
+    // flag, and removed from `roles`.
+    let first_alice = {
+        let store = FjallUserDirectory::open(&path).expect("reopen #1");
+        let alice = store
+            .state_by_user_id(&alice_uid)
+            .expect("alice resolves after normalization");
+        assert!(
+            alice.superuser,
+            "the `superuser` role string must be migrated into the flag"
+        );
+        assert!(
+            !alice.roles.iter().any(|r| r == "superuser"),
+            "the `superuser` string must be removed from roles after migration; got {:?}",
+            alice.roles
+        );
+        // Bob was never a superuser — must stay a normal account.
+        let bob = store.state_by_user_id(&bob_uid).expect("bob resolves");
+        assert!(!bob.superuser);
+        alice
+    };
+
+    // Second normalization pass: nothing changes (idempotence).
+    {
+        let store = FjallUserDirectory::open(&path).expect("reopen #2");
+        let alice_again = store
+            .state_by_user_id(&alice_uid)
+            .expect("alice still resolves after second normalization");
+        assert!(alice_again.superuser, "flag must survive a second boot");
+        assert!(
+            !alice_again.roles.iter().any(|r| r == "superuser"),
+            "roles must stay migrated after a second boot"
+        );
+        assert_eq!(
+            first_alice.roles, alice_again.roles,
+            "roles stable across boots"
+        );
+        assert_eq!(
+            first_alice.tickets_invalid_before_ns, alice_again.tickets_invalid_before_ns,
+            "tib stable across boots"
+        );
+        assert!(store.state_by_user_id(&bob_uid).is_some());
+    }
 }

@@ -32,8 +32,29 @@ pub struct SessionPermissions {
 impl SessionPermissions {
     /// Construct from a list of roles. `is_superuser` is true iff "superuser"
     /// is among them.
+    ///
+    /// **Task #557 note:** the literal `"superuser"` string is now reserved
+    /// at the directory write boundary (`FjallUserDirectory::update_roles`
+    /// rejects it), so any roles list produced by the real directory will
+    /// never contain it. Production code that has the directory's
+    /// authoritative `superuser` flag should use [`Self::new`] instead.
+    /// `from_roles` is retained for callers that build a `SessionPermissions`
+    /// from a plain role list without touching `FjallUserDirectory`
+    /// (in-memory/test directories, fixtures, resume from a legacy ticket).
     pub fn from_roles(roles: Vec<String>) -> Self {
         let is_superuser = roles.iter().any(|r| r == "superuser");
+        Self {
+            is_superuser,
+            roles,
+        }
+    }
+
+    /// Construct from the directory's authoritative `superuser` flag plus
+    /// the (now-reserved-string-free) role list. Use this instead of
+    /// [`Self::from_roles`] wherever the caller has a real flag value
+    /// (every production call site after task #557) — `from_roles`'s
+    /// string-scan is kept only for callers that never had the flag.
+    pub fn new(is_superuser: bool, roles: Vec<String>) -> Self {
         Self {
             is_superuser,
             roles,

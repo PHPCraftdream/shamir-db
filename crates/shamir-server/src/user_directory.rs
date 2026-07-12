@@ -645,6 +645,69 @@ impl FjallUserDirectory {
 
         Ok(true)
     }
+
+    /// Grant or revoke superuser status (task #557). Idempotent (no-op if
+    /// the flag is already at the requested value, returns `Ok(false)` with
+    /// no write). On an actual change: bumps `tickets_invalid_before_ns`
+    /// (spec §12.6 — a privilege change must invalidate existing sessions,
+    /// same rule as `update_roles`), persists with `SyncAll`, updates the
+    /// `tickets_cache`, and adjusts `superuser_count` atomically in the
+    /// SAME critical section as the blob mutation.
+    ///
+    /// Refuses to revoke the LAST remaining superuser (uses the O(1)
+    /// `superuser_count` warmed at `open()` and maintained by `remove()` +
+    /// this method) — mirrors `remove()`'s last-superuser guard so the
+    /// system can never lock itself out of admin.
+    ///
+    /// This is deliberately a bespoke method (not routed through
+    /// `read_modify_write`) because it needs to adjust `superuser_count`
+    /// in the SAME critical section as the blob mutation — `read_modify_write`'s
+    /// closure has no way to touch the counter.
+    pub fn set_superuser(&self, username: &str, on: bool, now_ns: u64) -> Result<bool> {
+        let _guard = self.write_lock.lock();
+
+        let blob = match self.read_blob(username)? {
+            Some(b) => b,
+            None => return Err(Error::InvalidInput("user not found")),
+        };
+        let mut user: PersistedUser = rmp_serde::from_slice(&blob)
+            .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
+
+        if user.superuser == on {
+            return Ok(false); // already at the requested state — no-op
+        }
+        // Last-superuser guard: refuse to revoke if this is the only one.
+        if user.superuser && !on && self.superuser_count.load(Ordering::Relaxed) <= 1 {
+            return Err(Error::InvalidInput(
+                "cannot revoke superuser status from the last remaining superuser account",
+            ));
+        }
+
+        user.superuser = on;
+        // Spec §12.6: privilege change must invalidate existing sessions.
+        if now_ns > user.tickets_invalid_before_ns {
+            user.tickets_invalid_before_ns = now_ns;
+        }
+        let new_bytes = rmp_serde::to_vec_named(&user)
+            .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
+        self.users
+            .insert(username.as_bytes(), new_bytes.as_slice())
+            .map_err(|e| Error::Encoding(format!("fjall: insert: {e}")))?;
+        // Spec §3.5 / §6.2: fsync before returning.
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+        if let Some(id) = user.user_id_array() {
+            self.update_cache(&id, user.tickets_invalid_before_ns);
+        }
+        if on {
+            self.superuser_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.superuser_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        Ok(true)
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -750,6 +813,18 @@ impl UserDirectory for FjallUserDirectory {
     }
 
     fn update_roles(&self, username: &str, roles: Vec<String>, now_ns: u64) -> Result<bool> {
+        // Task #557: reserve the literal `"superuser"` string at this single
+        // write boundary — every role-writing caller (create_scram_user's
+        // `update_roles`, the future GrantRole port, etc.) goes through
+        // here, so this one check closes the reservation for all of them.
+        // Superuser status is granted/revoked ONLY via `SetSuperuser` /
+        // `set_superuser`, which mutates the dedicated `superuser: bool`
+        // flag in the same critical section as `superuser_count`.
+        if roles.iter().any(|r| r == "superuser") {
+            return Err(Error::InvalidInput(
+                "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status",
+            ));
+        }
         self.read_modify_write(username, |user| {
             let roles_changed = user.roles != roles;
             // Spec §12.6: changing roles must bump `tickets_invalid_before_ns`

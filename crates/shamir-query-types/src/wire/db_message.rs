@@ -56,8 +56,11 @@ pub enum DbRequest {
         /// so it is zeroized on drop. The `String` here is the on-the-wire
         /// carrier — callers should avoid retaining it longer than needed.
         password: String,
-        /// Roles to grant. `["superuser"]` for admin powers; other
-        /// strings are opaque to the protocol (RBAC is app-defined).
+        /// Roles to grant. Other strings are opaque to the protocol
+        /// (RBAC is app-defined). NOTE (task #557): the literal
+        /// `"superuser"` string is RESERVED at the directory write boundary
+        /// — supplying it here surfaces a `query`-class error from the
+        /// server. Use [`DbRequest::SetSuperuser`] to grant admin powers.
         #[serde(default)]
         roles: Vec<String>,
     },
@@ -153,6 +156,30 @@ pub enum DbRequest {
         #[serde(with = "serde_bytes")]
         new_server_key: Vec<u8>,
     },
+
+    /// Grant or revoke superuser status on an existing SCRAM-directory
+    /// account. Requires an already-superuser session AND an HMAC
+    /// confirmation tag (same "did-you-mean-it" mechanism as destructive
+    /// BatchOps, tasks #542/#551/#554 — see `check_destructive_hmacs`'s
+    /// doc comment for the pattern this mirrors; this op is gated inline
+    /// in its own handler rather than through that BatchOp-shaped
+    /// function, since `SetSuperuser` is a top-level `DbRequest`, not a
+    /// `BatchOp` inside a batch).
+    ///
+    /// NOT a `BatchOp` because `BatchOp`s dispatch through `shamir-db`'s
+    /// engine, which has no handle to `shamir-server`'s real
+    /// `FjallUserDirectory` (that bridge is task #559's `UserAdminPort`,
+    /// not yet built). Mirrors `CreateScramUser`'s top-level shape.
+    SetSuperuser {
+        /// Target username.
+        user: String,
+        /// `true` to grant, `false` to revoke.
+        on: bool,
+        /// Hex-encoded HMAC-SHA256 tag over the canonical form — always
+        /// required (unconditional, unlike `CreateFunctionOp`'s
+        /// `security`/`secret_grants` fields).
+        hmac: Option<String>,
+    },
 }
 
 /// Application-layer DB response.
@@ -173,6 +200,14 @@ pub enum DbResponse {
         /// Stable 16-byte user_id assigned by the directory.
         #[serde(with = "serde_bytes")]
         user_id: Vec<u8>,
+    },
+    /// Successful [`DbRequest::SetSuperuser`] — the target's superuser flag
+    /// is now `on`.
+    SuperuserSet {
+        /// Echoed target username.
+        user: String,
+        /// Echoed requested state (`true` = granted, `false` = revoked).
+        on: bool,
     },
     /// DB-layer failure (permission, planner, query, lock-timeout, …).
     /// Not a protocol error; the wire frame is a normal `ResponseEnvelope`.

@@ -130,7 +130,7 @@ pub fn ensure_superuser(
         tickets_invalid_before_ns: 0,
     };
 
-    insert_with_role(dir, name, record, "superuser")?;
+    insert_superuser(dir, name, record)?;
 
     // Write the token file (only in RandomToken mode).
     let token_path = if let Some(tok) = &token_str {
@@ -157,18 +157,19 @@ pub fn ensure_superuser(
     })
 }
 
-/// Insert a fresh user with the requested role. Roles can't be set in a
-/// single transaction via the [`UserDirectory`] trait (see comment in
-/// [`FjallUserDirectory::insert`]), so this helper does insert + update_roles.
-fn insert_with_role(
-    dir: &FjallUserDirectory,
-    name: &str,
-    record: UserRecord,
-    role: &str,
-) -> ConnectResult<()> {
+/// Insert a fresh user and grant it superuser status. The superuser flag
+/// can't be set in a single transaction via the [`UserDirectory`] trait
+/// (see comment in [`FjallUserDirectory::insert`]), so this helper does
+/// `insert` + `set_superuser`.
+///
+/// Task #557: previously this helper was `insert_with_role(.., "superuser")`
+/// which went through `update_roles` — but task #557 reserves the literal
+/// `"superuser"` string at the directory write boundary, so the superuser
+/// flag is now flipped via the dedicated `set_superuser` method instead.
+fn insert_superuser(dir: &FjallUserDirectory, name: &str, record: UserRecord) -> ConnectResult<()> {
     dir.insert(name.to_string(), record)?;
-    // bump_to=0: roles change without bumping the validity epoch (no
-    // existing sessions can be invalidated on a fresh install anyway).
-    dir.update_roles(name, vec![role.to_string()], 0)?;
+    // now_ns=0: grant without bumping the validity epoch (no existing
+    // sessions can be invalidated on a fresh install anyway).
+    dir.set_superuser(name, true, 0)?;
     Ok(())
 }

@@ -89,9 +89,6 @@ enum HandshakeError {
     /// Client requested a handshake-protocol version this server does not
     /// implement. Fast-rejected before any Argon2id work.
     UnsupportedVersion,
-    /// Transient storage failure during role lookup (§C2: must not silently
-    /// downgrade to empty roles).
-    Storage(String),
 }
 
 /// Session-resume fast-path (SESSION_RESUMPTION §5).
@@ -406,15 +403,28 @@ async fn run_handshake<F: Framer>(
         Some(id) => id,
         None => return Err(HandshakeError::UnknownUser),
     };
-    let roles = match ctx.user_dir.lookup_roles(username.as_str()) {
-        Ok(Some(r)) => r,
-        Ok(None) => Vec::new(),
-        Err(e) => return Err(HandshakeError::Storage(format!("lookup_roles: {e}"))),
+    // Task #557: ONE directory lookup (`state_by_user_id`) replaces the two
+    // prior `lookup_roles` calls — it returns the authoritative `superuser`
+    // flag (read directly off the persisted blob) plus the post-migration
+    // roles list in a single fjall get + msgpack decode. The session's
+    // `is_superuser` is now driven by the flag, not by scanning the roles
+    // list for the literal `"superuser"` string (which is reserved at the
+    // directory write boundary as of #557, so the persisted list never
+    // contains it anyway).
+    //
+    // The roles value threaded into the resumption ticket is the SAME
+    // `state.roles` snapshot — task #558 will drop roles from the ticket
+    // entirely and re-verify against the directory on resume; until then
+    // we keep the payload shape, just sourced from `state_by_user_id`
+    // instead of a second `lookup_roles` call.
+    let user_state = match ctx.user_dir.state_by_user_id(&user_id) {
+        Some(s) => s,
+        None => return Err(HandshakeError::UnknownUser),
     };
     let session = Session::new(
         user_id,
         username.as_str().to_string(),
-        SessionPermissions::from_roles(roles),
+        SessionPermissions::new(user_state.superuser, user_state.roles.clone()),
         ctx.transport_kind,
         binding_mode,
         exporter,
@@ -448,15 +458,7 @@ async fn run_handshake<F: Framer>(
     // the client can reconnect without re-running Argon2id. TTL = 24h
     // matches the session max-age default in `SchedulerInputs::session_max_age_ns`.
     const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
-    let roles_for_ticket = match ctx.user_dir.lookup_roles(username.as_str()) {
-        Ok(Some(r)) => r,
-        Ok(None) => Vec::new(),
-        Err(e) => {
-            return Err(HandshakeError::Storage(format!(
-                "lookup_roles (ticket): {e}"
-            )))
-        }
-    };
+    let roles_for_ticket = user_state.roles;
     let (ticket_bytes, ticket_expires_at_ns) =
         match shamir_connect::server::resume::issue_initial_ticket(
             &ctx.resume_config.ticket_key,
@@ -652,12 +654,6 @@ pub async fn handle_connection<F>(
                     HandshakeError::UnsupportedVersion => "unsupported_version",
                     HandshakeError::Policy => "policy",
                     HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
-                    HandshakeError::Storage(detail) => {
-                        // Storage failure during role lookup — log the cause
-                        // (operator-facing only; client sees a generic auth fail).
-                        tracing::error!(error = %detail, "handshake storage failure");
-                        "storage"
-                    }
                 };
                 record_auth_attempt(label);
                 // NEW-2: on a bad `client_proof`, widen the latency pad to the
