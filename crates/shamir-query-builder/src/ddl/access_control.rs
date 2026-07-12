@@ -208,18 +208,57 @@ impl IntoBatchOp for ChgrpBuilder {
 // Group DDL
 // ============================================================================
 
-/// Create a new group.
-pub fn create_group(name: impl Into<String>) -> BatchOp {
-    BatchOp::CreateGroup(CreateGroupOp {
-        create_group: name.into(),
-    })
+/// Create a new group. Returns a builder (HMAC-gated, see
+/// [`CreateGroup::hmac`]).
+pub fn create_group(name: impl Into<String>) -> CreateGroup {
+    CreateGroup {
+        name: name.into(),
+        hmac: None,
+    }
 }
 
-/// Drop a group by reference (name or id). Returns a builder for optional flags.
+/// Builder for [`CreateGroupOp`].
+pub struct CreateGroup {
+    name: String,
+    hmac: Option<String>,
+}
+
+impl CreateGroup {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_create_group(name)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::CreateGroup(CreateGroupOp {
+            create_group: self.name,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<CreateGroup> for BatchOp {
+    fn from(b: CreateGroup) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for CreateGroup {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Drop a group by reference (name or id). Returns a builder for optional
+/// flags (HMAC-gated, see [`DropGroup::hmac`]).
 pub fn drop_group(group: GroupRef) -> DropGroup {
     DropGroup {
         group,
         if_exists: false,
+        hmac: None,
     }
 }
 
@@ -227,6 +266,7 @@ pub fn drop_group(group: GroupRef) -> DropGroup {
 pub struct DropGroup {
     group: GroupRef,
     if_exists: bool,
+    hmac: Option<String>,
 }
 
 impl DropGroup {
@@ -237,11 +277,19 @@ impl DropGroup {
         self
     }
 
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_drop_group(group)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropGroup(DropGroupOp {
             drop_group: self.group,
             if_exists: self.if_exists,
+            hmac: self.hmac,
         })
     }
 }
@@ -260,26 +308,143 @@ impl IntoBatchOp for DropGroup {
 
 /// Rename a group by reference (name or id) to `to`. Because groups are
 /// id-keyed, this only updates the display name; members and resource
-/// references (which store the group id) are unaffected.
-pub fn rename_group(group: GroupRef, to: impl Into<String>) -> BatchOp {
-    BatchOp::RenameGroup(RenameGroupOp {
-        rename_group: group,
+/// references (which store the group id) are unaffected. Returns a
+/// builder (HMAC-gated, see [`RenameGroup::hmac`]).
+pub fn rename_group(group: GroupRef, to: impl Into<String>) -> RenameGroup {
+    RenameGroup {
+        group,
         to: to.into(),
-    })
+        hmac: None,
+    }
 }
 
-/// Add a user to a group.
-pub fn add_group_member(group: GroupRef, user: u64) -> BatchOp {
-    BatchOp::AddGroupMember(AddGroupMemberOp {
-        add_group_member: group,
-        user,
-    })
+/// Builder for [`RenameGroupOp`].
+pub struct RenameGroup {
+    group: GroupRef,
+    to: String,
+    hmac: Option<String>,
 }
 
-/// Remove a user from a group.
-pub fn remove_group_member(group: GroupRef, user: u64) -> BatchOp {
-    BatchOp::RemoveGroupMember(RemoveGroupMemberOp {
-        remove_group_member: group,
+impl RenameGroup {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_rename_group(group, to)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::RenameGroup(RenameGroupOp {
+            rename_group: self.group,
+            to: self.to,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<RenameGroup> for BatchOp {
+    fn from(b: RenameGroup) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for RenameGroup {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Add a user to a group. Returns a builder (HMAC-gated, see
+/// [`AddGroupMember::hmac`]).
+pub fn add_group_member(group: GroupRef, user: u64) -> AddGroupMember {
+    AddGroupMember {
+        group,
         user,
-    })
+        hmac: None,
+    }
+}
+
+/// Builder for [`AddGroupMemberOp`].
+pub struct AddGroupMember {
+    group: GroupRef,
+    user: u64,
+    hmac: Option<String>,
+}
+
+impl AddGroupMember {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_add_group_member(group, user)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::AddGroupMember(AddGroupMemberOp {
+            add_group_member: self.group,
+            user: self.user,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<AddGroupMember> for BatchOp {
+    fn from(b: AddGroupMember) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for AddGroupMember {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Remove a user from a group. Returns a builder (HMAC-gated, see
+/// [`RemoveGroupMember::hmac`]).
+pub fn remove_group_member(group: GroupRef, user: u64) -> RemoveGroupMember {
+    RemoveGroupMember {
+        group,
+        user,
+        hmac: None,
+    }
+}
+
+/// Builder for [`RemoveGroupMemberOp`].
+pub struct RemoveGroupMember {
+    group: GroupRef,
+    user: u64,
+    hmac: Option<String>,
+}
+
+impl RemoveGroupMember {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_remove_group_member(group, user)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::RemoveGroupMember(RemoveGroupMemberOp {
+            remove_group_member: self.group,
+            user: self.user,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<RemoveGroupMember> for BatchOp {
+    fn from(b: RemoveGroupMember) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for RemoveGroupMember {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }

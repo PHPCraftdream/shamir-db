@@ -313,11 +313,9 @@ fn as_array_16(bytes: &[u8]) -> Option<[u8; limits::SALT_BYTES]> {
 /// `DropRole`, `Start/Commit/RollbackMigration`, `GrantRole`/`RevokeRole`
 /// (the single most dangerous op class — privilege escalation),
 /// `Chmod`/`Chown`/`Chgrp` (ownership/permission changes),
-/// `CreateUser`/`CreateRole`, and `SetRetention`/`PurgeHistory`
-/// (irreversible audit-trail loss). Group-mutating ops
-/// (`CreateGroup`/`DropGroup`/`RenameGroup`/`Add|RemoveGroupMember`) are
-/// NOT yet covered — see task #542's follow-up (audit ranks them lowest
-/// severity of this cluster).
+/// `CreateUser`/`CreateRole`, `SetRetention`/`PurgeHistory`
+/// (irreversible audit-trail loss), and the group-mutating ops
+/// (`CreateGroup`/`DropGroup`/`RenameGroup`/`Add|RemoveGroupMember`).
 ///
 /// Returns `Err((alias, code, message))` on the first failure
 /// where `code` is one of:
@@ -417,6 +415,26 @@ pub(super) fn check_destructive_hmacs(
             ),
             BatchOp::PurgeHistory(op) => (
                 canon::canonical_purge_history(db_name, &op.repo, &op.purge_history, &op.scope),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::CreateGroup(op) => (
+                canon::canonical_create_group(&op.create_group),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::DropGroup(op) => (
+                canon::canonical_drop_group(&op.drop_group),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::RenameGroup(op) => (
+                canon::canonical_rename_group(&op.rename_group, &op.to),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::AddGroupMember(op) => (
+                canon::canonical_add_group_member(&op.add_group_member, op.user),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::RemoveGroupMember(op) => (
+                canon::canonical_remove_group_member(&op.remove_group_member, op.user),
                 op.hmac.as_ref(),
             ),
             _ => continue, // non-destructive — pass.

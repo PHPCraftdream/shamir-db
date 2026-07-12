@@ -132,6 +132,10 @@ pub struct ChgrpOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateGroupOp {
     pub create_group: String,
+    /// Hex HMAC over `b"create_group\0<name>"`. See
+    /// `crate::auth::DropUserOp` for the field-shape precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Drop an existing group by name or id.
@@ -148,6 +152,9 @@ pub struct DropGroupOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    /// Hex HMAC over `b"drop_group\0<group_ref>"`. See `CreateGroupOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Rename an existing group. The group is id-keyed, so renaming only
@@ -163,6 +170,9 @@ pub struct DropGroupOp {
 pub struct RenameGroupOp {
     pub rename_group: GroupRef,
     pub to: String,
+    /// Hex HMAC over `b"rename_group\0<group_ref>\0<to>"`. See `CreateGroupOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Add a user to a group.
@@ -174,6 +184,10 @@ pub struct RenameGroupOp {
 pub struct AddGroupMemberOp {
     pub add_group_member: GroupRef,
     pub user: u64,
+    /// Hex HMAC over `b"add_group_member\0<group_ref>\0<user>"`. See
+    /// `CreateGroupOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Remove a user from a group.
@@ -185,6 +199,10 @@ pub struct AddGroupMemberOp {
 pub struct RemoveGroupMemberOp {
     pub remove_group_member: GroupRef,
     pub user: u64,
+    /// Hex HMAC over `b"remove_group_member\0<group_ref>\0<user>"`. See
+    /// `CreateGroupOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 // ============================================================================

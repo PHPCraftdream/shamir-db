@@ -60,10 +60,18 @@
 //! serialization to reuse, so this module defines the one both sides
 //! agree on).
 //!
-//! Group ops (`create_group`, `drop_group`, `rename_group`,
-//! `add_group_member`, `remove_group_member`) are NOT yet covered by the
-//! HMAC gate — see task #542's follow-up (lower severity than the
-//! privilege/ownership ops above; the audit ranks them last).
+//! | create_group        | `b"create_group\0<name>"`                                                    |
+//! | drop_group          | `b"drop_group\0<group_ref>"`                                                 |
+//! | rename_group        | `b"rename_group\0<group_ref>\0<to>"`                                         |
+//! | add_group_member    | `b"add_group_member\0<group_ref>\0<user>"`                                   |
+//! | remove_group_member | `b"remove_group_member\0<group_ref>\0<user>"`                                |
+//!
+//! `<group_ref>` is produced by [`canonical_group_ref`] — a stable
+//! `"name:<name>"` / `"id:<id>"` rendering of `GroupRef`'s two variants
+//! that can never collide between variants: `"name:"` / `"id:"` prefixes
+//! are reserved tags, not part of either variant's raw payload space, so
+//! a group literally named `"id:3"` canonicalizes to `"name:id:3"` —
+//! distinct from `GroupRef::Id { id: 3 }`'s `"id:3"`.
 
 /// 32-byte HMAC key derived from the session bearer token.
 pub fn derive_session_hmac_key(session_id: &[u8; 32]) -> [u8; 32] {
@@ -296,6 +304,55 @@ pub fn canonical_purge_history(
         repo.as_bytes(),
         table.as_bytes(),
         canonical_purge_scope(scope).as_bytes(),
+    ])
+}
+
+/// Render a [`crate::admin::GroupRef`] into the stable `name:<name>` /
+/// `id:<id>` string used by every `canonical_*` group-op helper below.
+/// Exhaustive match, no wildcard — a future `GroupRef` variant that isn't
+/// handled here fails to compile instead of silently falling through.
+///
+/// The `"name:"` / `"id:"` prefixes are reserved tags outside either
+/// variant's raw payload space, so the two variants can never collide:
+/// a group literally named `"id:3"` renders as `"name:id:3"`, not
+/// `"id:3"` (which only `GroupRef::Id { id: 3 }` produces).
+pub fn canonical_group_ref(r: &crate::admin::GroupRef) -> String {
+    use crate::admin::GroupRef;
+    match r {
+        GroupRef::Name { name } => format!("name:{name}"),
+        GroupRef::Id { id } => format!("id:{id}"),
+    }
+}
+
+pub fn canonical_create_group(name: &str) -> Vec<u8> {
+    join_null(&[b"create_group", name.as_bytes()])
+}
+
+pub fn canonical_drop_group(group: &crate::admin::GroupRef) -> Vec<u8> {
+    join_null(&[b"drop_group", canonical_group_ref(group).as_bytes()])
+}
+
+pub fn canonical_rename_group(group: &crate::admin::GroupRef, to: &str) -> Vec<u8> {
+    join_null(&[
+        b"rename_group",
+        canonical_group_ref(group).as_bytes(),
+        to.as_bytes(),
+    ])
+}
+
+pub fn canonical_add_group_member(group: &crate::admin::GroupRef, user: u64) -> Vec<u8> {
+    join_null(&[
+        b"add_group_member",
+        canonical_group_ref(group).as_bytes(),
+        user.to_string().as_bytes(),
+    ])
+}
+
+pub fn canonical_remove_group_member(group: &crate::admin::GroupRef, user: u64) -> Vec<u8> {
+    join_null(&[
+        b"remove_group_member",
+        canonical_group_ref(group).as_bytes(),
+        user.to_string().as_bytes(),
     ])
 }
 

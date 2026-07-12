@@ -6,9 +6,10 @@
  *
  * Non-HMAC ops are plain functions returning the wire object.
  * HMAC-gated ops (`drop_user`, `drop_role`, `chmod`, `chown`, `chgrp`,
- * `create_user`, `create_role`, `grant_role`, `revoke_role`) take a
- * `signer: HmacSigner`, build the canonical input via `../hmac.ts`, and
- * attach the HMAC tag.
+ * `create_user`, `create_role`, `grant_role`, `revoke_role`,
+ * `create_group`, `drop_group`, `rename_group`, `add_group_member`,
+ * `remove_group_member`) take a `signer: HmacSigner`, build the canonical
+ * input via `../hmac.ts`, and attach the HMAC tag.
  *
  * PLATFORM-AGNOSTIC.
  */
@@ -52,6 +53,11 @@ import {
   canonicalCreateRole,
   canonicalGrantRole,
   canonicalRevokeRole,
+  canonicalCreateGroup,
+  canonicalDropGroup,
+  canonicalRenameGroup,
+  canonicalAddGroupMember,
+  canonicalRemoveGroupMember,
 } from '../hmac.js';
 
 import { principalId } from '../principal-id.js';
@@ -143,52 +149,70 @@ export function chgrp(signer: HmacSigner, resource: ResourceRef, group: number |
   return { chgrp: resource, group, hmac: signer.hmacTagHex(canonical) };
 }
 
-export function createGroup(name: string): CreateGroupOp {
-  return { create_group: name };
+/** Create a new group (HMAC-gated). canonical = `canonicalCreateGroup(name)`. */
+export function createGroup(signer: HmacSigner, name: string): CreateGroupOp {
+  const canonical = canonicalCreateGroup(name);
+  return { create_group: name, hmac: signer.hmacTagHex(canonical) };
 }
 
+/** Drop a group by reference (HMAC-gated). canonical = `canonicalDropGroup(ref)`. */
 export function dropGroup(
+  signer: HmacSigner,
   ref: GroupRef,
   opts?: { if_exists?: boolean },
 ): DropGroupOp {
-  const op: DropGroupOp = { drop_group: ref };
+  const canonical = canonicalDropGroup(ref);
+  const op: DropGroupOp = { drop_group: ref, hmac: signer.hmacTagHex(canonical) };
   if (opts?.if_exists) op.if_exists = true;
   return op;
 }
 
 /**
- * Rename a group. Groups are id-keyed, so this only updates the display
- * name; members and resource references (which store the group id) are
- * unaffected.
+ * Rename a group (HMAC-gated). Groups are id-keyed, so this only updates
+ * the display name; members and resource references (which store the
+ * group id) are unaffected. canonical = `canonicalRenameGroup(ref, to)`.
  */
-export function renameGroup(ref: GroupRef, to: string): RenameGroupOp {
-  return { rename_group: ref, to };
+export function renameGroup(signer: HmacSigner, ref: GroupRef, to: string): RenameGroupOp {
+  const canonical = canonicalRenameGroup(ref, to);
+  return { rename_group: ref, to, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
- * Add a user to a group.
+ * Add a user to a group (HMAC-gated).
+ * canonical = `canonicalAddGroupMember(ref, user)`.
  *
  * `user` accepts:
  *   - `string`  — username, hashed to `principalId(username)` (bigint).
  *   - `bigint`  — pre-computed principal id.
  *   - `number`  — raw numeric id (only safe for values <= 2^53).
  */
-export function addGroupMember(ref: GroupRef, user: string | bigint | number): AddGroupMemberOp {
+export function addGroupMember(
+  signer: HmacSigner,
+  ref: GroupRef,
+  user: string | bigint | number,
+): AddGroupMemberOp {
   const resolved = typeof user === 'string' ? principalId(user) : user;
-  return { add_group_member: ref, user: resolved };
+  const canonical = canonicalAddGroupMember(ref, resolved);
+  return { add_group_member: ref, user: resolved, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
- * Remove a user from a group.
+ * Remove a user from a group (HMAC-gated).
+ * canonical = `canonicalRemoveGroupMember(ref, user)`.
  *
  * `user` accepts:
  *   - `string`  — username, hashed to `principalId(username)` (bigint).
  *   - `bigint`  — pre-computed principal id.
  *   - `number`  — raw numeric id (only safe for values <= 2^53).
  */
-export function removeGroupMember(ref: GroupRef, user: string | bigint | number): RemoveGroupMemberOp {
+export function removeGroupMember(
+  signer: HmacSigner,
+  ref: GroupRef,
+  user: string | bigint | number,
+): RemoveGroupMemberOp {
   const resolved = typeof user === 'string' ? principalId(user) : user;
-  return { remove_group_member: ref, user: resolved };
+  const canonical = canonicalRemoveGroupMember(ref, resolved);
+  return { remove_group_member: ref, user: resolved, hmac: signer.hmacTagHex(canonical) };
 }
 
 export function accessTree(opts?: { depth?: number; db?: string }): AccessTreeOp {

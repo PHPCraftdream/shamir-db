@@ -22,6 +22,11 @@ import {
   canonicalCreateRole,
   canonicalGrantRole,
   canonicalRevokeRole,
+  canonicalCreateGroup,
+  canonicalDropGroup,
+  canonicalRenameGroup,
+  canonicalAddGroupMember,
+  canonicalRemoveGroupMember,
 } from '../../hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
@@ -211,60 +216,102 @@ describe('chgrp (HMAC)', () => {
 });
 
 describe('createGroup', () => {
-  it('emits {create_group: name}', () => {
-    expect(admin.createGroup('devs')).toEqual({ create_group: 'devs' });
+  it('emits {create_group: name, hmac} — hmac = signer over canonicalCreateGroup(name)', () => {
+    const canonical = canonicalCreateGroup('devs');
+    const op = admin.createGroup(fakeSigner, 'devs');
+    expect(op).toEqual({
+      create_group: 'devs',
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 });
 
 describe('dropGroup', () => {
-  it('by name', () => {
-    const op = admin.dropGroup(admin.groupName('devs'));
-    expect(op).toEqual({ drop_group: { name: 'devs' } });
+  it('by name — hmac = signer over canonicalDropGroup(ref)', () => {
+    const ref = admin.groupName('devs');
+    const canonical = canonicalDropGroup(ref);
+    const op = admin.dropGroup(fakeSigner, ref);
+    expect(op).toEqual({
+      drop_group: { name: 'devs' },
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 
   it('by id', () => {
-    const op = admin.dropGroup(admin.groupId(3));
-    expect(op).toEqual({ drop_group: { id: 3 } });
+    const ref = admin.groupId(3);
+    const canonical = canonicalDropGroup(ref);
+    const op = admin.dropGroup(fakeSigner, ref);
+    expect(op).toEqual({
+      drop_group: { id: 3 },
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
+  });
+
+  it('emits if_exists when true', () => {
+    const op = admin.dropGroup(fakeSigner, admin.groupName('devs'), { if_exists: true });
+    expect(op.if_exists).toBe(true);
   });
 });
 
 describe('renameGroup', () => {
-  it('by name', () => {
-    const op = admin.renameGroup(admin.groupName('devs'), 'engineers');
-    expect(op).toEqual({ rename_group: { name: 'devs' }, to: 'engineers' });
+  it('by name — hmac = signer over canonicalRenameGroup(ref, to)', () => {
+    const ref = admin.groupName('devs');
+    const canonical = canonicalRenameGroup(ref, 'engineers');
+    const op = admin.renameGroup(fakeSigner, ref, 'engineers');
+    expect(op).toEqual({
+      rename_group: { name: 'devs' },
+      to: 'engineers',
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 
   it('by id', () => {
-    const op = admin.renameGroup(admin.groupId(3), 'engineers');
-    expect(op).toEqual({ rename_group: { id: 3 }, to: 'engineers' });
+    const ref = admin.groupId(3);
+    const canonical = canonicalRenameGroup(ref, 'engineers');
+    const op = admin.renameGroup(fakeSigner, ref, 'engineers');
+    expect(op).toEqual({
+      rename_group: { id: 3 },
+      to: 'engineers',
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 });
 
 describe('addGroupMember', () => {
-  it('emits {add_group_member: GroupRef, user} with number', () => {
-    const op = admin.addGroupMember(admin.groupName('devs'), 42);
+  it('emits {add_group_member: GroupRef, user, hmac} with number', () => {
+    const ref = admin.groupName('devs');
+    const canonical = canonicalAddGroupMember(ref, 42);
+    const op = admin.addGroupMember(fakeSigner, ref, 42);
     expect(op).toEqual({
       add_group_member: { name: 'devs' },
       user: 42,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 
   it('accepts string username and hashes to principalId', () => {
-    const op = admin.addGroupMember(admin.groupName('devs'), 'bob');
+    const ref = admin.groupName('devs');
+    const resolved = principalId('bob');
+    const canonical = canonicalAddGroupMember(ref, resolved);
+    const op = admin.addGroupMember(fakeSigner, ref, 'bob');
     expect(op).toEqual({
       add_group_member: { name: 'devs' },
-      user: principalId('bob'),
+      user: resolved,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
     expect(typeof op.user).toBe('bigint');
   });
 });
 
 describe('removeGroupMember', () => {
-  it('emits {remove_group_member: GroupRef, user}', () => {
-    const op = admin.removeGroupMember(admin.groupId(5), 7);
+  it('emits {remove_group_member: GroupRef, user, hmac}', () => {
+    const ref = admin.groupId(5);
+    const canonical = canonicalRemoveGroupMember(ref, 7);
+    const op = admin.removeGroupMember(fakeSigner, ref, 7);
     expect(op).toEqual({
       remove_group_member: { id: 5 },
       user: 7,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });
@@ -464,13 +511,8 @@ describe('renameRole', () => {
 // ── if_exists on admin drop ops ────────────────────────────────────
 
 describe('if_exists on admin drop ops', () => {
-  it('dropGroup emits if_exists when true', () => {
-    const op = admin.dropGroup(admin.groupName('devs'), { if_exists: true });
-    expect(op.if_exists).toBe(true);
-  });
-
   it('dropGroup omits if_exists when not set', () => {
-    const op = admin.dropGroup(admin.groupName('devs'));
+    const op = admin.dropGroup(fakeSigner, admin.groupName('devs'));
     expect(op).not.toHaveProperty('if_exists');
   });
 

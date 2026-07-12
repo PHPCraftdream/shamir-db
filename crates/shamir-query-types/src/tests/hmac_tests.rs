@@ -1,9 +1,11 @@
-use crate::admin::{PurgeScope, ResourceRef, Retention};
+use crate::admin::{GroupRef, PurgeScope, ResourceRef, Retention};
 use crate::hmac::{
-    canonical_chgrp, canonical_chmod, canonical_chown, canonical_commit_migration,
-    canonical_create_role, canonical_create_user, canonical_drop_db, canonical_drop_index,
+    canonical_add_group_member, canonical_chgrp, canonical_chmod, canonical_chown,
+    canonical_commit_migration, canonical_create_group, canonical_create_role,
+    canonical_create_user, canonical_drop_db, canonical_drop_group, canonical_drop_index,
     canonical_drop_repo, canonical_drop_role, canonical_drop_table, canonical_drop_user,
-    canonical_grant_role, canonical_purge_history, canonical_purge_scope, canonical_resource_ref,
+    canonical_grant_role, canonical_group_ref, canonical_purge_history, canonical_purge_scope,
+    canonical_remove_group_member, canonical_rename_group, canonical_resource_ref,
     canonical_retention, canonical_revoke_role, canonical_rollback_migration,
     canonical_set_retention, canonical_start_migration, compute_tag_hex, derive_session_hmac_key,
     hex_decode, hex_encode, verify_tag_hex,
@@ -261,5 +263,117 @@ fn new_canonical_inputs_roundtrip_through_hmac() {
     assert!(verify_tag_hex(&key, &canonical, &tag));
     // A tag computed for "alice" must not verify for "mallory".
     let wrong = canonical_grant_role("superuser", "mallory");
+    assert!(!verify_tag_hex(&key, &wrong, &tag));
+}
+
+// ---------------------------------------------------------------------------
+// Group-op canonical_* helpers (task #551 — group-mutating ops coverage)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn canonical_group_ref_renders_both_variants_without_collision() {
+    assert_eq!(
+        canonical_group_ref(&GroupRef::Name {
+            name: "devs".to_string()
+        }),
+        "name:devs"
+    );
+    assert_eq!(canonical_group_ref(&GroupRef::Id { id: 3 }), "id:3");
+    // A group literally named "id:3" must NOT collide with GroupRef::Id { id: 3 }.
+    assert_ne!(
+        canonical_group_ref(&GroupRef::Name {
+            name: "id:3".to_string()
+        }),
+        canonical_group_ref(&GroupRef::Id { id: 3 })
+    );
+    assert_eq!(
+        canonical_group_ref(&GroupRef::Name {
+            name: "id:3".to_string()
+        }),
+        "name:id:3"
+    );
+}
+
+#[test]
+fn canonical_create_group_is_null_separated() {
+    assert_eq!(canonical_create_group("devs"), b"create_group\0devs");
+}
+
+#[test]
+fn canonical_drop_group_is_null_separated() {
+    assert_eq!(
+        canonical_drop_group(&GroupRef::Name {
+            name: "devs".to_string()
+        }),
+        b"drop_group\0name:devs"
+    );
+    assert_eq!(
+        canonical_drop_group(&GroupRef::Id { id: 3 }),
+        b"drop_group\0id:3"
+    );
+}
+
+#[test]
+fn canonical_rename_group_is_null_separated() {
+    assert_eq!(
+        canonical_rename_group(
+            &GroupRef::Name {
+                name: "devs".to_string()
+            },
+            "engineers"
+        ),
+        b"rename_group\0name:devs\0engineers"
+    );
+    assert_eq!(
+        canonical_rename_group(&GroupRef::Id { id: 3 }, "engineers"),
+        b"rename_group\0id:3\0engineers"
+    );
+}
+
+#[test]
+fn canonical_add_group_member_is_null_separated() {
+    assert_eq!(
+        canonical_add_group_member(
+            &GroupRef::Name {
+                name: "devs".to_string()
+            },
+            42
+        ),
+        b"add_group_member\x00name:devs\x0042"
+    );
+    assert_eq!(
+        canonical_add_group_member(&GroupRef::Id { id: 3 }, 42),
+        b"add_group_member\x00id:3\x0042"
+    );
+}
+
+#[test]
+fn canonical_remove_group_member_is_null_separated() {
+    assert_eq!(
+        canonical_remove_group_member(
+            &GroupRef::Name {
+                name: "devs".to_string()
+            },
+            42
+        ),
+        b"remove_group_member\x00name:devs\x0042"
+    );
+    assert_eq!(
+        canonical_remove_group_member(&GroupRef::Id { id: 3 }, 42),
+        b"remove_group_member\x00id:3\x0042"
+    );
+}
+
+#[test]
+fn group_op_canonical_inputs_roundtrip_through_hmac() {
+    let key = derive_session_hmac_key(&[1u8; 32]);
+    let group = GroupRef::Name {
+        name: "devs".to_string(),
+    };
+    let canonical = canonical_add_group_member(&group, 42);
+    let tag = compute_tag_hex(&key, &canonical);
+    assert!(verify_tag_hex(&key, &canonical, &tag));
+    // A tag computed for user 42 must not verify for user 43.
+    let wrong = canonical_add_group_member(&group, 43);
     assert!(!verify_tag_hex(&key, &wrong, &tag));
 }
