@@ -47,7 +47,7 @@ use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, Pu
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 
-use shamir_db::access::{principal_id, Actor};
+use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -121,12 +121,12 @@ fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
 // `create_db`/`add_repo` (System-owned) persist ResourceMeta::owned_enforced
 // (owner-only 0o700) rather than the old open 0o777 default. `fixture_session()`
 // above is a regular ("alice") session, not a superuser, so it resolves to
-// Actor::User(principal_id("alice")) and needs ownership to pass the gate —
+// Actor::User(principal64([0xAB; 16])) and needs ownership to pass the gate —
 // both setup helpers below stamp that same actor via the `_as` variants.
 
 async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let bench_user = Actor::User(principal_id("alice"));
+    let bench_user = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as(db, bench_user.clone()).await;
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo_as(db, cfg, bench_user).await.unwrap();
@@ -135,7 +135,7 @@ async fn make_db_one_repo(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
 
 async fn make_db_two_tables(db: &str, repo: &str, table_a: &str, table_b: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let bench_user = Actor::User(principal_id("alice"));
+    let bench_user = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as(db, bench_user.clone()).await;
     let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory())
         .add_table(TableConfig::new(table_a))

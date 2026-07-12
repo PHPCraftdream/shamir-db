@@ -55,7 +55,7 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
-use shamir_db::access::{principal_id, Actor};
+use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -93,7 +93,7 @@ const TABLE: &str = "items";
 /// Mirrors `follower_loop_tests::build_db`.
 async fn build_db() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal_id(OWNER));
+    let owner = Actor::User(principal64_from_username(OWNER));
     shamir.create_db_as(DB, owner.clone()).await;
     let cfg = RepoConfig::new(REPO, BoxRepoFactory::in_memory()).add_table(TableConfig::new(TABLE));
     shamir.add_repo_as(DB, cfg, owner).await.expect("add repo");
@@ -104,7 +104,7 @@ async fn build_db() -> ShamirDb {
 /// commits → emits one changelog event. Polls until all `n` events are durable
 /// in the leader's journal (the journal writer is async).
 async fn write_rows(leader: &ShamirDb, n: usize) {
-    let owner = Actor::User(principal_id(OWNER));
+    let owner = Actor::User(principal64_from_username(OWNER));
     for i in 0..n {
         let key_str = format!("k{i}");
         let mut batch = Batch::named("ins");
@@ -143,7 +143,7 @@ async fn write_rows(leader: &ShamirDb, n: usize) {
 /// prove DATA convergence — not just changefeed convergence. A read batch
 /// (SELECT *) is built through the query builder.
 async fn count_rows(db: &ShamirDb) -> usize {
-    let owner = Actor::User(principal_id(OWNER));
+    let owner = Actor::User(principal64_from_username(OWNER));
     let mut batch = Batch::new();
     batch.id("count");
     batch.query("q", Query::from(TABLE));
@@ -231,7 +231,7 @@ async fn run_loop_until_caught_up(follower: Arc<ShamirDb>, leader: ShamirDb, boo
     }
 }
 
-/// A regular ("alice") session — resolves to `Actor::User(principal_id("alice"))`.
+/// A regular ("alice") session — resolves to `Actor::User(principal64_from_username("alice"))`.
 /// Mirrors `node_mode_tests::alice_session`.
 fn alice_session() -> Session {
     Session::new(

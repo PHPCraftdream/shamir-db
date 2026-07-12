@@ -19,8 +19,7 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::session::{Session, SessionPermissions};
 
-use shamir_db::access::principal_id;
-use shamir_db::access::Actor;
+use shamir_db::access::{principal64, principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -87,8 +86,8 @@ fn carol_replicator_session() -> Session {
 /// `alice` can read `main` but not `secret`; `carol` can read neither.
 async fn build_handler() -> ShamirDbHandler {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let alice = Actor::User(principal_id("alice"));
-    let bob = Actor::User(principal_id("bob"));
+    let alice = Actor::User(principal64([0xAB; 16]));
+    let bob = Actor::User(principal64_from_username("bob"));
 
     shamir.create_db_as("app", alice.clone()).await;
 
@@ -119,7 +118,7 @@ async fn build_handler() -> ShamirDbHandler {
 async fn write_rows(handler: &ShamirDbHandler, n: usize) {
     use shamir_query_builder::write::insert;
     let db = handler.db();
-    let owner = Actor::User(principal_id("alice"));
+    let owner = Actor::User(principal64([0xAB; 16]));
     for i in 0..n {
         let key_str = format!("k{i}");
         let mut batch = Batch::named("ins");
@@ -370,7 +369,7 @@ async fn long_poll_empty_tail_does_not_hang() {
 #[tokio::test]
 async fn leader_epoch_carried_on_all_responses() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal_id("alice"));
+    let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));

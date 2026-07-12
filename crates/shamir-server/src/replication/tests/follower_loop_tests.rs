@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use shamir_db::access::principal_id;
+use shamir_db::access::principal64_from_username;
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -42,7 +42,7 @@ use crate::replication::in_process::InProcessReplSource;
 /// independent.
 async fn build_db(owner_label: &str) -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
-    let owner = Actor::User(principal_id(owner_label));
+    let owner = Actor::User(principal64_from_username(owner_label));
     shamir.create_db_as("app", owner.clone()).await;
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
@@ -57,7 +57,7 @@ async fn build_db(owner_label: &str) -> ShamirDb {
 /// insert commits → emits one changefeed event. Polls until all `n` events
 /// are durable in the journal.
 async fn write_rows(leader: &ShamirDb, n: usize) {
-    let owner = Actor::User(principal_id("alice"));
+    let owner = Actor::User(principal64_from_username("alice"));
     for i in 0..n {
         let key_str = format!("k{i}");
         let mut batch = Batch::named("ins");

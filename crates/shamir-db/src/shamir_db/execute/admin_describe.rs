@@ -177,7 +177,15 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let owner_qv = match &meta.owner {
             crate::access::Actor::System => QueryValue::Str("System".to_string()),
-            crate::access::Actor::User(id) => QueryValue::Int(*id as i64),
+            // `Admin` and `User` both carry a real principal64 owner id
+            // (`Admin` is real ownership, not the anonymous System id); they
+            // render identically here. In practice `meta.owner` comes from
+            // `from_record`→`from_owner_id`, which never produces `Admin`
+            // (admin-ness is a live session property, never persisted) — the
+            // arm exists only for exhaustiveness.
+            crate::access::Actor::Admin(id) | crate::access::Actor::User(id) => {
+                QueryValue::Int(*id as i64)
+            }
         };
         let group_qv = match meta.group {
             Some(g) => QueryValue::Int(g as i64),

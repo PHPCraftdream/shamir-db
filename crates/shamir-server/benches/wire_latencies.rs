@@ -47,7 +47,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 
-use shamir_db::access::{principal_id, Actor};
+use shamir_db::access::{principal64, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -90,9 +90,9 @@ async fn build_handler() -> ShamirDbHandler {
     // `create_db`/`add_repo` (System-owned) persist ResourceMeta::owned_enforced
     // (owner-only 0o700) rather than the old open 0o777 default. `fixture_session()`
     // below is a regular ("alice") session, not a superuser, so it resolves to
-    // Actor::User(principal_id("alice")) and needs ownership to pass the gate —
+    // Actor::User(principal64([0xAB; 16])) and needs ownership to pass the gate —
     // stamp the bench db/repo/table with that same actor via the `_as` variants.
-    let bench_user = Actor::User(principal_id("alice"));
+    let bench_user = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", bench_user.clone()).await;
     let cfg =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));

@@ -112,15 +112,21 @@ pub(super) const INTERACTIVE_TX_MAX_LIFETIME: Duration = Duration::from_secs(300
 
 /// Resolve the [`Actor`] for the current session.
 ///
-/// Superuser sessions (admin / bootstrap) get `Actor::System` which bypasses
-/// the Shomer gate entirely. Regular authenticated users get
-/// `Actor::User(principal_id)` where `principal_id` is `fxhash::hash64(username)`
-/// — a stable, deterministic u64 consistent with `chown`/`chgrp` owner ids.
+/// Superuser sessions get `Actor::Admin(principal64(session.user_id))` —
+/// bypasses the Shomer gate exactly like `Actor::System`, but attributes
+/// ownership of admin-created resources to the real account instead of
+/// collapsing to `owner = 0`. Regular sessions get
+/// `Actor::User(principal64(session.user_id))`. `user_id` is the directory-
+/// minted 16-byte id stamped on the session at login — NOT derived from the
+/// username — so a dropped-and-recreated account gets a fresh id even if it
+/// reuses the same name (closes the identity-inheritance-on-recreate bug,
+/// design doc §1.1 finding 3).
 pub(super) fn session_actor(session: &Session) -> Actor {
+    let id = shamir_types::access::principal64(session.user_id);
     if session.permissions.is_superuser {
-        Actor::System
+        Actor::Admin(id)
     } else {
-        Actor::User(session.principal_id())
+        Actor::User(id)
     }
 }
 

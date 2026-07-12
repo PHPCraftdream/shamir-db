@@ -7,7 +7,7 @@ use shamir_query_builder::ddl;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
-use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath};
+use shamir_types::access::{principal64_from_username, Actor, ResourceMeta, ResourcePath};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -35,7 +35,7 @@ async fn access_tree_structure_meta_and_principals() {
 
     // A user record so the table's owner resolves to a name, and the
     // group membership renders the member name.
-    let alice = principal_id("alice");
+    let alice = principal64_from_username("alice");
     shamir.add_group_member(gid, alice).await.unwrap();
     {
         let table = shamir.system_store().users_table().await.unwrap();
@@ -159,7 +159,7 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
     assert!(tree_present(&sys), "System must receive the access tree");
 
     // Regular authenticated user → denied (no tree surfaces).
-    let bob = principal_id("bob");
+    let bob = principal64_from_username("bob");
     let user = shamir.execute_as(Actor::User(bob), "testdb", &req).await;
     assert!(
         !tree_present(&user),
