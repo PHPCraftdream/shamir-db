@@ -20,19 +20,28 @@
 
 ```
 ticket_plain = canonical_msgpack({
-  "version": 1,                           // u8
+  "version": 2,                           // u8 — bumped from 1 in task #558
   "user_id": bytes(16),
   "username_nfc": String,
-  "permissions": SessionPermissions,      // см. AUTH_PROTOCOL §7.3
   "transport_kind_at_auth": u8,
   "binding_mode_at_auth": u8,
   "channel_binding_at_auth": bytes(32),
   "ticket_family_id": bytes(16),          // см. §6.2 — per-device lineage
   "original_auth_at_ns": u64,             // unix nanos; ВСЕГДА от первого full SCRAM, не обновляется при refresh
   "expires_at_ns": u64,
-  "family_counter": u64                   // monotonic в пределах family_id
+  "family_counter": u64,                  // monotonic в пределах family_id
+  "identity_key_version": u64             // для anti-downgrade при Ed25519 rotation (§5.7)
 })
 ```
+
+**Note (task #558):** the ticket no longer carries a `permissions`/`roles`
+snapshot. Resume re-fetches the account's CURRENT `(username, roles,
+superuser)` from the directory by `user_id` and builds the session from
+that — a ticket proves continuity of authentication, it does not carry
+authorization. Changing a user's roles via `updateUser` (§12.5 AUTH) or
+`SetSuperuser` (§12.5.1 AUTH) invalidates outstanding tickets through
+`tickets_invalid_before_ns`, so a stale ticket can never grant privileges
+the directory no longer records.
 
 `ticket_plain` использует **canonical msgpack** (lex-sorted keys, smallest int encoding, no NaN) — потому что AAD валидация и detection tampering зависят от bit-exact bytes.
 
@@ -42,7 +51,7 @@ ticket_plain = canonical_msgpack({
 
 ```
 ticket_wire = struct {
-  version: u8 = 1,                        // визибл в envelope, используется для AAD + dispatch
+  version: u8 = 2,                        // визибл в envelope, используется для AAD + dispatch (task #558)
   nonce: bytes(12),                       // CSPRNG, per-ticket
   ciphertext_len: u16_be,
   ciphertext: bytes,                      // AES-256-GCM ciphertext (encrypts ticket_plain)
@@ -134,7 +143,7 @@ ciphertext, tag = AES-256-GCM(
 
 ```
 1. Parse ticket_wire envelope (version, nonce, ciphertext_len, ciphertext, tag)
-2. Validate envelope.version supported (e.g., == 1); unsupported → resumption_failed
+2. Validate envelope.version supported (e.g., == 2); unsupported → resumption_failed
 3. Construct aad = "SHAMIR-TICKET-v1" || u8(envelope.version)
 4. AES-256-GCM decrypt(ticket_key, nonce, ciphertext, tag, aad):
    - Try current ticket_key first
@@ -257,6 +266,7 @@ consumed_counters: DashMap<(user_id, ticket_family_id), u64>
 Сервер invalidates **все** tickets **всех families** юзера через `tickets_invalid_before_ns` (см. AUTH_PROTOCOL §3.5). Triggers:
 - `kickSession` admin command (§12.4 AUTH)
 - `updateUser` с new roles (§12.5 AUTH)
+- `setSuperuser` grant/revoke (§12.5.1 AUTH)
 - Manual `revokeUserTickets` admin command (см. §7)
 
 При resume (§5.4 step 6): `ticket.original_auth_at_ns > user.tickets_invalid_before_ns` обязательно. **Строгое `>`** (не `>=`) исключает race window даже если timestamp resolution коллидирует.

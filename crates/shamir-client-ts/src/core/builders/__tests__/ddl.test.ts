@@ -502,10 +502,6 @@ describe('list ops', () => {
     expect(ddl.listUsers()).toEqual({ list: 'users' });
   });
 
-  it('listRoles → {list: "roles"}', () => {
-    expect(ddl.listRoles()).toEqual({ list: 'roles' });
-  });
-
   it('listFunctions without folder', () => {
     expect(ddl.listFunctions()).toEqual({ list: 'functions' });
   });

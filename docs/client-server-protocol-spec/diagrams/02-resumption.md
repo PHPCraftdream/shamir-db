@@ -51,7 +51,7 @@ sequenceDiagram
     else fresh counter
         S->>DB: SYNCHRONOUS DURABLE persist counter<br/>(fsync + storage engine durability —<br/>SQLite PRAGMA synchronous=FULL, ext4 barrier=1)
         DB-->>S: persisted
-        Note over S: Step 12: Создать новую Session<br/>(created_at_ns = now_ns,<br/>binding_mode = binding_mode_now,<br/>channel_binding_at_auth = channel_binding_now,<br/>permissions = ticket_plain.permissions)
+        Note over S: Step 12: Создать новую Session<br/>(created_at_ns = now_ns,<br/>binding_mode = binding_mode_now,<br/>channel_binding_at_auth = channel_binding_now,<br/>permissions = re-fetch CURRENT roles<br/>from directory by user_id —<br/>ticket carries NO auth snapshot<br/>per task #558)
         S->>C: resume_ok { session_id(new),<br/>expires_at_ns,<br/>resumption_ticket?(family_id same, counter+1),<br/>resumption_expires_at_ns? }
     end
 

@@ -509,10 +509,6 @@ export function listUsers(): ListOp {
   return { list: 'users' };
 }
 
-export function listRoles(): ListOp {
-  return { list: 'roles' };
-}
-
 export function listFunctions(opts?: { folder?: string }): ListOp {
   const op: ListOp = { list: 'functions' };
   if (opts?.folder !== undefined) {
@@ -982,7 +978,6 @@ export const ddl = {
   listTables,
   listIndexes,
   listUsers,
-  listRoles,
   listFunctions,
   listValidators_,
   listFunctionFolders,

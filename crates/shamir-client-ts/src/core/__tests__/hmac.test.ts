@@ -18,7 +18,7 @@ import {
   canonicalDropTable,
   canonicalDropIndex,
   canonicalDropUser,
-  canonicalDropRole,
+  canonicalSetSuperuser,
   canonicalStartMigration,
   canonicalCommitMigration,
   canonicalRollbackMigration,
@@ -59,9 +59,18 @@ describe('canonical inputs are null-separated (hmac.rs vectors)', () => {
       arr(canonicalDropIndex('mydb', 'main', 'users', 'by_email', true)),
     ).toEqual(b('drop_index\0mydb\0main\0users\0by_email\x001'));
   });
-  it('drop_user / drop_role', () => {
+  it('drop_user', () => {
     expect(arr(canonicalDropUser('bob'))).toEqual(b('drop_user\0bob'));
-    expect(arr(canonicalDropRole('admin'))).toEqual(b('drop_role\0admin'));
+  });
+  it('set_superuser — on=true renders literal "true"', () => {
+    expect(arr(canonicalSetSuperuser('carol', true))).toEqual(
+      b('set_superuser\0carol\0true'),
+    );
+  });
+  it('set_superuser — on=false renders literal "false"', () => {
+    expect(arr(canonicalSetSuperuser('dave', false))).toEqual(
+      b('set_superuser\0dave\0false'),
+    );
   });
   it('migration canonicals', () => {
     expect(

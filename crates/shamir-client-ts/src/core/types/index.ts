@@ -117,11 +117,9 @@ export type {
   AccessTreeOp,
   CreateUserOp,
   DropUserOp,
-  CreateRoleOp,
-  DropRoleOp,
   GrantRoleOp,
   RevokeRoleOp,
-  RenameRoleOp,
+  SetSuperuserOp,
   AdminOp,
 } from './admin.js';
 

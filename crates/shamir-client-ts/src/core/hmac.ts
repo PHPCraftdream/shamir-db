@@ -131,8 +131,16 @@ export function canonicalDropUser(username: string): Uint8Array {
   return joinNull(['drop_user', username]);
 }
 
-export function canonicalDropRole(role: string): Uint8Array {
-  return joinNull(['drop_role', role]);
+/**
+ * `b"set_superuser\0<user>\0<on>"`. `<on>` is the literal `"true"` or
+ * `"false"` string (not `"1"`/`"0"`), matching how the field round-trips
+ * through the wire's `bool` — byte-for-byte mirror of the Rust
+ * `canonical_set_superuser`. HMAC on `set_superuser` is UNCONDITIONAL
+ * (unlike `create_function`'s conditional gate): every SetSuperuser op
+ * requires the tag, regardless of whether it's a grant or a revoke.
+ */
+export function canonicalSetSuperuser(user: string, on: boolean): Uint8Array {
+  return joinNull(['set_superuser', user, on ? 'true' : 'false']);
 }
 
 export function canonicalStartMigration(
@@ -178,12 +186,6 @@ export function canonicalCreateUser(username: string): Uint8Array {
   // Password is NEVER part of the canonical input — the tag confirms
   // "you meant to create this account", not the credential.
   return joinNull(['create_user', username]);
-}
-
-export function canonicalCreateRole(role: string): Uint8Array {
-  // Permissions are not part of the canonical input, mirroring
-  // `drop_role`'s precedent of identifying the op by name only.
-  return joinNull(['create_role', role]);
 }
 
 /**
