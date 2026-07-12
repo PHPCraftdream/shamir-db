@@ -332,6 +332,36 @@ describe('function DDL', () => {
     expect(op).not.toHaveProperty('source');
   });
 
+  it('createFunction — visibility/security/secret_grants/hmac threaded through', () => {
+    const op = ddl.createFunction('my_fn', {
+      wasm: '<base64>',
+      visibility: 'public',
+      security: 'definer',
+      secret_grants: ['FOO', 'BAR'],
+      hmac: 'deadbeef',
+    });
+    expect(op.visibility).toBe('public');
+    expect(op.security).toBe('definer');
+    expect(op.secret_grants).toEqual(['FOO', 'BAR']);
+    expect(op.hmac).toBe('deadbeef');
+  });
+
+  it('createFunction — new fields absent when not provided (wire back-compat)', () => {
+    const op = ddl.createFunction('my_fn', { wasm: '<base64>' });
+    expect(op).not.toHaveProperty('visibility');
+    expect(op).not.toHaveProperty('security');
+    expect(op).not.toHaveProperty('secret_grants');
+    expect(op).not.toHaveProperty('hmac');
+  });
+
+  it('createFunction — empty secret_grants omitted (skip_serializing_if)', () => {
+    const op = ddl.createFunction('my_fn', {
+      wasm: '<base64>',
+      secret_grants: [],
+    });
+    expect(op).not.toHaveProperty('secret_grants');
+  });
+
   it('dropFunction emits {drop_function}', () => {
     expect(ddl.dropFunction('my_fn')).toEqual({ drop_function: 'my_fn' });
   });

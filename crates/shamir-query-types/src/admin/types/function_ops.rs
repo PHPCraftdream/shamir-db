@@ -9,9 +9,16 @@ use super::db_ops::is_false;
 /// Exactly one of `source` or `wasm` must be provided. `wasm` is the raw
 /// binary bytes (base64-encoded on the wire).
 ///
+/// `visibility`/`security`/`secret_grants` thread the in-process
+/// `CreateFunctionOptions` fields onto the wire (task #554). Absent/empty
+/// values preserve the historical defaults (`Private` / `Invoker` / no
+/// grants). `security: "definer"` and non-empty `secret_grants` each
+/// require a matching `hmac` tag (conditional — see `check_destructive_hmacs`).
+///
 /// ```text
 /// { "create_function": "my_fn", "source": "pub fn shamir_call …", "replace": false }
 /// { "create_function": "my_fn", "wasm": "<base64>", "replace": true }
+/// { "create_function": "my_fn", "wasm": "<base64>", "security": "definer", "hmac": "<hex>" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateFunctionOp {
@@ -22,6 +29,28 @@ pub struct CreateFunctionOp {
     pub wasm: Option<String>,
     #[serde(default)]
     pub replace: bool,
+    /// `"public"` or `"private"` (parsed via `Visibility::from_str`,
+    /// `shamir-wasm-host/src/meta.rs`). Absent/None → `Visibility::Private`
+    /// (unchanged default). No extra gate — Private is already the
+    /// default, and setting Public on your own newly-created resource is
+    /// harmless (same as the existing chmod-to-Public path, which needs
+    /// only ordinary owner+Manage rights already implied by CREATE).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    /// `"invoker"` or `"definer"` (parsed via `Security::from_str`).
+    /// Absent/None → `Security::Invoker` (unchanged default). Setting
+    /// `"definer"` requires an `hmac` tag — see `hmac` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<String>,
+    /// Non-empty requires BOTH `Action::Manage` on `ResourcePath::Root`
+    /// AND an `hmac` tag — see `hmac` below.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_grants: Vec<String>,
+    /// Hex-encoded HMAC-SHA256 tag, required IFF `security == Some("definer")`
+    /// or `secret_grants` is non-empty (conditional — NOT required for
+    /// every `CreateFunctionOp`, unlike `chmod`/`drop_db`/etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Drop a stored function by name.

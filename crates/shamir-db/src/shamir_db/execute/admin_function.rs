@@ -5,7 +5,9 @@ use base64::Engine;
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
+use crate::shamir_db::FunctionSource;
 use crate::types::value::QueryValue;
+use shamir_engine::function::{CreateFunctionOptions, Security, Visibility};
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -41,12 +43,32 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // Parse the new per-field options from the wire op. Absent → the
+        // historical defaults (Private / Invoker), matching
+        // `CreateFunctionOptions::default()`.
+        let visibility = match op.visibility.as_deref() {
+            Some(s) => s.parse::<Visibility>().map_err(|e: String| err(e))?,
+            None => Visibility::Private,
+        };
+        let security = match op.security.as_deref() {
+            Some(s) => s.parse::<Security>().map_err(|e: String| err(e))?,
+            None => Security::Invoker,
+        };
+        let opts = CreateFunctionOptions {
+            replace: op.replace,
+            visibility,
+            security,
+            secret_grants: op.secret_grants.clone(),
+            net_grants: Vec::new(), // unchanged — net_grants has its own separate wiring (task #544)
+        };
+
         if let Some(ref source) = op.source {
             self.shamir
-                .create_function_from_source_as(
+                .create_function_with_opts_as(
                     &op.create_function,
-                    source,
-                    op.replace,
+                    FunctionSource::Source(source),
+                    opts,
                     self.actor.clone(),
                 )
                 .await
@@ -56,10 +78,10 @@ impl ShamirAdminExecutor {
                 .decode(wasm_b64)
                 .map_err(|e| err(format!("invalid base64 wasm: {}", e)))?;
             self.shamir
-                .create_function_from_wasm_as(
+                .create_function_with_opts_as(
                     &op.create_function,
-                    &wasm_bytes,
-                    op.replace,
+                    FunctionSource::Wasm(&wasm_bytes),
+                    opts,
                     self.actor.clone(),
                 )
                 .await

@@ -381,3 +381,26 @@ export function canonicalRemoveGroupMember(
     String(user),
   ]);
 }
+
+/**
+ * `b"create_function\0<name>\0<security>\0<secret_grants_csv>"` —
+ * byte-for-byte mirror of the Rust `canonical_create_function`.
+ *
+ * `<security>` is the literal string being set (`"invoker"` or `"definer"`)
+ * — the caller passes the same value the wire op carries; the server fills
+ * in `"invoker"` when the field is absent (matching
+ * `CreateFunctionOp::security`'s default). `<secret_grants_csv>` is the
+ * grants joined by `,` in the order given (empty string if none) — must be
+ * BYTE-IDENTICAL between client and server, so do not sort/dedupe.
+ *
+ * HMAC on `create_function` is CONDITIONAL (unlike every other op in this
+ * module): the tag is only required when `security === 'definer'` or
+ * `secret_grants` is non-empty. The caller decides whether to sign.
+ */
+export function canonicalCreateFunction(
+  name: string,
+  security: string,
+  secretGrants: string[],
+): Uint8Array {
+  return joinNull(['create_function', name, security, secretGrants.join(',')]);
+}

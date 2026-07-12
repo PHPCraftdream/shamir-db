@@ -470,6 +470,26 @@ pub(super) fn check_destructive_hmacs(
                 canon::canonical_remove_group_member(&op.remove_group_member, op.user),
                 op.hmac.as_ref(),
             ),
+            BatchOp::CreateFunction(op) => {
+                // CONDITIONAL HMAC (unique among the arms): the tag is
+                // required IFF `security == "definer"` or `secret_grants`
+                // is non-empty. A plain create_function (the common case)
+                // needs no tag at all — `continue` skips it exactly like
+                // the `_ => continue` fallthrough for non-destructive ops.
+                let needs_hmac =
+                    op.security.as_deref() == Some("definer") || !op.secret_grants.is_empty();
+                if !needs_hmac {
+                    continue;
+                }
+                (
+                    canon::canonical_create_function(
+                        &op.create_function,
+                        op.security.as_deref().unwrap_or("invoker"),
+                        &op.secret_grants,
+                    ),
+                    op.hmac.as_ref(),
+                )
+            }
             _ => continue, // non-destructive — pass.
         };
 

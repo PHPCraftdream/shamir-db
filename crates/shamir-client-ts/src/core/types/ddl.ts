@@ -312,6 +312,27 @@ export interface CreateFunctionOp {
   source?: string;
   wasm?: string;
   replace: boolean;
+  /**
+   * `"public"` or `"private"` (absent → `"private"`, the default).
+   * No HMAC required for this field.
+   */
+  visibility?: string;
+  /**
+   * `"invoker"` or `"definer"` (absent → `"invoker"`, the default).
+   * Setting `"definer"` requires an `hmac` tag.
+   */
+  security?: string;
+  /**
+   * OS-seeded env-var secret grants. Non-empty requires an `hmac` tag
+   * AND server-side `Manage(Root)` authorization.
+   */
+  secret_grants?: string[];
+  /**
+   * Hex-encoded HMAC-SHA256 tag, required IFF `security === "definer"`
+   * or `secret_grants` is non-empty. Canonical input:
+   * `canonicalCreateFunction(name, security, secret_grants)`.
+   */
+  hmac?: string;
 }
 
 export interface DropFunctionOp {

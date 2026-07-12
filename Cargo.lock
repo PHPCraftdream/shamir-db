@@ -3672,6 +3672,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "wat",
  "windows-service",
  "zeroize",
 ]

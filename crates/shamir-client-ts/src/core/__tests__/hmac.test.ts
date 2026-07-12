@@ -22,6 +22,7 @@ import {
   canonicalStartMigration,
   canonicalCommitMigration,
   canonicalRollbackMigration,
+  canonicalCreateFunction,
 } from '../hmac.js';
 import { NodePlatform } from '../../platform/node.js';
 
@@ -72,6 +73,21 @@ describe('canonical inputs are null-separated (hmac.rs vectors)', () => {
     expect(arr(canonicalRollbackMigration('mydb', 'mig-001'))).toEqual(
       b('rollback_migration\0mydb\0mig-001'),
     );
+  });
+  it('create_function — definer, no grants (csv = empty)', () => {
+    expect(arr(canonicalCreateFunction('my_fn', 'definer', []))).toEqual(
+      b('create_function\0my_fn\0definer\0'),
+    );
+  });
+  it('create_function — invoker, grants joined by comma in given order', () => {
+    expect(
+      arr(canonicalCreateFunction('my_fn', 'invoker', ['FOO', 'BAR'])),
+    ).toEqual(b('create_function\0my_fn\0invoker\0FOO,BAR'));
+  });
+  it('create_function — grants are NOT sorted/deduped (caller order preserved)', () => {
+    expect(
+      arr(canonicalCreateFunction('f', 'invoker', ['B', 'A', 'B'])),
+    ).toEqual(b('create_function\0f\0invoker\0B,A,B'));
   });
 });
 

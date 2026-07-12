@@ -65,6 +65,7 @@
 //! | rename_group        | `b"rename_group\0<group_ref>\0<to>"`                                         |
 //! | add_group_member    | `b"add_group_member\0<group_ref>\0<user>"`                                   |
 //! | remove_group_member | `b"remove_group_member\0<group_ref>\0<user>"`                                |
+//! | create_function     | `b"create_function\0<name>\0<security>\0<secret_grants_csv>"`               |
 //!
 //! `<group_ref>` is produced by [`canonical_group_ref`] — a stable
 //! `"name:<name>"` / `"id:<id>"` rendering of `GroupRef`'s two variants
@@ -353,6 +354,30 @@ pub fn canonical_remove_group_member(group: &crate::admin::GroupRef, user: u64) 
         b"remove_group_member",
         canonical_group_ref(group).as_bytes(),
         user.to_string().as_bytes(),
+    ])
+}
+
+/// `b"create_function\0<name>\0<security>\0<secret_grants_csv>"`.
+///
+/// `<security>` is the literal string being set (`"invoker"` or `"definer"`)
+/// — the caller passes the same value the wire op carries; the server fills
+/// in `"invoker"` when the field is absent (matching the
+/// `CreateFunctionOp::security` default). `<secret_grants_csv>` is the grants
+/// joined by `,` in the order given (empty string if none) — this must be
+/// BYTE-IDENTICAL between client and server, so do not sort/dedupe; whatever
+/// order the caller supplies is what gets hashed, and the server must
+/// canonicalize identically from the deserialized `Vec<String>` in wire order.
+///
+/// HMAC on `create_function` is CONDITIONAL (unlike every other op in this
+/// module): the tag is only required when `security == "definer"` or
+/// `secret_grants` is non-empty. See `check_destructive_hmacs`'s
+/// `CreateFunction` arm.
+pub fn canonical_create_function(name: &str, security: &str, secret_grants: &[String]) -> Vec<u8> {
+    join_null(&[
+        b"create_function",
+        name.as_bytes(),
+        security.as_bytes(),
+        secret_grants.join(",").as_bytes(),
     ])
 }
 
