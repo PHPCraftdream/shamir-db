@@ -86,7 +86,7 @@ use crate::tx_registry::TxRegistry;
 
 use super::admin::{
     change_password_challenge, change_password_verify, check_destructive_hmacs, create_scram_user,
-    AdminGlue,
+    is_coarse_admin_gate_exempt, AdminGlue,
 };
 use super::config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::subscribe_handler;
@@ -393,10 +393,14 @@ impl ShamirDbHandler {
             .max_queries
             .min(self.query_limits.max_queries_per_batch);
 
-        // Admin / auth gate.
+        // Admin / auth gate. An explicit 4-op allowlist (`List`,
+        // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
+        // `is_coarse_admin_gate_exempt`) is exempted from this coarse
+        // block; each still runs its own real per-table/per-path
+        // authorization further down the stack.
         if !session.permissions.is_superuser {
             for (alias, entry) in &batch.queries {
-                if entry.op.is_admin() {
+                if entry.op.is_admin() && !is_coarse_admin_gate_exempt(&entry.op) {
                     return DbResponse::Error {
                         code: "permission_denied".into(),
                         message: format!("query '{}' requires superuser (admin/auth op)", alias),
