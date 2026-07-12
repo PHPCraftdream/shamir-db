@@ -218,7 +218,7 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
         let group_id = self
             .shamir
-            .create_group(&op.create_group)
+            .create_group_as(&op.create_group, &self.actor)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -264,7 +264,7 @@ impl ShamirAdminExecutor {
             }
         };
         self.shamir
-            .drop_group(group_id)
+            .drop_group_as(group_id, &self.actor)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -303,7 +303,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         self.shamir
-            .rename_group(&op.rename_group, &op.to)
+            .rename_group_as(&op.rename_group, &op.to, &self.actor)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -365,7 +365,7 @@ impl ShamirAdminExecutor {
         // gap — `resolve_group_id` never validates `GroupRef::Id`).
 
         self.shamir
-            .add_group_member(group_id, op.user)
+            .add_group_member_as(group_id, op.user, &self.actor)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -410,7 +410,7 @@ impl ShamirAdminExecutor {
         // dangling-write anything. Nothing is created or written that
         // didn't already (potentially) exist.
         self.shamir
-            .remove_group_member(group_id, op.user)
+            .remove_group_member_as(group_id, op.user, &self.actor)
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({

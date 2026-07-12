@@ -138,6 +138,17 @@ impl ShamirDb {
 
     /// Rename a table. Convenience wrapper around [`rename_table_as`]
     /// using [`Actor::System`].
+    ///
+    /// // SAFETY (wire-reachability, task #546): NEVER call this from a
+    /// // wire-reachable path — it runs the rename as `Actor::System`
+    /// // unconditionally, silently bypassing ACL attribution for
+    /// // whoever actually issued the request. `handle_rename_table` (the
+    /// // real wire-reachable admin handler) already calls
+    /// // `rename_table_as(db_name, repo_name, from, to, real_actor)`
+    /// // directly, never this bare wrapper. This function exists ONLY
+    /// // for offline/CLI tooling and test setup that legitimately runs
+    /// // as the system principal — grep every call site before adding a
+    /// // new one from request-handling code.
     pub async fn rename_table(
         &self,
         db_name: &str,

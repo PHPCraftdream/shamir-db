@@ -1,4 +1,5 @@
 use shamir_collections::TMap;
+use shamir_types::access::{Action, ResourcePath};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -868,6 +869,109 @@ fn is_write_delete_is_true() {
     }));
     assert!(matches!(op, BatchOp::Delete(_)));
     assert!(op.is_write());
+}
+
+// ============================================================================
+// #546: `required_access` — regression against the pre-fix duplicated match
+// ============================================================================
+//
+// `BatchOp::required_access` replaces a byte-for-byte-duplicated inline
+// match that used to live separately in `shamir-db`'s `execute_as` and
+// `tx_execute_as`. These tests pin the exact `(Action, ResourcePath)` the
+// old duplicated code produced for a representative sample of ops, so a
+// future edit to `required_access` cannot silently drift from that
+// established behavior. `is_write`'s own exhaustive-match convention
+// covers "does this compile for every variant" — the property these
+// tests check is behavioral: same inputs, same `(Action, ResourcePath)`
+// as before the refactor.
+
+#[test]
+fn required_access_read_is_read_action() {
+    let op = roundtrip_op(mpack!({"from": "users"}));
+    assert!(matches!(op, BatchOp::Read(_)));
+    let (action, path) = op.required_access("mydb").expect("Read has a table_ref");
+    assert_eq!(action, Action::Read);
+    assert_eq!(path, ResourcePath::table("mydb", "main", "users"));
+}
+
+#[test]
+fn required_access_insert_is_create_action() {
+    let op = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    assert!(matches!(op, BatchOp::Insert(_)));
+    let (action, path) = op.required_access("mydb").expect("Insert has a table_ref");
+    assert_eq!(action, Action::Create);
+    assert_eq!(path, ResourcePath::table("mydb", "main", "users"));
+}
+
+#[test]
+fn required_access_set_is_write_action() {
+    let op = roundtrip_op(mpack!({"set": "users", "key": {"id": 1_i64}, "value": {"name": "x"}}));
+    assert!(matches!(op, BatchOp::Set(_)));
+    let (action, path) = op.required_access("mydb").expect("Set has a table_ref");
+    assert_eq!(action, Action::Write);
+    assert_eq!(path, ResourcePath::table("mydb", "main", "users"));
+}
+
+#[test]
+fn required_access_update_is_write_action() {
+    let op = roundtrip_op(mpack!({
+        "update": "users",
+        "where": {"op": "eq", "field": "id", "value": 1_i64},
+        "set": {"name": "y"}
+    }));
+    assert!(matches!(op, BatchOp::Update(_)));
+    let (action, path) = op.required_access("mydb").expect("Update has a table_ref");
+    assert_eq!(action, Action::Write);
+    assert_eq!(path, ResourcePath::table("mydb", "main", "users"));
+}
+
+#[test]
+fn required_access_delete_is_delete_action() {
+    let op = roundtrip_op(mpack!({
+        "delete_from": "users",
+        "where": {"op": "eq", "field": "id", "value": 1_i64}
+    }));
+    assert!(matches!(op, BatchOp::Delete(_)));
+    let (action, path) = op.required_access("mydb").expect("Delete has a table_ref");
+    assert_eq!(action, Action::Delete);
+    assert_eq!(path, ResourcePath::table("mydb", "main", "users"));
+}
+
+#[test]
+fn required_access_honors_explicit_repo() {
+    // TableRef's ["repo", "table"] wire form — the resulting
+    // ResourcePath::Table must carry the explicit repo/store, not the
+    // "main" default repo used by the bare string shorthand in the
+    // other tests above.
+    let op = roundtrip_op(mpack!({"from": ["sales", "orders"]}));
+    let (action, path) = op.required_access("mydb").expect("Read has a table_ref");
+    assert_eq!(action, Action::Read);
+    assert_eq!(path, ResourcePath::table("mydb", "sales", "orders"));
+}
+
+#[test]
+fn required_access_none_for_admin_ops() {
+    // Admin/DDL ops carry no table_ref() and are authorized separately in
+    // execute_admin — required_access must return None for them, matching
+    // table_ref()'s own None.
+    let op = roundtrip_op(mpack!({"create_db": "newdb"}));
+    assert!(op.table_ref().is_none());
+    assert!(op.required_access("mydb").is_none());
+}
+
+#[test]
+fn required_access_none_for_batch_and_subscribe() {
+    // Batch/Subscribe/Unsubscribe have no table_ref() either, despite
+    // carrying table-shaped data internally (recursion / grant markers
+    // handle their own authorization elsewhere).
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let sub_batch = SubBatchOp {
+        batch: single_query_batch("inner", inner_insert),
+        bind: TMap::default(),
+    };
+    let op = BatchOp::Batch(sub_batch);
+    assert!(op.table_ref().is_none());
+    assert!(op.required_access("mydb").is_none());
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
 use crate::access::{Action, Actor, ResourcePath};
-use crate::query::batch::{execute_batch, BatchError, BatchOp, BatchRequest, BatchResponse};
+use crate::query::batch::{execute_batch, BatchError, BatchRequest, BatchResponse};
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -49,20 +49,13 @@ impl ShamirDb {
         // table (admin/DDL ops carry no table_ref and are authorized in
         // execute_admin). authorize_access traverses the db/store ancestors,
         // so the table path covers the whole chain. System bypasses.
+        //
+        // `required_access` is the single source of truth for the
+        // BatchOp -> (Action, ResourcePath) mapping (was duplicated inline
+        // here and in `tx_execute_as` — see `BatchOp::required_access`'s
+        // doc comment).
         for entry in request.queries.values() {
-            if let Some(tref) = entry.op.table_ref() {
-                let action = match &entry.op {
-                    BatchOp::Read(_) => Action::Read,
-                    BatchOp::Insert(_) => Action::Create,
-                    BatchOp::Set(_) | BatchOp::Update(_) => Action::Write,
-                    BatchOp::Delete(_) => Action::Delete,
-                    _ => Action::Write,
-                };
-                let path = ResourcePath::Table {
-                    db: db_name.to_string(),
-                    store: tref.repo.clone(),
-                    table: tref.table.clone(),
-                };
+            if let Some((action, path)) = entry.op.required_access(db_name) {
                 self.authorize_access(&actor, &path, action)
                     .await
                     .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
