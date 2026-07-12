@@ -8,4 +8,6 @@ pub mod server_tests;
 pub mod tables_registry_tests;
 pub mod tls_tests;
 pub mod tx_registry_tests;
+pub mod user_directory_tests;
+pub mod user_state_lookup_tests;
 pub mod version_tests;

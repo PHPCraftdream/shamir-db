@@ -13,7 +13,9 @@ mod handshake;
 mod in_flight_guard;
 mod push_sink;
 mod request_loop;
-mod user_state_lookup;
+// `pub(crate)` so the in-crate adapter test (`src/tests/user_state_lookup_tests`)
+// can name `RedbUserStateLookup`; production use stays internal to this module.
+pub(crate) mod user_state_lookup;
 mod wire;
 
 pub use connection_context::ConnectionContext;
