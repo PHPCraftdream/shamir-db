@@ -361,3 +361,282 @@ fn concurrent_inserts_assign_distinct_user_ids() {
     }
     assert_eq!(ids.len(), 8);
 }
+
+// ----------------------------------------------------------------------------
+// Task #556 — directory v2: boot normalization, remove(), state_by_user_id
+// ----------------------------------------------------------------------------
+
+/// Helper: open the directory at `path` (mirrors the test-local reopen idiom).
+fn reopen(path: &std::path::Path) -> FjallUserDirectory {
+    FjallUserDirectory::open(path).expect("reopen user dir")
+}
+
+/// **Red test #1 — boot normalization idempotence.**
+///
+/// Seeds a user whose role list still carries the legacy `"superuser"`
+/// string (the shape pre-#556 data has, and the shape `update_roles`
+/// produces until normalization runs), then reopens the directory to
+/// trigger normalization, and asserts:
+///   - the `"superuser"` string is migrated into the `superuser` flag,
+///   - the role list no longer contains the string,
+///   - reopening a second time changes nothing further (idempotence).
+///
+/// The `principal64_index` is a pure re-projection of the immutable
+/// `user_id` each boot, so byte-identical contents across reopens is
+/// structurally guaranteed and unit-tested separately in
+/// `project_user_ids_*`; here we assert the observable effect: both users
+/// still resolve through `state_by_user_id` identically after each reopen.
+#[test]
+fn normalization_migrates_superuser_role_string_and_is_idempotent() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    let (alice_uid, bob_uid) = {
+        let store = reopen(&path);
+        let alice_uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+        let bob_uid = store.insert("bob".to_string(), fixture_record()).unwrap();
+        // Seed the legacy shape: "superuser" carried as a role STRING, flag
+        // is false (pre-#556 persisted blobs lacked the field entirely;
+        // `update_roles` reproduces the roles-list side of that shape).
+        store
+            .update_roles("alice", vec!["superuser".to_string()], 1_000)
+            .unwrap();
+        (alice_uid, bob_uid)
+    };
+
+    // First normalization pass. (Each reopen is in its own block so the
+    // fjall directory lock is released on drop before the next open —
+    // shadowing `store` would NOT drop the prior handle.)
+    let first_alice = {
+        let store = reopen(&path);
+        let alice = store
+            .state_by_user_id(&alice_uid)
+            .expect("alice resolves after normalization");
+        assert!(
+            alice.superuser,
+            "the `superuser` role string must be migrated into the flag"
+        );
+        assert!(
+            !alice.roles.iter().any(|r| r == "superuser"),
+            "the `superuser` string must be removed from roles after migration; got {:?}",
+            alice.roles
+        );
+        // lookup_roles synthesises the "superuser" string back from the flag
+        // (transitional compat: SessionPermissions::from_roles still keys off
+        // the string until task #557 rewires it to the flag). The PERSISTED
+        // roles (read via state_by_user_id) are empty — only the lookup API
+        // bridges the two.
+        assert_eq!(
+            store.lookup_roles("alice").unwrap(),
+            Some(vec!["superuser".to_string()])
+        );
+        // Bob was never a superuser — must stay a normal account.
+        let bob = store.state_by_user_id(&bob_uid).expect("bob resolves");
+        assert!(!bob.superuser);
+        alice
+    };
+
+    // Second normalization pass: nothing changes (idempotence).
+    {
+        let store = reopen(&path);
+        let alice_again = store
+            .state_by_user_id(&alice_uid)
+            .expect("alice still resolves after second normalization");
+        assert!(alice_again.superuser, "flag must survive a second boot");
+        assert!(
+            !alice_again.roles.iter().any(|r| r == "superuser"),
+            "roles must stay migrated after a second boot"
+        );
+        assert_eq!(
+            first_alice.roles, alice_again.roles,
+            "roles stable across boots"
+        );
+        assert_eq!(
+            first_alice.tickets_invalid_before_ns, alice_again.tickets_invalid_before_ns,
+            "tib stable across boots"
+        );
+        assert!(store.state_by_user_id(&bob_uid).is_some());
+    }
+}
+
+/// **Red test #2 — unknown-user resume rejected (fail-open fix).**
+///
+/// `state_by_user_id` (the primitive the `RedbUserStateLookup` adapter wraps)
+/// must return `None` for a never-inserted user_id, while a REAL inserted
+/// user — even one with `tickets_invalid_before_ns == 0` (the default) —
+/// must return `Some` with tib=0. This proves the fix distinguishes
+/// "unknown" from "known-but-zero" rather than collapsing both to `None`
+/// or both to `Some(0)` (the old fail-open behaviour). The adapter itself
+/// is exercised directly in `src/tests/user_state_lookup_tests`.
+#[test]
+fn state_by_user_id_distinguishes_unknown_from_known_but_zero() {
+    let (_tmp, store) = fresh_dir();
+    let alice_uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+
+    // Known user, tib == 0 (default) → Some(tib=0), NOT None.
+    let alice_state = store
+        .state_by_user_id(&alice_uid)
+        .expect("a known user with tib=0 must resolve, not collapse to None");
+    assert_eq!(
+        alice_state.tickets_invalid_before_ns, 0,
+        "known-but-zero must read 0, not be treated as unknown"
+    );
+    assert_eq!(alice_state.username, "alice");
+
+    // Unknown user_id → None (resume must reject).
+    let unknown = [0xFFu8; 16];
+    assert!(
+        store.state_by_user_id(&unknown).is_none(),
+        "an unknown user_id must resolve to None so resume rejects it"
+    );
+}
+
+/// **Red test #3 — last-superuser removal refused, then allowed with two.**
+///
+/// With exactly one superuser account, `remove()` must refuse (typed error)
+/// and leave the account intact. After a second superuser exists, removing
+/// the first must succeed — proving the guard is a genuine COUNT check, not
+/// an unconditional "superuser accounts are undeletable" block.
+#[test]
+fn remove_refuses_last_superuser_then_succeeds_with_two() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+
+    // Seed a single superuser account (the role-string → flag migration
+    // runs on reopen).
+    {
+        let store = reopen(&path);
+        store.insert("admin".to_string(), fixture_record()).unwrap();
+        store
+            .update_roles("admin", vec!["superuser".to_string()], 1_000)
+            .unwrap();
+    }
+    // Each reopen below is its own block so the fjall directory lock
+    // releases on drop before the next open (shadowing `store` would not
+    // drop the prior handle → fjall returns `Locked`).
+    {
+        let store = reopen(&path);
+        // Sanity: normalization promoted admin to a superuser.
+        let admin_uid = store.user_id("admin").expect("admin present");
+        assert!(
+            store
+                .state_by_user_id(&admin_uid)
+                .expect("admin resolves")
+                .superuser,
+            "admin must be a superuser after normalization"
+        );
+
+        // Last-superuser guard fires.
+        let err = store
+            .remove("admin")
+            .expect_err("removing the last superuser must be refused");
+        match err {
+            shamir_connect::common::error::Error::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("last remaining superuser"),
+                    "wrong InvalidInput message: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput for last-superuser removal, got {other:?}"),
+        }
+        // Account is still present.
+        assert!(
+            store.lookup_by_name("admin").is_some(),
+            "the refused-remove target must still exist"
+        );
+    }
+
+    // Add a SECOND superuser, then the first removal must succeed.
+    {
+        let store2 = reopen(&path);
+        store2
+            .insert("admin2".to_string(), fixture_record())
+            .unwrap();
+        store2
+            .update_roles("admin2", vec!["superuser".to_string()], 2_000)
+            .unwrap();
+    }
+    {
+        let store = reopen(&path);
+        let removed = store
+            .remove("admin")
+            .expect("removal with two superusers succeeds");
+        assert!(removed, "remove must report it deleted the account");
+        assert!(
+            store.lookup_by_name("admin").is_none(),
+            "admin must be gone after a successful remove"
+        );
+        assert!(
+            store.lookup_by_name("admin2").is_some(),
+            "the second superuser must survive"
+        );
+    }
+}
+
+/// `remove()` must evict the `tickets_cache` entry — otherwise a deleted
+/// account's `user_id` would still resolve to a stale `tib` value via
+/// `tickets_invalid_before_ns_by_user_id`, reopening the fail-open bug the
+/// `UserStateLookup` fix closes through a different path. (Definition of
+/// done: cache eviction is covered by a test, not just present in the diff.)
+#[test]
+fn remove_evicts_tickets_cache() {
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+    store.bump_tickets_invalid("alice", 99_999).unwrap();
+    assert_eq!(
+        store.tickets_invalid_before_ns_by_user_id(&uid),
+        99_999,
+        "precondition: tib is cached"
+    );
+
+    assert!(store.remove("alice").expect("remove known user"), "removed");
+    // Cache entry must be gone → hot-path lookup falls back to 0 (miss),
+    // and the authoritative reverse lookup returns None.
+    assert_eq!(
+        store.tickets_invalid_before_ns_by_user_id(&uid),
+        0,
+        "stale cache entry must NOT survive remove (fail-open bug)"
+    );
+    assert!(
+        store.state_by_user_id(&uid).is_none(),
+        "removed user must not resolve via state_by_user_id"
+    );
+}
+
+/// `remove()` is idempotent for an already-absent username (no-op, Ok(false)).
+#[test]
+fn remove_is_idempotent_for_unknown_user() {
+    let (_tmp, store) = fresh_dir();
+    let removed = store.remove("ghost").expect("remove unknown is Ok(false)");
+    assert!(
+        !removed,
+        "removing a never-inserted user is an idempotent no-op"
+    );
+}
+
+/// **`insert` maintains the third keyspace.** A round-trip insert +
+/// reopen must keep the account resolvable and the principal64 index
+/// consistent (the projection is re-derived each boot, so a second open
+/// must not produce a collision against the existing entry).
+#[test]
+fn insert_populates_principal64_index_surviving_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+    let uid = {
+        let store = reopen(&path);
+        store.insert("alice".to_string(), fixture_record()).unwrap()
+    };
+    // Reopen re-derives the index from user_id_index; the entry must not
+    // collide with itself and the account must still resolve.
+    let store = reopen(&path);
+    assert!(
+        store.state_by_user_id(&uid).is_some(),
+        "account must resolve after restart (principal64 index rebuilt)"
+    );
+    // Inserting a brand-new user after reopen must succeed — the rebuilt
+    // index correctly rejects only genuinely-taken projections.
+    let bob_uid = store
+        .insert("bob".to_string(), fixture_record())
+        .expect("new insert after reopen succeeds");
+    assert_ne!(uid, bob_uid, "distinct user_ids");
+}
