@@ -48,7 +48,10 @@ pub use net_gateway::{
 pub use params::Params;
 pub use registry::FunctionRegistry;
 pub use scalar::{builtin_aggs, builtin_scalars};
-pub use wasm::{WasmEngine, WasmFunction, WasmLimits};
+pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS};
+
+#[cfg(test)]
+pub(crate) use wasm::test_linker_and_store;
 
 #[cfg(test)]
 mod tests;
