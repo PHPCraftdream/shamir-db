@@ -25,18 +25,45 @@
 //!
 //! Null-byte-separated bytes:
 //!
-//! | Op           | Canonical input                                                              |
-//! |--------------|------------------------------------------------------------------------------|
-//! | drop_db      | `b"drop_db\0<db>"`                                                           |
-//! | drop_repo    | `b"drop_repo\0<db_in_use>\0<repo>"`                                          |
-//! | drop_table   | `b"drop_table\0<db_in_use>\0<repo>\0<table>"`                                |
-//! | drop_index   | `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`         |
-//! | drop_user    | `b"drop_user\0<username>"`                                                   |
-//! | drop_role    | `b"drop_role\0<role>"`                                                       |
+//! | Op                 | Canonical input                                                              |
+//! |---------------------|------------------------------------------------------------------------------|
+//! | drop_db             | `b"drop_db\0<db>"`                                                           |
+//! | drop_repo           | `b"drop_repo\0<db_in_use>\0<repo>"`                                          |
+//! | drop_table          | `b"drop_table\0<db_in_use>\0<repo>\0<table>"`                                |
+//! | drop_index          | `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`         |
+//! | drop_user           | `b"drop_user\0<username>"`                                                   |
+//! | drop_role           | `b"drop_role\0<role>"`                                                       |
+//! | grant_role          | `b"grant_role\0<role>\0<user>"`                                              |
+//! | revoke_role         | `b"revoke_role\0<role>\0<user>"`                                             |
+//! | chmod               | `b"chmod\0<resource>\0<mode>"`                                               |
+//! | chown               | `b"chown\0<resource>\0<owner>"`                                              |
+//! | chgrp               | `b"chgrp\0<resource>\0<group|null>"`                                         |
+//! | create_user         | `b"create_user\0<username>"` (password NEVER included)                       |
+//! | create_role         | `b"create_role\0<role>"` (permissions NOT included, mirrors `drop_role`)     |
+//! | set_retention       | `b"set_retention\0<db_in_use>\0<repo>\0<table>\0<retention>"`                |
+//! | purge_history       | `b"purge_history\0<db_in_use>\0<repo>\0<table>\0<scope>"`                    |
 //!
 //! `<db_in_use>` is the `db_name` the client passed to
 //! `client.execute(db_name, batch)` — server fills it in from the
 //! request envelope before validating.
+//!
+//! `<resource>` is the canonical rendering of a `ResourceRef` produced by
+//! [`canonical_resource_ref`] — the same `scheme://path` shape as
+//! `shamir_types::access::ResourcePath`'s `Display` impl, but built
+//! directly from the wire-level `ResourceRef` so it needs no
+//! `server`-feature conversion (client and server must both be able to
+//! compute it).
+//!
+//! `<retention>` / `<scope>` are produced by [`canonical_retention`] /
+//! [`canonical_purge_scope`] — stable textual forms of `Retention` /
+//! `PurgeScope` (neither type has an existing `Display`/canonical
+//! serialization to reuse, so this module defines the one both sides
+//! agree on).
+//!
+//! Group ops (`create_group`, `drop_group`, `rename_group`,
+//! `add_group_member`, `remove_group_member`) are NOT yet covered by the
+//! HMAC gate — see task #542's follow-up (lower severity than the
+//! privilege/ownership ops above; the audit ranks them last).
 
 /// 32-byte HMAC key derived from the session bearer token.
 pub fn derive_session_hmac_key(session_id: &[u8; 32]) -> [u8; 32] {
@@ -135,6 +162,140 @@ pub fn canonical_rollback_migration(db_in_use: &str, migration_id: &str) -> Vec<
         b"rollback_migration",
         db_in_use.as_bytes(),
         migration_id.as_bytes(),
+    ])
+}
+
+pub fn canonical_grant_role(role: &str, user: &str) -> Vec<u8> {
+    join_null(&[b"grant_role", role.as_bytes(), user.as_bytes()])
+}
+
+pub fn canonical_revoke_role(role: &str, user: &str) -> Vec<u8> {
+    join_null(&[b"revoke_role", role.as_bytes(), user.as_bytes()])
+}
+
+pub fn canonical_create_user(username: &str) -> Vec<u8> {
+    // Password is NEVER part of the canonical input — the tag confirms
+    // "you meant to create this account", not the credential.
+    join_null(&[b"create_user", username.as_bytes()])
+}
+
+pub fn canonical_create_role(role: &str) -> Vec<u8> {
+    // Permissions are not part of the canonical input, mirroring
+    // `drop_role`'s precedent of identifying the op by name only.
+    join_null(&[b"create_role", role.as_bytes()])
+}
+
+/// Render a [`crate::admin::ResourceRef`] into the stable `scheme://path`
+/// string used by every `canonical_*` chmod/chown/chgrp helper below.
+/// Mirrors `shamir_types::access::ResourcePath`'s `Display` shape, but is
+/// built directly from the wire-level `ResourceRef` (no `server`-feature
+/// conversion) so client and server compute byte-identical strings.
+pub fn canonical_resource_ref(r: &crate::admin::ResourceRef) -> String {
+    use crate::admin::ResourceRef;
+    match r {
+        ResourceRef::Database { database } => format!("db://{database}"),
+        ResourceRef::Store { store: [db, s] } => format!("db://{db}/{s}"),
+        ResourceRef::Table { table: [db, s, t] } => format!("db://{db}/{s}/{t}"),
+        ResourceRef::Function { function } => format!("fn://{function}"),
+        ResourceRef::FunctionFolder { function_folder } => {
+            format!("fn://{}/", function_folder.join("/"))
+        }
+        ResourceRef::FunctionNamespace { .. } => "fn://".to_string(),
+    }
+}
+
+pub fn canonical_chmod(resource: &crate::admin::ResourceRef, mode: u16) -> Vec<u8> {
+    join_null(&[
+        b"chmod",
+        canonical_resource_ref(resource).as_bytes(),
+        mode.to_string().as_bytes(),
+    ])
+}
+
+pub fn canonical_chown(resource: &crate::admin::ResourceRef, owner: u64) -> Vec<u8> {
+    join_null(&[
+        b"chown",
+        canonical_resource_ref(resource).as_bytes(),
+        owner.to_string().as_bytes(),
+    ])
+}
+
+/// `group: None` (clear the group) canonicalizes to the literal sentinel
+/// `"null"` — chosen because it can never collide with a valid decimal
+/// `u64` group id.
+pub fn canonical_chgrp(resource: &crate::admin::ResourceRef, group: Option<u64>) -> Vec<u8> {
+    let group_str = match group {
+        Some(g) => g.to_string(),
+        None => "null".to_string(),
+    };
+    join_null(&[
+        b"chgrp",
+        canonical_resource_ref(resource).as_bytes(),
+        group_str.as_bytes(),
+    ])
+}
+
+/// Render a [`crate::admin::Retention`] into the stable textual form used
+/// by [`canonical_set_retention`]. Neither this module nor `Retention`
+/// itself has an existing `Display`/canonical serialization, so this is
+/// the one both client and server agree on: each of the three orthogonal
+/// optional knobs rendered as its decimal value or the sentinel `"none"`,
+/// comma-joined in field-declaration order.
+pub fn canonical_retention(r: &crate::admin::Retention) -> String {
+    let age = r
+        .max_age_secs
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let max = r
+        .max_count
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let min = r
+        .min_count
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!("{age},{max},{min}")
+}
+
+pub fn canonical_set_retention(
+    db_in_use: &str,
+    repo: &str,
+    table: &str,
+    retention: &crate::admin::Retention,
+) -> Vec<u8> {
+    join_null(&[
+        b"set_retention",
+        db_in_use.as_bytes(),
+        repo.as_bytes(),
+        table.as_bytes(),
+        canonical_retention(retention).as_bytes(),
+    ])
+}
+
+/// Render a [`crate::admin::PurgeScope`] into the stable textual form used
+/// by [`canonical_purge_history`]. `PurgeScope` has no existing
+/// `Display`/canonical serialization, so this defines the agreed form:
+/// `"older_than:<timestamp>"` or `"older_than_age:<age_secs>"`.
+pub fn canonical_purge_scope(scope: &crate::admin::PurgeScope) -> String {
+    use crate::admin::PurgeScope;
+    match scope {
+        PurgeScope::OlderThan { timestamp } => format!("older_than:{timestamp}"),
+        PurgeScope::OlderThanAge { age_secs } => format!("older_than_age:{age_secs}"),
+    }
+}
+
+pub fn canonical_purge_history(
+    db_in_use: &str,
+    repo: &str,
+    table: &str,
+    scope: &crate::admin::PurgeScope,
+) -> Vec<u8> {
+    join_null(&[
+        b"purge_history",
+        db_in_use.as_bytes(),
+        repo.as_bytes(),
+        table.as_bytes(),
+        canonical_purge_scope(scope).as_bytes(),
     ])
 }
 

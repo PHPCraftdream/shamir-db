@@ -17,6 +17,8 @@ import {
   canonicalStartMigration,
   canonicalCommitMigration,
   canonicalRollbackMigration,
+  canonicalSetRetention,
+  canonicalPurgeHistory,
 } from '../../hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
@@ -256,24 +258,30 @@ describe('purge scope', () => {
 
 // ── purgeHistory / setRetention ─────────────────────────────────────
 
-describe('purgeHistory', () => {
-  it('emits {purge_history, repo, scope}', () => {
-    const op = ddl.purgeHistory('users', ddl.olderThanAge(86400));
+describe('purgeHistory (HMAC)', () => {
+  it('emits {purge_history, repo, scope, hmac}', () => {
+    const scope = ddl.olderThanAge(86400);
+    const canonical = canonicalPurgeHistory('mydb', 'main', 'users', scope);
+    const op = ddl.purgeHistory(fakeSigner, 'mydb', 'users', scope);
     expect(op).toEqual({
       purge_history: 'users',
       repo: 'main',
       scope: { older_than_age: { age_secs: 86400 } },
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });
 
-describe('setRetention', () => {
-  it('emits {set_retention, repo, retention}', () => {
-    const op = ddl.setRetention('users', ddl.currentOnly());
+describe('setRetention (HMAC)', () => {
+  it('emits {set_retention, repo, retention, hmac}', () => {
+    const retention = ddl.currentOnly();
+    const canonical = canonicalSetRetention('mydb', 'main', 'users', retention);
+    const op = ddl.setRetention(fakeSigner, 'mydb', 'users', retention);
     expect(op).toEqual({
       set_retention: 'users',
       repo: 'main',
       retention: { max_count: 0 },
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });

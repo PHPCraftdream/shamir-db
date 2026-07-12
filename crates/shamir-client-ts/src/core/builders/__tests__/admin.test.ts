@@ -15,6 +15,13 @@ import type { Action } from '../../types/admin.js';
 import {
   canonicalDropUser,
   canonicalDropRole,
+  canonicalChmod,
+  canonicalChown,
+  canonicalChgrp,
+  canonicalCreateUser,
+  canonicalCreateRole,
+  canonicalGrantRole,
+  canonicalRevokeRole,
 } from '../../hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
@@ -132,57 +139,73 @@ describe('GroupRef', () => {
 
 // ── ACL ops ─────────────────────────────────────────────────────────
 
-describe('chmod', () => {
-  it('emits {chmod: ResourceRef, mode}', () => {
-    const op = admin.chmod(admin.refTable('db', 'main', 'users'), 0o740);
+describe('chmod (HMAC)', () => {
+  it('emits {chmod: ResourceRef, mode, hmac}', () => {
+    const resource = admin.refTable('db', 'main', 'users');
+    const canonical = canonicalChmod(resource, 0o740);
+    const op = admin.chmod(fakeSigner, resource, 0o740);
     expect(op).toEqual({
       chmod: { table: ['db', 'main', 'users'] },
       mode: 0o740,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });
 
-describe('chown', () => {
-  it('emits {chown: ResourceRef, owner} with number', () => {
-    const op = admin.chown(admin.refDatabase('mydb'), 7);
+describe('chown (HMAC)', () => {
+  it('emits {chown: ResourceRef, owner, hmac} with number', () => {
+    const resource = admin.refDatabase('mydb');
+    const canonical = canonicalChown(resource, 7);
+    const op = admin.chown(fakeSigner, resource, 7);
     expect(op).toEqual({
       chown: { database: 'mydb' },
       owner: 7,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 
   it('accepts bigint owner', () => {
-    const op = admin.chown(admin.refDatabase('mydb'), 42n);
+    const resource = admin.refDatabase('mydb');
+    const op = admin.chown(fakeSigner, resource, 42n);
     expect(op).toEqual({
       chown: { database: 'mydb' },
       owner: 42n,
+      hmac: fakeSigner.hmacTagHex(canonicalChown(resource, 42n)),
     });
   });
 
   it('accepts string username and hashes to principalId', () => {
-    const op = admin.chown(admin.refDatabase('mydb'), 'alice');
+    const resource = admin.refDatabase('mydb');
+    const op = admin.chown(fakeSigner, resource, 'alice');
     expect(op).toEqual({
       chown: { database: 'mydb' },
       owner: principalId('alice'),
+      hmac: fakeSigner.hmacTagHex(canonicalChown(resource, principalId('alice'))),
     });
     expect(typeof op.owner).toBe('bigint');
   });
 });
 
-describe('chgrp', () => {
-  it('emits {chgrp: ResourceRef, group: number}', () => {
-    const op = admin.chgrp(admin.refStore('db', 'main'), 3);
+describe('chgrp (HMAC)', () => {
+  it('emits {chgrp: ResourceRef, group: number, hmac}', () => {
+    const resource = admin.refStore('db', 'main');
+    const canonical = canonicalChgrp(resource, 3);
+    const op = admin.chgrp(fakeSigner, resource, 3);
     expect(op).toEqual({
       chgrp: { store: ['db', 'main'] },
       group: 3,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 
   it('group:null clears the group', () => {
-    const op = admin.chgrp(admin.refDatabase('mydb'), null);
+    const resource = admin.refDatabase('mydb');
+    const canonical = canonicalChgrp(resource, null);
+    const op = admin.chgrp(fakeSigner, resource, null);
     expect(op).toEqual({
       chgrp: { database: 'mydb' },
       group: null,
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });
@@ -324,20 +347,23 @@ describe('permission', () => {
   });
 });
 
-describe('createUser', () => {
-  it('emits roles:[] by default (always present)', () => {
-    const op = admin.createUser('alice', 's3cret');
+describe('createUser (HMAC)', () => {
+  it('emits roles:[] by default (always present), hmac over username only', () => {
+    const canonical = canonicalCreateUser('alice');
+    const op = admin.createUser(fakeSigner, 'alice', 's3cret');
     expect(op).toEqual({
       create_user: 'alice',
       password: 's3cret',
       roles: [],
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
     expect(op).not.toHaveProperty('profile');
     expect(op).not.toHaveProperty('database');
   });
 
   it('with roles, profile, database', () => {
-    const op = admin.createUser('bob', 'pw', {
+    const canonical = canonicalCreateUser('bob');
+    const op = admin.createUser(fakeSigner, 'bob', 'pw', {
       roles: ['admin'],
       profile: { department: 'eng' },
       database: 'mydb',
@@ -348,7 +374,14 @@ describe('createUser', () => {
       roles: ['admin'],
       profile: { department: 'eng' },
       database: 'mydb',
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
+  });
+
+  it('hmac canonical never includes the password', () => {
+    const opA = admin.createUser(fakeSigner, 'carol', 'pw-one');
+    const opB = admin.createUser(fakeSigner, 'carol', 'pw-two-totally-different');
+    expect(opA.hmac).toBe(opB.hmac);
   });
 });
 
@@ -364,12 +397,13 @@ describe('dropUser (HMAC)', () => {
   });
 });
 
-describe('createRole', () => {
-  it('emits {create_role, permissions}', () => {
+describe('createRole (HMAC)', () => {
+  it('emits {create_role, permissions, hmac}', () => {
     const perms = [
       admin.permission('allow', ['read'], admin.scopeDatabase('mydb')),
     ];
-    const op = admin.createRole('reader', perms);
+    const canonical = canonicalCreateRole('reader');
+    const op = admin.createRole(fakeSigner, 'reader', perms);
     expect(op).toEqual({
       create_role: 'reader',
       permissions: [
@@ -379,6 +413,7 @@ describe('createRole', () => {
           resource: { scope: 'database', database: 'mydb' },
         },
       ],
+      hmac: fakeSigner.hmacTagHex(canonical),
     });
   });
 });
@@ -395,17 +430,27 @@ describe('dropRole (HMAC)', () => {
   });
 });
 
-describe('grantRole', () => {
-  it('emits {grant_role, user}', () => {
-    const op = admin.grantRole('reader', 'alice');
-    expect(op).toEqual({ grant_role: 'reader', user: 'alice' });
+describe('grantRole (HMAC)', () => {
+  it('emits {grant_role, user, hmac}', () => {
+    const canonical = canonicalGrantRole('reader', 'alice');
+    const op = admin.grantRole(fakeSigner, 'reader', 'alice');
+    expect(op).toEqual({
+      grant_role: 'reader',
+      user: 'alice',
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 });
 
-describe('revokeRole', () => {
-  it('emits {revoke_role, user}', () => {
-    const op = admin.revokeRole('reader', 'bob');
-    expect(op).toEqual({ revoke_role: 'reader', user: 'bob' });
+describe('revokeRole (HMAC)', () => {
+  it('emits {revoke_role, user, hmac}', () => {
+    const canonical = canonicalRevokeRole('reader', 'bob');
+    const op = admin.revokeRole(fakeSigner, 'reader', 'bob');
+    expect(op).toEqual({
+      revoke_role: 'reader',
+      user: 'bob',
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
   });
 });
 

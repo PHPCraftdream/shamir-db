@@ -99,25 +99,37 @@ export interface Permission {
   where?: Filter;
 }
 
-// ── ACL ops (access.rs) — all NON-HMAC ─────────────────────────────
+// ── ACL ops (access.rs) — chmod/chown/chgrp are HMAC-gated ─────────
 
+/**
+ * Change mode bits on a resource (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface ChmodOp {
   chmod: ResourceRef;
   mode: number;
-}
-
-export interface ChownOp {
-  chown: ResourceRef;
-  owner: number | bigint;
+  hmac?: string;
 }
 
 /**
- * `group` is `Option<u64>` — ALWAYS present on the wire.
- * `null` clears the group.
+ * Change owner on a resource (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
+export interface ChownOp {
+  chown: ResourceRef;
+  owner: number | bigint;
+  hmac?: string;
+}
+
+/**
+ * Change group on a resource (HMAC-gated). `group` is `Option<u64>` —
+ * ALWAYS present on the wire. `null` clears the group.
+ * `hmac` is `Option<String>` with skip → present when signed.
  */
 export interface ChgrpOp {
   chgrp: ResourceRef;
   group: number | null;
+  hmac?: string;
 }
 
 export interface CreateGroupOp {
@@ -157,12 +169,13 @@ export interface AccessTreeOp {
 // ── RBAC ops (auth/types.rs) ────────────────────────────────────────
 
 /**
- * Create a user (auth/types.rs `CreateUserOp`).
+ * Create a user (auth/types.rs `CreateUserOp`). HMAC-gated.
  *
  * - `password` is a `SecretString` on the Rust side → plain string on wire.
  * - `roles` is `#[serde(default)]` WITHOUT skip → **always present** on the
  *   wire (emit `roles: []` when none).
- * - `profile` / `database` are `skip_serializing_if = "Option::is_none"`.
+ * - `profile` / `database` / `hmac` are `skip_serializing_if = "Option::is_none"`.
+ * - `hmac` canonical is username-only — the password is NEVER part of it.
  */
 export interface CreateUserOp {
   create_user: string;
@@ -170,6 +183,7 @@ export interface CreateUserOp {
   roles: string[];
   profile?: WireValue;
   database?: string;
+  hmac?: string;
 }
 
 /**
@@ -182,9 +196,14 @@ export interface DropUserOp {
   if_exists?: boolean;
 }
 
+/**
+ * Create a role (HMAC-gated). `hmac` canonical is the role name only
+ * (permissions are not part of the canonical input, mirroring `drop_role`).
+ */
 export interface CreateRoleOp {
   create_role: string;
   permissions: Permission[];
+  hmac?: string;
 }
 
 /**
@@ -197,14 +216,21 @@ export interface DropRoleOp {
   if_exists?: boolean;
 }
 
+/**
+ * Grant a role to a user (HMAC-gated) — the single most dangerous op in
+ * the system (e.g. granting `superuser` to an attacker-controlled account).
+ */
 export interface GrantRoleOp {
   grant_role: string;
   user: string;
+  hmac?: string;
 }
 
+/** Revoke a role from a user (HMAC-gated). */
 export interface RevokeRoleOp {
   revoke_role: string;
   user: string;
+  hmac?: string;
 }
 
 export interface RenameRoleOp {

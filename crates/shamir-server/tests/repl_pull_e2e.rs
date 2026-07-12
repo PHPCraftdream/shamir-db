@@ -280,8 +280,15 @@ fn create_repo_table_req(db_name: &str, repo: &str, table: &str) -> DbRequest {
 }
 
 /// `chmod` a db / repo / table to `mode` — used to OPEN (0o777) the
-/// access path for the non-superuser `replicator` session.
-fn chmod_req(db: &str, repo: Option<&str>, table: Option<&str>, mode: u16) -> DbRequest {
+/// access path for the non-superuser `replicator` session. `session_id`
+/// is the signing session's bearer token — chmod is HMAC-gated (task #542).
+fn chmod_req(
+    session_id: [u8; 32],
+    db: &str,
+    repo: Option<&str>,
+    table: Option<&str>,
+    mode: u16,
+) -> DbRequest {
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod");
     let res = match (repo, table) {
@@ -289,7 +296,12 @@ fn chmod_req(db: &str, repo: Option<&str>, table: Option<&str>, mode: u16) -> Db
         (Some(r), None) => shamir_query_builder::ddl::res::store(db, r),
         _ => shamir_query_builder::ddl::res::database(db),
     };
-    b.chmod("cm", shamir_query_builder::ddl::chmod(res, mode));
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_chmod(&res, mode),
+    );
+    b.chmod("cm", shamir_query_builder::ddl::chmod(res, mode).hmac(tag));
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
@@ -457,7 +469,7 @@ async fn repl_hello_and_pull_with_events() {
     //     proven by `permission_e2e.rs` Scenario 3. ---
     for (r, t) in [(None, None), (Some(repo), None), (Some(repo), Some(table))] {
         let resp = roundtrip(
-            &chmod_req(db, r, t, 0o777),
+            &chmod_req(admin_sid, db, r, t, 0o777),
             admin_sid,
             &mut admin_rid,
             &mut admin_w,
@@ -663,7 +675,7 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
 
     for (r, t) in [(None, None), (Some(repo), None), (Some(repo), Some(table))] {
         let resp = roundtrip(
-            &chmod_req(db, r, t, 0o777),
+            &chmod_req(admin_sid, db, r, t, 0o777),
             admin_sid,
             &mut admin_rid,
             &mut admin_w,

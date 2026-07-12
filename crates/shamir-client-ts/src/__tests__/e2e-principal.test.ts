@@ -65,7 +65,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute('default', {
         id: 'cu-rbac',
         queries: {
-          cu: admin.createUser(TEST_USER, TEST_PW),
+          cu: admin.createUser(adminClient!, TEST_USER, TEST_PW),
         },
       }));
 
@@ -104,7 +104,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(chownDb, {
         id: 'chown-user',
         queries: {
-          ch: admin.chown(admin.refDatabase(chownDb), TEST_USER),
+          ch: admin.chown(adminClient!, admin.refDatabase(chownDb), TEST_USER),
         },
       }));
 

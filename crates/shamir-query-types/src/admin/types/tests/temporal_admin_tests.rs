@@ -204,6 +204,7 @@ fn purge_history_op_older_than_round_trip() {
         scope: PurgeScope::OlderThan {
             timestamp: 1_600_000_000_000,
         },
+        hmac: None,
     };
     let qv = to_qv(&op);
     assert_eq!(

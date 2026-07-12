@@ -71,6 +71,8 @@ import {
   canonicalStartMigration,
   canonicalCommitMigration,
   canonicalRollbackMigration,
+  canonicalSetRetention,
+  canonicalPurgeHistory,
 } from '../hmac.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -384,29 +386,45 @@ export function renameFunctionFolder(
   return { rename_function_folder: from, to };
 }
 
-/** Change a live table's history-retention policy. */
+/**
+ * Change a live table's history-retention policy (HMAC-gated).
+ * canonical = `canonicalSetRetention(dbInUse, repo, table, retention)`.
+ */
 export function setRetention(
+  signer: HmacSigner,
+  dbInUse: string,
   table: string,
   retention: Retention,
   opts?: { repo?: string },
 ): SetRetentionOp {
+  const repo = repoOrDefault(opts?.repo);
+  const canonical = canonicalSetRetention(dbInUse, repo, table, retention);
   return {
     set_retention: table,
-    repo: repoOrDefault(opts?.repo),
+    repo,
     retention,
+    hmac: signer.hmacTagHex(canonical),
   };
 }
 
-/** Imperative history purge for a table. */
+/**
+ * Imperative history purge for a table (HMAC-gated) — irreversible
+ * audit-trail loss. canonical = `canonicalPurgeHistory(dbInUse, repo, table, scope)`.
+ */
 export function purgeHistory(
+  signer: HmacSigner,
+  dbInUse: string,
   table: string,
   scope: PurgeScope,
   opts?: { repo?: string },
 ): PurgeHistoryOp {
+  const repo = repoOrDefault(opts?.repo);
+  const canonical = canonicalPurgeHistory(dbInUse, repo, table, scope);
   return {
     purge_history: table,
-    repo: repoOrDefault(opts?.repo),
+    repo,
     scope,
+    hmac: signer.hmacTagHex(canonical),
   };
 }
 

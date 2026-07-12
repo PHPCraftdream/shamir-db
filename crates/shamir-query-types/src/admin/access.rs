@@ -89,6 +89,10 @@ pub enum GroupRef {
 pub struct ChmodOp {
     pub chmod: ResourceRef,
     pub mode: u16,
+    /// Hex HMAC over `b"chmod\0<resource>\0<mode>"`. See
+    /// `crate::auth::DropUserOp` for the field-shape precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Change owner on a securable resource.
@@ -100,6 +104,9 @@ pub struct ChmodOp {
 pub struct ChownOp {
     pub chown: ResourceRef,
     pub owner: u64,
+    /// Hex HMAC over `b"chown\0<resource>\0<owner>"`. See `ChmodOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Change group on a securable resource. `group: null` clears the group.
@@ -112,6 +119,9 @@ pub struct ChownOp {
 pub struct ChgrpOp {
     pub chgrp: ResourceRef,
     pub group: Option<u64>,
+    /// Hex HMAC over `b"chgrp\0<resource>\0<group|null>"`. See `ChmodOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Create a new group.

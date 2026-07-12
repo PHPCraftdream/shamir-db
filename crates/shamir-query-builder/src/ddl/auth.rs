@@ -8,7 +8,7 @@ use shamir_types::types::value::QueryValue;
 use crate::batch::IntoBatchOp;
 
 /// Create a user with a plaintext password. Returns a builder for optional
-/// roles/profile.
+/// roles/profile. HMAC-gated (see [`CreateUser::hmac`]).
 pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> CreateUser {
     CreateUser {
         name: name.into(),
@@ -16,6 +16,7 @@ pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> Crea
         roles: Vec::new(),
         profile: None,
         database: None,
+        hmac: None,
     }
 }
 
@@ -26,6 +27,7 @@ pub struct CreateUser {
     roles: Vec<String>,
     profile: Option<QueryValue>,
     database: Option<String>,
+    hmac: Option<String>,
 }
 
 impl CreateUser {
@@ -48,6 +50,13 @@ impl CreateUser {
         self
     }
 
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_create_user(username)` (never the password).
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateUser(CreateUserOp {
@@ -56,6 +65,7 @@ impl CreateUser {
             roles: self.roles,
             profile: self.profile,
             database: self.database,
+            hmac: self.hmac,
         })
     }
 }
@@ -124,12 +134,51 @@ impl IntoBatchOp for DropUser {
     }
 }
 
-/// Create a role with a set of permissions.
-pub fn create_role(name: impl Into<String>, permissions: Vec<Permission>) -> BatchOp {
-    BatchOp::CreateRole(CreateRoleOp {
-        create_role: name.into(),
+/// Create a role with a set of permissions. Returns a builder (HMAC-gated,
+/// see [`CreateRole::hmac`]).
+pub fn create_role(name: impl Into<String>, permissions: Vec<Permission>) -> CreateRole {
+    CreateRole {
+        name: name.into(),
         permissions,
-    })
+        hmac: None,
+    }
+}
+
+/// Builder for [`CreateRoleOp`].
+pub struct CreateRole {
+    name: String,
+    permissions: Vec<Permission>,
+    hmac: Option<String>,
+}
+
+impl CreateRole {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_create_role(role)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::CreateRole(CreateRoleOp {
+            create_role: self.name,
+            permissions: self.permissions,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<CreateRole> for BatchOp {
+    fn from(b: CreateRole) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for CreateRole {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 /// Drop a role by name.
@@ -184,20 +233,99 @@ impl IntoBatchOp for DropRole {
     }
 }
 
-/// Grant a role to a user.
-pub fn grant_role(role: impl Into<String>, user: impl Into<String>) -> BatchOp {
-    BatchOp::GrantRole(GrantRoleOp {
-        grant_role: role.into(),
+/// Grant a role to a user. Returns a builder (HMAC-gated, see
+/// [`GrantRole::hmac`]) — the single most dangerous op in the system
+/// (e.g. granting `superuser` to an attacker-controlled account).
+pub fn grant_role(role: impl Into<String>, user: impl Into<String>) -> GrantRole {
+    GrantRole {
+        role: role.into(),
         user: user.into(),
-    })
+        hmac: None,
+    }
 }
 
-/// Revoke a role from a user.
-pub fn revoke_role(role: impl Into<String>, user: impl Into<String>) -> BatchOp {
-    BatchOp::RevokeRole(RevokeRoleOp {
-        revoke_role: role.into(),
+/// Builder for [`GrantRoleOp`].
+pub struct GrantRole {
+    role: String,
+    user: String,
+    hmac: Option<String>,
+}
+
+impl GrantRole {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_grant_role(role, user)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::GrantRole(GrantRoleOp {
+            grant_role: self.role,
+            user: self.user,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<GrantRole> for BatchOp {
+    fn from(b: GrantRole) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for GrantRole {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Revoke a role from a user. Returns a builder (HMAC-gated, see
+/// [`RevokeRole::hmac`]).
+pub fn revoke_role(role: impl Into<String>, user: impl Into<String>) -> RevokeRole {
+    RevokeRole {
+        role: role.into(),
         user: user.into(),
-    })
+        hmac: None,
+    }
+}
+
+/// Builder for [`RevokeRoleOp`].
+pub struct RevokeRole {
+    role: String,
+    user: String,
+    hmac: Option<String>,
+}
+
+impl RevokeRole {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_revoke_role(role, user)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::RevokeRole(RevokeRoleOp {
+            revoke_role: self.role,
+            user: self.user,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<RevokeRole> for BatchOp {
+    fn from(b: RevokeRole) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for RevokeRole {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 /// Rename a role (`from` → `to`). Re-keys the role record and rewrites

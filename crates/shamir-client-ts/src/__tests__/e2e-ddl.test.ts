@@ -396,7 +396,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // set retention — keep up to 100 versions
       br(await Batch.create('set-ret')
-        .add('r', ddl.setRetention('events', { max_count: 100 }))
+        .add('r', ddl.setRetention(client!, db, 'events', { max_count: 100 }))
         .execute(client!, db));
 
       // seed some data to create versions
@@ -413,7 +413,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // purgeHistory — purge everything older than 0 seconds
       br(await Batch.create('purge')
-        .add('p', ddl.purgeHistory('events', ddl.olderThanAge(0)))
+        .add('p', ddl.purgeHistory(client!, db, 'events', ddl.olderThanAge(0)))
         .execute(client!, db));
 
       // No error means purge succeeded — the round-trip is the test.

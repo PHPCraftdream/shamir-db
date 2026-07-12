@@ -5,8 +5,10 @@
  * `crates/shamir-query-types/src/auth/types.rs`.
  *
  * Non-HMAC ops are plain functions returning the wire object.
- * HMAC-gated ops (`drop_user`, `drop_role`) take a `signer: HmacSigner`,
- * build the canonical input via `../hmac.ts`, and attach the HMAC tag.
+ * HMAC-gated ops (`drop_user`, `drop_role`, `chmod`, `chown`, `chgrp`,
+ * `create_user`, `create_role`, `grant_role`, `revoke_role`) take a
+ * `signer: HmacSigner`, build the canonical input via `../hmac.ts`, and
+ * attach the HMAC tag.
  *
  * PLATFORM-AGNOSTIC.
  */
@@ -43,6 +45,13 @@ import type { WireValue } from '../types/write.js';
 import {
   canonicalDropUser,
   canonicalDropRole,
+  canonicalChmod,
+  canonicalChown,
+  canonicalChgrp,
+  canonicalCreateUser,
+  canonicalCreateRole,
+  canonicalGrantRole,
+  canonicalRevokeRole,
 } from '../hmac.js';
 
 import { principalId } from '../principal-id.js';
@@ -101,27 +110,37 @@ export function groupId(id: number): GroupRef {
   return { id };
 }
 
-// ── ACL ops (all NON-HMAC) ──────────────────────────────────────────
+// ── ACL ops (chmod / chown / chgrp — HMAC-gated) ────────────────────
 
-export function chmod(resource: ResourceRef, mode: number): ChmodOp {
-  return { chmod: resource, mode };
+/** Change mode bits on a resource (HMAC-gated). canonical = `canonicalChmod(resource, mode)`. */
+export function chmod(signer: HmacSigner, resource: ResourceRef, mode: number): ChmodOp {
+  const canonical = canonicalChmod(resource, mode);
+  return { chmod: resource, mode, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
- * Transfer ownership of a resource.
+ * Transfer ownership of a resource (HMAC-gated).
+ * canonical = `canonicalChown(resource, owner)`.
  *
  * `owner` accepts:
  *   - `string`  — username, hashed to `principalId(username)` (bigint).
  *   - `bigint`  — pre-computed principal id.
  *   - `number`  — raw numeric id (only safe for values <= 2^53).
  */
-export function chown(resource: ResourceRef, owner: string | bigint | number): ChownOp {
+export function chown(
+  signer: HmacSigner,
+  resource: ResourceRef,
+  owner: string | bigint | number,
+): ChownOp {
   const resolved = typeof owner === 'string' ? principalId(owner) : owner;
-  return { chown: resource, owner: resolved };
+  const canonical = canonicalChown(resource, resolved);
+  return { chown: resource, owner: resolved, hmac: signer.hmacTagHex(canonical) };
 }
 
-export function chgrp(resource: ResourceRef, group: number | null): ChgrpOp {
-  return { chgrp: resource, group };
+/** Change group on a resource (HMAC-gated). canonical = `canonicalChgrp(resource, group)`. */
+export function chgrp(signer: HmacSigner, resource: ResourceRef, group: number | null): ChgrpOp {
+  const canonical = canonicalChgrp(resource, group);
+  return { chgrp: resource, group, hmac: signer.hmacTagHex(canonical) };
 }
 
 export function createGroup(name: string): CreateGroupOp {
@@ -193,19 +212,24 @@ export function permission(
 }
 
 /**
- * Create a user. `roles` is `#[serde(default)]` WITHOUT skip → always
- * present on the wire. Emits `roles: []` when none provided.
+ * Create a user (HMAC-gated). `roles` is `#[serde(default)]` WITHOUT skip
+ * → always present on the wire. Emits `roles: []` when none provided.
  * `password` is a SecretString on the Rust side → plain string on wire.
+ * canonical = `canonicalCreateUser(username)` — the password is NEVER
+ * part of the canonical input.
  */
 export function createUser(
+  signer: HmacSigner,
   name: string,
   password: string,
   opts?: { roles?: string[]; profile?: WireValue; database?: string },
 ): CreateUserOp {
+  const canonical = canonicalCreateUser(name);
   const op: CreateUserOp = {
     create_user: name,
     password,
     roles: opts?.roles ?? [],
+    hmac: signer.hmacTagHex(canonical),
   };
   if (opts?.profile !== undefined) op.profile = opts.profile;
   if (opts?.database !== undefined) op.database = opts.database;
@@ -227,11 +251,18 @@ export function dropUser(
   return op;
 }
 
+/**
+ * Create a role (HMAC-gated). canonical = `canonicalCreateRole(name)` —
+ * the permissions list is not part of the canonical input, mirroring
+ * `dropRole`'s precedent of identifying by name only.
+ */
 export function createRole(
+  signer: HmacSigner,
   name: string,
   permissions: Permission[],
 ): CreateRoleOp {
-  return { create_role: name, permissions };
+  const canonical = canonicalCreateRole(name);
+  return { create_role: name, permissions, hmac: signer.hmacTagHex(canonical) };
 }
 
 /** Drop a role (HMAC-gated). canonical = `canonicalDropRole(role)`. */
@@ -249,12 +280,20 @@ export function dropRole(
   return op;
 }
 
-export function grantRole(role: string, user: string): GrantRoleOp {
-  return { grant_role: role, user };
+/**
+ * Grant a role to a user (HMAC-gated) — the single most dangerous op in
+ * the system (e.g. granting `superuser` to an attacker-controlled account).
+ * canonical = `canonicalGrantRole(role, user)`.
+ */
+export function grantRole(signer: HmacSigner, role: string, user: string): GrantRoleOp {
+  const canonical = canonicalGrantRole(role, user);
+  return { grant_role: role, user, hmac: signer.hmacTagHex(canonical) };
 }
 
-export function revokeRole(role: string, user: string): RevokeRoleOp {
-  return { revoke_role: role, user };
+/** Revoke a role from a user (HMAC-gated). canonical = `canonicalRevokeRole(role, user)`. */
+export function revokeRole(signer: HmacSigner, role: string, user: string): RevokeRoleOp {
+  const canonical = canonicalRevokeRole(role, user);
+  return { revoke_role: role, user, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**

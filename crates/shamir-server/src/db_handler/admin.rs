@@ -126,6 +126,16 @@ pub(super) async fn create_scram_user(
 
 /// Walk the batch and verify the `hmac` tag on every destructive op.
 ///
+/// Covers: `DropDb`/`DropRepo`/`DropTable`/`DropIndex`/`DropUser`/
+/// `DropRole`, `Start/Commit/RollbackMigration`, `GrantRole`/`RevokeRole`
+/// (the single most dangerous op class — privilege escalation),
+/// `Chmod`/`Chown`/`Chgrp` (ownership/permission changes),
+/// `CreateUser`/`CreateRole`, and `SetRetention`/`PurgeHistory`
+/// (irreversible audit-trail loss). Group-mutating ops
+/// (`CreateGroup`/`DropGroup`/`RenameGroup`/`Add|RemoveGroupMember`) are
+/// NOT yet covered — see task #542's follow-up (audit ranks them lowest
+/// severity of this cluster).
+///
 /// Returns `Err((alias, code, message))` on the first failure
 /// where `code` is one of:
 ///   * `"hmac_required"` — the field is missing on a destructive op,
@@ -191,6 +201,39 @@ pub(super) fn check_destructive_hmacs(
             ),
             BatchOp::RollbackMigration(op) => (
                 canon::canonical_rollback_migration(db_name, &op.rollback_migration),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::GrantRole(op) => (
+                canon::canonical_grant_role(&op.grant_role, &op.user),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::RevokeRole(op) => (
+                canon::canonical_revoke_role(&op.revoke_role, &op.user),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::Chmod(op) => (canon::canonical_chmod(&op.chmod, op.mode), op.hmac.as_ref()),
+            BatchOp::Chown(op) => (
+                canon::canonical_chown(&op.chown, op.owner),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::Chgrp(op) => (
+                canon::canonical_chgrp(&op.chgrp, op.group),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::CreateUser(op) => (
+                canon::canonical_create_user(&op.create_user),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::CreateRole(op) => (
+                canon::canonical_create_role(&op.create_role),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::SetRetention(op) => (
+                canon::canonical_set_retention(db_name, &op.repo, &op.set_retention, &op.retention),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::PurgeHistory(op) => (
+                canon::canonical_purge_history(db_name, &op.repo, &op.purge_history, &op.scope),
                 op.hmac.as_ref(),
             ),
             _ => continue, // non-destructive — pass.

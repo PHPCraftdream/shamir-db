@@ -165,3 +165,152 @@ export function canonicalRollbackMigration(
 ): Uint8Array {
   return joinNull(['rollback_migration', dbInUse, migrationId]);
 }
+
+export function canonicalGrantRole(role: string, user: string): Uint8Array {
+  return joinNull(['grant_role', role, user]);
+}
+
+export function canonicalRevokeRole(role: string, user: string): Uint8Array {
+  return joinNull(['revoke_role', role, user]);
+}
+
+export function canonicalCreateUser(username: string): Uint8Array {
+  // Password is NEVER part of the canonical input — the tag confirms
+  // "you meant to create this account", not the credential.
+  return joinNull(['create_user', username]);
+}
+
+export function canonicalCreateRole(role: string): Uint8Array {
+  // Permissions are not part of the canonical input, mirroring
+  // `drop_role`'s precedent of identifying the op by name only.
+  return joinNull(['create_role', role]);
+}
+
+/**
+ * Wire-encodable reference to a securable resource — byte-for-byte mirror
+ * of the Rust `ResourceRef` (untagged, single-key object). Only the
+ * shape needed to compute a canonical string is declared here; the full
+ * type lives in `./types/admin.ts`.
+ */
+type ResourceRefLike =
+  | { database: string }
+  | { store: [string, string] }
+  | { table: [string, string, string] }
+  | { function: string }
+  | { function_folder: string[] }
+  | { function_namespace: boolean };
+
+/**
+ * Render a `ResourceRef` into the stable `scheme://path` string used by
+ * `canonicalChmod` / `canonicalChown` / `canonicalChgrp`. Mirrors the
+ * Rust `canonical_resource_ref` in `hmac.rs` (itself matching
+ * `ResourcePath`'s `Display` shape) byte-for-byte.
+ */
+export function canonicalResourceRef(r: ResourceRefLike): string {
+  if ('database' in r) return `db://${r.database}`;
+  if ('store' in r) return `db://${r.store[0]}/${r.store[1]}`;
+  if ('table' in r) return `db://${r.table[0]}/${r.table[1]}/${r.table[2]}`;
+  if ('function' in r) return `fn://${r.function}`;
+  if ('function_folder' in r) return `fn://${r.function_folder.join('/')}/`;
+  if ('function_namespace' in r) return 'fn://';
+  // Compile-time exhaustiveness guard: a future `ResourceRefLike` member
+  // that isn't handled above fails `tsc` here instead of silently
+  // falling through to a wrong scheme (mirrors the Rust `canonical_resource_ref`
+  // match, which has no wildcard arm for the same reason).
+  const exhaustive: never = r;
+  throw new Error(`unhandled ResourceRef variant: ${JSON.stringify(exhaustive)}`);
+}
+
+export function canonicalChmod(resource: ResourceRefLike, mode: number): Uint8Array {
+  return joinNull(['chmod', canonicalResourceRef(resource), String(mode)]);
+}
+
+export function canonicalChown(
+  resource: ResourceRefLike,
+  owner: number | bigint,
+): Uint8Array {
+  return joinNull(['chown', canonicalResourceRef(resource), String(owner)]);
+}
+
+/**
+ * `group: null` (clear the group) canonicalizes to the literal sentinel
+ * `"null"` — mirrors the Rust `canonical_chgrp`.
+ */
+export function canonicalChgrp(
+  resource: ResourceRefLike,
+  group: number | bigint | null,
+): Uint8Array {
+  const groupStr = group === null ? 'null' : String(group);
+  return joinNull(['chgrp', canonicalResourceRef(resource), groupStr]);
+}
+
+/**
+ * Per-table history retention — byte-for-byte mirror of the Rust
+ * `Retention` shape needed to compute the canonical string.
+ */
+interface RetentionLike {
+  max_age_secs?: number;
+  max_count?: number;
+  min_count?: number;
+}
+
+/**
+ * Render a `Retention` into the stable textual form used by
+ * `canonicalSetRetention`. Mirrors the Rust `canonical_retention`:
+ * each of the three orthogonal optional knobs rendered as its decimal
+ * value or the sentinel `"none"`, comma-joined in field-declaration order.
+ */
+export function canonicalRetention(r: RetentionLike): string {
+  const age = r.max_age_secs === undefined ? 'none' : String(r.max_age_secs);
+  const max = r.max_count === undefined ? 'none' : String(r.max_count);
+  const min = r.min_count === undefined ? 'none' : String(r.min_count);
+  return `${age},${max},${min}`;
+}
+
+export function canonicalSetRetention(
+  dbInUse: string,
+  repo: string,
+  table: string,
+  retention: RetentionLike,
+): Uint8Array {
+  return joinNull([
+    'set_retention',
+    dbInUse,
+    repo,
+    table,
+    canonicalRetention(retention),
+  ]);
+}
+
+/**
+ * Imperative history purge scope — byte-for-byte mirror of the Rust
+ * `PurgeScope` shape needed to compute the canonical string.
+ */
+type PurgeScopeLike =
+  | { older_than: { timestamp: number } }
+  | { older_than_age: { age_secs: number } };
+
+/**
+ * Render a `PurgeScope` into the stable textual form used by
+ * `canonicalPurgeHistory`. Mirrors the Rust `canonical_purge_scope`:
+ * `"older_than:<timestamp>"` or `"older_than_age:<age_secs>"`.
+ */
+export function canonicalPurgeScope(scope: PurgeScopeLike): string {
+  if ('older_than' in scope) return `older_than:${scope.older_than.timestamp}`;
+  return `older_than_age:${scope.older_than_age.age_secs}`;
+}
+
+export function canonicalPurgeHistory(
+  dbInUse: string,
+  repo: string,
+  table: string,
+  scope: PurgeScopeLike,
+): Uint8Array {
+  return joinNull([
+    'purge_history',
+    dbInUse,
+    repo,
+    table,
+    canonicalPurgeScope(scope),
+  ]);
+}
