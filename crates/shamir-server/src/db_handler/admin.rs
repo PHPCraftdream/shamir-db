@@ -130,6 +130,110 @@ pub(super) async fn create_scram_user(
     }
 }
 
+/// `SetSuperuser` wire op (task #557) — grant or revoke superuser status on
+/// an existing SCRAM-directory account.
+///
+/// Authorization + HMAC gate (in this order, mirroring `create_scram_user`'s
+/// pattern):
+///   1. Caller must hold an already-superuser session (`permission_denied`
+///      otherwise; checked FIRST, before the HMAC gate, so a missing/wrong
+///      hmac on a non-superuser session still returns `permission_denied`).
+///   2. Handler must be built with `AdminGlue` (`not_supported` otherwise).
+///   3. The op must carry a hex HMAC-SHA256 tag over
+///      [`canonical_set_superuser`] keyed by the session's HMAC key
+///      (`hmac_required` if missing, `hmac_mismatch` if wrong). This is the
+///      same "did-you-mean-it" mechanism as destructive `BatchOp`s
+///      (tasks #542/#551/#554) — see `check_destructive_hmacs`'s doc
+///      comment. The check is inlined here (NOT routed through
+///      `check_destructive_hmacs`) because `SetSuperuser` is a top-level
+///      `DbRequest`, not a `BatchOp` inside a batch.
+///
+/// On a successful grant/revoke, `FjallUserDirectory::set_superuser`
+/// atomically flips the flag, bumps `tickets_invalid_before_ns`,
+/// adjusts `superuser_count`, and fsyncs.
+///
+/// Error-code conventions (chosen to match existing codebase vocabulary —
+/// see task brief §6: "consistency with the rest of the codebase's
+/// vocabulary matters more than matching this brief literally"):
+///   - Target user doesn't exist → `not_found` (matches `GrantRole`'s
+///     precedent for "user doesn't exist", and `admin_describe` /
+///     `admin_replication` / `admin_users_roles`'s shared `not_found`
+///     code for "target entity doesn't exist").
+///   - Last-superuser revoke refused → `invalid_owner` (matches
+///     `admin_access.rs`'s `ERR_INVALID_OWNER = "invalid_owner"` used by
+///     the chown-to-OWNER_SYSTEM refusal — same flavour: a privileged
+///     mutation refused on system-integrity grounds).
+///   - Any other directory error → `query` (the generic fallback used by
+///     every admin handler for untyped `Error::Encoding` / storage
+///     failures).
+pub(super) async fn set_superuser(
+    admin: Option<&AdminGlue>,
+    session: &Session,
+    user: String,
+    on: bool,
+    hmac: Option<String>,
+) -> DbResponse {
+    // 1. Permission gate FIRST (mirrors `create_scram_user`'s ordering — a
+    //    non-superuser session gets `permission_denied` regardless of the
+    //    hmac field's presence/validity).
+    if !session.permissions.is_superuser {
+        return DbResponse::Error {
+            code: "permission_denied".into(),
+            message: "set_superuser requires superuser".into(),
+        };
+    }
+    // 2. AdminGlue unwrap.
+    let admin = match admin {
+        Some(a) => a,
+        None => {
+            return DbResponse::Error {
+                code: "not_supported".into(),
+                message: "handler built without AdminGlue (no user_dir)".into(),
+            }
+        }
+    };
+
+    // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
+    //    `check_destructive_hmacs`).
+    use shamir_query_types::hmac as canon;
+    let canonical = canon::canonical_set_superuser(&user, on);
+    let Some(tag) = hmac.as_ref() else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "set_superuser missing `hmac` field".into(),
+        };
+    };
+    if !canon::verify_tag_hex(&session.hmac_key(), &canonical, tag) {
+        return DbResponse::Error {
+            code: "hmac_mismatch".into(),
+            message: "set_superuser `hmac` does not match canonical input".into(),
+        };
+    }
+
+    // 4. Op itself.
+    let now_ns = UnixNanos::now().as_u64();
+    match admin.user_dir.set_superuser(&user, on, now_ns) {
+        Ok(_) => DbResponse::SuperuserSet { user, on },
+        Err(e) => {
+            let msg = e.to_string();
+            // Surface a typed code for the two cases clients most want to
+            // distinguish (target-missing vs last-superuser-refusal); fall
+            // back to `query` for anything else.
+            let code = if msg.contains("not found") {
+                "not_found"
+            } else if msg.contains("last remaining superuser") {
+                "invalid_owner"
+            } else {
+                "query"
+            };
+            DbResponse::Error {
+                code: code.into(),
+                message: msg,
+            }
+        }
+    }
+}
+
 /// `ChangePasswordChallenge` (spec §12.5 step 1) — issue a fresh
 /// server-side challenge bound to the caller's own session.
 ///
