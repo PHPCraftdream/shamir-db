@@ -534,6 +534,7 @@ async fn make_fn_with_security(
         shamir_engine::function::Visibility::Private,
         security,
         Vec::new(),
+        Vec::new(),
     )
     .inject_into(&mut fn_rec);
 
@@ -694,6 +695,7 @@ async fn make_fn_without_owner_field(
     shamir_engine::function::FunctionMeta::new(
         shamir_engine::function::Visibility::Private,
         security,
+        Vec::new(),
         Vec::new(),
     )
     .inject_into(&mut fn_rec);

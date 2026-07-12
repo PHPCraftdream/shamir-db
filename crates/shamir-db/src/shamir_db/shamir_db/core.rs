@@ -593,18 +593,69 @@ impl ShamirDb {
             .unwrap_or_default();
         FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
-            .with_net(self.build_net_gateway())
+            .with_net(self.build_net_gateway(fn_name))
             .with_secret_grants(grants)
             .with_actor(actor)
     }
 
-    /// Build a [`NetGateway`] from the current allowlist.
+    /// Build a [`NetGateway`] scoped to `fn_name`'s effective egress reach:
+    /// the function's `net_grants` INTERSECTED with the DB-wide
+    /// `net_allowlist` (a function can never exceed the DB's own ceiling).
     ///
     /// Always returns a gateway so that allowlist-denial is a catchable
     /// runtime error, not a "no net gateway" trap.
-    pub(super) fn build_net_gateway(&self) -> Arc<dyn NetGateway> {
-        Arc::new(super::super::curl_gateway::CurlNetGateway::new(
-            self.net_allowlist.to_vec(),
-        ))
+    ///
+    /// # Empty `net_grants` semantics (deliberate, documented choice)
+    ///
+    /// Unlike `secret_grants` (empty = no secrets granted — the RESTRICTIVE
+    /// default), an EMPTY `net_grants` here means "no function-level
+    /// restriction": the function gets the FULL `net_allowlist`, exactly as
+    /// every function did before per-function `net_grants` existed. This is
+    /// intentionally inconsistent with `secret_grants`'s own precedent,
+    /// chosen for backward compatibility — flipping the default to
+    /// restrictive (empty = no egress) would silently lock every
+    /// already-deployed function that calls `ctx.http_fetch()` with no
+    /// `net_grants` ever set out of egress it currently has, with no
+    /// migration path (see `docs/prompts/audit/65-fix-544-*.md` and
+    /// `FunctionMeta::net_grants`'s doc comment for the full tradeoff). A
+    /// non-empty `net_grants` list narrows the function to LESS than the DB
+    /// default — there is no way to grant a function MORE than the DB
+    /// ceiling.
+    ///
+    /// # Intersection is literal-string, not pattern-aware (known limitation)
+    ///
+    /// The intersection below matches `net_grants` entries against
+    /// `net_allowlist` entries by EXACT STRING equality, not by resolving
+    /// either side against an actual host the way `check_host_allowed`'s
+    /// `glob_matches` does at fetch time. Concretely: if the DB allowlist
+    /// has the wildcard pattern `"*.example.com"` and a function's
+    /// `net_grants` names a concrete host like `"api.example.com"`, the two
+    /// strings don't match, so the intersection is EMPTY and the function is
+    /// denied ALL egress — even though `api.example.com` is both covered by
+    /// the DB's wildcard and clearly what the grant intended. This fails
+    /// CLOSED (never grants more than intended), so it's not a security
+    /// hole, but it means an operator narrowing a wildcard DB allowlist to a
+    /// concrete per-function host must currently spell `net_grants` with
+    /// the exact same pattern string as it appears in `net_allowlist` — a
+    /// real usability gap, not fixed by this task (see task #544's closing
+    /// report / a follow-up would need to intersect via pattern-subsumption
+    /// rather than string equality).
+    pub(super) fn build_net_gateway(&self, fn_name: &str) -> Arc<dyn NetGateway> {
+        let net_grants = self.function_meta(fn_name).map(|m| m.net_grants);
+        let effective = match net_grants {
+            // No catalogue entry (builtin) or an explicitly empty grant
+            // list: fall back to the full DB-wide allowlist (see doc above).
+            None => self.net_allowlist.to_vec(),
+            Some(grants) if grants.is_empty() => self.net_allowlist.to_vec(),
+            // Non-empty grants: intersect with the DB-wide allowlist so the
+            // function is scoped to the OVERLAP, never beyond the DB ceiling.
+            Some(grants) => self
+                .net_allowlist
+                .iter()
+                .filter(|host| grants.contains(host))
+                .cloned()
+                .collect(),
+        };
+        Arc::new(super::super::curl_gateway::CurlNetGateway::new(effective))
     }
 }

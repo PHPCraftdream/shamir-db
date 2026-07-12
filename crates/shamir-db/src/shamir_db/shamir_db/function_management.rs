@@ -168,7 +168,12 @@ impl ShamirDb {
             )));
         }
 
-        let meta = FunctionMeta::new(opts.visibility, opts.security, opts.secret_grants.clone());
+        let meta = FunctionMeta::new(
+            opts.visibility,
+            opts.security,
+            opts.secret_grants.clone(),
+            opts.net_grants.clone(),
+        );
 
         let version = 1u64;
         let mut m = shamir_types::types::common::new_map();
@@ -698,7 +703,7 @@ impl ShamirDb {
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway())
+            .with_net(self.build_net_gateway(name))
             .with_secret_grants(grants)
             .with_actor(actor);
         self.functions
@@ -752,7 +757,7 @@ impl ShamirDb {
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway())
+            .with_net(self.build_net_gateway(name))
             .with_secret_grants(grants)
             .with_actor(actor);
         self.functions
