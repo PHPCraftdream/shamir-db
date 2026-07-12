@@ -50,6 +50,7 @@ fn create_user_op_serde_round_trip_with_database() {
         roles: vec!["readonly".to_string()],
         profile: None,
         database: Some("testdb".to_string()),
+        hmac: None,
     };
     assert_eq!(op.create_user, "bob");
     assert_eq!(op.database.as_deref(), Some("testdb"));
@@ -68,6 +69,7 @@ fn create_user_op_serde_omits_database_when_absent() {
         roles: vec![],
         profile: None,
         database: None,
+        hmac: None,
     };
     assert_eq!(op.database, None);
 

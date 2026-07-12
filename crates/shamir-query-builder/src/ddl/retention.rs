@@ -5,12 +5,14 @@ use shamir_query_types::batch::BatchOp;
 
 use crate::batch::IntoBatchOp;
 
-/// Change a live table's history-retention policy. `repo` defaults to `"main"`.
+/// Change a live table's history-retention policy. `repo` defaults to
+/// `"main"`. Returns a builder (HMAC-gated, see [`SetRetention::hmac`]).
 pub fn set_retention(table: impl Into<String>, retention: Retention) -> SetRetention {
     SetRetention {
         table: table.into(),
         repo: "main".to_owned(),
         retention,
+        hmac: None,
     }
 }
 
@@ -19,6 +21,7 @@ pub struct SetRetention {
     table: String,
     repo: String,
     retention: Retention,
+    hmac: Option<String>,
 }
 
 impl SetRetention {
@@ -28,12 +31,20 @@ impl SetRetention {
         self
     }
 
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_set_retention(db_in_use, repo, table, retention)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::SetRetention(SetRetentionOp {
             set_retention: self.table,
             repo: self.repo,
             retention: self.retention,
+            hmac: self.hmac,
         })
     }
 }
@@ -50,7 +61,9 @@ impl IntoBatchOp for SetRetention {
     }
 }
 
-/// Imperative history purge. `repo` defaults to `"main"`.
+/// Imperative history purge. `repo` defaults to `"main"`. Returns a
+/// builder (HMAC-gated, see [`PurgeHistory::hmac`]) — irreversible
+/// audit-trail loss.
 ///
 /// ```ignore
 /// // purge versions older than 86_400 seconds (1 day)
@@ -61,6 +74,7 @@ pub fn purge_history(table: impl Into<String>, scope: PurgeScope) -> PurgeHistor
         table: table.into(),
         repo: "main".to_owned(),
         scope,
+        hmac: None,
     }
 }
 
@@ -69,6 +83,7 @@ pub struct PurgeHistory {
     table: String,
     repo: String,
     scope: PurgeScope,
+    hmac: Option<String>,
 }
 
 impl PurgeHistory {
@@ -78,12 +93,20 @@ impl PurgeHistory {
         self
     }
 
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_purge_history(db_in_use, repo, table, scope)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::PurgeHistory(PurgeHistoryOp {
             purge_history: self.table,
             repo: self.repo,
             scope: self.scope,
+            hmac: self.hmac,
         })
     }
 }

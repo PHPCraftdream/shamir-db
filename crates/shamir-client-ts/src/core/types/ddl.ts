@@ -372,16 +372,21 @@ export interface RenameFunctionFolderOp {
   to: string[];
 }
 
+/** Change a live table's history-retention policy (HMAC-gated). */
 export interface SetRetentionOp {
   set_retention: string;
   repo: string;
   retention: Retention;
+  hmac?: string;
 }
 
+/** Imperative history purge for a table (HMAC-gated) — irreversible
+ * audit-trail loss. */
 export interface PurgeHistoryOp {
   purge_history: string;
   repo: string;
   scope: PurgeScope;
+  hmac?: string;
 }
 
 export interface ChangesSinceOp {

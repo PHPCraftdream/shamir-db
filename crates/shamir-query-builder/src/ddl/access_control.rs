@@ -63,28 +63,145 @@ impl IntoBatchOp for AccessTree {
 // Access-control DDL (chmod / chown / chgrp)
 // ============================================================================
 
-/// Change mode bits on a resource.
-pub fn chmod(resource: ResourceRef, mode: u16) -> BatchOp {
-    BatchOp::Chmod(ChmodOp {
-        chmod: resource,
+/// Change mode bits on a resource. Returns a builder (HMAC-gated, see
+/// [`Chmod::hmac`]).
+pub fn chmod(resource: ResourceRef, mode: u16) -> Chmod {
+    Chmod {
+        resource,
         mode,
-    })
+        hmac: None,
+    }
 }
 
-/// Change owner on a resource.
-pub fn chown(resource: ResourceRef, owner: u64) -> BatchOp {
-    BatchOp::Chown(ChownOp {
-        chown: resource,
+/// Builder for [`ChmodOp`].
+pub struct Chmod {
+    resource: ResourceRef,
+    mode: u16,
+    hmac: Option<String>,
+}
+
+impl Chmod {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_chmod(resource, mode)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::Chmod(ChmodOp {
+            chmod: self.resource,
+            mode: self.mode,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<Chmod> for BatchOp {
+    fn from(b: Chmod) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for Chmod {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Change owner on a resource. Returns a builder (HMAC-gated, see
+/// [`Chown::hmac`]).
+pub fn chown(resource: ResourceRef, owner: u64) -> Chown {
+    Chown {
+        resource,
         owner,
-    })
+        hmac: None,
+    }
 }
 
-/// Change group on a resource. Pass `None` to clear the group.
-pub fn chgrp(resource: ResourceRef, group: Option<u64>) -> BatchOp {
-    BatchOp::Chgrp(ChgrpOp {
-        chgrp: resource,
+/// Builder for [`ChownOp`].
+pub struct Chown {
+    resource: ResourceRef,
+    owner: u64,
+    hmac: Option<String>,
+}
+
+impl Chown {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_chown(resource, owner)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::Chown(ChownOp {
+            chown: self.resource,
+            owner: self.owner,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<Chown> for BatchOp {
+    fn from(b: Chown) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for Chown {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Change group on a resource. Pass `None` to clear the group. Returns a
+/// builder (HMAC-gated, see [`Chgrp::hmac`]).
+pub fn chgrp(resource: ResourceRef, group: Option<u64>) -> ChgrpBuilder {
+    ChgrpBuilder {
+        resource,
         group,
-    })
+        hmac: None,
+    }
+}
+
+/// Builder for [`ChgrpOp`].
+pub struct ChgrpBuilder {
+    resource: ResourceRef,
+    group: Option<u64>,
+    hmac: Option<String>,
+}
+
+impl ChgrpBuilder {
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_chgrp(resource, group)`.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::Chgrp(ChgrpOp {
+            chgrp: self.resource,
+            group: self.group,
+            hmac: self.hmac,
+        })
+    }
+}
+
+impl From<ChgrpBuilder> for BatchOp {
+    fn from(b: ChgrpBuilder) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for ChgrpBuilder {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
 }
 
 // ============================================================================

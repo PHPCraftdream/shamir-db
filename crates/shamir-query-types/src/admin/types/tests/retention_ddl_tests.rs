@@ -114,6 +114,7 @@ fn set_retention_op_round_trip() {
             max_count: Some(5),
             ..Default::default()
         },
+        hmac: None,
     };
     let j = to_qv(&op);
     assert_eq!(

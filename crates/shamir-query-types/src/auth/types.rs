@@ -194,6 +194,11 @@ pub struct CreateUserOp {
     /// database) may create it without global-admin rights. See [`User`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// Hex HMAC over `b"create_user\0<username>"` — the password is NEVER
+    /// part of the canonical input (it must not enter an HMAC input or be
+    /// logged). See `DropUserOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 impl std::fmt::Debug for CreateUserOp {
@@ -204,6 +209,7 @@ impl std::fmt::Debug for CreateUserOp {
             .field("roles", &self.roles)
             .field("profile", &self.profile)
             .field("database", &self.database)
+            .field("hmac", &self.hmac)
             .finish()
     }
 }
@@ -229,6 +235,11 @@ pub struct DropUserOp {
 pub struct CreateRoleOp {
     pub create_role: String,
     pub permissions: Vec<Permission>,
+    /// Hex HMAC over `b"create_role\0<role>"`. See `DropRoleOp`. The
+    /// permissions list is not part of the canonical input — mirrors
+    /// `drop_role`'s precedent of identifying the op by name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Drop a role.
@@ -257,6 +268,11 @@ pub struct RenameRoleOp {
 pub struct GrantRoleOp {
     pub grant_role: String,
     pub user: String,
+    /// Hex HMAC over `b"grant_role\0<role>\0<user>"`. See `DropUserOp`.
+    /// The single most dangerous op in the system (e.g. granting
+    /// `superuser` to an attacker-controlled account) — always gated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Revoke a role from a user.
@@ -264,4 +280,7 @@ pub struct GrantRoleOp {
 pub struct RevokeRoleOp {
     pub revoke_role: String,
     pub user: String,
+    /// Hex HMAC over `b"revoke_role\0<role>\0<user>"`. See `GrantRoleOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }

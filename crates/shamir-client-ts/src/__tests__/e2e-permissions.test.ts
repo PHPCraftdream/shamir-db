@@ -118,7 +118,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(capDb, {
         id: 'chmod-db',
         queries: {
-          ch: admin.chmod(
+          ch: admin.chmod(adminClient!, 
             admin.refDatabase(capDb),
             0o700,
           ),
@@ -187,15 +187,15 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(capDb, {
         id: 'chmod-open',
         queries: {
-          ch_db: admin.chmod(
+          ch_db: admin.chmod(adminClient!, 
             admin.refDatabase(capDb),
             0o777,
           ),
-          ch_store: admin.chmod(
+          ch_store: admin.chmod(adminClient!, 
             admin.refStore(capDb, 'main'),
             0o777,
           ),
-          ch_tbl: admin.chmod(
+          ch_tbl: admin.chmod(adminClient!, 
             admin.refTable(capDb, 'main', 'secrets'),
             0o777,
           ),
@@ -214,7 +214,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(capDb, {
         id: 'chmod-restrict',
         queries: {
-          ch: admin.chmod(
+          ch: admin.chmod(adminClient!, 
             admin.refDatabase(capDb),
             0o700,
           ),
@@ -266,7 +266,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute('default', {
         id: 'mk-role',
         queries: {
-          cr: admin.createRole('test_admin', [
+          cr: admin.createRole(adminClient!, 'test_admin', [
             admin.permission('allow', ['all'], admin.scopeGlobal()),
           ]),
         },
@@ -276,19 +276,19 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute('default', {
         id: 'mk-rbac-user',
         queries: {
-          cu: admin.createUser(USER_A, USER_A_PW),
+          cu: admin.createUser(adminClient!, USER_A, USER_A_PW),
         },
       }));
       br(await adminClient!.execute('default', {
         id: 'grant-su',
         queries: {
-          gr: admin.grantRole('superuser', USER_A),
+          gr: admin.grantRole(adminClient!, 'superuser', USER_A),
         },
       }));
       br(await adminClient!.execute('default', {
         id: 'revoke-su',
         queries: {
-          rv: admin.revokeRole('superuser', USER_A),
+          rv: admin.revokeRole(adminClient!, 'superuser', USER_A),
         },
       }));
 
@@ -383,7 +383,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb1, {
         id: 'chmod-db1',
         queries: {
-          ch: admin.chmod(
+          ch: admin.chmod(adminClient!, 
             admin.refDatabase(visDb1),
             0o700,
           ),
@@ -394,7 +394,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb2, {
         id: 'chmod-db2',
         queries: {
-          ch: admin.chmod(
+          ch: admin.chmod(adminClient!, 
             admin.refDatabase(visDb2),
             0o700,
           ),
@@ -466,15 +466,15 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb1, {
         id: 'open-db1',
         queries: {
-          ch_db: admin.chmod(
+          ch_db: admin.chmod(adminClient!, 
             admin.refDatabase(visDb1),
             0o777,
           ),
-          ch_store: admin.chmod(
+          ch_store: admin.chmod(adminClient!, 
             admin.refStore(visDb1, 'main'),
             0o777,
           ),
-          ch_tbl: admin.chmod(
+          ch_tbl: admin.chmod(adminClient!, 
             admin.refTable(visDb1, 'main', 't1'),
             0o777,
           ),
@@ -505,7 +505,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb1, {
         id: 're-restrict-db1',
         queries: {
-          ch: admin.chmod(
+          ch: admin.chmod(adminClient!, 
             admin.refDatabase(visDb1),
             0o700,
           ),
@@ -517,15 +517,15 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb2, {
         id: 'open-db2',
         queries: {
-          ch_db: admin.chmod(
+          ch_db: admin.chmod(adminClient!, 
             admin.refDatabase(visDb2),
             0o777,
           ),
-          ch_store: admin.chmod(
+          ch_store: admin.chmod(adminClient!, 
             admin.refStore(visDb2, 'main'),
             0o777,
           ),
-          ch_tbl: admin.chmod(
+          ch_tbl: admin.chmod(adminClient!, 
             admin.refTable(visDb2, 'main', 't2'),
             0o777,
           ),
@@ -557,15 +557,15 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(visDb1, {
         id: 'open-db1-again',
         queries: {
-          ch_db: admin.chmod(
+          ch_db: admin.chmod(adminClient!, 
             admin.refDatabase(visDb1),
             0o777,
           ),
-          ch_store: admin.chmod(
+          ch_store: admin.chmod(adminClient!, 
             admin.refStore(visDb1, 'main'),
             0o777,
           ),
-          ch_tbl: admin.chmod(
+          ch_tbl: admin.chmod(adminClient!, 
             admin.refTable(visDb1, 'main', 't1'),
             0o777,
           ),
@@ -673,7 +673,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute('default', {
         id: 'mk-role-g3',
         queries: {
-          cr: admin.createRole(role, [
+          cr: admin.createRole(adminClient!, role, [
             admin.permission('allow', ['all'], admin.scopeGlobal()),
           ]),
         },
@@ -732,7 +732,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const chgrpResp = br(await adminClient!.execute(db, {
         id: 'chgrp-db-g3',
         queries: {
-          c: admin.chgrp(admin.refDatabase(db), gid),
+          c: admin.chgrp(adminClient!, admin.refDatabase(db), gid),
         },
       }));
       const chgrpRow = chgrpResp.results.c.records[0] as Record<string, unknown>;
@@ -824,17 +824,17 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(gdb, {
         id: 'chgrp-g4d',
         queries: {
-          cg_db: admin.chgrp(admin.refDatabase(gdb), gid),
-          cg_store: admin.chgrp(admin.refStore(gdb, 'main'), gid),
-          cg_tbl: admin.chgrp(admin.refTable(gdb, 'main', 'vault'), gid),
+          cg_db: admin.chgrp(adminClient!, admin.refDatabase(gdb), gid),
+          cg_store: admin.chgrp(adminClient!, admin.refStore(gdb, 'main'), gid),
+          cg_tbl: admin.chgrp(adminClient!, admin.refTable(gdb, 'main', 'vault'), gid),
         },
       }));
       br(await adminClient!.execute(gdb, {
         id: 'chmod-g4d',
         queries: {
-          cm_db: admin.chmod(admin.refDatabase(gdb), 0o770),
-          cm_store: admin.chmod(admin.refStore(gdb, 'main'), 0o770),
-          cm_tbl: admin.chmod(admin.refTable(gdb, 'main', 'vault'), 0o770),
+          cm_db: admin.chmod(adminClient!, admin.refDatabase(gdb), 0o770),
+          cm_store: admin.chmod(adminClient!, admin.refStore(gdb, 'main'), 0o770),
+          cm_tbl: admin.chmod(adminClient!, admin.refTable(gdb, 'main', 'vault'), 0o770),
         },
       }));
 

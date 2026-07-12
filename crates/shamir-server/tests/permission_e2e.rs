@@ -286,16 +286,20 @@ fn read_batch(table: &str) -> shamir_db::query::batch::BatchRequest {
     b.build()
 }
 
-/// Build a batch with a single chmod op on a table.
-fn chmod_batch(db: &str, store: &str, table: &str, mode: u16) -> DbRequest {
+/// Build a batch with a single chmod op on a table. `session_id` is the
+/// signing session's bearer token — chmod is HMAC-gated (task #542).
+fn chmod_batch(session_id: [u8; 32], db: &str, store: &str, table: &str, mode: u16) -> DbRequest {
+    let resource = shamir_query_builder::ddl::res::table(db, store, table);
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(
-            shamir_query_builder::ddl::res::table(db, store, table),
-            mode,
-        ),
+        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -305,12 +309,19 @@ fn chmod_batch(db: &str, store: &str, table: &str, mode: u16) -> DbRequest {
 }
 
 /// Build a batch with a single chmod op on a database (top-level container).
-fn chmod_db_batch(db: &str, mode: u16) -> DbRequest {
+/// `session_id` is the signing session's bearer token.
+fn chmod_db_batch(session_id: [u8; 32], db: &str, mode: u16) -> DbRequest {
+    let resource = shamir_query_builder::ddl::res::database(db);
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod_db");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(shamir_query_builder::ddl::res::database(db), mode),
+        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -319,13 +330,20 @@ fn chmod_db_batch(db: &str, mode: u16) -> DbRequest {
     }
 }
 
-/// Build a batch with a single chmod op on a store/repo.
-fn chmod_store_batch(db: &str, store: &str, mode: u16) -> DbRequest {
+/// Build a batch with a single chmod op on a store/repo. `session_id` is
+/// the signing session's bearer token.
+fn chmod_store_batch(session_id: [u8; 32], db: &str, store: &str, mode: u16) -> DbRequest {
+    let resource = shamir_query_builder::ddl::res::store(db, store);
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod_store");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(shamir_query_builder::ddl::res::store(db, store), mode),
+        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -334,16 +352,20 @@ fn chmod_store_batch(db: &str, store: &str, mode: u16) -> DbRequest {
     }
 }
 
-/// Build a batch with a single chgrp op on a table.
-fn chgrp_batch(db: &str, store: &str, table: &str, group: u64) -> DbRequest {
+/// Build a batch with a single chgrp op on a table. `session_id` is the
+/// signing session's bearer token — chgrp is HMAC-gated (task #542).
+fn chgrp_batch(session_id: [u8; 32], db: &str, store: &str, table: &str, group: u64) -> DbRequest {
+    let resource = shamir_query_builder::ddl::res::table(db, store, table);
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_chgrp(&resource, Some(group)),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chgrp");
     b.chgrp(
         "cg",
-        shamir_query_builder::ddl::chgrp(
-            shamir_query_builder::ddl::res::table(db, store, table),
-            Some(group),
-        ),
+        shamir_query_builder::ddl::chgrp(resource, Some(group)).hmac(tag),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -490,7 +512,7 @@ async fn permission_deny_allow_by_mode() {
 
     // --- Admin: chmod table to 0o700 (owner-only rwx) ---
     let resp = roundtrip(
-        &chmod_batch(db_name, "main", table_name, 0o700),
+        &chmod_batch(admin_sid, db_name, "main", table_name, 0o700),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -636,7 +658,7 @@ async fn permission_group_grant() {
     // db + repo ancestors to reach the table (whose group bits are the SUBJECT
     // of this test). Open the db + repo so Execute is granted to everyone.
     let resp = roundtrip(
-        &chmod_db_batch(db_name, 0o755),
+        &chmod_db_batch(admin_sid, db_name, 0o755),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -649,7 +671,7 @@ async fn permission_group_grant() {
         resp
     );
     let resp = roundtrip(
-        &chmod_store_batch(db_name, "main", 0o755),
+        &chmod_store_batch(admin_sid, db_name, "main", 0o755),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -731,7 +753,7 @@ async fn permission_group_grant() {
 
     // chgrp the table to the group
     let resp = roundtrip(
-        &chgrp_batch(db_name, "main", table_name, group_id),
+        &chgrp_batch(admin_sid, db_name, "main", table_name, group_id),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -746,7 +768,7 @@ async fn permission_group_grant() {
 
     // chmod: owner rwx + group r-x + other --- (0o750)
     let resp = roundtrip(
-        &chmod_batch(db_name, "main", table_name, 0o750),
+        &chmod_batch(admin_sid, db_name, "main", table_name, 0o750),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -913,9 +935,9 @@ async fn permission_open_default_allows_any_user() {
 
     // --- Admin chmod db + repo + table to OPEN (0o777) ---
     for req in [
-        chmod_db_batch(db_name, 0o777),
-        chmod_store_batch(db_name, "main", 0o777),
-        chmod_batch(db_name, "main", table_name, 0o777),
+        chmod_db_batch(admin_sid, db_name, 0o777),
+        chmod_store_batch(admin_sid, db_name, "main", 0o777),
+        chmod_batch(admin_sid, db_name, "main", table_name, 0o777),
     ] {
         let resp = roundtrip(&req, admin_sid, &mut admin_rid, &mut admin_w, &mut admin_r).await;
         assert!(
