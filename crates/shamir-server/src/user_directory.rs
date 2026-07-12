@@ -424,4 +424,38 @@ impl UserDirectory for FjallUserDirectory {
         let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
         user.user_id_array()
     }
+
+    fn update_credentials(
+        &self,
+        username: &str,
+        new_salt: [u8; 16],
+        new_stored_key: StoredKey,
+        new_server_key: [u8; 32],
+        new_kdf_params: KdfParams,
+        now_ns: u64,
+    ) -> Result<bool> {
+        // Fold the `tickets_invalid_before_ns` bump into the SAME
+        // read-modify-write transaction as the credential swap (rather than
+        // a second separate `bump_tickets_invalid` call): `changepw.rs`'s doc
+        // comment on `finalize_change_password` notes the caller persists
+        // `tickets_invalid_before_ns_ns` "for atomicity reasons" — a second,
+        // independent fjall write would reopen exactly the gap that note
+        // warns about (a crash between the two writes could leave new
+        // credentials durable while the old ticket epoch is still honoured,
+        // i.e. a stolen ticket minted under the OLD password would still
+        // pass the §7.5 validity check after the password change). Doing
+        // both mutations under one `write_lock` critical section + one
+        // `persist(SyncAll)` makes the update atomic with respect to a
+        // crash: either both land or neither does.
+        self.read_modify_write(username, |user| {
+            user.salt = new_salt.to_vec();
+            user.stored_key = new_stored_key.0.to_vec();
+            user.server_key = new_server_key.to_vec();
+            user.kdf_params = (&new_kdf_params).into();
+            if now_ns > user.tickets_invalid_before_ns {
+                user.tickets_invalid_before_ns = now_ns;
+            }
+            true
+        })
+    }
 }

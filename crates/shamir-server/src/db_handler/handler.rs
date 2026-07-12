@@ -70,7 +70,7 @@ use std::time::Duration;
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
-use shamir_connect::server::session::Session;
+use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
@@ -84,7 +84,10 @@ pub use shamir_query_types::wire::{DbRequest, DbResponse};
 
 use crate::tx_registry::TxRegistry;
 
-use super::admin::{check_destructive_hmacs, create_scram_user, AdminGlue};
+use super::admin::{
+    change_password_challenge, change_password_verify, check_destructive_hmacs, create_scram_user,
+    AdminGlue,
+};
 use super::config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::subscribe_handler;
 
@@ -157,6 +160,21 @@ pub struct ShamirDbHandler {
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
     pub(super) tx_registry: Arc<TxRegistry>,
+    /// `SessionStore` access for ops that must kill OTHER live sessions of
+    /// the calling user (currently only `ChangePasswordVerify`'s spec
+    /// §12.5.3 session-kill step). `None` means the handler was built
+    /// without it — the credential update in `ChangePasswordVerify` still
+    /// lands, but the session-kill half is skipped (documented partial-fix
+    /// fallback; see `ShamirDbHandler::with_session_store`).
+    ///
+    /// `SessionStore` itself lives at the connection/server layer
+    /// (`server_launcher.rs` creates it once and passes it into
+    /// `dispatch_request_view` as its own parameter for the §7.5 validity
+    /// check) — this field is an ADDITIONAL reference threaded in at
+    /// construction time so this handler can reach it too, without
+    /// restructuring `dispatch_request_view`'s signature or the
+    /// `RequestHandler` trait.
+    pub(super) session_store: Option<Arc<SessionStore>>,
 }
 
 impl ShamirDbHandler {
@@ -172,6 +190,7 @@ impl ShamirDbHandler {
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
+            session_store: None,
         }
     }
 
@@ -186,6 +205,7 @@ impl ShamirDbHandler {
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
+            session_store: None,
         }
     }
 
@@ -222,6 +242,20 @@ impl ShamirDbHandler {
     /// bump-on-promote are R3; for now this is a static field.
     pub fn with_leader_epoch(mut self, epoch: u64) -> Self {
         self.leader_epoch = epoch;
+        self
+    }
+
+    /// Give this handler access to the server-wide [`SessionStore`] so
+    /// `ChangePasswordVerify` can kill every OTHER live session of the
+    /// calling user (spec §12.5.3) after a successful credential change.
+    /// Without this, `SessionStore` — which is owned by the connection/
+    /// server layer and passed to `dispatch_request_view` as its own
+    /// parameter, not through the `RequestHandler` trait — is unreachable
+    /// from inside `handle`. Default `None`: the credential update in
+    /// `ChangePasswordVerify` still lands, but the session-kill step is
+    /// skipped.
+    pub fn with_session_store(mut self, session_store: Arc<SessionStore>) -> Self {
+        self.session_store = Some(session_store);
         self
     }
 
@@ -292,6 +326,28 @@ impl RequestHandler for ShamirDbHandler {
                 // Role + per-repo authorisation enforced inside `handle_repl`.
                 DbRequest::Repl(repl_req) => {
                     DbResponse::Repl(self.handle_repl(session, repl_req).await)
+                }
+
+                // changePassword (spec §12.5) — see `db_handler::admin`.
+                DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
+                    change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
+                }
+                DbRequest::ChangePasswordVerify {
+                    client_proof_old,
+                    new_salt,
+                    new_stored_key,
+                    new_server_key,
+                } => {
+                    change_password_verify(
+                        self.admin.as_ref(),
+                        self.session_store.as_ref(),
+                        session,
+                        client_proof_old,
+                        new_salt,
+                        new_stored_key,
+                        new_server_key,
+                    )
+                    .await
                 }
             };
 

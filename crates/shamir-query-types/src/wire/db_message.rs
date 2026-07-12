@@ -118,6 +118,41 @@ pub enum DbRequest {
     /// replication evolve without bumping the query-language version.
     /// R0: only `Hello` + `Pull` (§5.3).
     Repl(ReplRequest),
+
+    /// Step 1 of `changePassword` (spec §12.5): the caller's own session
+    /// requests a fresh server-side challenge (`server_nonce_cp`) bound to
+    /// its own `session_id`. No permission gate beyond "you hold a valid
+    /// session" — the caller can only ever change their own password
+    /// (proven by the SCRAM proof-of-old-password in
+    /// [`DbRequest::ChangePasswordVerify`]), so there is nothing extra to
+    /// authorize here.
+    ChangePasswordChallenge {
+        /// Client-supplied per-request CSPRNG nonce (anti-replay).
+        #[serde(with = "serde_bytes")]
+        client_nonce_cp: Vec<u8>,
+    },
+    /// Step 2 of `changePassword` (spec §12.5): submit the SCRAM proof
+    /// recovered from the OLD password plus the NEW credential material
+    /// (already derived client-side — the server only verifies the old
+    /// proof and persists the new material verbatim). On success the
+    /// server persists the new credentials, bumps
+    /// `tickets_invalid_before_ns`, and kills every other live session for
+    /// this user (spec §12.5.3).
+    ChangePasswordVerify {
+        /// SCRAM proof recovered from the OLD password, bound to the
+        /// pending challenge issued by [`DbRequest::ChangePasswordChallenge`].
+        #[serde(with = "serde_bytes")]
+        client_proof_old: Vec<u8>,
+        /// New per-user salt (CSPRNG, client-generated).
+        #[serde(with = "serde_bytes")]
+        new_salt: Vec<u8>,
+        /// New `stored_key = SHA256(HMAC(new_salted_pw, "Client Key"))`.
+        #[serde(with = "serde_bytes")]
+        new_stored_key: Vec<u8>,
+        /// New `server_key = HMAC(new_salted_pw, "Server Key")`.
+        #[serde(with = "serde_bytes")]
+        new_server_key: Vec<u8>,
+    },
 }
 
 /// Application-layer DB response.
@@ -199,4 +234,26 @@ pub enum DbResponse {
     /// nested [`ReplResponse`] carries `leader_epoch` on every variant for
     /// VR-style fencing (§5.2).
     Repl(ReplResponse),
+
+    /// Reply to [`DbRequest::ChangePasswordChallenge`] — the server-issued
+    /// challenge view (spec §12.5 `challenge_cp`).
+    ChangePasswordChallenge {
+        /// Fresh CSPRNG nonce issued by the server for this challenge.
+        #[serde(with = "serde_bytes")]
+        server_nonce_cp: Vec<u8>,
+        /// User's current salt (echoed for client convenience).
+        #[serde(with = "serde_bytes")]
+        salt: Vec<u8>,
+        /// User's current KDF memory cost (KB) — `proof_old` uses these.
+        kdf_memory_kb: u32,
+        /// User's current KDF time cost (passes).
+        kdf_time: u32,
+        /// User's current KDF parallelism.
+        kdf_parallelism: u32,
+        /// User's current Argon2 algorithm version byte.
+        kdf_argon2_version: u8,
+    },
+    /// Successful reply to [`DbRequest::ChangePasswordVerify`]. No payload
+    /// beyond ok — the client already knows its own new credentials.
+    ChangePasswordOk,
 }
