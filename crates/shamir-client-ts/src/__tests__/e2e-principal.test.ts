@@ -134,7 +134,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const grpResp = br(await adminClient!.execute(chownDb, {
         id: 'mk-grp',
         queries: {
-          g: admin.createGroup('testers'),
+          g: admin.createGroup(adminClient!, 'testers'),
         },
       }));
       const groupId = (grpResp.results.g.records[0] as Record<string, unknown>)
@@ -145,7 +145,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(chownDb, {
         id: 'add-member',
         queries: {
-          am: admin.addGroupMember(admin.groupName('testers'), TEST_USER),
+          am: admin.addGroupMember(adminClient!, admin.groupName('testers'), TEST_USER),
         },
       }));
 

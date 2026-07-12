@@ -314,3 +314,70 @@ export function canonicalPurgeHistory(
     canonicalPurgeScope(scope),
   ]);
 }
+
+/**
+ * Wire-encodable reference to a group — byte-for-byte mirror of the Rust
+ * `GroupRef` (untagged, single-key object). Only the shape needed to
+ * compute a canonical string is declared here; the full type lives in
+ * `./types/admin.ts`.
+ */
+type GroupRefLike = { name: string } | { id: number };
+
+/**
+ * Render a `GroupRef` into the stable `name:<name>` / `id:<id>` string
+ * used by every `canonical*Group*` helper below. Mirrors the Rust
+ * `canonical_group_ref` in `hmac.rs` byte-for-byte.
+ *
+ * The `"name:"` / `"id:"` prefixes are reserved tags outside either
+ * variant's raw payload space, so the two variants can never collide: a
+ * group literally named `"id:3"` renders as `"name:id:3"`, not `"id:3"`
+ * (which only `{ id: 3 }` produces).
+ */
+export function canonicalGroupRef(r: GroupRefLike): string {
+  if ('name' in r) return `name:${r.name}`;
+  if ('id' in r) return `id:${r.id}`;
+  // Compile-time exhaustiveness guard: a future `GroupRefLike` member
+  // that isn't handled above fails `tsc` here instead of silently
+  // falling through to a wrong scheme (mirrors the Rust
+  // `canonical_group_ref` match, which has no wildcard arm for the
+  // same reason).
+  const exhaustive: never = r;
+  throw new Error(`unhandled GroupRef variant: ${JSON.stringify(exhaustive)}`);
+}
+
+export function canonicalCreateGroup(name: string): Uint8Array {
+  return joinNull(['create_group', name]);
+}
+
+export function canonicalDropGroup(group: GroupRefLike): Uint8Array {
+  return joinNull(['drop_group', canonicalGroupRef(group)]);
+}
+
+export function canonicalRenameGroup(
+  group: GroupRefLike,
+  to: string,
+): Uint8Array {
+  return joinNull(['rename_group', canonicalGroupRef(group), to]);
+}
+
+export function canonicalAddGroupMember(
+  group: GroupRefLike,
+  user: number | bigint,
+): Uint8Array {
+  return joinNull([
+    'add_group_member',
+    canonicalGroupRef(group),
+    String(user),
+  ]);
+}
+
+export function canonicalRemoveGroupMember(
+  group: GroupRefLike,
+  user: number | bigint,
+): Uint8Array {
+  return joinNull([
+    'remove_group_member',
+    canonicalGroupRef(group),
+    String(user),
+  ]);
+}

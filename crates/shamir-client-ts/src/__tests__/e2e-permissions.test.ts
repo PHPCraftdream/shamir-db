@@ -241,7 +241,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const grpResp = br(await adminClient!.execute(capDb, {
         id: 'mk-group',
         queries: {
-          g: admin.createGroup('readers'),
+          g: admin.createGroup(adminClient!, 'readers'),
         },
       }));
       const groupId = (grpResp.results.g.records[0] as Record<string, unknown>)
@@ -720,7 +720,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const grpResp = br(await adminClient!.execute(db, {
         id: 'mk-group-g3',
         queries: {
-          g: admin.createGroup(groupName),
+          g: admin.createGroup(adminClient!, groupName),
         },
       }));
       const gid = (grpResp.results.g.records[0] as Record<string, unknown>)
@@ -803,7 +803,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const grpResp = br(await adminClient!.execute(gdb, {
         id: 'mk-group-g4d',
         queries: {
-          g: admin.createGroup(`g4d_grp_${process.pid}_${Date.now()}`),
+          g: admin.createGroup(adminClient!, `g4d_grp_${process.pid}_${Date.now()}`),
         },
       }));
       const gid = (grpResp.results.g.records[0] as Record<string, unknown>)
@@ -814,7 +814,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(gdb, {
         id: 'add-member-g4d',
         queries: {
-          a: admin.addGroupMember(admin.groupId(gid), USER_G),
+          a: admin.addGroupMember(adminClient!, admin.groupId(gid), USER_G),
         },
       }));
 
@@ -851,7 +851,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(gdb, {
         id: 'rm-member-g4d',
         queries: {
-          r: admin.removeGroupMember(admin.groupId(gid), USER_G),
+          r: admin.removeGroupMember(adminClient!, admin.groupId(gid), USER_G),
         },
       }));
 

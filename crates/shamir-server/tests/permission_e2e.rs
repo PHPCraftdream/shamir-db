@@ -374,11 +374,17 @@ fn chgrp_batch(session_id: [u8; 32], db: &str, store: &str, table: &str, group: 
     }
 }
 
-/// Build a batch creating a group.
-fn create_group_req(db: &str, name: &str) -> DbRequest {
+/// Build a batch creating a group. `session_id` is the signing session's
+/// bearer token — create_group is HMAC-gated (task #551).
+fn create_group_req(session_id: [u8; 32], db: &str, name: &str) -> DbRequest {
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_create_group(name),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("mkgrp");
-    b.create_group("mk", shamir_query_builder::ddl::create_group(name));
+    b.create_group("mk", shamir_query_builder::ddl::create_group(name).hmac(tag));
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
@@ -386,18 +392,27 @@ fn create_group_req(db: &str, name: &str) -> DbRequest {
     }
 }
 
-/// Build a batch adding a user to a group.
-fn add_group_member_req(db: &str, group_name: &str, user_id: u64) -> DbRequest {
+/// Build a batch adding a user to a group. `session_id` is the signing
+/// session's bearer token — add_group_member is HMAC-gated (task #551).
+fn add_group_member_req(
+    session_id: [u8; 32],
+    db: &str,
+    group_name: &str,
+    user_id: u64,
+) -> DbRequest {
+    let group = shamir_query_builder::ddl::GroupRef::Name {
+        name: group_name.to_string(),
+    };
+    let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let tag = shamir_query_types::hmac::compute_tag_hex(
+        &key,
+        &shamir_query_types::hmac::canonical_add_group_member(&group, user_id),
+    );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("addmember");
     b.add_group_member(
         "am",
-        shamir_query_builder::ddl::add_group_member(
-            shamir_query_builder::ddl::GroupRef::Name {
-                name: group_name.to_string(),
-            },
-            user_id,
-        ),
+        shamir_query_builder::ddl::add_group_member(group, user_id).hmac(tag),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -711,7 +726,7 @@ async fn permission_group_grant() {
 
     // --- Admin: create group ---
     let resp = roundtrip(
-        &create_group_req(db_name, "devs"),
+        &create_group_req(admin_sid, db_name, "devs"),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,
@@ -738,7 +753,7 @@ async fn permission_group_grant() {
     // Add bob to the group (use principal_id = fxhash of username)
     let bob_pid = principal_id("bob");
     let resp = roundtrip(
-        &add_group_member_req(db_name, "devs", bob_pid),
+        &add_group_member_req(admin_sid, db_name, "devs", bob_pid),
         admin_sid,
         &mut admin_rid,
         &mut admin_w,

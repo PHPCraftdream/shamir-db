@@ -245,7 +245,7 @@ fn chgrp_null_group_wire() {
 
 #[test]
 fn create_group_wire() {
-    let op = ddl::create_group("devs");
+    let op = ddl::create_group("devs").build();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -294,7 +294,8 @@ fn add_group_member_wire() {
             name: "devs".into(),
         },
         42,
-    );
+    )
+    .build();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -310,7 +311,7 @@ fn add_group_member_wire() {
 
 #[test]
 fn remove_group_member_wire() {
-    let op = ddl::remove_group_member(ddl::GroupRef::Id { id: 1 }, 42);
+    let op = ddl::remove_group_member(ddl::GroupRef::Id { id: 1 }, 42).build();
     let j = roundtrip(&op);
     assert_eq!(
         j,

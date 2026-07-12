@@ -132,28 +132,53 @@ export interface ChgrpOp {
   hmac?: string;
 }
 
+/**
+ * Create a new group (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface CreateGroupOp {
   create_group: string;
+  hmac?: string;
 }
 
+/**
+ * Drop an existing group by name or id (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface DropGroupOp {
   drop_group: GroupRef;
   if_exists?: boolean;
+  hmac?: string;
 }
 
+/**
+ * Rename an existing group (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface RenameGroupOp {
   rename_group: GroupRef;
   to: string;
+  hmac?: string;
 }
 
+/**
+ * Add a user to a group (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface AddGroupMemberOp {
   add_group_member: GroupRef;
   user: number | bigint;
+  hmac?: string;
 }
 
+/**
+ * Remove a user from a group (HMAC-gated).
+ * `hmac` is `Option<String>` with skip → present when signed.
+ */
 export interface RemoveGroupMemberOp {
   remove_group_member: GroupRef;
   user: number | bigint;
+  hmac?: string;
 }
 
 /**
