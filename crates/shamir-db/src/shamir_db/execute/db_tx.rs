@@ -13,8 +13,8 @@
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
-    commit_interactive_tx, execute_in_open_tx, open_interactive_tx, BatchError, BatchOp,
-    BatchRequest, BatchResponse, TransactionInfo,
+    commit_interactive_tx, execute_in_open_tx, open_interactive_tx, BatchError, BatchRequest,
+    BatchResponse, TransactionInfo,
 };
 
 use fxhash::FxHashMap;
@@ -129,6 +129,11 @@ impl ShamirDb {
 
         // Per-op DML authorization (mirrors execute_as).
         //
+        // `required_access` is the single source of truth for the
+        // BatchOp -> (Action, ResourcePath) mapping (was duplicated inline
+        // here and in `execute_as` — see `BatchOp::required_access`'s doc
+        // comment).
+        //
         // ACL inline cache: within a single tx_execute_as call every
         // (path, action) pair resolves to the same answer — the actor,
         // the ACL tree, and the requested resource do not change between
@@ -137,19 +142,7 @@ impl ShamirDb {
         // is stack-local and dropped at function exit (no cross-call sharing).
         let mut acl_cache: FxHashMap<(ResourcePath, Action), bool> = FxHashMap::default();
         for entry in request.queries.values() {
-            if let Some(tref) = entry.op.table_ref() {
-                let action = match &entry.op {
-                    BatchOp::Read(_) => Action::Read,
-                    BatchOp::Insert(_) => Action::Create,
-                    BatchOp::Set(_) | BatchOp::Update(_) => Action::Write,
-                    BatchOp::Delete(_) => Action::Delete,
-                    _ => Action::Write,
-                };
-                let path = ResourcePath::Table {
-                    db: db_name.to_string(),
-                    store: tref.repo.clone(),
-                    table: tref.table.clone(),
-                };
+            if let Some((action, path)) = entry.op.required_access(db_name) {
                 let key = (path.clone(), action);
                 let allowed = if let Some(&cached) = acl_cache.get(&key) {
                     cached

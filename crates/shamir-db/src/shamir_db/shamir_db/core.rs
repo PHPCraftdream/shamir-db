@@ -73,6 +73,21 @@ pub struct ShamirDb {
     /// can't read-modify-write the same `next_group_id`. Group creation is
     /// rare, so holding this across the (bounded) await sequence is fine.
     pub(super) group_id_lock: Arc<Mutex<()>>,
+    /// Serialises the whole `handle_create_db` sequence (exists-check →
+    /// authorize → create) so two concurrent `CREATE DATABASE IF NOT
+    /// EXISTS` (or plain `CREATE DATABASE`) calls for the SAME name can't
+    /// both observe "does not exist" and both proceed to create — see
+    /// task #546 (create-DB/create-repo TOCTOU). DB creation is rare, so
+    /// holding this across the (bounded) await sequence mirrors
+    /// `group_id_lock`'s established pattern.
+    pub(super) db_create_lock: Arc<Mutex<()>>,
+    /// Per-database lock serialising `handle_create_repo`'s exists-check →
+    /// authorize → create sequence, keyed by `db_name`. Mirrors
+    /// `admin_user_locks`'s per-key pattern: entries leak by design (each
+    /// unique db occupies a slot forever), which is fine since database
+    /// creation is rare and the map is bounded by the number of distinct
+    /// databases ever created.
+    pub(super) repo_create_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
     /// Live validator registry (compiled WASM validators loaded on open).
     pub(super) validators: Arc<ValidatorRegistry>,
     /// Base directory for durable repos, derived from the system store
@@ -130,6 +145,8 @@ impl ShamirDb {
             net_allowlist: Arc::new(Vec::new()),
             function_meta: Arc::new(DashMap::with_hasher(THasher::default())),
             group_id_lock: Arc::new(Mutex::new(())),
+            db_create_lock: Arc::new(Mutex::new(())),
+            repo_create_locks: Arc::new(DashMap::with_hasher(THasher::default())),
             validators,
             data_root,
         };
@@ -439,6 +456,20 @@ impl ShamirDb {
     /// RevokeRole) and close the §B9 read-modify-write race.
     pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.admin_user_locks
+    }
+
+    /// Global lock serialising the `handle_create_db` exists-check →
+    /// authorize → create sequence (task #546 TOCTOU close).
+    pub fn db_create_lock(&self) -> &Arc<Mutex<()>> {
+        &self.db_create_lock
+    }
+
+    /// Per-database lock map serialising `handle_create_repo`'s
+    /// exists-check → authorize → create sequence, keyed by `db_name`
+    /// (task #546 TOCTOU close). Mirrors [`Self::admin_user_locks`]'s
+    /// get-or-insert-then-lock usage pattern.
+    pub fn repo_create_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
+        &self.repo_create_locks
     }
 
     pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>> {

@@ -8,6 +8,20 @@ use super::ShamirDb;
 use super::SYSTEM_DB_NAME;
 
 impl ShamirDb {
+    /// System-actor convenience wrapper around
+    /// [`create_db_as`](Self::create_db_as).
+    ///
+    /// // SAFETY (wire-reachability, task #546): NEVER call this from a
+    /// // wire-reachable path (a server request handler, a new `BatchOp`
+    /// // admin handler, etc.) — it stamps the new database's owner as
+    /// // `Actor::System` unconditionally, silently bypassing ACL
+    /// // attribution for whoever actually issued the request. Every
+    /// // wire-reachable admin dispatcher already goes through
+    /// // `execute_as(real_actor, ...)` -> `handle_create_db` ->
+    /// // `create_db_as(name, real_actor)`, never this bare wrapper. This
+    /// // function exists ONLY for offline/CLI tooling and test setup that
+    /// // legitimately runs as the system principal — grep every call site
+    /// // before adding a new one from request-handling code.
     pub async fn create_db(&self, name: &str) -> DbInstance {
         self.create_db_as(name, Actor::System).await
     }
@@ -302,6 +316,19 @@ impl ShamirDb {
         Ok(())
     }
 
+    /// System-actor convenience wrapper around
+    /// [`add_repo_as`](Self::add_repo_as).
+    ///
+    /// // SAFETY (wire-reachability, task #546): NEVER call this from a
+    /// // wire-reachable path — it stamps the new repo's (and its inline
+    /// // tables') owner as `Actor::System` unconditionally, silently
+    /// // bypassing ACL attribution for whoever actually issued the
+    /// // request. `handle_create_repo` (the real wire-reachable admin
+    /// // handler) already calls `add_repo_as(db_name, config, real_actor)`
+    /// // directly, never this bare wrapper. This function exists ONLY for
+    /// // offline/CLI tooling and test setup that legitimately runs as the
+    /// // system principal — grep every call site before adding a new one
+    /// // from request-handling code.
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {
         self.add_repo_as(db_name, config, Actor::System).await
     }

@@ -699,3 +699,266 @@ async fn create_db_rejects_dotdot_name() {
         "expected path-traversal rejection, got: {msg}"
     );
 }
+
+// ============================================================================
+// #546 — create-DB / create-repo TOCTOU close
+// ============================================================================
+//
+// `handle_create_db` / `handle_create_repo` used to do exists-check ->
+// authorize -> create with no atomicity between the exists-check and the
+// create call. Two concurrent `CREATE ... IF NOT EXISTS` calls for the SAME
+// name could both observe "does not exist" and both proceed — an
+// idempotency/duplicate-create hazard (not a rights bypass: `create_db_as`/
+// `add_repo_as` still enforce ACL end-to-end). `db_create_lock` /
+// `repo_create_locks` now serialise the whole sequence per name.
+//
+// Two complementary tests per op:
+//
+// 1. `..._if_not_exists_is_consistent` fires both calls via `tokio::join!`
+//    (the same pattern `test_create_group_concurrent_distinct_ids` in
+//    group_tests.rs uses) and asserts the end state is consistent (exactly
+//    one "created", one "existed"). NOTE (honesty about what this proves):
+//    with `#[tokio::test]`'s default single-threaded runtime and an
+//    in-memory system store, neither task's `.await` points actually
+//    return `Poll::Pending` before the fix, so `tokio::join!` does NOT
+//    reliably force the interleaving that would reproduce the pre-fix
+//    double-create — this test passed even with the lock temporarily
+//    disabled during development (verified manually; not a suitable RED
+//    proof on its own). It is kept because it's still a real regression
+//    guard for the END STATE (no duplicate/ghost row), and it's the
+//    established pattern for this kind of test in this codebase.
+// 2. `..._lock_actually_serialises_holders` is the DETERMINISTIC proof:
+//    it manually acquires the exposed `db_create_lock()` /
+//    `repo_create_locks()` guard from OUTSIDE `handle_create_db`/
+//    `handle_create_repo` (simulating "another create is mid-flight"),
+//    spawns a concurrent `execute(...)` call, and asserts that call is
+//    still pending after a bounded wait — then releases the guard and
+//    confirms the call completes. This proves the lock genuinely brackets
+//    the handler's critical section (the actual property the fix
+//    provides), independent of whether the in-memory backend happens to
+//    yield at the right point. A full `BackfillPauseHook`-style seam
+//    (#534/#538) inside the handler itself would give an even tighter
+//    reproduction of the ORIGINAL exists-check race, but is a
+//    disproportionately large addition for this LOW-severity item — see
+//    the task's closing report for the scoped-down follow-up.
+
+#[tokio::test]
+async fn concurrent_create_db_if_not_exists_is_consistent() {
+    use shamir_query_builder::ddl;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let make_req = || {
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_db("cd", ddl::create_db("racedb").if_not_exists());
+        b.to_request_via_msgpack()
+    };
+    let req_a = make_req();
+    let req_b = make_req();
+
+    // `execute` needs an existing db for the routing db_name param (the
+    // CreateDb payload names the NEW db); route through the system db like
+    // the existing dotdot test does — any pre-existing db works here since
+    // CreateDb's own ACL target is Root, not the routing db.
+    shamir.create_db("router").await;
+
+    let (r1, r2) = tokio::join!(
+        shamir.execute("router", &req_a),
+        shamir.execute("router", &req_b),
+    );
+
+    let resp1 = r1.expect("first create_db (if_not_exists) must succeed");
+    let resp2 = r2.expect("second create_db (if_not_exists) must succeed");
+
+    let created1 = resp1.results["cd"].records[0].get_value_bool("created");
+    let created2 = resp2.results["cd"].records[0].get_value_bool("created");
+    let existed1 = resp1.results["cd"].records[0].get_value_bool("existed");
+    let existed2 = resp2.results["cd"].records[0].get_value_bool("existed");
+
+    // Exactly one call must have actually created the database; the other
+    // must observe it as already-existing. Both racing to "created" (or
+    // both to "existed", which would mean the db was never created) is the
+    // TOCTOU bug this test guards against.
+    let created_count = [created1, created2]
+        .iter()
+        .filter(|c| **c == Some(true))
+        .count();
+    let existed_count = [existed1, existed2]
+        .iter()
+        .filter(|c| **c == Some(true))
+        .count();
+    assert_eq!(
+        created_count, 1,
+        "exactly one concurrent create_db(if_not_exists) call must report created=true \
+         (created1={created1:?}, created2={created2:?})"
+    );
+    assert_eq!(
+        existed_count, 1,
+        "exactly one concurrent create_db(if_not_exists) call must report existed=true \
+         (existed1={existed1:?}, existed2={existed2:?})"
+    );
+
+    // The database itself must exist exactly once (no duplicate/ghost state).
+    assert!(shamir.has_db("racedb"));
+}
+
+#[tokio::test]
+async fn concurrent_create_repo_if_not_exists_is_consistent() {
+    use shamir_query_builder::ddl;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await;
+
+    let make_req = || {
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("racerepo")
+                .engine("in_memory")
+                .if_not_exists(),
+        );
+        b.to_request_via_msgpack()
+    };
+    let req_a = make_req();
+    let req_b = make_req();
+
+    let (r1, r2) = tokio::join!(
+        shamir.execute("testdb", &req_a),
+        shamir.execute("testdb", &req_b),
+    );
+
+    let resp1 = r1.expect("first create_repo (if_not_exists) must succeed");
+    let resp2 = r2.expect("second create_repo (if_not_exists) must succeed");
+
+    let created1 = resp1.results["cr"].records[0].get_value_bool("created");
+    let created2 = resp2.results["cr"].records[0].get_value_bool("created");
+    let existed1 = resp1.results["cr"].records[0].get_value_bool("existed");
+    let existed2 = resp2.results["cr"].records[0].get_value_bool("existed");
+
+    let created_count = [created1, created2]
+        .iter()
+        .filter(|c| **c == Some(true))
+        .count();
+    let existed_count = [existed1, existed2]
+        .iter()
+        .filter(|c| **c == Some(true))
+        .count();
+    assert_eq!(
+        created_count, 1,
+        "exactly one concurrent create_repo(if_not_exists) call must report created=true \
+         (created1={created1:?}, created2={created2:?})"
+    );
+    assert_eq!(
+        existed_count, 1,
+        "exactly one concurrent create_repo(if_not_exists) call must report existed=true \
+         (existed1={existed1:?}, existed2={existed2:?})"
+    );
+
+    // The repo itself must exist exactly once.
+    let db = shamir.get_db("testdb").unwrap();
+    assert!(db.has_repo("racerepo"));
+}
+
+/// Deterministic proof that `db_create_lock` actually brackets
+/// `handle_create_db`'s exists-check -> authorize -> create sequence:
+/// hold the lock from OUTSIDE the handler (simulating "a create is
+/// mid-flight"), spawn a concurrent `execute` for the SAME db name, and
+/// assert it is still pending after a bounded wait. Releasing the lock
+/// must let the spawned call complete. This is independent of whether the
+/// in-memory backend happens to yield inside the handler itself (see the
+/// module doc comment above on why `tokio::join!` alone doesn't reliably
+/// reproduce the original race).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_db_lock_actually_serialises_concurrent_callers() {
+    use shamir_query_builder::ddl;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("router").await;
+
+    // Hold the lock as if a create_db were already mid-flight.
+    let held_guard = shamir.db_create_lock().lock().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_db("cd", ddl::create_db("lockedb"));
+    let req = b.to_request_via_msgpack();
+
+    let shamir2 = shamir.clone();
+    let spawned = tokio::spawn(async move { shamir2.execute("router", &req).await });
+
+    // Give the spawned task a bounded chance to run; it must NOT complete
+    // while the lock is held.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !spawned.is_finished(),
+        "create_db must block while db_create_lock is held by another caller"
+    );
+    assert!(
+        !shamir.has_db("lockedb"),
+        "the database must not exist yet while the lock is held"
+    );
+
+    // Release: the spawned call must now proceed and succeed.
+    drop(held_guard);
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+        .await
+        .expect("spawned create_db must complete promptly after lock release")
+        .expect("task must not panic")
+        .expect("create_db must succeed once the lock is free");
+    assert_eq!(
+        resp.results["cd"].records[0].get_value_bool("created"),
+        Some(true)
+    );
+    assert!(shamir.has_db("lockedb"));
+}
+
+/// Same deterministic proof for `repo_create_locks` (per-db keyed lock).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_repo_lock_actually_serialises_concurrent_callers() {
+    use shamir_query_builder::ddl;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await;
+
+    // Acquire the per-db lock the same way handle_create_repo does
+    // (get-or-insert then lock), simulating "a create_repo is mid-flight".
+    let repo_lock = shamir
+        .repo_create_locks()
+        .entry("testdb".to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let held_guard = repo_lock.lock().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("lockedrepo").engine("in_memory"));
+    let req = b.to_request_via_msgpack();
+
+    let shamir2 = shamir.clone();
+    let spawned = tokio::spawn(async move { shamir2.execute("testdb", &req).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !spawned.is_finished(),
+        "create_repo must block while its per-db repo_create_locks entry is held"
+    );
+    let db = shamir.get_db("testdb").unwrap();
+    assert!(
+        !db.has_repo("lockedrepo"),
+        "the repo must not exist yet while the lock is held"
+    );
+
+    drop(held_guard);
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+        .await
+        .expect("spawned create_repo must complete promptly after lock release")
+        .expect("task must not panic")
+        .expect("create_repo must succeed once the lock is free");
+    assert_eq!(
+        resp.results["cr"].records[0].get_value_bool("created"),
+        Some(true)
+    );
+    assert!(db.has_repo("lockedrepo"));
+}

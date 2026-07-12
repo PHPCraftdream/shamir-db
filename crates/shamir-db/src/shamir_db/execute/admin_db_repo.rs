@@ -26,6 +26,18 @@ impl ShamirAdminExecutor {
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         validate_name_component(&op.create_db, "db_name")?;
+
+        // TOCTOU close (task #546): hold `db_create_lock` across the WHOLE
+        // exists-check -> authorize -> create sequence, so two concurrent
+        // `CREATE DATABASE` (or `IF NOT EXISTS`) calls for the SAME name
+        // can't both observe "does not exist" and both proceed to create.
+        // The audit framed this as narrow (create already happens under an
+        // internal per-instance lock, so ACL is respected end-to-end) — this
+        // is an idempotency/race-on-the-exists-check hazard, not a rights
+        // bypass; the lock is global (not per-name) since db creation is
+        // rare, mirroring `group_id_lock`'s established pattern.
+        let _create_guard = self.shamir.db_create_lock().lock().await;
+
         if self.shamir.has_db(&op.create_db) {
             if op.if_not_exists {
                 return Ok(admin_result(mpack!({
@@ -139,6 +151,21 @@ impl ShamirAdminExecutor {
 
         validate_name_component(&self.db_name, "db_name")?;
         validate_name_component(&op.create_repo, "repo_name")?;
+
+        // TOCTOU close (task #546): hold a per-db lock across the WHOLE
+        // exists-check -> authorize -> create sequence, so two concurrent
+        // `CREATE REPO` (or `IF NOT EXISTS`) calls for the same (db, repo)
+        // name can't both observe "does not exist" and both proceed to
+        // create. Keyed by `db_name` (not globally) so repo creation in
+        // unrelated databases doesn't serialise against each other — mirrors
+        // `admin_user_locks`'s per-key get-or-insert-then-lock pattern.
+        let repo_lock = self
+            .shamir
+            .repo_create_locks()
+            .entry(self.db_name.clone())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _create_guard = repo_lock.lock().await;
 
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {

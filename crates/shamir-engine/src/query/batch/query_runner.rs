@@ -13,7 +13,7 @@ use crate::query::TableRef;
 use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
 use shamir_query_types::batch::ResultEncoding;
-use shamir_types::access::{authorize, Action, Actor, ResourcePath};
+use shamir_types::access::{trace_access, Action, Actor, ResourcePath};
 use shamir_types::codecs::interned::query_value_to_storage_bytes_into;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
@@ -88,8 +88,15 @@ impl<'a> QueryRunner<'a> {
     /// `TableManager::execute_*_tx`; read and admin ops are
     /// unchanged.
     ///
-    /// Each data op calls [`authorize`] with the appropriate [`Action`]
-    /// before performing work (R2 transparent gate — always `Ok`).
+    /// Each data op calls [`trace_access`] with the appropriate [`Action`]
+    /// before performing work — an R2 OBSERVABILITY trace, always `Ok`,
+    /// NOT the enforcement gate. The real gate already ran earlier, in
+    /// `ShamirDb::execute_as` / `tx_execute_as` (the per-op
+    /// `authorize_access` loop driven by `BatchOp::required_access`); by
+    /// the time control reaches this `run` method the op has already been
+    /// authorized. Do not remove the outer `authorize_access` call under
+    /// the impression that the `trace_access` calls below are doing the
+    /// enforcement — they never have.
     pub async fn run(
         &mut self,
         alias: &str,
@@ -317,7 +324,10 @@ impl<'a> QueryRunner<'a> {
 
         match &entry.op {
             BatchOp::Read(query) => {
-                authorize(&self.actor, &resource, Action::Read).map_err(|e| {
+                // Observability trace only — see `trace_access`'s doc
+                // comment. Real enforcement already ran in execute_as /
+                // tx_execute_as before this runner was reached.
+                trace_access(&self.actor, &resource, Action::Read).map_err(|e| {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
@@ -372,7 +382,10 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Insert(op) => {
-                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                // Observability trace only — see `trace_access`'s doc
+                // comment. Real enforcement already ran in execute_as /
+                // tx_execute_as before this runner was reached.
+                trace_access(&self.actor, &resource, Action::Write).map_err(|e| {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
@@ -465,7 +478,10 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Update(op) => {
-                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                // Observability trace only — see `trace_access`'s doc
+                // comment. Real enforcement already ran in execute_as /
+                // tx_execute_as before this runner was reached.
+                trace_access(&self.actor, &resource, Action::Write).map_err(|e| {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
@@ -587,7 +603,10 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Delete(op) => {
-                authorize(&self.actor, &resource, Action::Delete).map_err(|e| {
+                // Observability trace only — see `trace_access`'s doc
+                // comment. Real enforcement already ran in execute_as /
+                // tx_execute_as before this runner was reached.
+                trace_access(&self.actor, &resource, Action::Delete).map_err(|e| {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
@@ -703,7 +722,10 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Set(op) => {
-                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                // Observability trace only — see `trace_access`'s doc
+                // comment. Real enforcement already ran in execute_as /
+                // tx_execute_as before this runner was reached.
+                trace_access(&self.actor, &resource, Action::Write).map_err(|e| {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),

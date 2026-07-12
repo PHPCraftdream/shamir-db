@@ -3,6 +3,7 @@
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use shamir_types::access::{Action, ResourcePath};
 
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterSubscriptionOp,
@@ -445,6 +446,125 @@ impl<'de> Deserialize<'de> for BatchOp {
 }
 
 impl BatchOp {
+    /// Returns the `(Action, ResourcePath)` this op must be authorized
+    /// against, for ops with a `table_ref()`. `None` for admin/DDL ops
+    /// (authorized separately in `execute_admin`) and read-only/
+    /// introspection ops with no target table.
+    ///
+    /// This is the single source of truth for the per-op DML authorization
+    /// mapping that was previously duplicated (byte-for-byte) in
+    /// `shamir-db`'s `execute_as` and `tx_execute_as` — both now call this
+    /// method instead of re-deriving the `Action` inline. Like
+    /// [`is_write`](Self::is_write), this is an **exhaustive `match` with
+    /// no wildcard arm**: adding a new `BatchOp` variant that carries a
+    /// `table_ref()` will fail to compile here until the author explicitly
+    /// classifies its `Action` — the old duplicated code's `_ =>
+    /// Action::Write` wildcard silently swallowed that decision instead.
+    ///
+    /// The per-variant `Action` choice mirrors `is_write`'s existing
+    /// read/write classification: `Read` → `Action::Read`; `Insert` →
+    /// `Action::Create`; `Set`/`Update` → `Action::Write`; `Delete` →
+    /// `Action::Delete`. Every other variant either has no `table_ref()`
+    /// (admin/DDL, `Batch`, `Subscribe`, `Unsubscribe`) and is unreachable
+    /// here, or is listed explicitly below for completeness even though
+    /// `table_ref()` already returns `None` for it — this keeps the two
+    /// matches mechanically in sync so a future change to `table_ref()`
+    /// that starts returning `Some` for one of them is forced to pick an
+    /// `Action` here too.
+    pub fn required_access(&self, db: &str) -> Option<(Action, ResourcePath)> {
+        let action = match self {
+            // ----- data ops: the classification duplicated pre-fix -------
+            BatchOp::Read(_) => Action::Read,
+            BatchOp::Insert(_) => Action::Create,
+            BatchOp::Set(_) | BatchOp::Update(_) => Action::Write,
+            BatchOp::Delete(_) => Action::Delete,
+
+            // ----- everything else has no table_ref(): unreachable below,
+            // but listed explicitly (no wildcard) so a new BatchOp variant
+            // forces a conscious choice here too. -------------------------
+            BatchOp::CreateDb(_)
+            | BatchOp::DropDb(_)
+            | BatchOp::CreateRepo(_)
+            | BatchOp::DropRepo(_)
+            | BatchOp::RenameRepo(_)
+            | BatchOp::RenameDb(_)
+            | BatchOp::CreateTable(_)
+            | BatchOp::DropTable(_)
+            | BatchOp::RenameTable(_)
+            | BatchOp::CreateIndex(_)
+            | BatchOp::DropIndex(_)
+            | BatchOp::RenameIndex(_)
+            | BatchOp::SetBufferConfig(_)
+            | BatchOp::GetBufferConfig(_)
+            | BatchOp::AlterBufferConfig(_)
+            | BatchOp::List(_)
+            | BatchOp::StartMigration(_)
+            | BatchOp::CommitMigration(_)
+            | BatchOp::RollbackMigration(_)
+            | BatchOp::MigrationStatus(_)
+            | BatchOp::CreateUser(_)
+            | BatchOp::DropUser(_)
+            | BatchOp::CreateRole(_)
+            | BatchOp::DropRole(_)
+            | BatchOp::RenameRole(_)
+            | BatchOp::GrantRole(_)
+            | BatchOp::RevokeRole(_)
+            | BatchOp::Chmod(_)
+            | BatchOp::Chown(_)
+            | BatchOp::Chgrp(_)
+            | BatchOp::CreateGroup(_)
+            | BatchOp::DropGroup(_)
+            | BatchOp::RenameGroup(_)
+            | BatchOp::AddGroupMember(_)
+            | BatchOp::RemoveGroupMember(_)
+            | BatchOp::AccessTree(_)
+            | BatchOp::CreateFunction(_)
+            | BatchOp::DropFunction(_)
+            | BatchOp::RenameFunction(_)
+            | BatchOp::CreateValidator(_)
+            | BatchOp::DropValidator(_)
+            | BatchOp::RenameValidator(_)
+            | BatchOp::BindValidator(_)
+            | BatchOp::UnbindValidator(_)
+            | BatchOp::ListValidators(_)
+            | BatchOp::SetTableSchema(_)
+            | BatchOp::AddSchemaRule(_)
+            | BatchOp::RemoveSchemaRule(_)
+            | BatchOp::GetTableSchema(_)
+            | BatchOp::DescribeTable(_)
+            | BatchOp::CreateFunctionFolder(_)
+            | BatchOp::RenameFunctionFolder(_)
+            | BatchOp::InternerDump(_)
+            | BatchOp::InternerTouch(_)
+            | BatchOp::PurgeHistory(_)
+            | BatchOp::SetRetention(_)
+            | BatchOp::ChangesSince(_)
+            | BatchOp::Call(_)
+            | BatchOp::Batch(_)
+            | BatchOp::Subscribe(_)
+            | BatchOp::Unsubscribe(_)
+            | BatchOp::CreateReplicationProfile(_)
+            | BatchOp::DropReplicationProfile(_)
+            | BatchOp::CreatePublication(_)
+            | BatchOp::DropPublication(_)
+            | BatchOp::CreateSubscription(_)
+            | BatchOp::DropSubscription(_)
+            | BatchOp::AlterSubscription(_)
+            | BatchOp::ListPublications(_)
+            | BatchOp::ListSubscriptions(_)
+            | BatchOp::ReplicationStatus(_) => return None,
+        };
+        let tref = self.table_ref()?;
+        Some((
+            action,
+            ResourcePath::Table {
+                db: db.to_string(),
+                store: tref.repo.clone(),
+                table: tref.table.clone(),
+            },
+        ))
+    }
+
     /// Returns the table reference for data operations, None for admin ops.
     pub fn table_ref(&self) -> Option<&crate::TableRef> {
         match self {

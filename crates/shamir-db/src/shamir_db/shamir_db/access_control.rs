@@ -8,8 +8,8 @@ use shamir_types::types::value::QueryValue;
 use shamir_engine::function::{FunctionMeta, Security};
 
 use crate::access::{
-    authorize, permits, principal_id, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
-    OWNER_SYSTEM,
+    permits, principal_id, trace_access, AccessError, Action, Actor, Mode, ResourceMeta,
+    ResourcePath, OWNER_SYSTEM,
 };
 use crate::{DbError, DbResult};
 
@@ -234,10 +234,43 @@ impl ShamirDb {
 
     /// Create a group with the given name. Returns the allocated group id.
     ///
+    /// Thin `Actor::System` wrapper around [`create_group_as`](Self::create_group_as)
+    /// — see that method's doc comment for the group-CRUD `Manage(Root)`
+    /// self-defense rationale (task #546). Kept for existing callers
+    /// (tests, offline/CLI tooling) that don't carry an `Actor`; every
+    /// wire-reachable admin dispatcher call (`admin_access.rs`) goes
+    /// through `create_group_as` with the real actor.
+    ///
     /// Group ids are allocated monotonically from a counter stored in the
     /// `settings` table under the key `"next_group_id"`. Id 0 is
     /// reserved/unused; allocation starts from 1.
     pub async fn create_group(&self, name: &str) -> DbResult<u64> {
+        self.create_group_as(name, &Actor::System).await
+    }
+
+    /// Create a group, self-defending with the `Manage(Root)` gate.
+    ///
+    /// Task #546 hardening: group-CRUD previously did NO authorization
+    /// check itself — safety relied ENTIRELY on the dispatcher
+    /// (`admin_access.rs::handle_create_group`) pre-calling
+    /// `authorize_access(Root, Manage)` before reaching this method. That
+    /// dispatcher check still runs (this is a deliberately redundant,
+    /// structurally-enforced inline check, not a replacement for it) —
+    /// the two compose rather than conflict: `Actor::System` bypasses
+    /// both, and a real dispatcher call that already authorized simply
+    /// pays one extra (cheap, System-bypassed-or-already-passing) check.
+    /// The goal is that a FUTURE caller who reaches this method WITHOUT
+    /// going through the dispatcher (e.g. a new internal code path) can't
+    /// silently skip the gate.
+    ///
+    /// Group ids are allocated monotonically from a counter stored in the
+    /// `settings` table under the key `"next_group_id"`. Id 0 is
+    /// reserved/unused; allocation starts from 1.
+    pub async fn create_group_as(&self, name: &str, actor: &Actor) -> DbResult<u64> {
+        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
         // Serialise the whole read-modify-write (rare op, bounded contention).
         let _guard = self.group_id_lock.lock().await;
 
@@ -274,11 +307,28 @@ impl ShamirDb {
     }
 
     /// Drop a group by id.
+    ///
+    /// Thin `Actor::System` wrapper — see
+    /// [`drop_group_as`](Self::drop_group_as).
     pub async fn drop_group(&self, group_id: u64) -> DbResult<()> {
+        self.drop_group_as(group_id, &Actor::System).await
+    }
+
+    /// Drop a group by id, self-defending with the `Manage(Root)` gate.
+    /// See [`create_group_as`](Self::create_group_as)'s doc comment for
+    /// the task #546 rationale (redundant-with-dispatcher, composes with
+    /// `Actor::System` bypass, guards a future non-dispatcher caller).
+    pub async fn drop_group_as(&self, group_id: u64, actor: &Actor) -> DbResult<()> {
+        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?;
         self.system_store.remove_group(group_id).await
     }
 
     /// Rename an existing group.
+    ///
+    /// Thin `Actor::System` wrapper — see
+    /// [`rename_group_as`](Self::rename_group_as).
     ///
     /// Groups are id-keyed: members and resource references store the
     /// (immutable) `group_id`, never the name. Renaming therefore rewrites
@@ -295,6 +345,22 @@ impl ShamirDb {
         group_ref: &crate::query::admin::GroupRef,
         to: &str,
     ) -> DbResult<()> {
+        self.rename_group_as(group_ref, to, &Actor::System).await
+    }
+
+    /// Rename an existing group, self-defending with the `Manage(Root)`
+    /// gate. See [`create_group_as`](Self::create_group_as)'s doc comment
+    /// for the task #546 rationale.
+    pub async fn rename_group_as(
+        &self,
+        group_ref: &crate::query::admin::GroupRef,
+        to: &str,
+        actor: &Actor,
+    ) -> DbResult<()> {
+        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
         let gid = self.resolve_group_id(group_ref).await?;
 
         // Uniqueness guard: reject if a *different* group already owns `to`.
@@ -314,12 +380,50 @@ impl ShamirDb {
     }
 
     /// Add a user to a group.
+    ///
+    /// Thin `Actor::System` wrapper — see
+    /// [`add_group_member_as`](Self::add_group_member_as).
     pub async fn add_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
+        self.add_group_member_as(group_id, user_id, &Actor::System)
+            .await
+    }
+
+    /// Add a user to a group, self-defending with the `Manage(Root)` gate.
+    /// See [`create_group_as`](Self::create_group_as)'s doc comment for
+    /// the task #546 rationale.
+    pub async fn add_group_member_as(
+        &self,
+        group_id: u64,
+        user_id: u64,
+        actor: &Actor,
+    ) -> DbResult<()> {
+        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?;
         self.system_store.add_group_member(group_id, user_id).await
     }
 
     /// Remove a user from a group.
+    ///
+    /// Thin `Actor::System` wrapper — see
+    /// [`remove_group_member_as`](Self::remove_group_member_as).
     pub async fn remove_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
+        self.remove_group_member_as(group_id, user_id, &Actor::System)
+            .await
+    }
+
+    /// Remove a user from a group, self-defending with the `Manage(Root)`
+    /// gate. See [`create_group_as`](Self::create_group_as)'s doc comment
+    /// for the task #546 rationale.
+    pub async fn remove_group_member_as(
+        &self,
+        group_id: u64,
+        user_id: u64,
+        actor: &Actor,
+    ) -> DbResult<()> {
+        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?;
         self.system_store
             .remove_group_member(group_id, user_id)
             .await
@@ -382,16 +486,19 @@ impl ShamirDb {
     ///    and checks [`permits`] for the requested `action`.
     ///
     /// On denial, builds an [`AccessError`] identifying the actor, the
-    /// denied path, and the action. The engine-level trace
-    /// ([`authorize`]) is still emitted for observability.
+    /// denied path, and the action. The engine-level observability trace
+    /// ([`trace_access`]) is still emitted first — it is NOT part of the
+    /// enforcement decision (it always returns `Ok`); the real check is
+    /// everything below this call.
     pub async fn authorize_access(
         &self,
         actor: &Actor,
         path: &ResourcePath,
         action: Action,
     ) -> Result<(), AccessError> {
-        // Engine-level trace (R2) — always emitted.
-        authorize(actor, path, action)?;
+        // Engine-level observability trace (R2) — always emitted, always Ok.
+        // NOT the enforcement gate; see `trace_access`'s doc comment.
+        trace_access(actor, path, action)?;
 
         // Admin bypass — the common live path.
         if matches!(actor, Actor::System) {

@@ -1,6 +1,6 @@
 use crate::access::{
-    action_perm, authorize, class_of, permits, principal_id, Action, Actor, Mode, Perm, PermClass,
-    ResourceMeta, ResourcePath, OWNER_SYSTEM,
+    action_perm, class_of, permits, principal_id, trace_access, Action, Actor, Mode, Perm,
+    PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
 use crate::mpack;
 
@@ -10,7 +10,7 @@ fn system_is_default() {
 }
 
 #[test]
-fn authorize_transparent_for_all_variants() {
+fn trace_access_transparent_for_all_variants() {
     for path in [
         ResourcePath::Root,
         ResourcePath::database("d"),
@@ -33,7 +33,7 @@ fn authorize_transparent_for_all_variants() {
             Action::List,
             Action::Manage,
         ] {
-            assert!(authorize(&Actor::System, &path, action).is_ok());
+            assert!(trace_access(&Actor::System, &path, action).is_ok());
         }
     }
 }

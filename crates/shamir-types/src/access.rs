@@ -1,10 +1,10 @@
 //! Shomer access-control primitive types.
 //!
 //! These types model *who* is acting ([`Actor`]), *what* they target
-//! ([`ResourcePath`]), and *how* ([`Action`]). The [`authorize`] gate is
-//! the engine-level trace (always `Ok`). Real enforcement lives in
-//! [`permits`] (pure decision) and the facade gate in `shamir-db`
-//! (meta resolution + ancestor traversal).
+//! ([`ResourcePath`]), and *how* ([`Action`]). [`trace_access`] is the
+//! engine-level OBSERVABILITY trace (always `Ok` — not an enforcement
+//! gate). Real enforcement lives in [`permits`] (pure decision) and the
+//! facade gate in `shamir-db` (meta resolution + ancestor traversal).
 //!
 //! The full object & operation hierarchy is specified in
 //! `docs/roadmap/ACCESS_HIERARCHY.md`.
@@ -579,11 +579,32 @@ pub struct AccessError {
     pub action: Action,
 }
 
-/// Transparent authorization gate (engine-level trace, R2).
+/// Transparent OBSERVABILITY trace (engine-level, R2) — **NOT an
+/// enforcement gate**.
 ///
-/// Always returns `Ok(())` and emits a `log::trace!` access line. The real
-/// POSIX-style enforcement happens in [`permits`] + the facade gate.
-pub fn authorize(actor: &Actor, path: &ResourcePath, action: Action) -> Result<(), AccessError> {
+/// Always returns `Ok(())` and emits a `log::trace!` access line. Despite
+/// the historical name, a call to `trace_access` performs no access
+/// check whatsoever — it exists purely so every attempted operation
+/// leaves a trace line for observability. The real POSIX-style
+/// enforcement happens in [`permits`] + the facade gate
+/// (`ShamirDb::authorize_access`, which also re-emits this same trace
+/// before doing the actual check).
+///
+/// Call sites in `shamir-engine`'s `QueryRunner::run` (the per-op
+/// `Read`/`Insert`/`Update`/`Delete`/`Set` match arms) invoke this
+/// AFTER the real gate (`execute_as`/`tx_execute_as`'s per-op
+/// `authorize_access` loop, driven by `BatchOp::required_access`) has
+/// already run — a future refactor must not see a call here, assume
+/// it's the enforcement point, and remove the outer `authorize_access`
+/// call thinking it's now redundant. If you are adding a NEW gate, call
+/// [`ShamirDb::authorize_access`] (or wire through `required_access`),
+/// never this function alone.
+///
+/// This function was named `authorize` until the #546 hardening pass —
+/// renamed specifically to make "this is a no-op trace, not a check"
+/// unmistakable from the call site, without needing to read this doc
+/// comment.
+pub fn trace_access(actor: &Actor, path: &ResourcePath, action: Action) -> Result<(), AccessError> {
     log::trace!("shomer: {actor} {action} on {path}");
     Ok(())
 }
