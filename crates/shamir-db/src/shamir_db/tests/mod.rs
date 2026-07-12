@@ -13,6 +13,7 @@ mod flush_all_tests;
 mod group_tests;
 mod interner_ops_tests;
 mod replication_ddl_tests;
+mod root_user_group_meta_tests;
 mod shamir_db_tests;
 mod system_changefeed_tests;
 mod system_metadata_tests;

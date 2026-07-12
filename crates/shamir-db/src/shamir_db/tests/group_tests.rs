@@ -37,7 +37,7 @@ async fn test_create_group_seeds_from_max_when_counter_absent() {
     // the `next_group_id` setting is never written.
     shamir
         .system_store()
-        .save_group(5, "preexisting", &[])
+        .save_group(5, "preexisting", &[], shamir_types::access::OWNER_SYSTEM)
         .await
         .unwrap();
 
