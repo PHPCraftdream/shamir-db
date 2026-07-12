@@ -141,6 +141,8 @@ windows-service = "0.8"
 tokio = { version = "1", features = ["test-util"] }
 fxhash = "0.2"
 serial_test = "3"
+# Compiles the echo WAT fixture used by create_function wire-gating tests.
+wat = "1.226"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —
 # brought in here too so dev-only test paths see the same crate version.
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }

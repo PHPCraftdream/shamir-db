@@ -253,6 +253,14 @@ export function createFunction(
     source?: string;
     wasm?: string;
     replace?: boolean;
+    /** `"public"` or `"private"` (absent → `"private"`). */
+    visibility?: string;
+    /** `"invoker"` or `"definer"` (absent → `"invoker"`). `"definer"` requires `hmac`. */
+    security?: string;
+    /** OS-seeded env-var secret grants. Non-empty requires `hmac`. */
+    secret_grants?: string[];
+    /** Hex HMAC tag, required IFF `security === "definer"` or non-empty `secret_grants`. */
+    hmac?: string;
   },
 ): CreateFunctionOp {
   const op: CreateFunctionOp = {
@@ -261,6 +269,12 @@ export function createFunction(
   };
   if (opts?.source !== undefined) op.source = opts.source;
   if (opts?.wasm !== undefined) op.wasm = opts.wasm;
+  if (opts?.visibility !== undefined) op.visibility = opts.visibility;
+  if (opts?.security !== undefined) op.security = opts.security;
+  if (opts?.secret_grants !== undefined && opts.secret_grants.length > 0) {
+    op.secret_grants = opts.secret_grants;
+  }
+  if (opts?.hmac !== undefined) op.hmac = opts.hmac;
   return op;
 }
 

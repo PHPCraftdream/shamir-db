@@ -13,6 +13,10 @@ pub fn create_function(name: impl Into<String>) -> CreateFunction {
         source: None,
         wasm: None,
         replace: false,
+        visibility: None,
+        security: None,
+        secret_grants: Vec::new(),
+        hmac: None,
     }
 }
 
@@ -22,6 +26,10 @@ pub struct CreateFunction {
     source: Option<String>,
     wasm: Option<String>,
     replace: bool,
+    visibility: Option<String>,
+    security: Option<String>,
+    secret_grants: Vec<String>,
+    hmac: Option<String>,
 }
 
 impl CreateFunction {
@@ -43,6 +51,35 @@ impl CreateFunction {
         self
     }
 
+    /// Set the function visibility (`"public"` or `"private"`).
+    /// Absent → `Visibility::Private` (the historical default).
+    pub fn visibility(mut self, visibility: impl Into<String>) -> Self {
+        self.visibility = Some(visibility.into());
+        self
+    }
+
+    /// Set the security mode (`"invoker"` or `"definer"`).
+    /// Absent → `Security::Invoker`. Setting `"definer"` requires an `hmac` tag.
+    pub fn security(mut self, security: impl Into<String>) -> Self {
+        self.security = Some(security.into());
+        self
+    }
+
+    /// Set the OS-seeded env-var secret grants. Non-empty requires BOTH
+    /// `Manage(Root)` AND an `hmac` tag.
+    pub fn secret_grants(mut self, grants: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.secret_grants = grants.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Attach the hex-encoded HMAC tag.
+    /// canonical = `canonical_create_function(name, security, secret_grants)`.
+    /// Required IFF `security == "definer"` or `secret_grants` is non-empty.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateFunction(CreateFunctionOp {
@@ -50,6 +87,10 @@ impl CreateFunction {
             source: self.source,
             wasm: self.wasm,
             replace: self.replace,
+            visibility: self.visibility,
+            security: self.security,
+            secret_grants: self.secret_grants,
+            hmac: self.hmac,
         })
     }
 }

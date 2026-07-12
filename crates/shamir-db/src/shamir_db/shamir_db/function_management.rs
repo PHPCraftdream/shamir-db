@@ -141,6 +141,22 @@ impl ShamirDb {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
+        // `secret_grants` names OS-seeded process environment variables
+        // (`GlobalVars::seed_env`) — a resource class the creator has NO
+        // defined rights over at all (there is no "which secrets can this
+        // actor grant" concept anywhere in this codebase yet). Without this
+        // gate, any actor holding bare `Create` on `FunctionNamespace` could
+        // request `secret_grants: ["ADMIN_DB_PASSWORD"]` on their own new
+        // function and exfiltrate host secrets by calling it. Deliberately
+        // admin-only (`Manage(Root)`) pending a real secrets-ACL — do not
+        // invent a finer-grained check that doesn't actually exist (task
+        // #554, per the signed-off design in
+        // `docs/design/root-user-group-dac-posture-550-decision.md` §3).
+        if !opts.secret_grants.is_empty() {
+            self.authorize_access(&actor, &ResourcePath::Root, Action::Manage)
+                .await
+                .map_err(|e| DbError::Function(e.to_string()))?;
+        }
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
