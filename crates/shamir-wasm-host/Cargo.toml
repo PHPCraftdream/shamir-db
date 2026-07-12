@@ -28,6 +28,15 @@ scc = "2.2"
 # guest `cargo build` (CRIT-6 / audit #440 part A). Already a transitive dep
 # in the workspace `Cargo.lock`; pinned here as a direct dependency.
 wait-timeout = "0.2.1"
+# Structural pre-instantiation sanitizer (task #545). Pinned to the exact
+# version wasmtime 45 pulls transitively (see `Cargo.lock`) so no second
+# copy enters the dependency graph.
+wasmparser = "=0.248.0"
+# WAT-text -> binary conversion for `WasmFunction::from_wat`, so the
+# sanitizer (which parses raw `.wasm` section bytes) can run on WAT-authored
+# test modules the same way it runs on `from_binary`'s compiled artifacts.
+# Already a transitive dep of wasmtime's `wat` feature; pinned exactly here.
+wat = "=1.251.0"
 
 [dev-dependencies]
 argon2 = "0.5"

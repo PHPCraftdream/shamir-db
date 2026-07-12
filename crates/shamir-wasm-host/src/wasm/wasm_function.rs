@@ -75,6 +75,7 @@ use super::host_db::{host_db_execute, host_db_get, host_db_insert, host_db_query
 use super::host_globals::{host_global_get, host_global_set};
 use super::host_http::host_http_fetch;
 use super::wasm_engine::{WasmEngine, WasmLimits};
+use super::wasm_sanitizer::verify_wasm_module;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
 use shamir_types::types::value::QueryValue;
@@ -90,7 +91,7 @@ use wasmtime::{InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuild
 /// registry gateway, the optional DB gateway, default repo name, and
 /// recursion depth tracking so host-import callbacks can reach them
 /// through [`wasmtime::Caller::data`].
-pub(super) struct HostState {
+pub(crate) struct HostState {
     pub(super) limits: StoreLimits,
     pub(super) batch: Arc<BatchContext>,
     pub(super) globals: Arc<GlobalVars>,
@@ -105,6 +106,34 @@ pub(super) struct HostState {
     pub(super) secret_grants: Arc<TFxSet<String>>,
 }
 
+/// Test-only: build a bare [`Store`] wrapping a minimal [`HostState`] plus
+/// the fully-registered [`Linker`], for
+/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// to enumerate the linker's real `(module, name)` surface via
+/// [`Linker::iter`] and cross-check it against
+/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`]. Never compiled into
+/// non-test builds.
+#[cfg(test)]
+pub(crate) fn test_linker_and_store(
+    engine: &WasmEngine,
+) -> FnResult<(Linker<HostState>, Store<HostState>)> {
+    let linker = build_linker(engine)?;
+    let state = HostState {
+        limits: StoreLimitsBuilder::new().build(),
+        batch: Arc::new(BatchContext::new()),
+        globals: Arc::new(GlobalVars::new()),
+        registry: None,
+        depth: 0,
+        depth_limit: 0,
+        db: None,
+        repo: String::new(),
+        net: None,
+        secret_grants: Arc::new(TFxSet::default()),
+    };
+    let store = Store::new(engine.engine(), state);
+    Ok((linker, store))
+}
+
 // ── WasmFunction ─────────────────────────────────────────────────────
 
 /// A [`ShamirFunction`] backed by a compiled WebAssembly module.
@@ -117,11 +146,19 @@ pub struct WasmFunction {
     limits: WasmLimits,
 }
 
-/// Build a [`Linker`] with all host imports registered and pre-instantiate
-/// it against the given module. The resulting [`InstancePre`] resolves
-/// imports once; each subsequent `instantiate_async` only needs a fresh
-/// [`Store`].
-fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<InstancePre<HostState>> {
+/// Build a [`Linker`] with all host imports registered, resolving nothing
+/// yet against any particular module.
+///
+/// `pub(crate)` (rather than private) so
+/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// can build the real registered [`Linker`] surface and cross-check its
+/// `(module, name)` pairs (via [`Linker::iter`]) against
+/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`] — this is the
+/// mechanism keeping the sanitizer's allowlist and the linker's actual
+/// registrations from silently drifting apart. Split out from
+/// [`build_instance_pre`] specifically so the cross-check test does not
+/// need a real [`Module`] to enumerate the registered surface.
+pub(crate) fn build_linker(engine: &WasmEngine) -> FnResult<Linker<HostState>> {
     let mut linker: Linker<HostState> = Linker::new(engine.engine());
 
     // Sync host imports under "shamir_host".
@@ -158,6 +195,15 @@ fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<Instance
         .func_wrap_async("shamir_host", "http_fetch", host_http_fetch)
         .map_err(|e| FunctionError::Compute(format!("linker http_fetch: {e}")))?;
 
+    Ok(linker)
+}
+
+/// Build a [`Linker`] with all host imports registered and pre-instantiate
+/// it against the given module. The resulting [`InstancePre`] resolves
+/// imports once; each subsequent `instantiate_async` only needs a fresh
+/// [`Store`].
+fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<InstancePre<HostState>> {
+    let linker = build_linker(engine)?;
     linker
         .instantiate_pre(module)
         .map_err(|e| FunctionError::Compute(format!("instantiate_pre failed: {e}")))
@@ -165,7 +211,18 @@ fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<Instance
 
 impl WasmFunction {
     /// Compile a WAT text module into a `WasmFunction`.
+    ///
+    /// Runs the structural pre-instantiation sanitizer
+    /// ([`verify_wasm_module`]) on the WAT's binary encoding before
+    /// `wasmtime::Module::new`/`instantiate_pre` ever see it — see
+    /// `wasm_sanitizer` module docs for why this is a real, if modest,
+    /// defense-in-depth control (fail-fast + an explicit auditable
+    /// allowlist) rather than a redundant re-check of what the linker
+    /// already rejects for free.
     pub fn from_wat(engine: Arc<WasmEngine>, wat: &str, limits: WasmLimits) -> FnResult<Self> {
+        let wasm_bytes = wat::parse_str(wat)
+            .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
+        verify_wasm_module(&wasm_bytes)?;
         let module = Module::new(engine.engine(), wat)
             .map_err(|e| FunctionError::Compute(format!("WAT compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
@@ -177,11 +234,33 @@ impl WasmFunction {
     }
 
     /// Compile a `.wasm` binary into a `WasmFunction`.
+    ///
+    /// Runs the structural pre-instantiation sanitizer
+    /// ([`verify_wasm_module`]) on the raw bytes before
+    /// `wasmtime::Module::from_binary`/`instantiate_pre` ever see them —
+    /// this is the path both the compile-on-DDL pipeline
+    /// (`compile_rust_source`'s output) and durable-catalogue recovery
+    /// (loading previously-stored `.wasm` bytes back at startup) both go
+    /// through, so every production call site is covered by this single
+    /// choke point.
+    ///
+    /// NOTE: despite the `wasm_or_cwasm_bytes` name (inherited from
+    /// `wasmtime::Module::from_binary`, which accepts either raw `.wasm`
+    /// or a pre-serialized `.cwasm` artifact), no call site in this
+    /// codebase produces or loads `.cwasm` bytes today — `.cwasm` AOT
+    /// caching is aspirational (see the crate's module docs). The
+    /// sanitizer parses raw wasm section bytes via `wasmparser` and would
+    /// fail to parse a genuine `.cwasm` blob; if `.cwasm` loading is ever
+    /// added, this call site will need to special-case it (e.g. skip the
+    /// sanitizer for a detected `.cwasm` header, relying on the fact that
+    /// `.cwasm` can only be produced by our own prior `Module::serialize`
+    /// call over an already-sanitized module).
     pub fn from_binary(
         engine: Arc<WasmEngine>,
         wasm_or_cwasm_bytes: &[u8],
         limits: WasmLimits,
     ) -> FnResult<Self> {
+        verify_wasm_module(wasm_or_cwasm_bytes)?;
         let module = Module::from_binary(engine.engine(), wasm_or_cwasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WASM compile error: {e}")))?;
         let instance_pre = build_instance_pre(&engine, &module)?;
