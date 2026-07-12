@@ -25,6 +25,7 @@ pub mod db_handler;
 pub mod framer;
 pub mod logging;
 pub mod observability;
+pub mod ports;
 pub mod replication;
 pub mod runtime;
 pub mod scheduler;

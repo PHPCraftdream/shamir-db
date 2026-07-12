@@ -27,8 +27,6 @@ pub enum ListOp {
     },
     #[serde(rename = "users")]
     Users,
-    #[serde(rename = "roles")]
-    Roles,
     /// List all registered functions. Optionally filter by folder prefix.
     #[serde(rename = "functions")]
     Functions {

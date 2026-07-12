@@ -97,11 +97,6 @@ pub fn list_users() -> BatchOp {
     BatchOp::List(ListOp::Users)
 }
 
-/// List roles.
-pub fn list_roles() -> BatchOp {
-    BatchOp::List(ListOp::Roles)
-}
-
 /// List all registered functions (catalogue-wide). Optionally filter by folder.
 pub fn list_functions() -> ListFunctions {
     ListFunctions { folder: None }

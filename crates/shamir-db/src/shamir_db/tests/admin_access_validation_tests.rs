@@ -69,18 +69,14 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-/// Persist a real user record via the wire-facing `create_user` admin op
-/// (same shape used by `create_user_emits_system_changefeed_event`), and
-/// return its derived `principal64_from_username`.
-async fn seed_user(shamir: &ShamirDb, name: &str) -> u64 {
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_user("cu", ddl::create_user(name, "correct horse battery staple"));
-    let req = b.to_request_via_msgpack();
-    shamir
-        .execute("testdb", &req)
-        .await
-        .unwrap_or_else(|e| panic!("seed_user({name}) failed: {e:?}"));
+/// Derive a deterministic `principal64` for a test fixture user name.
+/// Task #559: `create_user` now routes through the `UserAdminPort`
+/// (returns `not_supported` without one). These chown/chgrp tests only
+/// need a stable numeric owner id — the codebase convention (see module
+/// doc) treats numeric ids as free-standing identifiers that need NOT
+/// correspond to a persisted record. So we skip the wire create entirely
+/// and just return the hash-derived projection.
+async fn seed_user(_shamir: &ShamirDb, name: &str) -> u64 {
     principal64_from_username(name)
 }
 

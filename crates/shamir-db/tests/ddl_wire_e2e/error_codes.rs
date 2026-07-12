@@ -138,28 +138,26 @@ async fn error_code_access_denied_ddl() {
     );
 }
 
-/// GrantRole for non-existent user -> code == "not_found".
+/// GrantRole for non-existent user -> code == "not_found". Task #559:
+/// grant_role now routes through `UserAdminPort`; without a port installed
+/// it returns `not_supported` (not `not_found`), so this test now asserts
+/// the `not_supported` cutover behavior.
 #[tokio::test]
 async fn error_code_not_found_grant_role_user() {
     let db = setup_db().await;
 
-    // Create a role first.
+    // Grant to a non-existent user. With no UserAdminPort installed (the
+    // shamir-db test setup), the op returns not_supported after the
+    // Manage(Root) authorization gate passes for Actor::System.
     let mut b = Batch::new();
     b.id(1);
-    b.create_role("op", ddl::create_role("testrole", vec![]));
-    let create_role = b.to_request_via_msgpack();
-    db.execute("testdb", &create_role).await.unwrap();
-
-    // Grant to a non-existent user.
-    let mut b = Batch::new();
-    b.id(2);
     b.grant_role("op", ddl::grant_role("testrole", "ghost_user"));
     let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
-        Some("not_found"),
-        "expected code 'not_found', got: {:?} ({})",
+        Some("not_supported"),
+        "expected code 'not_supported' (no port installed), got: {:?} ({})",
         err.code(),
         err
     );

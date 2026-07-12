@@ -20,4 +20,5 @@ mod server_launcher;
 pub use boot_error::BootError;
 pub use bootstrap_mode::BootstrapMode;
 pub use server_handle::ServerHandle;
+pub use server_launcher::audit_store_b_vs_directory;
 pub use server_launcher::ServerLauncher;

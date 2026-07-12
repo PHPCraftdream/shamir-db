@@ -18,11 +18,45 @@
 //!   permission class). `set_resource_meta` can update only the owner.
 
 use crate::query::admin::GroupRef;
-use crate::shamir_db::ShamirDb;
+use crate::shamir_db::{PrincipalInfo, PrincipalResolver, ShamirDb};
 use crate::DbError;
 use shamir_types::access::{
     principal64_from_username, Action, Actor, Mode, ResourceMeta, ResourcePath,
 };
+use std::sync::Arc;
+
+/// Test-only mock resolver: maps a username to `principal64_from_username(name)`,
+/// mirroring the pre-#559 interim bridge. Used so `ResourcePath::User` meta
+/// resolution resolves to a real (if synthetic) owner in tests that don't
+/// have a real directory wired.
+struct MockResolver;
+
+impl PrincipalResolver for MockResolver {
+    fn resolve(&self, _principal64_val: u64) -> Option<PrincipalInfo> {
+        // Not used by these tests — only resolve_by_name matters.
+        None
+    }
+    fn list(&self) -> Vec<PrincipalInfo> {
+        Vec::new()
+    }
+    fn resolve_by_name(&self, name: &str) -> Option<PrincipalInfo> {
+        Some(PrincipalInfo {
+            principal64: principal64_from_username(name),
+            name: name.to_string(),
+            user_id: [0u8; 16],
+            database: None,
+            superuser: false,
+        })
+    }
+}
+
+/// In-memory ShamirDb with a mock PrincipalResolver installed (task #559:
+/// `ResourcePath::User` meta now resolves via the resolver; without one the
+/// owner degrades to `Actor::System`).
+async fn setup_with_resolver() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.with_principal_resolver(Arc::new(MockResolver))
+}
 
 /// Grant `actor` `Manage(Root)` by `chown`ing Root to them (via
 /// `Actor::System`, which always has the rights to do so). Test-only
@@ -237,7 +271,7 @@ async fn chown_to_non_system_owner_after_prior_execute_clear_is_denied() {
 
 #[tokio::test]
 async fn user_resource_meta_is_computed_owner_self_0o750() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
+    let shamir = setup_with_resolver().await;
     let meta = shamir
         .resource_meta(&ResourcePath::user("alice"))
         .await
@@ -262,7 +296,7 @@ async fn set_user_resource_meta_is_not_supported() {
 /// The user themselves can Read their own `User` path.
 #[tokio::test]
 async fn user_can_read_own_user_path() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
+    let shamir = setup_with_resolver().await;
     let alice = Actor::User(principal64_from_username("alice"));
     shamir
         .authorize_access(&alice, &ResourcePath::user("alice"), Action::Read)
@@ -274,7 +308,7 @@ async fn user_can_read_own_user_path() {
 /// path.
 #[tokio::test]
 async fn user_can_manage_own_user_path() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
+    let shamir = setup_with_resolver().await;
     let alice = Actor::User(principal64_from_username("alice"));
     shamir
         .authorize_access(&alice, &ResourcePath::user("alice"), Action::Manage)

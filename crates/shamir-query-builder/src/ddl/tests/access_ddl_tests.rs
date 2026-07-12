@@ -1,7 +1,6 @@
 //! Tests for Access tree, chmod / chown / chgrp, Group DDL, Auth users / roles,
 //! and `res` helpers.
 
-use shamir_query_types::auth::{Action, Effect, Permission, Resource};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -342,12 +341,12 @@ fn create_user_minimal() {
 fn create_user_full() {
     let op = ddl::create_user("bob", "hunter2")
         .roles(["admin", "viewer"])
-        .profile(mpack!({"department": "eng"}))
+        .database("testdb")
         .build();
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "bob");
     assert_eq!(j["roles"], mpack!(["admin", "viewer"]));
-    assert_eq!(j["profile"], mpack!({"department": "eng"}));
+    assert_eq!(j["database"], "testdb");
 }
 
 #[test]
@@ -371,61 +370,6 @@ fn drop_user_with_hmac() {
         mpack!({
             "drop_user": "alice",
             "hmac": "abc"
-        })
-    );
-}
-
-#[test]
-fn create_role_wire() {
-    let perms = vec![Permission {
-        effect: Effect::Allow,
-        actions: vec![Action::Read],
-        resource: Resource::Global,
-        row_filter: None,
-    }];
-    let op = ddl::create_role("viewer", perms).build();
-    let j = roundtrip(&op);
-    assert_eq!(j["create_role"], "viewer");
-    assert_eq!(j["permissions"][0]["effect"], "allow");
-    assert_eq!(j["permissions"][0]["actions"], mpack!(["read"]));
-    assert!(op.is_admin());
-}
-
-#[test]
-fn create_role_with_hmac() {
-    let perms = vec![Permission {
-        effect: Effect::Allow,
-        actions: vec![Action::Read],
-        resource: Resource::Global,
-        row_filter: None,
-    }];
-    let op = ddl::create_role("viewer", perms).hmac("abc").build();
-    let j = roundtrip(&op);
-    assert_eq!(j["create_role"], "viewer");
-    assert_eq!(j["hmac"], "abc");
-}
-
-#[test]
-fn drop_role_wire() {
-    let op = ddl::drop_role("viewer").build();
-    let j = roundtrip(&op);
-    assert_eq!(
-        j,
-        mpack!({
-            "drop_role": "viewer"
-        })
-    );
-}
-
-#[test]
-fn drop_role_with_hmac() {
-    let op = ddl::drop_role("viewer").hmac("ff").build();
-    let j = roundtrip(&op);
-    assert_eq!(
-        j,
-        mpack!({
-            "drop_role": "viewer",
-            "hmac": "ff"
         })
     );
 }

@@ -121,27 +121,6 @@ pub(super) fn apply_patch(
     }
 }
 
-/// Hash a plaintext password into an Argon2id PHC string for at-rest
-/// storage in the `users` table. Salt is drawn from the OS CSPRNG
-/// (`OsRng`) per a fresh 16-byte `SaltString`; params are the `argon2`
-/// crate defaults (Argon2id, v0x13). Returns the self-describing PHC
-/// string (`$argon2id$v=19$m=...$<salt>$<hash>`), which embeds the salt
-/// and params so verification needs no side-channel state.
-///
-/// NOTE: this field is admin/RBAC metadata, not the live-auth
-/// credential — wire login is SCRAM-Argon2id in `shamir-connect`. No
-/// verify site reads `users.password_hash`, so hashing here is purely
-/// defense-in-depth at rest.
-pub(super) fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    use argon2::password_hash::{PasswordHasher, SaltString};
-    use argon2::Argon2;
-    use rand::rngs::OsRng;
-
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default().hash_password(password.as_bytes(), &salt)?;
-    Ok(hash.to_string())
-}
-
 /// T3: look up a table's `MvccStore` and apply a retention policy.
 ///
 /// `per_table_mvcc` is lazily populated on first `get_table()`, so we

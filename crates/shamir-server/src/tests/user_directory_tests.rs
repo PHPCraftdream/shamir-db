@@ -176,7 +176,7 @@ fn superuser_flag_round_trips_through_msgpack() {
 
 fn sample_persisted_user() -> PersistedUser {
     let record = sample_record();
-    PersistedUser::from_record([0x42; 16], &record, Vec::new(), false)
+    PersistedUser::from_record([0x42; 16], &record, Vec::new(), false, None)
 }
 
 fn sample_record() -> UserRecord {
@@ -245,7 +245,8 @@ fn normalization_migrates_superuser_role_string_and_is_idempotent_in_crate() {
         // had the "superuser" role string: roles=["superuser"], flag=false
         // (the `superuser` field didn't exist on disk; #[serde(default)]
         // makes absence deserialise to false).
-        let mut legacy = PersistedUser::from_record(alice_uid, &sample_record(), Vec::new(), false);
+        let mut legacy =
+            PersistedUser::from_record(alice_uid, &sample_record(), Vec::new(), false, None);
         legacy.roles = vec!["superuser".to_string()];
         let legacy_bytes = rmp_serde::to_vec_named(&legacy).expect("encode legacy blob");
 

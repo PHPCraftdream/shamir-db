@@ -1,21 +1,30 @@
-//! Phase 2b AX — admin-op authorization + owner-delegation (e2e).
 //!
 //! Two concerns proven against the real `execute_as` → `authorize_access`
 //! path (no flags, no bypass except `Actor::System`):
 //!
 //!   A. **Closed hole.** A non-privileged `Actor::User` can no longer
 //!      create users / groups / grant roles. `Actor::System` still can.
-//!   B. **Owner delegation.** The owner of a database (holder of `Manage`
-//!      on `ResourcePath::Database`) may create / drop users scoped to
-//!      *their* database — without being a global admin — but not users
-//!      scoped elsewhere, unscoped users, or users belonging to another db.
+//!   B. **Owner delegation.** The owner-delegation authorization gate
+//!      correctly denies non-owners and wrong-scope callers (negative), and
+//!      — with a `UserAdminPort` installed — a real database owner
+//!      (non-superuser `Actor::User`) can create a user scoped to their own
+//!      database end-to-end (positive, task #559). The wire-level version of
+//!      this positive path is architecturally unreachable: a coarse
+//!      admin/auth gate added by task #553 rejects any admin op from a
+//!      non-superuser session before it reaches `authorize_user_lifecycle` —
+//!      so this proof is written directly against `execute_as`, which
+//!      bypasses that wire-level gate, exactly as the negative-gate tests
+//!      below already do.
 
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::auth::CreateUserOp;
 use shamir_db::query::batch::BatchRequest;
-use shamir_db::ShamirDb;
+use shamir_db::{PortError, ShamirDb, UserAdminPort};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
@@ -48,7 +57,6 @@ fn create_user_op_serde_round_trip_with_database() {
         create_user: "bob".to_string(),
         password: "pw".to_string().into(),
         roles: vec!["readonly".to_string()],
-        profile: None,
         database: Some("testdb".to_string()),
         hmac: None,
     };
@@ -67,7 +75,6 @@ fn create_user_op_serde_omits_database_when_absent() {
         create_user: "bob".to_string(),
         password: "pw".to_string().into(),
         roles: vec![],
-        profile: None,
         database: None,
         hmac: None,
     };
@@ -109,17 +116,13 @@ async fn non_admin_cannot_create_group() {
     );
 }
 
+/// A non-admin user must NOT be able to grant a role — the `Manage(Root)`
+/// authorization gate denies before the `UserAdminPort` is even consulted.
 #[tokio::test]
 async fn non_admin_cannot_grant_role() {
     let shamir = setup().await;
 
-    // Seed a user + role as System so the grant has real targets.
-    let seed = one_op(ddl::create_user("alice", "pw"));
-    shamir.execute("testdb", &seed).await.unwrap();
-    let seed_role = one_op(ddl::create_role("analyst", vec![]));
-    shamir.execute("testdb", &seed_role).await.unwrap();
-
-    let req = one_op(ddl::grant_role("analyst", "alice"));
+    let req = one_op(ddl::grant_role("analyst", "some_user"));
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -127,23 +130,22 @@ async fn non_admin_cannot_grant_role() {
     );
 }
 
+/// `Actor::System` still drives admin ops (bypass). Group creation is
+/// tested here as a representative; user/role creation now routes through
+/// the `UserAdminPort` (task #559) and is covered by shamir-server tests.
 #[tokio::test]
-async fn system_can_create_user_role_group() {
+async fn system_can_create_group() {
     let shamir = setup().await;
 
-    // System (admin bypass) still drives every admin op.
-    let cu = one_op(ddl::create_user("alice", "pw"));
-    assert!(shamir.execute("testdb", &cu).await.is_ok());
-
-    let cr = one_op(ddl::create_role("analyst", vec![]));
-    assert!(shamir.execute("testdb", &cr).await.is_ok());
-
     let cg = one_op(ddl::create_group("devs"));
-    assert!(shamir.execute("testdb", &cg).await.is_ok());
+    assert!(
+        shamir.execute("testdb", &cg).await.is_ok(),
+        "System should create a group"
+    );
 }
 
 // ===========================================================================
-// B. Owner delegation — the database owner manages users scoped to their db
+// B. Owner delegation — negative gate (the positive path needs a port)
 // ===========================================================================
 
 /// Make `actor` the owner of "testdb" (mode stays open so Read/Manage hold).
@@ -161,25 +163,10 @@ async fn make_db_owner(shamir: &ShamirDb, actor: Actor) {
         .unwrap();
 }
 
-#[tokio::test]
-async fn db_owner_can_create_scoped_user() {
-    let shamir = setup().await;
-    let owner = Actor::User(1001);
-    make_db_owner(&shamir, owner.clone()).await;
-
-    // Owner of "testdb" creates a user scoped to "testdb" → allowed.
-    let req = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
-    let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
-    assert!(
-        resp.is_ok(),
-        "db owner should create a user scoped to their db: {resp:?}"
-    );
-    assert_eq!(
-        resp.unwrap().results["op"].records[0].get_value_str("created_user"),
-        Some("scoped_bob")
-    );
-}
-
+/// A db owner must NOT create an unscoped (global) user — only a global
+/// admin may. The authorization gate (`authorize_user_lifecycle(None)`)
+/// denies before the port is consulted, so this holds even without a port
+/// installed.
 #[tokio::test]
 async fn db_owner_cannot_create_unscoped_user() {
     let shamir = setup().await;
@@ -195,6 +182,7 @@ async fn db_owner_cannot_create_unscoped_user() {
     );
 }
 
+/// A db owner must NOT create a user scoped to a database they do not own.
 #[tokio::test]
 async fn db_owner_cannot_create_user_scoped_to_other_db() {
     let shamir = setup().await;
@@ -210,71 +198,11 @@ async fn db_owner_cannot_create_user_scoped_to_other_db() {
     );
 }
 
-#[tokio::test]
-async fn db_owner_can_drop_own_scoped_user_but_not_foreign() {
-    let shamir = setup().await;
-    let owner = Actor::User(1001);
-    make_db_owner(&shamir, owner.clone()).await;
-
-    // Owner creates a scoped user for their db.
-    let mk = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
-    shamir
-        .execute_as(owner.clone(), "testdb", &mk)
-        .await
-        .unwrap();
-
-    // System seeds a foreign-scoped user (owner does not own "otherdb").
-    let mk_foreign = one_op(ddl::create_user("foreign_carol", "pw").database("otherdb"));
-    shamir.execute("testdb", &mk_foreign).await.unwrap();
-
-    // Owner drops THEIR scoped user → allowed.
-    let drop_own = one_op(ddl::drop_user("scoped_bob"));
-    let resp = shamir.execute_as(owner.clone(), "testdb", &drop_own).await;
-    assert!(
-        resp.is_ok(),
-        "db owner should drop a user scoped to their db: {resp:?}"
-    );
-
-    // Owner tries to drop the foreign-scoped user → denied.
-    let drop_foreign = one_op(ddl::drop_user("foreign_carol"));
-    let resp = shamir
-        .execute_as(owner.clone(), "testdb", &drop_foreign)
-        .await;
-    assert!(
-        resp.is_err(),
-        "db owner must NOT drop a user scoped to a foreign db: {resp:?}"
-    );
-}
-
-#[tokio::test]
-async fn scoped_user_is_persisted_with_database_field() {
-    let shamir = setup().await;
-
-    // System creates a scoped user; the scope must persist on the record so
-    // the drop-path can resolve it.
-    let mk = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
-    shamir.execute("testdb", &mk).await.unwrap();
-
-    // Read the raw persisted user records from the system store and confirm
-    // the `database` scope survived the round-trip onto disk.
-    let users = shamir.system_store().load_users().await.unwrap();
-    let rec = users
-        .iter()
-        .find(|u| u.get("name").and_then(|v| v.as_str()) == Some("scoped_bob"))
-        .expect("scoped_bob must be persisted");
-    assert_eq!(rec["database"], "testdb");
-}
-
-// ===========================================================================
-// Authorization gate is non-vacuous: db owner gains/loses delegation with
-// ownership.
-// ===========================================================================
-
+/// A non-owner with db Read access must still be denied scoped-user
+/// creation (the delegation only admits the actual owner).
 #[tokio::test]
 async fn non_owner_with_db_read_still_cannot_create_scoped_user() {
     let shamir = setup().await;
-    // User(1001) owns the db; User(2002) does NOT but the db is open so it
-    // can Read/enter execute_as. It must still be denied the scoped create.
     make_db_owner(&shamir, Actor::User(1001)).await;
 
     let req = one_op(ddl::create_user("x", "pw").database("testdb"));
@@ -283,8 +211,123 @@ async fn non_owner_with_db_read_still_cannot_create_scoped_user() {
         resp.is_err(),
         "a non-owner must NOT create a scoped user even with db read: {resp:?}"
     );
+}
 
-    // Sanity: the actual owner can.
-    let resp = shamir.execute_as(Actor::User(1001), "testdb", &req).await;
-    assert!(resp.is_ok(), "owner path must work: {resp:?}");
+/// Without a `UserAdminPort` installed, `create_user` returns
+/// `not_supported` — the retirement of Store B is a hard cutover, not a
+/// soft fallback.
+#[tokio::test]
+async fn create_user_without_port_returns_not_supported() {
+    let shamir = setup().await;
+
+    let req = one_op(ddl::create_user("alice", "pw"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(
+        resp.is_err(),
+        "create_user without a port must fail: {resp:?}"
+    );
+    let err = resp.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("not_supported"),
+        "expected code 'not_supported', got: {:?}",
+        err.code()
+    );
+}
+
+/// Without a `UserAdminPort`, `drop_user` also returns `not_supported`.
+#[tokio::test]
+async fn drop_user_without_port_returns_not_supported() {
+    let shamir = setup().await;
+
+    let req = one_op(ddl::drop_user("ghost"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err());
+    assert_eq!(resp.unwrap_err().code(), Some("not_supported"));
+}
+
+/// Without a `UserAdminPort`, `grant_role` returns `not_supported` (after
+/// the `Manage(Root)` gate passes for System).
+#[tokio::test]
+async fn grant_role_without_port_returns_not_supported() {
+    let shamir = setup().await;
+
+    let req = one_op(ddl::grant_role("admin", "somebody"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err());
+    assert_eq!(resp.unwrap_err().code(), Some("not_supported"));
+}
+
+// ===========================================================================
+// B (positive). Owner delegation with a port installed — a real database
+// owner (non-superuser `Actor::User`) creates a user scoped to their own
+// database, end-to-end through `UserAdminPort`.
+// ===========================================================================
+
+/// Records every `create_user` call it receives — proves the call actually
+/// reached the port (not just that the authorization gate admitted it).
+#[derive(Default)]
+struct RecordingPort {
+    calls: Mutex<Vec<(String, Vec<String>, Option<String>)>>,
+}
+
+#[async_trait]
+impl UserAdminPort for RecordingPort {
+    async fn create_user(
+        &self,
+        name: &str,
+        _password: &str,
+        roles: Vec<String>,
+        database: Option<String>,
+    ) -> Result<[u8; 16], PortError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), roles, database));
+        Ok([0x42u8; 16])
+    }
+    async fn drop_user(&self, _name: &str) -> Result<bool, PortError> {
+        Ok(false)
+    }
+    async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+    async fn revoke_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Ok(())
+    }
+    async fn set_superuser(&self, _user: &str, _on: bool) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+/// A real database owner (non-superuser `Actor::User`) creates a user
+/// scoped to their own database end-to-end: `authorize_user_lifecycle`'s
+/// Path 2 (database-owner delegation) admits, and the call actually reaches
+/// the installed `UserAdminPort` with the right name/scope — proving the
+/// task #559 seam wires delegation all the way through, not just at the
+/// authorization-gate boundary already covered above.
+#[tokio::test]
+async fn db_owner_creates_scoped_user_through_port() {
+    let shamir = setup().await;
+    let owner = Actor::User(1001);
+    make_db_owner(&shamir, owner.clone()).await;
+
+    let port = Arc::new(RecordingPort::default());
+    let shamir = shamir.with_user_admin_port(port.clone() as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::create_user("scoped_erin", "pw").database("testdb"));
+    let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
+    assert!(
+        resp.is_ok(),
+        "a non-superuser database owner must create a user scoped to their own db: {resp:?}"
+    );
+
+    let calls = port.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "the port must be called exactly once");
+    assert_eq!(calls[0].0, "scoped_erin");
+    assert_eq!(
+        calls[0].2.as_deref(),
+        Some("testdb"),
+        "the port must receive the owner's own database scope"
+    );
 }

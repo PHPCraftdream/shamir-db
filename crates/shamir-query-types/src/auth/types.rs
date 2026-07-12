@@ -1,7 +1,6 @@
 //! Auth types — Resource, Action, Permission, Role, User, and auth operations.
 
 use serde::{Deserialize, Serialize};
-use shamir_types::types::value::QueryValue;
 
 use crate::admin::types::db_ops::is_false;
 use crate::auth::SecretString;
@@ -150,9 +149,6 @@ pub struct User {
     /// prints the hash and the buffer is zeroized on drop.
     pub password_hash: SecretString,
     pub roles: Vec<String>,
-    /// Arbitrary user profile fields (for $user references in row filters).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<QueryValue>,
     /// Optional database scope. When set, the user is *owned* by that
     /// database — its owner (whoever holds `Manage` on the database) may
     /// create/drop this user without being a global admin. `None` means a
@@ -168,7 +164,6 @@ impl std::fmt::Debug for User {
             .field("name", &self.name)
             .field("password_hash", &self.password_hash)
             .field("roles", &self.roles)
-            .field("profile", &self.profile)
             .field("database", &self.database)
             .finish()
     }
@@ -187,8 +182,6 @@ pub struct CreateUserOp {
     pub password: SecretString,
     #[serde(default)]
     pub roles: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<QueryValue>,
     /// Optional database scope. When set, the created user is owned by this
     /// database, so the database owner (a holder of `Manage` on the
     /// database) may create it without global-admin rights. See [`User`].
@@ -207,7 +200,6 @@ impl std::fmt::Debug for CreateUserOp {
             .field("create_user", &self.create_user)
             .field("password", &self.password)
             .field("roles", &self.roles)
-            .field("profile", &self.profile)
             .field("database", &self.database)
             .field("hmac", &self.hmac)
             .finish()
@@ -228,39 +220,6 @@ pub struct DropUserOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
-}
-
-/// Create a role.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreateRoleOp {
-    pub create_role: String,
-    pub permissions: Vec<Permission>,
-    /// Hex HMAC over `b"create_role\0<role>"`. See `DropRoleOp`. The
-    /// permissions list is not part of the canonical input — mirrors
-    /// `drop_role`'s precedent of identifying the op by name only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hmac: Option<String>,
-}
-
-/// Drop a role.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DropRoleOp {
-    pub drop_role: String,
-    /// Hex HMAC over `b"drop_role\0<role>"`. See `DropUserOp`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hmac: Option<String>,
-    /// When `true`, dropping a non-existent role is a silent no-op
-    /// returning `{"existed": false}` instead of an error.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub if_exists: bool,
-}
-
-/// Rename a role (re-key the role record and rekey `roles` references
-/// in every user that holds the old name).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RenameRoleOp {
-    pub rename_role: String,
-    pub to: String,
 }
 
 /// Grant a role to a user.

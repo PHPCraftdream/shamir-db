@@ -87,18 +87,6 @@ fn list_users_wire() {
     );
 }
 
-#[test]
-fn list_roles_wire() {
-    let op = ddl::list_roles();
-    let j = roundtrip(&op);
-    assert_eq!(
-        j,
-        mpack!({
-            "list": "roles"
-        })
-    );
-}
-
 // ============================================================================
 // list functions / validators / function_folders
 // ============================================================================
