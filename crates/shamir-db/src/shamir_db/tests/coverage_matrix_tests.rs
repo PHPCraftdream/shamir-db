@@ -29,7 +29,7 @@
 //!
 //! | Object            | Read | Write | Create | Delete | Execute | List | Manage |
 //! |--------------------|------|-------|--------|--------|---------|------|--------|
-//! | Root               |  —   |  —    |  (open)|   —    |   —     |(open)|   X    |
+//! | Root               |  —   |  —    |    X   |   —    |   —     |(open)|   X    |
 //! | Database            |  X   |  —    |  X     |   X    |   X     |  X   |   X    |
 //! | Store                |  X   |  —    |  X     |   X    |   X     |  X   |   X    |
 //! | Table                 |  X   |  X    |  (X)   |   X    |   X     |  —   |   X    |
@@ -37,27 +37,41 @@
 //! | Index                   |  —   |  X    |  —     |   X    |   —     |  —   | (inherit)|
 //! | FunctionNamespace         |(open)|  —    |(open) |   —    |   —     |(open)|   —    |
 //! | Function                   |(open)|(open) |  —    |(open)  |(open)   |  —   |   X    |
-//! | User                        |(open)|(open) |  —    |(open)  |   —     |  —   |   X    |
-//! | Group                        |(open)|  —    |  —    |(open)  |   —     |(open)|   X    |
+//! | User                        |  X   |  X    |  —    |  X     |   —     |  —   |   X    |
+//! | Group                        |  X   |  —    |  —    |  X     |   —     |  X   |   X    |
 //!
 //! `X` cells assert DENIAL for a no-rights actor (real mode-bit enforcement
 //! against an owner-rwx-only default). `(open)` cells are NOT asserted as
 //! denied — `resource_meta` resolves these paths to `ResourceMeta::open()`
-//! unconditionally (`Root`/`User`/`Group`: hard-coded `Ok(open())` arm in
-//! `resource_meta`; `FunctionNamespace`/`Function`-with-no-catalogue-row:
-//! `Ok(None) => ResourceMeta::default()` on a genuinely-absent record), so
-//! mode-bit-gated actions on them are allowed for EVERY actor today. This
-//! is a pre-existing, deliberate (if debatable) posture — see
-//! `ResourceMeta::open`'s doc comment ("so nothing is restricted while the
-//! gate is transparent") and task #550 ("Root/User/Group always-open meta"),
-//! which owns the decision of whether to close it. This test asserts the
+//! unconditionally (`Root`'s Create/List, `FunctionNamespace`/
+//! `Function`-with-no-catalogue-row: `Ok(None) => ResourceMeta::default()`
+//! on a genuinely-absent record), so mode-bit-gated actions on them are
+//! allowed for EVERY actor today. This is a pre-existing, deliberate (if
+//! debatable) posture — see `ResourceMeta::open`'s doc comment ("so nothing
+//! is restricted while the gate is transparent"). This test asserts the
 //! matrix AS ENFORCED TODAY (proving the real `X` cells are genuinely
 //! denied, including the ones item (a)'s `required_access` refactor and
 //! item (d)'s group-CRUD gate touch) and explicitly documents the `(open)`
 //! cells as known, tracked gaps rather than silently omitting them — a
-//! future #550 fix that closes one of these should make the corresponding
+//! future fix that closes one of these should make the corresponding
 //! `(open)` cell start failing THIS test's `_allows_open_default_cells`
 //! companion below, forcing an explicit update here.
+//!
+//! **Task #552 update**: `User`/`Group` moved from `(open)` to `X` — the
+//! `resource_meta` arms for both kinds now resolve to REAL, kind-specific
+//! meta (`User`: computed `owner=self`, `mode=0o750`, never persisted;
+//! `Group`: persisted `owner` on the group record, `group=Some(group_id)`,
+//! `mode=0o750`) instead of the old blanket `ResourceMeta::open()`. A
+//! no-rights stranger now genuinely loses Read/Write/Delete on `User` and
+//! Read/List on `Group` (Other has no bits in `0o750`) — see
+//! `root_user_group_meta_tests.rs` for the dedicated per-kind coverage.
+//! `Root` also moved its `Create` cell from `(open)` to `X`: the new
+//! persisted default mode is `0o755` (not the old universal-open `0o777`),
+//! so `Other` loses the WRITE bit and `Create` (Write-mapped) is now
+//! genuinely denied for a no-rights actor — this is the design's own
+//! stated intent ("database creation is a privileged act", narrowing from
+//! everyone-writable to owner-only). `Root/List` stays open (`0o755`
+//! keeps the Read bit for `Other` unchanged).
 //!
 //! Record/Index inherit their Table's meta (`resource_meta` resolves them to
 //! the Table path) — covered by `enforcement_tests::record_enforcement_inherits_table_meta`
@@ -87,12 +101,22 @@ struct MatrixCell {
 /// `ACCESS_HIERARCHY.md`; each entry names the doc's `Object`/column pair.
 fn x_cells() -> Vec<MatrixCell> {
     vec![
-        // ── Root — only Manage is enforced (owner-only); Create/List are
-        // open-by-design, see `open_cells` below and the module doc. ──
+        // ── Root — Manage was already owner-only. Task #552: Root's
+        // default mode narrowed from `open()` (`0o777`) to `0o755` —
+        // Other loses the WRITE bit, so Create (Write-mapped) is now a
+        // real denial too (this is the design's OWN stated intent:
+        // "database creation is a privileged act", narrowing from
+        // everyone-writable to owner-only). List stays open (Read bit
+        // unchanged in 0o755) — see `open_cells` below. ──
         MatrixCell {
             label: "Root/Manage (server admin)",
             path: || ResourcePath::Root,
             action: Action::Manage,
+        },
+        MatrixCell {
+            label: "Root/Create (create db) — task #552: 0o755 narrows Other-write",
+            path: || ResourcePath::Root,
+            action: Action::Create,
         },
         // ── Database ──────────────────────────────────────────────────
         MatrixCell {
@@ -226,22 +250,47 @@ fn x_cells() -> Vec<MatrixCell> {
             path: || ResourcePath::function("myfn"),
             action: Action::Manage,
         },
-        // ── User — only Manage is enforced (owner-only); User always
-        // resolves to `ResourceMeta::open()` (hard-coded arm in
-        // `resource_meta`) — see `open_cells` below and task #550. ──
+        // ── User — task #552: computed owner=self, mode=0o750 — a
+        // no-rights stranger (Other) is denied Read/Write/Delete (no bits
+        // in 0o750) AND Manage (owner-only, unconditional). ──
         MatrixCell {
             label: "User/Manage (admin)",
             path: || ResourcePath::user("alice"),
             action: Action::Manage,
         },
-        // ── Group — same open()-default caveat as User; Manage
-        // (add/remove members) is the real cell — matches
-        // `create_group_as`'s and friends' inline gate this task's item
-        // (d) added. ──
+        MatrixCell {
+            label: "User/Read — task #552: real 0o750 enforcement",
+            path: || ResourcePath::user("alice"),
+            action: Action::Read,
+        },
+        MatrixCell {
+            label: "User/Write — task #552: real 0o750 enforcement",
+            path: || ResourcePath::user("alice"),
+            action: Action::Write,
+        },
+        MatrixCell {
+            label: "User/Delete — task #552: real 0o750 enforcement",
+            path: || ResourcePath::user("alice"),
+            action: Action::Delete,
+        },
+        // ── Group — task #552: persisted owner + mode=0o750 — a
+        // no-rights stranger is denied Read/List (no bits in 0o750) AND
+        // Manage (add/remove members) — matches `create_group_as`'s and
+        // friends' inline gate. ──
         MatrixCell {
             label: "Group/Manage (add/remove members)",
             path: || ResourcePath::group("devs"),
             action: Action::Manage,
+        },
+        MatrixCell {
+            label: "Group/Read — task #552: real 0o750 enforcement",
+            path: || ResourcePath::group("devs"),
+            action: Action::Read,
+        },
+        MatrixCell {
+            label: "Group/List — task #552: real 0o750 enforcement",
+            path: || ResourcePath::group("devs"),
+            action: Action::List,
         },
     ]
 }
@@ -250,18 +299,14 @@ fn x_cells() -> Vec<MatrixCell> {
 /// (or its `Ok(None)` -> `default()` equivalent for a genuinely-absent
 /// catalogue row) UNCONDITIONALLY today, so a no-rights actor IS allowed
 /// mode-bit-gated actions on them. Documented here (rather than silently
-/// omitted) so a future #550 fix that closes one of these makes
+/// omitted) so a future fix that closes one of these makes
 /// `access_hierarchy_matrix_open_cells_are_currently_unenforced` below
 /// start failing — forcing this file to be updated in lock-step with the
 /// enforcement change, instead of the coverage matrix silently going
-/// stale.
+/// stale. (User/Group already made this transition in task #552 — see
+/// the module doc.)
 fn open_cells() -> Vec<MatrixCell> {
     vec![
-        MatrixCell {
-            label: "Root/Create (create db) — open by design",
-            path: || ResourcePath::Root,
-            action: Action::Create,
-        },
         MatrixCell {
             label: "Root/List (list dbs) — open by design",
             path: || ResourcePath::Root,
@@ -297,36 +342,16 @@ fn open_cells() -> Vec<MatrixCell> {
             path: || ResourcePath::function("myfn"),
             action: Action::Execute,
         },
-        MatrixCell {
-            label: "User/Read — open by design (ResourceMeta::open() always)",
-            path: || ResourcePath::user("alice"),
-            action: Action::Read,
-        },
-        MatrixCell {
-            label: "User/Write — open by design (ResourceMeta::open() always)",
-            path: || ResourcePath::user("alice"),
-            action: Action::Write,
-        },
-        MatrixCell {
-            label: "User/Delete — open by design (ResourceMeta::open() always)",
-            path: || ResourcePath::user("alice"),
-            action: Action::Delete,
-        },
-        MatrixCell {
-            label: "Group/Read — open by design (ResourceMeta::open() always)",
-            path: || ResourcePath::group("devs"),
-            action: Action::Read,
-        },
-        MatrixCell {
-            label: "Group/List — open by design (ResourceMeta::open() always)",
-            path: || ResourcePath::group("devs"),
-            action: Action::List,
-        },
     ]
 }
 
-/// Set up a `ShamirDb` with `testdb/main/items` (+ an index) so every
-/// matrix cell above resolves to a real, existing resource.
+/// Set up a `ShamirDb` with `testdb/main/items` (+ an index) plus a
+/// `"devs"` group so every matrix cell above resolves to a real, existing
+/// resource — including the `Group` cells (task #552's `Group`
+/// `resource_meta` arm falls back to `ResourceMeta::open()` for a group
+/// that was never created, so the group MUST exist for its `X` cells to
+/// probe the real, persisted-owner enforcement rather than the
+/// not-found fallback).
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
@@ -339,6 +364,7 @@ async fn setup() -> ShamirDb {
         .create_index("main", "items", "idx1", &["field1"])
         .await
         .unwrap();
+    shamir.create_group("devs").await.unwrap();
     shamir
 }
 
@@ -419,14 +445,15 @@ async fn access_hierarchy_matrix_allows_system_actor() {
 }
 
 /// Documents the KNOWN gap: a no-rights actor currently PASSES every
-/// `open_cells` matrix cell (Root/FunctionNamespace/User/Group/absent-
-/// Function default to `ResourceMeta::open()`). This is the flip side of
-/// `access_hierarchy_matrix_denies_no_rights_actor` above — it exists so
-/// that when task #550 ("Root/User/Group always-open meta") closes one of
-/// these, THIS assertion starts failing (a cell that used to be `Ok` is
-/// now `Err`), forcing that fix to also move the cell from `open_cells`
-/// into `x_cells` here rather than leaving the coverage matrix silently
-/// out of sync with the enforcement it's supposed to document.
+/// `open_cells` matrix cell (Root's Create/List, FunctionNamespace,
+/// absent-Function default to `ResourceMeta::open()`). This is the flip
+/// side of `access_hierarchy_matrix_denies_no_rights_actor` above — it
+/// exists so that when a future fix closes one of these, THIS assertion
+/// starts failing (a cell that used to be `Ok` is now `Err`), forcing
+/// that fix to also move the cell from `open_cells` into `x_cells` here
+/// rather than leaving the coverage matrix silently out of sync with the
+/// enforcement it's supposed to document. (User/Group already made this
+/// transition in task #552.)
 #[tokio::test]
 async fn access_hierarchy_matrix_open_cells_are_currently_unenforced() {
     use shamir_types::access::Actor;

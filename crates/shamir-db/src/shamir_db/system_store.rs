@@ -626,14 +626,27 @@ impl SystemStore {
     // ========================================================================
 
     /// Persist a group record. `group_id` is allocated by the caller
-    /// (see [`ShamirDb::create_group`]).
-    pub async fn save_group(&self, group_id: u64, name: &str, members: &[u64]) -> DbResult<()> {
+    /// (see [`ShamirDb::create_group`]). `owner` is the persist-friendly
+    /// `Actor::to_owner_id()` encoding of the group's owner (task #552) —
+    /// callers doing a read-modify-write (`add_group_member`/
+    /// `remove_group_member` below, and `access_control.rs`'s
+    /// `rename_group_as`) must thread the EXISTING record's owner through
+    /// unchanged; only `create_group_as` and the `Group` `set_resource_meta`
+    /// write arm intentionally set a NEW owner.
+    pub async fn save_group(
+        &self,
+        group_id: u64,
+        name: &str,
+        members: &[u64],
+        owner: u64,
+    ) -> DbResult<()> {
         let members_list: Vec<QueryValue> =
             members.iter().map(|&m| QueryValue::Int(m as i64)).collect();
         let mut m = new_map();
         m.insert("group_id".to_string(), QueryValue::Int(group_id as i64));
         m.insert("name".to_string(), QueryValue::Str(name.to_string()));
         m.insert("members".to_string(), QueryValue::List(members_list));
+        m.insert("owner".to_string(), QueryValue::Int(owner as i64));
         let record = QueryValue::Map(m);
         let table = self.table(TABLE_GROUPS).await?;
         let op = crate::query::write::SetOp {
@@ -684,6 +697,10 @@ impl SystemStore {
 
     /// Add a user to a group. Reads the group, appends the user, and
     /// re-persists. Returns `Ok(())` even if the user was already a member.
+    ///
+    /// Read-modify-write: threads the existing record's `owner` field
+    /// through unchanged (task #552) — adding a member must not touch
+    /// ownership.
     pub async fn add_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
         let rec = self.load_group(group_id).await?;
         let mut members: Vec<u64> = rec
@@ -700,11 +717,20 @@ impl SystemStore {
             .and_then(|r| r.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        self.save_group(group_id, name, &members).await
+        let owner = rec
+            .as_ref()
+            .and_then(ResourceMeta::owner_field)
+            .unwrap_or(Actor::System)
+            .to_owner_id();
+        self.save_group(group_id, name, &members, owner).await
     }
 
     /// Remove a user from a group. Returns `Ok(())` even if the user was
     /// not a member.
+    ///
+    /// Read-modify-write: threads the existing record's `owner` field
+    /// through unchanged (task #552) — removing a member must not touch
+    /// ownership.
     pub async fn remove_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
         let rec = self.load_group(group_id).await?;
         let mut members: Vec<u64> = rec
@@ -719,7 +745,34 @@ impl SystemStore {
             .and_then(|r| r.get("name"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        self.save_group(group_id, name, &members).await
+        let owner = rec
+            .as_ref()
+            .and_then(ResourceMeta::owner_field)
+            .unwrap_or(Actor::System)
+            .to_owner_id();
+        self.save_group(group_id, name, &members, owner).await
+    }
+
+    /// Update a group's owner in place. Reloads the existing `name` +
+    /// `members`, then re-persists with the new `owner` — the write path
+    /// for the `Group` `set_resource_meta` arm (task #552). Group `mode`
+    /// stays fixed/computed (`0o750`); only `owner` is settable this way.
+    pub async fn set_group_owner(&self, group_id: u64, owner: u64) -> DbResult<()> {
+        let rec = self
+            .load_group(group_id)
+            .await?
+            .ok_or_else(|| DbError::NotFound(format!("group id {} not found", group_id)))?;
+        let name = rec
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let members: Vec<u64> = rec
+            .get("members")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+            .unwrap_or_default();
+        self.save_group(group_id, &name, &members, owner).await
     }
 
     /// Remove a group record by id.

@@ -360,3 +360,173 @@ async fn chmod_database_resource() {
         "should be denied at database traversal"
     );
 }
+
+// ============================================================================
+// group_owner_can_manage_own_group_via_wire_without_root_manage (task #552
+// adversarial-review regression): the group-CRUD OR-gate
+// (Manage(Root) OR Manage(Group{name})) must actually be reachable through
+// the WIRE DISPATCHER, not just the internal `ShamirDb::*_as` methods. A
+// review of an earlier revision found the dispatcher
+// (`shamir_db::execute::admin_access`) still ran its own, older,
+// unconditional `Manage(Root)`-only pre-check ahead of the corrected `*_as`
+// methods, silently pre-rejecting every non-Root-Manage caller — making the
+// whole feature unreachable from any real client even though the internal
+// methods were themselves correct. This test drives the ops through
+// `ShamirDb::execute_as` (the exact entry point the server uses), not the
+// internal methods directly, so it would have caught that regression.
+// ============================================================================
+
+#[tokio::test]
+async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
+    let shamir = setup().await;
+    let creator = Actor::User(500);
+    let stranger = Actor::User(501);
+
+    // Bootstrap: grant `creator` Manage(Root) just long enough to create the
+    // group (creation itself is still gated on Manage(Root) only — see the
+    // brief), then REVOKE it, proving every subsequent op works on
+    // ownership alone, through the real wire path.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::Root,
+            &ResourceMeta {
+                owner: creator.clone(),
+                group: None,
+                mode: 0o755,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_group("op", ddl::create_group("wire-devs"));
+    let req = b.to_request_via_msgpack();
+    let resp = shamir
+        .execute_as(creator.clone(), "testdb", &req)
+        .await
+        .unwrap();
+    let gid = resp.results["op"].records[0]
+        .get_value_u64("group_id")
+        .unwrap();
+
+    // Revoke creator's Manage(Root) — hand Root back to System.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::Root,
+            &ResourceMeta {
+                owner: Actor::System,
+                group: None,
+                mode: 0o755,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Creator can still rename/add-member/remove-member/drop THEIR OWN
+    // group through the wire dispatcher, without Manage(Root).
+    let group_ref = ddl::GroupRef::Name {
+        name: "wire-devs".into(),
+    };
+    let mut b = Batch::new();
+    b.id(1);
+    b.rename_group("op", ddl::rename_group(group_ref.clone(), "wire-devs-2"));
+    let req = b.to_request_via_msgpack();
+    shamir
+        .execute_as(creator.clone(), "testdb", &req)
+        .await
+        .expect("group owner must be able to rename their own group via the wire dispatcher");
+
+    let group_ref = ddl::GroupRef::Name {
+        name: "wire-devs-2".into(),
+    };
+    let mut b = Batch::new();
+    b.id(1);
+    b.add_group_member("op", ddl::add_group_member(group_ref.clone(), 999));
+    let req = b.to_request_via_msgpack();
+    shamir
+        .execute_as(creator.clone(), "testdb", &req)
+        .await
+        .expect(
+            "group owner must be able to add members to their own group via the wire dispatcher",
+        );
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.remove_group_member("op", ddl::remove_group_member(group_ref.clone(), 999));
+    let req = b.to_request_via_msgpack();
+    shamir
+        .execute_as(creator.clone(), "testdb", &req)
+        .await
+        .expect(
+        "group owner must be able to remove members from their own group via the wire dispatcher",
+    );
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_group("op", ddl::drop_group(ddl::GroupRef::Id { id: gid }));
+    let req = b.to_request_via_msgpack();
+    shamir
+        .execute_as(creator, "testdb", &req)
+        .await
+        .expect("group owner must be able to drop their own group via the wire dispatcher");
+
+    // A stranger — neither the owner nor holding Manage(Root) — is denied
+    // the same ops via the wire dispatcher (recreate the group first, since
+    // the creator just dropped theirs above).
+    shamir
+        .set_resource_meta(
+            &ResourcePath::Root,
+            &ResourceMeta {
+                owner: Actor::System,
+                group: None,
+                mode: 0o777,
+            },
+        )
+        .await
+        .unwrap();
+    let result = exec_op(&shamir, ddl::create_group("wire-devs-owned")).await;
+    let gid2 = result.records[0].get_value_u64("group_id").unwrap();
+    // Stamp a real owner (not the stranger) directly, simulating a group
+    // created by someone else.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::group("wire-devs-owned"),
+            &ResourceMeta {
+                owner: Actor::User(600),
+                group: None,
+                mode: 0o750,
+            },
+        )
+        .await
+        .unwrap();
+
+    let group_ref = ddl::GroupRef::Id { id: gid2 };
+    let mut b = Batch::new();
+    b.id(1);
+    b.rename_group("op", ddl::rename_group(group_ref.clone(), "should-fail"));
+    let req = b.to_request_via_msgpack();
+    let err = shamir
+        .execute_as(stranger.clone(), "testdb", &req)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("access_denied"),
+        "a non-owner, non-Manage(Root) actor must be denied rename_group via the wire dispatcher"
+    );
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_group("op", ddl::drop_group(group_ref));
+    let req = b.to_request_via_msgpack();
+    let err = shamir
+        .execute_as(stranger, "testdb", &req)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("access_denied"),
+        "a non-owner, non-Manage(Root) actor must be denied drop_group via the wire dispatcher"
+    );
+}

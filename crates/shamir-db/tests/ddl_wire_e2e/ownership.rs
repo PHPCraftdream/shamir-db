@@ -28,6 +28,25 @@ async fn owner_on_create_db_user_actor() {
         .await
         .unwrap();
 
+    // Task #552: Root's persisted default mode narrowed from `open()`
+    // (`0o777`) to `0o755` — Other loses the WRITE bit, so `CreateDb`
+    // (which needs `Action::Create`, i.e. Write, directly on
+    // `ResourcePath::Root`) now genuinely requires owner (or System)
+    // rights on Root itself. `chown`+`chmod` Root to this actor so the
+    // real SUBJECT of this test (creating "owned_db") can proceed —
+    // this is a deliberate, documented behavior change, not a workaround.
+    shamir
+        .set_resource_meta(
+            &ResourcePath::Root,
+            &shamir_types::access::ResourceMeta {
+                owner: user_actor.clone(),
+                group: None,
+                mode: 0o755,
+            },
+        )
+        .await
+        .unwrap();
+
     // Create a NEW database via execute_as with a user actor.
     let mut b = Batch::new();
     b.id(1);

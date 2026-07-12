@@ -235,11 +235,19 @@ async fn index_inherits_table_meta() {
 // Root and unknown paths default to open
 // ============================================================================
 
+// Task #552: Root now resolves to full persisted meta (settings key
+// "root_meta"), defaulting to System-owned `0o755` when absent — NOT the
+// universal-open `ResourceMeta::open()` (`0o777`) this test used to assert.
+// See `root_user_group_meta_tests.rs::root_meta_defaults_to_system_0o755_when_absent`
+// for the dedicated coverage; this test is updated in lock-step so it
+// doesn't silently assert stale pre-#552 behavior.
 #[tokio::test]
-async fn root_meta_defaults_to_open() {
+async fn root_meta_defaults_to_system_0o755() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let meta = shamir.resource_meta(&ResourcePath::Root).await.unwrap();
-    assert_eq!(meta, ResourceMeta::open());
+    assert_eq!(meta.owner, Actor::System);
+    assert_eq!(meta.group, None);
+    assert_eq!(meta.mode, 0o755);
 }
 
 #[tokio::test]

@@ -129,8 +129,65 @@ impl ShamirDb {
                     }
                 }
             }
-            ResourcePath::Root | ResourcePath::User { .. } | ResourcePath::Group { .. } => {
-                Ok(ResourceMeta::open())
+            // Root — full persisted meta, settings key "root_meta". Mirrors
+            // the FunctionNamespace arm above. Default (absent key) is
+            // System-owned, `0o755` — traverse/list stay open exactly as
+            // today; only "write to root" (creating a top-level database)
+            // narrows from everyone-writable to owner-only (task #552).
+            ResourcePath::Root => match self.system_store.load_setting("root_meta").await {
+                Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
+                Ok(None) => Ok(ResourceMeta {
+                    owner: Actor::System,
+                    group: None,
+                    mode: 0o755,
+                }),
+                Err(e) => {
+                    log::warn!("resource_meta: failed to load root meta: {e}");
+                    Err(e)
+                }
+            },
+            // User — a FIXED, computed 3-tier rule, never persisted.
+            // owner = self, mode = 0o750 (owner rwx; group n/a; other
+            // nothing). Effective behavior via the existing
+            // permits()/class_of() machinery: System — full (bypass); the
+            // user themselves — Read + Manage on their own path; everyone
+            // else — denied (Other has no bits in 0o750). Not persisted:
+            // see this arm's `set_resource_meta` counterpart (falls through
+            // to the catch-all NotFound) and task #552's brief for why
+            // persisting here would collide with the (separate, not-yet-
+            // landed) directory-canonical-store decision.
+            ResourcePath::User { name } => Ok(ResourceMeta {
+                // principal_id, NOT principal64 — task #555 (Actor::Admin/
+                // principal64) hasn't landed yet; this call site gets a
+                // one-line swap when it does.
+                owner: Actor::User(principal_id(name)),
+                group: None,
+                mode: 0o750,
+            }),
+            // Group — persisted `owner` on the existing group record,
+            // computed mode. `group: Some(group_id)` makes a group's own
+            // members a real permission class (roster-read for members).
+            // Not-found falls back to `ResourceMeta::open()` (mirrors the
+            // FunctionFolder "never created" convention above — a
+            // nonexistent group is not an error case for meta resolution).
+            ResourcePath::Group { name } => {
+                let group_ref = crate::query::admin::GroupRef::Name { name: name.clone() };
+                let group_id = match self.resolve_group_id(&group_ref).await {
+                    Ok(id) => id,
+                    Err(_) => return Ok(ResourceMeta::open()),
+                };
+                match self.system_store.load_group(group_id).await {
+                    Ok(Some(rec)) => Ok(ResourceMeta {
+                        owner: ResourceMeta::owner_field(&rec).unwrap_or(Actor::System),
+                        group: Some(group_id),
+                        mode: 0o750,
+                    }),
+                    Ok(None) => Ok(ResourceMeta::open()),
+                    Err(e) => {
+                        log::warn!("resource_meta: failed to load group '{}' meta: {e}", name);
+                        Err(e)
+                    }
+                }
             }
             // Record/Index already resolved to Table above; if something
             // slips through, return open.
@@ -222,8 +279,60 @@ impl ShamirDb {
                     .save_setting("fn_namespace_meta", &rec)
                     .await
             }
-            // Root, User, Group, Record, Index — not directly settable via
-            // catalogue in this slice. Root is always open; Record/Index
+            // Root — mirrors the FunctionNamespace write arm above, keyed
+            // "root_meta" (task #552).
+            //
+            // Guardrail: reject a chmod/chown that would leave Root with a
+            // non-System owner AND no owner-Execute bit. `Actor::System`
+            // bypasses `permits()` unconditionally and can always recover;
+            // a non-System owner without owner-Execute would have no way
+            // back in. This checks the NEW meta being written (`meta.owner`
+            // / `meta.mode`), not the meta being replaced — a review of an
+            // earlier revision of this guard found that checking the OLD
+            // (`current`) owner instead let the lockout through via two
+            // ordinary, separately-authorized calls: (1) while Root is
+            // still System-owned, chmod clears owner-Execute (allowed —
+            // System doesn't need the bit); (2) a SEPARATE chown then hands
+            // Root to a non-System actor without touching mode, inheriting
+            // the already-cleared bit — the old check only looked at
+            // `current.owner` (still System at the time of call 2) and
+            // never fired. Checking the actor/bits actually being persisted
+            // closes both the single-call and the two-call sequence.
+            ResourcePath::Root => {
+                if meta.owner != Actor::System
+                    && !Mode::is_set(
+                        meta.mode,
+                        shamir_types::access::PermClass::Owner,
+                        shamir_types::access::Perm::Execute,
+                    )
+                {
+                    return Err(DbError::Validation(format!(
+                        "chmod/chown would leave Root owned by non-System owner {} without \
+                         owner-Execute (unrecoverable self-lockout — System always bypasses \
+                         permits() and can always recover, but a non-System owner cannot)",
+                        meta.owner
+                    )));
+                }
+                let mut m = shamir_types::types::common::new_map();
+                m.insert("key".to_string(), QueryValue::Str("root_meta".to_string()));
+                let mut rec = QueryValue::Map(m);
+                meta.inject_into(&mut rec);
+                self.system_store.save_setting("root_meta", &rec).await
+            }
+            // Group — mirrors the FunctionNamespace write arm's shape, but
+            // only `owner` is settable (per the design doc, group `mode`
+            // stays fixed/computed at 0o750 — no demonstrated need for
+            // per-group chmod yet).
+            ResourcePath::Group { name } => {
+                let group_ref = crate::query::admin::GroupRef::Name { name: name.clone() };
+                let group_id = self.resolve_group_id(&group_ref).await?;
+                self.system_store
+                    .set_group_owner(group_id, meta.owner.to_owner_id())
+                    .await
+            }
+            // User, Record, Index — not directly settable via catalogue in
+            // this slice. User meta is a fixed, computed rule (never
+            // persisted — see the `resource_meta` arm above); Record/Index
             // inherit from their Table.
             _ => Err(DbError::NotFound(format!(
                 "resource path '{}' does not support set_resource_meta in this slice",
@@ -302,7 +411,9 @@ impl ShamirDb {
         self.system_store
             .save_setting("next_group_id", &QueryValue::Int((current + 1) as i64))
             .await?;
-        self.system_store.save_group(group_id, name, &[]).await?;
+        self.system_store
+            .save_group(group_id, name, &[], actor.to_owner_id())
+            .await?;
         Ok(group_id)
     }
 
@@ -314,14 +425,14 @@ impl ShamirDb {
         self.drop_group_as(group_id, &Actor::System).await
     }
 
-    /// Drop a group by id, self-defending with the `Manage(Root)` gate.
-    /// See [`create_group_as`](Self::create_group_as)'s doc comment for
-    /// the task #546 rationale (redundant-with-dispatcher, composes with
+    /// Drop a group by id, self-defending with EITHER the `Manage(Root)`
+    /// gate OR `Manage(Group{name})` (task #552 — a group's own creator
+    /// manages their own group without needing global root admin). See
+    /// [`create_group_as`](Self::create_group_as)'s doc comment for the
+    /// task #546 rationale (redundant-with-dispatcher, composes with
     /// `Actor::System` bypass, guards a future non-dispatcher caller).
     pub async fn drop_group_as(&self, group_id: u64, actor: &Actor) -> DbResult<()> {
-        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        self.authorize_group_manage_or_root(group_id, actor).await?;
         self.system_store.remove_group(group_id).await
     }
 
@@ -348,20 +459,18 @@ impl ShamirDb {
         self.rename_group_as(group_ref, to, &Actor::System).await
     }
 
-    /// Rename an existing group, self-defending with the `Manage(Root)`
-    /// gate. See [`create_group_as`](Self::create_group_as)'s doc comment
-    /// for the task #546 rationale.
+    /// Rename an existing group, self-defending with EITHER the
+    /// `Manage(Root)` gate OR `Manage(Group{name})` (task #552). See
+    /// [`create_group_as`](Self::create_group_as)'s doc comment for the
+    /// task #546 rationale.
     pub async fn rename_group_as(
         &self,
         group_ref: &crate::query::admin::GroupRef,
         to: &str,
         actor: &Actor,
     ) -> DbResult<()> {
-        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(|e| DbError::Validation(e.to_string()))?;
-
         let gid = self.resolve_group_id(group_ref).await?;
+        self.authorize_group_manage_or_root(gid, actor).await?;
 
         // Uniqueness guard: reject if a *different* group already owns `to`.
         let groups = self.system_store.load_groups().await?;
@@ -373,9 +482,19 @@ impl ShamirDb {
             return Err(DbError::KeyExists(format!("group '{}' already exists", to)));
         }
 
-        // Preserve membership across the name rewrite.
+        // Preserve membership AND ownership across the name rewrite —
+        // renaming must not touch ownership (task #552).
         let members = self.group_members(gid).await?;
-        self.system_store.save_group(gid, to, &members).await?;
+        let owner = self
+            .system_store
+            .load_group(gid)
+            .await?
+            .and_then(|rec| ResourceMeta::owner_field(&rec))
+            .unwrap_or(Actor::System)
+            .to_owner_id();
+        self.system_store
+            .save_group(gid, to, &members, owner)
+            .await?;
         Ok(())
     }
 
@@ -388,18 +507,17 @@ impl ShamirDb {
             .await
     }
 
-    /// Add a user to a group, self-defending with the `Manage(Root)` gate.
-    /// See [`create_group_as`](Self::create_group_as)'s doc comment for
-    /// the task #546 rationale.
+    /// Add a user to a group, self-defending with EITHER the
+    /// `Manage(Root)` gate OR `Manage(Group{name})` (task #552). See
+    /// [`create_group_as`](Self::create_group_as)'s doc comment for the
+    /// task #546 rationale.
     pub async fn add_group_member_as(
         &self,
         group_id: u64,
         user_id: u64,
         actor: &Actor,
     ) -> DbResult<()> {
-        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        self.authorize_group_manage_or_root(group_id, actor).await?;
         self.system_store.add_group_member(group_id, user_id).await
     }
 
@@ -412,21 +530,75 @@ impl ShamirDb {
             .await
     }
 
-    /// Remove a user from a group, self-defending with the `Manage(Root)`
-    /// gate. See [`create_group_as`](Self::create_group_as)'s doc comment
-    /// for the task #546 rationale.
+    /// Remove a user from a group, self-defending with EITHER the
+    /// `Manage(Root)` gate OR `Manage(Group{name})` (task #552). See
+    /// [`create_group_as`](Self::create_group_as)'s doc comment for the
+    /// task #546 rationale.
     pub async fn remove_group_member_as(
         &self,
         group_id: u64,
         user_id: u64,
         actor: &Actor,
     ) -> DbResult<()> {
-        self.authorize_access(actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(|e| DbError::Validation(e.to_string()))?;
+        self.authorize_group_manage_or_root(group_id, actor).await?;
         self.system_store
             .remove_group_member(group_id, user_id)
             .await
+    }
+
+    /// Shared self-defense gate for the group-CRUD `*_as` methods (task
+    /// #552): succeeds if EITHER `Manage(Root)` OR `Manage(Group{name})`
+    /// passes for `actor`. `permits()` already resolves `Manage` as
+    /// owner-only, so once the `Group` `resource_meta` arm reports the
+    /// real persisted owner, this naturally allows a group's own creator
+    /// to manage it without needing global root admin, while a stranger
+    /// (no Root-Manage, not the owner) is denied.
+    ///
+    /// Resolves `group_id` back to the group's `name` via `load_group` so
+    /// the check can build a `ResourcePath::Group { name }` — groups are
+    /// id-keyed everywhere else, but `resource_meta`/`authorize_access`
+    /// address groups by name (mirroring `User`/`Function`).
+    ///
+    /// `pub(crate)` (not private): the wire dispatcher
+    /// (`execute::admin_access`) calls this directly before invoking the
+    /// corresponding `*_as` method, so the OR-gate is actually reached from
+    /// the only path real clients use — see the task #552 review finding
+    /// that the dispatcher's OWN, older, unconditional `Manage(Root)`
+    /// pre-check made this method's OR-logic unreachable dead code.
+    pub(crate) async fn authorize_group_manage_or_root(
+        &self,
+        group_id: u64,
+        actor: &Actor,
+    ) -> DbResult<()> {
+        if self
+            .authorize_access(actor, &ResourcePath::Root, Action::Manage)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let name = self
+            .system_store
+            .load_group(group_id)
+            .await?
+            .and_then(|rec| rec.get("name").and_then(|v| v.as_str()).map(str::to_string));
+        if let Some(name) = name {
+            if self
+                .authorize_access(actor, &ResourcePath::group(name), Action::Manage)
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err(DbError::Validation(
+            AccessError {
+                actor: actor.clone(),
+                path: ResourcePath::Root.to_string(),
+                action: Action::Manage,
+            }
+            .to_string(),
+        ))
     }
 
     /// Resolve a [`GroupRef`] to a numeric group id.

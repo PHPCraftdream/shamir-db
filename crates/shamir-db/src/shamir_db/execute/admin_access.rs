@@ -241,14 +241,6 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
-
-        // Groups are global; managing them requires Manage on the root.
-        self.shamir
-            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(err_access)?;
 
         // if_exists: resolve_group_id may fail for non-existent group → no-op.
         let group_id = match self.shamir.resolve_group_id(&op.drop_group).await {
@@ -263,6 +255,18 @@ impl ShamirAdminExecutor {
                 return Err(err(e.to_string()));
             }
         };
+        // Groups are managed by EITHER Manage(Root) OR Manage(Group{name})
+        // (task #552) — a group's own creator can drop it without needing
+        // global root admin. Checked HERE, at the actual wire entry point,
+        // not just inside `drop_group_as` — a prior revision left this
+        // dispatcher's own unconditional Manage(Root)-only check in place,
+        // which pre-rejected every non-Root-Manage caller before the OR-gate
+        // inside `drop_group_as` was ever reached, making the whole feature
+        // unreachable from any real client.
+        self.shamir
+            .authorize_group_manage_or_root(group_id, &self.actor)
+            .await
+            .map_err(|e| err_code("access_denied", e.to_string()))?;
         self.shamir
             .drop_group_as(group_id, &self.actor)
             .await
@@ -287,14 +291,6 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
-
-        // Groups are global; managing them requires Manage on the root.
-        self.shamir
-            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(err_access)?;
 
         // Resolve the source group; rename requires it to exist (no if_exists).
         let group_id = self
@@ -302,6 +298,14 @@ impl ShamirAdminExecutor {
             .resolve_group_id(&op.rename_group)
             .await
             .map_err(|e| err(e.to_string()))?;
+        // Groups are managed by EITHER Manage(Root) OR Manage(Group{name})
+        // (task #552) — see `handle_drop_group`'s comment for why this must
+        // be checked here, at the wire entry point, not just inside
+        // `rename_group_as` (which re-checks redundantly, by design).
+        self.shamir
+            .authorize_group_manage_or_root(group_id, &self.actor)
+            .await
+            .map_err(|e| err_code("access_denied", e.to_string()))?;
         self.shamir
             .rename_group_as(&op.rename_group, &op.to, &self.actor)
             .await
@@ -326,19 +330,23 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
-        // Groups are global; managing them requires Manage on the root.
-        self.shamir
-            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(err_access)?;
         let group_id = self
             .shamir
             .resolve_group_id(&op.add_group_member)
             .await
             .map_err(|e| err(e.to_string()))?;
+        // Groups are managed by EITHER Manage(Root) OR Manage(Group{name})
+        // (task #552) — see `handle_drop_group`'s comment for why this must
+        // be checked here, at the wire entry point, not just inside
+        // `add_group_member_as` (which re-checks redundantly, by design).
+        // Checked BEFORE the `GroupRef::Id` existence check below so an
+        // unauthorized caller learns nothing about whether a numeric group
+        // id is real.
+        self.shamir
+            .authorize_group_manage_or_root(group_id, &self.actor)
+            .await
+            .map_err(|e| err_code("access_denied", e.to_string()))?;
 
         // `resolve_group_id` only validates existence for `GroupRef::Name`
         // (it scans `load_groups()` for a match); `GroupRef::Id { id }`
@@ -388,19 +396,20 @@ impl ShamirAdminExecutor {
             message: msg,
             code: Some(code.to_string()),
         };
-        let err_access =
-            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
-        // Groups are global; managing them requires Manage on the root.
-        self.shamir
-            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
-            .await
-            .map_err(err_access)?;
         let group_id = self
             .shamir
             .resolve_group_id(&op.remove_group_member)
             .await
             .map_err(|e| err(e.to_string()))?;
+        // Groups are managed by EITHER Manage(Root) OR Manage(Group{name})
+        // (task #552) — see `handle_drop_group`'s comment for why this must
+        // be checked here, at the wire entry point, not just inside
+        // `remove_group_member_as` (which re-checks redundantly, by design).
+        self.shamir
+            .authorize_group_manage_or_root(group_id, &self.actor)
+            .await
+            .map_err(|e| err_code("access_denied", e.to_string()))?;
 
         // Deliberately NOT validating op.user's existence here (unlike
         // add_group_member): removing a membership is a set-removal —
