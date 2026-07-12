@@ -873,6 +873,135 @@ async fn wasm_function_http_fetch_allowed() {
     }
 }
 
+// ── #544: per-function net_grants capability ─────────────────────────
+
+/// A function created with the default options (empty `net_grants`) must
+/// still reach a host the DB-wide `net_allowlist` permits — this is the
+/// chosen backward-compatible empty-list semantics (finding 1, task #544):
+/// empty `net_grants` means "no function-level restriction beyond the DB
+/// allowlist", NOT "no egress at all". `wasm_function_http_fetch_allowed`
+/// above already exercises this path end-to-end (real mock server); this
+/// test pins the invariant explicitly via the allowlist-denial error string
+/// so a future accidental flip to the empty-means-nothing semantics fails
+/// loudly here even without curl/network available.
+#[tokio::test]
+async fn net_grants_empty_falls_back_to_db_allowlist() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    // DB-wide allowlist permits an example host; the function has NO
+    // net_grants configured (default options).
+    db.set_net_allowlist(vec!["allowed.example.com".to_string()]);
+
+    if !compile_or_skip(&db, "fetcher", HTTP_FETCH_SRC).await {
+        return;
+    }
+
+    let mut params = Params::new();
+    params.set(
+        "url",
+        QueryValue::Str("http://allowed.example.com/".to_string()),
+    );
+    let result = db.invoke_function("fetcher", params).await.unwrap();
+    match result {
+        QueryValue::Str(s) if s.starts_with("err:") => {
+            assert!(
+                !s.contains("not allowed"),
+                "empty net_grants must fall back to the full DB allowlist \
+                 (backward compat) — got allowlist-denial error: {s}"
+            );
+        }
+        _ => {} // any non-allowlist outcome (e.g. DNS/connect failure) is fine
+    }
+}
+
+/// Source for a function that tries `ctx.http_get(url)` against a
+/// caller-supplied URL and reports whether the FAILURE was an allowlist
+/// denial specifically (vs. a network-level failure), so the test can
+/// distinguish "net_grants correctly scoped this down" from "network is
+/// just unavailable in this sandbox".
+const NET_GRANTS_FETCH_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn scoped_fetcher(ctx: Ctx, _batch: Batch, params: Params) -> Result<Value> {
+    let url = params.str("url")?;
+    match ctx.http_get(url) {
+        Ok(resp) => Ok(Value::Str(resp.body_text())),
+        Err(e) => Ok(Value::Str(format!("err:{}", e.message()))),
+    }
+}
+"#;
+
+/// A function with an explicit, NARROWER `net_grants` list must be denied
+/// egress to a host the DB-wide allowlist would otherwise permit but that
+/// is outside the function's own grant — the actual per-function scoping
+/// behavior finding 1 closes (task #544), independent of the empty-list
+/// question above. `build_net_gateway` must INTERSECT `net_grants` with
+/// `net_allowlist`, not just check the DB-wide list.
+///
+/// Toolchain-gated — skips cleanly when cargo / wasm32 target is absent.
+/// No curl/network needed: the allowlist guard rejects before any I/O.
+#[tokio::test]
+async fn net_grants_narrower_than_db_allowlist_denies_outside_host() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    // DB-wide allowlist permits BOTH hosts.
+    db.set_net_allowlist(vec![
+        "allowed.example.com".to_string(),
+        "other.example.com".to_string(),
+    ]);
+
+    let opts = CreateFunctionOptions {
+        replace: false,
+        visibility: Visibility::Private,
+        security: Security::Invoker,
+        secret_grants: Vec::new(),
+        // Function-level grant narrows it to ONLY "allowed.example.com" —
+        // "other.example.com" is DB-allowed but must be denied to THIS
+        // function specifically.
+        net_grants: vec!["allowed.example.com".to_string()],
+    };
+    match db
+        .create_function_with_opts(
+            "scoped_fetcher",
+            FunctionSource::Source(NET_GRANTS_FETCH_SRC),
+            opts,
+        )
+        .await
+    {
+        Ok(()) => {}
+        Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
+            eprintln!(
+                "SKIP net_grants_narrower_than_db_allowlist_denies_outside_host — toolchain unavailable: {msg}"
+            );
+            return;
+        }
+        Err(e) => panic!("compile scoped_fetcher failed: {e}"),
+    }
+
+    // Request the host that's DB-allowed but OUTSIDE this function's own
+    // net_grants — must be denied.
+    let mut params = Params::new();
+    params.set(
+        "url",
+        QueryValue::Str("http://other.example.com/".to_string()),
+    );
+    let result = db
+        .invoke_function("scoped_fetcher", params)
+        .await
+        .unwrap();
+    match result {
+        QueryValue::Str(s) if s.starts_with("err:") => {
+            assert!(
+                s.contains("not allowed"),
+                "host outside the function's own net_grants must be denied \
+                 by the allowlist guard, got: {s}"
+            );
+        }
+        other => panic!(
+            "expected an allowlist-denial error string for a host outside \
+             net_grants, got: {:?}",
+            other
+        ),
+    }
+}
+
 // ── Slice 9: secret-grant enforcement + function metadata ────────────
 
 /// Source that reads `ctx.global_get("env.SHAMIR_S9_SECRET")` and returns
@@ -970,6 +1099,7 @@ async fn secret_grant_gates_env_read() {
         visibility: Visibility::Private,
         security: Security::Invoker,
         secret_grants: vec!["SHAMIR_S9_SECRET".to_string()],
+        net_grants: Vec::new(),
     };
     db.create_function_with_opts("reader", FunctionSource::Source(ENV_READER_SRC), opts)
         .await
@@ -983,6 +1113,84 @@ async fn secret_grant_gates_env_read() {
     );
 
     std::env::remove_var("SHAMIR_S9_SECRET");
+}
+
+/// Source that writes an `env.*` global via `global_set`, then immediately
+/// reads it back (WITH a matching `secret_grants` entry, so any observed
+/// change is attributable to the write attempt, not the read gate) and
+/// returns what it sees.
+const ENV_WRITER_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn writer(ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+    ctx.global_set("env.SHAMIR_S9_WRITE_SECRET", Value::Str("pwned".to_string()));
+    Ok(ctx.global_get("env.SHAMIR_S9_WRITE_SECRET").unwrap_or(Value::Null))
+}
+"#;
+
+/// A guest `global_set("env.SOME_KEY", ...)` must NOT overwrite an
+/// OS-seeded `env.*` value — no guest may ever write into the `env.*`
+/// namespace, regardless of `secret_grants` (finding 2, task #544).
+///
+/// The writer function is granted `secret_grants: ["SHAMIR_S9_WRITE_SECRET"]`
+/// (so it CAN read the secret) and attempts to overwrite it via
+/// `global_set`. Before the fix this silently succeeds and corrupts the
+/// seeded value for the rest of the process; after the fix the write
+/// attempt fails (the host import traps) and the seeded value survives,
+/// verified independently via `db.globals()`.
+///
+/// Toolchain-gated — skips cleanly when cargo / wasm32 target is absent.
+#[tokio::test]
+async fn global_set_cannot_overwrite_seeded_env_value() {
+    std::env::set_var("SHAMIR_S9_WRITE_SECRET", "original-secret");
+    let db = ShamirDb::init_memory().await.unwrap();
+    assert_eq!(
+        db.globals().get("env.SHAMIR_S9_WRITE_SECRET"),
+        Some(QueryValue::Str("original-secret".to_string())),
+        "sanity: the env var must be seeded before the guest tries to overwrite it"
+    );
+
+    let opts = CreateFunctionOptions {
+        replace: false,
+        visibility: Visibility::Private,
+        security: Security::Invoker,
+        secret_grants: vec!["SHAMIR_S9_WRITE_SECRET".to_string()],
+        net_grants: Vec::new(),
+    };
+    match db
+        .create_function_with_opts("writer", FunctionSource::Source(ENV_WRITER_SRC), opts)
+        .await
+    {
+        Ok(()) => {}
+        Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
+            eprintln!("SKIP global_set_cannot_overwrite_seeded_env_value — toolchain unavailable: {msg}");
+            std::env::remove_var("SHAMIR_S9_WRITE_SECRET");
+            return;
+        }
+        Err(e) => {
+            std::env::remove_var("SHAMIR_S9_WRITE_SECRET");
+            panic!("compile writer failed: {e}");
+        }
+    }
+
+    // The write attempt must fail closed (the host import traps): the
+    // function invocation itself must return an error, NOT a successful
+    // "pwned" result.
+    let result = db.invoke_function("writer", Params::new()).await;
+    assert!(
+        result.is_err(),
+        "global_set into env.* must trap the invocation, got: {result:?}"
+    );
+
+    // The seeded value must have survived the write attempt untouched —
+    // verified independently through the shared GlobalVars, not just the
+    // function's own (failed) return value.
+    assert_eq!(
+        db.globals().get("env.SHAMIR_S9_WRITE_SECRET"),
+        Some(QueryValue::Str("original-secret".to_string())),
+        "a guest global_set must never corrupt a seeded env.* value"
+    );
+
+    std::env::remove_var("SHAMIR_S9_WRITE_SECRET");
 }
 
 /// Function metadata (visibility, security, secret_grants) persists across
@@ -1002,6 +1210,7 @@ async fn function_meta_roundtrip() {
             visibility: Visibility::Public,
             security: Security::Definer,
             secret_grants: vec!["FOO".to_string(), "BAR".to_string()],
+            net_grants: Vec::new(),
         };
         db.create_function_with_opts("echo", FunctionSource::Wasm(&echo_wasm()), opts)
             .await

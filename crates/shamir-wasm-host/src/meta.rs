@@ -76,15 +76,35 @@ pub struct FunctionMeta {
     pub visibility: Visibility,
     pub security: Security,
     pub secret_grants: Vec<String>,
+    /// Host patterns this function may reach via `ctx.http_fetch()`,
+    /// INTERSECTED with the DB-wide `net_allowlist` (a function can never
+    /// exceed the DB's own ceiling — see `build_net_gateway`).
+    ///
+    /// Unlike `secret_grants` (empty = no secrets granted), an EMPTY
+    /// `net_grants` means "no function-level restriction beyond the DB-wide
+    /// allowlist" — i.e. the function gets the full `net_allowlist`, exactly
+    /// as it did before this field existed. This is a deliberately
+    /// backward-compatible default: every function that never sets
+    /// `net_grants` keeps the egress reach it already had. A function can
+    /// only ask for LESS than the DB default via a non-empty grant list —
+    /// there is no way to exceed it. See `build_net_gateway`'s doc comment
+    /// for the full reasoning.
+    pub net_grants: Vec<String>,
 }
 
 impl FunctionMeta {
     /// Construct metadata with the given fields.
-    pub fn new(visibility: Visibility, security: Security, secret_grants: Vec<String>) -> Self {
+    pub fn new(
+        visibility: Visibility,
+        security: Security,
+        secret_grants: Vec<String>,
+        net_grants: Vec<String>,
+    ) -> Self {
         Self {
             visibility,
             security,
             secret_grants,
+            net_grants,
         }
     }
 
@@ -111,10 +131,20 @@ impl FunctionMeta {
                     .collect()
             })
             .unwrap_or_default();
+        let net_grants = rec
+            .get("net_grants")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             visibility,
             security,
             secret_grants,
+            net_grants,
         }
     }
 
@@ -139,6 +169,16 @@ impl FunctionMeta {
                 "secret_grants".to_string(),
                 shamir_types::types::value::QueryValue::List(grants),
             );
+            // Build the net_grants list as QueryValue::List.
+            let net_grants: Vec<shamir_types::types::value::QueryValue> = self
+                .net_grants
+                .iter()
+                .map(|s| shamir_types::types::value::QueryValue::Str(s.clone()))
+                .collect();
+            map.insert(
+                "net_grants".to_string(),
+                shamir_types::types::value::QueryValue::List(net_grants),
+            );
         }
     }
 }
@@ -147,13 +187,15 @@ impl FunctionMeta {
 /// facade's `create_function_with_opts`.
 ///
 /// Default matches pre-slice-9 behaviour: replace=false, Private, Invoker,
-/// no secret grants.
+/// no secret grants, no net grants (empty `net_grants` = full DB-wide
+/// `net_allowlist`, see [`FunctionMeta::net_grants`]).
 #[derive(Debug, Clone)]
 pub struct CreateFunctionOptions {
     pub replace: bool,
     pub visibility: Visibility,
     pub security: Security,
     pub secret_grants: Vec<String>,
+    pub net_grants: Vec<String>,
 }
 
 impl Default for CreateFunctionOptions {
@@ -163,6 +205,7 @@ impl Default for CreateFunctionOptions {
             visibility: Visibility::Private,
             security: Security::Invoker,
             secret_grants: Vec::new(),
+            net_grants: Vec::new(),
         }
     }
 }
