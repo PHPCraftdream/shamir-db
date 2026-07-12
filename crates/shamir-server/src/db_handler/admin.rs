@@ -299,6 +299,39 @@ pub(super) async fn change_password_verify(
     DbResponse::ChangePasswordOk
 }
 
+/// Explicit allowlist of admin/DDL ops exempted from the coarse wire-admin
+/// gate (task #553, per `docs/design/root-user-group-dac-posture-550-decision.md`
+/// §2). Exactly the 4 ops the design decision named — `List`, `AccessTree`,
+/// `DescribeTable`, `GetTableSchema` — never derived from `is_write()` or
+/// any other classifier.
+///
+/// Each of these 4 ops still runs its OWN independent per-table/per-path
+/// `authorize_access` check further down the stack (`admin_list.rs`,
+/// `admin_access.rs`'s `handle_access_tree`, `admin_describe.rs`,
+/// `admin_schema.rs`) — this predicate only stops the coarse gate from
+/// blocking them outright; it grants nothing by itself.
+///
+/// `BatchOp::Batch` (nested sub-batch) MUST NEVER be added here: its
+/// `required_access` is `None` (`batch_op.rs:543`), so the per-op
+/// authorization loop never recurses into a sub-batch's nested queries.
+/// Exempting `Batch` would let `Batch{ Read(forbidden_table) }` execute
+/// with zero per-table authorization — reopening the bug class task #510
+/// closed for `Subscribe`. The other 8 ops that `is_write() == false`
+/// covers (`GetBufferConfig`, `MigrationStatus`, `InternerDump`,
+/// `ChangesSince`, `ListValidators`, `ListPublications`,
+/// `ListSubscriptions`, `ReplicationStatus`) are deliberately excluded too
+/// — extending the exemption to any of them is a separate, deliberate
+/// decision to be made individually, not swept in by a blanket classifier.
+pub(super) fn is_coarse_admin_gate_exempt(op: &BatchOp) -> bool {
+    matches!(
+        op,
+        BatchOp::List(_)
+            | BatchOp::AccessTree(_)
+            | BatchOp::DescribeTable(_)
+            | BatchOp::GetTableSchema(_)
+    )
+}
+
 fn as_array_32(bytes: &[u8]) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes).ok()
 }

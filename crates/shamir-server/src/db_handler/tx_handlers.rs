@@ -3,7 +3,7 @@ use shamir_db::query::batch::{BatchError, BatchRequest};
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
-use super::admin::check_destructive_hmacs;
+use super::admin::{check_destructive_hmacs, is_coarse_admin_gate_exempt};
 use super::handler::{DbResponse, ShamirDbHandler, INTERACTIVE_TX_MAX_LIFETIME};
 
 impl ShamirDbHandler {
@@ -99,10 +99,14 @@ impl ShamirDbHandler {
             .max_queries
             .min(self.query_limits.max_queries_per_batch);
 
-        // Admin / auth gate.
+        // Admin / auth gate. An explicit 4-op allowlist (`List`,
+        // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
+        // `is_coarse_admin_gate_exempt`) is exempted from this coarse
+        // block; each still runs its own real per-table/per-path
+        // authorization further down the stack.
         if !session.permissions.is_superuser {
             for (alias, entry) in &batch.queries {
-                if entry.op.is_admin() {
+                if entry.op.is_admin() && !is_coarse_admin_gate_exempt(&entry.op) {
                     return DbResponse::Error {
                         code: "permission_denied".into(),
                         message: format!("query '{}' requires superuser (admin/auth op)", alias),
