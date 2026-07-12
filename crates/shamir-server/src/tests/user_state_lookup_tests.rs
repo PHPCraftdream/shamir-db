@@ -47,26 +47,27 @@ fn redb_user_state_lookup_returns_none_for_unknown_some_for_known() {
 
     let lookup = RedbUserStateLookup(&store);
 
-    // Known user with tib == 0 (default) → Some(0), NOT None.
+    // Known user with tib == 0 (default) → Some(state) with tib==0, NOT None.
+    let known = lookup
+        .lookup(&uid)
+        .expect("a known user must yield Some(state)");
     assert_eq!(
-        lookup.lookup(&uid),
-        Some(0),
-        "a known user with tib=0 must yield Some(0), not None"
+        known.tickets_invalid_before_ns, 0,
+        "a known user with tib=0 must yield tib=0, not None"
     );
 
     // Unknown user_id → None (resume must reject).
-    assert_eq!(
-        lookup.lookup(&[0xFFu8; 16]),
-        None,
+    assert!(
+        lookup.lookup(&[0xFFu8; 16]).is_none(),
         "an unknown user_id must yield None — the old impl returned Some(0) \
          (fail-open)"
     );
 
     // Bumping tib is reflected through the adapter.
     store.bump_tickets_invalid("alice", 42_000).expect("bump");
+    let after = lookup.lookup(&uid).expect("known user after bump");
     assert_eq!(
-        lookup.lookup(&uid),
-        Some(42_000),
+        after.tickets_invalid_before_ns, 42_000,
         "adapter must reflect a bumped tib"
     );
 }

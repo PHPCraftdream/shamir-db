@@ -4,12 +4,26 @@ use shamir_connect::common::time::{ns, UnixNanos};
 use shamir_connect::common::types::BindingMode;
 use shamir_connect::server::resume::{
     issue_initial_ticket, new_user_state_map, process_resume, ConsumedCounterStore,
-    InMemoryConsumedCounters, ResumeConfig, ResumeRequest,
+    InMemoryConsumedCounters, ResumeConfig, ResumeRequest, ResumeUserState,
 };
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
+use shamir_connect::server::ticket::TicketWire;
 
 const TICKET_TTL: u64 = ns::HOUR;
+
+/// Test helper: a minimal `ResumeUserState` carrying only a
+/// `tickets_invalid_before_ns` epoch (username/roles/superuser left at
+/// harmless defaults). Used at the mechanical call sites that only care
+/// about the epoch check.
+fn state(tib: u64) -> ResumeUserState {
+    ResumeUserState {
+        username: "u".into(),
+        roles: vec![],
+        superuser: false,
+        tickets_invalid_before_ns: tib,
+    }
+}
 
 fn fixed_config() -> ResumeConfig {
     ResumeConfig::new(
@@ -26,7 +40,7 @@ fn full_resume_round_trip() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0); // tickets_invalid_before_ns = 0
+    users.insert(user_id, state(0)); // tickets_invalid_before_ns = 0
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -37,8 +51,7 @@ fn full_resume_round_trip() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -116,7 +129,7 @@ fn rejects_expired_ticket() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -127,7 +140,6 @@ fn rejects_expired_ticket() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         0,
         now,
         ns::SECOND, // 1s TTL
@@ -173,7 +185,6 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         0,
         now, // original_auth_at_ns = now
         TICKET_TTL,
@@ -182,7 +193,7 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
 
     // Admin then kicked the user — tickets_invalid_before_ns = now (== original_auth_at_ns).
     // Per spec §5.4 step 9: STRICT > → reject.
-    users.insert(user_id, now);
+    users.insert(user_id, state(now));
 
     let req = ResumeRequest {
         ticket_wire_bytes: &ticket_bytes,
@@ -220,13 +231,12 @@ fn ticket_one_ns_after_kick_succeeds() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         0,
         now + 1, // ticket strictly after kick boundary
         TICKET_TTL,
     )
     .unwrap();
-    users.insert(user_id, now);
+    users.insert(user_id, state(now));
 
     let req = ResumeRequest {
         ticket_wire_bytes: &ticket_bytes,
@@ -254,7 +264,7 @@ fn rejects_anti_downgrade_tls_to_browser() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -265,8 +275,7 @@ fn rejects_anti_downgrade_tls_to_browser() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(), // ticket issued in TLS exporter context
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -299,7 +308,7 @@ fn allows_browser_to_native_upgrade_by_default() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -310,7 +319,6 @@ fn allows_browser_to_native_upgrade_by_default() {
         BindingMode::TlsNoExport.as_u8(),
         BindingMode::TlsNoExport.as_u8(), // browser-issued ticket
         [0u8; 32],
-        vec![],
         0,
         now,
         TICKET_TTL,
@@ -345,7 +353,7 @@ fn strict_mode_rejects_browser_to_native() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -356,7 +364,6 @@ fn strict_mode_rejects_browser_to_native() {
         BindingMode::TlsNoExport.as_u8(),
         BindingMode::TlsNoExport.as_u8(),
         [0u8; 32],
-        vec![],
         0,
         now,
         TICKET_TTL,
@@ -399,8 +406,7 @@ fn rejects_when_user_unknown() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -432,7 +438,7 @@ fn rejects_when_ticket_key_changed_no_overlap() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -443,8 +449,7 @@ fn rejects_when_ticket_key_changed_no_overlap() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -480,7 +485,7 @@ fn ticket_works_under_previous_key_during_overlap() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -492,8 +497,7 @@ fn ticket_works_under_previous_key_during_overlap() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -529,7 +533,7 @@ fn rejects_aad_tampered_ticket() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -540,8 +544,7 @@ fn rejects_aad_tampered_ticket() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -577,7 +580,7 @@ fn multi_device_family_isolation() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
@@ -590,8 +593,7 @@ fn multi_device_family_isolation() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -604,8 +606,7 @@ fn multi_device_family_isolation() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
-        0,      // identity_key_version
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -686,21 +687,30 @@ fn counter_store_gc_evicts_stale_entries() {
     assert_eq!(counters.len(), 0);
 }
 
-/// Diagram 02 step 12 + SESSION_RESUMPTION §2.1: the resumed [`Session`] MUST
-/// be constructed with `permissions = ticket_plain.roles`. A `superuser`
-/// session resumed via ticket MUST retain `is_superuser == true` so admin
-/// commands continue to work.
+/// Task #558 (replaces the old `resumed_admin_session_retains_roles_per_diagram_02`,
+/// which encoded the EXACT bug this task closes — "resume trusts the ticket's
+/// `roles` snapshot"). The ticket no longer carries ANY authorization data
+/// (roles/superuser), so a resumed session's permissions can ONLY come from the
+/// directory lookup. This test proves the grant direction: seed the directory
+/// with `superuser: true`, resume, and assert the session reflects the
+/// directory — not anything the ticket carried.
 #[test]
-fn resumed_admin_session_retains_roles_per_diagram_02() {
+fn resumed_session_permissions_come_from_directory_lookup_not_ticket() {
     let cfg = fixed_config();
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0xa0u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    let admin_state = ResumeUserState {
+        username: "admin".into(),
+        roles: vec!["read_write".to_string()],
+        superuser: true,
+        tickets_invalid_before_ns: 0,
+    };
+    users.insert(user_id, admin_state.clone());
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
-    let admin_roles = vec!["superuser".to_string(), "read_write".to_string()];
+    // No `roles` argument — the ticket structurally cannot carry authorization.
     let (ticket_bytes, _) = issue_initial_ticket(
         &cfg.ticket_key,
         user_id,
@@ -708,8 +718,7 @@ fn resumed_admin_session_retains_roles_per_diagram_02() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        admin_roles.clone(),
-        0,
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -734,30 +743,47 @@ fn resumed_admin_session_retains_roles_per_diagram_02() {
     )
     .unwrap();
 
-    // Pull the freshly-created session and assert role/superuser preserved.
+    // The session's permissions MUST match the LOOKUP map's state, proving the
+    // session was built from the directory, not from the ticket (which, by
+    // construction, has no roles/superuser field at all).
     let session = store.lookup(&ok.session_id).expect("session created");
     let perms = &session.permissions;
     assert!(
         perms.is_superuser,
-        "admin resumed via ticket must keep superuser flag (diagram 02 step 12)"
+        "resumed session must reflect the directory's superuser flag (task #558)"
     );
-    assert_eq!(perms.roles, admin_roles, "roles vector must round-trip");
+    assert_eq!(
+        perms.roles, admin_state.roles,
+        "resumed session roles must match the directory lookup, not the ticket"
+    );
+    // Username must come from the directory (`state.username`), not the
+    // ticket's `username_nfc` (they happen to agree here, but see
+    // `revoked_superuser_resolves_to_non_admin_without_epoch_bump` and the
+    // rename-guard rationale in design doc §5).
+    assert_eq!(session.username, admin_state.username);
 }
 
-/// Diagram 02 step 13 + SESSION_RESUMPTION §2.1: a refresh-ticket issued
-/// during resume MUST carry the same roles forward so subsequent resumes
-/// continue to authorize the user as admin.
+/// Task #558 (replaces the old `refresh_ticket_carries_roles_forward_per_diagram_02`,
+/// which asserted a refresh ticket carried roles forward). The refresh ticket
+/// now carries NO authorization data, so a second resume — using the refreshed
+/// ticket — still resolves its permissions from a FRESH directory lookup, not
+/// from anything baked into the refreshed ticket.
 #[test]
-fn refresh_ticket_carries_roles_forward_per_diagram_02() {
+fn refresh_ticket_carries_no_authorization_session_reads_directory_each_resume() {
     let cfg = fixed_config();
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0xa1u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    let admin_state = ResumeUserState {
+        username: "admin".into(),
+        roles: vec!["read_write".to_string()],
+        superuser: true,
+        tickets_invalid_before_ns: 0,
+    };
+    users.insert(user_id, admin_state.clone());
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
-    let admin_roles = vec!["superuser".to_string()];
     let (ticket_v1, _) = issue_initial_ticket(
         &cfg.ticket_key,
         user_id,
@@ -765,8 +791,7 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        admin_roles.clone(),
-        0,
+        0, // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -792,7 +817,9 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
     .unwrap();
     let ticket_v2 = ok.resumption_ticket.expect("refresh ticket issued");
 
-    // Resume with the refreshed ticket — admin still admin.
+    // Resume with the refreshed ticket — the second session's permissions must
+    // STILL come from the directory lookup (the refreshed ticket carries no
+    // roles/superuser to influence them).
     let req2 = ResumeRequest {
         ticket_wire_bytes: &ticket_v2,
         client_nonce: [0xacu8; 32],
@@ -812,7 +839,137 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
     )
     .unwrap();
     let session2 = store.lookup(&ok2.session_id).expect("session created");
-    assert!(session2.permissions.is_superuser);
+    assert!(
+        session2.permissions.is_superuser,
+        "second resume must read superuser from the directory, not the refreshed ticket"
+    );
+    assert_eq!(
+        session2.permissions.roles, admin_state.roles,
+        "second resume roles must match the directory lookup"
+    );
+}
+
+/// Task #558 red test #1: a v1 ticket (pre-cutover wire shape) MUST be
+/// rejected after the version bump. The version gate at `process_resume`
+/// step 2 (`wire.version != 2`) fails closed, forcing a full SCRAM re-auth.
+/// This is the ENTIRE migration mechanism — no dual-version window.
+#[test]
+fn rejects_v1_ticket_post_cutover() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xa2u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, state(0));
+    let store = SessionStore::new();
+
+    let now = UnixNanos::now().as_u64();
+
+    // Hand-craft a minimal v1 envelope: version byte = 1, a 12-byte nonce,
+    // ct_len = 0, empty ciphertext, and a 16-byte tag. The version gate fires
+    // BEFORE decryption, so the ciphertext/tag contents are irrelevant — only
+    // the leading version byte matters here.
+    let v1_wire = TicketWire {
+        version: 1,
+        nonce: [0u8; 12],
+        ciphertext: Vec::new(),
+        tag: [0u8; 16],
+    };
+    let v1_bytes = v1_wire.to_bytes();
+    assert_eq!(v1_bytes[0], 1, "sanity: first byte is the v1 version");
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &v1_bytes,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
+    assert!(
+        matches!(result, Err(shamir_connect::Error::AuthFailed)),
+        "a v1 ticket must be rejected post-cutover (version gate)"
+    );
+    assert_eq!(store.len(), 0, "no session should be created");
+}
+
+/// Task #558 red test #2 — the DIRECT regression test for the bug this task
+/// closes. Simulate an account that WAS a superuser when its ticket was minted
+/// but has since been revoked. Crucially, `tickets_invalid_before_ns` is left
+/// at 0 (NOT bumped past `original_auth_at_ns`), so the existing epoch check
+/// alone would NOT catch this — only the directory re-lookup does. The resumed
+/// session MUST resolve to `is_superuser == false`, proving the lookup-based
+/// path closes the grant-revocation gap independently of the epoch mechanism.
+#[test]
+fn revoked_superuser_resolves_to_non_admin_without_epoch_bump() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xa3u8; 16];
+    let users = new_user_state_map();
+    // The directory's CURRENT state: superuser revoked. `tickets_invalid_before_ns`
+    // stays 0 — deliberately NOT bumped past the ticket's `original_auth_at_ns`,
+    // so the §5.4 step 9 epoch check does NOT fire.
+    users.insert(
+        user_id,
+        ResumeUserState {
+            username: "was-admin".into(),
+            roles: vec!["read_write".to_string()],
+            superuser: false,
+            tickets_invalid_before_ns: 0,
+        },
+    );
+    let store = SessionStore::new();
+
+    let now = UnixNanos::now().as_u64();
+    // The ticket (v2) carries no roles/superuser at all; even if it could, the
+    // directory now says superuser == false.
+    let (ticket_bytes, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "was-admin".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        0,   // identity_key_version
+        now, // original_auth_at_ns == now; epoch is 0, so 0 < now is NOT a reject
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_bytes,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let ok = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    )
+    .unwrap();
+
+    let session = store.lookup(&ok.session_id).expect("session created");
+    assert!(
+        !session.permissions.is_superuser,
+        "a revoked superuser must NOT retain admin powers on resume — the \
+         session must reflect the directory's current superuser=false, even \
+         though no epoch bump ran (task #558 closes this gap)"
+    );
 }
 
 /// Spec §5.7 NORMATIVE / diagram 12 footer: a ticket issued under the
@@ -825,7 +982,7 @@ fn pre_rotation_ticket_rejected_during_overlap_per_diagram_12() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0xb0u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     // Identity v0 — issue a ticket under it.
@@ -839,7 +996,6 @@ fn pre_rotation_ticket_rejected_during_overlap_per_diagram_12() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         identity.current_version(), // 0
         now,
         TICKET_TTL,
@@ -883,7 +1039,7 @@ fn post_rotation_ticket_accepted_during_overlap() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0xb1u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let identity = ServerIdentityState::fresh();
@@ -899,7 +1055,6 @@ fn post_rotation_ticket_accepted_during_overlap() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         identity.current_version(), // 1
         now,
         TICKET_TTL,
@@ -935,7 +1090,7 @@ fn pre_rotation_ticket_rejected_after_overlap_finalize() {
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0xb2u8; 16];
     let users = new_user_state_map();
-    users.insert(user_id, 0);
+    users.insert(user_id, state(0));
     let store = SessionStore::new();
 
     let identity = ServerIdentityState::fresh();
@@ -947,7 +1102,6 @@ fn pre_rotation_ticket_rejected_after_overlap_finalize() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
-        vec![],
         0,
         now,
         TICKET_TTL,
@@ -1009,12 +1163,11 @@ fn ticket_plain_bytearray_wire_compat_with_vec_u8() {
         original_auth_at_ns: u64,
         expires_at_ns: u64,
         family_counter: u64,
-        roles: Vec<String>,
         identity_key_version: u64,
     }
 
     let mirror = VecMirror {
-        version: 1,
+        version: 2,
         user_id: vec![0x01u8; 16],
         username_nfc: "alice".into(),
         transport_kind_at_auth: 0x01,
@@ -1024,13 +1177,12 @@ fn ticket_plain_bytearray_wire_compat_with_vec_u8() {
         original_auth_at_ns: 1_000_000,
         expires_at_ns: 2_000_000,
         family_counter: 1,
-        roles: vec!["read_write".into()],
         identity_key_version: 0,
     };
 
     use shamir_connect::server::ticket::TicketPlain;
     let real = TicketPlain {
-        version: 1,
+        version: 2,
         user_id: serde_bytes::ByteArray::new([0x01u8; 16]),
         username_nfc: "alice".into(),
         transport_kind_at_auth: 0x01,
@@ -1040,7 +1192,6 @@ fn ticket_plain_bytearray_wire_compat_with_vec_u8() {
         original_auth_at_ns: 1_000_000,
         expires_at_ns: 2_000_000,
         family_counter: 1,
-        roles: vec!["read_write".into()],
         identity_key_version: 0,
     };
 
