@@ -37,6 +37,47 @@ pub struct AdminGlue {
     pub tables_registry: Option<Arc<TablesRegistry>>,
 }
 
+/// Derive a SCRAM `UserRecord` (Argon2id) from a plaintext password under
+/// the given KDF params. CPU-bound work is delegated to `spawn_blocking`.
+/// Shared between [`create_scram_user`] (the wire `CreateScramUser` path)
+/// and the `UserAdminPort::create_user` impl (task #559) so the Argon2id
+/// code is not duplicated a third time. Returns `Err(message)` on a
+/// derivation or join failure (callers surface it as a `code: "query"`
+/// error / `PortError` respectively).
+pub(crate) async fn derive_scram_record(
+    password: String,
+    kdf: KdfParams,
+) -> Result<UserRecord, String> {
+    // Move password into a zeroizing buffer right away. `Zeroizing`
+    // wipes on Drop, so we don't need an explicit `.zeroize()` call —
+    // both the success and error paths drop `pw_buf` before returning.
+    let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
+    let salt: [u8; 16] = random_array();
+
+    // Argon2id is CPU-heavy — delegate to spawn_blocking so the runtime
+    // worker is free to make progress on other tasks during derivation.
+    let derive_result = tokio::task::spawn_blocking(move || {
+        DerivedKeys::derive(&pw_buf, &salt, &kdf).map(|d| (d, salt))
+    })
+    .await;
+
+    let (derived, salt) = match derive_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => return Err(format!("argon2id: {e}")),
+        Err(join_err) => return Err(format!("argon2id task failed: {join_err}")),
+    };
+
+    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    server_key_z.copy_from_slice(&derived.server_key[..]);
+    Ok(UserRecord {
+        salt,
+        stored_key: derived.stored_key,
+        server_key: server_key_z,
+        kdf_params: kdf,
+        tickets_invalid_before_ns: 0,
+    })
+}
+
 /// Create a SCRAM-authenticatable user. Server-side Argon2id is CPU-bound
 /// and is delegated to `tokio::task::spawn_blocking` so the runtime worker
 /// remains free during derivation.
@@ -66,41 +107,14 @@ pub(super) async fn create_scram_user(
     // Move password into a zeroizing buffer right away. `Zeroizing`
     // wipes on Drop, so we don't need an explicit `.zeroize()` call —
     // both the success and error paths drop `pw_buf` before returning.
-    let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
-    let salt: [u8; 16] = random_array();
-    let kdf = admin.kdf;
-
-    // Argon2id is CPU-heavy — delegate to spawn_blocking so the runtime
-    // worker is free to make progress on other tasks during derivation.
-    let derive_result = tokio::task::spawn_blocking(move || {
-        DerivedKeys::derive(&pw_buf, &salt, &kdf).map(|d| (d, salt))
-    })
-    .await;
-
-    let (derived, salt) = match derive_result {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => {
+    let record = match derive_scram_record(password, admin.kdf).await {
+        Ok(r) => r,
+        Err(msg) => {
             return DbResponse::Error {
                 code: "query".into(),
-                message: format!("argon2id: {e}"),
+                message: msg,
             };
         }
-        Err(join_err) => {
-            return DbResponse::Error {
-                code: "query".into(),
-                message: format!("argon2id task failed: {join_err}"),
-            };
-        }
-    };
-
-    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
-    server_key_z.copy_from_slice(&derived.server_key[..]);
-    let record = UserRecord {
-        salt,
-        stored_key: derived.stored_key,
-        server_key: server_key_z,
-        kdf_params: admin.kdf,
-        tickets_invalid_before_ns: 0,
     };
 
     let user_id = match admin.user_dir.insert(name.clone(), record) {
@@ -446,11 +460,11 @@ fn as_array_16(bytes: &[u8]) -> Option<[u8; limits::SALT_BYTES]> {
 
 /// Walk the batch and verify the `hmac` tag on every destructive op.
 ///
-/// Covers: `DropDb`/`DropRepo`/`DropTable`/`DropIndex`/`DropUser`/
-/// `DropRole`, `Start/Commit/RollbackMigration`, `GrantRole`/`RevokeRole`
+/// Covers: `DropDb`/`DropRepo`/`DropTable`/`DropIndex`/`DropUser`,
+/// `Start/Commit/RollbackMigration`, `GrantRole`/`RevokeRole`
 /// (the single most dangerous op class — privilege escalation),
 /// `Chmod`/`Chown`/`Chgrp` (ownership/permission changes),
-/// `CreateUser`/`CreateRole`, `SetRetention`/`PurgeHistory`
+/// `CreateUser`, `SetRetention`/`PurgeHistory`
 /// (irreversible audit-trail loss), and the group-mutating ops
 /// (`CreateGroup`/`DropGroup`/`RenameGroup`/`Add|RemoveGroupMember`).
 ///
@@ -502,7 +516,6 @@ pub(super) fn check_destructive_hmacs(
                 op.hmac.as_ref(),
             ),
             BatchOp::DropUser(op) => (canon::canonical_drop_user(&op.drop_user), op.hmac.as_ref()),
-            BatchOp::DropRole(op) => (canon::canonical_drop_role(&op.drop_role), op.hmac.as_ref()),
             BatchOp::StartMigration(op) => (
                 canon::canonical_start_migration(
                     db_name,
@@ -540,10 +553,6 @@ pub(super) fn check_destructive_hmacs(
             ),
             BatchOp::CreateUser(op) => (
                 canon::canonical_create_user(&op.create_user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::CreateRole(op) => (
-                canon::canonical_create_role(&op.create_role),
                 op.hmac.as_ref(),
             ),
             BatchOp::SetRetention(op) => (

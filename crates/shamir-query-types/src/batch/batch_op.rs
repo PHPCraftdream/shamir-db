@@ -19,9 +19,7 @@ use crate::admin::{
     ReplicationStatusOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, SetTableSchemaOp,
     StartMigrationOp, UnbindValidatorOp,
 };
-use crate::auth::{
-    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RenameRoleOp, RevokeRoleOp,
-};
+use crate::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
 use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
@@ -82,9 +80,6 @@ pub enum BatchOp {
     // Auth operations
     CreateUser(CreateUserOp),
     DropUser(DropUserOp),
-    CreateRole(CreateRoleOp),
-    DropRole(DropRoleOp),
-    RenameRole(RenameRoleOp),
     GrantRole(GrantRoleOp),
     RevokeRole(RevokeRoleOp),
 
@@ -202,9 +197,6 @@ impl Serialize for BatchOp {
             BatchOp::MigrationStatus(op) => op.serialize(serializer),
             BatchOp::CreateUser(op) => op.serialize(serializer),
             BatchOp::DropUser(op) => op.serialize(serializer),
-            BatchOp::CreateRole(op) => op.serialize(serializer),
-            BatchOp::DropRole(op) => op.serialize(serializer),
-            BatchOp::RenameRole(op) => op.serialize(serializer),
             BatchOp::GrantRole(op) => op.serialize(serializer),
             BatchOp::RevokeRole(op) => op.serialize(serializer),
             BatchOp::Chmod(op) => op.serialize(serializer),
@@ -336,12 +328,6 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<CreateUserOp, _>(&bytes).map(BatchOp::CreateUser)
         } else if has("drop_user") {
             qv_to::<DropUserOp, _>(&bytes).map(BatchOp::DropUser)
-        } else if has("create_role") {
-            qv_to::<CreateRoleOp, _>(&bytes).map(BatchOp::CreateRole)
-        } else if has("drop_role") {
-            qv_to::<DropRoleOp, _>(&bytes).map(BatchOp::DropRole)
-        } else if has("rename_role") {
-            qv_to::<RenameRoleOp, _>(&bytes).map(BatchOp::RenameRole)
         } else if has("grant_role") {
             qv_to::<GrantRoleOp, _>(&bytes).map(BatchOp::GrantRole)
         } else if has("revoke_role") {
@@ -504,9 +490,6 @@ impl BatchOp {
             | BatchOp::MigrationStatus(_)
             | BatchOp::CreateUser(_)
             | BatchOp::DropUser(_)
-            | BatchOp::CreateRole(_)
-            | BatchOp::DropRole(_)
-            | BatchOp::RenameRole(_)
             | BatchOp::GrantRole(_)
             | BatchOp::RevokeRole(_)
             | BatchOp::Chmod(_)
@@ -604,9 +587,6 @@ impl BatchOp {
                 | BatchOp::MigrationStatus(_)
                 | BatchOp::CreateUser(_)
                 | BatchOp::DropUser(_)
-                | BatchOp::CreateRole(_)
-                | BatchOp::DropRole(_)
-                | BatchOp::RenameRole(_)
                 | BatchOp::GrantRole(_)
                 | BatchOp::RevokeRole(_)
                 | BatchOp::Chmod(_)
@@ -714,9 +694,6 @@ impl BatchOp {
             // ----- auth mutations ----------------------------------------
             BatchOp::CreateUser(_) => true,
             BatchOp::DropUser(_) => true,
-            BatchOp::CreateRole(_) => true,
-            BatchOp::DropRole(_) => true,
-            BatchOp::RenameRole(_) => true,
             BatchOp::GrantRole(_) => true,
             BatchOp::RevokeRole(_) => true,
 

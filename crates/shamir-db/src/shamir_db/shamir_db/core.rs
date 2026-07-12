@@ -19,6 +19,7 @@ use crate::engine::migration::MigrationCoordinator;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 
+use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::system_store::{SystemStore, SystemStoreConfig};
 use super::SYSTEM_DB_NAME;
 
@@ -96,6 +97,17 @@ pub struct ShamirDb {
     /// durable redb engine under this root; in-memory homes fall back to
     /// in-memory repos — coherent with the home's durability class.
     pub(super) data_root: Option<std::path::PathBuf>,
+    /// Injected write-side user-administration port (task #559). `None`
+    /// for embedded/no-directory deployments and tests; `Some` when the
+    /// embedding layer (`shamir-server`) wires its directory-backed impl.
+    /// When `None`, the four re-targeted user-admin handlers return
+    /// `not_supported` (hard cutover off Store B).
+    pub(super) user_admin_port: Option<Arc<dyn UserAdminPort>>,
+    /// Injected read-only principal resolver (task #559). `None` for
+    /// embedded/no-directory deployments; `Some` lets `access_tree` /
+    /// `ListOp::Users` / owner-delegation scope lookup read real directory
+    /// state. When `None`, names resolve to `None` (degraded but safe).
+    pub(super) principal_resolver: Option<Arc<dyn PrincipalResolver>>,
 }
 
 impl ShamirDb {
@@ -149,6 +161,8 @@ impl ShamirDb {
             repo_create_locks: Arc::new(DashMap::with_hasher(THasher::default())),
             validators,
             data_root,
+            user_admin_port: None,
+            principal_resolver: None,
         };
 
         // Load existing databases from system store
@@ -480,6 +494,35 @@ impl ShamirDb {
     /// is redb-backed (production), `None` for in-memory (tests).
     pub fn data_root(&self) -> Option<&std::path::Path> {
         self.data_root.as_deref()
+    }
+
+    /// The injected write-side user-administration port, if any (task #559).
+    /// `None` for embedded/no-directory deployments — the four re-targeted
+    /// handlers then return `not_supported`.
+    pub fn user_admin_port(&self) -> Option<&Arc<dyn UserAdminPort>> {
+        self.user_admin_port.as_ref()
+    }
+
+    /// The injected read-only principal resolver, if any (task #559). `None`
+    /// for embedded/no-directory deployments — names then resolve to `None`.
+    pub fn principal_resolver(&self) -> Option<&Arc<dyn PrincipalResolver>> {
+        self.principal_resolver.as_ref()
+    }
+
+    /// Builder: install a write-side user-admin port. Mirrors the cheap-clone
+    /// `Arc`-backed field pattern — returns `Self` so callers can chain.
+    /// Idempotent overwrites are allowed (last-writer-wins); production wiring
+    /// calls this exactly once at boot.
+    pub fn with_user_admin_port(mut self, port: Arc<dyn UserAdminPort>) -> Self {
+        self.user_admin_port = Some(port);
+        self
+    }
+
+    /// Builder: install a read-only principal resolver. Mirrors
+    /// [`Self::with_user_admin_port`].
+    pub fn with_principal_resolver(mut self, resolver: Arc<dyn PrincipalResolver>) -> Self {
+        self.principal_resolver = Some(resolver);
+        self
     }
 
     /// Names of `kind = Native` catalogue entries (functions + validators)

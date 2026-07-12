@@ -390,9 +390,6 @@ impl SessionPermissions {
             | BatchOp::DropUser(_)
             | BatchOp::GrantRole(_)
             | BatchOp::RevokeRole(_) => (Action::ManageUsers, Resource::Global),
-            BatchOp::CreateRole(_) | BatchOp::DropRole(_) | BatchOp::RenameRole(_) => {
-                (Action::ManageRoles, Resource::Global)
-            }
 
             // Migration — alter on the source table (destructive DDL)
             BatchOp::StartMigration(op) => (

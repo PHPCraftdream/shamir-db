@@ -1,14 +1,13 @@
 use crate::admin::{GroupRef, PurgeScope, ResourceRef, Retention};
 use crate::hmac::{
     canonical_add_group_member, canonical_chgrp, canonical_chmod, canonical_chown,
-    canonical_commit_migration, canonical_create_group, canonical_create_role,
-    canonical_create_user, canonical_drop_db, canonical_drop_group, canonical_drop_index,
-    canonical_drop_repo, canonical_drop_role, canonical_drop_table, canonical_drop_user,
-    canonical_grant_role, canonical_group_ref, canonical_purge_history, canonical_purge_scope,
-    canonical_remove_group_member, canonical_rename_group, canonical_resource_ref,
-    canonical_retention, canonical_revoke_role, canonical_rollback_migration,
-    canonical_set_retention, canonical_start_migration, compute_tag_hex, derive_session_hmac_key,
-    hex_decode, hex_encode, verify_tag_hex,
+    canonical_commit_migration, canonical_create_group, canonical_create_user, canonical_drop_db,
+    canonical_drop_group, canonical_drop_index, canonical_drop_repo, canonical_drop_table,
+    canonical_drop_user, canonical_grant_role, canonical_group_ref, canonical_purge_history,
+    canonical_purge_scope, canonical_remove_group_member, canonical_rename_group,
+    canonical_resource_ref, canonical_retention, canonical_revoke_role,
+    canonical_rollback_migration, canonical_set_retention, canonical_start_migration,
+    compute_tag_hex, derive_session_hmac_key, hex_decode, hex_encode, verify_tag_hex,
 };
 
 #[test]
@@ -45,7 +44,6 @@ fn canonical_inputs_are_null_separated() {
         b"drop_index\0mydb\0main\0users\0by_email\x001"
     );
     assert_eq!(canonical_drop_user("bob"), b"drop_user\0bob");
-    assert_eq!(canonical_drop_role("admin"), b"drop_role\0admin");
 
     assert_eq!(
         canonical_start_migration("mydb", "main", "users", "cold", "redb"),
@@ -126,11 +124,6 @@ fn canonical_grant_revoke_role_are_null_separated() {
 fn canonical_create_user_never_includes_password() {
     // Canonical input is username-only — no password field exists to leak.
     assert_eq!(canonical_create_user("bob"), b"create_user\0bob");
-}
-
-#[test]
-fn canonical_create_role_is_name_only() {
-    assert_eq!(canonical_create_role("viewer"), b"create_role\0viewer");
 }
 
 #[test]

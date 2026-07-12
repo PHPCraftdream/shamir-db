@@ -50,9 +50,6 @@ impl AdminExecutor for ShamirAdminExecutor {
             // ── Users / Roles ──────────────────────────────────────────
             BatchOp::CreateUser(op) => self.handle_create_user(op).await,
             BatchOp::DropUser(op) => self.handle_drop_user(op).await,
-            BatchOp::CreateRole(op) => self.handle_create_role(op).await,
-            BatchOp::DropRole(op) => self.handle_drop_role(op).await,
-            BatchOp::RenameRole(op) => self.handle_rename_role(op).await,
             BatchOp::GrantRole(op) => self.handle_grant_role(op).await,
             BatchOp::RevokeRole(op) => self.handle_revoke_role(op).await,
 

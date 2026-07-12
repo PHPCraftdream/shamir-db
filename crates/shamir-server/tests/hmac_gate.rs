@@ -405,7 +405,7 @@ async fn drop_index_unique_flag_changes_canonical() {
 }
 
 // --------------------------------------------------------------------------
-// drop_user / drop_role
+// drop_user
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -433,62 +433,20 @@ async fn drop_user_requires_hmac() {
     assert_eq!(code, "hmac_required");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn drop_role_requires_hmac() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    let handler = ShamirDbHandler::new(Arc::new(shamir));
-    let session = root_session();
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.drop_role("d", ddl::drop_role("admin"));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let (code, _) = expect_error(res);
-    assert_eq!(code, "hmac_required");
-}
-
 // --------------------------------------------------------------------------
 // grant_role / revoke_role (task #542 — the single most dangerous op class)
 // --------------------------------------------------------------------------
 
-async fn make_db_with_user(db: &str, username: &str) -> Arc<ShamirDb> {
+/// Build a fresh in-memory ShamirDb for HMAC-gate rejection tests. Task
+/// #559: `create_user` now routes through `UserAdminPort` (returns
+/// `not_supported` without one), so the old fixture that seeded a real
+/// user via the wire path no longer works. The HMAC-rejection tests below
+/// don't need a real user — the HMAC gate runs BEFORE the handler/port —
+/// so a bare db suffices.
+async fn make_db_with_user(db: &str, _username: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     shamir.create_db(db).await;
-    let shamir = Arc::new(shamir);
-    let handler = ShamirDbHandler::new(shamir.clone());
-    let session = root_session();
-    let tag = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_create_user(username),
-    );
-    let mut b = Batch::new();
-    b.id(0);
-    b.create_user("u", ddl::create_user(username, "s3cretpw").hmac(&tag));
-    let req = execute_built(db, b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    // Fail fast with a useful message if fixture setup itself breaks.
-    let _ = expect_batch_ok(res);
-    shamir
+    Arc::new(shamir)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -542,34 +500,12 @@ async fn grant_role_with_wrong_hmac_rejected() {
     assert_eq!(code, "hmac_mismatch");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn grant_role_with_correct_hmac_accepted() {
-    let shamir = make_db_with_user("scratch", "alice").await;
-    let handler = ShamirDbHandler::new(shamir);
-    let session = root_session();
-
-    let tag = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_grant_role("superuser", "alice"),
-    );
-    let mut b = Batch::new();
-    b.id(1);
-    b.grant_role("g", ddl::grant_role("superuser", "alice").hmac(&tag));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let resp = expect_batch_ok(res);
-    let rec = &resp.results["g"].records[0];
-    assert_eq!(rec.get_value_str("granted_role"), Some("superuser"));
-}
+// Task #559: `grant_role_with_correct_hmac_accepted` and
+// `revoke_role_with_correct_hmac_accepted` were removed — they tested the
+// positive path, which now routes through `UserAdminPort` (needs a real
+// directory wired, covered in `user_admin_port_wire.rs`). The HMAC
+// *rejection* tests below remain valid because the HMAC gate runs BEFORE
+// the handler/port is consulted.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoke_role_without_hmac_rejected() {
@@ -620,35 +556,6 @@ async fn revoke_role_with_wrong_hmac_rejected() {
     );
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn revoke_role_with_correct_hmac_accepted() {
-    let shamir = make_db_with_user("scratch", "alice").await;
-    let handler = ShamirDbHandler::new(shamir);
-    let session = root_session();
-
-    let tag = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_revoke_role("superuser", "alice"),
-    );
-    let mut b = Batch::new();
-    b.id(1);
-    b.revoke_role("r", ddl::revoke_role("superuser", "alice").hmac(&tag));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let resp = expect_batch_ok(res);
-    let rec = &resp.results["r"].records[0];
-    assert_eq!(rec.get_value_str("revoked_role"), Some("superuser"));
 }
 
 // --------------------------------------------------------------------------
@@ -962,115 +869,13 @@ async fn create_user_with_wrong_hmac_rejected() {
     assert_eq!(code, "hmac_mismatch");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_user_with_correct_hmac_accepted() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    let handler = ShamirDbHandler::new(Arc::new(shamir));
-    let session = root_session();
-
-    let tag = canon::compute_tag_hex(&session_key(&session), &canon::canonical_create_user("bob"));
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_user("u", ddl::create_user("bob", "s3cretpw").hmac(&tag));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let resp = expect_batch_ok(res);
-    let rec = &resp.results["u"].records[0];
-    assert_eq!(rec.get_value_str("created_user"), Some("bob"));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_role_without_hmac_rejected() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    let handler = ShamirDbHandler::new(Arc::new(shamir));
-    let session = root_session();
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_role("r", ddl::create_role("viewer", vec![]));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let (code, _) = expect_error(res);
-    assert_eq!(code, "hmac_required");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_role_with_wrong_hmac_rejected() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    let handler = ShamirDbHandler::new(Arc::new(shamir));
-    let session = root_session();
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_role(
-        "r",
-        ddl::create_role("viewer", vec![]).hmac("deadbeef".repeat(8)),
-    );
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let (code, _) = expect_error(res);
-    assert_eq!(code, "hmac_mismatch");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_role_with_correct_hmac_accepted() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("scratch").await;
-    let handler = ShamirDbHandler::new(Arc::new(shamir));
-    let session = root_session();
-
-    let tag = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_create_role("viewer"),
-    );
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_role("r", ddl::create_role("viewer", vec![]).hmac(&tag));
-    let req = execute_built("scratch", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let resp = expect_batch_ok(res);
-    let rec = &resp.results["r"].records[0];
-    assert_eq!(rec.get_value_str("created_role"), Some("viewer"));
-}
+// Task #559: `create_user_with_correct_hmac_accepted` was removed — it
+// tested the positive path, which now routes through `UserAdminPort`
+// (needs a real directory wired). All `create_role`/`drop_role` HMAC
+// tests were removed because those BatchOp variants no longer exist.
+// The `create_user_without_hmac_rejected` and
+// `create_user_with_wrong_hmac_rejected` tests above remain valid (the
+// HMAC gate runs before the handler/port).
 
 // --------------------------------------------------------------------------
 // set_retention / purge_history
@@ -1430,10 +1235,7 @@ async fn create_group_with_wrong_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.create_group(
-        "g",
-        ddl::create_group("devs").hmac("deadbeef".repeat(8)),
-    );
+    b.create_group("g", ddl::create_group("devs").hmac("deadbeef".repeat(8)));
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler

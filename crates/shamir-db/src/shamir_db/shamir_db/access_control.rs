@@ -8,8 +8,8 @@ use shamir_types::types::value::QueryValue;
 use shamir_engine::function::{FunctionMeta, Security};
 
 use crate::access::{
-    permits, principal64_from_username, trace_access, AccessError, Action, Actor, Mode,
-    ResourceMeta, ResourcePath, OWNER_SYSTEM,
+    permits, trace_access, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
+    OWNER_SYSTEM,
 };
 use crate::{DbError, DbResult};
 
@@ -147,27 +147,31 @@ impl ShamirDb {
                 }
             },
             // User — a FIXED, computed 3-tier rule, never persisted.
-            // owner = self, mode = 0o750 (owner rwx; group n/a; other
-            // nothing). Effective behavior via the existing
-            // permits()/class_of() machinery: System — full (bypass); the
-            // user themselves — Read + Manage on their own path; everyone
-            // else — denied (Other has no bits in 0o750). Not persisted:
-            // see this arm's `set_resource_meta` counterpart (falls through
-            // to the catch-all NotFound) and task #552's brief for why
-            // persisting here would collide with the (separate, not-yet-
-            // landed) directory-canonical-store decision.
-            ResourcePath::User { name } => Ok(ResourceMeta {
-                // Interim: principal64_from_username, NOT a real directory lookup —
-                // there is no live Session/PrincipalResolver at this call site to
-                // resolve `name` to its real minted id. Replaced by a real
-                // PrincipalResolver-backed lookup in task #559; until then this
-                // preserves today's exact behavior (a name-keyed synthetic owner)
-                // just routed through the new principal64 projection instead of the
-                // now-deleted principal_id.
-                owner: Actor::User(principal64_from_username(name)),
-                group: None,
-                mode: 0o750,
-            }),
+            // Task #559: the owner is the REAL principal64 resolved from
+            // the directory via the injected PrincipalResolver. With a
+            // resolver installed, `resolve_by_name` yields the user's true
+            // minted id, so the user owns their own path (System bypasses;
+            // the user themselves gets Read+Manage; everyone else denied
+            // via the `0o750` mode). With NO resolver installed, name→id
+            // resolution is unavailable — the design doc's "absent resolver
+            // → names resolve to null" framing means we DEGRADE to a
+            // System-owned open-ish meta (no synthetic hash-based owner is
+            // synthesised — that interim bridge is retired here, NOT kept
+            // alive). Only System can then manage a User resource in the
+            // no-directory case; regular access-control on opaque ids is
+            // otherwise unchanged.
+            ResourcePath::User { name } => {
+                let owner = self
+                    .principal_resolver()
+                    .and_then(|r| r.resolve_by_name(name))
+                    .map(|info| Actor::User(info.principal64))
+                    .unwrap_or(Actor::System);
+                Ok(ResourceMeta {
+                    owner,
+                    group: None,
+                    mode: 0o750,
+                })
+            }
             // Group — persisted `owner` on the existing group record,
             // computed mode. `group: Some(group_id)` makes a group's own
             // members a real permission class (roster-read for members).
@@ -891,15 +895,17 @@ impl ShamirDb {
         let mut name_of: TFxMap<u64, String> = TFxMap::default();
         name_of.insert(OWNER_SYSTEM, "system".to_string());
         let mut users_list: Vec<QueryValue> = Vec::new();
-        for rec in self.system_store.load_users().await? {
-            if let Some(uname) = rec.get("name").and_then(|v| v.as_str()) {
-                // Interim: principal64_from_username, NOT a real directory lookup
-                // — replaced by PrincipalResolver-backed resolution in task #559.
-                let id = principal64_from_username(uname);
-                name_of.insert(id, uname.to_string());
+        // Task #559: enumerate principals from the injected
+        // PrincipalResolver (the real directory) instead of Store B's
+        // `users_table()`. With no resolver installed the principals
+        // section is empty — the design doc's "absent resolver → names
+        // resolve to null" degrade (NOT the old hash-based bridge).
+        if let Some(resolver) = self.principal_resolver() {
+            for p in resolver.list() {
+                name_of.insert(p.principal64, p.name.clone());
                 let mut m = new_map();
-                m.insert("id".to_string(), QueryValue::Int(id as i64));
-                m.insert("name".to_string(), QueryValue::Str(uname.to_string()));
+                m.insert("id".to_string(), QueryValue::Int(p.principal64 as i64));
+                m.insert("name".to_string(), QueryValue::Str(p.name));
                 users_list.push(QueryValue::Map(m));
             }
         }

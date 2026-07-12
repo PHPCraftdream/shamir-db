@@ -322,21 +322,6 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
-    /// Create a role.
-    pub fn create_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
-        self.add_entry(alias, op.into_batch_op(), true)
-    }
-
-    /// Drop a role.
-    pub fn drop_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
-        self.add_entry(alias, op.into_batch_op(), true)
-    }
-
-    /// Rename a role.
-    pub fn rename_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
-        self.add_entry(alias, op.into_batch_op(), true)
-    }
-
     /// Grant a role to a user.
     pub fn grant_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
@@ -484,11 +469,6 @@ impl Batch {
 
     /// List users.
     pub fn list_users(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
-        self.add_entry(alias, op.into_batch_op(), true)
-    }
-
-    /// List roles.
-    pub fn list_roles(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 

@@ -78,70 +78,36 @@ impl ShamirAdminExecutor {
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
                     .map_err(err_access)?;
-                let table = self
-                    .shamir
-                    .system_store()
-                    .users_table()
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                let interner = table
-                    .interner()
-                    .get()
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                let refs = crate::types::common::new_map();
-                let ctx = crate::query::filter::FilterContext::new(interner, &refs);
-                let query = crate::query::read::ReadQuery::new("users");
-                let result = table
-                    .read(&query, &ctx)
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                // Strip password_hash from output using QueryValue-native access.
-                let users: Vec<QueryValue> = result
-                    .records
+                // Task #559: list users from the injected PrincipalResolver
+                // (the real durable directory) instead of Store B's
+                // `users_table()`. With no resolver installed there is no
+                // live principal source, so this degrades to a typed
+                // `not_supported` (mirroring how the user-admin handlers
+                // behave without a port) rather than silently returning
+                // stale Store-B rows.
+                let Some(resolver) = self.shamir.principal_resolver() else {
+                    return Err(err_code(
+                        "not_supported",
+                        "user directory is not configured on this server".to_string(),
+                    ));
+                };
+                let users: Vec<QueryValue> = resolver
+                    .list()
                     .into_iter()
-                    .map(|r| {
-                        let mut qv = r.as_value().into_owned();
-                        if let QueryValue::Map(ref mut m) = qv {
-                            m.shift_remove("password_hash");
-                        }
-                        qv
+                    .map(|p| {
+                        mpack!({
+                            "name": @(QueryValue::Str(p.name)),
+                            "principal64": @(QueryValue::Int(p.principal64 as i64)),
+                            "superuser": @(QueryValue::Bool(p.superuser)),
+                            "database": @(match p.database {
+                                Some(d) => QueryValue::Str(d),
+                                None => QueryValue::Null,
+                            }),
+                        })
                     })
                     .collect();
                 Ok(admin_result(mpack!({
                     "users": @(QueryValue::List(users)),
-                })))
-            }
-            ListOp::Roles => {
-                self.shamir
-                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
-                    .await
-                    .map_err(err_access)?;
-                let table = self
-                    .shamir
-                    .system_store()
-                    .roles_table()
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                let interner = table
-                    .interner()
-                    .get()
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                let refs = crate::types::common::new_map();
-                let ctx = crate::query::filter::FilterContext::new(interner, &refs);
-                let query = crate::query::read::ReadQuery::new("roles");
-                let result = table
-                    .read(&query, &ctx)
-                    .await
-                    .map_err(|e| err(e.to_string()))?;
-                let roles: Vec<QueryValue> = result
-                    .records
-                    .into_iter()
-                    .map(|r| r.as_value().into_owned())
-                    .collect();
-                Ok(admin_result(mpack!({
-                    "roles": @(QueryValue::List(roles)),
                 })))
             }
             ListOp::Indexes { table, repo } => {

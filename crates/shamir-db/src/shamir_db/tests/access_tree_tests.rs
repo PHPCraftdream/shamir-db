@@ -6,10 +6,41 @@ use shamir_query_builder::ddl;
 
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
-use crate::shamir_db::ShamirDb;
+use crate::shamir_db::{PrincipalInfo, PrincipalResolver, ShamirDb};
 use shamir_types::access::{principal64_from_username, Actor, ResourceMeta, ResourcePath};
-use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
+use std::sync::Arc;
+
+/// Test-only mock resolver: returns a single PrincipalInfo for "alice",
+/// mirroring the pre-#559 Store-B-backed principals listing. Task #559
+/// changed `access_tree`'s principals loop to read from the resolver.
+struct MockAliceResolver;
+
+impl PrincipalResolver for MockAliceResolver {
+    fn resolve(&self, p64: u64) -> Option<PrincipalInfo> {
+        let alice = principal64_from_username("alice");
+        if p64 == alice {
+            Some(PrincipalInfo {
+                principal64: alice,
+                name: "alice".to_string(),
+                user_id: [0u8; 16],
+                database: None,
+                superuser: false,
+            })
+        } else {
+            None
+        }
+    }
+    fn list(&self) -> Vec<PrincipalInfo> {
+        vec![PrincipalInfo {
+            principal64: principal64_from_username("alice"),
+            name: "alice".to_string(),
+            user_id: [0u8; 16],
+            database: None,
+            superuser: false,
+        }]
+    }
+}
 
 /// Find a child node by its `name`, panicking if absent. Children order
 /// is non-deterministic (dashmap iteration), so always look up by name.
@@ -24,7 +55,12 @@ fn child<'a>(node: &'a QueryValue, name: &str) -> &'a QueryValue {
 
 #[tokio::test]
 async fn access_tree_structure_meta_and_principals() {
-    let shamir = ShamirDb::init_memory().await.unwrap();
+    // Task #559: install a mock resolver so access_tree's principals loop
+    // lists alice (previously this read Store B's users_table directly).
+    let shamir = ShamirDb::init_memory()
+        .await
+        .unwrap()
+        .with_principal_resolver(Arc::new(MockAliceResolver));
     shamir.create_db("testdb").await;
     let config =
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
@@ -33,23 +69,10 @@ async fn access_tree_structure_meta_and_principals() {
     // A real group so the table's group resolves to a name.
     let gid = shamir.create_group("devs").await.unwrap();
 
-    // A user record so the table's owner resolves to a name, and the
+    // A user principal so the table's owner resolves to a name, and the
     // group membership renders the member name.
     let alice = principal64_from_username("alice");
     shamir.add_group_member(gid, alice).await.unwrap();
-    {
-        let table = shamir.system_store().users_table().await.unwrap();
-        let op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new("users"),
-            key: mpack!({ "name": "alice" }),
-            value: mpack!({ "name": "alice" }),
-        };
-        shamir
-            .system_store()
-            .set_via_implicit_tx(&table, &op)
-            .await
-            .unwrap();
-    }
 
     // chown alice + chgrp devs + chmod 0o750 on the table.
     let meta = ResourceMeta {

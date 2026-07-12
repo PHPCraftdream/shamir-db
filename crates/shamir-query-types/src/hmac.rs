@@ -32,14 +32,12 @@
 //! | drop_table          | `b"drop_table\0<db_in_use>\0<repo>\0<table>"`                                |
 //! | drop_index          | `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`         |
 //! | drop_user           | `b"drop_user\0<username>"`                                                   |
-//! | drop_role           | `b"drop_role\0<role>"`                                                       |
 //! | grant_role          | `b"grant_role\0<role>\0<user>"`                                              |
 //! | revoke_role         | `b"revoke_role\0<role>\0<user>"`                                             |
 //! | chmod               | `b"chmod\0<resource>\0<mode>"`                                               |
 //! | chown               | `b"chown\0<resource>\0<owner>"`                                              |
 //! | chgrp               | `b"chgrp\0<resource>\0<group|null>"`                                         |
 //! | create_user         | `b"create_user\0<username>"` (password NEVER included)                       |
-//! | create_role         | `b"create_role\0<role>"` (permissions NOT included, mirrors `drop_role`)     |
 //! | set_retention       | `b"set_retention\0<db_in_use>\0<repo>\0<table>\0<retention>"`                |
 //! | purge_history       | `b"purge_history\0<db_in_use>\0<repo>\0<table>\0<scope>"`                    |
 //!
@@ -138,10 +136,6 @@ pub fn canonical_drop_user(username: &str) -> Vec<u8> {
     join_null(&[b"drop_user", username.as_bytes()])
 }
 
-pub fn canonical_drop_role(role: &str) -> Vec<u8> {
-    join_null(&[b"drop_role", role.as_bytes()])
-}
-
 pub fn canonical_start_migration(
     db_in_use: &str,
     src_repo: &str,
@@ -187,12 +181,6 @@ pub fn canonical_create_user(username: &str) -> Vec<u8> {
     // Password is NEVER part of the canonical input — the tag confirms
     // "you meant to create this account", not the credential.
     join_null(&[b"create_user", username.as_bytes()])
-}
-
-pub fn canonical_create_role(role: &str) -> Vec<u8> {
-    // Permissions are not part of the canonical input, mirroring
-    // `drop_role`'s precedent of identifying the op by name only.
-    join_null(&[b"create_role", role.as_bytes()])
 }
 
 /// Render a [`crate::admin::ResourceRef`] into the stable `scheme://path`

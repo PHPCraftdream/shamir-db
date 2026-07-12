@@ -124,6 +124,16 @@ pub(crate) struct PersistedUser {
     /// Migrated into the flag below by boot-time normalization.
     #[serde(default)]
     pub(crate) superuser: bool,
+    /// Database-scope for owner-delegation (`authorize_user_lifecycle`).
+    /// Task #559: the only Store-B datum with live enforcement meaning
+    /// moves *schema-wise* to the directory record. `#[serde(default)]`
+    /// — no pre-#559 persisted blob has this field. Set only via
+    /// `UserAdminPort::create_user`'s `database` parameter; NOT
+    /// auto-imported from shamir-db's retired Store B (design doc §6.3 —
+    /// importing risks silently RE-GRANTING a stale scoped-admin privilege
+    /// that was never actually enforceable before this task).
+    #[serde(default)]
+    pub(crate) database: Option<String>,
 }
 
 impl PersistedUser {
@@ -132,6 +142,7 @@ impl PersistedUser {
         record: &UserRecord,
         roles: Vec<String>,
         superuser: bool,
+        database: Option<String>,
     ) -> Self {
         Self {
             user_id: user_id.to_vec(),
@@ -142,6 +153,7 @@ impl PersistedUser {
             roles,
             tickets_invalid_before_ns: record.tickets_invalid_before_ns,
             superuser,
+            database,
         }
     }
 
@@ -199,6 +211,11 @@ pub struct UserDirectoryState {
     /// Migrated flag (task #557 wires enforcement; this task only carries
     /// the value).
     pub superuser: bool,
+    /// Database scope for owner-delegation (task #559). `None` for global
+    /// users. Read by the `PrincipalResolver` impl so
+    /// `authorize_user_lifecycle`'s drop-user scope lookup can resolve via
+    /// the directory instead of Store B.
+    pub database: Option<String>,
     /// `tickets_invalid_before_ns` — the anti-replay epoch.
     pub tickets_invalid_before_ns: u64,
 }
@@ -467,6 +484,7 @@ impl FjallUserDirectory {
             username,
             roles: user.roles,
             superuser: user.superuser,
+            database: user.database,
             tickets_invalid_before_ns: user.tickets_invalid_before_ns,
         })
     }
@@ -708,6 +726,155 @@ impl FjallUserDirectory {
         }
         Ok(true)
     }
+
+    // ------------------------------------------------------------------
+    // Task #559: directory methods backing the PrincipalResolver /
+    // UserAdminPort seam. These live on `FjallUserDirectory` itself (not
+    // just the adapter) so they share the directory's `write_lock`
+    // serialisation and fjall atomicity guarantees — the adapter stays a
+    // thin passthrough.
+    // ------------------------------------------------------------------
+
+    /// Insert a fresh user carrying a `database` scope, parallel to the
+    /// [`UserDirectory::insert`] trait method (which cannot carry
+    /// `database` — `shamir-connect`'s `UserRecord` is SCRAM-only). Used
+    /// by the `UserAdminPort::create_user` impl so the scope is set
+    /// atomically with creation. Roles start empty here; the port attaches
+    /// them via `update_roles` (which enforces the `"superuser"` string
+    /// reservation).
+    pub fn insert_with_scope(
+        &self,
+        username: String,
+        record: UserRecord,
+        database: Option<String>,
+    ) -> Result<[u8; 16]> {
+        let _guard = self.write_lock.lock();
+
+        let exists = self
+            .users
+            .contains_key(username.as_bytes())
+            .map_err(|e| Error::Encoding(format!("fjall: contains_key: {e}")))?;
+        if exists {
+            return Err(Error::InvalidInput("username exists"));
+        }
+
+        let user_id = self.mint_unique_user_id()?;
+        let projected = principal64(user_id);
+        let pkey = projected.to_be_bytes();
+
+        let persisted = PersistedUser::from_record(user_id, &record, Vec::new(), false, database);
+        let bytes = rmp_serde::to_vec_named(&persisted)
+            .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
+
+        let mut batch = self.db.batch();
+        batch.insert(&self.users, username.as_bytes(), bytes.as_slice());
+        batch.insert(&self.user_id_index, &user_id[..], username.as_bytes());
+        batch.insert(&self.principal64_index, &pkey[..], username.as_bytes());
+        batch
+            .commit()
+            .map_err(|e| Error::Encoding(format!("fjall: batch commit: {e}")))?;
+
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+        self.update_cache(&user_id, persisted.tickets_invalid_before_ns);
+
+        Ok(user_id)
+    }
+
+    /// Resolve a principal by its `principal64` projection key, mirroring
+    /// [`Self::state_by_user_id`]'s shape/error conventions but keyed by
+    /// the projection via the `principal64_to_name_v1` keyspace (built in
+    /// #556 specifically for this consumer). Returns `None` for an
+    /// unknown/removed projection.
+    pub fn resolve_by_principal64(&self, principal64_key: u64) -> Option<UserDirectoryState> {
+        let key = principal64_key.to_be_bytes();
+        let entry = self.principal64_index.get(&key[..]).ok().flatten()?;
+        let username = String::from_utf8(entry.as_ref().to_vec()).ok()?;
+        let blob = self.read_blob(&username).ok().flatten()?;
+        let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
+        Some(UserDirectoryState {
+            username,
+            roles: user.roles,
+            superuser: user.superuser,
+            database: user.database,
+            tickets_invalid_before_ns: user.tickets_invalid_before_ns,
+        })
+    }
+
+    /// One-shot full-directory scan: iterate `users_v1` once, decoding
+    /// every `PersistedUser` into a `(principal64, UserDirectoryState)`
+    /// pair. O(N) — acceptable, this mirrors `access_tree`/`List`'s
+    /// existing cost model. Backs `PrincipalResolver::list`.
+    pub fn list_all(&self) -> Result<Vec<(u64, UserDirectoryState)>> {
+        let mut out = Vec::new();
+        for guard in self.users.iter() {
+            let (username_bytes, blob) = match guard.into_inner() {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            };
+            let user: PersistedUser = match rmp_serde::from_slice(blob.as_ref()) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+            let username = String::from_utf8_lossy(username_bytes.as_ref()).into_owned();
+            let Some(uid) = user.user_id_array() else {
+                continue;
+            };
+            let projected = principal64(uid);
+            out.push((
+                projected,
+                UserDirectoryState {
+                    username,
+                    roles: user.roles,
+                    superuser: user.superuser,
+                    database: user.database,
+                    tickets_invalid_before_ns: user.tickets_invalid_before_ns,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Atomically add a role string to a user's role list (no-op if already
+    /// present). Mirrors `set_superuser`'s bespoke-method precedent: the
+    /// whole read-modify-write runs under `write_lock` so two concurrent
+    /// grants to the same user cannot lose an update (the adapter-side
+    /// read-then-write alternative would have a TOCTOU gap). Rejects the
+    /// reserved `"superuser"` string (use `set_superuser` for the flag) and
+    /// bumps `tickets_invalid_before_ns` on a real change (spec §12.6).
+    pub fn grant_role(&self, username: &str, role: &str, now_ns: u64) -> Result<bool> {
+        if role == "superuser" {
+            return Err(Error::InvalidInput(
+                "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status",
+            ));
+        }
+        self.read_modify_write(username, |user| {
+            if user.roles.iter().any(|r| r == role) {
+                return false;
+            }
+            user.roles.push(role.to_string());
+            if now_ns > user.tickets_invalid_before_ns {
+                user.tickets_invalid_before_ns = now_ns;
+            }
+            true
+        })
+    }
+
+    /// Atomically remove a role string from a user's role list (no-op if
+    /// absent). See [`Self::grant_role`] for the atomicity rationale.
+    pub fn revoke_role(&self, username: &str, role: &str, now_ns: u64) -> Result<bool> {
+        self.read_modify_write(username, |user| {
+            let before = user.roles.len();
+            user.roles.retain(|r| r != role);
+            let changed = user.roles.len() != before;
+            if changed && now_ns > user.tickets_invalid_before_ns {
+                user.tickets_invalid_before_ns = now_ns;
+            }
+            changed
+        })
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -786,7 +953,7 @@ impl UserDirectory for FjallUserDirectory {
         // superuser via the field is task #557's `SetSuperuser`/bootstrap
         // wiring — NOT this task.) This matches the in-memory reference impl
         // semantics.
-        let persisted = PersistedUser::from_record(user_id, &record, Vec::new(), false);
+        let persisted = PersistedUser::from_record(user_id, &record, Vec::new(), false, None);
         let bytes = rmp_serde::to_vec_named(&persisted)
             .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
 
