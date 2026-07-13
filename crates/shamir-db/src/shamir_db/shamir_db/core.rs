@@ -56,6 +56,18 @@ pub struct ShamirDb {
     /// (each unique user occupies a slot forever), but admin ops are
     /// rare so the memory cost is negligible.
     pub(super) admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
+    /// Per-`group_id` lock map used to serialise group-record
+    /// read-modify-write mutations (`add_group_member_as` /
+    /// `remove_group_member_as` / `set_resource_meta(Group)` /
+    /// `rename_group_as` / `drop_group_as`) and close the §81 / #563
+    /// last-writer-wins-on-whole-record race when two concurrent mutations
+    /// target the SAME `group_id`. Keyed by `group_id` (a `u64`, unlike
+    /// `admin_user_locks`'s `String` key, since groups are id-keyed not
+    /// name-keyed). Entries leak by design (each unique group occupies a
+    /// slot forever), but group mutations are rare so the memory cost is
+    /// negligible — exactly the `admin_user_locks`/`repo_create_locks`
+    /// tradeoff.
+    pub(super) group_member_locks: Arc<DashMap<u64, Arc<Mutex<()>>, THasher>>,
     pub(super) active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>>,
     /// Live function registry (builtins + WASM functions loaded on open).
     pub(super) functions: Arc<FunctionRegistry>,
@@ -137,6 +149,7 @@ impl ShamirDb {
 
         let dbs = Arc::new(DashMap::with_hasher(THasher::default()));
         let admin_user_locks = Arc::new(DashMap::with_hasher(THasher::default()));
+        let group_member_locks = Arc::new(DashMap::with_hasher(THasher::default()));
         let active_migrations = Arc::new(DashMap::with_hasher(THasher::default()));
         let wasm_engine =
             Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
@@ -150,6 +163,7 @@ impl ShamirDb {
             dbs,
             system_store,
             admin_user_locks,
+            group_member_locks,
             active_migrations,
             functions,
             wasm_engine,
@@ -470,6 +484,14 @@ impl ShamirDb {
     /// RevokeRole) and close the §B9 read-modify-write race.
     pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.admin_user_locks
+    }
+
+    /// Per-`group_id` lock map used to serialise group-record read-modify-write
+    /// mutations (add/remove member, set owner, rename, drop) and close the
+    /// §81 / #563 last-writer-wins-on-whole-record race when two concurrent
+    /// mutations target the same `group_id`.
+    pub fn group_member_locks(&self) -> &Arc<DashMap<u64, Arc<Mutex<()>>, THasher>> {
+        &self.group_member_locks
     }
 
     /// Global lock serialising the `handle_create_db` exists-check →
