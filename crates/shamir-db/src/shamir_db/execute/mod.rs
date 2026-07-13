@@ -10,7 +10,7 @@
 //! - [`admin_table_index`] — CreateTable, DropTable, CreateIndex, DropIndex
 //! - [`admin_buffer`]      — GetBufferConfig, SetBufferConfig, AlterBufferConfig
 //! - [`admin_list`]        — List
-//! - [`admin_users_roles`] — CreateUser, DropUser, CreateRole, DropRole, GrantRole, RevokeRole
+//! - [`admin_users_roles`] — CreateUser, DropUser, GrantRole, RevokeRole
 //! - [`admin_migration`]   — StartMigration, CommitMigration, RollbackMigration, MigrationStatus
 //! - [`admin_access`]      — Chmod, Chown, Chgrp, CreateGroup, DropGroup, AddGroupMember, RemoveGroupMember, AccessTree
 //! - [`admin_function`]    — CreateFunction, DropFunction, RenameFunction, CreateFunctionFolder

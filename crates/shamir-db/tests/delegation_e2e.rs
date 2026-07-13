@@ -264,11 +264,16 @@ async fn grant_role_without_port_returns_not_supported() {
 // database, end-to-end through `UserAdminPort`.
 // ===========================================================================
 
-/// Records every `create_user` call it receives — proves the call actually
-/// reached the port (not just that the authorization gate admitted it).
+/// One recorded `create_user` call: `(name, roles, database)`.
+type CreateUserCall = (String, Vec<String>, Option<String>);
+
+/// Records every `create_user`/`drop_user` call it receives — proves the
+/// call actually reached the port (not just that the authorization gate
+/// admitted it).
 #[derive(Default)]
 struct RecordingPort {
-    calls: Mutex<Vec<(String, Vec<String>, Option<String>)>>,
+    calls: Mutex<Vec<CreateUserCall>>,
+    drop_calls: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -286,7 +291,8 @@ impl UserAdminPort for RecordingPort {
             .push((name.to_string(), roles, database));
         Ok([0x42u8; 16])
     }
-    async fn drop_user(&self, _name: &str) -> Result<bool, PortError> {
+    async fn drop_user(&self, name: &str) -> Result<bool, PortError> {
+        self.drop_calls.lock().unwrap().push(name.to_string());
         Ok(false)
     }
     async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
@@ -329,5 +335,137 @@ async fn db_owner_creates_scoped_user_through_port() {
         calls[0].2.as_deref(),
         Some("testdb"),
         "the port must receive the owner's own database scope"
+    );
+}
+
+// ===========================================================================
+// C. Error classification — `handle_grant_role`/`handle_revoke_role`
+// classify a `UserAdminPort` error containing "user not found" into code
+// `not_found`, and any other message into the generic `query` (task #559
+// review follow-up, #565).
+// ===========================================================================
+
+/// A `UserAdminPort` whose `grant_role`/`revoke_role` always fail with a
+/// caller-supplied message. `create_user`/`drop_user`/`set_superuser` are
+/// unused by these tests and just succeed trivially.
+struct FailingRolePort {
+    message: String,
+}
+
+#[async_trait]
+impl UserAdminPort for FailingRolePort {
+    async fn create_user(
+        &self,
+        _name: &str,
+        _password: &str,
+        _roles: Vec<String>,
+        _database: Option<String>,
+    ) -> Result<[u8; 16], PortError> {
+        Ok([0u8; 16])
+    }
+    async fn drop_user(&self, _name: &str) -> Result<bool, PortError> {
+        Ok(false)
+    }
+    async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Err(self.message.clone().into())
+    }
+    async fn revoke_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
+        Err(self.message.clone().into())
+    }
+    async fn set_superuser(&self, _user: &str, _on: bool) -> Result<(), PortError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn grant_role_user_not_found_maps_to_not_found_code() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "user not found: ghost".to_string(),
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::grant_role("analyst", "ghost"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err(), "expected an error: {resp:?}");
+    assert_eq!(resp.unwrap_err().code(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn grant_role_other_error_maps_to_query_code() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "directory I/O failure".to_string(),
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::grant_role("analyst", "bob"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err(), "expected an error: {resp:?}");
+    assert_eq!(resp.unwrap_err().code(), Some("query"));
+}
+
+#[tokio::test]
+async fn revoke_role_user_not_found_maps_to_not_found_code() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "user not found: ghost".to_string(),
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::revoke_role("analyst", "ghost"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err(), "expected an error: {resp:?}");
+    assert_eq!(resp.unwrap_err().code(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn revoke_role_other_error_maps_to_query_code() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "directory I/O failure".to_string(),
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::revoke_role("analyst", "bob"));
+    let resp = shamir.execute("testdb", &req).await;
+    assert!(resp.is_err(), "expected an error: {resp:?}");
+    assert_eq!(resp.unwrap_err().code(), Some("query"));
+}
+
+// ===========================================================================
+// D. No-resolver degrade — `handle_drop_user`'s scope lookup degrades to
+// "global-admin only" when no `PrincipalResolver` is installed, even for
+// the actual owner of the target user's database (documented
+// safe-but-degraded behaviour, design doc §3.1; task #565).
+// ===========================================================================
+
+/// A database owner (non-superuser `Actor::User`) must NOT be able to drop
+/// a user when no `PrincipalResolver` is installed: `drop_user`'s scope
+/// lookup (`self.shamir.principal_resolver().and_then(...)`) has nothing to
+/// resolve against, so it degrades to `None` — and `authorize_user_lifecycle`
+/// only admits a global admin for an unscoped (`None`) target, denying the
+/// owner. The port must never even be reached.
+#[tokio::test]
+async fn drop_user_without_resolver_degrades_to_global_admin_only() {
+    let shamir = setup().await;
+    let owner = Actor::User(1001);
+    make_db_owner(&shamir, owner.clone()).await;
+
+    // A UserAdminPort IS installed (storage is reachable in principle), but
+    // NO PrincipalResolver — proving the degrade is specifically about scope
+    // resolution, not a missing port.
+    let port = Arc::new(RecordingPort::default());
+    let shamir = shamir.with_user_admin_port(port.clone() as Arc<dyn UserAdminPort>);
+
+    let req = one_op(ddl::drop_user("scoped_user"));
+    let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
+    assert!(
+        resp.is_err(),
+        "without a resolver, a db owner must NOT drop a user (scope degrades to None): {resp:?}"
+    );
+    assert!(
+        port.drop_calls.lock().unwrap().is_empty(),
+        "the port must not be reached — the authorization gate must deny first"
     );
 }

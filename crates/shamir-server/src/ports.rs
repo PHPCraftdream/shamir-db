@@ -45,12 +45,10 @@ impl DirectoryPorts {
 impl PrincipalResolver for DirectoryPorts {
     fn resolve(&self, principal64_key: u64) -> Option<PrincipalInfo> {
         let st = self.dir.resolve_by_principal64(principal64_key)?;
-        // Resolve user_id BEFORE moving st.username into `name`.
-        let user_id = self.dir.user_id(&st.username)?;
         Some(PrincipalInfo {
             principal64: principal64_key,
             name: st.username,
-            user_id,
+            user_id: st.user_id,
             database: st.database,
             superuser: st.superuser,
         })
@@ -65,8 +63,8 @@ impl PrincipalResolver for DirectoryPorts {
             .into_iter()
             .map(|(principal64, st)| PrincipalInfo {
                 principal64,
-                name: st.username.clone(),
-                user_id: self.dir.user_id(&st.username).unwrap_or([0u8; 16]),
+                name: st.username,
+                user_id: st.user_id,
                 database: st.database,
                 superuser: st.superuser,
             })

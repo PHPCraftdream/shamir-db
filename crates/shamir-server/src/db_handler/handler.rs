@@ -21,8 +21,7 @@
 //!     - writes (Insert / Update / Set (upsert) / Delete),
 //!     - admin DDL (CreateDb / DropDb / CreateRepo / DropRepo / CreateTable /
 //!       DropTable / CreateIndex / DropIndex / List),
-//!     - auth ops (CreateUser / DropUser / CreateRole / DropRole / GrantRole /
-//!       RevokeRole),
+//!     - auth ops (CreateUser / DropUser / GrantRole / RevokeRole),
 //!     - cross-query references via `{"$query": "@alias[].field"}`,
 //!     - optional MVCC transactional semantics.
 //!
