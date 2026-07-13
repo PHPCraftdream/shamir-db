@@ -1214,7 +1214,10 @@ impl RepoInstance {
             .token_names
             .read_async(&token, |_, name| name.clone())
             .await?;
-        let cell = self.tables.get(&name).map(|entry| Arc::clone(entry.value()))?;
+        let cell = self
+            .tables
+            .get(&name)
+            .map(|entry| Arc::clone(entry.value()))?;
         cell.get().cloned()
     }
 

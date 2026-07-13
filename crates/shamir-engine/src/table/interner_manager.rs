@@ -249,7 +249,10 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(RecordKey::from_slice(chunk_record_id(idx).as_bytes()), bytes)
+            .set(
+                RecordKey::from_slice(chunk_record_id(idx).as_bytes()),
+                bytes,
+            )
             .await?;
         self.next_chunk_idx.store(idx + 1, Ordering::Release);
         // `last_persisted_len` is advanced by `persist()` callers based
@@ -343,7 +346,10 @@ impl InternerManager {
             ))
         })?;
         self.info_store
-            .set(RecordKey::from_slice(chunk_record_id(idx).as_bytes()), bytes)
+            .set(
+                RecordKey::from_slice(chunk_record_id(idx).as_bytes()),
+                bytes,
+            )
             .await?;
         // CRIT-2 (#436): flush the chunk write BEFORE advancing
         // `last_persisted_len`. `Store::set` above lands in a write-back

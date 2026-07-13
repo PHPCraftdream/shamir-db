@@ -15,8 +15,8 @@ use futures::StreamExt;
 use super::helpers::make_mvcc_with_gate;
 use crate::repo_tx_gate::RepoTxGate;
 use crate::version_codec::encode_version_key;
-use std::sync::Arc;
 use shamir_storage::types::RecordKey;
+use std::sync::Arc;
 
 fn make_gate() -> Arc<RepoTxGate> {
     Arc::new(RepoTxGate::fresh())
@@ -54,8 +54,11 @@ async fn get_at_overlay_newer_than_history_wins() {
     let mvcc = make_mvcc_with_gate(gate.clone());
     // Durable history at v3; overlay at v7. Floor high enough to see both.
     put_history(&mvcc, b"k", 3, Bytes::from_static(b"hist-v3")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"k")), 7, Bytes::from_static(b"ov-v7"));
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        7,
+        Bytes::from_static(b"ov-v7"),
+    );
     gate.publish_committed_max(10);
 
     // snapshot 10, fallback path (cell absent → cur_v == 0).
@@ -86,8 +89,11 @@ async fn get_at_overlay_older_than_history_history_wins() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"k", 8, Bytes::from_static(b"hist-v8")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"k")), 4, Bytes::from_static(b"ov-v4"));
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        4,
+        Bytes::from_static(b"ov-v4"),
+    );
     gate.publish_committed_max(10);
 
     assert_eq!(
@@ -105,9 +111,13 @@ async fn get_at_direct_path_overlay_hit() {
     // history at v5 with one value; overlay at the SAME v5 with another. The
     // cell points at v5. Overlay probe must win on the direct path.
     put_history(&mvcc, b"k", 5, Bytes::from_static(b"hist-v5")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"k")), 5, Bytes::from_static(b"ov-v5"));
-    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5).await;
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        5,
+        Bytes::from_static(b"ov-v5"),
+    );
+    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5)
+        .await;
     gate.publish_committed_max(10);
 
     assert_eq!(
@@ -149,13 +159,19 @@ async fn get_current_overlay_supersedes_history() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"k", 5, Bytes::from_static(b"hist-v5")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"k")), 5, Bytes::from_static(b"ov-v5"));
-    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5).await;
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        5,
+        Bytes::from_static(b"ov-v5"),
+    );
+    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5)
+        .await;
     gate.publish_committed_max(5);
 
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
         Some(Bytes::from_static(b"ov-v5")),
     );
 }
@@ -167,7 +183,8 @@ async fn get_current_overlay_only_key_found() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     // No history entry at all; key lives only in the overlay.
-    mvcc.overlay().insert(RecordKey::from(Bytes::from_static(b"ghost")),
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"ghost")),
         4,
         Bytes::from_static(b"ov-only"),
     );
@@ -186,8 +203,11 @@ async fn get_current_overlay_only_key_found() {
 async fn get_current_overlay_only_tombstone_none() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"ghost")), 4, Bytes::new());
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"ghost")),
+        4,
+        Bytes::new(),
+    );
     gate.publish_committed_max(10);
 
     assert_eq!(
@@ -204,12 +224,15 @@ async fn get_current_empty_overlay_identical_to_history() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"k", 5, Bytes::from_static(b"hist-v5")).await;
-    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5).await;
+    mvcc.seed_version(RecordKey::from(Bytes::from_static(b"k")), 5)
+        .await;
     gate.publish_committed_max(5);
     assert!(mvcc.overlay().is_empty());
 
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
         Some(Bytes::from_static(b"hist-v5")),
     );
     assert_eq!(
@@ -232,8 +255,11 @@ async fn current_stream_overlay_overrides_history_key() {
     put_history(&mvcc, b"a", 2, Bytes::from_static(b"a-hist")).await;
     put_history(&mvcc, b"b", 3, Bytes::from_static(b"b-hist")).await;
     // overlay holds a newer version of `a`.
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"a")), 8, Bytes::from_static(b"a-ov"));
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        8,
+        Bytes::from_static(b"a-ov"),
+    );
     gate.publish_committed_max(10);
 
     let got = collect_stream(&mvcc, 16).await;
@@ -252,8 +278,11 @@ async fn current_stream_overlay_only_key_emitted() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"a", 2, Bytes::from_static(b"a-hist")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"z")), 5, Bytes::from_static(b"z-ov"));
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"z")),
+        5,
+        Bytes::from_static(b"z-ov"),
+    );
     gate.publish_committed_max(10);
 
     let got = collect_stream(&mvcc, 16).await;
@@ -308,8 +337,11 @@ async fn current_stream_history_newer_than_overlay_wins() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"a", 9, Bytes::from_static(b"a-hist-v9")).await;
-    mvcc.overlay()
-        .insert(RecordKey::from(Bytes::from_static(b"a")), 4, Bytes::from_static(b"a-ov-v4"));
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        4,
+        Bytes::from_static(b"a-ov-v4"),
+    );
     gate.publish_committed_max(10);
 
     let got = collect_stream(&mvcc, 16).await;
@@ -354,7 +386,8 @@ async fn current_stream_overlay_above_floor_excluded() {
     let mvcc = make_mvcc_with_gate(gate.clone());
     put_history(&mvcc, b"a", 2, Bytes::from_static(b"a-hist")).await;
     // overlay version 20 is ABOVE the floor of 5 → invisible.
-    mvcc.overlay().insert(RecordKey::from(Bytes::from_static(b"a")),
+    mvcc.overlay().insert(
+        RecordKey::from(Bytes::from_static(b"a")),
         20,
         Bytes::from_static(b"a-future"),
     );

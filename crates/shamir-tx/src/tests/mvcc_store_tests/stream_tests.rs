@@ -24,7 +24,9 @@ async fn current_stream_lists_all_current() {
         (Bytes::from("s-c"), Bytes::from("vc")),
     ];
     for (k, v) in pairs {
-        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone()).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone())
+            .await
+            .unwrap();
     }
 
     // Collect the seam stream into a map.
@@ -108,9 +110,12 @@ async fn c2_current_stream_exceeds_batch_no_panic() {
     // 5 distinct current keys, streamed with batch_size = 2 (3 output
     // batches: 2 + 2 + 1). The buggy code paniced on the 2nd pull.
     for i in 0..5u32 {
-        mvcc.set_versioned(RecordKey::from(Bytes::from(format!("bk{i}"))), Bytes::from(format!("v{i}")))
-            .await
-            .unwrap();
+        mvcc.set_versioned(
+            RecordKey::from(Bytes::from(format!("bk{i}"))),
+            Bytes::from(format!("v{i}")),
+        )
+        .await
+        .unwrap();
     }
 
     let mut keys: BTreeSet<Vec<u8>> = BTreeSet::new();
@@ -203,7 +208,10 @@ async fn mvcc2_real_interleaving_toctou_characterization() {
 
     // --- Spawn write task ---
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
+        mvcc_w
+            .set_versioned(RecordKey::from(key_w), new_val_w)
+            .await
+            .unwrap();
     });
 
     // --- Wait for write to be inside the pause ---

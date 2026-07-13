@@ -738,8 +738,7 @@ async fn effective_fn_actor_invoker_setuid_missing_owner_returns_caller_not_syst
     let shamir = ShamirDb::init_memory().await.unwrap();
     let caller = Actor::User(43);
 
-    make_fn_without_owner_field(&shamir, "invoker_suid_no_owner_fn", true, Security::Invoker)
-        .await;
+    make_fn_without_owner_field(&shamir, "invoker_suid_no_owner_fn", true, Security::Invoker).await;
 
     let effective = shamir
         .effective_fn_actor("invoker_suid_no_owner_fn", &caller)

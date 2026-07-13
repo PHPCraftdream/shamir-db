@@ -143,10 +143,7 @@ mod opt_record_id_base58 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use shamir_types::types::record_id::RecordId;
 
-    pub(super) fn serialize<S: Serializer>(
-        v: &Option<RecordId>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(v: &Option<RecordId>, s: S) -> Result<S::Ok, S::Error> {
         // `skip_serializing_if = Option::is_none` guarantees `Some` here, but
         // stay total: emit the base58 string for `Some`, unit for `None`.
         match v {

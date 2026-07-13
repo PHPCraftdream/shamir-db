@@ -2,10 +2,10 @@ use super::helpers::{count_history_entries, make_gate, make_mvcc_with_gate};
 use super::test_stores::counting_store::CountingStore;
 use crate::mvcc_store::{MvccStore, Retention};
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use shamir_storage::types::RecordKey;
 
 /// Helper: build an MvccStore backed by a CountingStore so we can
 /// assert scan_prefix_stream call counts.
@@ -35,7 +35,14 @@ async fn append_only_batch_skips_current_version_lookup() {
         })
         .collect();
 
-    mvcc.set_versioned_many_append_only(items.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    mvcc.set_versioned_many_append_only(
+        items
+            .into_iter()
+            .map(|(k, v)| (RecordKey::from(k), v))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
@@ -65,9 +72,24 @@ async fn append_only_byte_identical_to_many() {
         })
         .collect();
 
-    mvcc_a.set_versioned_many(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    mvcc_a
+        .set_versioned_many(
+            items
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     mvcc_b
-        .set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
+        .set_versioned_many_append_only(
+            items
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
         .await
         .unwrap();
 
@@ -88,8 +110,14 @@ async fn append_only_byte_identical_to_many() {
 
     // Both must resolve the same values via get_current.
     for (key, expected_val) in &items {
-        let val_a = mvcc_a.get_current(RecordKey::from(key.clone())).await.unwrap();
-        let val_b = mvcc_b.get_current(RecordKey::from(key.clone())).await.unwrap();
+        let val_a = mvcc_a
+            .get_current(RecordKey::from(key.clone()))
+            .await
+            .unwrap();
+        let val_b = mvcc_b
+            .get_current(RecordKey::from(key.clone()))
+            .await
+            .unwrap();
         assert_eq!(
             val_a,
             Some(expected_val.clone()),
@@ -132,13 +160,22 @@ async fn append_only_under_snapshot_safe() {
             )
         })
         .collect();
-    mvcc.set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
-        .await
-        .unwrap();
+    mvcc.set_versioned_many_append_only(
+        items
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (RecordKey::from(k), v))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
 
     // The fresh keys must be readable at current.
     for (key, expected_val) in &items {
-        let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+        let val = mvcc
+            .get_current(RecordKey::from(key.clone()))
+            .await
+            .unwrap();
         assert_eq!(
             val,
             Some(expected_val.clone()),
@@ -191,9 +228,15 @@ async fn append_only_with_keep_history_retention() {
             )
         })
         .collect();
-    mvcc.set_versioned_many_append_only(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>())
-        .await
-        .unwrap();
+    mvcc.set_versioned_many_append_only(
+        items
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (RecordKey::from(k), v))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .unwrap();
 
     // All 5 history entries must be present (nothing reclaimed).
     let hist = count_history_entries(&mvcc).await;
@@ -204,7 +247,10 @@ async fn append_only_with_keep_history_retention() {
 
     // All values readable.
     for (key, expected_val) in &items {
-        let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+        let val = mvcc
+            .get_current(RecordKey::from(key.clone()))
+            .await
+            .unwrap();
         assert_eq!(val, Some(expected_val.clone()));
     }
 }

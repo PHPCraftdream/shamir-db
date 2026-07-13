@@ -139,7 +139,10 @@ async fn eager_vacuum_race_open_snapshot() {
     let key_w = key.clone();
     let new_val_w = new_val.clone();
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
+        mvcc_w
+            .set_versioned(RecordKey::from(key_w), new_val_w)
+            .await
+            .unwrap();
     });
 
     // Wait until the write is paused inside history.set — cell already
@@ -500,7 +503,10 @@ async fn retention_race_open_snapshot_with_count() {
     let key_w = key.clone();
     let new_val_w = new_val.clone();
     let write_handle = tokio::spawn(async move {
-        mvcc_w.set_versioned(RecordKey::from(key_w), new_val_w).await.unwrap();
+        mvcc_w
+            .set_versioned(RecordKey::from(key_w), new_val_w)
+            .await
+            .unwrap();
     });
 
     // Wait for the write to pause inside history.set (after publish_cell,

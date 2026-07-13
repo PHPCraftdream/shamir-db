@@ -68,11 +68,15 @@ async fn two_nontx_writes_no_watermark_hole() {
 
     // Both writes are visible at the current floor.
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from("a"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from("a")))
+            .await
+            .unwrap(),
         Some(Bytes::from("va")),
     );
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from("b"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from("b")))
+            .await
+            .unwrap(),
         Some(Bytes::from("vb")),
     );
 }
@@ -125,7 +129,15 @@ async fn nontx_batch_advances_watermark_to_max() {
         (Bytes::from("k2"), Bytes::from("v2")),
         (Bytes::from("k3"), Bytes::from("v3")),
     ];
-    let max_v = mvcc.set_versioned_many(items.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    let max_v = mvcc
+        .set_versioned_many(
+            items
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(gate.completion().watermark(), max_v);
     assert_eq!(gate.completion().watermark(), gate.last_committed());
@@ -140,7 +152,10 @@ async fn nontx_delete_advances_completion_watermark() {
     mvcc.set_versioned(RecordKey::from(Bytes::from("k")), Bytes::from("v"))
         .await
         .unwrap();
-    let del_v = mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await.unwrap();
+    let del_v = mvcc
+        .delete_versioned(RecordKey::from(Bytes::from("k")))
+        .await
+        .unwrap();
 
     assert_eq!(gate.completion().watermark(), del_v);
     assert_eq!(gate.completion().watermark(), gate.last_committed());

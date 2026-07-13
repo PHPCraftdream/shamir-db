@@ -1183,7 +1183,12 @@ impl Store for MemBufferStore {
             };
             // Task #539 — increment inline, only on a genuinely-new key;
             // see `set_many` above / `remove` for the rationale.
-            if self.state.dirty.insert(k.clone(), Slot::Tombstone).is_none() {
+            if self
+                .state
+                .dirty
+                .insert(k.clone(), Slot::Tombstone)
+                .is_none()
+            {
                 self.state.dirty_count.fetch_add(1, Ordering::Release);
             }
             cache.insert(k, Slot::Tombstone).await;

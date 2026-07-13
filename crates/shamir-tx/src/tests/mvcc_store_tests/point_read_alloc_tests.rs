@@ -28,9 +28,12 @@ async fn get_current_ref_present() {
 async fn get_current_ref_tombstoned() {
     let mvcc = make_mvcc();
     let key = b"tomb-key";
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("alive"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("alive"),
+    )
+    .await
+    .unwrap();
     mvcc.delete_versioned(RecordKey::from(Bytes::copy_from_slice(key)))
         .await
         .unwrap();
@@ -55,15 +58,24 @@ async fn get_current_ref_absent() {
 async fn get_current_ref_latest_version_wins() {
     let mvcc = make_mvcc();
     let key = b"multi-ver";
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v1"))
-        .await
-        .unwrap();
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v2"))
-        .await
-        .unwrap();
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("v3"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("v1"),
+    )
+    .await
+    .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("v2"),
+    )
+    .await
+    .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("v3"),
+    )
+    .await
+    .unwrap();
 
     let got = mvcc.get_current_bytes(key.as_slice()).await.unwrap();
     assert_eq!(got, Some(Bytes::from("v3")));
@@ -96,18 +108,24 @@ async fn get_current_ref_floor_cap() {
     let key = b"floor-key";
 
     // First write — auto-advances gate.
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("committed"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("committed"),
+    )
+    .await
+    .unwrap();
 
     // Confirm the floor moved.
     let floor = gate.last_committed();
     assert!(floor > 0);
 
     // Second write — also auto-advances gate.
-    mvcc.set_versioned(RecordKey::from(Bytes::copy_from_slice(key)), Bytes::from("later"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::copy_from_slice(key)),
+        Bytes::from("later"),
+    )
+    .await
+    .unwrap();
 
     // Both writes are committed, so the latest is visible.
     let got = mvcc.get_current_bytes(key.as_slice()).await.unwrap();

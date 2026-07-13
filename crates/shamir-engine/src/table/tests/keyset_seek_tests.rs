@@ -406,9 +406,13 @@ async fn keyset_seek_tiebreaker_recovers_all_ties_across_pages() {
     // Page 2 WITH the tie-breaker: the third 20 is recovered, then 30.
     let page2 = tbl
         .read(
-            &ReadQuery::new("t").order_by(OrderBy::asc("score")).pagination(
-                Pagination::after_with_id(vec![QueryValue::Int(20)], Some(2), Some(last_id)),
-            ),
+            &ReadQuery::new("t")
+                .order_by(OrderBy::asc("score"))
+                .pagination(Pagination::after_with_id(
+                    vec![QueryValue::Int(20)],
+                    Some(2),
+                    Some(last_id),
+                )),
             &ctx,
         )
         .await
@@ -737,9 +741,13 @@ async fn keyset_seek_tiebreaker_survives_stale_posting_in_same_request() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Single request: client already has b1, wants the next 2 tied rows.
-    let query = ReadQuery::new("t").order_by(OrderBy::asc("score")).pagination(
-        Pagination::after_with_id(vec![QueryValue::Int(20)], Some(2), Some(b1)),
-    );
+    let query = ReadQuery::new("t")
+        .order_by(OrderBy::asc("score"))
+        .pagination(Pagination::after_with_id(
+            vec![QueryValue::Int(20)],
+            Some(2),
+            Some(b1),
+        ));
     let result = tbl.read(&query, &ctx).await.unwrap();
 
     assert_eq!(
