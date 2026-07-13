@@ -10,7 +10,6 @@
 
 import { describe, it, expect } from 'vitest';
 import { admin } from '../admin.js';
-import { principalId } from '../../principal-id.js';
 import type { Action, SetSuperuserOp } from '../../types/admin.js';
 import {
   canonicalDropUser,
@@ -178,15 +177,18 @@ describe('chown (HMAC)', () => {
     });
   });
 
-  it('accepts string username and hashes to principalId', () => {
+  it('string username is a compile-time error (task #569 removed the overload)', () => {
+    // The string overload was removed: a username MUST be resolved to its
+    // real principal64 first via `ShamirClient.resolvePrincipal(username)`.
+    // `@ts-expect-error` turns a regression (re-adding the string arm) into
+    // a compile error — same pattern as batch.test.ts's records_idmsgpack
+    // compile-fail guard.
     const resource = admin.refDatabase('mydb');
+    // @ts-expect-error string username is no longer accepted; pass bigint|number
     const op = admin.chown(fakeSigner, resource, 'alice');
-    expect(op).toEqual({
-      chown: { database: 'mydb' },
-      owner: principalId('alice'),
-      hmac: fakeSigner.hmacTagHex(canonicalChown(resource, principalId('alice'))),
-    });
-    expect(typeof op.owner).toBe('bigint');
+    // At runtime the string slips through (TS types are erased), but the
+    // owner field echoes it verbatim now — no silent hashing to a wrong id.
+    expect((op as { owner: unknown }).owner).toBe('alice');
   });
 });
 
@@ -288,17 +290,13 @@ describe('addGroupMember', () => {
     });
   });
 
-  it('accepts string username and hashes to principalId', () => {
+  it('string username is a compile-time error (task #569 removed the overload)', () => {
+    // The string overload was removed: a username MUST be resolved to its
+    // real principal64 first via `ShamirClient.resolvePrincipal(username)`.
     const ref = admin.groupName('devs');
-    const resolved = principalId('bob');
-    const canonical = canonicalAddGroupMember(ref, resolved);
+    // @ts-expect-error string username is no longer accepted; pass bigint|number
     const op = admin.addGroupMember(fakeSigner, ref, 'bob');
-    expect(op).toEqual({
-      add_group_member: { name: 'devs' },
-      user: resolved,
-      hmac: fakeSigner.hmacTagHex(canonical),
-    });
-    expect(typeof op.user).toBe('bigint');
+    expect((op as { user: unknown }).user).toBe('bob');
   });
 });
 

@@ -1,7 +1,15 @@
 /**
- * End-to-end principal-id verification — proves the TS fxhash64 replica
- * matches the running server, and that chown / addGroupMember work with
- * username-based principal ids (BigInt on the wire).
+ * End-to-end principal-id verification — proves `ShamirClient.resolvePrincipal`
+ * returns the server's real, server-assigned principal64 for a username, and
+ * that the resolved id is consistent across surfaces (accessTree principals,
+ * chown owner, addGroupMember member). BigInt on the wire.
+ *
+ * Pre-#569 this file asserted `principalId(username) === server principal_id`,
+ * treating the principal as a client-side fxhash of the username. Task #548
+ * replaced that with a real random server-assigned `user_id` (projected into
+ * `principal64`), so the offline hash assumption was invalidated; task #569
+ * removed the broken `principalId()` client and added the async
+ * `resolvePrincipal(username)` round-trip used here as the oracle instead.
  *
  * Own startServer (ephemeral port) — no conflict with other e2e suites.
  */
@@ -9,10 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import type { ShamirClient } from '../index.js';
-import {
-  admin,
-  principalId,
-} from '../index.js';
+import { admin } from '../index.js';
 import {
   SERVER_AVAILABLE,
   HOST,
@@ -52,24 +57,28 @@ describe.skipIf(!SERVER_AVAILABLE)(
       }
     }, 15_000);
 
-    // ── 1. Hash match: TS principalId === server's principal_id ─────────
+    // ── 1. resolvePrincipal === server principal64 from accessTree ──────
 
     const TEST_USER = `pid_test_${process.pid}`;
     const TEST_PW = 'principal-id test pw';
     let chownDb: string;
+    let resolvedId: bigint;
 
-    it('TS principalId matches server principal_id from accessTree', async () => {
-      // Create user via both SCRAM (for login) and RBAC createUser
-      // (so it appears in accessTree principals.users).
+    it('resolvePrincipal(username) matches accessTree principals.users id', async () => {
+      // Create the user via SCRAM only — that alone adds it to the durable
+      // directory (and therefore to accessTree principals.users). The previous
+      // redundant `admin.createUser(TEST_USER, ...)` here collided with the
+      // already-created SCRAM account ("username exists"); removed per the
+      // task #560 A8 precedent (one creation method per username).
       await adminClient!.createScramUser(TEST_USER, TEST_PW, []);
-      br(await adminClient!.execute('default', {
-        id: 'cu-rbac',
-        queries: {
-          cu: admin.createUser(adminClient!, TEST_USER, TEST_PW),
-        },
-      }));
 
-      // Fetch GLOBAL accessTree to see principals.users
+      // The new oracle: resolve via the live directory.
+      resolvedId = await adminClient!.resolvePrincipal(TEST_USER);
+      expect(typeof resolvedId).toBe('bigint');
+      expect(resolvedId).toBeGreaterThan(0n);
+
+      // Cross-check: the same id appears in the GLOBAL accessTree's
+      // principals.users list.
       const resp = br(await adminClient!.execute('default', {
         id: 'at-pid',
         queries: {
@@ -85,31 +94,29 @@ describe.skipIf(!SERVER_AVAILABLE)(
         name: string;
       }>;
 
-      // Find our test user
       const entry = users.find((u) => u.name === TEST_USER);
       expect(entry).toBeDefined();
 
-      // The critical assertion: TS hash matches server hash
+      // The critical assertion: the resolved id matches the directory's id.
       const serverId = BigInt(entry!.id);
-      const tsId = principalId(TEST_USER);
-      expect(tsId).toBe(serverId);
+      expect(resolvedId).toBe(serverId);
     });
 
     // ── 2. chown round-trip ──────────────────────────────────────────────
 
-    it('chown with username string works (BigInt on wire)', async () => {
+    it('chown with resolved principal64 works (BigInt on wire)', async () => {
       chownDb = await setupDb(adminClient!, 'pid_chown', ['items']);
 
-      // chown the database to TEST_USER (by username string)
+      // chown the database to TEST_USER (by resolved principal64)
       br(await adminClient!.execute(chownDb, {
         id: 'chown-user',
         queries: {
-          ch: admin.chown(adminClient!, admin.refDatabase(chownDb), TEST_USER),
+          ch: admin.chown(adminClient!, admin.refDatabase(chownDb), resolvedId),
         },
       }));
 
-      // Verify via accessTree: the database resource's owner should be
-      // principalId(TEST_USER).
+      // Verify via accessTree: the database resource's owner should be the
+      // resolved principal64.
       const resp = br(await adminClient!.execute(chownDb, {
         id: 'at-chown',
         queries: {
@@ -124,12 +131,12 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const dbNode = children.find((c) => c.name === chownDb);
       expect(dbNode).toBeDefined();
       const owner = BigInt(dbNode!.owner as number | bigint);
-      expect(owner).toBe(principalId(TEST_USER));
+      expect(owner).toBe(resolvedId);
     });
 
     // ── 3. addGroupMember round-trip ─────────────────────────────────────
 
-    it('addGroupMember with username string works (BigInt on wire)', async () => {
+    it('addGroupMember with resolved principal64 works (BigInt on wire)', async () => {
       // Create a group
       const grpResp = br(await adminClient!.execute(chownDb, {
         id: 'mk-grp',
@@ -141,16 +148,20 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .group_id as number;
       expect(typeof groupId).toBe('number');
 
-      // Add TEST_USER to group by username (BigInt principal id on wire)
+      // Add TEST_USER to group by resolved principal64 (BigInt on wire)
       br(await adminClient!.execute(chownDb, {
         id: 'add-member',
         queries: {
-          am: admin.addGroupMember(adminClient!, admin.groupName('testers'), TEST_USER),
+          am: admin.addGroupMember(
+            adminClient!,
+            admin.groupName('testers'),
+            resolvedId,
+          ),
         },
       }));
 
       // Verify via accessTree: principals.groups should have 'testers'
-      // with a member whose id matches principalId(TEST_USER).
+      // with a member whose id matches the resolved principal64.
       const resp = br(await adminClient!.execute(chownDb, {
         id: 'at-grp',
         queries: {
@@ -169,7 +180,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const testersGroup = groups.find((g) => g.name === 'testers');
       expect(testersGroup).toBeDefined();
       const memberIds = testersGroup!.members.map((m) => BigInt(m.id));
-      expect(memberIds).toContainEqual(principalId(TEST_USER));
+      expect(memberIds).toContainEqual(resolvedId);
     });
   },
 );

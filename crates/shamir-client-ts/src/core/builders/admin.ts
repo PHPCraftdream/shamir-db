@@ -57,8 +57,6 @@ import {
   canonicalRemoveGroupMember,
 } from '../hmac.js';
 
-import { principalId } from '../principal-id.js';
-
 // ── ResourceRef constructors (access.rs, untagged, single-key) ──────
 
 export function refDatabase(db: string): ResourceRef {
@@ -126,18 +124,21 @@ export function chmod(signer: HmacSigner, resource: ResourceRef, mode: number): 
  * canonical = `canonicalChown(resource, owner)`.
  *
  * `owner` accepts:
- *   - `string`  — username, hashed to `principalId(username)` (bigint).
- *   - `bigint`  — pre-computed principal id.
- *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ *   - `bigint` — pre-computed principal id.
+ *   - `number` — raw numeric id (only safe for values <= 2^53).
+ *
+ * The server's `principal64` is a real, server-assigned random id (task
+ * #548), NOT reproducible client-side from a username. Callers must resolve
+ * a username to its real principal64 first — see
+ * `ShamirClient.resolvePrincipal(username)`.
  */
 export function chown(
   signer: HmacSigner,
   resource: ResourceRef,
-  owner: string | bigint | number,
+  owner: bigint | number,
 ): ChownOp {
-  const resolved = typeof owner === 'string' ? principalId(owner) : owner;
-  const canonical = canonicalChown(resource, resolved);
-  return { chown: resource, owner: resolved, hmac: signer.hmacTagHex(canonical) };
+  const canonical = canonicalChown(resource, owner);
+  return { chown: resource, owner, hmac: signer.hmacTagHex(canonical) };
 }
 
 /** Change group on a resource (HMAC-gated). canonical = `canonicalChgrp(resource, group)`. */
@@ -179,18 +180,21 @@ export function renameGroup(signer: HmacSigner, ref: GroupRef, to: string): Rena
  * canonical = `canonicalAddGroupMember(ref, user)`.
  *
  * `user` accepts:
- *   - `string`  — username, hashed to `principalId(username)` (bigint).
- *   - `bigint`  — pre-computed principal id.
- *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ *   - `bigint` — pre-computed principal id.
+ *   - `number` — raw numeric id (only safe for values <= 2^53).
+ *
+ * The server's `principal64` is a real, server-assigned random id (task
+ * #548), NOT reproducible client-side from a username. Callers must resolve
+ * a username to its real principal64 first — see
+ * `ShamirClient.resolvePrincipal(username)`.
  */
 export function addGroupMember(
   signer: HmacSigner,
   ref: GroupRef,
-  user: string | bigint | number,
+  user: bigint | number,
 ): AddGroupMemberOp {
-  const resolved = typeof user === 'string' ? principalId(user) : user;
-  const canonical = canonicalAddGroupMember(ref, resolved);
-  return { add_group_member: ref, user: resolved, hmac: signer.hmacTagHex(canonical) };
+  const canonical = canonicalAddGroupMember(ref, user);
+  return { add_group_member: ref, user, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
@@ -198,18 +202,21 @@ export function addGroupMember(
  * canonical = `canonicalRemoveGroupMember(ref, user)`.
  *
  * `user` accepts:
- *   - `string`  — username, hashed to `principalId(username)` (bigint).
- *   - `bigint`  — pre-computed principal id.
- *   - `number`  — raw numeric id (only safe for values <= 2^53).
+ *   - `bigint` — pre-computed principal id.
+ *   - `number` — raw numeric id (only safe for values <= 2^53).
+ *
+ * The server's `principal64` is a real, server-assigned random id (task
+ * #548), NOT reproducible client-side from a username. Callers must resolve
+ * a username to its real principal64 first — see
+ * `ShamirClient.resolvePrincipal(username)`.
  */
 export function removeGroupMember(
   signer: HmacSigner,
   ref: GroupRef,
-  user: string | bigint | number,
+  user: bigint | number,
 ): RemoveGroupMemberOp {
-  const resolved = typeof user === 'string' ? principalId(user) : user;
-  const canonical = canonicalRemoveGroupMember(ref, resolved);
-  return { remove_group_member: ref, user: resolved, hmac: signer.hmacTagHex(canonical) };
+  const canonical = canonicalRemoveGroupMember(ref, user);
+  return { remove_group_member: ref, user, hmac: signer.hmacTagHex(canonical) };
 }
 
 export function accessTree(opts?: { depth?: number; db?: string }): AccessTreeOp {
