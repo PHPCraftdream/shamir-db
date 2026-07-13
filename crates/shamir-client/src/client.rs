@@ -607,7 +607,7 @@ impl Client {
         let mut client_nonce = [0u8; 32];
         {
             use rand::RngCore;
-            rand::thread_rng().fill_bytes(&mut client_nonce);
+            rand::rng().fill_bytes(&mut client_nonce);
         }
 
         let (mut r, mut w) = split(tls);
