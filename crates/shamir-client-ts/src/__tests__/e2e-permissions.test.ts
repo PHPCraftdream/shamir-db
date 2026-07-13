@@ -11,15 +11,17 @@
  * per-resource access control.  G.4c: new resources default to enforced
  * owner-rwx (0o700); tests that need open access explicitly `chmod 0o777`
  * the db + store + table so traversal-Execute reaches the target.
- * `listDatabases` is classified as an **admin op** and
- * requires `is_superuser` (the "superuser" role); non-superusers
- * receive `permission_denied`.  When superusers call `listDatabases`,
- * they see ALL databases — the server does NOT filter the catalog by
- * per-database permissions.
+ * `listDatabases` is gated by the real Root/User/Group DAC model
+ * (task #552/#553): every batch also requires traversal access to the
+ * `db` context it's executed against, so a non-superuser calling
+ * `listDatabases` against the default-mode-restricted "default" db is
+ * denied with `access_denied` before the op's own Root-List check ever
+ * runs.  When superusers call `listDatabases`, they see ALL databases —
+ * the server does NOT filter the catalog by per-database permissions.
  *
  * Therefore "different users see different databases" is NOT the
  * server's current visibility model.  Instead:
- *   - Non-superusers cannot list databases at all.
+ *   - Non-superusers cannot list databases at all (`access_denied`).
  *   - Access control is enforced per-operation (read/write on a
  *     specific table/store/database), not at the catalog level.
  */
@@ -310,11 +312,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
       }
 
       // A non-superuser (USER_A logged in with roles=[], untouched by the
-      // grant/revoke round-trip above) is denied admin ops. Matches either
-      // denial code — the exact taxonomy (`access_denied` vs
-      // `permission_denied`) for this admin-gate case is an open,
-      // pre-existing question tracked separately (not introduced or
-      // resolved by task #560).
+      // grant/revoke round-trip above) is denied admin ops with
+      // `access_denied` — resolved by task #567: the denial comes from the
+      // real Root/User/Group DAC model (db-context traversal + Root-List),
+      // not the pre-#552/#553 superuser-hardcoded gate's `permission_denied`.
       try {
         await Batch.create('denied-list')
           .add('l', ddl.listDatabases())
@@ -322,7 +323,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         expect.unreachable('non-superuser must be denied listDatabases');
       } catch (e: unknown) {
         const msg = (e as Error).message;
-        expect(msg).toMatch(/access_denied|permission_denied/);
+        expect(msg).toMatch(/access_denied/);
       }
     });
 
@@ -354,8 +355,8 @@ describe.skipIf(!SERVER_AVAILABLE)(
     //
     // The brief asks: "A.listDatabases() != B.listDatabases()".
     // The REAL server model:
-    //   1. listDatabases is an admin op requiring superuser.
-    //   2. Non-superusers get permission_denied (cannot list at all).
+    //   1. listDatabases requires db-context traversal access + Root-List.
+    //   2. Non-superusers get access_denied (cannot list at all).
     //   3. Superusers see ALL databases — no per-db filtering.
     //   4. Access control is enforced per-operation on specific resources.
     //
@@ -416,7 +417,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       }
     }, 15_000);
 
-    it('B1: non-superuser A cannot listDatabases at all (permission_denied)', async () => {
+    it('B1: non-superuser A cannot listDatabases at all (access_denied)', async () => {
       try {
         await Batch.create('vis-list-a')
           .add('l', ddl.listDatabases())
@@ -424,11 +425,11 @@ describe.skipIf(!SERVER_AVAILABLE)(
         expect.unreachable('non-superuser should be denied listDatabases');
       } catch (e: unknown) {
         const msg = (e as Error).message;
-        expect(msg).toMatch(/permission_denied/);
+        expect(msg).toMatch(/access_denied/);
       }
     });
 
-    it('B2: non-superuser B cannot listDatabases at all (permission_denied)', async () => {
+    it('B2: non-superuser B cannot listDatabases at all (access_denied)', async () => {
       try {
         await Batch.create('vis-list-b')
           .add('l', ddl.listDatabases())
@@ -436,7 +437,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         expect.unreachable('non-superuser should be denied listDatabases');
       } catch (e: unknown) {
         const msg = (e as Error).message;
-        expect(msg).toMatch(/permission_denied/);
+        expect(msg).toMatch(/access_denied/);
       }
     });
 
