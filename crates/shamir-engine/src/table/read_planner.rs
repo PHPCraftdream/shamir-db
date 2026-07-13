@@ -14,6 +14,16 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use super::table_manager::TableManager;
 
+/// `try_plan_keyset_seek`'s eligibility result: `(index_name, encoded_key,
+/// seek_record_id, limit, direction)`.
+type KeysetSeekPlan = (
+    u64,
+    Vec<u8>,
+    Option<RecordId>,
+    usize,
+    shamir_query_types::read::OrderDirection,
+);
+
 impl TableManager {
     // ============================================================================
     // Index scan planning
@@ -463,13 +473,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-    ) -> Option<(
-        u64,
-        Vec<u8>,
-        Option<RecordId>,
-        usize,
-        shamir_query_types::read::OrderDirection,
-    )> {
+    ) -> Option<KeysetSeekPlan> {
         // Same shape guards as the ORDER BY + LIMIT K fast path.
         if query.r#where.is_some()
             || query.group_by.is_some()
