@@ -32,6 +32,9 @@ use shamir_server::db_handler::{AdminGlue, ShamirDbHandler};
 use shamir_server::ports::DirectoryPorts;
 use shamir_server::server::audit_store_b_vs_directory;
 use shamir_server::user_directory::FjallUserDirectory;
+use shamir_types::codecs::interned::query_value_to_inner;
+use shamir_types::mpack;
+use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use tracing::Subscriber;
 use tracing_subscriber::fmt::MakeWriter;
@@ -474,6 +477,167 @@ async fn boot_audit_runs_without_mutating_stores() {
     assert!(
         user_dir.user_id("real_user").is_some(),
         "directory must still have real_user (audit is read-only)"
+    );
+
+    std::mem::forget(tmp);
+}
+
+/// Seed a raw record directly into shamir-db's retired Store B `users`
+/// table — bypasses the (now-removed) `BatchOp::CreateUser` write path,
+/// which is the whole point: this reproduces the pre-#559 divergent-state
+/// scenarios the boot audit (`audit_store_b_vs_directory`) must warn about,
+/// none of which are reachable through any live write path anymore.
+async fn seed_store_b_user(shamir: &ShamirDb, name: &str, roles: &[&str]) {
+    let table = shamir.system_store().users_table().await.unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let qv = mpack!({
+        "name": @(QueryValue::Str(name.to_string())),
+        "roles": @(QueryValue::List(
+            roles.iter().map(|r| QueryValue::Str(r.to_string())).collect(),
+        )),
+    });
+    let inner = query_value_to_inner(&qv, interner).unwrap();
+    table.insert(&inner).await.unwrap();
+}
+
+/// A username present in Store B but NOT in the directory (phantom — it
+/// never had a live login) triggers a WARN naming the user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_audit_warns_on_phantom_store_b_user() {
+    let tmp = TempDir::new().unwrap();
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = CaptureWriter { buf: buf.clone() };
+    let subscriber: Box<dyn Subscriber + Send + Sync> = Box::new(
+        tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish(),
+    );
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let meta_path = tmp.path().join("meta.redb");
+    let shamir = ShamirDb::init(SystemStoreConfig::Fjall(meta_path))
+        .await
+        .unwrap();
+    let user_dir = FjallUserDirectory::open(tmp.path().join("users")).unwrap();
+
+    // "ghost" exists only in Store B — the directory is empty.
+    seed_store_b_user(&shamir, "ghost", &["analyst"]).await;
+
+    audit_store_b_vs_directory(&shamir, &user_dir).await;
+
+    let captured = {
+        let lock = buf.lock().unwrap();
+        String::from_utf8_lossy(&lock).into_owned()
+    };
+    assert!(
+        captured.contains("WARN") && captured.contains("ghost"),
+        "expected a WARN naming the phantom Store B user 'ghost': captured: {}",
+        captured
+    );
+    assert!(
+        captured.contains("NOT in the real directory"),
+        "expected the phantom-user WARN message: captured: {}",
+        captured
+    );
+
+    std::mem::forget(tmp);
+}
+
+/// A user present in BOTH stores with DIVERGENT role sets triggers a WARN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_audit_warns_on_role_divergence() {
+    let tmp = TempDir::new().unwrap();
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = CaptureWriter { buf: buf.clone() };
+    let subscriber: Box<dyn Subscriber + Send + Sync> = Box::new(
+        tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish(),
+    );
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let meta_path = tmp.path().join("meta.redb");
+    let shamir = ShamirDb::init(SystemStoreConfig::Fjall(meta_path))
+        .await
+        .unwrap();
+    let user_dir = FjallUserDirectory::open(tmp.path().join("users")).unwrap();
+
+    // "carol" exists in BOTH stores, but Store B's role list ("editor")
+    // diverges from the directory's ("analyst").
+    user_dir
+        .insert("carol".to_string(), fixture_record())
+        .unwrap();
+    user_dir.grant_role("carol", "analyst", 0).unwrap();
+    seed_store_b_user(&shamir, "carol", &["editor"]).await;
+
+    audit_store_b_vs_directory(&shamir, &user_dir).await;
+
+    let captured = {
+        let lock = buf.lock().unwrap();
+        String::from_utf8_lossy(&lock).into_owned()
+    };
+    assert!(
+        captured.contains("WARN") && captured.contains("carol"),
+        "expected a WARN naming the divergent user 'carol': captured: {}",
+        captured
+    );
+    assert!(
+        captured.contains("role sets diverge"),
+        "expected the role-divergence WARN message: captured: {}",
+        captured
+    );
+
+    std::mem::forget(tmp);
+}
+
+/// Store B has a phantom "superuser" grant the directory does NOT have —
+/// triggers the dedicated phantom-superuser WARN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_audit_warns_on_phantom_superuser() {
+    let tmp = TempDir::new().unwrap();
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let writer = CaptureWriter { buf: buf.clone() };
+    let subscriber: Box<dyn Subscriber + Send + Sync> = Box::new(
+        tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish(),
+    );
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let meta_path = tmp.path().join("meta.redb");
+    let shamir = ShamirDb::init(SystemStoreConfig::Fjall(meta_path))
+        .await
+        .unwrap();
+    let user_dir = FjallUserDirectory::open(tmp.path().join("users")).unwrap();
+
+    // "dave" exists in both stores; Store B claims a "superuser" grant the
+    // directory does not have (directory superuser stays false/default).
+    user_dir
+        .insert("dave".to_string(), fixture_record())
+        .unwrap();
+    seed_store_b_user(&shamir, "dave", &["superuser"]).await;
+
+    audit_store_b_vs_directory(&shamir, &user_dir).await;
+
+    let captured = {
+        let lock = buf.lock().unwrap();
+        String::from_utf8_lossy(&lock).into_owned()
+    };
+    assert!(
+        captured.contains("WARN") && captured.contains("dave"),
+        "expected a WARN naming the phantom-superuser user 'dave': captured: {}",
+        captured
+    );
+    assert!(
+        captured.contains("phantom superuser"),
+        "expected the phantom-superuser WARN message: captured: {}",
+        captured
     );
 
     std::mem::forget(tmp);
