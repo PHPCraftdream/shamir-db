@@ -9,3 +9,6 @@
 
 # style: cargo fmt #61-campaign crates (engine/server/funclib/index/query-types)
 28ffe8ab9b085e1c5e2ca320aaa56ea2468adc7b
+
+# style: cargo fmt --all workspace-wide sweep (task #529 final gate)
+f52211d337fafaecbb8a6bf2dbfd0d8bdb44052a
