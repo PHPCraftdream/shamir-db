@@ -790,6 +790,53 @@ async fn create_scram_user_success_then_duplicate() {
     }
 }
 
+/// `CreateScramUser` with the reserved "superuser" role in its roles list
+/// must fail atomically — no orphan, roleless account left behind. Before
+/// this fix, `update_roles`'s reservation-rejection error was silently
+/// discarded (`let _ = ...`) and the handler still reported `UserCreated`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_with_reserved_superuser_role_leaves_no_orphan_account() {
+    let tmp = TempDir::new().unwrap();
+    let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::with_admin(
+        Arc::new(db),
+        AdminGlue {
+            user_dir: user_dir.clone(),
+            kdf: fast_kdf(),
+            tables_registry: None,
+        },
+    );
+    let session = root_session();
+
+    let req = DbRequest::CreateScramUser {
+        name: "frank".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec!["superuser".into()],
+    };
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    match res {
+        DbResponse::Error { .. } => {}
+        other => panic!("expected Error, got {:?}", other),
+    }
+
+    use shamir_connect::server::admin::UserDirectory;
+    assert!(
+        user_dir.lookup_by_name("frank").is_none(),
+        "frank must NOT be persisted in the directory after create_scram_user \
+         is rejected for requesting the reserved 'superuser' role"
+    );
+}
+
 // --------------------------------------------------------------------------
 // Shomer DAC: wire-level enforcement through session_actor → execute_as →
 // authorize_access → permits.

@@ -104,6 +104,20 @@ pub(super) async fn create_scram_user(
         }
     };
 
+    // Reject the reserved "superuser" role BEFORE persisting anything —
+    // `update_roles` enforces the same check (task #557), but checking it
+    // here too avoids leaving a durably-persisted, roleless orphan account
+    // behind a reported failure (the insert below cannot be rolled back
+    // once committed).
+    if roles.iter().any(|r| r == "superuser") {
+        return DbResponse::Error {
+            code: "query".into(),
+            message: "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke \
+                      superuser status"
+                .into(),
+        };
+    }
+
     // Move password into a zeroizing buffer right away. `Zeroizing`
     // wipes on Drop, so we don't need an explicit `.zeroize()` call —
     // both the success and error paths drop `pw_buf` before returning.
@@ -133,9 +147,18 @@ pub(super) async fn create_scram_user(
         }
     };
     if !roles.is_empty() {
-        // Best-effort role attach. now_ns=0 means "don't bump session
-        // validity epoch" — no existing sessions for a brand-new user.
-        let _ = admin.user_dir.update_roles(&name, roles, 0);
+        // now_ns=0 means "don't bump session validity epoch" — no existing
+        // sessions for a brand-new user. The reserved-role check above means
+        // this can only fail on a genuine internal directory error, not on
+        // caller input — surface it rather than silently discarding it, since
+        // the user record already exists at this point (not rollback-able)
+        // and the caller needs to know its roles didn't actually attach.
+        if let Err(e) = admin.user_dir.update_roles(&name, roles, 0) {
+            return DbResponse::Error {
+                code: "query".into(),
+                message: format!("user '{name}' was created but role attachment failed: {e}"),
+            };
+        }
     }
 
     DbResponse::UserCreated {
