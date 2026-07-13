@@ -85,13 +85,35 @@ const CHILD_SENTINEL_TRUNC: &str = "SHAMIR_TEST_CRASH_CHILD_TRUNC";
 /// segments to delete. Read by `repo_instance` directly from this name.
 const SEG_MAX_BYTES_ENV: &str = "SHAMIR_WAL_SEGMENT_MAX_BYTES";
 
-/// Number of records the truncation child commits. Large enough (with the
-/// tiny cap below) to seal MULTIPLE segments so `wal_mid_delete` has >= 2
-/// truncatable segments to delete between.
-const TRUNC_RECORDS: usize = 40;
+/// Number of records the truncation child commits. Must be large enough that:
+///
+/// 1. The WAL seals MULTIPLE segments under `TRUNC_SEG_CAP` (so `wal_mid_delete`
+///    has >= 2 truncatable segments to delete between). At ~186 bytes/record
+///    (single-field map, bincode `WalEntryV2`) and a 4096-byte cap, a segment
+///    seals roughly every 22 records, so 96 records seal ~4 segments.
+///
+/// 2. The commit count clears `INTERNER_CHECKPOINT_INTERVAL` (64). Each record
+///    references the interned `"body"` field id, so every entry carries a
+///    non-empty `interner_delta`. The drainer's A5 gate
+///    (`interner_delta_safe_to_truncate`) blocks WAL truncation for an entry
+///    until its delta's max id is `<= persisted_high_water()`. That high-water
+///    mark only advances when the background interner checkpoint fires — which
+///    happens at `commit_version % 64 == 0` (commit 32e63e17, "A5 — remove
+///    interner.persist() from Phase 1 + checkpoint mechanism"). Below 64
+///    commits the checkpoint NEVER fires, `persisted_high_water()` stays below
+///    the `"body"` id, the A5 gate permanently pins the truncation ceiling at
+///    0, `has_truncatable` is never true, and NONE of the truncation crash
+///    seams ever fire — the child exits cleanly and the parent's
+///    `!status.success()` assertion fails. 96 clears 64 with a 32-record
+///    margin so the spawned checkpoint completes (a few await points) while
+///    versions are still flowing through the drainer, guaranteeing a
+///    `drain_step` with `drained > 0` re-runs `settle_and_truncate` after the
+///    high-water mark advanced and the ceiling opens.
+const TRUNC_RECORDS: usize = 96;
 
-/// Tiny segment cap (bytes) for the truncation scenario — forces a seal
-/// roughly every record so 40 commits produce many sealed segments.
+/// Tiny segment cap (bytes) for the truncation scenario. At ~186 bytes/record
+/// a 4096-byte cap seals a segment roughly every 22 records, so `TRUNC_RECORDS`
+/// (96) commits produce ~4 sealed segments for truncation to reclaim.
 const TRUNC_SEG_CAP: &str = "4096";
 
 // ---------------------------------------------------------------------------
