@@ -39,13 +39,11 @@
 //! [`drain_step`](Drainer::drain_step) in a loop:
 //!   - **Phase A** — for each entry in the window
 //!     `durable_watermark < commit_version <= last_committed` (ascending),
-//!     [`replay_v2_entry`](crate::tx::recovery::replay_v2_entry) writes
-//!     the entry's data + index ops to history (idempotent,
-//!     last-write-wins) and applies its interner delta in memory.
-//!   - **Phase B** (A11 mirror of the cold-recovery fix): after the
-//!     per-entry pass, force ONE `repo_interner.persist()` so every
-//!     replayed interner delta is durably checkpointed before any entry
-//!     is finalized.
+//!     apply its interner delta in memory (A4 keystone) and replay
+//!     non-MVCC ops; data ops (Put/Delete) are accumulated per table.
+//!   - **Phase B** — ONE `write_committed_batch_to_history` per touched
+//!     table (coalesces E entries × T tables down to T history-transact
+//!     calls).
 //!   - **Phase C** — for each finalized entry: `gate.mark_durable(v)`,
 //!     then the A5 interner-hwm gate
 //!     ([`interner_delta_safe_to_truncate`](crate::tx::materialize::interner_delta_safe_to_truncate)),
@@ -56,6 +54,28 @@
 //! and the warm drainer converge to the same state. The shared
 //! "replay V → history" core is [`replay_v2_entry`]; the A5 truncation
 //! gate is shared via [`interner_delta_safe_to_truncate`].
+//!
+//! ## Truncation liveness bound (A5)
+//!
+//! `drain_step` does NOT force an interner persist itself — the A5 gate's
+//! `persisted_high_water()` only advances via the per-table background
+//! checkpoint (fires every `INTERNER_CHECKPOINT_INTERVAL`, default 64,
+//! commits — see `shamir-tunables`) or a graceful shutdown
+//! (`RepoInstance::flush_buffers`, which persists every table's interner
+//! synchronously). So a table that references a new interned field id and
+//! then commits FEWER than `INTERNER_CHECKPOINT_INTERVAL` more times before
+//! going idle forever has its covering WAL segments held un-truncatable
+//! until either the checkpoint eventually fires or the process next
+//! shuts down gracefully — a bounded, self-healing gap, not unconditional
+//! growth. In practice this window is negligible: at the default
+//! `WAL_SEGMENT_MAX_BYTES` (8 MiB), a segment holds tens of thousands of
+//! records before sealing, so any table with real traffic clears the
+//! 64-commit checkpoint interval long before a single segment could even
+//! seal. (Previously this doc claimed `drain_step` runs an unconditional
+//! forced persist as a "Phase B" step mirroring cold recovery — that never
+//! shipped; this section corrects the record. Found during task #572's
+//! review of task #571's crash_recovery.rs fix, where a test using a tiny
+//! non-default segment cap hit exactly this window.)
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
