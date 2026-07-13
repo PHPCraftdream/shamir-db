@@ -173,12 +173,15 @@ fn canonical_chmod_chown_chgrp_are_null_separated() {
     };
     assert_eq!(
         canonical_chmod(&table, 0o700),
-        b"chmod\0db://db/main/users\0448"
+        b"chmod\0db://db/main/users\x00448"
     );
-    assert_eq!(canonical_chown(&table, 7), b"chown\0db://db/main/users\07");
+    assert_eq!(
+        canonical_chown(&table, 7),
+        b"chown\0db://db/main/users\x007"
+    );
     assert_eq!(
         canonical_chgrp(&table, Some(3)),
-        b"chgrp\0db://db/main/users\03"
+        b"chgrp\0db://db/main/users\x003"
     );
     // Clearing the group uses the "null" sentinel — never collides with a
     // valid decimal u64 group id.
