@@ -41,6 +41,7 @@ use zeroize::Zeroizing;
 
 use shamir_client as core;
 use shamir_query_types::wire::repl::ReplRequest;
+use shamir_query_types::wire::DbResponse;
 
 // --------------------------------------------------------------------------
 // Connect options — JS sees a plain object with camelCase fields.
@@ -94,14 +95,14 @@ impl ShamirClient {
     /// client.
     #[napi(factory)]
     pub async fn connect(opts: ConnectOptions) -> Result<ShamirClient> {
-        let port = u16::try_from(opts.port).map_err(|_| {
-            Error::from_reason(format!("port out of range: {}", opts.port))
-        })?;
-        let addr: SocketAddr = format!("{}:{}", opts.host, port)
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                Error::from_reason(format!("invalid host:port: {e}"))
-            })?;
+        let port = u16::try_from(opts.port)
+            .map_err(|_| Error::from_reason(format!("port out of range: {}", opts.port)))?;
+        let addr: SocketAddr =
+            format!("{}:{}", opts.host, port)
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    Error::from_reason(format!("invalid host:port: {e}"))
+                })?;
 
         let trusted_pin = match opts.trusted_pin {
             None => None,
@@ -134,7 +135,7 @@ impl ShamirClient {
 
         let client = core::Client::connect(core_opts)
             .await
-            .map_err(to_napi)?;
+            .map_err(infra_error)?;
 
         let pin = client.server_pub_key_pin();
         let session_id = client.session_id();
@@ -193,7 +194,7 @@ impl ShamirClient {
         let client = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
-        client.ping().await.map_err(to_napi)
+        client.ping().await.map_err(infra_error)
     }
 
     /// Execute a `BatchRequest` (passed as a MessagePack-encoded `Buffer`)
@@ -207,10 +208,19 @@ impl ShamirClient {
         let client = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
-        let response = client.execute(&db, batch_req).await.map_err(to_napi)?;
-        let bytes = rmp_serde::to_vec_named(&response)
-            .map_err(|e| Error::from_reason(format!("encode response: {e}")))?;
-        Ok(Buffer::from(bytes))
+        // Domain-level DB errors (ClientError::Db) are routed through
+        // [`encode_db_error`] as a marker Buffer instead of thrown as a plain
+        // napi Error — the JS wrapper (index.js) decodes the marker and throws
+        // a typed ShamirDbError with `.code` / `.retryable`. See task #519.
+        match client.execute(&db, batch_req).await {
+            Ok(response) => {
+                let bytes = rmp_serde::to_vec_named(&response)
+                    .map_err(|e| Error::from_reason(format!("encode response: {e}")))?;
+                Ok(Buffer::from(bytes))
+            }
+            Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+            Err(e) => Err(infra_error(e)),
+        }
     }
 
     /// Privileged replication pull-API (REPLICATION §5). Takes a msgpack
@@ -226,10 +236,15 @@ impl ShamirClient {
         let client = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
-        let resp = client.repl(repl_req).await.map_err(to_napi)?;
-        let bytes = rmp_serde::to_vec_named(&resp)
-            .map_err(|e| Error::from_reason(format!("encode repl response: {e}")))?;
-        Ok(Buffer::from(bytes))
+        match client.repl(repl_req).await {
+            Ok(resp) => {
+                let bytes = rmp_serde::to_vec_named(&resp)
+                    .map_err(|e| Error::from_reason(format!("encode repl response: {e}")))?;
+                Ok(Buffer::from(bytes))
+            }
+            Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+            Err(e) => Err(infra_error(e)),
+        }
     }
 
     /// Create a new SCRAM-authenticatable user. Requires the current
@@ -246,11 +261,14 @@ impl ShamirClient {
         let client = guard
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
-        let user_id = client
+        match client
             .create_scram_user(&name, Zeroizing::new(password), roles)
             .await
-            .map_err(to_napi)?;
-        Ok(Buffer::from(user_id))
+        {
+            Ok(user_id) => Ok(Buffer::from(user_id)),
+            Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+            Err(e) => Err(infra_error(e)),
+        }
     }
 
     /// Close the TLS write half cleanly. Idempotent — second call is
@@ -265,22 +283,50 @@ impl ShamirClient {
     }
 }
 
-/// Map a [`core::ClientError`] into a napi [`Error`].
+// -----------------------------------------------------------------------
+// Error mapping
+// -----------------------------------------------------------------------
+//
+// napi-rs 3.x async `#[napi]` fns hard-pin the Result error type to
+// `napi::Error<Status>`: the codegen funnels through
+// `execute_tokio_future_with_finalize_callback` whose `Future` bound is
+// `Output = Result<Data, impl Into<Error>>` where `Error = Error<Status>`.
+// A custom `Error<S>` (where `S: AsRef<str>` carries the DB error code as the
+// JS `.code` property) has no `From<Error<S>> for Error<Status>` impl, and the
+// orphan rule blocks adding one — so the Rust-side custom-error-type approach
+// does NOT compile for async fns (verified by real compilation, task #519).
+//
+// Instead, domain-level DB errors (`ClientError::Db { code, message }`) are
+// NOT thrown at the napi boundary. The Rust method returns `Ok(Buffer)` where
+// the buffer is a msgpack-encoded `DbResponse::Error { kind: "error", code,
+// message }`. The JS wrapper in `index.js` decodes every response buffer and,
+// if it detects the `kind: "error"` marker, throws a typed `ShamirDbError`
+// (mirrors the TS SDK's `shamir-client-ts/src/core/errors.ts`) with `.code`
+// and `.retryable` properties.
+//
+// Infrastructure errors (connection closed, TLS, transport, timeout, …) stay
+// as plain napi `Error<Status>` → JS `Error` with only `.message`, which is
+// appropriate — these are not the `ShamirDbError`-parity case.
+
+/// Map an **infrastructure** [`core::ClientError`] into a napi [`Error`].
 ///
-/// Finding 2.1 (node binding — PARTIAL): the server sends a typed `code` in
-/// `ClientError::Db { code, message }`. Ideally the JS `Error` would carry that
-/// code as its `.code` property. In napi-rs 2.x the JS `.code` is derived from
-/// the error's `Status` (`napi_create_error(env, code=status.as_ref(), …)`),
-/// and `Status` is a FIXED enum with no custom-string variant — while the napi
-/// async-method signatures are hard-wired to `Result<T, Error<Status>>` by the
-/// `#[napi]` macro, so an `Error<String>` (which WOULD surface an arbitrary
-/// `.code`) does not thread through. Attaching a true typed `.code` therefore
-/// needs either a napi-rs 3.x upgrade (version bump — out of scope) or a custom
-/// `#[napi]` error-class wrapper. Until then we preserve the
-/// `db error [code]: message` reason so callers can still recover the code by
-/// parsing the message. The TS ws-client (the primary SDK) already exposes a
-/// fully-typed `ShamirDbError { code, retryable }` (see
-/// `shamir-client-ts/src/core/errors.ts`). Tracked as a follow-up.
-fn to_napi(e: core::ClientError) -> Error {
+/// Callers that return `Buffer` (`execute`, `repl`, `create_scram_user`)
+/// route `ClientError::Db` through [`encode_db_error`] instead — this
+/// function is only reached for non-Db variants or from `connect` / `ping`
+/// where no structured-error surface is possible.
+fn infra_error(e: core::ClientError) -> Error {
     Error::from_reason(e.to_string())
+}
+
+/// Encode a domain-level DB error as a `DbResponse::Error` msgpack Buffer.
+///
+/// Returns `Ok(Buffer)` so the JS wrapper can decode `{ kind: "error",
+/// code, message }`, detect the marker, and throw a `ShamirDbError` with
+/// typed `.code` / `.retryable` — instead of receiving it as a thrown napi
+/// `Error` that only carries `.message`.
+fn encode_db_error(code: String, message: String) -> Result<Buffer> {
+    let err = DbResponse::Error { code, message };
+    let bytes = rmp_serde::to_vec_named(&err)
+        .map_err(|e| Error::from_reason(format!("encode db error: {e}")))?;
+    Ok(Buffer::from(bytes))
 }

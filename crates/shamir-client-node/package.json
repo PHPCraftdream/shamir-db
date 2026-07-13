@@ -2,11 +2,13 @@
   "name": "shamir-client",
   "version": "0.1.0",
   "description": "ShamirDB Node.js client SDK — TLS 1.3 + SCRAM-Argon2id, native binding to the Rust shamir-client crate.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "wrapper.js",
+  "types": "wrapper.d.ts",
   "files": [
     "index.js",
     "index.d.ts",
+    "wrapper.js",
+    "wrapper.d.ts",
     "shamir-client.*.node"
   ],
   "license": "MIT OR Apache-2.0",

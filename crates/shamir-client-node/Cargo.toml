@@ -12,15 +12,31 @@ crate-type = ["cdylib"]
 shamir-client       = { path = "../shamir-client" }
 shamir-query-types  = { path = "../shamir-query-types" }
 
-# napi-rs 2.x stable. Features:
+# napi-rs 3.x. Pinned EXACT (`=3.10.5`) rather than a caret range because
+# napi-derive 3.5.10's codegen backend (napi-derive-backend 5.1.2) emits calls
+# to `set_named_property_raw` / `from_raw_required_field` / etc. that were only
+# added to the `napi` runtime in a later 3.x patch — a caret range (`"3"`) let
+# the resolver pick `napi 3.8.6` (which lacks those fns) and the build failed
+# with `cannot find function set_named_property_raw in napi::bindgen_prelude`.
+# Pinning to 3.10.5 (latest stable at time of writing, verified to define all
+# four backend-emitted helpers) keeps the runtime ahead of the codegen.
+#
+# Features (both still present in 3.x, verified against napi 3.10.5's published
+# Cargo.toml):
 #   napi6  — Node-API v6 baseline (Node ≥ 10.20 / Electron ≥ 8); supports
 #            BigInt, async functions, Buffer, etc.
 #   async  — generates Node Promise wrappers from `async fn` automatically.
+#            In 3.x `async` maps to the `tokio_rt` feature (verified).
 # Requests/responses cross the boundary as MessagePack-encoded `Buffer`s
 # (the JS side encodes/decodes with @msgpack/msgpack), matching the rest of
 # the wire — no JSON intermediate.
-napi        = { version = "2", default-features = false, features = ["napi6", "async"] }
-napi-derive = "2"
+#
+# `napi-build` deliberately stays on its 2.x line: as of napi-build 2.3.1 the
+# build-support crate is still published at major 2 and is compatible with
+# napi 3.x (no `napi-build` 3.x exists on crates.io). Verified via
+# `cargo info napi-build`.
+napi        = { version = "=3.10.5", default-features = false, features = ["napi6", "async"] }
+napi-derive = "=3.5.10"
 
 serde      = { version = "1", features = ["derive"] }
 rmp-serde  = "1.3"
