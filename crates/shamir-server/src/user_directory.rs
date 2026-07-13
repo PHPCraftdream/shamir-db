@@ -218,6 +218,10 @@ pub struct UserDirectoryState {
     pub database: Option<String>,
     /// `tickets_invalid_before_ns` — the anti-replay epoch.
     pub tickets_invalid_before_ns: u64,
+    /// The directory's stable 128-bit id for this principal. Carried here so
+    /// callers (`PrincipalResolver::resolve`/`list`) don't need a second
+    /// `user_id()` lookup on top of an already-decoded record.
+    pub user_id: [u8; 16],
 }
 
 // ----------------------------------------------------------------------------
@@ -486,6 +490,7 @@ impl FjallUserDirectory {
             superuser: user.superuser,
             database: user.database,
             tickets_invalid_before_ns: user.tickets_invalid_before_ns,
+            user_id: *user_id,
         })
     }
 
@@ -794,12 +799,14 @@ impl FjallUserDirectory {
         let username = String::from_utf8(entry.as_ref().to_vec()).ok()?;
         let blob = self.read_blob(&username).ok().flatten()?;
         let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
+        let user_id = user.user_id_array()?;
         Some(UserDirectoryState {
             username,
             roles: user.roles,
             superuser: user.superuser,
             database: user.database,
             tickets_invalid_before_ns: user.tickets_invalid_before_ns,
+            user_id,
         })
     }
 
@@ -831,6 +838,7 @@ impl FjallUserDirectory {
                     superuser: user.superuser,
                     database: user.database,
                     tickets_invalid_before_ns: user.tickets_invalid_before_ns,
+                    user_id: uid,
                 },
             ));
         }
