@@ -17,7 +17,7 @@ use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
+use rand::TryRngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
@@ -64,7 +64,9 @@ pub type HmacTag = [u8; 32];
 /// Uses [`rand::rngs::OsRng`] — same source as Ed25519 key generation and
 /// nonce derivation throughout the spec.
 pub fn random_bytes(out: &mut [u8]) {
-    rand::rngs::OsRng.fill_bytes(out);
+    rand::rngs::OsRng
+        .try_fill_bytes(out)
+        .expect("OS RNG failure");
 }
 
 /// Generate `N` random bytes as a fresh array.
@@ -199,7 +201,9 @@ impl Ed25519Keypair {
     /// Generate a fresh keypair from OsRng.
     pub fn generate() -> Self {
         let mut seed = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut seed);
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut seed)
+            .expect("OS RNG failure");
         Self {
             signing: SigningKey::from_bytes(&seed),
         }
