@@ -334,6 +334,17 @@ impl ShamirDb {
             ResourcePath::Group { name } => {
                 let group_ref = crate::query::admin::GroupRef::Name { name: name.clone() };
                 let group_id = self.resolve_group_id(&group_ref).await?;
+                // §81 / #563: hold the per-group_id lock across the whole
+                // load→set-owner→save_group RMW so a concurrent
+                // add/remove-member/rename/drop on the SAME group_id can't
+                // lose this chown (or get its own change lost by this chown's
+                // stale-read overwrite).
+                let group_lock = self
+                    .group_member_locks()
+                    .entry(group_id)
+                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                let _group_guard = group_lock.lock().await;
                 self.system_store
                     .set_group_owner(group_id, meta.owner.to_owner_id())
                     .await
@@ -441,6 +452,17 @@ impl ShamirDb {
     /// `Actor::System` bypass, guards a future non-dispatcher caller).
     pub async fn drop_group_as(&self, group_id: u64, actor: &Actor) -> DbResult<()> {
         self.authorize_group_manage_or_root(group_id, actor).await?;
+        // §81 / #563: hold the per-group_id lock across the delete so a
+        // concurrent in-flight add/remove-member/set-owner/rename can't
+        // observe the pre-drop record, get descheduled, and then `save_group`
+        // it back AFTER `remove_group` has run — resurrecting the dropped
+        // group with stale fields (the delete-vs-RMW TOCTOU).
+        let group_lock = self
+            .group_member_locks()
+            .entry(group_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _group_guard = group_lock.lock().await;
         self.system_store.remove_group(group_id).await
     }
 
@@ -480,7 +502,26 @@ impl ShamirDb {
         let gid = self.resolve_group_id(group_ref).await?;
         self.authorize_group_manage_or_root(gid, actor).await?;
 
+        // §81 / #563: hold the per-group_id lock across the whole
+        // read(members+owner)→write(save_group) RMW so a concurrent
+        // add/remove-member/set-owner/drop on the SAME group_id can't lose
+        // this rename (or have this rename silently revert a racing
+        // member-add/chown via a stale-read overwrite).
+        let group_lock = self
+            .group_member_locks()
+            .entry(gid)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _group_guard = group_lock.lock().await;
+
         // Uniqueness guard: reject if a *different* group already owns `to`.
+        // NOTE: this check is NOT protected against a cross-group_id race —
+        // the lock above only serialises mutations on THIS group_id. Two
+        // concurrent renames targeting two DIFFERENT group_ids to the SAME
+        // `to` can both pass this scan before either `save_group` lands,
+        // producing two groups with an identical name (a pre-existing gap,
+        // not introduced or closed by #563's per-group_id lock — tracked
+        // separately, see task list).
         let groups = self.system_store.load_groups().await?;
         let conflict = groups.iter().any(|g| {
             g.get("name").and_then(|v| v.as_str()) == Some(to)
@@ -526,6 +567,15 @@ impl ShamirDb {
         actor: &Actor,
     ) -> DbResult<()> {
         self.authorize_group_manage_or_root(group_id, actor).await?;
+        // §81 / #563: serialise the whole load→mutate→save_group RMW against
+        // concurrent mutations on the SAME group_id (chown/rename/remove/
+        // drop), closing the last-writer-wins-on-whole-record race.
+        let group_lock = self
+            .group_member_locks()
+            .entry(group_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _group_guard = group_lock.lock().await;
         self.system_store.add_group_member(group_id, user_id).await
     }
 
@@ -549,6 +599,15 @@ impl ShamirDb {
         actor: &Actor,
     ) -> DbResult<()> {
         self.authorize_group_manage_or_root(group_id, actor).await?;
+        // §81 / #563: serialise the whole load→mutate→save_group RMW against
+        // concurrent mutations on the SAME group_id (chown/rename/add/drop),
+        // closing the last-writer-wins-on-whole-record race.
+        let group_lock = self
+            .group_member_locks()
+            .entry(group_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _group_guard = group_lock.lock().await;
         self.system_store
             .remove_group_member(group_id, user_id)
             .await

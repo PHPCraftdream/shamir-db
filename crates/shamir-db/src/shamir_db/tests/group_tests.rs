@@ -10,7 +10,8 @@
 //! not a runtime behaviour, so it carries no separate test.)
 
 use crate::shamir_db::ShamirDb;
-use shamir_types::access::Actor;
+use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+use std::sync::Arc;
 
 /// Sequential `create_group` calls return distinct, monotonically increasing
 /// ids.
@@ -227,4 +228,118 @@ async fn group_as_methods_still_allow_system_actor() {
         .drop_group_as(gid, &Actor::System)
         .await
         .expect("System must be allowed by drop_group_as");
+}
+
+// ============================================================================
+// #563 — per-group_id RMW lock closes the unlocked read-modify-write
+// TOCTOU on group records (add/remove-member, set-owner, rename).
+// ============================================================================
+//
+// Before this fix, `add_group_member_as` / `remove_group_member_as` /
+// `set_resource_meta(Group)` / `rename_group_as` each performed an UNLOCKED
+// load_group → mutate → save_group sequence. Two concurrent mutations on the
+// SAME group_id each independently read the pre-mutation record, applied
+// their own single-field change, and wrote back the WHOLE record — so
+// whichever `save_group` landed second won outright, silently discarding the
+// other call's change (last-writer-wins on the full record, not per-field).
+//
+// This test forces that interleaving: it releases N distinct-member
+// `add_group_member_as` calls PLUS one concurrent chown
+// (`set_resource_meta(Group)`) simultaneously via a barrier, then reloads the
+// record and asserts EVERY member add is reflected AND the owner change
+// survived. On the unlocked code the membership list is silently truncated
+// (only the last writer's base + its own add survives, never all N); with the
+// per-group_id lock the whole sequence serialises and no update is lost.
+//
+// The `multi_thread` flavour is deliberate: real OS-thread parallelism across
+// the contending tasks maximises the load-before-any-save window so the race
+// trips reliably on the unlocked code (a flaky-red reproduction would be
+// unacceptable proof). On the fixed code the per-group_id mutex makes the
+// outcome deterministic regardless of scheduling.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_member_toctou_concurrent_mutations_lose_no_update() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let group_name = "race_group";
+    let gid = shamir.create_group(group_name).await.unwrap();
+
+    const N: usize = 48;
+    let new_owner = Actor::User(4242);
+
+    // Barrier of size N+1 (N member-add tasks + the chown task). The spawned
+    // tasks self-release: once all N+1 have arrived the barrier fires and they
+    // all proceed at once, maximising initial contention on the shared group
+    // record. The main task does NOT participate in the barrier — it just
+    // awaits the join handles below.
+    let barrier = Arc::new(tokio::sync::Barrier::new(N + 1));
+
+    let mut handles = Vec::with_capacity(N + 1);
+    for i in 0..N as u64 {
+        let shamir = shamir.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            // `Actor::System` bypasses the Manage gate, so this exercises the
+            // bare (previously unlocked) read-modify-write path directly.
+            shamir
+                .add_group_member_as(gid, 1000 + i, &Actor::System)
+                .await
+        }));
+    }
+    // One concurrent chown on the SAME group via the Group arm of
+    // `set_resource_meta` (the `set_group_owner` read-modify-write path).
+    let new_owner_for_task = new_owner.clone();
+    {
+        let shamir = shamir.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            shamir
+                .set_resource_meta(
+                    &ResourcePath::group(group_name),
+                    &ResourceMeta {
+                        owner: new_owner_for_task,
+                        group: None,
+                        mode: 0o750,
+                    },
+                )
+                .await
+        }));
+    }
+
+    // The spawned tasks self-release the barrier (size N+1 == N member-adds
+    // + 1 chown). Just await their completion.
+    for h in handles {
+        h.await.unwrap().unwrap();
+    }
+
+    // Reload the record and verify NO membership update was lost.
+    let mut members = shamir.group_members(gid).await.unwrap();
+    members.sort();
+    let expected: Vec<u64> = (0..N as u64).map(|i| 1000 + i).collect();
+    assert_eq!(
+        members,
+        expected,
+        "all {N} concurrent member adds must survive — a truncated list means \
+         the unlocked read-modify-write lost an update (TOCTOU #563); \
+         got {} members, expected {N}",
+        members.len(),
+    );
+
+    // The chown must survive too. On the unlocked code, a racing member add
+    // that read owner=System BEFORE the chown could overwrite owner back to
+    // System AFTER the chown landed. With the per-group_id lock, once the
+    // chown runs every subsequent op reads owner=new_owner and preserves it
+    // (member-add threads the existing owner through unchanged), so the final
+    // owner is deterministically `new_owner`.
+    let meta = shamir
+        .resource_meta(&ResourcePath::group(group_name))
+        .await
+        .unwrap();
+    assert_eq!(
+        meta.owner, new_owner,
+        "concurrent chown must survive — owner reverted to {} means a stale \
+         member-mutation read (pre-chown) overwrote the chown (TOCTOU #563)",
+        meta.owner,
+    );
 }
