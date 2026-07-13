@@ -50,6 +50,83 @@ export function serverBinPath(): string {
 export const SERVER_BIN = serverBinPath();
 export const SERVER_AVAILABLE = fs.existsSync(SERVER_BIN);
 
+// ─── stale-binary guard ──────────────────────────────────────────────────────
+
+/**
+ * Walk `crates/` (plus the workspace `Cargo.toml`/`Cargo.lock`) and return
+ * the newest `.rs`/`Cargo.toml` mtime found. Used to detect a `shamir-server`
+ * binary that predates the current source tree (task #566 — a week-stale
+ * binary silently ran pre-#557/#559 behaviour for the whole #552-#560 e2e
+ * verification chain, reporting false-positive green runs).
+ */
+function newestSourceMtimeMs(): number {
+  let newest = 0;
+  const roots = [
+    path.join(REPO_ROOT, 'crates'),
+    path.join(REPO_ROOT, 'Cargo.toml'),
+    path.join(REPO_ROOT, 'Cargo.lock'),
+  ];
+  const dirStack: string[] = [];
+  for (const root of roots) {
+    try {
+      const st = fs.statSync(root);
+      if (st.isDirectory()) dirStack.push(root);
+      else if (st.mtimeMs > newest) newest = st.mtimeMs;
+    } catch {
+      // missing root — nothing to scan there.
+    }
+  }
+  while (dirStack.length > 0) {
+    const dir = dirStack.pop() as string;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      // Build output / vendored dirs don't feed the source build.
+      if (entry.name === 'target' || entry.name === 'node_modules' || entry.name === '.git') {
+        continue;
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        dirStack.push(full);
+      } else if (entry.name.endsWith('.rs') || entry.name === 'Cargo.toml') {
+        const mtime = fs.statSync(full).mtimeMs;
+        if (mtime > newest) newest = mtime;
+      }
+    }
+  }
+  return newest;
+}
+
+/**
+ * Throws if `SERVER_BIN` predates the newest Rust source file that feeds it
+ * — applies to BOTH the default release-binary path and the
+ * `SHAMIR_SERVER_BIN` debug-binary override, since either can silently point
+ * at code older than the current working tree. Set
+ * `SHAMIR_SKIP_STALE_BINARY_CHECK=1` to bypass (not recommended — defeats
+ * the purpose of task #566).
+ */
+export function assertServerBinaryFresh(): void {
+  if (process.env.SHAMIR_SKIP_STALE_BINARY_CHECK === '1') return;
+  if (!SERVER_AVAILABLE) return; // a separate check already skips suites when absent
+  const binMtime = fs.statSync(SERVER_BIN).mtimeMs;
+  const sourceMtime = newestSourceMtimeMs();
+  if (sourceMtime > binMtime) {
+    throw new Error(
+      `stale shamir-server binary: ${SERVER_BIN} was built ${new Date(binMtime).toISOString()}, ` +
+        `but Rust source under crates/ was modified ${new Date(sourceMtime).toISOString()} ` +
+        `(newer). Rebuild before running e2e tests: cargo build --release -p shamir-server` +
+        (process.env.CARGO_TARGET_DIR
+          ? ` (CARGO_TARGET_DIR=${process.env.CARGO_TARGET_DIR})`
+          : '') +
+        `. To bypass (not recommended), set SHAMIR_SKIP_STALE_BINARY_CHECK=1.`,
+    );
+  }
+}
+
 // ─── constants ───────────────────────────────────────────────────────────────
 
 export const HOST = '127.0.0.1';
@@ -180,6 +257,7 @@ export function generateSelfSignedCert(dir: string): boolean {
 export async function startServer(opts?: {
   port?: number;
 }): Promise<ServerHandle> {
+  assertServerBinaryFresh();
   const port = opts?.port ?? await getFreePort();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-ts-e2e-'));
   const hasCert = generateSelfSignedCert(dataDir);
