@@ -23,7 +23,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p shamir-numa --lib --locked
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     if: contains(github.event.head_commit.message, '[numa-qemu]')
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6.0.3
       - name: Install QEMU + numactl
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
       - name: Boot 2-node QEMU and run Linux integration tests
