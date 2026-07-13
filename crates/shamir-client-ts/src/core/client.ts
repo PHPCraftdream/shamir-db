@@ -29,6 +29,7 @@ import {
 import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
 import { signCanonical } from './hmac.js';
 import { setSuperuser } from './builders/admin.js';
+import { listUsers } from './builders/ddl.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
 import type { PushEnvelope } from './types/subscribe.js';
@@ -960,6 +961,43 @@ export class ShamirClient {
     throw new Error(
       `unexpected DbResponse kind for set_superuser: ${r.kind}`,
     );
+  }
+
+  /**
+   * Resolve a username to its real server-assigned `principal64` — a stable
+   * 64-bit projection of the random 128-bit `user_id` the directory mints at
+   * user creation (task #548). Backed by `ListOp::Users` against the durable
+   * principal directory; this is a real network round-trip, NOT a
+   * client-side hash.
+   *
+   * Required by callers of `chown` / `addGroupMember` / `removeGroupMember`,
+   * whose wire parameter is a `u64` principal id (never a username string).
+   * Throws `Error("no such user: <username>")` when the name is unknown.
+   *
+   * Uses the `"default"` db context like other Root-scoped admin convenience
+   * calls on this client — `ListOp::Users` is authorised at
+   * `ResourcePath::Root` (admin_list.rs:77-80) and is NOT database-scoped
+   * server-side, so any db context the caller can traverse works; `"default"`
+   * matches the established pattern in `createUser`/`grantRole` callers.
+   */
+  async resolvePrincipal(username: string): Promise<bigint> {
+    const resp = await this.execute('default', {
+      id: 'resolve-principal',
+      queries: { u: listUsers() },
+    });
+    const rec = resp.results.u.records[0] as
+      | Record<string, unknown>
+      | undefined;
+    const users =
+      (rec?.users as Array<{
+        name: string;
+        principal64: number | bigint;
+      }>) ?? [];
+    const entry = users.find((u) => u.name === username);
+    if (entry === undefined) {
+      throw new Error(`no such user: ${username}`);
+    }
+    return BigInt(entry.principal64);
   }
 
   /**

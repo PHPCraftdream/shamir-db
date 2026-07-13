@@ -50,10 +50,12 @@ import {
 } from './e2e-harness.js';
 import type { ServerHandle } from './e2e-harness.js';
 
-// principal_id gap FIXED: chown / addGroupMember now accept username strings,
-// hash them to bigint via principalId(), and the framing layer encodes BigInt
-// as msgpack uint64 (`useBigInt64: true`).  See e2e-principal.test.ts for the
-// cross-language hash-match proof.
+// principal resolution: chown / addGroupMember / removeGroupMember take a
+// real server-assigned principal64 (u64 on the wire), NOT a username string.
+// Callers resolve a username first via `ShamirClient.resolvePrincipal(username)`
+// (task #569 — the old client-side fxhash `principalId(username)` was a stale
+// reimplementation that no longer matched the server's real principal64 after
+// task #548 bound Actor::User to a random user_id).
 
 // ─── test suite ──────────────────────────────────────────────────────────────
 
@@ -239,7 +241,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('A6: createGroup round-trip — group created and returned', async () => {
       // createGroup succeeds and returns a group_id.
       // addGroupMember/removeGroupMember are now exercised in
-      // e2e-principal.test.ts (principalId gap is fixed).
+      // e2e-principal.test.ts (principal resolution via resolvePrincipal).
       const grpResp = br(await adminClient!.execute(capDb, {
         id: 'mk-group',
         queries: {
@@ -824,7 +826,13 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(gdb, {
         id: 'add-member-g4d',
         queries: {
-          a: admin.addGroupMember(adminClient!, admin.groupId(gid), USER_G),
+          a: admin.addGroupMember(
+            adminClient!,
+            admin.groupId(gid),
+            // Resolve USER_G's real server-assigned principal64 (task #569):
+            // the builder no longer accepts a username string.
+            await adminClient!.resolvePrincipal(USER_G),
+          ),
         },
       }));
 
@@ -861,7 +869,11 @@ describe.skipIf(!SERVER_AVAILABLE)(
       br(await adminClient!.execute(gdb, {
         id: 'rm-member-g4d',
         queries: {
-          r: admin.removeGroupMember(adminClient!, admin.groupId(gid), USER_G),
+          r: admin.removeGroupMember(
+            adminClient!,
+            admin.groupId(gid),
+            await adminClient!.resolvePrincipal(USER_G),
+          ),
         },
       }));
 
