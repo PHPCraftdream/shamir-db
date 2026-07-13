@@ -83,7 +83,7 @@ impl RecordId {
         thread_local! {
             static RNG: RefCell<Xoshiro256PlusPlus> = {
                 use rand::SeedableRng;
-                RefCell::new(Xoshiro256PlusPlus::from_entropy())
+                RefCell::new(Xoshiro256PlusPlus::from_os_rng())
             };
         }
         RNG.with(|rng| rng.borrow_mut().fill_bytes(dest));

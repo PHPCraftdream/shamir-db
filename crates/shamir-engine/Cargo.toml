@@ -39,7 +39,7 @@ fxhash = "0.2.1"
 # avoids heap alloc per FilterNode / SelectProjection. Already a
 # transitive dep via several crates.
 smallvec = { version = "1.11", features = ["serde"] }
-rand = "0.8.5"
+rand = "0.9.2"
 log = "0.4"               # log!/info!/warn! macros throughout engine
 regex = "1.11.1"          # query::filter::eval Regex matcher
 indexmap = { version = "2.7", features = ["serde"] }  # ordered maps in batch

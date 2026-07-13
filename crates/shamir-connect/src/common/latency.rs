@@ -50,7 +50,7 @@ pub const JITTER_MAX_MS: u64 = 25;
 /// because `FLOOR > JITTER_MAX` (so `max(50, j) == 50` always). The current
 /// form is unambiguous: caller-visible behaviour is byte-equivalent.
 pub fn target_constant_time_ms() -> u64 {
-    let jitter: u64 = rand::thread_rng().gen_range(0..=JITTER_MAX_MS);
+    let jitter: u64 = rand::rng().random_range(0..=JITTER_MAX_MS);
     FIXED_FLOOR_MS + jitter
 }
 

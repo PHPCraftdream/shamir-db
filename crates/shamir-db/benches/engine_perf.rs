@@ -992,7 +992,7 @@ fn main() {
                 });
 
             // Shuffle keys for uniform-random access pattern.
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             let mut shuffled = keys.clone();
             shuffled.shuffle(&mut rng);
             let cursor = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
