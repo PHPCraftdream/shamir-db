@@ -11,18 +11,21 @@ use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, to_qv};
 
 /// Shared error code for every "target id does not resolve to a real
-/// principal/group" rejection below (`chown`'s OWNER_SYSTEM guard,
-/// `add_group_member`'s group-id check) — kept identical so callers can
-/// pattern-match on one code regardless of which op tripped it.
+/// principal/group" rejection below (`chown`'s OWNER_SYSTEM guard and
+/// resolver-gated owner check, `chgrp`'s group check, `add_group_member`'s
+/// group-id check and resolver-gated member check) — kept identical so
+/// callers can pattern-match on one code regardless of which op tripped it.
 const ERR_INVALID_OWNER: &str = "invalid_owner";
 
 impl ShamirAdminExecutor {
-    /// Existence check for a group id: groups ARE id-keyed (unlike users —
-    /// see task #543's closing report for why a user-id-exists check was
-    /// attempted and reverted), so this is a direct point lookup via
-    /// `load_group`, not a scan. Used by `handle_add_group_member` to
-    /// validate the group side of a `GroupRef::Id`, which
-    /// `resolve_group_id` passes through unchecked.
+    /// Existence check for a group id: groups ARE id-keyed (a direct point
+    /// lookup via `load_group`, not a scan), so a group-id-exists check has
+    /// always been possible unconditionally — unlike the user-id-exists
+    /// checks, which had to wait for task #559's `PrincipalResolver` and are
+    /// gated on one being installed (task #561). Used by
+    /// `handle_add_group_member` to validate the group side of a
+    /// `GroupRef::Id` (which `resolve_group_id` passes through unchecked) and
+    /// by `handle_chgrp` to validate `op.group` (task #561 §2).
     pub(super) async fn group_id_exists(&self, group_id: u64) -> Result<bool, BatchError> {
         let err = |msg: String| BatchError::QueryError {
             alias: String::new(),
@@ -123,17 +126,29 @@ impl ShamirAdminExecutor {
                 "chown to the System owner is only permitted for the System actor".to_string(),
             ));
         }
-        // NOTE (task #543 scope-down): an id-must-resolve-to-a-real-user
-        // check was attempted here and reverted — this codebase's
-        // established convention (many pre-existing tests across
-        // shamir-db/shamir-server) treats a numeric owner id as a valid,
-        // free-standing identifier that need NOT correspond to a row in
-        // the `users` table (e.g. `chown(path, 7)` with no prior
-        // `create_user`). Enforcing existence here broke that convention
-        // pervasively (14+ pre-existing tests failed) and would require
-        // reconciling with the identity-model questions task #548/#549
-        // are chartered to resolve, not something to force through here.
-        // Left as an explicit follow-up — see task #543's closing report.
+        // Task #561: when a `PrincipalResolver` is installed, require the
+        // (non-`OWNER_SYSTEM`) owner id to resolve to a real principal before
+        // writing it into the catalogue. This is the user-target half of
+        // task #543's originally-deferred validation, now coherent because
+        // task #559 landed a real resolver backed by the durable
+        // `FjallUserDirectory`. GATED on a resolver being installed: chown is
+        // a core ACL op that has never required an injected port, and
+        // hard-failing it in every embedded/no-directory deployment (and the
+        // many tests that build a bare `ShamirDb` without one) would be
+        // unjustified scope creep — absence means "cannot check, so don't".
+        if op.owner != OWNER_SYSTEM {
+            if let Some(resolver) = self.shamir.principal_resolver() {
+                if resolver.resolve(op.owner).is_none() {
+                    return Err(err_code(
+                        ERR_INVALID_OWNER,
+                        format!(
+                            "chown target owner id {} does not resolve to a known principal",
+                            op.owner
+                        ),
+                    ));
+                }
+            }
+        }
 
         let mut meta = self
             .shamir
@@ -177,11 +192,21 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // NOTE (task #543 scope-down): a group-must-exist check was
-        // attempted here and reverted for the same reason as `chown`'s
-        // owner check above — e.g. `chgrp_with_correct_hmac_accepted`
-        // (shamir-server) legitimately chgrps to a literal group id with
-        // no prior `create_group`. See `handle_chown`'s comment.
+        // Task #561: when `op.group` is `Some(gid)`, require the group to
+        // actually exist via the already-existing `group_id_exists` point
+        // lookup. This is UNCONDITIONAL (no resolver/port dependency) — groups
+        // have always been directly, id-keyed checkable, so this half of
+        // task #543's deferred validation never depended on the identity-model
+        // work (#548/#549, closed by #559). `None` (clearing the group) is
+        // never checked — there is nothing to validate against.
+        if let Some(gid) = op.group {
+            if !self.group_id_exists(gid).await? {
+                return Err(err_code(
+                    ERR_INVALID_OWNER,
+                    format!("chgrp target group id {gid} does not exist"),
+                ));
+            }
+        }
 
         let mut meta = self
             .shamir
@@ -369,13 +394,26 @@ impl ShamirAdminExecutor {
             ));
         }
 
-        // NOTE (task #543 scope-down): a user-must-exist check on `op.user`
-        // was attempted here and reverted — `group_grant_via_ddl`/
-        // `drop_group_removes_access` (shamir-db) legitimately add numeric
-        // user ids that were never `create_user`'d. See `handle_chown`'s
-        // comment for the full reasoning; this handler's GROUP-side check
-        // above is unaffected (it closes a narrower, genuinely orthogonal
+        // Task #561: when a `PrincipalResolver` is installed, require the
+        // member id (`op.user`) to resolve to a real principal before adding
+        // it to the group. This is the user-target half of task #543's
+        // originally-deferred validation for this op, now coherent because
+        // task #559 landed a real resolver. GATED on a resolver being
+        // installed (same rationale as `handle_chown`'s owner check): absence
+        // means "cannot check, so don't". The GROUP-side check above is
+        // unaffected (it is unconditional and closes a narrower, orthogonal
         // gap — `resolve_group_id` never validates `GroupRef::Id`).
+        if let Some(resolver) = self.shamir.principal_resolver() {
+            if resolver.resolve(op.user).is_none() {
+                return Err(err_code(
+                    ERR_INVALID_OWNER,
+                    format!(
+                        "add_group_member target user id {} does not resolve to a known principal",
+                        op.user
+                    ),
+                ));
+            }
+        }
 
         self.shamir
             .add_group_member_as(group_id, op.user, &self.actor)
