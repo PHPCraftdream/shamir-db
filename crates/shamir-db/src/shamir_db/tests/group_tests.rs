@@ -9,7 +9,9 @@
 //! is O(1) instead of deep-copying the map — is a compile-time type guarantee,
 //! not a runtime behaviour, so it carries no separate test.)
 
+use crate::query::admin::GroupRef;
 use crate::shamir_db::ShamirDb;
+use crate::DbError;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 use std::sync::Arc;
 
@@ -341,5 +343,203 @@ async fn group_member_toctou_concurrent_mutations_lose_no_update() {
         "concurrent chown must survive — owner reverted to {} means a stale \
          member-mutation read (pre-chown) overwrote the chown (TOCTOU #563)",
         meta.owner,
+    );
+}
+
+// ============================================================================
+// #570 — group-NAME uniqueness across both allocation paths (create + rename).
+// ============================================================================
+//
+// Before this fix `create_group_as` had NO name-uniqueness check at all (a
+// complete absence — not a race), and `rename_group_as`'s uniqueness scan was
+// protected only by #563's per-`group_id` lock (which serialises mutations on
+// the SAME id, not across DIFFERENT ids). The invariant that a group name maps
+// to exactly one group — relied on by `resolve_group_id` / `GroupRef::Name` —
+// was therefore broken both sequentially (two `create_group("ops")` calls both
+// succeeding) and concurrently (a create racing a rename, or two concurrent
+// creates, all landing the same name). The fix reuses the existing global
+// `group_id_lock` as the single point of serialization across the whole group
+// NAME namespace for both create and rename, held from before the uniqueness
+// scan through the write.
+
+/// Task #570 — `create_group_as` previously had NO name-uniqueness check at
+/// all: two SEQUENTIAL (non-concurrent) `create_group("ops")` calls both
+/// succeeded, producing two groups sharing the name "ops". This breaks
+/// name-based resolution (`resolve_group_id` / `GroupRef::Name`), which
+/// assumes a name maps to exactly one group. No concurrency is needed to
+/// reproduce the gap.
+#[tokio::test]
+async fn create_group_as_rejects_duplicate_name_sequential() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let _first = shamir.create_group("ops").await.unwrap();
+
+    // A second create with the SAME name must be rejected with KeyExists —
+    // a silent second success means two groups share the name and name-based
+    // resolution becomes nondeterministic (whichever a linear scan finds
+    // first). On the unfixed code this `unwrap_err` panics because the call
+    // succeeds outright.
+    let err = shamir
+        .create_group("ops")
+        .await
+        .expect_err("duplicate create_group('ops') must be rejected");
+    assert!(
+        matches!(err, DbError::KeyExists(_)),
+        "expected DbError::KeyExists, got {err:?}"
+    );
+
+    // Persistence invariant: exactly one group named "ops" survives.
+    let groups = shamir.system_store().load_groups().await.unwrap();
+    let count = groups
+        .iter()
+        .filter(|g| g["name"].as_str() == Some("ops"))
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly one 'ops' group must persist after the duplicate create, \
+         got {count}"
+    );
+}
+
+/// Task #570 — N concurrent `create_group_as` calls all targeting the SAME
+/// name must collapse to exactly one success and N-1 `KeyExists` rejections.
+/// Before the fix the global `group_id_lock` was held only across the
+/// id-counter bump, NOT across any uniqueness check, so N concurrent creates
+/// of the same name each passed (there was no check to race) and all N
+/// landed — producing N groups sharing a name. The `multi_thread` flavour
+/// maximises real OS-level contention so the race trips reliably on the
+/// unfixed code; on the fixed code the global lock makes the outcome
+/// deterministic regardless of scheduling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_group_as_concurrent_same_name_only_one_wins() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    const N: usize = 16;
+    let name = "dupe";
+
+    // Barrier of size N: all create tasks self-release simultaneously to
+    // maximise the contention window. The main task does NOT participate.
+    let barrier = Arc::new(tokio::sync::Barrier::new(N));
+
+    let mut handles = Vec::with_capacity(N);
+    for _ in 0..N {
+        let shamir = shamir.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            // `Actor::System` bypasses the Manage gate, exercising the bare
+            // (previously check-free) allocation path directly.
+            shamir.create_group_as(name, &Actor::System).await
+        }));
+    }
+
+    let mut oks = 0usize;
+    let mut keyexists = 0usize;
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(_) => oks += 1,
+            Err(DbError::KeyExists(_)) => keyexists += 1,
+            Err(e) => panic!("unexpected error from create_group_as: {e:?}"),
+        }
+    }
+    assert_eq!(
+        oks, 1,
+        "exactly one concurrent create of '{name}' must succeed, got {oks}"
+    );
+    assert_eq!(
+        keyexists,
+        N - 1,
+        "the remaining {} creates must return KeyExists, got {keyexists}",
+        N - 1
+    );
+
+    // Persistence invariant: exactly one group named `name` survives.
+    let groups = shamir.system_store().load_groups().await.unwrap();
+    let count = groups
+        .iter()
+        .filter(|g| g["name"].as_str() == Some(name))
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly one '{name}' group must persist, got {count}"
+    );
+}
+
+/// Task #570 — the cross-path race the original review finding specifically
+/// called out: a `create_group_as("beta")` racing a
+/// `rename_group_as(<other existing group>, "beta")` on the SAME target
+/// name. Before the fix the rename's uniqueness scan was protected only by
+/// #563's per-`group_id` lock (serialising mutations on the SAME id, not
+/// across ids) and the create had no uniqueness check at all — so both could
+/// land a group named "beta". The shared global `group_id_lock` now covers
+/// the entire group-NAME namespace across both allocation paths, so exactly
+/// one of the two wins and the loser gets a clear `KeyExists` conflict rather
+/// than a silent double-assignment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_create_vs_rename_same_name_only_one_wins() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    // Two pre-existing groups: "alpha" (to be renamed) and a sentinel so the
+    // create doesn't run against an empty namespace.
+    let alpha = shamir.create_group("alpha").await.unwrap();
+    let _sentinel = shamir.create_group("sentinel").await.unwrap();
+
+    let target = "beta";
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    // Create task.
+    let shamir_create = shamir.clone();
+    let barrier_create = barrier.clone();
+    let create_handle = tokio::spawn(async move {
+        barrier_create.wait().await;
+        shamir_create.create_group_as(target, &Actor::System).await
+    });
+
+    // Rename task — renames "alpha" → "beta".
+    let shamir_rename = shamir.clone();
+    let barrier_rename = barrier.clone();
+    let rename_handle = tokio::spawn(async move {
+        barrier_rename.wait().await;
+        shamir_rename
+            .rename_group_as(&GroupRef::Id { id: alpha }, target, &Actor::System)
+            .await
+    });
+
+    let create_res = create_handle.await.unwrap();
+    let rename_res = rename_handle.await.unwrap();
+
+    // Exactly one of the two must land the name "beta"; never both, never
+    // neither. (A double-success is the #570 cross-path race; a double-failure
+    // would be a different regression — one side must win.)
+    let create_ok = create_res.is_ok();
+    let rename_ok = rename_res.is_ok();
+    assert!(
+        create_ok ^ rename_ok,
+        "exactly one of create/rename must succeed — \
+         create_ok={create_ok} rename_ok={rename_ok} \
+         (double-assignment or double-failure is the #570 cross-path race)",
+    );
+    // The loser must surface `KeyExists` (not some other error or a panic).
+    if !create_ok {
+        assert!(
+            matches!(create_res, Err(DbError::KeyExists(_))),
+            "losing create must surface KeyExists, got {create_res:?}"
+        );
+    }
+    if !rename_ok {
+        assert!(
+            matches!(rename_res, Err(DbError::KeyExists(_))),
+            "losing rename must surface KeyExists, got {rename_res:?}"
+        );
+    }
+
+    // Persistence invariant: exactly one group named "beta" survives.
+    let groups = shamir.system_store().load_groups().await.unwrap();
+    let count = groups
+        .iter()
+        .filter(|g| g["name"].as_str() == Some(target))
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly one '{target}' group must persist, got {count}"
     );
 }

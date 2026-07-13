@@ -400,7 +400,30 @@ impl ShamirDb {
             .map_err(|e| DbError::Validation(e.to_string()))?;
 
         // Serialise the whole read-modify-write (rare op, bounded contention).
+        // §84 / #570: this same global lock is ALSO acquired by
+        // `rename_group_as`'s name-uniqueness scan+write, so a create can't
+        // race a rename — nor another create — onto the same name. It is the
+        // single point of serialization for the whole group-NAME namespace.
         let _guard = self.group_id_lock.lock().await;
+
+        // Load the existing-group snapshot ONCE, reused both for the
+        // name-uniqueness guard below and for counter seeding in the
+        // `next_group_id`-absent branch (avoids a redundant second scan).
+        let existing = self.system_store.load_groups().await?;
+
+        // Name-uniqueness guard (task #570): reject if ANY existing group
+        // already holds `name`. Performed WHILE holding `group_id_lock` so a
+        // concurrent create or rename of the same name serializes against
+        // this scan → only one passes before the other's `save_group` lands.
+        // (No `group_id != gid` exclusion is needed here, unlike
+        // `rename_group_as`: the new id isn't allocated yet, so there is no
+        // "self" record to exclude.)
+        if existing
+            .iter()
+            .any(|g| g.get("name").and_then(|v| v.as_str()) == Some(name))
+        {
+            return Err(DbError::KeyExists(format!("group '{name}' already exists")));
+        }
 
         let current = match self
             .system_store
@@ -411,16 +434,11 @@ impl ShamirDb {
             Some(v) => v,
             // Counter absent: seed past the highest EXISTING group id so a
             // lost/missing setting can't collide with a live group.
-            None => {
-                let max = self
-                    .system_store
-                    .load_groups()
-                    .await?
-                    .iter()
-                    .filter_map(|g| g.get("group_id").and_then(|v| v.as_u64()))
-                    .max();
-                max.map_or(1, |m| m + 1)
-            }
+            None => existing
+                .iter()
+                .filter_map(|g| g.get("group_id").and_then(|v| v.as_u64()))
+                .max()
+                .map_or(1, |m| m + 1),
         };
         let group_id = current;
 
@@ -514,14 +532,23 @@ impl ShamirDb {
             .clone();
         let _group_guard = group_lock.lock().await;
 
+        // §84 / #570: ALSO hold the global `group_id_lock` across the
+        // name-uniqueness scan → `save_group` sequence — the SAME lock
+        // `create_group_as` acquires for its (now also name-uniqueness-
+        // guarded) allocation. This closes the cross-`group_id` race that the
+        // per-group_id lock above can't reach (it only serialises mutations
+        // on THIS id; the global lock serialises the shared NAME namespace
+        // across BOTH allocation paths). Now two concurrent renames targeting
+        // two DIFFERENT group_ids to the same `to`, or a create racing a
+        // rename, can no longer both pass the scan before either write lands.
+        //
+        // Lock-order / deadlock note: `group_id_lock` is only ever acquired
+        // alone in `create_group_as`, or nested here INSIDE a single
+        // `group_member_locks` entry — never the reverse order anywhere in
+        // the codebase, so no lock-order cycle is possible.
+        let _name_guard = self.group_id_lock.lock().await;
+
         // Uniqueness guard: reject if a *different* group already owns `to`.
-        // NOTE: this check is NOT protected against a cross-group_id race —
-        // the lock above only serialises mutations on THIS group_id. Two
-        // concurrent renames targeting two DIFFERENT group_ids to the SAME
-        // `to` can both pass this scan before either `save_group` lands,
-        // producing two groups with an identical name (a pre-existing gap,
-        // not introduced or closed by #563's per-group_id lock — tracked
-        // separately, see task list).
         let groups = self.system_store.load_groups().await?;
         let conflict = groups.iter().any(|g| {
             g.get("name").and_then(|v| v.as_str()) == Some(to)
