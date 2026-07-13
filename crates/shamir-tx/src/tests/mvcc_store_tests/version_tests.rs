@@ -56,7 +56,10 @@ async fn apply_committed_ops_updates_version_cache() {
     assert_eq!(mvcc.version_of(&key), 42);
 
     // Value is in the log.
-    let val = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+    let val = mvcc
+        .get_current(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
     assert_eq!(val, Some(Bytes::from("val")));
 }
 
@@ -72,7 +75,10 @@ async fn apply_committed_ops_archives_old_value() {
     mvcc.apply_committed_ops(ops, 10).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
-    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+    let via_seam = mvcc
+        .get_current(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
     assert_eq!(via_seam, Some(Bytes::from("new")));
 
     // The log contains the new value at the commit version.
@@ -104,7 +110,10 @@ async fn apply_committed_ops_remove_archives_and_deletes() {
     mvcc.apply_committed_ops(ops, 20).await.unwrap();
 
     // Remove writes a tombstone to the log; get_current reads it as None.
-    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+    let via_seam = mvcc
+        .get_current(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
     assert!(
         via_seam.is_none(),
         "FINAL-A: Remove tombstone → None from seam"
@@ -137,7 +146,10 @@ async fn apply_committed_ops_no_snapshots_skips_history() {
     mvcc.apply_committed_ops(ops, 5).await.unwrap();
 
     // Value is in the log (single log append). Assert via the seam.
-    let via_seam = mvcc.get_current(RecordKey::from(key.clone())).await.unwrap();
+    let via_seam = mvcc
+        .get_current(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
     assert_eq!(via_seam, Some(Bytes::from("new")));
 
     assert_eq!(mvcc.version_of(&key), 5);
@@ -362,7 +374,10 @@ async fn live_version_advances_on_delete() {
         .set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
-    let vd = mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
+    let vd = mvcc
+        .delete_versioned(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
 
     assert!(vd > v1, "delete version must be greater than write version");
     assert_eq!(
@@ -391,7 +406,16 @@ async fn set_versioned_many_sets_hwm_fast_path() {
         (Bytes::from("bk2"), Bytes::from("v2")),
         (Bytes::from("bk3"), Bytes::from("v3")),
     ];
-    let max_v = mvcc.set_versioned_many(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    let max_v = mvcc
+        .set_versioned_many(
+            items
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     assert!(max_v > 0);
 
     // Every key gets its own monotonic version (one per record);

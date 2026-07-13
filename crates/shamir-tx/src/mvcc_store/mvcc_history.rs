@@ -441,10 +441,7 @@ impl MvccStore {
                 // KvOp keys and the overlay are both `RecordKey`-keyed
                 // (task #532) — clone straight through, no conversion.
                 KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
-                KvOp::Remove(k) => {
-                    self.overlay
-                        .insert(k.clone(), commit_version, Bytes::new())
-                }
+                KvOp::Remove(k) => self.overlay.insert(k.clone(), commit_version, Bytes::new()),
             }
         }
 

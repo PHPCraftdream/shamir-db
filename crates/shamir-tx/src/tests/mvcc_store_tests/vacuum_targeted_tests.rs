@@ -2,10 +2,10 @@ use super::helpers::{count_history_entries, make_gate, make_mvcc_with_gate};
 use super::test_stores::counting_store::CountingStore;
 use crate::mvcc_store::{MvccStore, Retention};
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use shamir_storage::types::RecordKey;
 
 /// Helper: build an MvccStore backed by a CountingStore so we can
 /// assert scan_prefix_stream call counts.
@@ -177,7 +177,9 @@ async fn append_only_no_vacuum_scan() {
     // Write distinct keys — each is an append (old_v == 0).
     for i in 0..5u32 {
         let key = Bytes::from(format!("new_key_{i}"));
-        mvcc.set_versioned(RecordKey::from(key), Bytes::from("val")).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(key), Bytes::from("val"))
+            .await
+            .unwrap();
     }
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
@@ -207,7 +209,9 @@ async fn delete_versioned_currentonly_reclaims_old() {
 
     // Delete — fast path fires (no scan). A10: v1 is deferred as anchor,
     // the tombstone becomes current.
-    mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
     assert_eq!(
         store.scan_prefix_count.load(Ordering::Relaxed),
         0,

@@ -22,9 +22,9 @@
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::mvcc_store::MvccStore;
 use bytes::Bytes;
+use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use std::sync::Arc;
-use shamir_storage::types::RecordKey;
 
 // ================================================================
 // Test 1 — Core race closed: OLD broken ordering no longer loses the
@@ -180,7 +180,9 @@ async fn a10_concurrent_vacuum_during_open_snapshot() {
         let mvcc = Arc::clone(&mvcc);
         let key = key.clone();
         async move {
-            mvcc.set_versioned(RecordKey::from(key), Bytes::from("NEW")).await.unwrap();
+            mvcc.set_versioned(RecordKey::from(key), Bytes::from("NEW"))
+                .await
+                .unwrap();
         }
     });
     write_handle.await.unwrap();

@@ -79,7 +79,9 @@ async fn history_of_deleted_key_keeps_prior_versions() {
         .await
         .unwrap();
     // C1: delete writes a tombstone (empty value) into the log.
-    mvcc.delete_versioned(RecordKey::from(Bytes::from("k"))).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(Bytes::from("k")))
+        .await
+        .unwrap();
 
     let timeline = mvcc.history_of(b"k").await.unwrap();
     // v1 + v2 (prior log entries) + v3 (tombstone, also in the log).

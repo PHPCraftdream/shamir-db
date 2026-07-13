@@ -128,10 +128,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
-use shamir_storage::types::RecordKey;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
+use shamir_storage::types::RecordKey;
 use shamir_tx::mvcc_store::LockMode;
 use shamir_tx::{IsolationLevel, MvccStore, RepoTxGate};
 use shamir_types::types::value::InnerValue;

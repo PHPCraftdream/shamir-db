@@ -2,9 +2,9 @@ use super::helpers::make_mvcc;
 use crate::mvcc_store::LockMode;
 use bytes::Bytes;
 use shamir_storage::error::DbError;
+use shamir_storage::types::RecordKey;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use shamir_storage::types::RecordKey;
 
 // ----------------------------------------------------------------
 // S2 — Level-3 pessimistic locking (wound-wait).
@@ -163,7 +163,9 @@ async fn lock_key_deadlock_freedom_opposite_order() {
             .await
             .unwrap();
         tokio::task::yield_now().await;
-        mvcc1.lock_key(RecordKey::from(key_b1), 1, f2, n2, LockMode::Exclusive).await
+        mvcc1
+            .lock_key(RecordKey::from(key_b1), 1, f2, n2, LockMode::Exclusive)
+            .await
     });
 
     // T2: lock B (Exclusive), then A (Exclusive). Same wound/notify.
@@ -174,7 +176,9 @@ async fn lock_key_deadlock_freedom_opposite_order() {
             .await
             .unwrap();
         tokio::task::yield_now().await;
-        mvcc2.lock_key(RecordKey::from(key_a2), 2, f2, n2, LockMode::Exclusive).await
+        mvcc2
+            .lock_key(RecordKey::from(key_a2), 2, f2, n2, LockMode::Exclusive)
+            .await
     });
 
     // Bound with a generous timeout: a real deadlock hangs CI and fails.
@@ -202,20 +206,42 @@ async fn lock_key_reentrant_same_tx_no_self_deadlock() {
     let w = TxWound::new();
 
     // First acquire Shared.
-    mvcc.lock_key(RecordKey::from(key.clone()), 42, w.flag(), w.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        42,
+        w.flag(),
+        w.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
     // Re-acquire Exclusive (upgrade) — same tx, must not deadlock.
-    mvcc.lock_key(RecordKey::from(key.clone()), 42, w.flag(), w.notify(), LockMode::Exclusive)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        42,
+        w.flag(),
+        w.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .unwrap();
     // And again — idempotent.
-    mvcc.lock_key(RecordKey::from(key.clone()), 42, w.flag(), w.notify(), LockMode::Exclusive)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        42,
+        w.flag(),
+        w.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .unwrap();
 
     // The tx still holds exactly one holder entry (no duplicates).
-    let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lock = mvcc
+        .locks
+        .get(key.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     let state = lock.state.lock().await;
     assert_eq!(
         state.holders.len(),
@@ -237,15 +263,31 @@ async fn release_locks_clears_holders() {
     let w = TxWound::new();
 
     // Acquire Exclusive on both keys.
-    mvcc.lock_key(RecordKey::from(key_a.clone()), 7, w.flag(), w.notify(), LockMode::Exclusive)
-        .await
-        .unwrap();
-    mvcc.lock_key(RecordKey::from(key_b.clone()), 7, w.flag(), w.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key_a.clone()),
+        7,
+        w.flag(),
+        w.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key_b.clone()),
+        7,
+        w.flag(),
+        w.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
 
     // Confirm held.
-    let la = mvcc.locks.get(key_a.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let la = mvcc
+        .locks
+        .get(key_a.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     {
         let s = la.state.lock().await;
         assert_eq!(s.holders.len(), 1);
@@ -268,7 +310,11 @@ async fn release_locks_clears_holders() {
         assert!(s.holders.is_empty(), "holders must be empty after release");
         assert_eq!(s.mode, None, "mode must be None after release");
     }
-    let lb = mvcc.locks.get(key_b.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lb = mvcc
+        .locks
+        .get(key_b.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     {
         let s = lb.state.lock().await;
         assert!(s.holders.is_empty());
@@ -306,16 +352,32 @@ async fn lock_key_shared_shared_compatible() {
 
     // T1 (version 1) Shared.
     let t1 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 1, t1.flag(), t1.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        1,
+        t1.flag(),
+        t1.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
     // T2 (version 2) Shared — compatible, both hold.
     let t2 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 2, t2.flag(), t2.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        2,
+        t2.flag(),
+        t2.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
 
-    let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lock = mvcc
+        .locks
+        .get(key.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     {
         let s = lock.state.lock().await;
         assert_eq!(s.holders.len(), 2, "two Shared holders");
@@ -325,12 +387,22 @@ async fn lock_key_shared_shared_compatible() {
     // T0 (version 0, OLDEST) Exclusive → wounds both younger Shared
     // holders and acquires.
     let t0 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 0, t0.flag(), t0.notify(), LockMode::Exclusive)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        0,
+        t0.flag(),
+        t0.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .unwrap();
     assert!(t1.is_wounded(), "younger Shared holder T1 wounded");
     assert!(t2.is_wounded(), "younger Shared holder T2 wounded");
-    let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lock = mvcc
+        .locks
+        .get(key.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     let s = lock.state.lock().await;
     assert_eq!(
         s.holders.len(),
@@ -363,18 +435,34 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
 
     // T1 (version 1, OLDER) acquires Shared.
     let t1 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 1, t1.flag(), t1.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        1,
+        t1.flag(),
+        t1.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
     // T2 (version 2, YOUNGER) acquires Shared — compatible, both hold.
     let t2 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 2, t2.flag(), t2.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        2,
+        t2.flag(),
+        t2.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
 
     // Sanity: two Shared holders, mode Shared.
     {
-        let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+        let lock = mvcc
+            .locks
+            .get(key.as_ref())
+            .map(|e| Arc::clone(e.get()))
+            .unwrap();
         let s = lock.state.lock().await;
         assert_eq!(s.holders.len(), 2);
         assert_eq!(s.mode, Some(LockMode::Shared));
@@ -383,9 +471,15 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
     // T1 (older) requests the Shared→Exclusive UPGRADE. Must WOUND T2,
     // remove T2's holder, and grant — NOT return instantly while T2 still
     // holds Shared.
-    mvcc.lock_key(RecordKey::from(key.clone()), 1, t1.flag(), t1.notify(), LockMode::Exclusive)
-        .await
-        .expect("older tx upgrade must succeed after wounding younger holder");
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        1,
+        t1.flag(),
+        t1.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .expect("older tx upgrade must succeed after wounding younger holder");
 
     // T2 (younger Shared holder) must have been wounded.
     assert!(
@@ -395,7 +489,11 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
     assert!(!t1.is_wounded(), "older tx must not wound itself");
 
     // Invariant restored: exactly one holder (T1), mode Exclusive.
-    let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lock = mvcc
+        .locks
+        .get(key.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     let s = lock.state.lock().await;
     assert_eq!(
         s.holders.len(),
@@ -411,7 +509,13 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
     let t3 = TxWound::new();
     let t3_acquired = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        mvcc.lock_key(RecordKey::from(key.clone()), 3, t3.flag(), t3.notify(), LockMode::Shared),
+        mvcc.lock_key(
+            RecordKey::from(key.clone()),
+            3,
+            t3.flag(),
+            t3.notify(),
+            LockMode::Shared,
+        ),
     )
     .await;
     assert!(
@@ -439,21 +543,39 @@ async fn lock_key_a6_younger_upgrade_waits_for_older_shared_holder() {
 
     // T1 (version 1, OLDER) acquires Shared.
     let t1 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 1, t1.flag(), t1.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        1,
+        t1.flag(),
+        t1.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
     // T2 (version 2, YOUNGER) acquires Shared — compatible.
     let t2 = TxWound::new();
-    mvcc.lock_key(RecordKey::from(key.clone()), 2, t2.flag(), t2.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        2,
+        t2.flag(),
+        t2.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
 
     // T2 (younger) requests Shared→Exclusive upgrade. T1 (older) still
     // holds Shared, so T2 must WAIT. Bounded by a timeout: a buggy
     // instant-grant resolves Ok (test fails); a correct wait elapses.
     let upgrade = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        mvcc.lock_key(RecordKey::from(key.clone()), 2, t2.flag(), t2.notify(), LockMode::Exclusive),
+        mvcc.lock_key(
+            RecordKey::from(key.clone()),
+            2,
+            t2.flag(),
+            t2.notify(),
+            LockMode::Exclusive,
+        ),
     )
     .await;
     assert!(
@@ -482,21 +604,37 @@ async fn lock_key_a6_solo_upgrade_no_other_holders_fast_path() {
     let w = TxWound::new();
 
     // Solo Shared acquire.
-    mvcc.lock_key(RecordKey::from(key.clone()), 42, w.flag(), w.notify(), LockMode::Shared)
-        .await
-        .unwrap();
+    mvcc.lock_key(
+        RecordKey::from(key.clone()),
+        42,
+        w.flag(),
+        w.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
 
     // Solo Shared→Exclusive upgrade — no other holders, must be instant.
     let upgrade = tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        mvcc.lock_key(RecordKey::from(key.clone()), 42, w.flag(), w.notify(), LockMode::Exclusive),
+        mvcc.lock_key(
+            RecordKey::from(key.clone()),
+            42,
+            w.flag(),
+            w.notify(),
+            LockMode::Exclusive,
+        ),
     )
     .await
     .expect("solo upgrade with no other holders must grant instantly (no wait)");
     upgrade.expect("solo upgrade must succeed");
 
     // Invariant holds: exactly one holder, mode Exclusive.
-    let lock = mvcc.locks.get(key.as_ref()).map(|e| Arc::clone(e.get())).unwrap();
+    let lock = mvcc
+        .locks
+        .get(key.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
     let s = lock.state.lock().await;
     assert_eq!(s.holders.len(), 1);
     assert_eq!(s.holders[0].tx_version, 42);
@@ -534,7 +672,13 @@ async fn lock_key_wounded_waiter_aborts() {
     let yw_notify = younger.notify();
     let wait = tokio::spawn(async move {
         mvcc_c
-            .lock_key(RecordKey::from(key_c), 2, yw_flag, yw_notify, LockMode::Exclusive)
+            .lock_key(
+                RecordKey::from(key_c),
+                2,
+                yw_flag,
+                yw_notify,
+                LockMode::Exclusive,
+            )
             .await
     });
 

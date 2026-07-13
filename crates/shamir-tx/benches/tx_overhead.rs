@@ -49,7 +49,9 @@ fn main() {
                 }
             },
             move |(mvcc, key, value)| async move {
-                mvcc.set_versioned(RecordKey::from(key), value).await.unwrap();
+                mvcc.set_versioned(RecordKey::from(key), value)
+                    .await
+                    .unwrap();
             },
         );
     }

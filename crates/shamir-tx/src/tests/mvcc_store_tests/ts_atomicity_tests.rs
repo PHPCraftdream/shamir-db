@@ -10,8 +10,8 @@ use crate::version_codec::decode_version_key;
 
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::KvOp;
-use std::sync::Arc;
 use shamir_storage::types::RecordKey;
+use std::sync::Arc;
 
 /// Build a test MvccStore with an in-memory history + shared gate.
 fn make_mvcc() -> (MvccStore, Arc<RepoTxGate>) {
@@ -56,7 +56,10 @@ async fn set_versioned_writes_ts_atomically() {
     mvcc.set_test_now(frozen_ts);
 
     let v = mvcc
-        .set_versioned(RecordKey::from(Bytes::from_static(b"k1")), Bytes::from_static(b"v1"))
+        .set_versioned(
+            RecordKey::from(Bytes::from_static(b"k1")),
+            Bytes::from_static(b"v1"),
+        )
         .await
         .unwrap();
 
@@ -90,7 +93,15 @@ async fn set_versioned_many_writes_ts_atomically() {
         .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
         .collect();
 
-    let max_v = mvcc.set_versioned_many(items.into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    let max_v = mvcc
+        .set_versioned_many(
+            items
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     assert!(max_v >= 3, "expected at least 3 versions allocated");
 
     let (version_entries, ts_entries) = scan_history(&mvcc).await;
@@ -134,7 +145,10 @@ async fn delete_versioned_writes_ts_atomically() {
 
     // First insert so there's something to delete.
     let _v1 = mvcc
-        .set_versioned(RecordKey::from(Bytes::from_static(b"dk")), Bytes::from_static(b"dv"))
+        .set_versioned(
+            RecordKey::from(Bytes::from_static(b"dk")),
+            Bytes::from_static(b"dv"),
+        )
         .await
         .unwrap();
 
@@ -234,7 +248,10 @@ async fn transact_failure_leaves_no_data_no_ts() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let result = mvcc
-        .set_versioned(RecordKey::from(Bytes::from_static(b"fk")), Bytes::from_static(b"fv"))
+        .set_versioned(
+            RecordKey::from(Bytes::from_static(b"fk")),
+            Bytes::from_static(b"fv"),
+        )
         .await;
 
     assert!(

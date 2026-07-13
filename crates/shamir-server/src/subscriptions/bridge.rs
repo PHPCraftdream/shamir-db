@@ -99,10 +99,7 @@ pub(crate) async fn bridge_task(
 ) {
     // Release this subscription's registry slot on EVERY exit path. Bound
     // before any `.await` so cancellation-unwind fires its `Drop` too.
-    let _slot_guard = SubscriptionSlotGuard {
-        registry,
-        sub_id,
-    };
+    let _slot_guard = SubscriptionSlotGuard { registry, sub_id };
 
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across

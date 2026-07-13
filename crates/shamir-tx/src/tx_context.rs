@@ -362,11 +362,7 @@ impl TxContext {
     /// tx-aware read path (which holds `&TxContext`) can record locks without
     /// `&mut`. The map's dedup (same `(token, key)` inserted twice is a
     /// no-op) mirrors `lock_key`'s re-entrant idempotency.
-    pub fn record_locked_key(
-        &self,
-        table_token: u64,
-        key: shamir_storage::types::RecordKey,
-    ) {
+    pub fn record_locked_key(&self, table_token: u64, key: shamir_storage::types::RecordKey) {
         // entry_async requires await; use the sync entry on a non-async
         // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
         // the unconditional insert path.

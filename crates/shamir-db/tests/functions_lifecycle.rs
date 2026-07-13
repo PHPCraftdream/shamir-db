@@ -982,10 +982,7 @@ async fn net_grants_narrower_than_db_allowlist_denies_outside_host() {
         "url",
         QueryValue::Str("http://other.example.com/".to_string()),
     );
-    let result = db
-        .invoke_function("scoped_fetcher", params)
-        .await
-        .unwrap();
+    let result = db.invoke_function("scoped_fetcher", params).await.unwrap();
     match result {
         QueryValue::Str(s) if s.starts_with("err:") => {
             assert!(
@@ -1162,7 +1159,9 @@ async fn global_set_cannot_overwrite_seeded_env_value() {
     {
         Ok(()) => {}
         Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
-            eprintln!("SKIP global_set_cannot_overwrite_seeded_env_value — toolchain unavailable: {msg}");
+            eprintln!(
+                "SKIP global_set_cannot_overwrite_seeded_env_value — toolchain unavailable: {msg}"
+            );
             std::env::remove_var("SHAMIR_S9_WRITE_SECRET");
             return;
         }

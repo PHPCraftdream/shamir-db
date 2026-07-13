@@ -244,12 +244,7 @@ async fn lookup_range_first_k_page_asc_tiebreaker_skips_only_up_to_id() {
     let id20_b = rid_byte(0x20);
     let id20_c = rid_byte(0x30);
     let id30 = rid_byte(0x40);
-    for (id, score) in [
-        (id20_a, 20i64),
-        (id20_b, 20),
-        (id20_c, 20),
-        (id30, 30),
-    ] {
+    for (id, score) in [(id20_a, 20i64), (id20_b, 20), (id20_c, 20), (id30, 30)] {
         mgr.on_record_created(&id, &record_with_int(201, score), 1)
             .await
             .unwrap();
@@ -289,12 +284,7 @@ async fn lookup_range_first_k_page_desc_tiebreaker_skips_only_from_id() {
     let id20_b = rid_byte(0x20);
     let id20_c = rid_byte(0x30);
     let id10 = rid_byte(0x05);
-    for (id, score) in [
-        (id20_a, 20i64),
-        (id20_b, 20),
-        (id20_c, 20),
-        (id10, 10),
-    ] {
+    for (id, score) in [(id20_a, 20i64), (id20_b, 20), (id20_c, 20), (id10, 10)] {
         mgr.on_record_created(&id, &record_with_int(201, score), 1)
             .await
             .unwrap();

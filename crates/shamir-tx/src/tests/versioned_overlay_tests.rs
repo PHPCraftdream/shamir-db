@@ -30,7 +30,11 @@ fn get_missing_key_returns_none() {
 #[test]
 fn get_wrong_version_returns_none() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 5, Bytes::from_static(b"v"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        5,
+        Bytes::from_static(b"v"),
+    );
 
     assert_eq!(ov.get(b"k", 4), None);
     assert_eq!(ov.get(b"k", 6), None);
@@ -44,7 +48,11 @@ fn get_wrong_version_returns_none() {
 #[test]
 fn newest_visible_single_version() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 10, Bytes::from_static(b"ten"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        10,
+        Bytes::from_static(b"ten"),
+    );
 
     assert_eq!(
         ov.newest_visible(b"k", 10),
@@ -60,9 +68,21 @@ fn newest_visible_single_version() {
 #[test]
 fn newest_visible_multiple_versions() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 3, Bytes::from_static(b"v3"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 7, Bytes::from_static(b"v7"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 12, Bytes::from_static(b"v12"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        3,
+        Bytes::from_static(b"v3"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        7,
+        Bytes::from_static(b"v7"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        12,
+        Bytes::from_static(b"v12"),
+    );
 
     // Exact matches.
     assert_eq!(
@@ -116,10 +136,26 @@ fn tombstone_stored_as_empty_bytes() {
 #[test]
 fn gc_upto_removes_below_threshold() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 1, Bytes::from_static(b"v1"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 5, Bytes::from_static(b"v5"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 10, Bytes::from_static(b"v10"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"b")), 3, Bytes::from_static(b"bv3"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        1,
+        Bytes::from_static(b"v1"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        5,
+        Bytes::from_static(b"v5"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        10,
+        Bytes::from_static(b"v10"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"b")),
+        3,
+        Bytes::from_static(b"bv3"),
+    );
     assert_eq!(ov.len(), 4);
 
     // GC with threshold = min(durable_wm=5, floor=5) = 5.
@@ -139,8 +175,16 @@ fn gc_upto_removes_below_threshold() {
 #[test]
 fn gc_upto_uses_min_of_both_args() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 3, Bytes::from_static(b"v3"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 7, Bytes::from_static(b"v7"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        3,
+        Bytes::from_static(b"v3"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        7,
+        Bytes::from_static(b"v7"),
+    );
 
     // durable_watermark=10, floor=3 → threshold = 3.
     ov.gc_upto(10, 3);
@@ -153,7 +197,11 @@ fn gc_upto_uses_min_of_both_args() {
 #[test]
 fn gc_upto_zero_is_noop() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 1, Bytes::from_static(b"v"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        1,
+        Bytes::from_static(b"v"),
+    );
     ov.gc_upto(0, 0);
     assert_eq!(ov.len(), 1);
 }
@@ -161,8 +209,16 @@ fn gc_upto_zero_is_noop() {
 #[test]
 fn approx_bytes_consistent_after_gc() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 1, Bytes::from_static(b"val1"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 2, Bytes::from_static(b"val2"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        1,
+        Bytes::from_static(b"val1"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        2,
+        Bytes::from_static(b"val2"),
+    );
     let bytes_before = ov.approx_bytes();
     assert!(bytes_before > 0);
 
@@ -180,13 +236,29 @@ fn approx_bytes_consistent_after_gc() {
 fn newest_visible_key_isolation() {
     let ov = VersionedOverlay::new();
     // Key "a" has versions 1, 5.
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 1, Bytes::from_static(b"a1"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 5, Bytes::from_static(b"a5"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        1,
+        Bytes::from_static(b"a1"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        5,
+        Bytes::from_static(b"a5"),
+    );
     // Key "b" has version 3.
-    ov.insert(RecordKey::from(Bytes::from_static(b"b")), 3, Bytes::from_static(b"b3"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"b")),
+        3,
+        Bytes::from_static(b"b3"),
+    );
     // Key "ab" has version 2 — prefix of neither "a" nor "b" in Ord terms,
     // but lexicographically between "a" and "b".
-    ov.insert(RecordKey::from(Bytes::from_static(b"ab")), 2, Bytes::from_static(b"ab2"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"ab")),
+        2,
+        Bytes::from_static(b"ab2"),
+    );
 
     // "a" at snapshot=10 → version 5, not version 3 from "b" or 2 from "ab".
     assert_eq!(
@@ -229,8 +301,16 @@ fn default_is_empty() {
 #[test]
 fn duplicate_insert_is_idempotent() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 1, Bytes::from_static(b"v"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 1, Bytes::from_static(b"v"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        1,
+        Bytes::from_static(b"v"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        1,
+        Bytes::from_static(b"v"),
+    );
 
     assert_eq!(ov.len(), 1);
     assert_eq!(ov.get(b"k", 1), Some(Bytes::from_static(b"v")));
@@ -284,7 +364,11 @@ fn snapshot_le_empty_overlay_is_empty() {
 #[test]
 fn snapshot_le_floor_zero_is_empty() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 1, Bytes::from_static(b"v"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        1,
+        Bytes::from_static(b"v"),
+    );
     assert!(ov.snapshot_le(0).is_empty());
 }
 
@@ -292,11 +376,31 @@ fn snapshot_le_floor_zero_is_empty() {
 fn snapshot_le_picks_highest_version_per_key_le_floor() {
     let ov = VersionedOverlay::new();
     // key a: versions 1, 3, 7 ; key b: versions 2, 5
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 1, Bytes::from_static(b"a1"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 3, Bytes::from_static(b"a3"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"a")), 7, Bytes::from_static(b"a7"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"b")), 2, Bytes::from_static(b"b2"));
-    ov.insert(RecordKey::from(Bytes::from_static(b"b")), 5, Bytes::from_static(b"b5"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        1,
+        Bytes::from_static(b"a1"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        3,
+        Bytes::from_static(b"a3"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"a")),
+        7,
+        Bytes::from_static(b"a7"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"b")),
+        2,
+        Bytes::from_static(b"b2"),
+    );
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"b")),
+        5,
+        Bytes::from_static(b"b5"),
+    );
 
     // floor = 4 → a winner = v3 (a3), b winner = v2 (b2). v7/v5 excluded.
     let mut got = ov.snapshot_le(4);
@@ -324,7 +428,11 @@ fn snapshot_le_picks_highest_version_per_key_le_floor() {
 #[test]
 fn snapshot_le_includes_tombstone_winner() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"k")), 2, Bytes::from_static(b"v2"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"k")),
+        2,
+        Bytes::from_static(b"v2"),
+    );
     // newer version is a tombstone (empty value).
     ov.insert(RecordKey::from(Bytes::from_static(b"k")), 5, Bytes::new());
 
@@ -343,7 +451,11 @@ fn snapshot_le_includes_tombstone_winner() {
 #[test]
 fn snapshot_le_key_only_above_floor_omitted() {
     let ov = VersionedOverlay::new();
-    ov.insert(RecordKey::from(Bytes::from_static(b"hi")), 50, Bytes::from_static(b"x"));
+    ov.insert(
+        RecordKey::from(Bytes::from_static(b"hi")),
+        50,
+        Bytes::from_static(b"x"),
+    );
     // floor below the only version → key omitted entirely.
     assert!(ov.snapshot_le(10).is_empty());
 }
@@ -384,6 +496,10 @@ fn newest_visible_and_snapshot_le_with_heap_tier_key() {
     let got = ov.snapshot_le(5);
     assert_eq!(
         got,
-        vec![(RecordKey::from_slice(&long_key), 3, Bytes::from_static(b"v3"))]
+        vec![(
+            RecordKey::from_slice(&long_key),
+            3,
+            Bytes::from_static(b"v3")
+        )]
     );
 }

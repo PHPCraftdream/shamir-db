@@ -327,7 +327,11 @@ impl Store for FjallStore {
         // collision probe would be provably pointless (~2⁻¹²⁸). The actual
         // insert runs on the dedicated write worker (task #536), replacing the
         // former per-op `spawn_blocking` hop — see `exec_insert`.
-        submit(self.worker().sender(), |reply| WriteJob::Insert { value, reply }).await
+        submit(self.worker().sender(), |reply| WriteJob::Insert {
+            value,
+            reply,
+        })
+        .await
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -475,7 +479,11 @@ impl Store for FjallStore {
         }
         // Routed through the write worker (task #536) so the atomic batch
         // commit is ordered against every other point-write on this store.
-        submit(self.worker().sender(), |reply| WriteJob::Transact { ops, reply }).await
+        submit(self.worker().sender(), |reply| WriteJob::Transact {
+            ops,
+            reply,
+        })
+        .await
     }
 
     /// Force the WAL to fsync-on-disk. fjall buffers individual

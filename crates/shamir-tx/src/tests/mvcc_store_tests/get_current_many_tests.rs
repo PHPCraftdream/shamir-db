@@ -39,7 +39,9 @@ async fn get_current_many_warm_absent_tombstone() {
         .unwrap();
 
     // Delete k2 (tombstone).
-    mvcc.delete_versioned(RecordKey::from(k2.clone())).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(k2.clone()))
+        .await
+        .unwrap();
 
     let keys = vec![k1.clone(), k2.clone(), k3.clone(), k_absent.clone()];
     let result = mvcc.get_current_many(&keys).await.unwrap();
@@ -62,7 +64,9 @@ async fn get_current_many_preserves_order() {
         .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
         .collect();
     for (k, v) in &keys_data {
-        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone()).await.unwrap();
+        mvcc.set_versioned(RecordKey::from(k.clone()), v.clone())
+            .await
+            .unwrap();
     }
 
     // Read in reverse order.
@@ -163,7 +167,9 @@ async fn get_current_many_tombstone_in_miss_set() {
     mvcc.set_versioned(RecordKey::from(k.clone()), Bytes::from_static(b"alive"))
         .await
         .unwrap();
-    mvcc.delete_versioned(RecordKey::from(k.clone())).await.unwrap();
+    mvcc.delete_versioned(RecordKey::from(k.clone()))
+        .await
+        .unwrap();
 
     let result = mvcc
         .get_current_many(std::slice::from_ref(&k))

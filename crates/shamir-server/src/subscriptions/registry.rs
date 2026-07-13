@@ -109,7 +109,12 @@ impl SubscriptionRegistry {
     pub(crate) fn reserve_pending(&self, id: u64) {
         if self
             .subs
-            .insert(id, ActiveSubscription { bridge_handle: None })
+            .insert(
+                id,
+                ActiveSubscription {
+                    bridge_handle: None,
+                },
+            )
             .is_err()
         {
             // Duplicate id (never expected: ids are monotonic) — release the

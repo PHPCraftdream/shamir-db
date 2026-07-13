@@ -913,8 +913,7 @@ impl Client {
         // When `request_timeout` is set, bound the wait: a server that
         // accepts the connection but never answers this rid must not hang
         // the caller forever. `None` preserves the original unbounded await.
-        let payload =
-            await_pending_response(rx, self.request_timeout, &self.pending, rid).await?;
+        let payload = await_pending_response(rx, self.request_timeout, &self.pending, rid).await?;
 
         let response: DbResponse = rmp_serde::from_slice(&payload)?;
         if let DbResponse::Error { code, message } = &response {

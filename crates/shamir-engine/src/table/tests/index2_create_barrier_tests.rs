@@ -159,11 +159,8 @@ async fn insert_during_index2_create_is_not_lost() {
     // Now insert a NEW row while the create is parked in the exact lost-write
     // window. WITH the fix this blocks on the barrier the parked create holds.
     let tbl_insert = tbl.clone();
-    let insert = tokio::spawn(async move {
-        tbl_insert
-            .insert(&record_with_str(name_field, "Bob"))
-            .await
-    });
+    let insert =
+        tokio::spawn(async move { tbl_insert.insert(&record_with_str(name_field, "Bob")).await });
 
     // Give the insert task time to reach — and (post-fix) block on — the
     // barrier. Post-fix it must still be running; pre-fix it would already have
@@ -231,7 +228,10 @@ async fn create_index_v2_acquires_write_barrier() {
     );
 
     drop(guard);
-    create.await.unwrap().expect("create must complete once lock released");
+    create
+        .await
+        .unwrap()
+        .expect("create must complete once lock released");
     // Sanity: backend registered.
     assert!(
         tbl.index2_registry()
@@ -442,7 +442,9 @@ async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
     // question, which `stage_and_commit_inside_window_still_misses_new_index_part_b_open`
     // exercises separately.
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-    let op = write::insert("people").rows([mpack!({ "name": "Bob" })]).build();
+    let op = write::insert("people")
+        .rows([mpack!({ "name": "Bob" })])
+        .build();
     let result = tbl
         .execute_insert_tx(&op, &mut tx, true, None)
         .await
@@ -544,7 +546,10 @@ async fn stage_and_commit_inside_window_still_misses_new_index_part_b_open() {
         .expect("tx commit must succeed (data write is never at risk)");
 
     // The row IS physically present (Phase 5a is unconditional).
-    let _ = tbl.get(carol).await.expect("row must be physically present");
+    let _ = tbl
+        .get(carol)
+        .await
+        .expect("row must be physically present");
 
     // But it is NOT queryable via the new functional index — Part B's
     // guaranteed-miss residual, honestly reproduced: this tx's

@@ -422,9 +422,7 @@ fn rk(b: &[u8]) -> RecordKey {
     RecordKey::from_slice(b)
 }
 
-async fn collect_stream(
-    mut s: crate::types::RecordStream,
-) -> Vec<(RecordKey, Bytes)> {
+async fn collect_stream(mut s: crate::types::RecordStream) -> Vec<(RecordKey, Bytes)> {
     use futures::StreamExt;
     let mut out = Vec::new();
     while let Some(batch) = s.next().await {
@@ -470,7 +468,10 @@ async fn iter_stream_merges_overlay_without_draining() {
     // k1 → overlay wins over inner; k2 → overlay-only visible; k3 → tombstoned.
     assert_eq!(map.get(b"k1".as_ref()).unwrap(), b"overlay1");
     assert_eq!(map.get(b"k2".as_ref()).unwrap(), b"overlay2");
-    assert!(!map.contains_key(b"k3".as_ref()), "tombstoned key must be excluded");
+    assert!(
+        !map.contains_key(b"k3".as_ref()),
+        "tombstoned key must be excluded"
+    );
     assert_eq!(map.len(), 2, "exactly k1,k2 visible: {map:?}");
 
     // The scan must NOT have drained the dirty buffer to disk.
@@ -529,18 +530,32 @@ async fn scan_prefix_stream_merges_overlay_sorted_and_in_prefix() {
         .collect();
     assert_eq!(map.get(b"pre:a".as_ref()).unwrap(), b"ov_a");
     assert_eq!(map.get(b"pre:b".as_ref()).unwrap(), b"ov_b"); // overlay wins
-    assert!(!map.contains_key(b"pre:d".as_ref()), "tombstone excludes pre:d");
-    assert!(!map.iter().any(|(k, _)| !k.starts_with(b"pre:")), "no out-of-prefix keys");
+    assert!(
+        !map.contains_key(b"pre:d".as_ref()),
+        "tombstone excludes pre:d"
+    );
+    assert!(
+        !map.iter().any(|(k, _)| !k.starts_with(b"pre:")),
+        "no out-of-prefix keys"
+    );
     assert_eq!(map.len(), 2, "pre:a, pre:b only: {map:?}");
 
-    assert!(!buffered.is_dirty_empty(), "prefix scan must not drain dirty");
+    assert!(
+        !buffered.is_dirty_empty(),
+        "prefix scan must not drain dirty"
+    );
 }
 
 #[tokio::test]
 async fn iter_range_stream_merges_overlay_ascending() {
     let inner_repo = InMemoryRepo::new();
     let inner_store = inner_repo.store_get("t").await.unwrap();
-    for (k, v) in [(b"a" as &[u8], "ia"), (b"c", "ic"), (b"e", "ie"), (b"g", "ig")] {
+    for (k, v) in [
+        (b"a" as &[u8], "ia"),
+        (b"c", "ic"),
+        (b"e", "ie"),
+        (b"g", "ig"),
+    ] {
         inner_store
             .set(rk(k), Bytes::copy_from_slice(v.as_bytes()))
             .await
@@ -548,9 +563,18 @@ async fn iter_range_stream_merges_overlay_ascending() {
     }
     let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
     // Overlay keys interleaved in the range, plus a tombstone.
-    buffered.set(rk(b"b"), Bytes::from_static(b"ob")).await.unwrap();
-    buffered.set(rk(b"d"), Bytes::from_static(b"od")).await.unwrap();
-    buffered.set(rk(b"c"), Bytes::from_static(b"oc")).await.unwrap(); // override
+    buffered
+        .set(rk(b"b"), Bytes::from_static(b"ob"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"d"), Bytes::from_static(b"od"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"c"), Bytes::from_static(b"oc"))
+        .await
+        .unwrap(); // override
     buffered.remove(rk(b"e")).await.unwrap(); // tombstone
 
     // Range [b ..= f].
@@ -571,24 +595,45 @@ async fn iter_range_stream_merges_overlay_ascending() {
         .iter()
         .map(|(k, v)| (k.as_ref().to_vec(), v.as_ref().to_vec()))
         .collect();
-    assert_eq!(map.get(b"c".as_ref()).unwrap(), b"oc", "overlay override wins");
-    assert!(!buffered.is_dirty_empty(), "range scan must not drain dirty");
+    assert_eq!(
+        map.get(b"c".as_ref()).unwrap(),
+        b"oc",
+        "overlay override wins"
+    );
+    assert!(
+        !buffered.is_dirty_empty(),
+        "range scan must not drain dirty"
+    );
 }
 
 #[tokio::test]
 async fn iter_range_stream_reverse_merges_overlay_descending() {
     let inner_repo = InMemoryRepo::new();
     let inner_store = inner_repo.store_get("t").await.unwrap();
-    for (k, v) in [(b"a" as &[u8], "ia"), (b"c", "ic"), (b"e", "ie"), (b"g", "ig")] {
+    for (k, v) in [
+        (b"a" as &[u8], "ia"),
+        (b"c", "ic"),
+        (b"e", "ie"),
+        (b"g", "ig"),
+    ] {
         inner_store
             .set(rk(k), Bytes::copy_from_slice(v.as_bytes()))
             .await
             .unwrap();
     }
     let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), no_flush_config()));
-    buffered.set(rk(b"b"), Bytes::from_static(b"ob")).await.unwrap();
-    buffered.set(rk(b"d"), Bytes::from_static(b"od")).await.unwrap();
-    buffered.set(rk(b"c"), Bytes::from_static(b"oc")).await.unwrap();
+    buffered
+        .set(rk(b"b"), Bytes::from_static(b"ob"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"d"), Bytes::from_static(b"od"))
+        .await
+        .unwrap();
+    buffered
+        .set(rk(b"c"), Bytes::from_static(b"oc"))
+        .await
+        .unwrap();
     buffered.remove(rk(b"e")).await.unwrap();
 
     let got = collect_stream(buffered.iter_range_stream_reverse(
@@ -604,7 +649,10 @@ async fn iter_range_stream_reverse_merges_overlay_descending() {
         vec![b"d".to_vec(), b"c".to_vec(), b"b".to_vec()],
         "reverse range scan must be descending + correctly merged"
     );
-    assert!(!buffered.is_dirty_empty(), "reverse range scan must not drain dirty");
+    assert!(
+        !buffered.is_dirty_empty(),
+        "reverse range scan must not drain dirty"
+    );
 }
 
 /// Op C regression: insert_many / set_many / remove_many must publish
@@ -835,8 +883,7 @@ mod clear_race_535 {
         let racing_val = Bytes::from_static(b"racing-value-535");
 
         // Late-bound slot so the hook can reach the store built AFTER the hook.
-        let store_slot: Arc<Mutex<Weak<MemBufferStore>>> =
-            Arc::new(Mutex::new(Weak::new()));
+        let store_slot: Arc<Mutex<Weak<MemBufferStore>>> = Arc::new(Mutex::new(Weak::new()));
         // Fire exactly ONCE — the drain-loop is not used here (single
         // `drain_once` pass), but guard defensively so the injected K is not
         // re-inserted on any later drain.
@@ -868,7 +915,10 @@ mod clear_race_535 {
 
         // Prime `dirty` with an unrelated key J so the single `drain_once`
         // actually flushes something and reaches the clear window.
-        let jkey = buffered.insert(Bytes::from_static(b"prime-j")).await.unwrap();
+        let jkey = buffered
+            .insert(Bytes::from_static(b"prime-j"))
+            .await
+            .unwrap();
 
         // ONE drain pass: flushes J → `dirty` observed empty → `store(false)` →
         // hook injects K into the gap → verify-after-clear must restore the

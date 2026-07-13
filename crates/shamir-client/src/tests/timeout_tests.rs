@@ -139,8 +139,14 @@ async fn request_none_preserves_unbounded_wait_then_delivers() {
 
     // 2) Now deliver a response; the same (still-pending) future must resolve
     //    with the payload — the unbounded path still works end-to-end.
-    let sender = pending.lock().unwrap().remove(&rid).expect("sender present");
-    sender.send(Ok(b"late-but-delivered".to_vec())).expect("send");
+    let sender = pending
+        .lock()
+        .unwrap()
+        .remove(&rid)
+        .expect("sender present");
+    sender
+        .send(Ok(b"late-but-delivered".to_vec()))
+        .expect("send");
 
     let out = tokio::time::timeout(Duration::from_secs(2), &mut fut)
         .await
@@ -163,7 +169,11 @@ async fn request_timeout_generous_delivers_normally() {
         let pending = pending.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(20)).await;
-            let sender = pending.lock().unwrap().remove(&rid).expect("sender present");
+            let sender = pending
+                .lock()
+                .unwrap()
+                .remove(&rid)
+                .expect("sender present");
             sender.send(Ok(b"ok".to_vec())).expect("send");
         })
     };

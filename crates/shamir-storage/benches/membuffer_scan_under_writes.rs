@@ -108,7 +108,11 @@ async fn full_scan(store: &Arc<MemBufferStore>) -> u64 {
 
 /// `scan_with_dirty` — the finding under test: write a batch of dirty records,
 /// then scan. Old code flushes the batch on every scan; new code merges it.
-fn bench_scan_with_dirty(h: &mut Harness, rt: &tokio::runtime::Runtime, store: Arc<MemBufferStore>) {
+fn bench_scan_with_dirty(
+    h: &mut Harness,
+    rt: &tokio::runtime::Runtime,
+    store: Arc<MemBufferStore>,
+) {
     rt.block_on(seed(&store, SEED_COUNT));
     let counter = std::sync::atomic::AtomicUsize::new(0);
     h.bench_async("scan_with_dirty", move || {

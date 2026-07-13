@@ -72,9 +72,12 @@ async fn nontx_delete_overlay_tombstone_matches_history() {
     let mvcc = make_mvcc();
     let key = b"k".as_slice();
     // Seed a value first, then delete it.
-    mvcc.set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v0"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::from_static(b"k")),
+        Bytes::from_static(b"v0"),
+    )
+    .await
+    .unwrap();
     let dv = mvcc
         .delete_versioned(RecordKey::from(Bytes::from_static(b"k")))
         .await
@@ -101,7 +104,16 @@ async fn nontx_set_many_overlay_matches_history() {
         (Bytes::from_static(b"b"), Bytes::from_static(b"vb")),
         (Bytes::from_static(b"c"), Bytes::from_static(b"vc")),
     ];
-    let max_v = mvcc.set_versioned_many(items.clone().into_iter().map(|(k, v)| (RecordKey::from(k), v)).collect::<Vec<_>>()).await.unwrap();
+    let max_v = mvcc
+        .set_versioned_many(
+            items
+                .clone()
+                .into_iter()
+                .map(|(k, v)| (RecordKey::from(k), v))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     // Versions are assigned sequentially; the batch occupies
     // [max_v - n + 1 ..= max_v] in order of `items`.
     let n = items.len() as u64;
@@ -197,7 +209,9 @@ async fn overlay_serves_read_after_history_removed() {
     );
     // Current read (cell points at `v`): also overlay-served.
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
         Some(val),
         "get_current must resolve the value from the overlay after history removal",
     );
@@ -240,9 +254,12 @@ async fn overlay_serves_tx_read_after_history_removed() {
 async fn overlay_serves_tombstone_after_history_removed() {
     let gate = make_gate();
     let mvcc = make_mvcc_with_gate(gate.clone());
-    mvcc.set_versioned(RecordKey::from(Bytes::from_static(b"k")), Bytes::from_static(b"v0"))
-        .await
-        .unwrap();
+    mvcc.set_versioned(
+        RecordKey::from(Bytes::from_static(b"k")),
+        Bytes::from_static(b"v0"),
+    )
+    .await
+    .unwrap();
     let dv = mvcc
         .delete_versioned(RecordKey::from(Bytes::from_static(b"k")))
         .await
@@ -264,7 +281,9 @@ async fn overlay_serves_tombstone_after_history_removed() {
         "overlay tombstone must keep the key deleted after history removal",
     );
     assert_eq!(
-        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k"))).await.unwrap(),
+        mvcc.get_current(RecordKey::from(Bytes::from_static(b"k")))
+            .await
+            .unwrap(),
         None,
         "get_current must honour the overlay tombstone after history removal",
     );

@@ -361,7 +361,10 @@ async fn c1_vacuum_keeps_tombstone_current() {
     mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("val"))
         .await
         .unwrap();
-    let del_v = mvcc.delete_versioned(RecordKey::from(key.clone())).await.unwrap();
+    let del_v = mvcc
+        .delete_versioned(RecordKey::from(key.clone()))
+        .await
+        .unwrap();
 
     // The tombstone is the current version for this key — it must survive.
     let tombstone = mvcc
