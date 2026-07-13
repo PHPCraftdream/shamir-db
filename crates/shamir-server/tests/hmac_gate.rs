@@ -733,12 +733,16 @@ async fn chown_with_correct_hmac_accepted() {
 async fn chgrp_without_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("scratch").await;
+    // Task #561 §2: chgrp now validates the group id unconditionally, so
+    // target a real (created) group — the test's point is the HMAC gate, not
+    // the group's existence.
+    let gid = shamir.create_group("devs").await.unwrap();
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
     let mut b = Batch::new();
     b.id(1);
-    b.chgrp("c", ddl::chgrp(ddl::res::database("scratch"), Some(3)));
+    b.chgrp("c", ddl::chgrp(ddl::res::database("scratch"), Some(gid)));
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -758,6 +762,10 @@ async fn chgrp_without_hmac_rejected() {
 async fn chgrp_with_wrong_hmac_rejected() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("scratch").await;
+    // Task #561 §2: chgrp now validates the group id unconditionally, so
+    // target a real (created) group — the test's point is the HMAC gate, not
+    // the group's existence.
+    let gid = shamir.create_group("devs").await.unwrap();
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
@@ -765,7 +773,7 @@ async fn chgrp_with_wrong_hmac_rejected() {
     b.id(1);
     b.chgrp(
         "c",
-        ddl::chgrp(ddl::res::database("scratch"), Some(3)).hmac("deadbeef".repeat(8)),
+        ddl::chgrp(ddl::res::database("scratch"), Some(gid)).hmac("deadbeef".repeat(8)),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -786,17 +794,21 @@ async fn chgrp_with_wrong_hmac_rejected() {
 async fn chgrp_with_correct_hmac_accepted() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("scratch").await;
+    // Task #561 §2: chgrp now validates the group id unconditionally, so
+    // target a real (created) group — the test's point is the HMAC gate, not
+    // the group's existence.
+    let gid = shamir.create_group("devs").await.unwrap();
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
     let resource = ddl::res::database("scratch");
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_chgrp(&resource, Some(3)),
+        &canon::canonical_chgrp(&resource, Some(gid)),
     );
     let mut b = Batch::new();
     b.id(1);
-    b.chgrp("c", ddl::chgrp(resource, Some(3)).hmac(&tag));
+    b.chgrp("c", ddl::chgrp(resource, Some(gid)).hmac(&tag));
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
