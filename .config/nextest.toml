@@ -58,6 +58,26 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 failure-output = "final"
 success-output = "never"
 fail-fast = false
+# Task #589: nextest's default test-threads = num-cpus already caps how
+# many test BINARIES run concurrently to the runner's reported core count
+# — but it has no visibility into what happens INSIDE each spawned test
+# process. A large fraction of this workspace's tests use
+# `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` (33 files
+# as of this writing), so N concurrently-running binaries can each spin up
+# their OWN 4-worker tokio runtime — N×4 real OS threads competing for
+# whatever (likely far fewer than this repo's 16-core dev boxes) vCPUs a
+# hosted CI runner actually has. This is the leading, still-unconfirmed
+# hypothesis for the handful of tests that legitimately pass in isolation
+# but TIMEOUT under full-workspace CI parallelism (e.g.
+# overlay_ordering_reader_sees_version_implies_value_history_arm, which
+# itself uses worker_threads = 4). Capping test-threads explicitly bounds
+# the number of concurrently-running binaries (hence the total worker-
+# thread fan-out) well below "one per real core" so the worker_threads=4
+# multiplier inside each doesn't compound into severe oversubscription.
+# Starting value — tune down further (or up, if CI logs show idle cores)
+# once real GitHub-runner behavior is observed; this is a hypothesis-
+# driven starting point, not a measured-optimal value.
+test-threads = 4
 
 # Per-test overrides (extend as we discover legitimately-slow tests).
 [[profile.default.overrides]]
