@@ -813,3 +813,112 @@ async fn authorize_access_denies_when_resource_meta_errors() {
          because the old default-open ResourceMeta permits every actor"
     );
 }
+
+// ============================================================================
+// Task #602 — resource_meta's ResourcePath::Group branch fails CLOSED on a
+// real catalogue-read error from `resolve_group_id`, mirroring the Database
+// branch above (audit #540). `resolve_group_id` returns `DbResult<u64>`
+// (not `DbResult<Option<u64>>`), so the fix matches on the `Err` variant
+// itself: `DbError::NotFound(_)` is the confirmed-absent case (legitimate
+// fallback to `ResourceMeta::open()`), any other `Err` (a real storage
+// fault) must propagate.
+// ============================================================================
+
+/// Build a `ShamirDb` whose SYSTEM_REPO "groups" table is backed by a
+/// `FailingStore`, returning the `ShamirDb` plus a handle to arm/disarm the
+/// injected fault. The table starts unarmed so normal catalogue writes
+/// (`create_group`) succeed; the test arms the fault right before the
+/// `resource_meta`/`authorize_access` call under test.
+async fn shamir_with_failing_groups_table(
+) -> (ShamirDb, std::sync::Arc<failing_store::FailingStore>) {
+    use crate::engine::table::TableManager;
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let data_store = std::sync::Arc::new(failing_store::FailingStore::new());
+    let info_store: std::sync::Arc<dyn shamir_storage::types::Store> =
+        std::sync::Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
+    let tbl = TableManager::create(
+        "groups".to_string(),
+        data_store.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
+        info_store,
+    )
+    .await
+    .unwrap();
+
+    let system_repo = shamir.system_store().system_repo().unwrap();
+    system_repo.install_table_for_test("groups", tbl);
+
+    (shamir, data_store)
+}
+
+#[tokio::test]
+async fn resource_meta_group_fails_closed_on_storage_error() {
+    let (shamir, fault) = shamir_with_failing_groups_table().await;
+    shamir.create_group("testgroup").await.unwrap();
+
+    // Sanity: unarmed, the call succeeds (mirrors the Database fault-
+    // injection sanity check above: it confirms the unarmed path doesn't
+    // already error, not that the catalogue round-trip is deep-verified —
+    // that's covered by `group_resource_meta_reports_persisted_owner_and_group_class`
+    // in `root_user_group_meta_tests.rs`, which runs against the real
+    // (non-swapped) SYSTEM_REPO tables).
+    let meta = shamir
+        .resource_meta(&ResourcePath::Group {
+            name: "testgroup".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(meta.owner, Actor::System);
+
+    // Arm the fault: the next catalogue read (via resolve_group_id ->
+    // load_groups) returns a REAL Err, not a confirmed not-found. resource_meta
+    // must propagate it, NOT collapse it into ResourceMeta::open() (owner=
+    // System, mode 0o777 — accessible to everyone).
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = shamir
+        .resource_meta(&ResourcePath::Group {
+            name: "testgroup".into(),
+        })
+        .await;
+    assert!(
+        result.is_err(),
+        "resource_meta must propagate a real storage error from \
+         resolve_group_id as Err, not fail-open into a default-open \
+         ResourceMeta"
+    );
+}
+
+#[tokio::test]
+async fn authorize_access_denies_when_group_resource_meta_errors() {
+    let (shamir, fault) = shamir_with_failing_groups_table().await;
+    shamir.create_group("testgroup").await.unwrap();
+
+    // Under the OLD fail-open code, a group whose resolve_group_id call
+    // errors would collapse to ResourceMeta::open() (owner=System, mode
+    // 0o777) — any Actor::User would then be PERMITTED Read via the
+    // Other-rwx bits. Confirm the actor is a non-owner (User(999) is not
+    // System, and default owner is System) so a fail-open bug would show
+    // up as `Ok(())` here.
+    let actor = Actor::User(999);
+
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let result = shamir
+        .authorize_access(
+            &actor,
+            &ResourcePath::Group {
+                name: "testgroup".into(),
+            },
+            crate::access::Action::Read,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "authorize_access must deny (Err) when resource_meta for a Group \
+         fails with a real storage error — a fail-open bug would return \
+         Ok(()) here because the old default-open ResourceMeta permits \
+         every actor"
+    );
+}

@@ -175,14 +175,18 @@ impl ShamirDb {
             // Group — persisted `owner` on the existing group record,
             // computed mode. `group: Some(group_id)` makes a group's own
             // members a real permission class (roster-read for members).
-            // Not-found falls back to `ResourceMeta::open()` (mirrors the
-            // FunctionFolder "never created" convention above — a
-            // nonexistent group is not an error case for meta resolution).
+            // Confirmed not-found falls back to `ResourceMeta::open()`
+            // (mirrors the FunctionFolder "never created" convention above —
+            // a nonexistent group is not an error case for meta resolution).
+            // Any OTHER error from `resolve_group_id` (e.g. a real storage/
+            // catalogue-read failure) must propagate as `Err`, not collapse
+            // into a fail-open default-open ResourceMeta.
             ResourcePath::Group { name } => {
                 let group_ref = crate::query::admin::GroupRef::Name { name: name.clone() };
                 let group_id = match self.resolve_group_id(&group_ref).await {
                     Ok(id) => id,
-                    Err(_) => return Ok(ResourceMeta::open()),
+                    Err(DbError::NotFound(_)) => return Ok(ResourceMeta::open()),
+                    Err(e) => return Err(e),
                 };
                 match self.system_store.load_group(group_id).await {
                     Ok(Some(rec)) => Ok(ResourceMeta {
