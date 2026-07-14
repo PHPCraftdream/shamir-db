@@ -108,6 +108,10 @@ ShamirDB Auth Protocol v1 НЕ гарантирует:
 
 4.9. **Browser-mode security parity с native.** Browser лишён TLS exporter API → channel_binding ослаблен (`binding_mode=0x02`). Mitigations: strict TOFU + out-of-band pinning + HSTS + CSP.
 
+4.10. **Embedded/library trust boundary (deliberate, not an open finding).** Эта модель описывает **wire-facing** развёртывание — `shamir-server` перед сетевыми клиентами. Когда `shamir-db` используется НАПРЯМУЮ как embedded-библиотека (без `shamir-server`/wire-протокола вообще), отдельного «клиента» для аутентификации не существует — сам встраивающий процесс И ЕСТЬ trust boundary: код с прямым доступом к API уже строго более привилегирован, чем любой wire-аутентифицированный superuser. Из этого следует:
+- System-actor convenience-обёртки (`create_db`/`add_repo`/`rename_table`, task #606, `#[doc(hidden)]`, не `pub(crate)`) — корректны для embedded-вызывающих; опасны ТОЛЬКО если случайно попадут в код, обрабатывающий сетевые запросы (см. их SAFETY doc-комментарии).
+- Отсутствие `PrincipalResolver` в embedded-режиме (task #561) намеренно допускает невалидированные owner/member id — это принятый default для этого режима, а не пробел. Для wire-facing развёртывания резолвер обязателен и подключается `shamir-server`'ом при старте; это уже покрыто и протестировано.
+
 **Practical attack vectors при TLS MITM в browser path** (corporate proxy с installed CA, DNS hijack + rogue Let's Encrypt cert):
 - Атакующий перехватывает `GET /admin/static/main.<hash>.js`
 - Подменяет embedded Ed25519 server pin на свой
