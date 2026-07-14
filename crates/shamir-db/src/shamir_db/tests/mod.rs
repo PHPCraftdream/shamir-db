@@ -18,3 +18,4 @@ mod shamir_db_tests;
 mod system_changefeed_tests;
 mod system_metadata_tests;
 mod user_scalar_tests;
+mod wasm_compiler_permission_tests;

@@ -28,6 +28,23 @@
 //! 3. **Wall-clock timeout** — the build is killed after
 //!    [`WASM_COMPILE_TIMEOUT`], so a malicious or pathological guest
 //!    cannot wedge the host indefinitely.
+//!
+//! ## Defense-in-depth, layer 0: permission gate (task #607)
+//!
+//! Per the user's explicit direction (2026-07-14), the primary mitigation
+//! for "untrusted host compilation" is NOT OS-level sandboxing (no
+//! container/seccomp/rlimit) — it is a POSIX-style access-control gate,
+//! applied *before* this module is ever reached. Only actors holding
+//! `Action::Execute` on the `ResourcePath::WasmCompiler` singleton (default
+//! mode `0o755`, mirroring `ResourcePath::Root`) may trigger
+//! [`compile_rust_source`] at all; the check lives in
+//! `shamir-db`'s `create_function_with_opts_as`
+//! (`FunctionSource::Source` branch only — `FunctionSource::Wasm` uploads
+//! bypass the host compiler entirely and are unaffected), NOT in this
+//! module. This module stays policy-agnostic: it has no notion of actors,
+//! ACLs, or grants. The forbidden-macro scan / env allowlist / timeout
+//! above are the SECOND layer, defending the compilation process itself
+//! once an authorized actor has already been let through.
 
 use super::error::{FnResult, FunctionError};
 use std::fs;

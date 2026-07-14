@@ -161,6 +161,14 @@ impl ShamirDb {
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
+                // Task #607: compiling Rust source into WASM runs a host
+                // compiler process — gate it as a separate POSIX-style
+                // permission (Execute bit on the WasmCompiler singleton),
+                // not folded into bare FunctionNamespace Create. Mirrors the
+                // secret_grants escalation pattern above.
+                self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
+                    .await
+                    .map_err(|e| DbError::Function(e.to_string()))?;
                 let compiled = compile_rust_source(src).map_err(|e| match e {
                     FunctionError::ToolchainUnavailable(msg) => {
                         DbError::Function(format!("toolchain unavailable: {}", msg))

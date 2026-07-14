@@ -146,6 +146,24 @@ impl ShamirDb {
                     Err(e)
                 }
             },
+            // WasmCompiler — persisted meta, settings key "wasm_compiler_meta".
+            // Mirrors Root's default: absent key -> System-owned, 0o755 (task
+            // #607 — user's explicit directive: POSIX-style mode gate, not an
+            // OS sandbox).
+            ResourcePath::WasmCompiler => {
+                match self.system_store.load_setting("wasm_compiler_meta").await {
+                    Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
+                    Ok(None) => Ok(ResourceMeta {
+                        owner: Actor::System,
+                        group: None,
+                        mode: 0o755,
+                    }),
+                    Err(e) => {
+                        log::warn!("resource_meta: failed to load wasm compiler meta: {e}");
+                        Err(e)
+                    }
+                }
+            }
             // User — a FIXED, computed 3-tier rule, never persisted.
             // Task #559: the owner is the REAL principal64 resolved from
             // the directory via the injected PrincipalResolver. With a
@@ -330,6 +348,24 @@ impl ShamirDb {
                 let mut rec = QueryValue::Map(m);
                 meta.inject_into(&mut rec);
                 self.system_store.save_setting("root_meta", &rec).await
+            }
+            // WasmCompiler — mirrors the FunctionNamespace write arm above,
+            // keyed "wasm_compiler_meta" (task #607). No Root-style
+            // self-lockout guardrail: that guard is specific to Root's
+            // "always need a way back in via System bypass" concern, not
+            // applicable here — a locked-down WasmCompiler simply means
+            // Rust-source compilation is denied, recoverable via System.
+            ResourcePath::WasmCompiler => {
+                let mut m = shamir_types::types::common::new_map();
+                m.insert(
+                    "key".to_string(),
+                    QueryValue::Str("wasm_compiler_meta".to_string()),
+                );
+                let mut rec = QueryValue::Map(m);
+                meta.inject_into(&mut rec);
+                self.system_store
+                    .save_setting("wasm_compiler_meta", &rec)
+                    .await
             }
             // Group — mirrors the FunctionNamespace write arm's shape, but
             // only `owner` is settable (per the design doc, group `mode`

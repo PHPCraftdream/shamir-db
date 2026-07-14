@@ -400,6 +400,12 @@ pub enum ResourcePath {
     },
     /// The container under which user-defined functions are created.
     FunctionNamespace,
+    /// Global singleton gating the "compile Rust source into WASM"
+    /// capability (task #607) — separate from `FunctionNamespace`'s
+    /// bare Create right. Mode-bearing, POSIX-style ("x" bit = may
+    /// trigger host compilation), default `0o755` (mirrors `Root`'s
+    /// default — see `resource_meta`'s `ResourcePath::Root` arm).
+    WasmCompiler,
     /// A folder within the function namespace, addressed by path segments.
     ///
     /// For example, the folder `reports/daily` is represented as
@@ -514,6 +520,7 @@ impl ResourcePath {
                 table.clone(),
             )),
             ResourcePath::FunctionNamespace => Some(ResourcePath::Root),
+            ResourcePath::WasmCompiler => Some(ResourcePath::Root),
             ResourcePath::FunctionFolder { path } => {
                 if path.len() > 1 {
                     Some(ResourcePath::function_folder(
@@ -571,6 +578,7 @@ impl fmt::Display for ResourcePath {
                 index,
             } => write!(f, "db://{db}/{store}/{table}.idx/{index}"),
             ResourcePath::FunctionNamespace => f.write_str("fn://"),
+            ResourcePath::WasmCompiler => f.write_str("compiler://"),
             ResourcePath::FunctionFolder { path } => write!(f, "fn://{}/", path.join("/")),
             ResourcePath::Function { name } => write!(f, "fn://{name}"),
             ResourcePath::User { name } => write!(f, "user://{name}"),
