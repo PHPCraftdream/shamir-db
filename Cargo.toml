@@ -21,9 +21,11 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 # future 0.1.x/0.2 that hasn't been reviewed here. Was a non-reproducible
 # `path = "D:/dev/rust/captrack"` (audit C1).
 captrack = { version = "=0.1.0", features = ["telemetry"] }
-# TEMPORARY: path dep until bench-scale-tool is published as a standalone
-# crate (crates.io or a git dep) — swap this one line then.
-bench-scale-tool = { path = "D:/dev/rust/bench-scale-tool" }
+# Published on crates.io (https://crates.io/crates/bench-scale-tool, repo
+# https://github.com/PHPCraftdream/bench-scale-tool). Was a non-reproducible
+# `path = "D:/dev/rust/bench-scale-tool"` — broke every CI runner, which
+# never has that absolute path (numa.yml, supply-chain.yml).
+bench-scale-tool = { version = "0.1.0" }
 
 [workspace.lints.clippy]
 absolute_paths = "warn"
