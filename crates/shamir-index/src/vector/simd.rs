@@ -546,14 +546,6 @@ fn has_avx512vnni() -> bool {
     *CACHED.get_or_init(|| std::is_x86_feature_detected!("avx512vnni"))
 }
 
-#[cfg(target_arch = "aarch64")]
-#[inline]
-fn has_dotprod() -> bool {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| std::arch::is_aarch64_feature_detected!("dotprod"))
-}
-
 /// Unsigned u8 dot product: returns `Σ (a_i as u32) * (b_i as u32)`.
 ///
 /// Bit-exact across all dispatched kernels and the scalar reference. The
@@ -579,12 +571,6 @@ pub(crate) fn dot_u8(a: &[u8], b: &[u8]) -> u32 {
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if has_dotprod() {
-            // SAFETY: `has_dotprod()` guarantees the `dotprod` target
-            // feature (the `udot` instruction) required by the intrinsics
-            // in `dot_u8_neon_udot` is present on this CPU.
-            return unsafe { dot_u8_neon_udot(a, b) };
-        }
         if has_neon() {
             // SAFETY: `has_neon()` guarantees the NEON target feature
             // required by the intrinsics in `dot_u8_neon_wide`.
@@ -712,48 +698,7 @@ unsafe fn dot_u8_avx2(a: &[u8], b: &[u8]) -> u32 {
     sum
 }
 
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "dotprod")]
-unsafe fn dot_u8_neon_udot(a: &[u8], b: &[u8]) -> u32 {
-    use std::arch::aarch64::*;
-
-    debug_assert_eq!(a.len(), b.len());
-    let n = a.len().min(b.len());
-    let chunks = n / 16;
-
-    // Four u32x4 accumulators. `udot` (vdotq_u32) is UNSIGNED, so no
-    // signedness trap: four u8*u8 products per u32 lane, max 4*65025
-    // = 260100 ≪ 2^32 — no overflow.
-    let mut acc0 = vdupq_n_u32(0);
-    let mut acc1 = vdupq_n_u32(0);
-    let mut acc2 = vdupq_n_u32(0);
-    let mut acc3 = vdupq_n_u32(0);
-
-    let ap = a.as_ptr();
-    let bp = b.as_ptr();
-    let mut i = 0usize;
-    while i + 64 <= chunks * 16 {
-        acc0 = vdotq_u32(acc0, vld1q_u8(ap.add(i)), vld1q_u8(bp.add(i)));
-        acc1 = vdotq_u32(acc1, vld1q_u8(ap.add(i + 16)), vld1q_u8(bp.add(i + 16)));
-        acc2 = vdotq_u32(acc2, vld1q_u8(ap.add(i + 32)), vld1q_u8(bp.add(i + 32)));
-        acc3 = vdotq_u32(acc3, vld1q_u8(ap.add(i + 48)), vld1q_u8(bp.add(i + 48)));
-        i += 64;
-    }
-    while i + 16 <= chunks * 16 {
-        acc0 = vdotq_u32(acc0, vld1q_u8(ap.add(i)), vld1q_u8(bp.add(i)));
-        i += 16;
-    }
-
-    let sum = vaddq_u32(vaddq_u32(acc0, acc1), vaddq_u32(acc2, acc3));
-    let mut s = vaddvq_u32(sum);
-
-    for k in (chunks * 16)..n {
-        s += (a[k] as u32) * (b[k] as u32);
-    }
-    s
-}
-
-/// Portable NEON widening path for aarch64 CPUs WITHOUT `dotprod`.
+/// Portable NEON widening path for aarch64 CPUs.
 /// Uses `vmull_u8` (u8→u16 widening multiply) + accumulation in u32.
 /// Still bit-exact: no saturation, all-u32 accumulation.
 #[cfg(target_arch = "aarch64")]
