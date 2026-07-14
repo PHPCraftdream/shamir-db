@@ -701,19 +701,11 @@ impl ShamirDb {
     /// Always returns a gateway so that allowlist-denial is a catchable
     /// runtime error, not a "no net gateway" trap.
     ///
-    /// # Empty `net_grants` semantics (deliberate, documented choice)
+    /// # Empty `net_grants` semantics
     ///
-    /// Unlike `secret_grants` (empty = no secrets granted — the RESTRICTIVE
-    /// default), an EMPTY `net_grants` here means "no function-level
-    /// restriction": the function gets the FULL `net_allowlist`, exactly as
-    /// every function did before per-function `net_grants` existed. This is
-    /// intentionally inconsistent with `secret_grants`'s own precedent,
-    /// chosen for backward compatibility — flipping the default to
-    /// restrictive (empty = no egress) would silently lock every
-    /// already-deployed function that calls `ctx.http_fetch()` with no
-    /// `net_grants` ever set out of egress it currently has, with no
-    /// migration path (see `docs/dev-artifacts/prompts/audit/65-fix-544-*.md` and
-    /// `FunctionMeta::net_grants`'s doc comment for the full tradeoff). A
+    /// Task #609: empty `net_grants` now means NO egress, matching
+    /// `secret_grants`'s restrictive-by-default precedent. No
+    /// backward-compatibility constraint applies (pre-release). A
     /// non-empty `net_grants` list narrows the function to LESS than the DB
     /// default — there is no way to grant a function MORE than the DB
     /// ceiling.
@@ -739,10 +731,13 @@ impl ShamirDb {
     pub(super) fn build_net_gateway(&self, fn_name: &str) -> Arc<dyn NetGateway> {
         let net_grants = self.function_meta(fn_name).map(|m| m.net_grants);
         let effective = match net_grants {
-            // No catalogue entry (builtin) or an explicitly empty grant
-            // list: fall back to the full DB-wide allowlist (see doc above).
+            // No catalogue entry (builtin, not a user function going
+            // through `CreateFunctionOptions`): fall back to the full
+            // DB-wide allowlist — a different code path from "explicit
+            // empty grants" below.
             None => self.net_allowlist.to_vec(),
-            Some(grants) if grants.is_empty() => self.net_allowlist.to_vec(),
+            // Explicitly empty grants: NO egress at all (task #609).
+            Some(grants) if grants.is_empty() => Vec::new(),
             // Non-empty grants: intersect with the DB-wide allowlist so the
             // function is scoped to the OVERLAP, never beyond the DB ceiling.
             Some(grants) => self

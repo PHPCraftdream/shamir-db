@@ -16,6 +16,7 @@ pub fn create_function(name: impl Into<String>) -> CreateFunction {
         visibility: None,
         security: None,
         secret_grants: Vec::new(),
+        net_grants: Vec::new(),
         hmac: None,
     }
 }
@@ -29,6 +30,7 @@ pub struct CreateFunction {
     visibility: Option<String>,
     security: Option<String>,
     secret_grants: Vec<String>,
+    net_grants: Vec<String>,
     hmac: Option<String>,
 }
 
@@ -72,6 +74,15 @@ impl CreateFunction {
         self
     }
 
+    /// Set the egress allowlist for this function, intersected with the
+    /// DB-wide `net_allowlist` (can only narrow, never exceed the DB
+    /// ceiling). Absent/empty means NO egress for this function (task
+    /// #609 — matches `secret_grants`'s restrictive-by-default precedent).
+    pub fn net_grants(mut self, grants: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.net_grants = grants.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Attach the hex-encoded HMAC tag.
     /// canonical = `canonical_create_function(name, security, secret_grants)`.
     /// Required IFF `security == "definer"` or `secret_grants` is non-empty.
@@ -90,6 +101,7 @@ impl CreateFunction {
             visibility: self.visibility,
             security: self.security,
             secret_grants: self.secret_grants,
+            net_grants: self.net_grants,
             hmac: self.hmac,
         })
     }

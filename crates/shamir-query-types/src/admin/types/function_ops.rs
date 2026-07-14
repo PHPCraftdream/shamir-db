@@ -9,11 +9,14 @@ use super::db_ops::is_false;
 /// Exactly one of `source` or `wasm` must be provided. `wasm` is the raw
 /// binary bytes (base64-encoded on the wire).
 ///
-/// `visibility`/`security`/`secret_grants` thread the in-process
-/// `CreateFunctionOptions` fields onto the wire (task #554). Absent/empty
-/// values preserve the historical defaults (`Private` / `Invoker` / no
-/// grants). `security: "definer"` and non-empty `secret_grants` each
-/// require a matching `hmac` tag (conditional — see `check_destructive_hmacs`).
+/// `visibility`/`security`/`secret_grants`/`net_grants` thread the
+/// in-process `CreateFunctionOptions` fields onto the wire (task #554,
+/// #609). Absent/empty values preserve the historical defaults (`Private` /
+/// `Invoker` / no secret grants / no egress). `security: "definer"` and
+/// non-empty `secret_grants` each require a matching `hmac` tag
+/// (conditional — see `check_destructive_hmacs`). `net_grants` is
+/// narrowing-only (never exceeds the DB-wide `net_allowlist`), so it does
+/// NOT require an `hmac` tag.
 ///
 /// ```text
 /// { "create_function": "my_fn", "source": "pub fn shamir_call …", "replace": false }
@@ -46,6 +49,13 @@ pub struct CreateFunctionOp {
     /// AND an `hmac` tag — see `hmac` below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_grants: Vec<String>,
+    /// Egress allowlist for this function, INTERSECTED with the DB-wide
+    /// `net_allowlist` (can only narrow, never exceed the DB ceiling).
+    /// Absent/empty means NO egress for this function (task #609 — matches
+    /// `secret_grants`'s restrictive-by-default precedent; no backward-
+    /// compatibility default, this repo has not released yet).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub net_grants: Vec<String>,
     /// Hex-encoded HMAC-SHA256 tag, required IFF `security == Some("definer")`
     /// or `secret_grants` is non-empty (conditional — NOT required for
     /// every `CreateFunctionOp`, unlike `chmod`/`drop_db`/etc.).

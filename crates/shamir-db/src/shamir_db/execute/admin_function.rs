@@ -60,7 +60,7 @@ impl ShamirAdminExecutor {
             visibility,
             security,
             secret_grants: op.secret_grants.clone(),
-            net_grants: Vec::new(), // unchanged — net_grants has its own separate wiring (task #544)
+            net_grants: op.net_grants.clone(), // task #609: wire surface added
         };
 
         if let Some(ref source) = op.source {

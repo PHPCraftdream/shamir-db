@@ -24,6 +24,8 @@ use shamir_engine::function::{
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::Query;
+use shamir_query_types::admin::CreateFunctionOp;
+use shamir_query_types::batch::BatchOp;
 use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -840,8 +842,26 @@ async fn wasm_function_http_fetch_allowed() {
     let mut db = ShamirDb::init_memory().await.unwrap();
     db.set_net_allowlist(vec!["127.0.0.1".to_string()]);
 
-    if !compile_or_skip(&db, "fetcher", HTTP_FETCH_SRC).await {
-        return;
+    // Task #609: empty `net_grants` now denies all egress, so this test
+    // (which makes a REAL network call and expects it to succeed) must
+    // grant the mock server's host explicitly.
+    let opts = CreateFunctionOptions {
+        replace: false,
+        visibility: Visibility::Private,
+        security: Security::Invoker,
+        secret_grants: Vec::new(),
+        net_grants: vec!["127.0.0.1".to_string()],
+    };
+    match db
+        .create_function_with_opts("fetcher", FunctionSource::Source(HTTP_FETCH_SRC), opts)
+        .await
+    {
+        Ok(()) => {}
+        Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
+            eprintln!("SKIP wasm_function_http_fetch_allowed — toolchain unavailable: {msg}");
+            return;
+        }
+        Err(e) => panic!("compile fetcher failed: {e}"),
     }
 
     let mut params = Params::new();
@@ -873,22 +893,21 @@ async fn wasm_function_http_fetch_allowed() {
     }
 }
 
-// ── #544: per-function net_grants capability ─────────────────────────
+// ── #544/#609: per-function net_grants capability ─────────────────────
 
 /// A function created with the default options (empty `net_grants`) must
-/// still reach a host the DB-wide `net_allowlist` permits — this is the
-/// chosen backward-compatible empty-list semantics (finding 1, task #544):
-/// empty `net_grants` means "no function-level restriction beyond the DB
-/// allowlist", NOT "no egress at all". `wasm_function_http_fetch_allowed`
-/// above already exercises this path end-to-end (real mock server); this
-/// test pins the invariant explicitly via the allowlist-denial error string
-/// so a future accidental flip to the empty-means-nothing semantics fails
-/// loudly here even without curl/network available.
+/// be denied ALL egress, even to a host the DB-wide `net_allowlist`
+/// permits — task #609 flips the empty-list default to match
+/// `secret_grants`'s restrictive-by-default precedent: empty `net_grants`
+/// means "no egress at all" for this function, not "fall back to the DB
+/// allowlist". This pins the invariant explicitly via the allowlist-denial
+/// error string so a future accidental flip back to the permissive
+/// semantics fails loudly here even without curl/network available.
 #[tokio::test]
-async fn net_grants_empty_falls_back_to_db_allowlist() {
+async fn net_grants_empty_denies_all_egress() {
     let mut db = ShamirDb::init_memory().await.unwrap();
     // DB-wide allowlist permits an example host; the function has NO
-    // net_grants configured (default options).
+    // net_grants configured (default options) — must still be denied.
     db.set_net_allowlist(vec!["allowed.example.com".to_string()]);
 
     if !compile_or_skip(&db, "fetcher", HTTP_FETCH_SRC).await {
@@ -904,12 +923,16 @@ async fn net_grants_empty_falls_back_to_db_allowlist() {
     match result {
         QueryValue::Str(s) if s.starts_with("err:") => {
             assert!(
-                !s.contains("not allowed"),
-                "empty net_grants must fall back to the full DB allowlist \
-                 (backward compat) — got allowlist-denial error: {s}"
+                s.contains("not allowed"),
+                "empty net_grants must deny ALL egress (task #609, restrictive \
+                 default) — expected an allowlist-denial error, got: {s}"
             );
         }
-        _ => {} // any non-allowlist outcome (e.g. DNS/connect failure) is fine
+        other => panic!(
+            "expected an allowlist-denial error string for a function with \
+             empty net_grants, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -994,6 +1017,71 @@ async fn net_grants_narrower_than_db_allowlist_denies_outside_host() {
         other => panic!(
             "expected an allowlist-denial error string for a host outside \
              net_grants, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Task #609 wire-surface check: a function created via the wire
+/// `create_function` batch op (`BatchOp::CreateFunction` /
+/// `handle_create_function`), with `net_grants` left at its default (empty
+/// `Vec`), must get NO egress at all — even to a host the DB-wide
+/// `net_allowlist` permits. This guards the wire-path plumbing added in
+/// `admin_function.rs::handle_create_function` (previously hardcoded to
+/// `Vec::new()` regardless of what the caller wanted; now threads
+/// `op.net_grants` through), independent of the embedded-API path already
+/// covered by `net_grants_empty_denies_all_egress` above.
+#[tokio::test]
+async fn create_function_with_empty_net_grants_via_wire_gets_no_egress() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("testdb").await;
+    db.set_net_allowlist(vec!["allowed.example.com".to_string()]);
+
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        BatchOp::CreateFunction(CreateFunctionOp {
+            create_function: "wire_fetcher".to_string(),
+            source: Some(HTTP_FETCH_SRC.to_string()),
+            wasm: None,
+            replace: false,
+            visibility: None,
+            security: None,
+            secret_grants: Vec::new(),
+            net_grants: Vec::new(), // default — must deny all egress (task #609)
+            hmac: None,
+        }),
+    );
+    let req = b.to_request_via_msgpack();
+    match db.execute("testdb", &req).await {
+        Ok(_) => {}
+        Err(e) if e.to_string().contains("toolchain unavailable") => {
+            eprintln!(
+                "SKIP create_function_with_empty_net_grants_via_wire_gets_no_egress — toolchain unavailable: {e}"
+            );
+            return;
+        }
+        Err(e) => panic!("create_function via wire failed: {e}"),
+    }
+
+    let mut params = Params::new();
+    params.set(
+        "url",
+        QueryValue::Str("http://allowed.example.com/".to_string()),
+    );
+    let result = db.invoke_function("wire_fetcher", params).await.unwrap();
+    match result {
+        QueryValue::Str(s) if s.starts_with("err:") => {
+            assert!(
+                s.contains("not allowed"),
+                "function created via the wire with default (empty) net_grants \
+                 must deny ALL egress (task #609), got: {s}"
+            );
+        }
+        other => panic!(
+            "expected an allowlist-denial error string for a wire-created \
+             function with empty net_grants, got: {:?}",
             other
         ),
     }
