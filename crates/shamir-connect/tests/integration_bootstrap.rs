@@ -59,7 +59,7 @@ fn full_bootstrap_round_trip() {
 
     // Server consumes the token and creates the user.
     let mut server_key_buf = zeroize::Zeroizing::new([0u8; 32]);
-    server_key_buf.copy_from_slice(&request.server_key);
+    server_key_buf.copy_from_slice(request.server_key.as_slice());
     let user_record = state
         .consume(
             &request.token,

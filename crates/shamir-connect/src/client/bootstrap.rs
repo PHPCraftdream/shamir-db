@@ -17,7 +17,7 @@ use crate::common::username::NormalizedUsername;
 use crate::server::bootstrap::{
     make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum allowed clock skew between client and server during bootstrap.
 /// Per spec §11.3.4 (d).
@@ -100,11 +100,11 @@ pub fn build_request(
     server_key_bytes.copy_from_slice(&derived.server_key[..]);
 
     Ok(BootstrapRequest {
-        token,
+        token: Zeroizing::new(token),
         user,
         salt,
         stored_key: derived.stored_key.0,
-        server_key: server_key_bytes,
+        server_key: Zeroizing::new(server_key_bytes),
         kdf_params,
     })
 }

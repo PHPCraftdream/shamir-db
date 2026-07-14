@@ -210,10 +210,13 @@ pub struct BootstrapChallenge {
 }
 
 /// Wire view: client → server `bootstrap` (the actual create-superuser).
-#[derive(Debug, Clone)]
+///
+/// Custom [`Debug`] impl redacts `token` and `server_key` — both are raw
+/// crypto secrets (the operator-issued bootstrap token and the SCRAM server
+/// key) and must never appear in `{:?}`-style logging.
 pub struct BootstrapRequest {
     /// 32-byte token from operator (out-of-band channel).
-    pub token: [u8; 32],
+    pub token: Zeroizing<[u8; 32]>,
     /// Username (post-NFC + UsernameCaseMapped).
     pub user: NormalizedUsername,
     /// Per-user salt.
@@ -221,9 +224,22 @@ pub struct BootstrapRequest {
     /// Stored key (= SHA256(client_key)).
     pub stored_key: [u8; 32],
     /// Server key (= HMAC(salted_password, "Server Key")).
-    pub server_key: [u8; 32],
+    pub server_key: Zeroizing<[u8; 32]>,
     /// KDF parameters used.
     pub kdf_params: KdfParams,
+}
+
+impl core::fmt::Debug for BootstrapRequest {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BootstrapRequest")
+            .field("token", &"<REDACTED>")
+            .field("user", &self.user)
+            .field("salt", &self.salt)
+            .field("stored_key", &self.stored_key)
+            .field("server_key", &"<REDACTED>")
+            .field("kdf_params", &self.kdf_params)
+            .finish()
+    }
 }
 
 /// Server-side: build the [`BootstrapChallenge`] in response to `bootstrap_hello`.
