@@ -44,3 +44,4 @@
 | `phase-d/` | Referential ON DELETE: FkAction DTO → RESTRICT (см. дизайн `docs/dev-artifacts/design/declarative-schema-validators/10-referential-on-delete.md`) |
 | `builders/` | B1 Batch-сеттеры · B3 `val::expr`/`val::cond` |
 | `deps/` | Мажорные бампы сторонних зависимостей (scc 2→3 и т.п.) |
+| `security-remediation/` | Закрытие остаточных находок аудитов 6/10/11 июля (taskId #602–#617) |
