@@ -181,6 +181,22 @@ case "$mode" in
         ;;
 esac
 
+# CI runners have far fewer real cores than a dev box (this repo's dev
+# machines: 16 logical cores) and run the SAME 30+ test binaries under the
+# SAME nextest parallelism — CPU-bound / heavily-contended tests (worker
+# threads competing with busy-spin reader tasks, WASM cranelift compiles,
+# etc.) can legitimately need much longer wall-clock time to make progress
+# there, without being deadlocked. `[profile.ci]` in .config/nextest.toml
+# already encodes a looser kill threshold (60s x 10 = 600s) for exactly
+# this; this wrapper never selected it, so every CI run silently used
+# `[profile.default]`'s 180s kill instead, misreporting real contention as
+# a hung/failed test. `CI=true` is set automatically by GitHub Actions (and
+# most other CI providers) — auto-select the ci profile there unless the
+# caller already passed an explicit `--profile`.
+if [[ "${CI:-}" == "true" ]] && ! printf '%s\n' "${extra_args[@]:-}" | grep -q -- '--profile'; then
+    nextest_args+=(--profile ci)
+fi
+
 echo "» cargo nextest run ${nextest_args[*]} ${extra_args[*]:-}" >&2
 # The cargo-runner guard (.cargo/config.toml) gates on $NEXTEST, which
 # nextest sets itself for every test process it launches — so no
