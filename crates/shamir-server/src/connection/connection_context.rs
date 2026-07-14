@@ -56,6 +56,13 @@ pub struct ConnectionContext {
     /// task + buffers indefinitely otherwise. Real clients send `auth_init`
     /// within ~50 ms; the default of 5 s is comfortably above network jitter.
     pub auth_init_timeout: Duration,
+    /// Maximum idle time on an authenticated connection before the server
+    /// closes it (task #616 pt.3). Resets on every frame received on the
+    /// request loop. Distinct from `auth_init_timeout` (pre-auth only) and
+    /// from any per-request wall-clock timeout — this bounds how long a
+    /// session can hold its slot + socket while sending nothing at all.
+    /// Default is [`shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT`].
+    pub idle_timeout: Duration,
     /// Maximum number of requests in-flight concurrently on a single
     /// connection. Controls the per-connection semaphore + writer-channel
     /// capacity in [`request_loop`]. `1` gives lock-step semantics;
@@ -99,6 +106,7 @@ impl ConnectionContext {
         transport_kind: TransportKind,
         kdf_override: Option<KdfParams>,
         auth_init_timeout: Duration,
+        idle_timeout: Duration,
         max_in_flight: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -119,6 +127,7 @@ impl ConnectionContext {
             transport_kind,
             kdf_override,
             auth_init_timeout,
+            idle_timeout,
             max_in_flight,
         })
     }

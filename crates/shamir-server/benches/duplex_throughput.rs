@@ -143,6 +143,7 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
         TransportKind::Tcp,
         None,
         Duration::from_secs(5),
+        shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT,
         max_in_flight,
     )
 }

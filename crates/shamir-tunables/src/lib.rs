@@ -47,6 +47,13 @@ pub mod instance_defaults {
     /// * Default `32` → up to 32 pipelined requests before the reader stalls.
     pub const CONN_MAX_IN_FLIGHT: usize = 32;
 
+    /// Maximum idle time on an authenticated connection before the server
+    /// closes it (task #616 pt.3). Resets on every frame received. A
+    /// generous default — legitimate clients send SOMETHING (even a Ping)
+    /// well within this window; a silent connection past it is either dead
+    /// or abandoned and should not hold a session slot + socket forever.
+    pub const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
     /// Post-auth per-session request-rate limit (task #608). Token-bucket,
     /// burst = 1 second's worth (mirrors the pre-auth `auth_init`
     /// rate-limiter's burst convention in `shamir-connect::server::rate_limit`).

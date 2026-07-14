@@ -67,9 +67,24 @@ impl RequestHandler for StubHandler {
 // ---------------------------------------------------------------------------
 
 /// Build a minimal `Arc<ConnectionContext>` with the given `max_in_flight` and
-/// a pre-inserted session with `session_id = [0xAB; 32]`.
+/// a pre-inserted session with `session_id = [0xAB; 32]`. Uses the production
+/// `CONN_IDLE_TIMEOUT` default; use [`make_ctx_with_session_and_idle_timeout`]
+/// to override it for idle-timeout tests.
 fn make_ctx_with_session(
     max_in_flight: usize,
+) -> (Arc<shamir_server::connection::ConnectionContext>, [u8; 32]) {
+    make_ctx_with_session_and_idle_timeout(
+        max_in_flight,
+        shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT,
+    )
+}
+
+/// Same as [`make_ctx_with_session`] but with an explicit `idle_timeout`, so
+/// tests can exercise the post-auth idle-timeout close path (task #616 pt.3)
+/// without waiting on the 600 s production default.
+fn make_ctx_with_session_and_idle_timeout(
+    max_in_flight: usize,
+    idle_timeout: Duration,
 ) -> (Arc<shamir_server::connection::ConnectionContext>, [u8; 32]) {
     use shamir_connect::common::kdf_params::KdfParams;
     use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
@@ -150,6 +165,7 @@ fn make_ctx_with_session(
         TransportKind::Tcp,
         None,
         Duration::from_secs(5),
+        idle_timeout,
         max_in_flight,
     );
 
@@ -394,6 +410,45 @@ async fn duplex_test4_burst_16_requests() {
     assert_eq!(
         received_rids, expected,
         "all 16 rids must be received exactly once"
+    );
+
+    drop(cw);
+    drop(cr);
+    let _ = loop_task.await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 — post-auth idle timeout: an authenticated connection that never
+// sends a frame is closed by the server once `idle_timeout` elapses
+// (task #616 pt.3). Symmetric to the existing `auth_init_timeout` coverage,
+// but for the *post*-auth phase.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplex_test6_idle_timeout_closes_silent_connection() {
+    let idle_timeout = Duration::from_millis(200);
+    let (ctx, sid) = make_ctx_with_session_and_idle_timeout(8, idle_timeout);
+
+    let (server_io, client_io) = duplex(128 * 1024);
+    let (server_r, server_w) = TcpFramer::new(server_io).split();
+
+    let loop_task = tokio::spawn(request_loop(ctx, server_r, server_w, sid));
+
+    let (mut cr, cw) = tokio::io::split(client_io);
+
+    // Deliberately send nothing. The server must close the connection on its
+    // own once `idle_timeout` elapses, without the client ever writing or
+    // closing its half.
+    let mut buf = Vec::new();
+    let result = timeout(
+        Duration::from_secs(2),
+        read_frame_into(&mut cr, MAX_FRAME_SIZE_DEFAULT, &mut buf),
+    )
+    .await
+    .expect("server did not close the idle connection within 2s");
+    assert!(
+        result.is_err(),
+        "server must close the connection after idle_timeout elapses with no frames"
     );
 
     drop(cw);

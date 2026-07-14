@@ -22,7 +22,8 @@
 //!   must correlate by `request_id` (rid). `max_in_flight = 1` gives
 //!   lock-step ordering identical to the old sequential loop.
 //!
-//! Teardown on any exit path:
+//! Teardown on any exit path (client EOF/error, writer death, panic in
+//! dispatch, or post-auth idle timeout — task #616 pt.3):
 //!   - `join_set.abort_all()` cancels in-flight dispatch tasks.
 //!   - `tx` (Sender) is dropped, closing the channel.
 //!   - Writer task sees channel closed → calls `writer.shutdown().await` and
@@ -266,6 +267,17 @@ pub async fn request_loop<R, W>(
                 // Tear down immediately; do not block on a lingering client.
                 drop(permit);
                 writer_done = true;
+                break;
+            }
+            _ = tokio::time::sleep(ctx.idle_timeout) => {
+                // No frame arrived within the idle window — close the
+                // connection (task #616 pt.3). Not an error path per se, just
+                // reclaiming an abandoned/dead connection's resources. This
+                // `sleep` is recreated fresh on every loop iteration, so it
+                // naturally measures time since the *last* frame, not a
+                // fixed wall-clock deadline — no manual Instant/reset needed.
+                tracing::info!(idle_timeout_secs = ctx.idle_timeout.as_secs(), "connection idle timeout");
+                drop(permit);
                 break;
             }
         }

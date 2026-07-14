@@ -782,6 +782,7 @@ fn build_ctx(
 ) -> Arc<ConnectionContext> {
     let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
     let max_in_flight = shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT;
+    let idle_timeout = shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT;
     ConnectionContext::new(
         identity.clone(),
         identity_keypair,
@@ -800,6 +801,7 @@ fn build_ctx(
         transport_kind,
         kdf_override,
         auth_init_timeout,
+        idle_timeout,
         max_in_flight,
     )
 }

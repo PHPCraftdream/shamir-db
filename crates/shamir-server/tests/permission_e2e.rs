@@ -1664,7 +1664,10 @@ async fn coarse_gate_access_tree_and_list_semantics() {
                 "List(Databases) should be access_denied by default (task #615/#620)"
             );
         }
-        other => panic!("expected access_denied for List(Databases), got {:?}", other),
+        other => panic!(
+            "expected access_denied for List(Databases), got {:?}",
+            other
+        ),
     }
 
     cleanup(&mut bob_w, &mut bob_r).await;
