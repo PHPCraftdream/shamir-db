@@ -96,8 +96,8 @@ impl FieldMap {
     pub fn insert_entry(&self, name: &str, id: u64) {
         // Forward direction. Ignore the (name, id) return on collision —
         // first writer wins (see doc comment).
-        let _ = self.name_to_id.insert(name.to_string(), id);
-        let _ = self.id_to_name.insert(id, name.to_string());
+        let _ = self.name_to_id.insert_sync(name.to_string(), id);
+        let _ = self.id_to_name.insert_sync(id, name.to_string());
         self.advance_epoch(id);
     }
 
@@ -113,12 +113,12 @@ impl FieldMap {
         // Option is the key-presence signal, so the closure returns the bare
         // id and the outer Option IS our result. `name` (the key) is the
         // STRING being resolved — §9.4: we never parse it as a number.
-        self.name_to_id.read(name, |_, id| *id)
+        self.name_to_id.read_sync(name, |_, id| *id)
     }
 
     /// Reverse lookup: id → name.
     pub fn name_of(&self, id: u64) -> Option<String> {
-        self.id_to_name.read(&id, |_, name| name.clone())
+        self.id_to_name.read_sync(&id, |_, name| name.clone())
     }
 
     /// Collect the names from `input` that are NOT yet cached.
@@ -207,17 +207,17 @@ impl InternerCacheRegistry {
         let key = (db.to_string(), repo.to_string());
         // Fast path: already present. `read` returns `Option<R>`; the closure
         // clones the inner Arc, so the outer Option is the presence signal.
-        if let Some(fm) = self.maps.read(&key, |_, v| Arc::clone(v)) {
+        if let Some(fm) = self.maps.read_sync(&key, |_, v| Arc::clone(v)) {
             return fm;
         }
         // Slow path: race the insert. Loser gets back the winner's Arc.
         let new_fm = Arc::new(FieldMap::new());
-        match self.maps.insert(key, Arc::clone(&new_fm)) {
+        match self.maps.insert_sync(key, Arc::clone(&new_fm)) {
             Ok(()) => new_fm,
             Err((recovered_key, _)) => {
                 // Another caller won the race — hand back theirs.
                 self.maps
-                    .read(&recovered_key, |_, v| Arc::clone(v))
+                    .read_sync(&recovered_key, |_, v| Arc::clone(v))
                     // scc insert failed AND the read missed — should be
                     // unreachable given the prior insert. Fall back to a fresh
                     // map rather than panicking on a cache miss.

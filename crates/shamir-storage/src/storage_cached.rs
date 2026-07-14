@@ -64,16 +64,16 @@ impl CacheAction {
     fn apply(self, cache: &TreeIndex<RecordKey, Bytes>, size: &AtomicUsize) {
         match self {
             Self::Populate(key, value) => {
-                let existed = cache.remove(&key);
+                let existed = cache.remove_sync(&key);
                 if !existed {
                     size.fetch_add(1, Ordering::Relaxed);
                 }
                 // insert always succeeds after a remove (scc::TreeIndex
                 // only rejects on a duplicate key, which we just removed).
-                let _ = cache.insert(key, value);
+                let _ = cache.insert_sync(key, value);
             }
             Self::Invalidate(key) => {
-                if cache.remove(&key) {
+                if cache.remove_sync(&key) {
                     size.fetch_sub(1, Ordering::Relaxed);
                 }
             }
@@ -123,7 +123,7 @@ impl CachedStore {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {
-                if cache.insert(key, value).is_ok() {
+                if cache.insert_sync(key, value).is_ok() {
                     size.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -191,7 +191,7 @@ impl CachedStore {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {
-                if self.cache.insert(key, value).is_ok() {
+                if self.cache.insert_sync(key, value).is_ok() {
                     self.size.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -218,12 +218,12 @@ impl CachedStore {
     /// Cache-internal upsert: remove old entry (updating size), then insert new.
     /// Returns `true` if this was a new key (didn't exist before).
     fn cache_upsert(&self, key: RecordKey, value: Bytes) -> bool {
-        let existed = self.cache.remove(&key);
+        let existed = self.cache.remove_sync(&key);
         if !existed {
             self.size.fetch_add(1, Ordering::Relaxed);
         }
         // insert always succeeds after remove
-        let _ = self.cache.insert(key, value);
+        let _ = self.cache.insert_sync(key, value);
         !existed
     }
 }
@@ -236,7 +236,7 @@ impl Store for CachedStore {
         let key = self.inner.insert(value.clone()).await?;
 
         // Cache the value immediately (new key, so always increments size)
-        let _ = self.cache.insert(key.clone(), value);
+        let _ = self.cache.insert_sync(key.clone(), value);
         self.size.fetch_add(1, Ordering::Relaxed);
         Ok(key)
     }
@@ -286,7 +286,7 @@ impl Store for CachedStore {
         let value = self.inner.get(key.clone()).await?;
 
         // Store in cache for future access (new entry → increment size)
-        if self.cache.insert(key, value.clone()).is_ok() {
+        if self.cache.insert_sync(key, value.clone()).is_ok() {
             self.size.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -294,7 +294,7 @@ impl Store for CachedStore {
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        let existed = self.cache.remove(&key);
+        let existed = self.cache.remove_sync(&key);
         if existed {
             self.size.fetch_sub(1, Ordering::Relaxed);
         }
@@ -356,7 +356,7 @@ impl Store for CachedStore {
                 // Drive one batch inside a short-lived Guard scope.
                 let cur_last = last_key.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
-                    let g = scc::ebr::Guard::new();
+                    let g = scc::Guard::new();
                     // Use the tuple `(Bound<RecordKey>, Bound<RecordKey>)`
                     // form so scc infers `Q = RecordKey` (which is
                     // `Comparable<RecordKey>`); an explicit `Bound<..>..`
@@ -416,7 +416,7 @@ impl Store for CachedStore {
                 let cur_last = last_key.clone();
                 let pfx = prefix.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
-                    let g = scc::ebr::Guard::new();
+                    let g = scc::Guard::new();
                     // `Bound` type must be `Comparable<RecordKey>` → use
                     // owned `RecordKey` for the bound key (the prefix bound
                     // converts the `Bytes` prefix into a `RecordKey`, a

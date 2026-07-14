@@ -101,7 +101,7 @@ async fn ssi_records_reads_and_detects_write_skew_end_to_end() {
     );
     assert!(
         tx1.read_set
-            .read(&(token, key.clone()), |_, _| ())
+            .read_sync(&(token, key.clone()), |_, _| ())
             .is_some(),
         "the recorded read must be keyed by (table_token, record key)"
     );

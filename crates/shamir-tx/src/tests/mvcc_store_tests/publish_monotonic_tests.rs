@@ -26,7 +26,7 @@ use shamir_storage::types::RecordKey;
 /// Returns `None` when the key has no cell (mirrors the probe pattern in
 /// `cell_reservation_tests.rs`).
 fn cell_state(mvcc: &MvccStore, key: &[u8]) -> Option<(u64, u64)> {
-    mvcc.cells.read(key, |_, c| (c.version, c.reserved_by))
+    mvcc.cells.read_sync(key, |_, c| (c.version, c.reserved_by))
 }
 
 // ----------------------------------------------------------------

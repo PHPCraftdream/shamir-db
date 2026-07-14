@@ -19,7 +19,7 @@ tokio-rustls = "0.26"
 rustls  = { version = "0.23", default-features = false, features = ["std"] }
 
 # Lock-free concurrent maps (interner field-map cache registry + per-repo maps).
-scc = "2.2"
+scc = "3.8"
 
 # Wire serialization
 serde       = { version = "1", features = ["derive"] }

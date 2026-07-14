@@ -26,7 +26,7 @@ fn cell_state(mvcc: &MvccStore, key: &[u8]) -> Option<(u64, u64)> {
     // on `RecordCell`, so probe the map directly (the live path never reads
     // the marker — asserting it is the whole point here). Other mvcc_store
     // tests probe `mvcc.cells` the same way (see `version_tests.rs`).
-    mvcc.cells.read(key, |_, c| (c.version, c.reserved_by))
+    mvcc.cells.read_sync(key, |_, c| (c.version, c.reserved_by))
 }
 
 #[tokio::test]

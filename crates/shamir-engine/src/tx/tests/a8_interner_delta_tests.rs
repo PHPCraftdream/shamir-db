@@ -123,7 +123,7 @@ async fn a8_fast_path_first_interner_still_recorded() {
     staging.set(Bytes::from_static(b"k").into(), staged_bytes);
     let mut tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
     tx.interner_overlay
-        .insert("brand_new".to_string(), overlay_id)
+        .insert_sync("brand_new".to_string(), overlay_id)
         .expect("overlay insert ok");
     tx.write_set.insert(token, staging);
 

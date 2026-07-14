@@ -41,7 +41,7 @@ impl FunctionRegistry {
     pub fn register(&self, name: impl Into<String>, f: Arc<dyn ShamirFunction>) -> FnResult<()> {
         let name = name.into();
         self.functions
-            .insert(name.clone(), f)
+            .insert_sync(name.clone(), f)
             .map_err(|_| FunctionError::AlreadyExists(name))
     }
 
@@ -49,48 +49,53 @@ impl FunctionRegistry {
     /// new artifact; in-flight ones keep the `Arc` they captured.
     pub fn replace(&self, name: impl Into<String>, f: Arc<dyn ShamirFunction>) {
         let name = name.into();
-        let _ = self.functions.remove(&name);
-        let _ = self.functions.insert(name, f);
+        let _ = self.functions.remove_sync(&name);
+        let _ = self.functions.insert_sync(name, f);
     }
 
     /// Look up a function by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn ShamirFunction>> {
-        self.functions.read(name, |_, v| v.clone())
+        self.functions.read_sync(name, |_, v| v.clone())
     }
 
     /// Whether a function is registered under `name`.
     pub fn contains(&self, name: &str) -> bool {
-        self.functions.contains(name)
+        self.functions.contains_sync(name)
     }
 
     /// Drop a function. Returns `true` if it existed.
     pub fn remove(&self, name: &str) -> bool {
-        self.functions.remove(name).is_some()
+        self.functions.remove_sync(name).is_some()
     }
 
     /// Rename `from` → `to` (pure re-key, no recompile). Errors if `from` is
     /// missing or `to` is already taken.
     pub fn rename(&self, from: &str, to: &str) -> FnResult<()> {
-        if self.functions.contains(to) {
+        if self.functions.contains_sync(to) {
             return Err(FunctionError::AlreadyExists(to.to_string()));
         }
         let (_, f) = self
             .functions
-            .remove(from)
+            .remove_sync(from)
             .ok_or_else(|| FunctionError::NotFound(from.to_string()))?;
         // `to` was free a moment ago; if a racing register grabbed it, put
         // `from` back and report the collision.
-        self.functions.insert(to.to_string(), f).map_err(|(_, f)| {
-            let _ = self.functions.insert(from.to_string(), f);
-            FunctionError::AlreadyExists(to.to_string())
-        })
+        self.functions
+            .insert_sync(to.to_string(), f)
+            .map_err(|(_, f)| {
+                let _ = self.functions.insert_sync(from.to_string(), f);
+                FunctionError::AlreadyExists(to.to_string())
+            })
     }
 
     /// Snapshot of registered names.
     #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub fn list(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(self.functions.len());
-        self.functions.scan(|k, _| out.push(k.clone()));
+        self.functions.iter_sync(|k, _| {
+            out.push(k.clone());
+            true
+        });
         out
     }
 

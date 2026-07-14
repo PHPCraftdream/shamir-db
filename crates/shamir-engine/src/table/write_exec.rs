@@ -12,7 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::StreamExt;
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use crate::function::builtin_scalars;
 use crate::query::filter::eval::compile_filter;

@@ -171,7 +171,10 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
         #[allow(clippy::disallowed_methods)]
         let mut entries: Vec<(u64, String)> = Vec::with_capacity(tx.interner_overlay.len());
         tx.interner_overlay
-            .scan_async(|k, v| entries.push((*v, k.clone())))
+            .iter_async(|k, v| {
+                entries.push((*v, k.clone()));
+                true
+            })
             .await;
         if !entries.is_empty() {
             ops.push(WalOpV2::InternerOverlayMerge { entries });
@@ -813,12 +816,13 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     #[allow(clippy::disallowed_methods)]
     let mut by_table: TFxMap<u64, Vec<shamir_storage::types::RecordKey>> =
         TFxMap::with_capacity_and_hasher(tx.locked_keys.len(), THasher::default());
-    tx.locked_keys.scan(|(token, key), _| {
+    tx.locked_keys.iter_sync(|(token, key), _| {
         by_table.entry(*token).or_default().push(key.clone());
+        true
     });
     let mvcc_map = repo.per_table_mvcc();
     for (token, keys) in by_table {
-        if let Some(e) = mvcc_map.get(&token) {
+        if let Some(e) = mvcc_map.get_sync(&token) {
             e.get().release_locks(tx.tx_id.0, &keys).await;
         }
     }

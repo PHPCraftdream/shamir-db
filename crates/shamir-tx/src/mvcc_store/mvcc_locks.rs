@@ -203,7 +203,7 @@ impl MvccStore {
     /// kept in the map (cheap; GC is intentionally not done here).
     pub async fn release_locks(&self, tx_version: u64, keys: &[RecordKey]) {
         for key in keys {
-            let Some(lock) = self.locks.get(key).map(|e| Arc::clone(e.get())) else {
+            let Some(lock) = self.locks.get_sync(key).map(|e| Arc::clone(e.get())) else {
                 continue;
             };
             let mut state = lock.state.lock().await;

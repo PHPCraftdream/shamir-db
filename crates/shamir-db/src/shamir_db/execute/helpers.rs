@@ -152,7 +152,7 @@ pub(super) async fn apply_table_retention(
         .get_repo(repo)
         .ok_or_else(|| err(format!("Repository '{}' not found", repo)))?;
     let token = crate::engine::table::table_token_for(table);
-    if let Some(entry) = repo_instance.per_table_mvcc().get(&token) {
+    if let Some(entry) = repo_instance.per_table_mvcc().get_sync(&token) {
         entry
             .set_retention(policy)
             .map_err(|e| err(e.to_string()))?;
@@ -192,7 +192,7 @@ pub(super) async fn resolve_table_mvcc(
     let token = crate::engine::table::table_token_for(table);
     repo_instance
         .per_table_mvcc()
-        .get(&token)
+        .get_sync(&token)
         .map(|entry| std::sync::Arc::clone(&entry))
         .ok_or_else(|| {
             err(format!(

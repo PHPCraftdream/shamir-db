@@ -1071,8 +1071,9 @@ async fn run_background_compaction(
     // Step 4b: Reconcile-deletes (close resurrect race)
     if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
         let mut rids_to_delete: Vec<RecordId> = Vec::new();
-        del_rids.scan(|rid, ()| {
+        del_rids.iter_sync(|rid, ()| {
             rids_to_delete.push(*rid);
+            true
         });
         for rid in rids_to_delete {
             let _ = new_adapter_arc.delete(rid).await;
