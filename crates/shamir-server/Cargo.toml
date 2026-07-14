@@ -139,7 +139,6 @@ windows-service = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-fxhash = "0.2"
 serial_test = "3"
 # Compiles the echo WAT fixture used by create_function wire-gating tests.
 wat = "1.226"

@@ -152,7 +152,7 @@ pub enum RateLimitSnapshotError {
 /// `FxHasher` for small fixed-size Subnet keys ([u8;3] for IPv4 /24,
 /// [u8;8] for IPv6 /64). DoS resistance for this map is moot — the
 /// limiter itself is what protects against DoS.
-type SubnetHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
+type SubnetHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 /// Token-bucket rate limiter keyed by client subnet.
 ///

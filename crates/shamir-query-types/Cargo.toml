@@ -15,7 +15,6 @@ serde      = { version = "1.0.217", features = ["derive"] }
 serde_bytes = "0.11"
 rmp-serde  = "1.3"
 indexmap   = { version = "2.7", features = ["serde"] }
-fxhash     = "0.2.1"
 
 # Pure-data helpers for HMAC-confirmed destructive ops. `hmac` +
 # `sha2` are stable, no-std-capable, already used elsewhere in the

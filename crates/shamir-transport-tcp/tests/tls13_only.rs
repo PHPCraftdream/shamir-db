@@ -34,15 +34,14 @@ fn tls12_only_client_config() -> Arc<ClientConfig> {
 /// only) refuses to handshake with it.
 fn tls12_only_server_config(cert_pem: &str, key_pem: &str) -> Arc<ServerConfig> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::PrivatePkcs8KeyDer;
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .into_iter()
-        .collect();
+        .unwrap();
     let key_pem_bytes = key_pem.as_bytes().to_vec();
-    let mut slice = key_pem_bytes.as_slice();
     let key = PrivateKeyDer::Pkcs8(
-        rustls_pemfile::pkcs8_private_keys(&mut slice)
+        PrivatePkcs8KeyDer::pem_slice_iter(key_pem_bytes.as_slice())
             .next()
             .unwrap()
             .unwrap(),

@@ -12,7 +12,7 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use shamir_types::record_view::RecordRef;

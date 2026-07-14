@@ -461,7 +461,7 @@ pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> TokenizerEnum {
 
 /// Hash a token to u64 for posting keys.
 pub fn token_hash(token: &str) -> u64 {
-    use fxhash::FxHasher;
+    use rustc_hash::FxHasher;
     use std::hash::Hasher;
     let mut h = FxHasher::default();
     h.write(token.as_bytes());

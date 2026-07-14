@@ -5,7 +5,7 @@ mod tests {
     use crate::types::common::{new_map, new_set};
     use crate::types::value::{InnerValue, UserValue};
     use bytes::Bytes;
-    use fxhash::FxHasher;
+    use rustc_hash::FxHasher;
     use num_bigint::BigInt;
     use rust_decimal::Decimal;
     use std::hash::Hash;

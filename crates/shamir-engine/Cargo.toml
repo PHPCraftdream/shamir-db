@@ -34,7 +34,7 @@ dashmap = "6.1.0"
 
 # Data
 serde = { version = "1.0.217", features = ["derive"] }
-fxhash = "0.2.1"
+rustc-hash = "2.1"
 # Inline storage for field-path Vec<u64> (1-3 segments typical) —
 # avoids heap alloc per FilterNode / SelectProjection. Already a
 # transitive dep via several crates.

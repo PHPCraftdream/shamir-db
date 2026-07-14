@@ -21,7 +21,7 @@ use crate::server::ticket::{
     ticket_limits, validate_ticket_enums, TicketPlain, TicketWire,
 };
 use dashmap::DashMap;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 

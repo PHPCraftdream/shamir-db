@@ -12,7 +12,7 @@ shamir-collections = { path = "../shamir-collections" }
 smallvec = "1.11"
 serde = { version = "1.0.217", features = ["derive"] }
 indexmap = { version = "2.7", features = ["serde"] }
-fxhash = "0.2.1"
+rustc-hash = "2.1"
 dashmap = "6.1.0"
 # Lock-free read snapshots for the interner's reverse map.
 # Forward direction uses DashMap (sharded, fine for write+read);

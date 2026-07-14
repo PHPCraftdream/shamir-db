@@ -296,9 +296,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.1"
+version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94bffc006df10ac2a68c83692d734a465f8ee6c5b384d8545a636f81d858f4bf"
+checksum = "4342d8937fc7e5dd9b1c60292261c0670c882a2cd1719cfc11b1af41731e32ad"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -306,14 +306,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.38.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4321e568ed89bb5a7d291a7f37997c2c0df89809d7b6d12062c81ddb54aa782e"
+checksum = "6d9ceb1da931507a12f4fccea479dccd00da1943e1b4ae72d8e502d707361444"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1485,15 +1486,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "fxhash"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -3044,15 +3036,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3351,8 +3334,8 @@ dependencies = [
 name = "shamir-collections"
 version = "0.1.0"
 dependencies = [
- "fxhash",
  "indexmap",
+ "rustc-hash 2.1.1",
 ]
 
 [[package]]
@@ -3366,7 +3349,6 @@ dependencies = [
  "dashmap",
  "ed25519-dalek",
  "fjall",
- "fxhash",
  "hex",
  "hkdf",
  "hmac",
@@ -3375,6 +3357,7 @@ dependencies = [
  "precis-profiles",
  "rand 0.9.4",
  "rmp-serde",
+ "rustc-hash 2.1.1",
  "serde",
  "serde_bytes",
  "sha2",
@@ -3399,12 +3382,12 @@ dependencies = [
  "captrack",
  "dashmap",
  "futures",
- "fxhash",
  "log",
  "mimalloc",
  "rand 0.9.4",
  "rcgen",
  "rmp-serde",
+ "rustc-hash 2.1.1",
  "rustls",
  "sefer-alloc",
  "serde",
@@ -3436,7 +3419,6 @@ dependencies = [
  "dashmap",
  "dhat",
  "futures",
- "fxhash",
  "indexmap",
  "log",
  "memory-stats",
@@ -3446,6 +3428,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rust_decimal",
+ "rustc-hash 2.1.1",
  "scc",
  "serde",
  "serde_bytes",
@@ -3508,13 +3491,13 @@ dependencies = [
  "crc32fast",
  "dashmap",
  "futures",
- "fxhash",
  "hnsw_rs",
  "log",
  "num-bigint",
  "rmp-serde",
  "rust-stemmers",
  "rust_decimal",
+ "rustc-hash 2.1.1",
  "scc",
  "serde",
  "serial_test",
@@ -3568,7 +3551,6 @@ name = "shamir-query-types"
 version = "0.1.0"
 dependencies = [
  "bench-scale-tool",
- "fxhash",
  "hmac",
  "indexmap",
  "rmp-serde",
@@ -3619,7 +3601,6 @@ dependencies = [
  "fjall",
  "fs4",
  "futures-util",
- "fxhash",
  "hex",
  "indexmap",
  "ktav",
@@ -3701,7 +3682,7 @@ dependencies = [
  "rcgen",
  "rmp-serde",
  "rustls",
- "rustls-pemfile",
+ "rustls-pki-types",
  "serde",
  "serde_bytes",
  "shamir-connect",
@@ -3770,7 +3751,6 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
- "fxhash",
  "indexmap",
  "log",
  "num-bigint",
@@ -3780,6 +3760,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rust_decimal",
+ "rustc-hash 2.1.1",
  "serde",
  "serial_test",
  "shamir-collections",
@@ -3910,9 +3891,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]

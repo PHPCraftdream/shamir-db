@@ -9,7 +9,7 @@
 //! Total: 25 bytes
 
 use bytes::Bytes;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
 /// Index record key for B-Tree

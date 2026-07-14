@@ -9,6 +9,8 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::PrivatePkcs8KeyDer;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -40,11 +42,11 @@ pub fn make_server_config_from_pem(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key_pem_bytes = Zeroizing::new(key_pem.as_bytes().to_vec());
-    let mut slice = key_pem_bytes.as_slice();
-    let mut key_iter = rustls_pemfile::pkcs8_private_keys(&mut slice);
-    let key = key_iter.next().ok_or("no PKCS8 key in PEM")??;
+    let key = PrivatePkcs8KeyDer::pem_slice_iter(key_pem_bytes.as_slice())
+        .next()
+        .ok_or("no PKCS8 key in PEM")??;
     let key = PrivateKeyDer::Pkcs8(key);
 
     // TLS 1.3 ONLY (TRANSPORT_TCP §3.1 NORMATIVE).
