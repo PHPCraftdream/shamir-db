@@ -56,8 +56,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --lib --locked
+      - run: ./scripts/test.sh --locked
 
   # Integration gate: the test files under `crates/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
@@ -105,10 +106,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      # bash on every runner (Git Bash on Windows) so the `--test '*'` glob
-      # target selector is passed to cargo identically across OSes.
-      - run: cargo test --workspace --test '*' --locked
+      # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
+      # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
+      # filterset equivalent of cargo's `--test '*'` target selector; it
+      # deliberately excludes `kind(lib)` (covered by the `test` job above)
+      # and `kind(bench)` (never a correctness gate).
+      - run: ./scripts/test.sh --full --locked -E 'kind(test)'
         shell: bash
 
   # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
