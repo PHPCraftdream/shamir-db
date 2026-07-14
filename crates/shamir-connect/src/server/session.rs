@@ -281,7 +281,7 @@ pub const DISCONNECT_GRACE_NS: u64 = 5 * ns::SECOND;
 /// `FxHasher` over the 32-byte session_id is enough — the keys are random
 /// bytes from a CSPRNG, DoS resistance comes from rate limiting upstream,
 /// not from the hash function. SipHash's per-byte cost is wasted here.
-type SessionIdHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
+type SessionIdHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Debug)]
 /// Active sessions indexed by session ID.

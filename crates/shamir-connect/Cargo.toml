@@ -15,7 +15,7 @@ doctest = false
 [features]
 default = ["client", "server"]
 client = []
-server = ["dashmap", "parking_lot", "fxhash", "arc-swap"]
+server = ["dashmap", "parking_lot", "rustc-hash", "arc-swap"]
 durable-fjall = ["server", "fjall"]
 
 [dependencies]
@@ -53,8 +53,9 @@ parking_lot = { version = "0.12", optional = true }
 # Fast non-cryptographic hasher for the DashMaps that key by fixed-size
 # byte arrays (session_id [u8;32], Subnet [u8;3..8]). DashMap's default
 # SipHash is overkill for hash-tables where DoS resistance is already
-# enforced upstream (rate limiter, auth).
-fxhash = { version = "0.2", optional = true }
+# enforced upstream (rate limiter, auth). fxhash is unmaintained
+# (RUSTSEC-2025-0057); rustc-hash is the actively maintained continuation.
+rustc-hash = { version = "2.1", optional = true }
 # Durable counter store (optional: durable-fjall feature)
 fjall = { version = "3.0.1", optional = true }
 

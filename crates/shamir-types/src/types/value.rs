@@ -4,7 +4,7 @@ use crate::core::interner::InternerKey;
 use crate::types::common::{new_map, new_map_wc, TMap, TSet};
 use crate::types::value_error::ValueError;
 use bytes::Bytes;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
