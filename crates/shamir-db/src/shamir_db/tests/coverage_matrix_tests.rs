@@ -73,6 +73,21 @@
 //! everyone-writable to owner-only). `Root/List` stays open (`0o755`
 //! keeps the Read bit for `Other` unchanged).
 //!
+//! **Task #611 review (2026-07-14)**: audit asked whether this matrix
+//! should be re-driven through the REAL `execute_as`/`tx_execute_as`/WASM
+//! entry points instead of calling `authorize_access` directly. Accepted
+//! as sufficient AS IS: the equivalence argument above (every real
+//! dispatcher calls `authorize_access` with the identical
+//! `(ResourcePath, Action)` pair, grep-verified) plus
+//! `facade_gateway_acl_tests.rs`'s existing end-to-end proof for the
+//! Table-Read/Write cells already demonstrate the wire path bottoms out
+//! in this same gate. Re-driving the FULL matrix (~70 cells) through a
+//! real wire/`BatchOp` round trip per cell would be substantial,
+//! disproportionate-to-P2 test-writing effort with no new coverage this
+//! equivalence argument doesn't already establish. Revisit only if a
+//! future refactor breaks the "every dispatcher calls authorize_access
+//! directly" invariant this rests on.
+//!
 //! Record/Index inherit their Table's meta (`resource_meta` resolves them to
 //! the Table path) — covered by `enforcement_tests::record_enforcement_inherits_table_meta`
 //! already; this matrix focuses on the mode-bearing objects that carry their
