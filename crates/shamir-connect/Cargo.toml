@@ -46,6 +46,9 @@ thiserror = "2.0"
 # kill the request path but must surface to operators.
 log = "0.4"
 
+# Post-auth per-session rate-limit tunable (task #608).
+shamir-tunables = { path = "../shamir-tunables" }
+
 # Server-only (concurrent state)
 arc-swap = { version = "1.7", optional = true }
 dashmap = { version = "6.1", optional = true }

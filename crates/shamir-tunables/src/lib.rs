@@ -47,6 +47,14 @@ pub mod instance_defaults {
     /// * Default `32` → up to 32 pipelined requests before the reader stalls.
     pub const CONN_MAX_IN_FLIGHT: usize = 32;
 
+    /// Post-auth per-session request-rate limit (task #608). Token-bucket,
+    /// burst = 1 second's worth (mirrors the pre-auth `auth_init`
+    /// rate-limiter's burst convention in `shamir-connect::server::rate_limit`).
+    /// Bounds the frequency of cheap-but-frequent requests a single
+    /// authenticated session can issue — separate from `CONN_MAX_IN_FLIGHT`,
+    /// which bounds CONCURRENCY, not frequency.
+    pub const POST_AUTH_RATE_LIMIT_PER_SEC: u32 = 500;
+
     /// Number of consecutive push failures before a subscription bridge
     /// declares the consumer "slow" and tears down the subscription.
     pub const SLOW_CONSUMER_THRESHOLD: u32 = 100;

@@ -165,6 +165,31 @@ pub struct Session {
     /// single atomic `swap(None)` so exactly one caller observes a non-empty
     /// slot — the §12.5 double-submit guard with no TOCTOU window.
     pub pending_changepw_challenge: ArcSwapOption<PendingChangePwChallenge>,
+    /// Post-auth request-rate token bucket (task #608). Bounded per-session
+    /// contention (≤ `max_in_flight` concurrent requests on one session) —
+    /// mirrors the pre-auth `InMemoryRateLimiter`'s per-subnet `DashMap`
+    /// shard-lock precedent (`rate_limit.rs`), just scoped to one session
+    /// instead of a sharded map. `std::sync::Mutex` is the sanctioned
+    /// exception here (CLAUDE.md): no `.await` is held across the lock, and
+    /// contention is bounded by the connection's own concurrency cap, not a
+    /// workspace-wide hot path.
+    post_auth_bucket: std::sync::Mutex<PostAuthBucket>,
+}
+
+/// Fixed-point token-bucket state — mirrors `rate_limit.rs`'s `BucketState`
+/// shape (`micro_tokens` = tokens × 1e9, refill without floats).
+struct PostAuthBucket {
+    micro_tokens: u64,
+    last_refill_at_ns: u64,
+}
+
+impl PostAuthBucket {
+    /// Capacity in scaled units (= burst limit × 1e9). We allow burst of
+    /// 1 second's worth of tokens, mirroring `BucketState::capacity_at_rate`
+    /// in `rate_limit.rs`.
+    fn capacity() -> u64 {
+        (shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC as u64) * 1_000_000_000
+    }
 }
 
 impl Session {
@@ -191,6 +216,10 @@ impl Session {
             binding_mode,
             channel_binding_at_auth,
             pending_changepw_challenge: ArcSwapOption::const_empty(),
+            post_auth_bucket: std::sync::Mutex::new(PostAuthBucket {
+                micro_tokens: PostAuthBucket::capacity(),
+                last_refill_at_ns: now_ns,
+            }),
         }
     }
 
@@ -256,6 +285,34 @@ impl Session {
     #[inline]
     pub fn is_valid_for_user(&self, tickets_invalid_before_ns: u64) -> bool {
         self.created_at_ns > tickets_invalid_before_ns
+    }
+
+    /// Check + consume one post-auth request token (task #608). Returns
+    /// `None` if allowed (bucket debited), `Some(retry_after_secs)` if
+    /// rejected. Mirrors `rate_limit.rs::InMemoryRateLimiter::check`'s exact
+    /// refill math (fixed-point micro_tokens, no floats), scoped to this one
+    /// session instead of a per-subnet map — no warmup window (that's a
+    /// pre-auth/post-restart-abuse concept, not applicable to an
+    /// already-authenticated session).
+    pub fn check_post_auth_rate_limit(&self, now_ns: u64) -> Option<u32> {
+        let mut b = self.post_auth_bucket.lock().unwrap();
+        let capacity = PostAuthBucket::capacity();
+        let rate = shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC as u64;
+
+        let elapsed = now_ns.saturating_sub(b.last_refill_at_ns);
+        let refill = elapsed.saturating_mul(rate);
+        b.micro_tokens = b.micro_tokens.saturating_add(refill).min(capacity);
+        b.last_refill_at_ns = now_ns;
+
+        let cost = 1_000_000_000u64;
+        if b.micro_tokens >= cost {
+            b.micro_tokens -= cost;
+            None
+        } else {
+            let deficit = cost - b.micro_tokens;
+            let secs_to_wait = (deficit / rate) / 1_000_000_000;
+            Some((secs_to_wait as u32).max(1))
+        }
     }
 }
 
