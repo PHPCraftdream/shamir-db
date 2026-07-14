@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
@@ -29,7 +30,9 @@ use shamir_query_builder::ddl;
 use shamir_query_builder::Query;
 use shamir_query_types::admin::PurgeScope;
 use shamir_query_types::hmac as canon;
-use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
+use shamir_server::db_handler::{AdminGlue, DbRequest, DbResponse, ShamirDbHandler};
+use shamir_server::user_directory::FjallUserDirectory;
+use tempfile::TempDir;
 
 // --------------------------------------------------------------------------
 // Fixtures
@@ -92,6 +95,37 @@ fn expect_batch_ok(res: DbResponse) -> shamir_db::query::batch::BatchResponse {
         DbResponse::Batch { response } => response,
         other => panic!("expected Batch, got {:?}", other),
     }
+}
+
+fn fast_kdf() -> KdfParams {
+    KdfParams {
+        memory_kb: 19_456,
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    }
+}
+
+/// Build a handler wired with `AdminGlue` (real `FjallUserDirectory`) — the
+/// `DbRequest::CreateScramUser` handler needs this to run past the HMAC
+/// gate and actually create the user (mirrors `set_superuser_wire.rs`'s
+/// `build_handler`).
+async fn build_handler_with_admin() -> ShamirDbHandler {
+    let tmp = TempDir::new().unwrap();
+    let user_dir = Arc::new(FjallUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::with_admin(
+        Arc::new(db),
+        AdminGlue {
+            user_dir,
+            kdf: fast_kdf(),
+            tables_registry: None,
+        },
+    );
+    // Hold `tmp` alive for the test's lifetime by leaking it — mirrors
+    // `set_superuser_wire.rs`'s fixture.
+    std::mem::forget(tmp);
+    handler
 }
 
 // --------------------------------------------------------------------------
@@ -1755,4 +1789,97 @@ async fn remove_group_member_with_correct_hmac_accepted() {
     );
     let resp = expect_batch_ok(res);
     assert!(!resp.results["r"].records.is_empty());
+}
+
+// --------------------------------------------------------------------------
+// create_scram_user (task #604 — top-level DbRequest, not a BatchOp, so it
+// is gated inline in `create_scram_user`'s handler, mirroring
+// `SetSuperuser`'s pattern).
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_without_hmac_rejected() {
+    let handler = build_handler_with_admin().await;
+    let session = root_session();
+
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec!["user".into()],
+        hmac: None,
+    };
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    let (code, _msg) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_with_wrong_hmac_rejected() {
+    let handler = build_handler_with_admin().await;
+    let session = root_session();
+
+    // Tag computed for a different name — must not validate for "bob".
+    let wrong_tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_create_scram_user("someone_else", &["user".to_string()]),
+    );
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec!["user".into()],
+        hmac: Some(wrong_tag),
+    };
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    let (code, _msg) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_with_correct_hmac_accepted() {
+    let handler = build_handler_with_admin().await;
+    let session = root_session();
+
+    let roles = vec!["user".to_string()];
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_create_scram_user("bob", &roles),
+    );
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles,
+        hmac: Some(tag),
+    };
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    match res {
+        DbResponse::UserCreated { name, .. } => assert_eq!(name, "bob"),
+        other => panic!("expected UserCreated, got {:?}", other),
+    }
 }

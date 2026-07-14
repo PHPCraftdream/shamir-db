@@ -46,7 +46,11 @@ pub enum DbRequest {
     /// over the wire). Distinct from `BatchOp::CreateUser` (DB-level
     /// user for table permissions). Server runs Argon2id with its
     /// configured KDF defaults and writes the record to the durable
-    /// user directory. Requires superuser session.
+    /// user directory. Requires superuser session AND an HMAC
+    /// confirmation tag (same "did-you-mean-it" mechanism as
+    /// `SetSuperuser` and destructive `BatchOp`s, task #604 — gated
+    /// inline in `create_scram_user`'s handler since this is a
+    /// top-level `DbRequest`, not a `BatchOp`).
     CreateScramUser {
         /// Username (will be NFC + UsernameCaseMapped normalised on
         /// the server write path).
@@ -63,6 +67,10 @@ pub enum DbRequest {
         /// server. Use [`DbRequest::SetSuperuser`] to grant admin powers.
         #[serde(default)]
         roles: Vec<String>,
+        /// Hex-encoded HMAC-SHA256 tag over the canonical form — always
+        /// required (unconditional, symmetric with `SetSuperuser`'s gate;
+        /// task #604).
+        hmac: Option<String>,
     },
 
     // --- Phase B: interactive (multi-call) transactions ---

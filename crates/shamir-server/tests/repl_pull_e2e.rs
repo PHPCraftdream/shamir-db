@@ -359,11 +359,17 @@ async fn repl_deny_by_default_no_replicator_role() {
         scram_login(server_addr, "admin", &admin_pw).await;
 
     let plain_pw = b"plain-password".to_vec();
+    let plain_roles: Vec<String> = vec![];
+    let plain_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("plain", &plain_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "plain".into(),
             password: String::from_utf8(plain_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: plain_roles,
+            hmac: Some(plain_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -510,11 +516,17 @@ async fn repl_hello_and_pull_with_events() {
 
     // --- Admin: create the `replicator`-role user. ---
     let repl_pw = b"repl-password".to_vec();
+    let repl_roles = vec!["replicator".to_string()];
+    let repl_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("repl", &repl_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
             password: String::from_utf8(repl_pw.clone()).expect("utf8"),
-            roles: vec!["replicator".into()],
+            roles: repl_roles,
+            hmac: Some(repl_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -710,11 +722,17 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
 
     // --- Admin: create the `replicator`-role user. ---
     let repl_pw = b"repl-password".to_vec();
+    let repl_roles = vec!["replicator".to_string()];
+    let repl_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("repl", &repl_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
             password: String::from_utf8(repl_pw.clone()).expect("utf8"),
-            roles: vec!["replicator".into()],
+            roles: repl_roles,
+            hmac: Some(repl_tag),
         },
         admin_sid,
         &mut admin_rid,

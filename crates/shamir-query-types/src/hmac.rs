@@ -65,6 +65,7 @@
 //! | remove_group_member | `b"remove_group_member\0<group_ref>\0<user>"`                                |
 //! | create_function     | `b"create_function\0<name>\0<security>\0<secret_grants_csv>"`               |
 //! | set_superuser       | `b"set_superuser\0<user>\0<on>"` (`<on>` is the literal `"true"`/`"false"`)  |
+//! | create_scram_user   | `b"create_scram_user\0<name>\0<role1>\0<role2>...\0"` (password NEVER included) |
 //!
 //! `<group_ref>` is produced by [`canonical_group_ref`] — a stable
 //! `"name:<name>"` / `"id:<id>"` rendering of `GroupRef`'s two variants
@@ -386,6 +387,20 @@ pub fn canonical_set_superuser(user: &str, on: bool) -> Vec<u8> {
         user.as_bytes(),
         if on { b"true" } else { b"false" },
     ])
+}
+
+/// Canonical input for `CreateScramUser`'s HMAC confirmation tag.
+/// Password is NEVER part of the canonical input (same convention as
+/// `canonical_create_user`) — the tag confirms "you meant to create this
+/// account with these roles", not the credential. Roles are joined in the
+/// order given — caller and verifier must agree on ordering (no sorting
+/// here, matches how the wire field is defined: `Vec<String>` as-is).
+pub fn canonical_create_scram_user(name: &str, roles: &[String]) -> Vec<u8> {
+    let mut parts: Vec<&[u8]> = vec![b"create_scram_user", name.as_bytes()];
+    for r in roles {
+        parts.push(r.as_bytes());
+    }
+    join_null(&parts)
 }
 
 /// Compute a hex-encoded HMAC-SHA256 tag.

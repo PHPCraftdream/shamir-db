@@ -810,16 +810,26 @@ impl Client {
     /// Create a SCRAM-authenticatable user. Requires the current
     /// session to be a superuser (server enforces). Returns the
     /// stable 16-byte `user_id`.
+    ///
+    /// The HMAC confirmation tag required by the server (task #604) is
+    /// computed automatically from `self.session_id` — callers don't need
+    /// to know about the HMAC plumbing.
     pub async fn create_scram_user(
         &self,
         name: &str,
         password: Zeroizing<String>,
         roles: Vec<String>,
     ) -> Result<Vec<u8>, ClientError> {
+        let tag = {
+            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+            let canonical = shamir_query_types::hmac::canonical_create_scram_user(name, &roles);
+            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
+        };
         let mut req = DbRequest::CreateScramUser {
             name: name.to_string(),
             password: password.as_str().to_owned(),
             roles,
+            hmac: Some(tag),
         };
         let result = self.roundtrip(&req).await;
         // Wipe the cleartext password copy placed into the request before it

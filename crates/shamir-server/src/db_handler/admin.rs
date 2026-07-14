@@ -81,19 +81,56 @@ pub(crate) async fn derive_scram_record(
 /// Create a SCRAM-authenticatable user. Server-side Argon2id is CPU-bound
 /// and is delegated to `tokio::task::spawn_blocking` so the runtime worker
 /// remains free during derivation.
+///
+/// Authorization + HMAC gate (in this order, mirroring `set_superuser`'s
+/// pattern, task #604):
+///   1. Caller must hold an already-superuser session (`permission_denied`
+///      otherwise; checked FIRST, before the HMAC gate, so a missing/wrong
+///      hmac on a non-superuser session still returns `permission_denied`).
+///   2. The op must carry a hex HMAC-SHA256 tag over
+///      [`shamir_query_types::hmac::canonical_create_scram_user`] keyed by
+///      the session's HMAC key (`hmac_required` if missing, `hmac_mismatch`
+///      if wrong). Same "did-you-mean-it" mechanism as `SetSuperuser` and
+///      destructive `BatchOp`s — inlined here (NOT routed through
+///      `check_destructive_hmacs`) because `CreateScramUser` is a top-level
+///      `DbRequest`, not a `BatchOp` inside a batch.
+///   3. Handler must be built with `AdminGlue` (`not_supported` otherwise).
 pub(super) async fn create_scram_user(
     admin: Option<&AdminGlue>,
     session: &Session,
     name: String,
     password: String,
     roles: Vec<String>,
+    hmac: Option<String>,
 ) -> DbResponse {
+    // 1. Permission gate FIRST (mirrors `set_superuser`'s ordering — a
+    //    non-superuser session gets `permission_denied` regardless of the
+    //    hmac field's presence/validity).
     if !session.permissions.is_superuser {
         return DbResponse::Error {
             code: "permission_denied".into(),
             message: "create_scram_user requires superuser".into(),
         };
     }
+
+    // 2. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
+    //    `check_destructive_hmacs`).
+    use shamir_query_types::hmac as canon;
+    let canonical = canon::canonical_create_scram_user(&name, &roles);
+    let Some(tag) = hmac.as_ref() else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "create_scram_user missing `hmac` field".into(),
+        };
+    };
+    if !canon::verify_tag_hex(&session.hmac_key(), &canonical, tag) {
+        return DbResponse::Error {
+            code: "hmac_mismatch".into(),
+            message: "create_scram_user `hmac` does not match canonical input".into(),
+        };
+    }
+
+    // 3. AdminGlue unwrap.
     let admin = match admin {
         Some(a) => a,
         None => {

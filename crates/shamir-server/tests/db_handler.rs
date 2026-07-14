@@ -33,6 +33,7 @@ use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::{insert, upsert};
 use shamir_query_builder::Query;
+use shamir_query_types::hmac as canon;
 use shamir_server::db_handler::{
     AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler, TxLimitsCap,
 };
@@ -665,10 +666,18 @@ async fn create_scram_user_denied_without_admin_glue() {
     let handler = ShamirDbHandler::new(Arc::new(db)); // no admin glue
     let session = root_session();
 
+    // Correct hmac so this test exercises the `not_supported` path (AdminGlue
+    // missing), not the HMAC gate that now runs first (task #604).
+    let roles = vec!["user".to_string()];
+    let tag = canon::compute_tag_hex(
+        &canon::derive_session_hmac_key(&session.session_id),
+        &canon::canonical_create_scram_user("bob", &roles),
+    );
     let req = DbRequest::CreateScramUser {
         name: "bob".into(),
         password: "correct horse battery staple".into(),
-        roles: vec!["user".into()],
+        roles,
+        hmac: Some(tag),
     };
     let res = decode(
         &handler
@@ -701,10 +710,13 @@ async fn create_scram_user_denied_for_non_superuser() {
     );
     let session = user_session();
 
+    // No hmac — proves the permission gate fires FIRST, before the HMAC
+    // check (task #604, mirrors `set_superuser`'s ordering).
     let req = DbRequest::CreateScramUser {
         name: "bob".into(),
         password: "correct horse battery staple".into(),
         roles: vec![],
+        hmac: None,
     };
     let res = decode(
         &handler
@@ -737,10 +749,16 @@ async fn create_scram_user_success_then_duplicate() {
     );
     let session = root_session();
 
+    let roles = vec!["read_write".to_string()];
+    let tag = canon::compute_tag_hex(
+        &canon::derive_session_hmac_key(&session.session_id),
+        &canon::canonical_create_scram_user("bob", &roles),
+    );
     let req = DbRequest::CreateScramUser {
         name: "bob".into(),
         password: "correct horse battery staple".into(),
-        roles: vec!["read_write".into()],
+        roles,
+        hmac: Some(tag),
     };
     let res = decode(
         &handler
@@ -769,10 +787,16 @@ async fn create_scram_user_success_then_duplicate() {
     assert!(roles.iter().any(|r| r == "read_write"), "roles attached");
 
     // Second insert with same name -> typed user_exists error.
+    let roles2: Vec<String> = vec![];
+    let tag2 = canon::compute_tag_hex(
+        &canon::derive_session_hmac_key(&session.session_id),
+        &canon::canonical_create_scram_user("bob", &roles2),
+    );
     let req2 = DbRequest::CreateScramUser {
         name: "bob".into(),
         password: "another password".into(),
-        roles: vec![],
+        roles: roles2,
+        hmac: Some(tag2),
     };
     let res2 = decode(
         &handler
@@ -809,10 +833,16 @@ async fn create_scram_user_with_reserved_superuser_role_leaves_no_orphan_account
     );
     let session = root_session();
 
+    let roles = vec!["superuser".to_string()];
+    let tag = canon::compute_tag_hex(
+        &canon::derive_session_hmac_key(&session.session_id),
+        &canon::canonical_create_scram_user("frank", &roles),
+    );
     let req = DbRequest::CreateScramUser {
         name: "frank".into(),
         password: "correct horse battery staple".into(),
-        roles: vec!["superuser".into()],
+        roles,
+        hmac: Some(tag),
     };
     let res = decode(
         &handler

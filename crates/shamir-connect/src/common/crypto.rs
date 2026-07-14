@@ -87,6 +87,19 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Derive a session's HMAC key from its `session_id` — pure
+/// `SHA256("shamir-db hmac key v1\0" || session_id)`. Both the server
+/// (`Session::hmac_key`) and any client holding its own `session_id` can
+/// compute this identically; it adds zero authentication strength beyond
+/// the bearer token, but proves "deliberate construction" for confirmation
+/// tags on destructive/sensitive top-level ops (task #604).
+pub fn derive_session_hmac_key(session_id: &[u8; 32]) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(22 + 32);
+    buf.extend_from_slice(b"shamir-db hmac key v1\0");
+    buf.extend_from_slice(session_id);
+    sha256(&buf)
+}
+
 // ----------------------------------------------------------------------------
 // HMAC-SHA256
 // ----------------------------------------------------------------------------

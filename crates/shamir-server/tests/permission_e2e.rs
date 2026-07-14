@@ -798,11 +798,17 @@ async fn permission_deny_allow_by_mode() {
 
     // --- Create a non-admin user ---
     let user_pw = b"user-password".to_vec();
+    let create_alice_roles: Vec<String> = vec![];
+    let create_alice_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("alice", &create_alice_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "alice".into(),
             password: String::from_utf8(user_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: create_alice_roles,
+            hmac: Some(create_alice_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -964,11 +970,17 @@ async fn permission_group_grant() {
     let mut bob_user_id: Option<Vec<u8>> = None;
 
     for (name, pw) in [("bob", &bob_pw), ("carol", &carol_pw)] {
+        let loop_roles: Vec<String> = vec![];
+        let loop_tag = shamir_query_types::hmac::compute_tag_hex(
+            &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+            &shamir_query_types::hmac::canonical_create_scram_user(name, &loop_roles),
+        );
         let resp = roundtrip(
             &DbRequest::CreateScramUser {
                 name: name.into(),
                 password: String::from_utf8(pw.clone()).expect("utf8"),
-                roles: vec![],
+                roles: loop_roles,
+                hmac: Some(loop_tag),
             },
             admin_sid,
             &mut admin_rid,
@@ -1175,11 +1187,17 @@ async fn permission_open_default_allows_any_user() {
 
     // Create a regular user
     let dave_pw = b"dave-password".to_vec();
+    let dave_roles: Vec<String> = vec![];
+    let dave_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("dave", &dave_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "dave".into(),
             password: String::from_utf8(dave_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: dave_roles,
+            hmac: Some(dave_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -1392,11 +1410,17 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
     );
 
     let alice_pw = b"alice-password".to_vec();
+    let alice_roles2: Vec<String> = vec![];
+    let alice_tag2 = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("alice", &alice_roles2),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "alice".into(),
             password: String::from_utf8(alice_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: alice_roles2,
+            hmac: Some(alice_tag2),
         },
         admin_sid,
         &mut admin_rid,
@@ -1554,11 +1578,17 @@ async fn coarse_gate_access_tree_and_list_semantics() {
     );
 
     let bob_pw = b"bob-password".to_vec();
+    let bob553c_roles: Vec<String> = vec![];
+    let bob553c_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("bob553c", &bob553c_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "bob553c".into(),
             password: String::from_utf8(bob_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: bob553c_roles,
+            hmac: Some(bob553c_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -1694,11 +1724,17 @@ async fn coarse_gate_nested_batch_stays_denied() {
     // carol below has no rights to it whatsoever.
 
     let carol_pw = b"carol-password".to_vec();
+    let carol553e_roles: Vec<String> = vec![];
+    let carol553e_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("carol553e", &carol553e_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "carol553e".into(),
             password: String::from_utf8(carol_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: carol553e_roles,
+            hmac: Some(carol553e_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -1820,11 +1856,17 @@ async fn coarse_gate_non_exempted_ops_stay_superuser_only() {
     );
 
     let eve_pw = b"eve-password".to_vec();
+    let eve553f_roles: Vec<String> = vec![];
+    let eve553f_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_create_scram_user("eve553f", &eve553f_roles),
+    );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "eve553f".into(),
             password: String::from_utf8(eve_pw.clone()).expect("utf8"),
-            roles: vec![],
+            roles: eve553f_roles,
+            hmac: Some(eve553f_tag),
         },
         admin_sid,
         &mut admin_rid,

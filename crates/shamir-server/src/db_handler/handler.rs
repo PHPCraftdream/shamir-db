@@ -300,7 +300,11 @@ impl RequestHandler for ShamirDbHandler {
                     name,
                     password,
                     roles,
-                } => create_scram_user(self.admin.as_ref(), session, name, password, roles).await,
+                    hmac,
+                } => {
+                    create_scram_user(self.admin.as_ref(), session, name, password, roles, hmac)
+                        .await
+                }
                 DbRequest::SetSuperuser { user, on, hmac } => {
                     set_superuser(self.admin.as_ref(), session, user, on, hmac).await
                 }

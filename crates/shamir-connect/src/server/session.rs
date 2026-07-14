@@ -194,19 +194,14 @@ impl Session {
         }
     }
 
-    /// Derive the per-session HMAC key from `session_id`. Pure
-    /// `SHA256(domain || session_id)` — same shape `hmac_key()`
-    /// returns, factored out so `SessionStore::insert` can warm
-    /// the cache immediately after stamping `session_id`.
+    /// Derive the per-session HMAC key from `session_id`. Delegates to
+    /// the shared [`crate::common::crypto::derive_session_hmac_key`] so
+    /// server and client compute byte-identical keys from one definition
+    /// (task #604) — same shape `hmac_key()` returns, factored out so
+    /// `SessionStore::insert` can warm the cache immediately after
+    /// stamping `session_id`.
     fn derive_hmac_key(session_id: &[u8; limits::SESSION_ID_BYTES]) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(b"shamir-db hmac key v1\0");
-        h.update(session_id);
-        let out = h.finalize();
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&out);
-        k
+        crate::common::crypto::derive_session_hmac_key(session_id)
     }
 
     /// Per-session HMAC key for destructive-op confirmation.
