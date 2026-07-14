@@ -218,6 +218,51 @@ fn approx_dot_matches_term_by_term_expansion() {
     );
 }
 
+#[test]
+fn approx_dot_matches_pre_refactor_scalar_loop_across_fit_configs() {
+    // Task #614: `approx_dot`'s linear+bilinear terms now go through the
+    // SIMD-dispatched `weighted_bilinear_f32` kernel instead of the
+    // original scalar loop. Pin several distinct fit configurations
+    // (dims spanning multiple SIMD chunk widths + tails, several seeds)
+    // and confirm `approx_dot` still agrees with the ORIGINAL scalar-loop
+    // formula computed independently here, within the same tolerance used
+    // elsewhere in this file.
+    for &dim in &[1usize, 7, 8, 16, 31, 32, 64, 100, 128] {
+        for seed in [1u64, 17, 257] {
+            let train = clustered(48, dim, 4, 0.4, seed);
+            let q = Sq8Quantizer::fit(&train, dim);
+            let x = &train[0];
+            let y = &train[train.len() - 1];
+            let qx = q.quantize(x);
+            let qy = q.quantize(y);
+
+            // Original pre-refactor scalar loop (sq8.rs:252-257 before
+            // #614), recomputed independently from public accessors.
+            let mins = q.mins();
+            let scales = q.scales();
+            let mut min_sq_sum = 0.0f32;
+            let mut pre_refactor = 0.0f32;
+            for i in 0..dim {
+                min_sq_sum += mins[i] * mins[i];
+                let min_scale_i = mins[i] * scales[i];
+                let scales_sq_i = scales[i] * scales[i];
+                let qx_i = qx[i] as f32;
+                let qy_i = qy[i] as f32;
+                pre_refactor += min_scale_i * (qx_i + qy_i) + scales_sq_i * qx_i * qy_i;
+            }
+            pre_refactor += min_sq_sum;
+
+            let post_refactor = q.approx_dot(&qx, &qy);
+            let rel = (post_refactor - pre_refactor).abs() / pre_refactor.abs().max(1e-9);
+            assert!(
+                rel < 1e-3,
+                "dim={dim} seed={seed}: approx_dot (post-refactor) {post_refactor} != \
+                 pre-refactor scalar loop {pre_refactor} (rel {rel})"
+            );
+        }
+    }
+}
+
 // =========================================================================
 // recall ≤ 2% drop (DoD): recall@k ≥ 0.98
 // =========================================================================

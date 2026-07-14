@@ -11,7 +11,7 @@
 //! are type-checked via `cargo check --target aarch64-*` and mirror the
 //! proven AVX2/scalar structure (see the block comment in `simd.rs`).
 
-use crate::vector::simd::{dot_u8, dot_u8_scalar};
+use crate::vector::simd::{dot_u8, dot_u8_scalar, weighted_bilinear_f32, weighted_bilinear_scalar};
 
 /// Numerical-Recipes LCG (same lineage as `shamir_bench_utils::Lcg` and
 /// `hnsw_rs_contract_tests::lcg_vec`) — deterministic, no global RNG.
@@ -149,3 +149,118 @@ fn scalar_reference_value_known() {
 // mismatched lengths — that contract is shared with `dot_product` and is
 // enforced by the `debug_assert_eq!` in each kernel. A release build
 // truncates to the shorter length, matching `dot_product`'s behaviour.
+
+// =====================================================================
+// `weighted_bilinear_f32` (task #614) vs `weighted_bilinear_scalar`
+// reference — f32 equivalence tests, not bit-exact (f32/FMA rounding
+// differs between the SIMD and scalar accumulation order).
+// =====================================================================
+
+/// Relative-error tolerance shared by all f32 equivalence checks below,
+/// consistent with the crate's other f32 SIMD-vs-scalar assertions.
+fn assert_close(got: f32, want: f32, ctx: &str) {
+    let tol = 1e-3 * want.abs().max(1.0);
+    assert!(
+        (got - want).abs() < tol,
+        "{ctx}: got {got}, want {want} (tol {tol})"
+    );
+}
+
+fn rand_f32_vec(dim: usize, seed: u64, lo: f32, hi: f32) -> Vec<f32> {
+    let mut rng = Lcg::new(seed);
+    (0..dim)
+        .map(|_| {
+            let high = (rng.next_u64() >> 32) as u32;
+            let t = (high as f32) / (1u64 << 32) as f32;
+            lo + (hi - lo) * t
+        })
+        .collect()
+}
+
+const WEIGHTED_DIMS: &[usize] = &[
+    0, 1, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100, 128, 200,
+];
+
+#[test]
+fn weighted_bilinear_dispatcher_equals_scalar_random() {
+    for &dim in WEIGHTED_DIMS {
+        let min_scale = rand_f32_vec(dim, dim as u64 * 3 + 1, -5.0, 5.0);
+        let scales_sq = rand_f32_vec(dim, dim as u64 * 5 + 2, 0.0, 3.0);
+        let qx = rand_vec(dim, dim as u64 * 7 + 3);
+        let qy = rand_vec(dim, dim as u64 * 11 + 5);
+
+        let want = weighted_bilinear_scalar(&min_scale, &scales_sq, &qx, &qy);
+        let got = weighted_bilinear_f32(&min_scale, &scales_sq, &qx, &qy);
+        assert_close(got, want, &format!("weighted_bilinear dim={dim}"));
+    }
+}
+
+#[test]
+fn weighted_bilinear_dispatcher_equals_scalar_many_seeds() {
+    // Statistical sweep over dim=128 (multiple SIMD chunks + no tail) and
+    // dim=100 (multiple chunks + a scalar tail on every dispatched path).
+    for &dim in &[100usize, 128] {
+        for s in 0..64u64 {
+            let min_scale =
+                rand_f32_vec(dim, s.wrapping_mul(2654435761).wrapping_add(1), -3.0, 3.0);
+            let scales_sq = rand_f32_vec(dim, s.wrapping_mul(40503).wrapping_add(7), 0.0, 2.0);
+            let qx = rand_vec(dim, s.wrapping_mul(97).wrapping_add(11));
+            let qy = rand_vec(dim, s.wrapping_mul(131).wrapping_add(13));
+
+            let want = weighted_bilinear_scalar(&min_scale, &scales_sq, &qx, &qy);
+            let got = weighted_bilinear_f32(&min_scale, &scales_sq, &qx, &qy);
+            assert_close(
+                got,
+                want,
+                &format!("weighted_bilinear seed sweep dim={dim} s={s}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn weighted_bilinear_dispatcher_equals_scalar_zero_dim() {
+    let empty: Vec<f32> = Vec::new();
+    let empty_u8: Vec<u8> = Vec::new();
+    assert_eq!(
+        weighted_bilinear_f32(&empty, &empty, &empty_u8, &empty_u8),
+        0.0
+    );
+    assert_eq!(
+        weighted_bilinear_scalar(&empty, &empty, &empty_u8, &empty_u8),
+        0.0
+    );
+}
+
+#[test]
+fn weighted_bilinear_dispatcher_equals_scalar_all_255() {
+    // Saturation-adjacent configuration: every code at the u8 max, mixed
+    // with large-magnitude weights, across dims spanning multiple SIMD
+    // chunk widths plus a tail.
+    for &dim in &[8usize, 16, 32, 100, 128] {
+        let qx = vec![255u8; dim];
+        let qy = vec![255u8; dim];
+        let min_scale = vec![2.5f32; dim];
+        let scales_sq = vec![1.5f32; dim];
+
+        let want = weighted_bilinear_scalar(&min_scale, &scales_sq, &qx, &qy);
+        let got = weighted_bilinear_f32(&min_scale, &scales_sq, &qx, &qy);
+        assert_close(got, want, &format!("weighted_bilinear all-255 dim={dim}"));
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[test]
+fn weighted_bilinear_avx2_path_is_exercised_on_this_host() {
+    // The equivalence tests above only prove the *dispatched* path (whatever
+    // it happens to be) matches the scalar reference — they do not prove
+    // the AVX2 kernel itself ran. x86_64 CI/dev hosts have AVX2, so assert
+    // the feature-detect gate that `weighted_bilinear_f32` branches on is
+    // actually true here, closing that gap.
+    use crate::vector::simd::has_avx2;
+    assert!(
+        has_avx2(),
+        "expected AVX2 on the x86_64 test host; weighted_bilinear_f32's \
+         AVX2 kernel would not be exercised by the tests above otherwise"
+    );
+}

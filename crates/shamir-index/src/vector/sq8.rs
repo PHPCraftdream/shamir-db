@@ -33,13 +33,13 @@
 //! The three sums separate cleanly:
 //!  * the constant term `Σ min_i²` depends only on the training data —
 //!    precomputed once in [`Sq8Quantizer::fit`];
-//!  * the bilinear term `Σ s_i² · qx_i · qy_i` has per-dimension `s_i²`
-//!    weights that CANNOT be folded into the SIMD
-//!    [`dot_u8`](crate::vector::simd::dot_u8) kernel (which assumes uniform
-//!    1·1 weights), so it is accumulated per-dimension alongside the linear
-//!    terms in [`Sq8Quantizer::approx_dot`] (scalar f32 loop);
-//!  * the linear terms `Σ min_i·s_i·qx_i`, `Σ min_i·s_i·qy_i` are plain
-//!    per-dimension weighted sums.
+//!  * the linear term `Σ min_i·s_i·(qx_i + qy_i)` and the bilinear term
+//!    `Σ s_i² · qx_i · qy_i` have per-dimension `s_i²` weights that CANNOT
+//!    be folded into the SIMD [`dot_u8`](crate::vector::simd::dot_u8)
+//!    kernel (which assumes uniform 1·1 weights), so both are accumulated
+//!    together by a dedicated per-lane-weighted f32 SIMD kernel,
+//!    [`weighted_bilinear_f32`](crate::vector::simd::weighted_bilinear_f32)
+//!    (AVX2/NEON/scalar dispatch), called from [`Sq8Quantizer::approx_dot`].
 //!
 //! `dot_u8` is exercised by the `simd_tests` invariant suite (kept as
 //! tested SIMD infrastructure) but is NOT on the `approx_dot` hot path
@@ -210,10 +210,11 @@ impl Sq8Quantizer {
     /// The bilinear `s_i²` weights are per-dimension and CANNOT be folded
     /// into the SIMD [`dot_u8`](crate::vector::simd::dot_u8) kernel (which
     /// assumes uniform 1·1 weights), so `s_i²·qx_i·qy_i` is accumulated
-    /// per-dimension in the same scalar loop as the linear terms; the
-    /// constant `Σ min_i²` term is precomputed in [`Self::fit`]. This keeps
-    /// the math exact term-by-term; the only approximation is the
-    /// quantization itself.
+    /// together with the linear terms by the dedicated
+    /// [`weighted_bilinear_f32`](crate::vector::simd::weighted_bilinear_f32)
+    /// SIMD kernel; the constant `Σ min_i²` term is precomputed in
+    /// [`Self::fit`]. This keeps the math exact term-by-term; the only
+    /// approximation is the quantization itself.
     ///
     /// # Panics
     ///
@@ -236,25 +237,20 @@ impl Sq8Quantizer {
 
         // VR-7 (#429) — the integer core `Σ qx_i·qy_i` is NOT used by this
         // expansion: the per-dimension `s_i²` bilinear weights cannot be
-        // folded into `dot_u8` (which assumes uniform 1·1 weights), so the
-        // bilinear term is accumulated per-dimension in the scalar loop below.
-        // An earlier revision called `dot_u8(qx, qy)` here "to keep the SIMD
+        // folded into `dot_u8` (which assumes uniform 1·1 weights). An
+        // earlier revision called `dot_u8(qx, qy)` here "to keep the SIMD
         // path warm/covered" — but the result was computed and discarded, an
         // extra O(dim) SIMD pass on EVERY graph hop (Dot/Cosine eval + HNSW
         // inserts). The in-kernel invariant `dot_u8 == dot_u8_scalar` is
         // already pinned exhaustively in `tests/simd_tests.rs`, so the
         // hot-path call was pure dead weight. Removed.
 
+        // Task #614: the linear + bilinear terms are computed by a
+        // dedicated per-lane-weighted f32 SIMD kernel (AVX2/NEON/scalar
+        // dispatch, see `vector::simd::weighted_bilinear_f32`) instead of
+        // the scalar loop this replaces.
         let mut acc = self.min_sq_sum;
-        // Audit 4(c): use precomputed `min_scale` (= min_i·s_i) and
-        // `scales_sq` (= s_i²) instead of recomputing `m*s` / `s*s` per call.
-        // Indexes parallel slices (min_scale, scales_sq, qx, qy) by the same i.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..self.dim {
-            let qx_i = qx[i] as f32;
-            let qy_i = qy[i] as f32;
-            acc += self.min_scale[i] * (qx_i + qy_i) + self.scales_sq[i] * qx_i * qy_i;
-        }
+        acc += crate::vector::simd::weighted_bilinear_f32(&self.min_scale, &self.scales_sq, qx, qy);
         acc
     }
 
