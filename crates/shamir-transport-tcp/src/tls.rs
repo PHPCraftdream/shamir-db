@@ -42,7 +42,8 @@ pub fn make_server_config_from_pem(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    let certs =
+        CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key_pem_bytes = Zeroizing::new(key_pem.as_bytes().to_vec());
     let key = PrivatePkcs8KeyDer::pem_slice_iter(key_pem_bytes.as_slice())
         .next()

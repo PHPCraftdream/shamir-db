@@ -18,9 +18,10 @@
 //! Both files use the same cpulist encoding already parsed by
 //! [`parse_cpulist`](crate::parse_cpulist).
 
-use std::collections::HashMap;
 use std::io;
 use std::mem;
+
+use shamir_collections::TFxMap;
 
 use crate::cpulist::parse_cpulist;
 use crate::error::AffinityError;
@@ -36,7 +37,7 @@ pub struct LinuxTopology {
     /// `cores[i]` is the list of logical CPUs on NUMA node `i`.
     cores: Vec<Vec<CpuId>>,
     /// Reverse index: CPU → node, for fast [`current_node`](Topology::current_node) lookup.
-    cpu_to_node: HashMap<CpuId, NodeId>,
+    cpu_to_node: TFxMap<CpuId, NodeId>,
 }
 
 impl LinuxTopology {
@@ -80,7 +81,7 @@ impl LinuxTopology {
         }
 
         // 3. Build the reverse CPU→node map.
-        let mut cpu_to_node: HashMap<CpuId, NodeId> = HashMap::new();
+        let mut cpu_to_node: TFxMap<CpuId, NodeId> = TFxMap::default();
         for (slot, cpus) in cores.iter().enumerate() {
             let node = NodeId(slot);
             for &cpu in cpus {
