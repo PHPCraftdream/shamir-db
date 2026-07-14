@@ -80,15 +80,14 @@ pub struct FunctionMeta {
     /// INTERSECTED with the DB-wide `net_allowlist` (a function can never
     /// exceed the DB's own ceiling — see `build_net_gateway`).
     ///
-    /// Unlike `secret_grants` (empty = no secrets granted), an EMPTY
-    /// `net_grants` means "no function-level restriction beyond the DB-wide
-    /// allowlist" — i.e. the function gets the full `net_allowlist`, exactly
-    /// as it did before this field existed. This is a deliberately
-    /// backward-compatible default: every function that never sets
-    /// `net_grants` keeps the egress reach it already had. A function can
-    /// only ask for LESS than the DB default via a non-empty grant list —
-    /// there is no way to exceed it. See `build_net_gateway`'s doc comment
-    /// for the full reasoning.
+    /// Task #609: matches `secret_grants`'s restrictive-by-default
+    /// precedent — an EMPTY/absent `net_grants` means NO egress for this
+    /// function. A non-empty grant list can only ask for LESS than the
+    /// DB-wide `net_allowlist`, never more (see `build_net_gateway`'s doc
+    /// comment for the full reasoning). Builtin functions with no
+    /// catalogue row are a separate code path and keep the full
+    /// allowlist — this restrictive default applies to user-created
+    /// functions going through `CreateFunctionOptions`.
     pub net_grants: Vec<String>,
 }
 
