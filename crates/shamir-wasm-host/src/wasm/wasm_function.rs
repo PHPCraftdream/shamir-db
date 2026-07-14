@@ -55,12 +55,17 @@
 //! WALL-CLOCK deadline (`tokio::time::timeout`) bounding the TOTAL time of a
 //! request across every nested `ctx.call`.
 //!
-//! FOLLOW-UP (deferred, task #495 scope-down): fuel is still RESET to a full
-//! budget per nested Store, so nested calls do not draw down from a shared
-//! per-request fuel budget — wall-clock + epoch cap total time but not total
-//! instructions across the fan-out. A genuine AGGREGATE cross-Store fuel
-//! budget (threading a shared remaining-fuel counter through `host_call.rs`)
-//! is a larger Store-lifecycle change left as a documented follow-up.
+//! RESOLVED (task #612, follow-up to task #495 scope-down): an AGGREGATE
+//! cross-Store fuel budget is now threaded through `host_call.rs` via a
+//! shared `Arc<AtomicI64>` remaining-fuel counter on `FnCtx`
+//! (`fuel_budget`). The top-level `WasmFunction::call` (depth 0) lazily
+//! seeds the counter from `WasmLimits::fuel`; every nested Store draws its
+//! `set_fuel` grant from the SAME counter (capped at `limits.fuel` per
+//! Store as defense-in-depth) and debits actually-consumed fuel back into
+//! it on every exit path. So a guest that recurses via `ctx.call` can no
+//! longer execute N × `limits.fuel` instructions across N nested Stores —
+//! the aggregate instruction count across the whole fan-out is bounded by
+//! one shared budget, same as wall-clock + epoch already bound total time.
 
 use super::super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use super::super::contract::ShamirFunction;
@@ -104,6 +109,10 @@ pub(crate) struct HostState {
     /// Env-var names this function may read via `global_get("env.X")`.
     /// Non-`env.` globals are ungated; a denied secret looks absent.
     pub(super) secret_grants: Arc<TFxSet<String>>,
+    /// Shared aggregate fuel-budget counter (task #612) — threaded through
+    /// `host_call.rs` into every nested `FnCtx` so instruction consumption
+    /// across the whole `ctx.call` fan-out draws down from one counter.
+    pub(super) fuel_budget: Arc<std::sync::atomic::AtomicI64>,
 }
 
 /// Test-only: build a bare [`Store`] wrapping a minimal [`HostState`] plus
@@ -129,6 +138,7 @@ pub(crate) fn test_linker_and_store(
         repo: String::new(),
         net: None,
         secret_grants: Arc::new(TFxSet::default()),
+        fuel_budget: Arc::new(std::sync::atomic::AtomicI64::new(0)),
     };
     let store = Store::new(engine.engine(), state);
     Ok((linker, store))
@@ -404,6 +414,27 @@ impl ShamirFunction for WasmFunction {
         let net = ctx.net_gateway().cloned();
         let secret_grants = ctx.secret_grants().clone();
 
+        // Aggregate cross-Store fuel budget (task #612). `None` at depth 0
+        // (fresh top-level `FnCtx`) — lazily seed it from `limits.fuel`. Every
+        // nested `ctx.call` thread the SAME `Arc` through (see host_call.rs),
+        // so instruction consumption across the whole fan-out draws down
+        // from one shared counter instead of resetting per Store.
+        let fuel_budget = ctx
+            .fuel_budget()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicI64::new(limits.fuel as i64)));
+
+        let remaining = fuel_budget.load(std::sync::atomic::Ordering::Relaxed);
+        if remaining <= 0 {
+            return Err(FunctionError::Compute(
+                "aggregate fuel budget exhausted across nested calls".into(),
+            ));
+        }
+        // Still bounded above by this call's own per-Store ceiling — a single
+        // nested call can never draw MORE than its normal quota even if the
+        // shared budget has generous headroom left (defense-in-depth).
+        let grant = (remaining as u64).min(limits.fuel);
+
         // NOTE: we no longer use spawn_blocking. With async_support enabled
         // the entire execution runs on the tokio runtime; Wasmtime suspends
         // the fiber at host-import .await points. A pure-CPU guest with no
@@ -426,11 +457,12 @@ impl ShamirFunction for WasmFunction {
             repo,
             net,
             secret_grants,
+            fuel_budget: fuel_budget.clone(),
         };
         let mut store: Store<HostState> = Store::new(engine.engine(), state);
         store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
         store
-            .set_fuel(limits.fuel)
+            .set_fuel(grant)
             .map_err(|e| FunctionError::Compute(e.to_string()))?;
 
         // Per-Store epoch deadline: trap the guest once the engine epoch has
@@ -442,86 +474,107 @@ impl ShamirFunction for WasmFunction {
         let deadline_ticks = (deadline.as_millis() as u64).div_ceil(tick_ms).max(1);
         store.set_epoch_deadline(deadline_ticks);
 
-        let instance = self
-            .instance_pre
-            .instantiate_async(&mut store)
-            .await
-            .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
-
-        let memory = instance
-            .get_memory(&mut store, "memory")
-            .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
-
-        let alloc_fn = instance
-            .get_typed_func::<i32, i32>(&mut store, "shamir_alloc")
-            .map_err(|e| FunctionError::Compute(format!("missing export `shamir_alloc`: {e}")))?;
-
-        let call_fn = instance
-            .get_typed_func::<(i32, i32), i64>(&mut store, "shamir_call")
-            .map_err(|e| FunctionError::Compute(format!("missing export `shamir_call`: {e}")))?;
-
-        let input_len = i32::try_from(input.len())
-            .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
-
-        // Allocate space for input in guest memory.
-        let in_ptr = alloc_fn
-            .call_async(&mut store, input_len)
-            .await
-            .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
-        if in_ptr < 0 {
-            return Err(FunctionError::Compute(
-                "shamir_alloc returned negative pointer".into(),
-            ));
-        }
-        let in_ptr_u = in_ptr as usize;
-        let in_end = in_ptr_u.saturating_add(input.len());
-        if in_end > memory.data_size(&store) {
-            return Err(FunctionError::Compute(
-                "shamir_alloc pointer outside memory bounds".into(),
-            ));
-        }
-
-        // Write input msgpack into guest memory.
-        memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
-
-        // Call the guest function. At the top level (depth 0) bound the TOTAL
-        // wall-clock of the request — spanning every nested `ctx.call` — with
-        // a `timeout`. Nested invocations (depth > 0) run inside this future,
-        // so a single top-level deadline covers the whole fan-out; re-arming
-        // it per nested Store would multiply the effective budget. Epoch
-        // interruption handles the pure-CPU case even when the future never
-        // yields to let the `timeout` fire.
-        let call_future = call_fn.call_async(&mut store, (in_ptr, input_len));
-        let packed = if depth == 0 {
-            match tokio::time::timeout(deadline, call_future).await {
-                Ok(res) => res.map_err(|e| map_wasm_error(e, "shamir_call"))?,
-                Err(_) => {
-                    return Err(FunctionError::Compute(format!(
-                        "wasm request exceeded wall-clock deadline ({}s)",
-                        deadline.as_secs_f64()
-                    )));
-                }
-            }
-        } else {
-            call_future
+        // Wrap the instantiate/call/decode body in an async block that
+        // borrows `store` (not moves it), so fuel consumption can be read
+        // off `store` AFTER the block regardless of which path it exits by
+        // (success or any of its early `?`/`return Err` points) — the
+        // aggregate fuel budget must be debited exactly once per `call`, on
+        // every exit path (task #612).
+        let result: FnResult<QueryValue> = async {
+            let instance = self
+                .instance_pre
+                .instantiate_async(&mut store)
                 .await
-                .map_err(|e| map_wasm_error(e, "shamir_call"))?
-        };
+                .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
 
-        // Unpack the result pointer/length.
-        let out_ptr = ((packed as u64) >> 32) as usize;
-        let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
-        let out_end = out_ptr.saturating_add(out_len);
-        if out_end > memory.data_size(&store) {
-            return Err(FunctionError::Compute(
-                "result pointer outside memory bounds".into(),
-            ));
+            let memory = instance
+                .get_memory(&mut store, "memory")
+                .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
+
+            let alloc_fn = instance
+                .get_typed_func::<i32, i32>(&mut store, "shamir_alloc")
+                .map_err(|e| {
+                    FunctionError::Compute(format!("missing export `shamir_alloc`: {e}"))
+                })?;
+
+            let call_fn = instance
+                .get_typed_func::<(i32, i32), i64>(&mut store, "shamir_call")
+                .map_err(|e| {
+                    FunctionError::Compute(format!("missing export `shamir_call`: {e}"))
+                })?;
+
+            let input_len = i32::try_from(input.len())
+                .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
+
+            // Allocate space for input in guest memory.
+            let in_ptr = alloc_fn
+                .call_async(&mut store, input_len)
+                .await
+                .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
+            if in_ptr < 0 {
+                return Err(FunctionError::Compute(
+                    "shamir_alloc returned negative pointer".into(),
+                ));
+            }
+            let in_ptr_u = in_ptr as usize;
+            let in_end = in_ptr_u.saturating_add(input.len());
+            if in_end > memory.data_size(&store) {
+                return Err(FunctionError::Compute(
+                    "shamir_alloc pointer outside memory bounds".into(),
+                ));
+            }
+
+            // Write input msgpack into guest memory.
+            memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
+
+            // Call the guest function. At the top level (depth 0) bound the TOTAL
+            // wall-clock of the request — spanning every nested `ctx.call` — with
+            // a `timeout`. Nested invocations (depth > 0) run inside this future,
+            // so a single top-level deadline covers the whole fan-out; re-arming
+            // it per nested Store would multiply the effective budget. Epoch
+            // interruption handles the pure-CPU case even when the future never
+            // yields to let the `timeout` fire.
+            let call_future = call_fn.call_async(&mut store, (in_ptr, input_len));
+            let packed = if depth == 0 {
+                match tokio::time::timeout(deadline, call_future).await {
+                    Ok(res) => res.map_err(|e| map_wasm_error(e, "shamir_call"))?,
+                    Err(_) => {
+                        return Err(FunctionError::Compute(format!(
+                            "wasm request exceeded wall-clock deadline ({}s)",
+                            deadline.as_secs_f64()
+                        )));
+                    }
+                }
+            } else {
+                call_future
+                    .await
+                    .map_err(|e| map_wasm_error(e, "shamir_call"))?
+            };
+
+            // Unpack the result pointer/length.
+            let out_ptr = ((packed as u64) >> 32) as usize;
+            let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
+            let out_end = out_ptr.saturating_add(out_len);
+            if out_end > memory.data_size(&store) {
+                return Err(FunctionError::Compute(
+                    "result pointer outside memory bounds".into(),
+                ));
+            }
+
+            let out = memory.data(&store)[out_ptr..out_end].to_vec();
+
+            QueryValue::from_bytes(&out)
+                .map_err(|e| FunctionError::Compute(format!("result decode error: {e}")))
         }
+        .await;
 
-        let out = memory.data(&store)[out_ptr..out_end].to_vec();
+        // Debit actually-consumed fuel from the aggregate budget — exactly
+        // once, on every exit path (success or error) of the block above.
+        let remaining_after = store.get_fuel().unwrap_or(0);
+        let consumed = grant.saturating_sub(remaining_after);
+        fuel_budget.fetch_sub(consumed as i64, std::sync::atomic::Ordering::Relaxed);
 
-        QueryValue::from_bytes(&out)
-            .map_err(|e| FunctionError::Compute(format!("result decode error: {e}")))
+        result
     }
 }
 

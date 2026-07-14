@@ -303,6 +303,14 @@ pub struct FnCtx {
     net: Option<Arc<dyn NetGateway>>,
     secret_grants: Arc<TFxSet<String>>,
     actor: Actor,
+    /// Shared remaining-fuel counter for the aggregate cross-Store fuel
+    /// budget (task #612). `None` in a fresh top-level `FnCtx` — the
+    /// top-level Store creation in `WasmFunction::call` lazily seeds it
+    /// from `WasmLimits::fuel` on first use and threads the SAME `Arc`
+    /// through every nested `ctx.call` (via `host_call.rs`'s child `FnCtx`
+    /// construction), so instruction consumption across the WHOLE fan-out
+    /// draws down from one shared budget instead of resetting per Store.
+    fuel_budget: Option<Arc<std::sync::atomic::AtomicI64>>,
 }
 
 impl FnCtx {
@@ -321,6 +329,7 @@ impl FnCtx {
             net: None,
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
+            fuel_budget: None,
         }
     }
 
@@ -336,6 +345,7 @@ impl FnCtx {
             net: None,
             secret_grants: Arc::new(TFxSet::default()),
             actor: Actor::System,
+            fuel_budget: None,
         }
     }
 
@@ -390,6 +400,21 @@ impl FnCtx {
     pub fn with_actor(mut self, actor: Actor) -> Self {
         self.actor = actor;
         self
+    }
+
+    /// Builder: attach a shared aggregate fuel-budget counter (task #612).
+    /// Used internally by `host_call.rs` to thread the SAME counter into a
+    /// nested call's `FnCtx` — do not call this from outside `shamir-wasm-host`.
+    pub(crate) fn with_fuel_budget(mut self, budget: Arc<std::sync::atomic::AtomicI64>) -> Self {
+        self.fuel_budget = Some(budget);
+        self
+    }
+
+    /// The aggregate fuel-budget counter, if one has been seeded (always
+    /// `Some` once a top-level `WasmFunction::call` has run at least once
+    /// for this ctx chain).
+    pub(crate) fn fuel_budget(&self) -> Option<&Arc<std::sync::atomic::AtomicI64>> {
+        self.fuel_budget.as_ref()
     }
 
     /// The actor that initiated this invocation.

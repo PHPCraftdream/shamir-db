@@ -51,6 +51,7 @@ pub(super) fn host_call(
         let globals;
         let next_depth;
         let depth_limit;
+        let fuel_budget;
         {
             let memory = caller
                 .get_export("memory")
@@ -66,6 +67,7 @@ pub(super) fn host_call(
             globals = state.globals.clone();
             next_depth = state.depth.saturating_add(1);
             depth_limit = state.depth_limit;
+            fuel_budget = state.fuel_budget.clone();
         }
         // Borrows on caller (memory, data) are dropped. Caller itself is still alive.
 
@@ -92,7 +94,8 @@ pub(super) fn host_call(
         let child_ctx = FnCtx::with_globals(globals)
             .with_registry(reg)
             .with_depth(next_depth)
-            .with_depth_limit(depth_limit);
+            .with_depth_limit(depth_limit)
+            .with_fuel_budget(fuel_budget);
         let child_batch = FnBatch::with_context(batch_ctx);
 
         let result = child_ctx
