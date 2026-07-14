@@ -394,6 +394,17 @@ impl ShamirAdminExecutor {
             ));
         }
 
+        // `op.user` is a wire-supplied u64 that feeds `QueryValue::Int`
+        // (i64-based) below — an `op.user > i64::MAX` would silently wrap to
+        // a negative number on `as i64`. Reject it explicitly rather than
+        // let it through with surprising/undefined filtering behavior.
+        if op.user > i64::MAX as u64 {
+            return Err(err_code(
+                "query",
+                format!("member user id {} exceeds the valid i64 range", op.user),
+            ));
+        }
+
         // Task #561: when a `PrincipalResolver` is installed, require the
         // member id (`op.user`) to resolve to a real principal before adding
         // it to the group. This is the user-target half of task #543's
@@ -453,6 +464,17 @@ impl ShamirAdminExecutor {
             .authorize_group_manage_or_root(group_id, &self.actor)
             .await
             .map_err(|e| err_code("access_denied", e.to_string()))?;
+
+        // `op.user` is a wire-supplied u64 that feeds `QueryValue::Int`
+        // (i64-based) below — an `op.user > i64::MAX` would silently wrap to
+        // a negative number on `as i64`. Reject it explicitly rather than
+        // let it through with surprising/undefined filtering behavior.
+        if op.user > i64::MAX as u64 {
+            return Err(err_code(
+                "query",
+                format!("member user id {} exceeds the valid i64 range", op.user),
+            ));
+        }
 
         // Deliberately NOT validating op.user's existence here (unlike
         // add_group_member): removing a membership is a set-removal —

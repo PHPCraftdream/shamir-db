@@ -130,6 +130,25 @@ pub(super) async fn create_scram_user(
         };
     }
 
+    // 2b. PRECIS-normalize the username the same way the login path does
+    //     (`NormalizedUsername::from_raw` in `handshake.rs`) so two
+    //     visually-identical-but-byte-distinct usernames (e.g. Latin vs.
+    //     Cyrillic "a") can't be created as two separate accounts here while
+    //     login collapses them into one — task #605.
+    let normalized_name =
+        match shamir_connect::common::username::NormalizedUsername::from_raw(&name) {
+            Ok(n) => n,
+            Err(_) => {
+                return DbResponse::Error {
+                    code: "invalid_username".into(),
+                    message: format!(
+                        "username '{name}' is not a valid PRECIS UsernameCaseMapped identifier"
+                    ),
+                };
+            }
+        };
+    let name = normalized_name.as_str().to_string();
+
     // 3. AdminGlue unwrap.
     let admin = match admin {
         Some(a) => a,

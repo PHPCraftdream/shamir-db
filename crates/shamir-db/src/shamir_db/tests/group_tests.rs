@@ -543,3 +543,39 @@ async fn concurrent_create_vs_rename_same_name_only_one_wins() {
         "exactly one '{target}' group must persist, got {count}"
     );
 }
+
+// ============================================================================
+// #605 — numeric range guard on wire-supplied u64 ids before `as i64` casts.
+// ============================================================================
+//
+// `GroupRef::Id { id }` and `AddGroupMemberOp`/`RemoveGroupMemberOp`'s
+// `op.user` are wire-supplied `u64`s that eventually feed `QueryValue::Int`
+// (`i64`-based). An id above `i64::MAX` would silently wrap to a negative
+// number on `as i64` — undefined/surprising behaviour rather than a crash.
+// Server-generated ids (group id counter, principal64) never approach this
+// range by construction, so the guard only needs to reject caller-supplied
+// out-of-range values at the wire boundary.
+
+/// `resolve_group_id(&GroupRef::Id { id: u64::MAX })` must return `Err`
+/// rather than silently passing the id through for a later `as i64` wrap.
+#[tokio::test]
+async fn resolve_group_id_rejects_out_of_range_id() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+
+    let err = shamir
+        .resolve_group_id(&GroupRef::Id { id: u64::MAX })
+        .await
+        .expect_err("id > i64::MAX must be rejected");
+    assert!(
+        matches!(err, DbError::Validation(_)),
+        "expected DbError::Validation, got {err:?}"
+    );
+}
+
+// The `add_group_member`/`remove_group_member` `op.user` range-guard tests
+// live in `crates/shamir-db/tests/access_ddl.rs`
+// (`add_group_member_rejects_out_of_range_user_id_via_wire` /
+// `remove_group_member_rejects_out_of_range_user_id_via_wire`) — the guard
+// is implemented at the wire dispatcher (`admin_access.rs`), not on
+// `ShamirDb::add_group_member`/`remove_group_member` themselves, so it's
+// exercised end-to-end through `ShamirDb::execute` there instead of here.

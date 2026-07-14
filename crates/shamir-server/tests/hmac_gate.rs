@@ -1883,3 +1883,41 @@ async fn create_scram_user_with_correct_hmac_accepted() {
         other => panic!("expected UserCreated, got {:?}", other),
     }
 }
+
+/// Task #605 — `create_scram_user` normalizes `name` through
+/// `NormalizedUsername::from_raw` right after the HMAC gate, mirroring the
+/// login path (`handshake.rs`). A PRECIS-invalid name (a NUL byte embedded
+/// in the username, guaranteed rejected by `UsernameCaseMapped::enforce` —
+/// see `crates/shamir-connect/src/common/tests/username_tests.rs`) must be
+/// rejected with `code == "invalid_username"`, not persisted as a raw,
+/// unnormalized account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_with_invalid_precis_name_rejected() {
+    let handler = build_handler_with_admin().await;
+    let session = root_session();
+
+    let invalid_name = "alice\0bob";
+    let roles = vec!["user".to_string()];
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_create_scram_user(invalid_name, &roles),
+    );
+    let req = DbRequest::CreateScramUser {
+        name: invalid_name.into(),
+        password: "correct horse battery staple".into(),
+        roles,
+        hmac: Some(tag),
+    };
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    let (code, _msg) = expect_error(res);
+    assert_eq!(code, "invalid_username");
+}

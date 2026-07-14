@@ -530,3 +530,95 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
         "a non-owner, non-Manage(Root) actor must be denied drop_group via the wire dispatcher"
     );
 }
+
+// ============================================================================
+// #605 — numeric range guard on wire-supplied u64 ids before `as i64` casts.
+// ============================================================================
+//
+// `op.user: u64` in `AddGroupMemberOp`/`RemoveGroupMemberOp` feeds
+// `QueryValue::Int(op.user as i64)` downstream. A caller-supplied
+// `op.user > i64::MAX` (e.g. `u64::MAX`) would silently wrap to a negative
+// number on that cast without a guard. These tests drive the guard through
+// the real wire dispatcher (`handle_add_group_member` /
+// `handle_remove_group_member` in `admin_access.rs`).
+//
+// `.build()` (not `.to_request_via_msgpack()`) is used deliberately: the
+// generic msgpack `Value` round-trip that codec path exercises cannot
+// faithfully carry a bare `u64::MAX` through an untagged/i64-shaped
+// intermediate representation (it decodes as `-1`, panicking before the
+// request even reaches the dispatcher) — a pre-existing codec-level
+// limitation, orthogonal to this task's `as i64` range guard. `.build()`
+// constructs the `BatchRequest` directly, in-process, which is enough to
+// exercise the guard added in `admin_access.rs`/`access_control.rs`.
+
+#[tokio::test]
+async fn add_group_member_rejects_out_of_range_user_id_via_wire() {
+    let shamir = setup().await;
+
+    let result = exec_op(&shamir, ddl::create_group("devs")).await;
+    let group_id = result.records[0].get_value_u64("group_id").unwrap();
+    let group_ref = ddl::GroupRef::Id { id: group_id };
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.add_group_member("op", ddl::add_group_member(group_ref, u64::MAX));
+    let req = b.build();
+    let err = shamir
+        .execute("testdb", &req)
+        .await
+        .expect_err("op.user == u64::MAX must be rejected, not silently wrapped to i64");
+    assert_eq!(
+        err.code(),
+        Some("query"),
+        "expected the 'query' fallback code for an out-of-range member user id"
+    );
+
+    // No membership must have been created as a side effect.
+    assert!(!shamir.user_in_group(u64::MAX, group_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn remove_group_member_rejects_out_of_range_user_id_via_wire() {
+    let shamir = setup().await;
+
+    let result = exec_op(&shamir, ddl::create_group("devs")).await;
+    let group_id = result.records[0].get_value_u64("group_id").unwrap();
+    let group_ref = ddl::GroupRef::Id { id: group_id };
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.remove_group_member("op", ddl::remove_group_member(group_ref, u64::MAX));
+    let req = b.build();
+    let err = shamir
+        .execute("testdb", &req)
+        .await
+        .expect_err("op.user == u64::MAX must be rejected, not silently wrapped to i64");
+    assert_eq!(
+        err.code(),
+        Some("query"),
+        "expected the 'query' fallback code for an out-of-range member user id"
+    );
+}
+
+/// `resolve_group_id(&GroupRef::Id { id: u64::MAX })` must return `Err`
+/// rather than silently passing the id through for a later `as i64` wrap —
+/// exercised at the wire boundary via `drop_group`, which routes every
+/// `GroupRef` through `resolve_group_id` first.
+#[tokio::test]
+async fn drop_group_rejects_out_of_range_group_id_via_wire() {
+    let shamir = setup().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_group("op", ddl::drop_group(ddl::GroupRef::Id { id: u64::MAX }));
+    let req = b.build();
+    let err = shamir
+        .execute("testdb", &req)
+        .await
+        .expect_err("group id == u64::MAX must be rejected by resolve_group_id, not wrapped");
+    assert!(
+        err.code().is_none() || err.code() != Some("access_denied"),
+        "the range-guard error must surface before any access-control check, got code {:?}",
+        err.code()
+    );
+}

@@ -709,7 +709,20 @@ impl ShamirDb {
         group_ref: &crate::query::admin::GroupRef,
     ) -> DbResult<u64> {
         match group_ref {
-            crate::query::admin::GroupRef::Id { id } => Ok(*id),
+            crate::query::admin::GroupRef::Id { id } => {
+                // Wire-supplied group ids feed `QueryValue::Int`/
+                // `FilterValue::Int` (both `i64`-based) downstream — an
+                // `id > i64::MAX` would silently wrap to a negative number
+                // on `as i64`. Server-generated group ids (monotonic
+                // counter from 1) never approach this range; only a
+                // caller-supplied `GroupRef::Id` can.
+                if *id > i64::MAX as u64 {
+                    return Err(DbError::Validation(format!(
+                        "group id {id} exceeds the valid i64 range"
+                    )));
+                }
+                Ok(*id)
+            }
             crate::query::admin::GroupRef::Name { name } => {
                 let groups = self.system_store.load_groups().await?;
                 let id = groups
