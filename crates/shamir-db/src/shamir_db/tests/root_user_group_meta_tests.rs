@@ -7,9 +7,11 @@
 //! DIFFERENT, kind-specific models:
 //!
 //! - **Root**: full persisted meta (settings key `"root_meta"`), mirroring
-//!   the existing `FunctionNamespace` pattern. Default `0o755`/`System`
-//!   when absent. `set_resource_meta` gains a matching write arm, guarded
-//!   against a non-System owner locking themselves out via a
+//!   the existing `FunctionNamespace` pattern. Default `0o751`/`System`
+//!   when absent (task #615/#620 — closed enumeration: no Other-Read, but
+//!   Other-Execute stays so ancestor-traversal into nested resources is
+//!   not collaterally broken). `set_resource_meta` gains a matching write
+//!   arm, guarded against a non-System owner locking themselves out via a
 //!   traverse-clearing `chmod`.
 //! - **User**: a FIXED, computed 3-tier rule (`owner = Actor::User(principal64_from_username(name))`,
 //!   `mode = 0o750`) — never persisted, no `set_resource_meta` arm.
@@ -84,12 +86,12 @@ async fn grant_root_manage(shamir: &ShamirDb, actor: &Actor) {
 // ============================================================================
 
 #[tokio::test]
-async fn root_meta_defaults_to_system_0o755_when_absent() {
+async fn root_meta_defaults_to_system_0o751_when_absent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let meta = shamir.resource_meta(&ResourcePath::Root).await.unwrap();
     assert_eq!(meta.owner, Actor::System);
     assert_eq!(meta.group, None);
-    assert_eq!(meta.mode, 0o755);
+    assert_eq!(meta.mode, 0o751);
 }
 
 #[tokio::test]

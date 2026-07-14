@@ -47,9 +47,9 @@ fn echo_wasm() -> Vec<u8> {
 async fn secret_grants_without_root_manage_denied() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    // A regular user. Root's default meta is { owner: System, mode: 0o755 },
-    // so alice (Other) has Execute (traverse) but is NOT the owner →
-    // `Manage(Root)` fails. FunctionNamespace's default meta is
+    // A regular user. Root's default meta is { owner: System, mode: 0o751 },
+    // so alice (Other) has only Execute/traverse (no Read/Write) and is
+    // NOT the owner → `Manage(Root)` fails. FunctionNamespace's default meta is
     // `ResourceMeta::open()` = { owner: System, mode: 0o777 }, so alice
     // (Other) has Create via the Write bit.
     let alice = Actor::User(principal64_from_username("alice"));

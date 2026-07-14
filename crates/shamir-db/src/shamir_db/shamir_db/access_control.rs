@@ -131,15 +131,27 @@ impl ShamirDb {
             }
             // Root — full persisted meta, settings key "root_meta". Mirrors
             // the FunctionNamespace arm above. Default (absent key) is
-            // System-owned, `0o755` — traverse/list stay open exactly as
-            // today; only "write to root" (creating a top-level database)
-            // narrows from everyone-writable to owner-only (task #552).
+            // System-owned, `0o751` — Other keeps the EXECUTE (traverse) bit
+            // but loses READ, so top-level database ENUMERATION (`List`,
+            // Read-mapped) is closed to non-owner/non-System actors by
+            // default (task #615/#620), while traversal into a nested
+            // resource an actor separately holds rights on (Database/Table/
+            // Function/User/Group) still works — `authorize_access`'s
+            // ancestor-traversal check requires Execute on every ancestor
+            // INCLUDING Root for any nested path, so dropping Root's
+            // Execute bit too (0o750) would collaterally deny access to
+            // every nested resource for every non-owner actor, not just
+            // Root listing (discovered via full-suite regression while
+            // implementing task #620 — do not repeat that mistake). "Write
+            // to root" (creating a top-level database) was already
+            // narrowed to owner-only (task #552). An operator who wants
+            // open listing can explicitly `chmod` via `set_resource_meta`.
             ResourcePath::Root => match self.system_store.load_setting("root_meta").await {
                 Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
                 Ok(None) => Ok(ResourceMeta {
                     owner: Actor::System,
                     group: None,
-                    mode: 0o755,
+                    mode: 0o751,
                 }),
                 Err(e) => {
                     log::warn!("resource_meta: failed to load root meta: {e}");
@@ -147,9 +159,10 @@ impl ShamirDb {
                 }
             },
             // WasmCompiler — persisted meta, settings key "wasm_compiler_meta".
-            // Mirrors Root's default: absent key -> System-owned, 0o755 (task
-            // #607 — user's explicit directive: POSIX-style mode gate, not an
-            // OS sandbox).
+            // Absent key -> System-owned, 0o755 (task #607 — user's explicit
+            // directive: POSIX-style mode gate, not an OS sandbox). Distinct
+            // from Root's default (0o751, task #615/#620) — WasmCompiler's
+            // open-Other default is intentional and out of scope here.
             ResourcePath::WasmCompiler => {
                 match self.system_store.load_setting("wasm_compiler_meta").await {
                     Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),

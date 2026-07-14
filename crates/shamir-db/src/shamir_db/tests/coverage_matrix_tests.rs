@@ -29,7 +29,7 @@
 //!
 //! | Object            | Read | Write | Create | Delete | Execute | List | Manage |
 //! |--------------------|------|-------|--------|--------|---------|------|--------|
-//! | Root               |  —   |  —    |    X   |   —    |   —     |(open)|   X    |
+//! | Root               |  —   |  —    |    X   |   —    |   —     |  X   |   X    |
 //! | Database            |  X   |  —    |  X     |   X    |   X     |  X   |   X    |
 //! | Store                |  X   |  —    |  X     |   X    |   X     |  X   |   X    |
 //! | Table                 |  X   |  X    |  (X)   |   X    |   X     |  —   |   X    |
@@ -43,7 +43,7 @@
 //! `X` cells assert DENIAL for a no-rights actor (real mode-bit enforcement
 //! against an owner-rwx-only default). `(open)` cells are NOT asserted as
 //! denied — `resource_meta` resolves these paths to `ResourceMeta::open()`
-//! unconditionally (`Root`'s Create/List, `FunctionNamespace`/
+//! unconditionally (`Root`'s Create, `FunctionNamespace`/
 //! `Function`-with-no-catalogue-row: `Ok(None) => ResourceMeta::default()`
 //! on a genuinely-absent record), so mode-bit-gated actions on them are
 //! allowed for EVERY actor today. This is a pre-existing, deliberate (if
@@ -70,8 +70,19 @@
 //! so `Other` loses the WRITE bit and `Create` (Write-mapped) is now
 //! genuinely denied for a no-rights actor — this is the design's own
 //! stated intent ("database creation is a privileged act", narrowing from
-//! everyone-writable to owner-only). `Root/List` stays open (`0o755`
-//! keeps the Read bit for `Other` unchanged).
+//! everyone-writable to owner-only).
+//!
+//! **Task #615/#620 update (2026-07-14)**: `Root`'s persisted default mode
+//! narrowed again, `0o755` -> `0o751` — `Other` loses the READ bit (so
+//! `Root/List`, top-level database enumeration, moves from `(open)` to `X`:
+//! a no-rights actor can no longer list databases by default) but KEEPS the
+//! EXECUTE bit — `authorize_access`'s ancestor-traversal check requires
+//! Execute on every ancestor including Root for any nested resource, so
+//! dropping it too (`0o750`) would collaterally deny access to every
+//! Database/Table/Function/User/Group for every non-owner actor, not just
+//! Root listing (discovered via full-suite regression, corrected before
+//! landing). An operator who wants open listing can explicitly `chmod`
+//! Root back to `0o755`/`0o777` via `set_resource_meta`.
 //!
 //! **Task #611 review (2026-07-14)**: audit asked whether this matrix
 //! should be re-driven through the REAL `execute_as`/`tx_execute_as`/WASM
@@ -121,8 +132,11 @@ fn x_cells() -> Vec<MatrixCell> {
         // Other loses the WRITE bit, so Create (Write-mapped) is now a
         // real denial too (this is the design's OWN stated intent:
         // "database creation is a privileged act", narrowing from
-        // everyone-writable to owner-only). List stays open (Read bit
-        // unchanged in 0o755) — see `open_cells` below. ──
+        // everyone-writable to owner-only). Task #615/#620: Root's default
+        // narrowed again to `0o751` — Other also loses the READ bit, so
+        // List (top-level database enumeration) is now a real denial too
+        // (Other keeps EXECUTE so ancestor-traversal into nested resources
+        // is unaffected). ──
         MatrixCell {
             label: "Root/Manage (server admin)",
             path: || ResourcePath::Root,
@@ -132,6 +146,11 @@ fn x_cells() -> Vec<MatrixCell> {
             label: "Root/Create (create db) — task #552: 0o755 narrows Other-write",
             path: || ResourcePath::Root,
             action: Action::Create,
+        },
+        MatrixCell {
+            label: "Root/List (list dbs) — task #615/#620: 0o751 narrows Other-read",
+            path: || ResourcePath::Root,
+            action: Action::List,
         },
         // ── Database ──────────────────────────────────────────────────
         MatrixCell {
@@ -323,11 +342,6 @@ fn x_cells() -> Vec<MatrixCell> {
 fn open_cells() -> Vec<MatrixCell> {
     vec![
         MatrixCell {
-            label: "Root/List (list dbs) — open by design",
-            path: || ResourcePath::Root,
-            action: Action::List,
-        },
-        MatrixCell {
             label: "FunctionNamespace/Create (create function) — open by design",
             path: || ResourcePath::FunctionNamespace,
             action: Action::Create,
@@ -460,8 +474,8 @@ async fn access_hierarchy_matrix_allows_system_actor() {
 }
 
 /// Documents the KNOWN gap: a no-rights actor currently PASSES every
-/// `open_cells` matrix cell (Root's Create/List, FunctionNamespace,
-/// absent-Function default to `ResourceMeta::open()`). This is the flip
+/// `open_cells` matrix cell (FunctionNamespace, absent-Function default to
+/// `ResourceMeta::open()`). This is the flip
 /// side of `access_hierarchy_matrix_denies_no_rights_actor` above — it
 /// exists so that when a future fix closes one of these, THIS assertion
 /// starts failing (a cell that used to be `Ok` is now `Err`), forcing
