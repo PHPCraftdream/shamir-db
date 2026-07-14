@@ -373,7 +373,7 @@ impl RepoInstance {
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
         let token = table_token_for(table_name);
-        let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));
+        let _ = self.per_table_mvcc.insert_sync(token, Arc::clone(&mvcc));
 
         // L14: when an MvccStore is attached, ALL data reads and writes are
         // routed through the version log (`history`), never through `__data__`.
@@ -438,7 +438,7 @@ impl RepoInstance {
             let token = table_token_for(table_name);
             let _ = self
                 .token_names
-                .remove_if(&token, |existing| existing.as_str() == table_name);
+                .remove_if_sync(&token, |existing| existing.as_str() == table_name);
             // A13: evict the per_table_mvcc registration too. The token is
             // a deterministic hash of the name, so a DROP followed by a
             // CREATE of the SAME name reuses it — if this entry leaked,
@@ -453,7 +453,7 @@ impl RepoInstance {
             // counting means any in-flight handle that already captured
             // the old store keeps working against it; this only stops
             // NEW lookups from finding the stale entry.
-            let _ = self.per_table_mvcc.remove(&token);
+            let _ = self.per_table_mvcc.remove_sync(&token);
         }
         removed
     }
@@ -488,7 +488,7 @@ impl RepoInstance {
         //    Idempotent: if the overlay is already drained (all entries are
         //    in history), this is a no-op.
         let from_token = table_token_for(from);
-        if let Some(mvcc) = self.per_table_mvcc.get(&from_token) {
+        if let Some(mvcc) = self.per_table_mvcc.get_sync(&from_token) {
             mvcc.drain_to_history().await?;
         }
 
@@ -1344,8 +1344,9 @@ impl RepoInstance {
     /// first one returned after attempting them all.
     pub async fn flush_all_history(&self) -> DbResult<()> {
         let mut mvccs = Vec::new();
-        self.per_table_mvcc.scan(|_, mvcc| {
+        self.per_table_mvcc.iter_sync(|_, mvcc| {
             mvccs.push(Arc::clone(mvcc));
+            true
         });
         let mut first_err: Option<DbError> = None;
         for mvcc in mvccs {
@@ -1436,7 +1437,10 @@ impl RepoInstance {
     pub async fn run_gc(&self) -> DbResult<usize> {
         let mut stores: Vec<Arc<shamir_tx::MvccStore>> = Vec::new();
         self.per_table_mvcc
-            .scan_async(|_, mvcc| stores.push(Arc::clone(mvcc)))
+            .iter_async(|_, mvcc| {
+                stores.push(Arc::clone(mvcc));
+                true
+            })
             .await;
 
         let mut total = 0usize;
@@ -1500,9 +1504,9 @@ pub fn repo_token(name: &str) -> u64 {
 ///   the caller should rename it.
 fn register_token(token_names: &scc::HashMap<u64, String, THasher>, name: &str) {
     let token = table_token_for(name);
-    if let Err((_, attempted)) = token_names.insert(token, name.to_string()) {
+    if let Err((_, attempted)) = token_names.insert_sync(token, name.to_string()) {
         // Key already present — inspect the existing mapping.
-        let existing = token_names.read(&token, |_, n| n.clone());
+        let existing = token_names.read_sync(&token, |_, n| n.clone());
         if existing.as_deref() != Some(attempted.as_str()) {
             log::warn!(
                 "repo_instance: table token collision on {} — keeping '{}', \

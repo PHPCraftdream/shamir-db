@@ -559,10 +559,11 @@ async fn upsert_same_rid_concurrent_no_duplicate() {
         let mut live_internals = 0usize;
         adapter
             .rid_map
-            .scan_async(|internal, mapped_rid| {
-                if *mapped_rid == target && !adapter.deleted.contains(internal) {
+            .iter_async(|internal, mapped_rid| {
+                if *mapped_rid == target && !adapter.deleted.contains_sync(internal) {
                     live_internals += 1;
                 }
+                true
             })
             .await;
         assert_eq!(
@@ -831,10 +832,11 @@ async fn upsert_batch_concurrent_with_upsert_no_duplicate() {
         let mut live_internals = 0usize;
         adapter
             .rid_map
-            .scan_async(|internal, mapped_rid| {
-                if *mapped_rid == target && !adapter.deleted.contains(internal) {
+            .iter_async(|internal, mapped_rid| {
+                if *mapped_rid == target && !adapter.deleted.contains_sync(internal) {
                     live_internals += 1;
                 }
+                true
             })
             .await;
         assert_eq!(
@@ -899,10 +901,11 @@ async fn upsert_batch_duplicate_rid_within_batch_last_wins() {
     let mut live = 0usize;
     adapter
         .rid_map
-        .scan_async(|internal, mapped| {
-            if *mapped == target && !adapter.deleted.contains(internal) {
+        .iter_async(|internal, mapped| {
+            if *mapped == target && !adapter.deleted.contains_sync(internal) {
                 live += 1;
             }
+            true
         })
         .await;
     assert_eq!(
@@ -1282,7 +1285,7 @@ async fn from_parts_seeds_deleted_count() {
 
     // Seed 5 tombstones
     for i in 0..5usize {
-        let _ = deleted.insert(i, ());
+        let _ = deleted.insert_sync(i, ());
     }
 
     let adapter = HnswAdapter::from_parts(

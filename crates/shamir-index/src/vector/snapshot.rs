@@ -1023,16 +1023,16 @@ pub async fn load_snapshot(
     let vectors = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
     let deleted = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
     for (internal, rid) in rid_map_pairs {
-        let _ = rid_map.insert(internal, rid);
+        let _ = rid_map.insert_sync(internal, rid);
     }
     for (rid, internal) in rid_to_internal_pairs {
-        let _ = rid_to_internal.insert(rid, internal);
+        let _ = rid_to_internal.insert_sync(rid, internal);
     }
     for (internal, v) in vectors_pairs {
-        let _ = vectors.insert(internal, v);
+        let _ = vectors.insert_sync(internal, v);
     }
     for internal in tombstones {
-        let _ = deleted.insert(internal, ());
+        let _ = deleted.insert_sync(internal, ());
     }
 
     // V5.3 (#412): if a u8 graph was loaded, assemble the fitted adapter.
@@ -1040,7 +1040,7 @@ pub async fn load_snapshot(
         // Rebuild the vectors_u8 map from the sidecar pairs.
         let vectors_u8 = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
         for (internal, codes) in vectors_u8_pairs {
-            let _ = vectors_u8.insert(internal, codes);
+            let _ = vectors_u8.insert_sync(internal, codes);
         }
         let adapter = HnswAdapter::from_parts_with_quantization(
             dim,

@@ -223,7 +223,7 @@ impl Drainer {
             self.offer_dropped_total.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        if self.window.insert(entry.commit_version, entry).is_ok() {
+        if self.window.insert_sync(entry.commit_version, entry).is_ok() {
             self.window_depth.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -233,7 +233,7 @@ impl Drainer {
     pub fn seed_from_recover(&self, entries: Vec<WalEntryV2>) {
         for e in entries {
             let v = e.commit_version;
-            if self.window.insert(v, Arc::new(e)).is_ok() {
+            if self.window.insert_sync(v, Arc::new(e)).is_ok() {
                 self.window_depth.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -249,7 +249,7 @@ impl Drainer {
     /// Test-only: collect window keys in ascending order.
     #[cfg(test)]
     pub fn window_keys(&self) -> Vec<u64> {
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         self.window.iter(&guard).map(|(k, _)| *k).collect()
     }
 
@@ -278,7 +278,7 @@ impl Drainer {
     /// Test-only: remove a window entry by commit_version (for gap simulation).
     #[cfg(test)]
     pub(crate) fn window_remove_for_test(&self, version: u64) {
-        if self.window.remove(&version) {
+        if self.window.remove_sync(&version) {
             self.window_depth.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -326,7 +326,7 @@ impl Drainer {
         // ascending prefix [dur+1 .. vis]. No I/O in steady state.
         let mut window_entries: Vec<Arc<WalEntryV2>> = Vec::new();
         {
-            let guard = scc::ebr::Guard::new();
+            let guard = scc::Guard::new();
             let mut expected = dur + 1;
             for (k, v) in self.window.range(expected..=vis, &guard) {
                 if *k != expected {
@@ -362,7 +362,7 @@ impl Drainer {
             self.seed_from_recover(recovered);
             // Retry the window scan once.
             window_entries.clear();
-            let guard2 = scc::ebr::Guard::new();
+            let guard2 = scc::Guard::new();
             let mut expected2 = dur + 1;
             for (k, v) in self.window.range(expected2..=vis, &guard2) {
                 if *k != expected2 {
@@ -574,7 +574,9 @@ impl Drainer {
                 // comment above) so no concurrent truncation attempt can
                 // ever observe `v` as durable without also seeing it as
                 // protected.
-                let _ = self.pending_unsafe.insert(*v, delta_max_id.unwrap_or(0));
+                let _ = self
+                    .pending_unsafe
+                    .insert_sync(*v, delta_max_id.unwrap_or(0));
             }
 
             // The value is now durable in history -> advance the durable
@@ -608,7 +610,7 @@ impl Drainer {
             // Op #2 Stage 3: remove the finalized entry from the window so
             // memory does not grow without bound. PT 1: keep the atomic
             // depth mirror in lock-step with the actual tree.
-            if self.window.remove(v) {
+            if self.window.remove_sync(v) {
                 self.window_depth.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -632,8 +634,9 @@ impl Drainer {
             // `history`, which is independent of WAL-segment truncation. Only
             // F6b below must use the interner-safe ceiling.
             let durable = gate.durable_watermark();
-            repo.per_table_mvcc().scan(|_, mvcc| {
+            repo.per_table_mvcc().iter_sync(|_, mvcc| {
                 mvcc.gc_overlay_to(durable);
+                true
             });
 
             // F6b — WAL truncation. `settle_and_truncate` computes the
@@ -669,7 +672,7 @@ impl Drainer {
     /// converge on a ceiling that is conservative-or-equal, never unsafe.
     async fn settle_and_truncate(&self, repo: &RepoInstance) -> DbResult<()> {
         let snapshot: Vec<(u64, u64)> = {
-            let guard = scc::ebr::Guard::new();
+            let guard = scc::Guard::new();
             self.pending_unsafe
                 .iter(&guard)
                 .map(|(k, v)| (*k, *v))
@@ -689,7 +692,7 @@ impl Drainer {
                     "drain_step: pending-unsafe commit_version {v} is now A5-safe; \
                      removing from the pending set"
                 );
-                let _ = self.pending_unsafe.remove(&v);
+                let _ = self.pending_unsafe.remove_sync(&v);
             }
             // Ok(false)/Err: leave it in `pending_unsafe` — still bounds the
             // ceiling below `v`.
@@ -698,7 +701,7 @@ impl Drainer {
         let gate = repo.tx_gate().await?;
         let durable = gate.durable_watermark();
         let min_pending: Option<u64> = {
-            let guard = scc::ebr::Guard::new();
+            let guard = scc::Guard::new();
             self.pending_unsafe.iter(&guard).next().map(|(k, _)| *k)
         };
         let ceiling = match min_pending {

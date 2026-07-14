@@ -320,7 +320,7 @@ impl MvccStore {
             // distinction exactly.
             let ts_ms = self
                 .pending_ts
-                .get(&v)
+                .get_sync(&v)
                 .map(|e| *e.get())
                 .unwrap_or_else(|| self.now_millis());
             let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
@@ -430,7 +430,9 @@ impl MvccStore {
         // once per commit_version (all ops share it); reclaimed by
         // `gc_overlay_to` once the version is durable (A14: the drain paths
         // READ this non-destructively, so they no longer remove it here).
-        let _ = self.pending_ts.insert(commit_version, self.now_millis());
+        let _ = self
+            .pending_ts
+            .insert_sync(commit_version, self.now_millis());
 
         // P1c: populate the overlay with the SAME (key, version) → value pair
         // that the drainer will later land in history. The overlay value is
@@ -517,7 +519,7 @@ impl MvccStore {
         // recovery), NOT "already consumed by a racer".
         let ts_ms = self
             .pending_ts
-            .get(&commit_version)
+            .get_sync(&commit_version)
             .map(|e| *e.get())
             .unwrap_or_else(|| self.now_millis());
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());

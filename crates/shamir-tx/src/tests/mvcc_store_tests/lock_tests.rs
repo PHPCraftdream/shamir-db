@@ -239,7 +239,7 @@ async fn lock_key_reentrant_same_tx_no_self_deadlock() {
     // The tx still holds exactly one holder entry (no duplicates).
     let lock = mvcc
         .locks
-        .get(key.as_ref())
+        .get_sync(key.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     let state = lock.state.lock().await;
@@ -285,7 +285,7 @@ async fn release_locks_clears_holders() {
     // Confirm held.
     let la = mvcc
         .locks
-        .get(key_a.as_ref())
+        .get_sync(key_a.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     {
@@ -312,7 +312,7 @@ async fn release_locks_clears_holders() {
     }
     let lb = mvcc
         .locks
-        .get(key_b.as_ref())
+        .get_sync(key_b.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     {
@@ -375,7 +375,7 @@ async fn lock_key_shared_shared_compatible() {
 
     let lock = mvcc
         .locks
-        .get(key.as_ref())
+        .get_sync(key.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     {
@@ -400,7 +400,7 @@ async fn lock_key_shared_shared_compatible() {
     assert!(t2.is_wounded(), "younger Shared holder T2 wounded");
     let lock = mvcc
         .locks
-        .get(key.as_ref())
+        .get_sync(key.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     let s = lock.state.lock().await;
@@ -460,7 +460,7 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
     {
         let lock = mvcc
             .locks
-            .get(key.as_ref())
+            .get_sync(key.as_ref())
             .map(|e| Arc::clone(e.get()))
             .unwrap();
         let s = lock.state.lock().await;
@@ -491,7 +491,7 @@ async fn lock_key_a6_older_upgrade_wounds_younger_shared_holder() {
     // Invariant restored: exactly one holder (T1), mode Exclusive.
     let lock = mvcc
         .locks
-        .get(key.as_ref())
+        .get_sync(key.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     let s = lock.state.lock().await;
@@ -632,7 +632,7 @@ async fn lock_key_a6_solo_upgrade_no_other_holders_fast_path() {
     // Invariant holds: exactly one holder, mode Exclusive.
     let lock = mvcc
         .locks
-        .get(key.as_ref())
+        .get_sync(key.as_ref())
         .map(|e| Arc::clone(e.get()))
         .unwrap();
     let s = lock.state.lock().await;

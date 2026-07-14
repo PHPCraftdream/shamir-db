@@ -87,7 +87,12 @@ impl IndexRegistry {
     #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub async fn all_backends(&self) -> Vec<Arc<dyn IndexBackend>> {
         let mut out = Vec::with_capacity(self.by_id.len());
-        self.by_id.scan_async(|_, v| out.push(v.clone())).await;
+        self.by_id
+            .iter_async(|_, v| {
+                out.push(v.clone());
+                true
+            })
+            .await;
         out
     }
 
@@ -96,7 +101,10 @@ impl IndexRegistry {
     pub async fn all_descriptors(&self) -> Vec<crate::descriptor::IndexDescriptor> {
         let mut out = Vec::with_capacity(self.by_id.len());
         self.by_id
-            .scan_async(|_, v| out.push(v.descriptor().clone()))
+            .iter_async(|_, v| {
+                out.push(v.descriptor().clone());
+                true
+            })
             .await;
         out
     }
@@ -140,10 +148,7 @@ impl IndexRegistry {
     ) -> Option<Arc<dyn IndexBackend>> {
         let mut found = None;
         self.by_id
-            .scan_async(|_, backend| {
-                if found.is_some() {
-                    return;
-                }
+            .iter_async(|_, backend| {
                 let desc = backend.descriptor();
                 let kind_matches = matches!(
                     (&desc.kind, kind_tag),
@@ -154,7 +159,9 @@ impl IndexRegistry {
                 );
                 if kind_matches && !desc.paths.is_empty() && desc.paths[0] == field_path {
                     found = Some(backend.clone());
+                    return false;
                 }
+                true
             })
             .await;
         found

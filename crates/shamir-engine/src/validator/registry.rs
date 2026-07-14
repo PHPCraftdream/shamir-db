@@ -61,17 +61,17 @@ impl ValidatorRegistry {
     ) -> Result<(), ValidatorRegistryError> {
         let name = name.into();
         // Check name uniqueness first.
-        if self.name_to_id.contains(&name) {
+        if self.name_to_id.contains_sync(&name) {
             return Err(ValidatorRegistryError::AlreadyExists(name));
         }
         // Insert name → id; if a racing register grabbed the name, report.
         self.name_to_id
-            .insert(name.clone(), id)
+            .insert_sync(name.clone(), id)
             .map_err(|_| ValidatorRegistryError::AlreadyExists(name.clone()))?;
         // Insert the compiled artifact. If the id already exists (shouldn't
         // happen in normal operation), remove the name mapping and report.
-        if self.by_id.insert(id, compiled).is_err() {
-            let _ = self.name_to_id.remove(&name);
+        if self.by_id.insert_sync(id, compiled).is_err() {
+            let _ = self.name_to_id.remove_sync(&name);
             return Err(ValidatorRegistryError::AlreadyExists(name));
         }
         Ok(())
@@ -79,7 +79,7 @@ impl ValidatorRegistry {
 
     /// Look up a compiled validator by id.
     pub fn get_by_id(&self, id: &RecordId) -> Option<Arc<dyn RecordValidator>> {
-        self.by_id.read(id, |_, v| v.clone())
+        self.by_id.read_sync(id, |_, v| v.clone())
     }
 
     /// Swap the compiled artifact for an already-registered `id` in place,
@@ -92,31 +92,31 @@ impl ValidatorRegistry {
     /// one materialised from the catalogue, without disturbing bindings.
     pub fn replace_artifact(&self, id: &RecordId, compiled: Arc<dyn RecordValidator>) -> bool {
         self.by_id
-            .update(id, |_, v| *v = compiled.clone())
+            .update_sync(id, |_, v| *v = compiled.clone())
             .is_some()
     }
 
     /// Resolve a name to its `RecordId`.
     pub fn id_for_name(&self, name: &str) -> Option<RecordId> {
-        self.name_to_id.read(name, |_, v| *v)
+        self.name_to_id.read_sync(name, |_, v| *v)
     }
 
     /// Rename a validator (`from` → `to`). The id and bindings are unchanged.
     ///
     /// Errors if `from` is missing or `to` is already taken.
     pub fn rename(&self, from: &str, to: &str) -> Result<(), ValidatorRegistryError> {
-        if self.name_to_id.contains(to) {
+        if self.name_to_id.contains_sync(to) {
             return Err(ValidatorRegistryError::AlreadyExists(to.to_string()));
         }
         let (_, id) = self
             .name_to_id
-            .remove(from)
+            .remove_sync(from)
             .ok_or_else(|| ValidatorRegistryError::NotFound(from.to_string()))?;
         // Insert the new name. If a racing rename grabbed `to`, put `from` back.
         self.name_to_id
-            .insert(to.to_string(), id)
+            .insert_sync(to.to_string(), id)
             .map_err(|(_, id)| {
-                let _ = self.name_to_id.insert(from.to_string(), id);
+                let _ = self.name_to_id.insert_sync(from.to_string(), id);
                 ValidatorRegistryError::AlreadyExists(to.to_string())
             })
     }
@@ -126,49 +126,51 @@ impl ValidatorRegistry {
     ///
     /// Returns `true` if the validator existed.
     pub fn remove(&self, id: &RecordId) -> bool {
-        let existed = self.by_id.remove(id).is_some();
+        let existed = self.by_id.remove_sync(id).is_some();
         // Remove the name → id entry. We need to scan because we don't have
         // the name here, but the map is small (validators are few).
         let mut name_key: Option<String> = None;
-        self.name_to_id.scan(|k, v| {
+        self.name_to_id.iter_sync(|k, v| {
             if v == id {
                 name_key = Some(k.clone());
+                return false;
             }
+            true
         });
         if let Some(k) = name_key {
-            let _ = self.name_to_id.remove(&k);
+            let _ = self.name_to_id.remove_sync(&k);
         }
-        let _ = self.bound_in.remove(id);
+        let _ = self.bound_in.remove_sync(id);
         existed
     }
 
     /// Whether the validator is bound to at least one table.
     pub fn is_bound(&self, id: &RecordId) -> bool {
         self.bound_in
-            .read(id, |_, set| !set.is_empty())
+            .read_sync(id, |_, set| !set.is_empty())
             .unwrap_or(false)
     }
 
     /// Return the list of tables the validator is bound to.
     pub fn bound_tables(&self, id: &RecordId) -> Vec<String> {
         self.bound_in
-            .read(id, |_, set| set.iter().cloned().collect())
+            .read_sync(id, |_, set| set.iter().cloned().collect())
             .unwrap_or_default()
     }
 
     /// Record a binding between a validator and a table.
     pub fn add_binding(&self, id: &RecordId, table: impl Into<String>) {
         let table = table.into();
-        let _ = self.bound_in.entry(*id).and_modify(|set| {
+        let _ = self.bound_in.entry_sync(*id).and_modify(|set| {
             set.insert(table.clone());
         });
         // If the entry did not exist, insert a fresh set.
-        let _ = self.bound_in.insert(*id, BTreeSet::from([table])).ok();
+        let _ = self.bound_in.insert_sync(*id, BTreeSet::from([table])).ok();
     }
 
     /// Remove a binding between a validator and a table.
     pub fn remove_binding(&self, id: &RecordId, table: &str) {
-        let _ = self.bound_in.entry(*id).and_modify(|set| {
+        let _ = self.bound_in.entry_sync(*id).and_modify(|set| {
             set.remove(table);
         });
     }
@@ -181,16 +183,17 @@ impl ValidatorRegistry {
     pub fn unbind_all_for_table(&self, table_ref: &str) -> Vec<(RecordId, String)> {
         // Step 1: collect ids that contain this table_ref.
         let mut candidate_ids = Vec::new();
-        self.bound_in.scan(|id, set| {
+        self.bound_in.iter_sync(|id, set| {
             if set.contains(table_ref) {
                 candidate_ids.push(*id);
             }
+            true
         });
 
         // Step 2: remove the table_ref from each candidate (entry gives &mut).
         let mut affected = Vec::new();
         for id in candidate_ids {
-            let _ = self.bound_in.entry(id).and_modify(|set| {
+            let _ = self.bound_in.entry_sync(id).and_modify(|set| {
                 if set.remove(table_ref) {
                     if let Some(name) = self.name_for_id(&id) {
                         affected.push((id, name));
@@ -204,10 +207,12 @@ impl ValidatorRegistry {
     /// Resolve a `RecordId` back to its name (reverse of `id_for_name`).
     pub fn name_for_id(&self, id: &RecordId) -> Option<String> {
         let mut found: Option<String> = None;
-        self.name_to_id.scan(|name, vid| {
+        self.name_to_id.iter_sync(|name, vid| {
             if vid == id && found.is_none() {
                 found = Some(name.clone());
+                return false;
             }
+            true
         });
         found
     }
@@ -215,8 +220,9 @@ impl ValidatorRegistry {
     /// Snapshot of all registered validators as `(id, name)` pairs.
     pub fn list(&self) -> Vec<(RecordId, String)> {
         let mut out = Vec::new();
-        self.name_to_id.scan(|name, id| {
+        self.name_to_id.iter_sync(|name, id| {
             out.push((*id, name.clone()));
+            true
         });
         out
     }

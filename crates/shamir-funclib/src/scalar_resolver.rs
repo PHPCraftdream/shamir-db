@@ -38,12 +38,12 @@ impl UserScalarLayer {
 
     /// Register (or replace) a user scalar under `name`.
     pub fn register(&self, name: impl Into<String>, entry: FnEntry) {
-        let _ = self.fns.insert(name.into(), entry);
+        let _ = self.fns.insert_sync(name.into(), entry);
     }
 
     /// Look up an entry by name.
     pub fn get(&self, name: &str) -> Option<FnEntry> {
-        self.fns.get(name).map(|e| e.get().clone())
+        self.fns.get_sync(name).map(|e| e.get().clone())
     }
 
     /// Whether the layer holds any functions.

@@ -25,17 +25,18 @@ struct MemChangelogStore {
 #[async_trait::async_trait]
 impl ChangelogStore for MemChangelogStore {
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
-        let _ = self.inner.upsert(key.to_vec(), value.to_vec());
+        let _ = self.inner.upsert_sync(key.to_vec(), value.to_vec());
         Ok(())
     }
 
     async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
         let from = from_key.to_vec();
         let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        self.inner.scan(|k, v| {
+        self.inner.iter_sync(|k, v| {
             if k.as_slice() >= from.as_slice() {
                 pairs.push((k.clone(), v.clone()));
             }
+            true
         });
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(pairs

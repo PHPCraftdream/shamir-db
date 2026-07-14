@@ -535,14 +535,14 @@ async fn a13_remove_table_clears_per_table_mvcc_entry() {
     let _ = instance.get_table("users").await.unwrap();
     let token = table_token_for("users");
     assert!(
-        instance.per_table_mvcc().get(&token).is_some(),
+        instance.per_table_mvcc().get_sync(&token).is_some(),
         "precondition: users table must have a registered MvccStore"
     );
 
     // Drop the table — the stale registry entry must NOT survive.
     assert!(instance.remove_table("users"));
     assert!(
-        instance.per_table_mvcc().get(&token).is_none(),
+        instance.per_table_mvcc().get_sync(&token).is_none(),
         "remove_table must evict the per_table_mvcc entry; a stale \
          registration causes a split-brain on drop+recreate (A13)"
     );
@@ -550,12 +550,12 @@ async fn a13_remove_table_clears_per_table_mvcc_entry() {
     // Sibling table is unaffected — only the dropped token is evicted.
     let orders_token = table_token_for("orders");
     assert!(
-        instance.per_table_mvcc().get(&orders_token).is_none(),
+        instance.per_table_mvcc().get_sync(&orders_token).is_none(),
         "orders should not be in per_table_mvcc (never materialized)"
     );
     let _ = instance.get_table("orders").await.unwrap();
     assert!(
-        instance.per_table_mvcc().get(&orders_token).is_some(),
+        instance.per_table_mvcc().get_sync(&orders_token).is_some(),
         "sibling table's MvccStore must be untouched by the drop"
     );
 }
@@ -624,13 +624,13 @@ async fn a13_plain_drop_no_recreate_still_clean() {
     let instance = create_test_instance();
     let _ = instance.get_table("users").await.unwrap();
     let token = table_token_for("users");
-    assert!(instance.per_table_mvcc().get(&token).is_some());
+    assert!(instance.per_table_mvcc().get_sync(&token).is_some());
 
     assert!(instance.remove_table("users"));
     assert!(!instance.has_table("users"));
     assert!(instance.get_table("users").await.is_err());
     assert!(
-        instance.per_table_mvcc().get(&token).is_none(),
+        instance.per_table_mvcc().get_sync(&token).is_none(),
         "registry entry must be evicted on plain drop too"
     );
 }

@@ -79,7 +79,7 @@ impl VersionedOverlay {
     pub fn insert(&self, key: RecordKey, version: u64, value: Bytes) {
         let entry_bytes = key.len() + value.len() + PER_ENTRY_OVERHEAD;
         let composite = (key, version);
-        if self.tree.insert(composite, value).is_ok() {
+        if self.tree.insert_sync(composite, value).is_ok() {
             // New entry — update counters.
             self.byte_size.fetch_add(entry_bytes, Ordering::Relaxed);
             self.count.fetch_add(1, Ordering::Relaxed);
@@ -117,7 +117,7 @@ impl VersionedOverlay {
             .tree
             .peek_with(&composite, |_, v| v.len())
             .map(|vlen| composite.0.len() + vlen + PER_ENTRY_OVERHEAD);
-        if self.tree.remove(&composite) {
+        if self.tree.remove_sync(&composite) {
             if let Some(bytes) = entry_bytes {
                 self.byte_size.fetch_sub(bytes, Ordering::Relaxed);
             }
@@ -138,7 +138,7 @@ impl VersionedOverlay {
         let lo = (key_rk.clone(), 0u64);
         let hi = (key_rk, max_version);
 
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         // TreeIndex::range returns entries in ascending key order.
         // We want the *last* entry in [lo..=hi], i.e. the newest version.
         self.tree
@@ -171,7 +171,7 @@ impl VersionedOverlay {
         // Collect keys to remove. Entries are sorted by (key, version) — not
         // by version alone — so we must filter (not take_while).
         let to_remove: Vec<(OverlayKey, usize)> = {
-            let guard = scc::ebr::Guard::new();
+            let guard = scc::Guard::new();
             self.tree
                 .iter(&guard)
                 .filter(|(k, _)| k.1 <= threshold)
@@ -185,7 +185,7 @@ impl VersionedOverlay {
         let mut removed_bytes = 0usize;
         let mut removed_count = 0usize;
         for (key, entry_bytes) in to_remove {
-            if self.tree.remove(&key) {
+            if self.tree.remove_sync(&key) {
                 removed_bytes += entry_bytes;
                 removed_count += 1;
             }
@@ -219,7 +219,7 @@ impl VersionedOverlay {
         if floor == 0 {
             return out;
         }
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         // iter() yields entries in ascending (key, version) order. Within a
         // key run, the last entry with version ≤ floor is that key's winner.
         for ((k, v), val) in self.tree.iter(&guard) {
@@ -258,7 +258,7 @@ impl VersionedOverlay {
         if floor == 0 {
             return Vec::new();
         }
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         self.tree
             .iter(&guard)
             .filter(|((_, v), _)| *v <= floor)

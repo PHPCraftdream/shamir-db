@@ -106,7 +106,7 @@ impl Store for InMemoryStore {
         let key = RecordKey::from_slice(id.as_bytes());
 
         // TreeIndex::insert returns Err((k, v)) on duplicate key.
-        match self.data.insert(key.clone(), value) {
+        match self.data.insert_sync(key.clone(), value) {
             Ok(()) => Ok(key),
             Err(_) => Err(DbError::KeyExists(format!("Key already exists: {:?}", key))),
         }
@@ -117,7 +117,7 @@ impl Store for InMemoryStore {
         // walk). On collision, fall back to remove+insert — 2 traversals
         // only when the key already exists. Avoids always-2-traversal of
         // the prior remove+insert pattern.
-        let existed = match self.data.insert(key.clone(), value.clone()) {
+        let existed = match self.data.insert_sync(key.clone(), value.clone()) {
             Ok(()) => false, // new key — done in one traversal
             Err((k, v)) => {
                 // Key already exists (insert rejected): remove then re-insert.
@@ -126,8 +126,8 @@ impl Store for InMemoryStore {
                 // may observe a brief absence between remove and insert;
                 // InMemoryStore is a single-session in-memory backend where
                 // this window is acceptable (no durability guarantee).
-                self.data.remove(&k);
-                let _ = self.data.insert(k, v);
+                self.data.remove_sync(&k);
+                let _ = self.data.insert_sync(k, v);
                 true
             }
         };
@@ -141,7 +141,7 @@ impl Store for InMemoryStore {
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        Ok(self.data.remove(&key))
+        Ok(self.data.remove_sync(&key))
     }
 
     fn iter_stream(
@@ -151,7 +151,7 @@ impl Store for InMemoryStore {
         // Snapshot under an epoch guard; the stream then yields without
         // holding the guard. TreeIndex iter is already sorted.
         let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::ebr::Guard::new();
+            let g = scc::Guard::new();
             self.data
                 .iter(&g)
                 .map(|(k, v)| (k.clone(), v.clone()))
@@ -186,7 +186,7 @@ impl Store for InMemoryStore {
             let mut first_batch = true;
             loop {
                 let batch: Vec<(RecordKey, Bytes)> = {
-                    let g = scc::ebr::Guard::new();
+                    let g = scc::Guard::new();
                     let iter: Box<dyn Iterator<Item = (&RecordKey, &Bytes)> + '_> =
                         match &resume_key {
                             // Query type is `RecordKey` (the tree's key type);
@@ -238,7 +238,7 @@ impl Store for InMemoryStore {
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         // O(log N + matches) via TreeIndex::range from the prefix start.
         let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::ebr::Guard::new();
+            let g = scc::Guard::new();
             self.data
                 .range(RecordKey::from(prefix.clone()).., &g)
                 .take_while(|(k, _)| k.starts_with(&prefix[..]))

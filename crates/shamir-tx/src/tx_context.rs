@@ -367,7 +367,7 @@ impl TxContext {
         // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
         // the unconditional insert path.
         use scc::hash_map::Entry;
-        match self.locked_keys.entry((table_token, key)) {
+        match self.locked_keys.entry_sync((table_token, key)) {
             Entry::Occupied(_) => {}
             Entry::Vacant(e) => {
                 e.insert_entry(());
@@ -490,7 +490,7 @@ impl TxContext {
     pub fn record_read_shared(&self, table_id: u64, key: Bytes, version: u64) {
         if self.isolation == IsolationLevel::Serializable {
             use scc::hash_map::Entry::{Occupied, Vacant};
-            match self.read_set.entry((table_id, key)) {
+            match self.read_set.entry_sync((table_id, key)) {
                 // First-read-wins: keep the earliest observed version.
                 Occupied(_) => {}
                 Vacant(ve) => {
@@ -532,9 +532,9 @@ impl TxContext {
         // `std::HashMap`), so which key surfaces on a multi-key conflict is
         // not contractual — callers test single-key scenarios.
         let mut conflict: Option<(u64, Bytes)> = None;
-        self.read_set.scan(|(table_id, key), version_seen| {
+        self.read_set.iter_sync(|(table_id, key), version_seen| {
             if conflict.is_some() {
-                return;
+                return false;
             }
             match version_provider(*table_id, key) {
                 None => conflict = Some((*table_id, key.clone())),
@@ -543,6 +543,7 @@ impl TxContext {
                 }
                 Some(_) => {}
             }
+            true
         });
         match conflict {
             Some(c) => Err(c),

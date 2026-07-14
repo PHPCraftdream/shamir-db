@@ -129,7 +129,7 @@ impl ShamirAdminExecutor {
             let token = crate::engine::table::table_token_for(table);
             match repo_instance.and_then(|r| {
                 r.per_table_mvcc()
-                    .get(&token)
+                    .get_sync(&token)
                     .map(|arc| std::sync::Arc::clone(&arc))
             }) {
                 Some(mvcc) => {

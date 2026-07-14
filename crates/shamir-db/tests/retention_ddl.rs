@@ -44,7 +44,7 @@ async fn table_retention(
     let token = table_token_for(table);
     let entry = repo_instance
         .per_table_mvcc()
-        .get(&token)
+        .get_sync(&token)
         .expect("mvcc entry exists");
     **entry.retention()
 }

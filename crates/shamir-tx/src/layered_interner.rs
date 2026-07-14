@@ -90,7 +90,7 @@ impl<'a> LayeredInterner<'a> {
                 if let Some(ik) = base.get_ind(key) {
                     return ik.id();
                 }
-                let entry = overlay.entry(key.to_string());
+                let entry = overlay.entry_sync(key.to_string());
                 use scc::hash_map::Entry::{Occupied, Vacant};
                 match entry {
                     Occupied(oe) => *oe.get(),
@@ -139,10 +139,12 @@ impl<'a> LayeredInterner<'a> {
                         .map(|arc| arc.to_string())
                 } else {
                     let mut found: Option<String> = None;
-                    overlay.scan(|k: &String, v: &u64| {
+                    overlay.iter_sync(|k: &String, v: &u64| {
                         if *v == id {
                             found = Some(k.clone());
+                            return false;
                         }
+                        true
                     });
                     found
                 }
@@ -201,7 +203,10 @@ pub async fn commit_interner_overlay(
     let mut delta = Vec::new();
     let mut pending: Vec<(String, u64)> = Vec::new();
     overlay
-        .scan_async(|k, v| pending.push((k.clone(), *v)))
+        .iter_async(|k, v| {
+            pending.push((k.clone(), *v));
+            true
+        })
         .await;
 
     for (key, overlay_id) in pending {

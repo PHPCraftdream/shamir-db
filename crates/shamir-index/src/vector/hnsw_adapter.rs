@@ -480,35 +480,39 @@ impl HnswAdapter {
     /// Iterate `(internal -> rid)` pairs for snapshot serialisation. Borrows
     /// each entry read-only under the scc cursor; the closure must not block.
     pub(crate) fn for_each_rid_map<F: FnMut(usize, RecordId)>(&self, mut f: F) {
-        self.rid_map.scan(|internal, rid| {
+        self.rid_map.iter_sync(|internal, rid| {
             f(*internal, *rid);
+            true
         });
     }
 
     /// Iterate `(rid -> internal)` pairs for snapshot serialisation.
     pub(crate) fn for_each_rid_to_internal<F: FnMut(RecordId, usize)>(&self, mut f: F) {
-        self.rid_to_internal.scan(|rid, internal| {
+        self.rid_to_internal.iter_sync(|rid, internal| {
             f(*rid, *internal);
+            true
         });
     }
 
     /// Check if a rid exists in the live index (not tombstoned).
     #[allow(dead_code)] // API for #408 compaction tests
     pub(crate) fn contains_rid(&self, rid: &RecordId) -> bool {
-        self.rid_to_internal.contains(rid)
+        self.rid_to_internal.contains_sync(rid)
     }
 
     /// Iterate the tombstone (`deleted`) internals for snapshot serialisation.
     pub(crate) fn for_each_deleted<F: FnMut(usize)>(&self, mut f: F) {
-        self.deleted.scan(|internal, ()| {
+        self.deleted.iter_sync(|internal, ()| {
             f(*internal);
+            true
         });
     }
 
     /// Iterate `(internal -> vector)` pairs for snapshot serialisation.
     pub(crate) fn for_each_vector<F: FnMut(usize, &[f32])>(&self, mut f: F) {
-        self.vectors.scan(|internal, vec| {
+        self.vectors.iter_sync(|internal, vec| {
             f(*internal, vec);
+            true
         });
     }
 
@@ -698,18 +702,19 @@ impl HnswAdapter {
         } else {
             None
         };
-        self.rid_to_internal.scan(|rid, internal| {
+        self.rid_to_internal.iter_sync(|rid, internal| {
             // Skip tombstoned internals
-            if self.deleted.contains(internal) {
-                return;
+            if self.deleted.contains_sync(internal) {
+                return true;
             }
             if let Some(q) = quantizer.as_ref() {
-                if let Some(codes) = self.vectors_u8.read(internal, |_, c| c.clone()) {
+                if let Some(codes) = self.vectors_u8.read_sync(internal, |_, c| c.clone()) {
                     result.push((*rid, q.dequantize(&codes)));
                 }
-            } else if let Some(vec) = self.vectors.read(internal, |_, v| v.clone()) {
+            } else if let Some(vec) = self.vectors.read_sync(internal, |_, v| v.clone()) {
                 result.push((*rid, vec));
             }
+            true
         });
         result
     }
@@ -740,7 +745,7 @@ impl HnswAdapter {
         for (rid, vec) in items {
             // Skip if this rid was deleted via double-write
             if let Some(ref del_rids) = self.compaction_deleted_rids {
-                if del_rids.contains(rid) {
+                if del_rids.contains_sync(rid) {
                     continue;
                 }
             }
@@ -751,7 +756,7 @@ impl HnswAdapter {
                 Vacant(vac) => {
                     // Re-check deleted_rids under the entry lock to close the race
                     if let Some(ref del_rids) = self.compaction_deleted_rids {
-                        if del_rids.contains(rid) {
+                        if del_rids.contains_sync(rid) {
                             continue;
                         }
                     }
@@ -856,7 +861,7 @@ impl HnswAdapter {
                         // only in `rid_map`) — a pre-flip internal that never
                         // bumps `migrated_pre_flip` → catch-up loop hangs
                         // forever (`backfill_delete_same_rid_race_no_double_count`).
-                        if !self.deleted.contains(&internal) {
+                        if !self.deleted.contains_sync(&internal) {
                             let codes = self.quantize(vec);
                             if self
                                 .claim_and_publish_u8_async(internal, codes.clone())
@@ -999,8 +1004,9 @@ impl HnswAdapter {
         if !self.is_quantized() {
             return;
         }
-        self.vectors_u8.scan(|internal, codes| {
+        self.vectors_u8.iter_sync(|internal, codes| {
             f(*internal, codes);
+            true
         });
     }
 
@@ -1057,7 +1063,7 @@ impl HnswAdapter {
     /// bit-identical; keeping the existing one is correct).
     #[allow(clippy::disallowed_methods)] // scc::HashMap::insert is lock-free (CAS)
     fn claim_and_publish_u8(&self, internal: usize, codes: Vec<u8>) -> Option<()> {
-        if self.vectors_u8.insert(internal, codes).is_ok() {
+        if self.vectors_u8.insert_sync(internal, codes).is_ok() {
             // Won the claim — this internal is new to vectors_u8. Bump
             // the pre-flip migration counter if this is a pre-flip internal.
             let nif = self.next_id_at_flip.load(Ordering::Acquire);
@@ -1121,7 +1127,7 @@ impl HnswAdapter {
     /// release builds.
     #[cfg(test)]
     pub(crate) fn test_force_publish_u8(&self, internal: usize, codes: Vec<u8>) {
-        let _ = self.vectors_u8.insert(internal, codes);
+        let _ = self.vectors_u8.insert_sync(internal, codes);
     }
 
     /// VR-8 (#430, Б-6) — test-only: does `vectors_u8` hold a code for
@@ -1131,7 +1137,7 @@ impl HnswAdapter {
     /// away in release builds.
     #[cfg(test)]
     pub(crate) fn test_vectors_u8_contains(&self, internal: usize) -> bool {
-        self.vectors_u8.contains(&internal)
+        self.vectors_u8.contains_sync(&internal)
     }
 
     /// Post-VR-8-follow-up (delete-vs-backfill same-rid race) — test-only:
@@ -1251,14 +1257,15 @@ impl HnswAdapter {
         // Snapshot the f32 buffer (internal, vec) pairs. We read under a
         // plain scc scan — no entry guard held across the await below.
         let mut snapshot: Vec<(usize, Vec<f32>)> = Vec::new();
-        self.vectors.scan(|internal, vec| {
+        self.vectors.iter_sync(|internal, vec| {
             // Skip tombstoned internals — their codes must NOT enter the
             // u8 graph (a tombstoned internal is never resurrectated:
             // next_id is monotonic, so a brand-new internal never aliases
             // a tombstoned one).
-            if !self.deleted.contains(internal) {
+            if !self.deleted.contains_sync(internal) {
                 snapshot.push((*internal, vec.clone()));
             }
+            true
         });
         // The snapshot is empty or below threshold → nothing to fit yet
         // (the threshold check is the caller's responsibility, but we
@@ -1336,8 +1343,8 @@ impl HnswAdapter {
             snapshot.iter().map(|(i, _)| *i).collect();
         let mut graph_batch_delta: Vec<(usize, Vec<u8>)> = Vec::new();
         let mut delta_claimed = 0usize;
-        self.vectors.scan(|internal, vec| {
-            if !snapshot_ids.contains(internal) && !self.deleted.contains(internal) {
+        self.vectors.iter_sync(|internal, vec| {
+            if !snapshot_ids.contains(internal) && !self.deleted.contains_sync(internal) {
                 let codes = quantizer_arc.quantize(vec);
                 if self
                     .claim_and_publish_u8(*internal, codes.clone())
@@ -1349,6 +1356,7 @@ impl HnswAdapter {
                     delta_claimed += 1;
                 }
             }
+            true
         });
 
         // Build the u8 graph and insert the snapshot + delta codes in ONE
@@ -1497,8 +1505,8 @@ impl HnswAdapter {
         let mut spins: u32 = 0;
         loop {
             // Claim any pre-flip internals still sitting in the f32 buffer.
-            self.vectors.scan(|internal, vec| {
-                if !self.deleted.contains(internal) {
+            self.vectors.iter_sync(|internal, vec| {
+                if !self.deleted.contains_sync(internal) {
                     let codes = quantizer_arc.quantize(vec);
                     if self
                         .claim_and_publish_u8(*internal, codes.clone())
@@ -1509,19 +1517,21 @@ impl HnswAdapter {
                         pending_graph_inserts.push((*internal, codes));
                     }
                 }
+                true
             });
 
             // Drain entries that are in vectors_u8 (claimed by us or by a
             // concurrent self-migration upsert). Both paths remove from
             // `vectors`; whichever runs first wins, the second is a no-op.
             let mut internals_to_drop: Vec<usize> = Vec::new();
-            self.vectors.scan(|internal, _| {
-                if self.vectors_u8.contains(internal) {
+            self.vectors.iter_sync(|internal, _| {
+                if self.vectors_u8.contains_sync(internal) {
                     internals_to_drop.push(*internal);
                 }
+                true
             });
             for internal in &internals_to_drop {
-                let _ = self.vectors.remove(internal);
+                let _ = self.vectors.remove_sync(internal);
             }
 
             // Convergence: migrated_pre_flip is bumped only for claims on
@@ -1672,7 +1682,7 @@ impl HnswAdapter {
         internal: usize,
         vec: &[f32],
     ) -> Result<(), VectorError> {
-        if self.deleted.contains(&internal) {
+        if self.deleted.contains_sync(&internal) {
             // A concurrent same-rid upsert/delete tombstoned this internal
             // (it already bumped `migrated_pre_flip` via the tombstone site).
             // Skip both the claim and the graph insert.
@@ -1719,7 +1729,10 @@ impl HnswAdapter {
             .get()
             .expect("quantized_active but quantizer unset");
         let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
-        self.vectors_u8.scan(|i, c| pairs.push((*i, c.clone())));
+        self.vectors_u8.iter_sync(|i, c| {
+            pairs.push((*i, c.clone()));
+            true
+        });
         // Audit finding 4.1 (task #530): build the fused rescore context ONCE
         // per query (precomputes `qm`/`qs`/`q_norm`), then score each candidate
         // with zero per-candidate dequant allocation.
@@ -2166,7 +2179,7 @@ impl VectorAdapter for HnswAdapter {
                 Occupied(mut occ) => {
                     let old_internal = *occ.get();
                     // Tombstone the previous (or concurrently-serialised) internal.
-                    if self.deleted.insert(old_internal, ()).is_ok() {
+                    if self.deleted.insert_sync(old_internal, ()).is_ok() {
                         self.deleted_count.fetch_add(1, Ordering::Relaxed);
                         self.bump_migrated_on_tombstone(old_internal);
                     }
@@ -2266,7 +2279,7 @@ impl VectorAdapter for HnswAdapter {
             // the f32 `vectors` map (the catch-up scan and every other
             // claim path also skip `deleted` entries, so nothing else
             // would ever remove it).
-            if !self.deleted.contains(&internal) {
+            if !self.deleted.contains_sync(&internal) {
                 let codes = self.quantize(&vec_for_store);
                 if self
                     .claim_and_publish_u8_async(internal, codes.clone())
@@ -2353,7 +2366,7 @@ impl VectorAdapter for HnswAdapter {
                         // earlier-in-this-batch) internal. Same rationale as
                         // single `upsert`: the transition is atomic per rid
                         // while the entry is held.
-                        if self.deleted.insert(old_internal, ()).is_ok() {
+                        if self.deleted.insert_sync(old_internal, ()).is_ok() {
                             self.deleted_count.fetch_add(1, Ordering::Relaxed);
                             self.bump_migrated_on_tombstone(old_internal);
                         }
@@ -2394,7 +2407,7 @@ impl VectorAdapter for HnswAdapter {
             // runs for every row (published, claimed by us or not).
             let mut graph_batch: Vec<(usize, Vec<u8>)> = Vec::with_capacity(code_rows.len());
             for (internal, rid, codes) in code_rows {
-                if !self.deleted.contains(&internal)
+                if !self.deleted.contains_sync(&internal)
                     && self
                         .claim_and_publish_u8_async(internal, codes.clone())
                         .await
@@ -2477,7 +2490,7 @@ impl VectorAdapter for HnswAdapter {
                 // `entry_async` loop above) and this loop reaching it. The
                 // tombstone already bumped `migrated_pre_flip`; claiming a
                 // tombstoned internal here would double-bump the counter.
-                if !self.deleted.contains(&internal) {
+                if !self.deleted.contains_sync(&internal) {
                     let codes = self.quantize(&vec);
                     if self
                         .claim_and_publish_u8_async(internal, codes.clone())
@@ -2622,7 +2635,10 @@ impl VectorAdapter for HnswAdapter {
                 };
                 // Snapshot (internal, vector) pairs — the index is tiny here.
                 let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
-                self.vectors.scan(|i, v| pairs.push((*i, v.clone())));
+                self.vectors.iter_sync(|i, v| {
+                    pairs.push((*i, v.clone()));
+                    true
+                });
                 let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
                 for (internal, v) in pairs {
                     if self.deleted.contains_async(&internal).await {

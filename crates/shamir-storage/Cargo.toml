@@ -57,7 +57,7 @@ arc-swap = "1.7"
 # Lock-free concurrent sorted B+ tree — backs InMemoryStore so
 # `scan_prefix_stream` does O(log N + matches) range walks instead of
 # the O(N) full-iter+filter the previous DashMap shape required.
-scc = "2.2"
+scc = "3.8"
 # `MemBufferConfig` serializes into the engine's info_store via
 # bincode at the DDL boundary.
 serde = { version = "1", features = ["derive"] }

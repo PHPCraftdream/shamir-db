@@ -51,7 +51,7 @@ async fn get_mvcc(
     // the map which borrows repo_instance — can't return the guard itself).
     let mvcc_arc = repo_instance
         .per_table_mvcc()
-        .get(&token)
+        .get_sync(&token)
         .expect("mvcc entry exists")
         .clone();
     mvcc_arc

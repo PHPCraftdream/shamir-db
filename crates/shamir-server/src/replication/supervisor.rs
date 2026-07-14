@@ -179,7 +179,7 @@ impl SubscriptionSupervisor {
 
     /// `true` if a loop is currently registered for `name`.
     pub fn is_running(&self, name: &str) -> bool {
-        self.registry.contains(name)
+        self.registry.contains_sync(name)
     }
 
     /// Poke the supervisor after an admin batch that may have changed the
@@ -209,16 +209,17 @@ impl SubscriptionSupervisor {
 
         // 1. Stop loops that should no longer run (removed / paused / rebound).
         let mut to_stop: Vec<String> = Vec::new();
-        self.registry.scan(|name, handle| {
+        self.registry.iter_sync(|name, handle| {
             let keep = subs
                 .iter()
                 .any(|s| &s.name == name && s.is_active() && s.profile == handle.profile);
             if !keep {
                 to_stop.push(name.clone());
             }
+            true
         });
         for name in to_stop {
-            if let Some((_, handle)) = self.registry.remove(&name) {
+            if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
                 info!(subscription = %name, "supervisor: stopped follower loop");
             }
@@ -226,7 +227,7 @@ impl SubscriptionSupervisor {
 
         // 2. Start loops for active subscriptions not yet running.
         for sub in &subs {
-            if !sub.is_active() || self.registry.contains(&sub.name) {
+            if !sub.is_active() || self.registry.contains_sync(&sub.name) {
                 continue;
             }
             if let Err(e) = self.start_subscription(sub).await {
@@ -238,9 +239,12 @@ impl SubscriptionSupervisor {
     /// Stop every running loop and clear the registry (shutdown).
     pub async fn stop_all(&self) {
         let mut names: Vec<String> = Vec::new();
-        self.registry.scan(|name, _| names.push(name.clone()));
+        self.registry.iter_sync(|name, _| {
+            names.push(name.clone());
+            true
+        });
         for name in names {
-            if let Some((_, handle)) = self.registry.remove(&name) {
+            if let Some((_, handle)) = self.registry.remove_sync(&name) {
                 handle.stop();
             }
         }
@@ -293,7 +297,7 @@ impl SubscriptionSupervisor {
         };
         // A racing reconcile may have inserted already; if so, stop the loops
         // we just spawned rather than leak them.
-        if let Err((_, handle)) = self.registry.insert(sub.name.clone(), handle) {
+        if let Err((_, handle)) = self.registry.insert_sync(sub.name.clone(), handle) {
             handle.stop();
         } else {
             info!(subscription = %sub.name, profile = %sub.profile, "supervisor: started follower loop");

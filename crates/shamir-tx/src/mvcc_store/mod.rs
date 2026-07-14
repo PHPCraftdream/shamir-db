@@ -267,7 +267,7 @@ impl MvccStore {
         // `retain` is a lock-free sweep over the (small) map; on the common
         // path it finds nothing (the drain half already removed each stamp it
         // consumed), so this is cheap.
-        self.pending_ts.retain(|v, _| *v > durable_watermark);
+        self.pending_ts.retain_sync(|v, _| *v > durable_watermark);
     }
 
     /// D2 P1e — number of entries currently in the in-memory overlay.
@@ -295,7 +295,7 @@ impl MvccStore {
     pub(super) fn ts_index_insert(&self, ts_millis: u64, version: u64) {
         let _ = self
             .ts_index
-            .insert((Reverse(ts_millis), Reverse(version)), ());
+            .insert_sync((Reverse(ts_millis), Reverse(version)), ());
     }
 
     /// Audit 2.1: drop a single `(ts_millis, version)` entry from the
@@ -315,7 +315,7 @@ impl MvccStore {
     /// Lock-free (`TreeIndex::remove` is a CAS-based B+ tree operation).
     pub(super) fn ts_index_remove(&self, ts_millis: u64, version: u64) {
         self.ts_index
-            .remove(&(Reverse(ts_millis), Reverse(version)));
+            .remove_sync(&(Reverse(ts_millis), Reverse(version)));
     }
 
     /// Audit 2.1: number of live entries in the in-memory ts-index.
@@ -331,7 +331,7 @@ impl MvccStore {
     /// Returns `None` if the index is empty or no entry satisfies the bound.
     /// O(log N) via reversed-key forward range + `.next()`.
     pub(super) fn ts_index_query(&self, target_ts: u64) -> Option<u64> {
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         // Reversed keys: (Reverse(ts), Reverse(version)) sorted ascending means
         // largest ts first. range((Reverse(target_ts), Reverse(u64::MAX))..) yields
         // entries where Reverse(ts) >= Reverse(target_ts) i.e. ts <= target_ts,
@@ -499,7 +499,7 @@ impl MvccStore {
     pub(crate) fn swap_vacuum_anchor(&self, key: &[u8], new_anchor: u64) -> Option<u64> {
         // Inline-cheap for the 16-byte `RecordId` shape; builds the cell map's
         // `RecordKey` entry key without the prior `Bytes` heap copy.
-        match self.cells.entry(RecordKey::from_slice(key)) {
+        match self.cells.entry_sync(RecordKey::from_slice(key)) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
                 let prev = cell.vacuum_anchor;
@@ -558,7 +558,7 @@ impl MvccStore {
     /// explicit serialization point that makes "exactly one committer wins" hold
     /// for non-unique tables under true parallelism.
     pub fn try_reserve(&self, key: RecordKey, snapshot_version: u64, txn_id: u64) -> bool {
-        match self.cells.entry(key) {
+        match self.cells.entry_sync(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
                 if cell.version <= snapshot_version && cell.reserved_by == 0 {
@@ -592,7 +592,7 @@ impl MvccStore {
     /// Phase 5a) in place of the prior `publish_cell_sync` — it is a strict
     /// superset (sets `version` AND clears `reserved_by`).
     pub(crate) fn finalize_reservation(&self, key: RecordKey, version: u64) {
-        match self.cells.entry(key) {
+        match self.cells.entry_sync(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 let cell = e.get_mut();
                 cell.version = version;
@@ -618,7 +618,7 @@ impl MvccStore {
     /// already `0`). This makes the RAII guard's `Drop` safe to fire after a
     /// successful `finalize_reservation`.
     pub(crate) fn release_reservation(&self, key: RecordKey, txn_id: u64) {
-        if let scc::hash_map::Entry::Occupied(mut e) = self.cells.entry(key) {
+        if let scc::hash_map::Entry::Occupied(mut e) = self.cells.entry_sync(key) {
             let cell = e.get_mut();
             if cell.reserved_by == txn_id {
                 cell.reserved_by = 0;
@@ -1218,7 +1218,7 @@ impl MvccStore {
     /// previous `Bytes::copy_from_slice(key)` heap-alloc+copy on every probe
     /// (one per `get_at`, one per `version_of` read-set entry) is gone.
     pub(crate) fn current_version(&self, key: &[u8]) -> u64 {
-        self.cells.read(key, |_, c| c.version).unwrap_or(0)
+        self.cells.read_sync(key, |_, c| c.version).unwrap_or(0)
     }
 
     /// Public accessor: current committed version for `key`, or `0` if
@@ -1237,7 +1237,7 @@ impl MvccStore {
     /// version equals this value is fresh; `None` means "no in-process
     /// mutation" (the durable posting is consistent).
     pub fn live_version(&self, key: &[u8]) -> Option<u64> {
-        self.cells.read(key, |_, c| c.version)
+        self.cells.read_sync(key, |_, c| c.version)
     }
 
     // ========================================================================

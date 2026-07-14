@@ -37,7 +37,7 @@ log = "0.4"
 rust-stemmers = "1.2"
 
 # Concurrency
-scc        = "2.2"
+scc        = "3.8"
 arc-swap   = "1.7"
 shamir-numa = { path = "../shamir-numa" }
 

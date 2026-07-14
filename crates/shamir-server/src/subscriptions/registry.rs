@@ -109,7 +109,7 @@ impl SubscriptionRegistry {
     pub(crate) fn reserve_pending(&self, id: u64) {
         if self
             .subs
-            .insert(
+            .insert_sync(
                 id,
                 ActiveSubscription {
                     bridge_handle: None,
@@ -132,13 +132,13 @@ impl SubscriptionRegistry {
     /// `JoinHandle`'s `Drop` detaches without aborting anything — there is
     /// nothing left to abort).
     pub(crate) fn attach_handle(&self, id: u64, handle: JoinHandle<()>) {
-        self.subs.update(&id, move |_, sub| {
+        self.subs.update_sync(&id, move |_, sub| {
             sub.bridge_handle = Some(handle);
         });
     }
 
     pub fn remove(&self, id: u64) -> bool {
-        if self.subs.remove(&id).is_some() {
+        if self.subs.remove_sync(&id).is_some() {
             self.active.fetch_sub(1, Ordering::AcqRel);
             true
         } else {
@@ -148,7 +148,7 @@ impl SubscriptionRegistry {
 
     /// Cancel all subscriptions (connection teardown).
     pub fn close_all(&self) {
-        self.subs.retain(|_, _| false);
+        self.subs.retain_sync(|_, _| false);
         self.active.store(0, Ordering::Release);
     }
 

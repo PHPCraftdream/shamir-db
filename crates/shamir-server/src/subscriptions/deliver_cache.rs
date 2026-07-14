@@ -82,7 +82,7 @@ pub(crate) fn deliver_cache_insert(
         mode,
     );
     let arc = Arc::new(data);
-    let _ = GLOBAL.inner.insert(key, Arc::clone(&arc));
+    let _ = GLOBAL.inner.insert_sync(key, Arc::clone(&arc));
     arc
 }
 
@@ -98,6 +98,6 @@ pub(crate) fn deliver_cache_evict_up_to(up_to: u64) {
         .is_ok()
     {
         let hi = (up_to, u64::MAX, u64::MAX, usize::MAX, u8::MAX);
-        GLOBAL.inner.remove_range(..=hi);
+        GLOBAL.inner.remove_range_sync(..=hi);
     }
 }

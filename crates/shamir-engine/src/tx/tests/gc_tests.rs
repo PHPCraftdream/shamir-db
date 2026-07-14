@@ -69,7 +69,10 @@ async fn gc_respects_active_snapshot() {
     let key = rid.to_bytes();
     let mut stores: Vec<Arc<shamir_tx::MvccStore>> = Vec::new();
     repo.per_table_mvcc()
-        .scan_async(|_, m| stores.push(Arc::clone(m)))
+        .iter_async(|_, m| {
+            stores.push(Arc::clone(m));
+            true
+        })
         .await;
 
     let mut found_v1 = false;

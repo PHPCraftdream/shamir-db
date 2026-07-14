@@ -106,7 +106,7 @@ pub(crate) fn cache_insert(
     // returned Err carries (key, value). The first writer wins; subsequent
     // identical inserts succeed at the user-observable layer because the
     // first one's bytes are deterministic-equal to ours.
-    let _ = GLOBAL.inner.insert(key, Arc::clone(&arc));
+    let _ = GLOBAL.inner.insert_sync(key, Arc::clone(&arc));
     arc
 }
 
@@ -129,6 +129,6 @@ pub(crate) fn cache_evict_up_to(up_to: u64) {
         // — evicts every key whose first component (commit_version) <= up_to,
         // across all db_id / repo_hash / change_idx values.
         let hi = (up_to, u64::MAX, u64::MAX, usize::MAX);
-        GLOBAL.inner.remove_range(..=hi);
+        GLOBAL.inner.remove_range_sync(..=hi);
     }
 }

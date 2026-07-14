@@ -389,7 +389,8 @@ impl FjallUserDirectory {
             }
 
             if let Some(id) = user.user_id_array() {
-                let _ = tickets_cache.insert(id, AtomicU64::new(user.tickets_invalid_before_ns));
+                let _ =
+                    tickets_cache.insert_sync(id, AtomicU64::new(user.tickets_invalid_before_ns));
             }
             if user.superuser {
                 superuser_count += 1;
@@ -422,7 +423,7 @@ impl FjallUserDirectory {
         // means "unknown user". Returning 0 matches the prior fail-open
         // behaviour for unknown users (0 = no invalidation).
         self.tickets_cache
-            .read(user_id, |_, v| v.load(Ordering::Relaxed))
+            .read_sync(user_id, |_, v| v.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
@@ -543,7 +544,7 @@ impl FjallUserDirectory {
     /// mutates the cache at a time; concurrent readers use `Relaxed` loads
     /// which is safe because the `AtomicU64` is the only mutable state.
     fn update_cache(&self, user_id: &[u8; 16], tickets_invalid_before_ns: u64) {
-        if let Some(v) = self.tickets_cache.get(user_id) {
+        if let Some(v) = self.tickets_cache.get_sync(user_id) {
             v.store(tickets_invalid_before_ns, Ordering::Relaxed);
         } else {
             // Insert returns false if the key was already present (race with
@@ -552,7 +553,7 @@ impl FjallUserDirectory {
             // genuinely new user_id.
             let _ = self
                 .tickets_cache
-                .insert(*user_id, AtomicU64::new(tickets_invalid_before_ns));
+                .insert_sync(*user_id, AtomicU64::new(tickets_invalid_before_ns));
         }
     }
 
@@ -660,7 +661,7 @@ impl FjallUserDirectory {
         // the fail-open 0 — reproducing exactly the fail-open bug the
         // `UserStateLookup` fix closes, just via a different path. This is
         // NOT optional.
-        let _ = self.tickets_cache.remove(&user_id);
+        let _ = self.tickets_cache.remove_sync(&user_id);
 
         if user.superuser {
             self.superuser_count.fetch_sub(1, Ordering::Relaxed);

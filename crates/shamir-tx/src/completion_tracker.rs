@@ -51,7 +51,7 @@ impl CompletionTracker {
         if version <= current_wm {
             return; // already compacted
         }
-        let _ = self.states.insert(version, state);
+        let _ = self.states.insert_sync(version, state);
         self.try_advance();
     }
 
@@ -67,7 +67,7 @@ impl CompletionTracker {
             let next = current + 1;
 
             // Check if next version is completed.
-            let completed = self.states.read(&next, |_, s| {
+            let completed = self.states.read_sync(&next, |_, s| {
                 matches!(s, State::Materialized | State::Aborted)
             });
 
@@ -82,7 +82,7 @@ impl CompletionTracker {
                     ) {
                         Ok(_) => {
                             // Successfully advanced — remove the entry.
-                            let _ = self.states.remove(&next);
+                            let _ = self.states.remove_sync(&next);
                         }
                         Err(_) => {
                             // Another thread advanced; retry from top.
