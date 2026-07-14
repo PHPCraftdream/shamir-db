@@ -25,38 +25,46 @@ use std::sync::Arc;
 pub struct SessionPermissions {
     /// Whether this session has the `superuser` role (spec §12 admin commands).
     pub is_superuser: bool,
+    /// Whether this session has replication-API access (task #621, mirrors
+    /// `is_superuser` — driven by the directory's authoritative `replicator`
+    /// flag, not a role string).
+    pub is_replicator: bool,
     /// Roles snapshot.
     pub roles: Vec<String>,
 }
 
 impl SessionPermissions {
     /// Construct from a list of roles. `is_superuser` is true iff "superuser"
-    /// is among them.
+    /// is among them; `is_replicator` is true iff "replicator" is among them.
     ///
-    /// **Task #557 note:** the literal `"superuser"` string is now reserved
-    /// at the directory write boundary (`FjallUserDirectory::update_roles`
-    /// rejects it), so any roles list produced by the real directory will
-    /// never contain it. Production code that has the directory's
-    /// authoritative `superuser` flag should use [`Self::new`] instead.
-    /// `from_roles` is retained for callers that build a `SessionPermissions`
-    /// from a plain role list without touching `FjallUserDirectory`
-    /// (in-memory/test directories, fixtures, resume from a legacy ticket).
+    /// **Task #557/#621 note:** the literal `"superuser"`/`"replicator"`
+    /// strings are now reserved at the directory write boundary
+    /// (`FjallUserDirectory::update_roles` rejects both), so any roles list
+    /// produced by the real directory will never contain them. Production
+    /// code that has the directory's authoritative flags should use
+    /// [`Self::new`] instead. `from_roles` is retained for callers that
+    /// build a `SessionPermissions` from a plain role list without touching
+    /// `FjallUserDirectory` (in-memory/test directories, fixtures, resume
+    /// from a legacy ticket).
     pub fn from_roles(roles: Vec<String>) -> Self {
         let is_superuser = roles.iter().any(|r| r == "superuser");
+        let is_replicator = roles.iter().any(|r| r == "replicator");
         Self {
             is_superuser,
+            is_replicator,
             roles,
         }
     }
 
-    /// Construct from the directory's authoritative `superuser` flag plus
-    /// the (now-reserved-string-free) role list. Use this instead of
-    /// [`Self::from_roles`] wherever the caller has a real flag value
-    /// (every production call site after task #557) — `from_roles`'s
-    /// string-scan is kept only for callers that never had the flag.
-    pub fn new(is_superuser: bool, roles: Vec<String>) -> Self {
+    /// Construct from the directory's authoritative `superuser`/`replicator`
+    /// flags plus the (now-reserved-string-free) role list. Use this instead
+    /// of [`Self::from_roles`] wherever the caller has real flag values
+    /// (every production call site after task #557/#621) — `from_roles`'s
+    /// string-scan is kept only for callers that never had the flags.
+    pub fn new(is_superuser: bool, is_replicator: bool, roles: Vec<String>) -> Self {
         Self {
             is_superuser,
+            is_replicator,
             roles,
         }
     }

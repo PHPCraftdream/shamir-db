@@ -424,7 +424,11 @@ async fn run_handshake<F: Framer>(
     let session = Session::new(
         user_id,
         username.as_str().to_string(),
-        SessionPermissions::new(user_state.superuser, user_state.roles),
+        SessionPermissions::new(
+            user_state.superuser,
+            user_state.replicator,
+            user_state.roles,
+        ),
         ctx.transport_kind,
         binding_mode,
         exporter,

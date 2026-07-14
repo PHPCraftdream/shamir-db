@@ -188,6 +188,20 @@ pub enum DbRequest {
         /// `security`/`secret_grants` fields).
         hmac: Option<String>,
     },
+
+    /// Grant or revoke replication API access on an existing SCRAM-directory
+    /// account (task #621 — mirrors SetSuperuser's shape/gate exactly, no
+    /// last-remaining guard). Requires an already-superuser session AND an
+    /// HMAC confirmation tag.
+    SetReplicator {
+        /// Target username.
+        user: String,
+        /// `true` to grant, `false` to revoke.
+        on: bool,
+        /// Hex-encoded HMAC-SHA256 tag over the canonical form — always
+        /// required (unconditional, mirrors `SetSuperuser`'s gate).
+        hmac: Option<String>,
+    },
 }
 
 /// Application-layer DB response.
@@ -212,6 +226,14 @@ pub enum DbResponse {
     /// Successful [`DbRequest::SetSuperuser`] — the target's superuser flag
     /// is now `on`.
     SuperuserSet {
+        /// Echoed target username.
+        user: String,
+        /// Echoed requested state (`true` = granted, `false` = revoked).
+        on: bool,
+    },
+    /// Successful [`DbRequest::SetReplicator`] — the target's replicator
+    /// flag is now `on`.
+    ReplicatorSet {
         /// Echoed target username.
         user: String,
         /// Echoed requested state (`true` = granted, `false` = revoked).

@@ -514,19 +514,21 @@ async fn repl_hello_and_pull_with_events() {
         );
     }
 
-    // --- Admin: create the `replicator`-role user. ---
+    // --- Admin: create the user, then grant the `replicator` capability
+    //     flag via `SetReplicator` (task #621 — `"replicator"` is now a
+    //     reserved role string; `CreateScramUser`/`update_roles` reject it,
+    //     so the flag must be granted through its own wire op). ---
     let repl_pw = b"repl-password".to_vec();
-    let repl_roles = vec!["replicator".to_string()];
-    let repl_tag = shamir_query_types::hmac::compute_tag_hex(
+    let create_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("repl", &repl_roles),
+        &shamir_query_types::hmac::canonical_create_scram_user("repl", &[]),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
             password: String::from_utf8(repl_pw.clone()).expect("utf8"),
-            roles: repl_roles,
-            hmac: Some(repl_tag),
+            roles: Vec::new(),
+            hmac: Some(create_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -537,6 +539,27 @@ async fn repl_hello_and_pull_with_events() {
     assert!(
         matches!(resp, DbResponse::UserCreated { .. }),
         "create repl user: {resp:?}",
+    );
+
+    let set_repl_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_set_replicator("repl", true),
+    );
+    let resp = roundtrip(
+        &DbRequest::SetReplicator {
+            user: "repl".into(),
+            on: true,
+            hmac: Some(set_repl_tag),
+        },
+        admin_sid,
+        &mut admin_rid,
+        &mut admin_w,
+        &mut admin_r,
+    )
+    .await;
+    assert!(
+        matches!(resp, DbResponse::ReplicatorSet { .. }),
+        "grant replicator flag: {resp:?}",
     );
 
     // --- repl: login. ---
@@ -720,19 +743,21 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
         "seed write: {resp:?}"
     );
 
-    // --- Admin: create the `replicator`-role user. ---
+    // --- Admin: create the user, then grant the `replicator` capability
+    //     flag via `SetReplicator` (task #621 — `"replicator"` is now a
+    //     reserved role string; `CreateScramUser`/`update_roles` reject it,
+    //     so the flag must be granted through its own wire op). ---
     let repl_pw = b"repl-password".to_vec();
-    let repl_roles = vec!["replicator".to_string()];
-    let repl_tag = shamir_query_types::hmac::compute_tag_hex(
+    let create_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("repl", &repl_roles),
+        &shamir_query_types::hmac::canonical_create_scram_user("repl", &[]),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
             password: String::from_utf8(repl_pw.clone()).expect("utf8"),
-            roles: repl_roles,
-            hmac: Some(repl_tag),
+            roles: Vec::new(),
+            hmac: Some(create_tag),
         },
         admin_sid,
         &mut admin_rid,
@@ -743,6 +768,27 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
     assert!(
         matches!(resp, DbResponse::UserCreated { .. }),
         "create repl user: {resp:?}",
+    );
+
+    let set_repl_tag = shamir_query_types::hmac::compute_tag_hex(
+        &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
+        &shamir_query_types::hmac::canonical_set_replicator("repl", true),
+    );
+    let resp = roundtrip(
+        &DbRequest::SetReplicator {
+            user: "repl".into(),
+            on: true,
+            hmac: Some(set_repl_tag),
+        },
+        admin_sid,
+        &mut admin_rid,
+        &mut admin_w,
+        &mut admin_r,
+    )
+    .await;
+    assert!(
+        matches!(resp, DbResponse::ReplicatorSet { .. }),
+        "grant replicator flag: {resp:?}",
     );
 
     let (repl_sid, mut repl_r, mut repl_w, mut repl_rid) =

@@ -47,12 +47,13 @@ fn alice_plain_session() -> Session {
     )
 }
 
-/// `alice` with the `replicator` role (still owns the `app/main` repo).
+/// `alice` with the `is_replicator` capability flag set (task #621 — no
+/// longer a role string; still owns the `app/main` repo).
 fn alice_replicator_session() -> Session {
     Session::new(
         [0xAB; 16],
         "alice".into(),
-        SessionPermissions::from_roles(vec!["read_write".into(), "replicator".into()]),
+        SessionPermissions::new(false, true, vec!["read_write".into()]),
         TransportKind::Tcp,
         BindingMode::TlsExporter,
         [0u8; 32],
@@ -60,13 +61,13 @@ fn alice_replicator_session() -> Session {
     )
 }
 
-/// `carol` with the `replicator` role but NO ownership of any repo —
-/// used for the `denied_repo` case.
+/// `carol` with the `is_replicator` capability flag set but NO ownership of
+/// any repo — used for the `denied_repo` case.
 fn carol_replicator_session() -> Session {
     Session::new(
         [0xCD; 16],
         "carol".into(),
-        SessionPermissions::from_roles(vec!["replicator".into()]),
+        SessionPermissions::new(false, true, vec![]),
         TransportKind::Tcp,
         BindingMode::TlsExporter,
         [0u8; 32],

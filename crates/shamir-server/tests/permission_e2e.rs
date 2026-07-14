@@ -1520,8 +1520,11 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
 
 /// (c) + (d): `AccessTree` and `List(Users)`/`List(Roles)` stay denied for
 /// a non-superuser (their own `Manage(Root)` gate still applies underneath
-/// the now-passing coarse gate); `List(Databases)` is allowed (Root's
-/// default-open List/Read traversal per the #552 posture).
+/// the now-passing coarse gate); `List(Databases)` is now ALSO denied by
+/// default — task #615/#620 narrowed Root's default mode `0o755` -> `0o751`,
+/// dropping Other-Read (so `List`, i.e. database-name enumeration, is
+/// closed by default), while keeping Other-Execute (so ancestor-traversal
+/// into resources an actor separately holds rights on is unaffected).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn coarse_gate_access_tree_and_list_semantics() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -1643,8 +1646,9 @@ async fn coarse_gate_access_tree_and_list_semantics() {
         other => panic!("expected access_denied for List(Users), got {:?}", other),
     }
 
-    // (d) List(Databases) — Root's default mode permits List/Read
-    // traversal, so a non-superuser is ALLOWED.
+    // (d) List(Databases) — task #615/#620: Root's default mode no longer
+    // grants Other-Read, so database-name enumeration is DENIED by default
+    // for a non-superuser (was ALLOWED before this task).
     let resp = roundtrip(
         &list_databases_req(db_name),
         bob_sid,
@@ -1653,11 +1657,15 @@ async fn coarse_gate_access_tree_and_list_semantics() {
         &mut bob_r,
     )
     .await;
-    assert!(
-        matches!(resp, DbResponse::Batch { .. }),
-        "List(Databases) should be allowed for a non-superuser: {:?}",
-        resp
-    );
+    match resp {
+        DbResponse::Error { code, .. } => {
+            assert_eq!(
+                code, "access_denied",
+                "List(Databases) should be access_denied by default (task #615/#620)"
+            );
+        }
+        other => panic!("expected access_denied for List(Databases), got {:?}", other),
+    }
 
     cleanup(&mut bob_w, &mut bob_r).await;
     cleanup(&mut admin_w, &mut admin_r).await;

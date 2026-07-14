@@ -85,7 +85,7 @@ use crate::tx_registry::TxRegistry;
 
 use super::admin::{
     change_password_challenge, change_password_verify, check_destructive_hmacs, create_scram_user,
-    is_coarse_admin_gate_exempt, set_superuser, AdminGlue,
+    is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
 };
 use super::config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::subscribe_handler;
@@ -307,6 +307,9 @@ impl RequestHandler for ShamirDbHandler {
                 }
                 DbRequest::SetSuperuser { user, on, hmac } => {
                     set_superuser(self.admin.as_ref(), session, user, on, hmac).await
+                }
+                DbRequest::SetReplicator { user, on, hmac } => {
+                    set_replicator(self.admin.as_ref(), session, user, on, hmac).await
                 }
 
                 // --- Phase B: interactive (multi-call) transactions ---

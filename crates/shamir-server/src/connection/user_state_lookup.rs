@@ -34,6 +34,7 @@ impl UserStateLookup for RedbUserStateLookup<'_> {
             username: s.username,
             roles: s.roles,
             superuser: s.superuser,
+            replicator: s.replicator,
             tickets_invalid_before_ns: s.tickets_invalid_before_ns,
         })
     }

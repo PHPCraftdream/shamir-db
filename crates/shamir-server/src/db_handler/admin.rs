@@ -327,6 +327,82 @@ pub(super) async fn set_superuser(
     }
 }
 
+/// `SetReplicator` wire op (task #621) — grant or revoke replication-API
+/// access on an existing SCRAM-directory account. Mirrors `set_superuser`
+/// almost literally (permission gate → HMAC gate → op), but WITHOUT the
+/// last-remaining-account specific error code: `set_replicator` has no
+/// last-remaining guard (zero replicators is a normal state), so its
+/// directory error surface only ever needs `not_found` (target missing) or
+/// the generic `query` fallback.
+///
+/// Authorization + HMAC gate (same order as `set_superuser`):
+///   1. Caller must hold an already-superuser session (`permission_denied`
+///      otherwise; checked FIRST, before the HMAC gate).
+///   2. Handler must be built with `AdminGlue` (`not_supported` otherwise).
+///   3. The op must carry a hex HMAC-SHA256 tag over
+///      [`canonical_set_replicator`] keyed by the session's HMAC key
+///      (`hmac_required` if missing, `hmac_mismatch` if wrong).
+pub(super) async fn set_replicator(
+    admin: Option<&AdminGlue>,
+    session: &Session,
+    user: String,
+    on: bool,
+    hmac: Option<String>,
+) -> DbResponse {
+    // 1. Permission gate FIRST (mirrors `set_superuser`'s ordering).
+    if !session.permissions.is_superuser {
+        return DbResponse::Error {
+            code: "permission_denied".into(),
+            message: "set_replicator requires superuser".into(),
+        };
+    }
+    // 2. AdminGlue unwrap.
+    let admin = match admin {
+        Some(a) => a,
+        None => {
+            return DbResponse::Error {
+                code: "not_supported".into(),
+                message: "handler built without AdminGlue (no user_dir)".into(),
+            }
+        }
+    };
+
+    // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
+    //    `check_destructive_hmacs`).
+    use shamir_query_types::hmac as canon;
+    let canonical = canon::canonical_set_replicator(&user, on);
+    let Some(tag) = hmac.as_ref() else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "set_replicator missing `hmac` field".into(),
+        };
+    };
+    if !canon::verify_tag_hex(&session.hmac_key(), &canonical, tag) {
+        return DbResponse::Error {
+            code: "hmac_mismatch".into(),
+            message: "set_replicator `hmac` does not match canonical input".into(),
+        };
+    }
+
+    // 4. Op itself.
+    let now_ns = UnixNanos::now().as_u64();
+    match admin.user_dir.set_replicator(&user, on, now_ns) {
+        Ok(_) => DbResponse::ReplicatorSet { user, on },
+        Err(e) => {
+            let msg = e.to_string();
+            let code = if msg.contains("not found") {
+                "not_found"
+            } else {
+                "query"
+            };
+            DbResponse::Error {
+                code: code.into(),
+                message: msg,
+            }
+        }
+    }
+}
+
 /// `ChangePasswordChallenge` (spec §12.5 step 1) — issue a fresh
 /// server-side challenge bound to the caller's own session.
 ///

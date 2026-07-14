@@ -220,6 +220,9 @@ pub struct ResumeUserState {
     pub roles: Vec<String>,
     /// Current superuser flag.
     pub superuser: bool,
+    /// Current replication-API capability flag (task #621, mirrors
+    /// `superuser` above).
+    pub replicator: bool,
     /// `tickets_invalid_before_ns` — unchanged mechanism, still consulted for
     /// the spec §5.4 step 9 STRICT `>` epoch check.
     pub tickets_invalid_before_ns: u64,
@@ -420,7 +423,7 @@ pub fn process_resume(
     let session = Session::new(
         user_id,
         state.username,
-        SessionPermissions::new(state.superuser, state.roles),
+        SessionPermissions::new(state.superuser, state.replicator, state.roles),
         session_transport,
         request.binding_mode_now,
         request.channel_binding_now,

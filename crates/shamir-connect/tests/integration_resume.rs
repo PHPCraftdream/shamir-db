@@ -21,6 +21,7 @@ fn state(tib: u64) -> ResumeUserState {
         username: "u".into(),
         roles: vec![],
         superuser: false,
+        replicator: false,
         tickets_invalid_before_ns: tib,
     }
 }
@@ -704,6 +705,7 @@ fn resumed_session_permissions_come_from_directory_lookup_not_ticket() {
         username: "admin".into(),
         roles: vec!["read_write".to_string()],
         superuser: true,
+        replicator: false,
         tickets_invalid_before_ns: 0,
     };
     users.insert(user_id, admin_state.clone());
@@ -778,6 +780,7 @@ fn refresh_ticket_carries_no_authorization_session_reads_directory_each_resume()
         username: "admin".into(),
         roles: vec!["read_write".to_string()],
         superuser: true,
+        replicator: false,
         tickets_invalid_before_ns: 0,
     };
     users.insert(user_id, admin_state.clone());
@@ -923,6 +926,7 @@ fn revoked_superuser_resolves_to_non_admin_without_epoch_bump() {
             username: "was-admin".into(),
             roles: vec!["read_write".to_string()],
             superuser: false,
+            replicator: false,
             tickets_invalid_before_ns: 0,
         },
     );

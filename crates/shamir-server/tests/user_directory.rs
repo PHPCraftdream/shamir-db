@@ -620,6 +620,103 @@ fn update_roles_rejects_reserved_superuser_string() {
     );
 }
 
+/// **Task #621 — `"replicator"` reservation rejected.**
+///
+/// Mirrors `update_roles_rejects_reserved_superuser_string` above:
+/// `update_roles(.., vec!["replicator".to_string()], ..)` must return `Err`
+/// — the string is reserved at the directory write boundary; only
+/// `set_replicator` may flip the flag. State stays unchanged.
+#[test]
+fn update_roles_rejects_reserved_replicator_string() {
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+    let before = store.state_by_user_id(&uid).expect("alice resolves");
+    assert!(!before.replicator);
+    assert!(before.roles.is_empty());
+
+    let err = store
+        .update_roles("alice", vec!["replicator".to_string()], 1_000)
+        .expect_err("the literal \"replicator\" string is reserved");
+    match err {
+        shamir_connect::common::error::Error::InvalidInput(msg) => {
+            assert!(
+                msg.contains("reserved"),
+                "error must explain the reservation: {msg}"
+            );
+            assert!(
+                msg.contains("SetReplicator"),
+                "error must point at SetReplicator as the blessed alternative: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput for reserved role string, got {other:?}"),
+    }
+
+    let after = store.state_by_user_id(&uid).expect("alice still resolves");
+    assert_eq!(after.replicator, before.replicator);
+    assert_eq!(after.roles, before.roles);
+    assert_eq!(
+        after.tickets_invalid_before_ns, before.tickets_invalid_before_ns,
+        "tib must not advance on a rejected op"
+    );
+}
+
+/// **Task #621 — `set_replicator` grant/revoke, tib bump.**
+///
+/// Granting replicator on a non-replicator:
+///   - returns `Ok(true)`,
+///   - flips `replicator` to `true`,
+///   - bumps `tickets_invalid_before_ns` to at least `now_ns`,
+///   - is observable via `state_by_user_id`.
+///
+/// Then revoking it flips the flag back, bumps tib again, and returns
+/// `Ok(true)` — WITHOUT any last-remaining refusal (unlike `set_superuser`,
+/// there is no such guard for `replicator`). A repeated grant/revoke at the
+/// same state is a no-op (`Ok(false)`, no tib bump).
+#[test]
+fn set_replicator_grant_revoke_bumps_tib_no_last_remaining_guard() {
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+    let before = store.state_by_user_id(&uid).expect("alice resolves");
+    assert!(!before.replicator);
+    assert_eq!(before.tickets_invalid_before_ns, 0);
+
+    // Grant.
+    let changed = store
+        .set_replicator("alice", true, 5_000)
+        .expect("grant should succeed");
+    assert!(changed, "grant must report a real change");
+    let after_grant = store.state_by_user_id(&uid).expect("alice resolves");
+    assert!(after_grant.replicator, "flag must be true after grant");
+    assert!(
+        after_grant.tickets_invalid_before_ns >= 5_000,
+        "tib must bump on a privilege change"
+    );
+
+    // No-op re-grant: same state, no write, no tib bump.
+    let noop = store
+        .set_replicator("alice", true, 9_000)
+        .expect("no-op re-grant should not error");
+    assert!(!noop, "granting an already-granted flag must be a no-op");
+    let after_noop = store.state_by_user_id(&uid).expect("alice resolves");
+    assert_eq!(
+        after_noop.tickets_invalid_before_ns, after_grant.tickets_invalid_before_ns,
+        "no-op must not bump tib"
+    );
+
+    // Revoke — succeeds even though alice is the ONLY replicator (no
+    // last-remaining guard, unlike superuser).
+    let revoked = store
+        .set_replicator("alice", false, 10_000)
+        .expect("revoke of the only replicator must succeed");
+    assert!(revoked, "revoke must report a real change");
+    let after_revoke = store.state_by_user_id(&uid).expect("alice resolves");
+    assert!(!after_revoke.replicator, "flag must be false after revoke");
+    assert!(
+        after_revoke.tickets_invalid_before_ns >= 10_000,
+        "tib must bump again on the revoke"
+    );
+}
+
 /// **Red test #2 (task #557) — `set_superuser` grant/revoke, tib bump, count.**
 ///
 /// Granting superuser on a non-superuser:
@@ -821,7 +918,7 @@ fn set_superuser_is_idempotent() {
 ///
 /// The handshake change in task #557 replaces `lookup_roles` +
 /// `SessionPermissions::from_roles` with `state_by_user_id` +
-/// `SessionPermissions::new(state.superuser, state.roles)`. This test
+/// `SessionPermissions::new(state.superuser, state.replicator, state.roles)`. This test
 /// exercises that exact construction pattern against a real
 /// `FjallUserDirectory` account whose `superuser` flag is `true` but whose
 /// persisted `roles` list does NOT contain the literal `"superuser"`
@@ -850,7 +947,7 @@ fn handshake_wiring_superuser_flag_drives_is_superuser_without_role_string() {
     let state = store
         .state_by_user_id(&uid)
         .expect("alice must resolve via state_by_user_id");
-    let perms = SessionPermissions::new(state.superuser, state.roles.clone());
+    let perms = SessionPermissions::new(state.superuser, state.replicator, state.roles.clone());
 
     assert!(
         perms.is_superuser,

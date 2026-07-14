@@ -124,6 +124,16 @@ pub(crate) struct PersistedUser {
     /// Migrated into the flag below by boot-time normalization.
     #[serde(default)]
     pub(crate) superuser: bool,
+    /// Authoritative replication-API capability flag (task #621, mirrors
+    /// `superuser` above). Unlike `superuser`, `"replicator"` was NEVER a
+    /// valid persisted role string before this task, so there is no
+    /// migration to run — `#[serde(default)]` covers every pre-#621 blob
+    /// (they deserialize with `replicator == false`), and the string is
+    /// simply reserved from this point on (see `update_roles`). No
+    /// last-remaining guard and no counter: zero replicators is a normal
+    /// state, unlike zero superusers.
+    #[serde(default)]
+    pub(crate) replicator: bool,
     /// Database-scope for owner-delegation (`authorize_user_lifecycle`).
     /// Task #559: the only Store-B datum with live enforcement meaning
     /// moves *schema-wise* to the directory record. `#[serde(default)]`
@@ -153,6 +163,7 @@ impl PersistedUser {
             roles,
             tickets_invalid_before_ns: record.tickets_invalid_before_ns,
             superuser,
+            replicator: false,
             database,
         }
     }
@@ -211,6 +222,9 @@ pub struct UserDirectoryState {
     /// Migrated flag (task #557 wires enforcement; this task only carries
     /// the value).
     pub superuser: bool,
+    /// Authoritative replication-API capability flag (task #621, mirrors
+    /// `superuser` above — no migration needed, see `PersistedUser::replicator`).
+    pub replicator: bool,
     /// Database scope for owner-delegation (task #559). `None` for global
     /// users. Read by the `PrincipalResolver` impl so
     /// `authorize_user_lifecycle`'s drop-user scope lookup can resolve via
@@ -489,6 +503,7 @@ impl FjallUserDirectory {
             username,
             roles: user.roles,
             superuser: user.superuser,
+            replicator: user.replicator,
             database: user.database,
             tickets_invalid_before_ns: user.tickets_invalid_before_ns,
             user_id: *user_id,
@@ -733,6 +748,48 @@ impl FjallUserDirectory {
         Ok(true)
     }
 
+    /// Grant or revoke replication-API access (task #621). Mirrors
+    /// [`Self::set_superuser`] almost literally — same idempotent no-op
+    /// shape, same §12.6 privilege-change tickets-invalidation bump, same
+    /// cache update — but deliberately WITHOUT a last-remaining guard or a
+    /// counter: unlike superuser (which must always have at least one
+    /// holder so the system can't lock itself out of admin), zero
+    /// replicators is a perfectly normal state — nothing is gated on "how
+    /// many are left".
+    pub fn set_replicator(&self, username: &str, on: bool, now_ns: u64) -> Result<bool> {
+        let _guard = self.write_lock.lock();
+
+        let blob = match self.read_blob(username)? {
+            Some(b) => b,
+            None => return Err(Error::InvalidInput("user not found")),
+        };
+        let mut user: PersistedUser = rmp_serde::from_slice(&blob)
+            .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
+
+        if user.replicator == on {
+            return Ok(false); // already at the requested state — no-op
+        }
+
+        user.replicator = on;
+        // Spec §12.6-style: privilege change must invalidate existing sessions.
+        if now_ns > user.tickets_invalid_before_ns {
+            user.tickets_invalid_before_ns = now_ns;
+        }
+        let new_bytes = rmp_serde::to_vec_named(&user)
+            .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
+        self.users
+            .insert(username.as_bytes(), new_bytes.as_slice())
+            .map_err(|e| Error::Encoding(format!("fjall: insert: {e}")))?;
+        self.db
+            .persist(PersistMode::SyncAll)
+            .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+        if let Some(id) = user.user_id_array() {
+            self.update_cache(&id, user.tickets_invalid_before_ns);
+        }
+        Ok(true)
+    }
+
     // ------------------------------------------------------------------
     // Task #559: directory methods backing the PrincipalResolver /
     // UserAdminPort seam. These live on `FjallUserDirectory` itself (not
@@ -805,6 +862,7 @@ impl FjallUserDirectory {
             username,
             roles: user.roles,
             superuser: user.superuser,
+            replicator: user.replicator,
             database: user.database,
             tickets_invalid_before_ns: user.tickets_invalid_before_ns,
             user_id,
@@ -837,6 +895,7 @@ impl FjallUserDirectory {
                     username,
                     roles: user.roles,
                     superuser: user.superuser,
+                    replicator: user.replicator,
                     database: user.database,
                     tickets_invalid_before_ns: user.tickets_invalid_before_ns,
                     user_id: uid,
@@ -999,6 +1058,16 @@ impl UserDirectory for FjallUserDirectory {
         if roles.iter().any(|r| r == "superuser") {
             return Err(Error::InvalidInput(
                 "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status",
+            ));
+        }
+        // Task #621: reserve "replicator" at the same write boundary,
+        // mirroring the "superuser" reservation above — the replication
+        // capability is granted/revoked ONLY via `SetReplicator` /
+        // `set_replicator`, which mutates the dedicated `replicator: bool`
+        // flag.
+        if roles.iter().any(|r| r == "replicator") {
+            return Err(Error::InvalidInput(
+                "\"replicator\" is a reserved role name — use SetReplicator to grant/revoke replication access",
             ));
         }
         self.read_modify_write(username, |user| {

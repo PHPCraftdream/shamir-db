@@ -7,7 +7,8 @@
 //! # Authorisation model
 //!
 //! Replication is a **privileged** operation: the calling session must hold
-//! the `replicator` role (or be a superuser). On top of that, every repo
+//! the `replicator` capability flag (task #621; or be a superuser). On top
+//! of that, every repo
 //! advertised in `Hello` / served by `Pull` is individually authorised via
 //! `authorize_access(actor, store(db,repo), Read)` — repos the caller cannot
 //! read are silently omitted from `Hello` (no existence leak) and rejected
@@ -35,15 +36,18 @@ use super::handler::{session_actor, ShamirDbHandler};
 /// loop when the tail is empty. See §5.1.
 const POLL_STEP: Duration = Duration::from_millis(50);
 
-/// Role name required for the replication pull-API (§5.4, PR2).
-const REPLICATOR_ROLE: &str = "replicator";
-
 impl ShamirDbHandler {
-    /// Entry point for `DbRequest::Repl`. Enforces the role gate, then
+    /// Entry point for `DbRequest::Repl`. Enforces the capability gate, then
     /// dispatches to [`Self::handle_hello`] / [`Self::handle_pull`].
     pub(super) async fn handle_repl(&self, session: &Session, req: ReplRequest) -> ReplResponse {
-        // Role gate — deny-by-default. Superuser bypasses (§5.4).
-        if !(session.permissions.is_superuser || session.permissions.has_role(REPLICATOR_ROLE)) {
+        // Capability gate — deny-by-default. Superuser bypasses (§5.4).
+        //
+        // Task #621: `replicator` is now an authoritative
+        // `SessionPermissions::is_replicator` flag (mirrors `is_superuser`),
+        // NOT a role string — the literal `"replicator"` string is reserved
+        // at the directory write boundary (`FjallUserDirectory::update_roles`),
+        // so `has_role("replicator")` would never match a real account.
+        if !(session.permissions.is_superuser || session.permissions.is_replicator) {
             return ReplResponse::Error {
                 leader_epoch: self.leader_epoch,
                 code: "bad_role".into(),

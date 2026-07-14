@@ -389,6 +389,18 @@ pub fn canonical_set_superuser(user: &str, on: bool) -> Vec<u8> {
     ])
 }
 
+/// Canonical input for `SetReplicator`'s HMAC confirmation tag (task #621,
+/// mirrors [`canonical_set_superuser`] literally). HMAC on `set_replicator`
+/// is UNCONDITIONAL — every `SetReplicator` op requires the tag, regardless
+/// of grant or revoke.
+pub fn canonical_set_replicator(user: &str, on: bool) -> Vec<u8> {
+    join_null(&[
+        b"set_replicator",
+        user.as_bytes(),
+        if on { b"true" } else { b"false" },
+    ])
+}
+
 /// Canonical input for `CreateScramUser`'s HMAC confirmation tag.
 /// Password is NEVER part of the canonical input (same convention as
 /// `canonical_create_user`) — the tag confirms "you meant to create this
