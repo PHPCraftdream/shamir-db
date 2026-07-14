@@ -149,6 +149,13 @@ impl ShamirDb {
     /// // for offline/CLI tooling and test setup that legitimately runs
     /// // as the system principal — grep every call site before adding a
     /// // new one from request-handling code.
+    /// // `#[doc(hidden)]` (not `pub(crate)`): narrowing visibility would
+    /// // break 50+ integration test files (a separate compiled crate) —
+    /// // no production caller outside `shamir-db/src`/`shamir-db/tests`
+    /// // exists today, but the test blast radius alone makes
+    /// // `pub(crate)` impractical; hiding from public rustdoc/API
+    /// // discovery is the achievable P2 mitigation here (task #606).
+    #[doc(hidden)]
     pub async fn rename_table(
         &self,
         db_name: &str,

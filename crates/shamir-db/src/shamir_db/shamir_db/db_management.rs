@@ -22,11 +22,17 @@ impl ShamirDb {
     /// // function exists ONLY for offline/CLI tooling and test setup that
     /// // legitimately runs as the system principal — grep every call site
     /// // before adding a new one from request-handling code.
+    /// // `#[doc(hidden)]` (not `pub(crate)`): narrowing visibility would
+    /// // break 50+ integration test files (a separate compiled crate) and
+    /// // shamir-server's legitimate boot-time `create_db` call in
+    /// // `server_launcher.rs` — hiding from public rustdoc/API discovery
+    /// // is the achievable P2 mitigation here (task #606).
+    #[doc(hidden)]
     pub async fn create_db(&self, name: &str) -> DbInstance {
         self.create_db_as(name, Actor::System).await
     }
 
-    /// Like [`create_db`] but stamps the new database's owner as `actor`
+    /// Like `create_db` but stamps the new database's owner as `actor`
     /// instead of `System`. Mode stays `0o777` (open).
     pub async fn create_db_as(&self, name: &str, actor: Actor) -> DbInstance {
         let db = DbInstance::new();
@@ -329,11 +335,17 @@ impl ShamirDb {
     /// // offline/CLI tooling and test setup that legitimately runs as the
     /// // system principal — grep every call site before adding a new one
     /// // from request-handling code.
+    /// // `#[doc(hidden)]` (not `pub(crate)`): narrowing visibility would
+    /// // break 50+ integration test files (a separate compiled crate) and
+    /// // shamir-server's legitimate boot-time `add_repo` call in
+    /// // `server_launcher.rs` — hiding from public rustdoc/API discovery
+    /// // is the achievable P2 mitigation here (task #606).
+    #[doc(hidden)]
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {
         self.add_repo_as(db_name, config, Actor::System).await
     }
 
-    /// Like [`add_repo`] but stamps the repo (and its inline tables) with
+    /// Like `add_repo` but stamps the repo (and its inline tables) with
     /// the given actor as owner.
     pub async fn add_repo_as(
         &self,
