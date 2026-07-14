@@ -15,12 +15,13 @@ exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [workspace.dependencies]
 # Published on crates.io (https://crates.io/crates/captrack, repo
-# https://github.com/PHPCraftdream/captrack). Pinned exact (`=0.1.0`) rather
+# https://github.com/PHPCraftdream/captrack). Pinned exact (`=0.1.1`) rather
 # than a caret range so (a) the supply-chain cooldown's lockfile-baseline stays
 # stable, and (b) `cargo deny` / downstream consumers cannot silently pick up a
 # future 0.1.x/0.2 that hasn't been reviewed here. Was a non-reproducible
-# `path = "D:/dev/rust/captrack"` (audit C1).
-captrack = { version = "=0.1.0", features = ["telemetry"] }
+# `path = "D:/dev/rust/captrack"` (audit C1). 0.1.1 fixes RUSTSEC-2026-0205
+# (scc 2.2->3.8 migration) — see captrack's own CHANGELOG.
+captrack = { version = "=0.1.1", features = ["telemetry"] }
 # Published on crates.io (https://crates.io/crates/bench-scale-tool, repo
 # https://github.com/PHPCraftdream/bench-scale-tool). Was a non-reproducible
 # `path = "D:/dev/rust/bench-scale-tool"` — broke every CI runner, which
