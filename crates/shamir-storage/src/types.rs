@@ -65,6 +65,21 @@ pub trait Store: Send + Sync {
     /// Removes a record by its `RecordKey`.
     async fn remove(&self, key: RecordKey) -> DbResult<bool>;
 
+    /// Like [`Self::set`] but for callers that don't need the "was created"
+    /// flag — skips the extra existence-check lookup some backends (Fjall)
+    /// would otherwise need to compute it (task #613). Default impl just
+    /// discards `set`'s flag; override where the backend can genuinely skip
+    /// the check.
+    async fn set_no_flag(&self, key: RecordKey, value: Bytes) -> DbResult<()> {
+        self.set(key, value).await.map(|_| ())
+    }
+
+    /// Like [`Self::remove`] but for callers that don't need the "existed"
+    /// flag (task #613). Default impl just discards `remove`'s flag.
+    async fn remove_no_flag(&self, key: RecordKey) -> DbResult<()> {
+        self.remove(key).await.map(|_| ())
+    }
+
     /// Force the backend to make all writes-so-far durable.
     ///
     /// **Durability contract.** The basic `insert` / `set` / `remove`

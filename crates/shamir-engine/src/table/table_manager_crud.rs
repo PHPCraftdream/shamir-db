@@ -117,7 +117,7 @@ impl TableManager {
         } else {
             self.table
                 .data_store()
-                .set(RecordKey::from_slice(id.as_bytes()), bytes)
+                .set_no_flag(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?;
             0
         };
@@ -424,7 +424,7 @@ impl TableManager {
         } else {
             self.table
                 .data_store()
-                .set(RecordKey::from_slice(id.as_bytes()), bytes)
+                .set_no_flag(RecordKey::from_slice(id.as_bytes()), bytes)
                 .await?;
             0
         };

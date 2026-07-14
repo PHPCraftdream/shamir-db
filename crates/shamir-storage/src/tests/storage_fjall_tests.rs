@@ -59,6 +59,46 @@ async fn run_store_tests(store: Arc<dyn Store>) {
     assert_eq!(all_records_after_remove.len(), 2);
 }
 
+/// Symmetric coverage for the flag-free fast-path methods (task #613):
+/// `set_no_flag` / `remove_no_flag` must actually write/delete data —
+/// verified through a subsequent `get`, not just "doesn't panic".
+#[tokio::test]
+async fn test_fjall_set_remove_no_flag() {
+    let path = "./test_data/fjall_set_remove_no_flag";
+    if std::path::Path::new(path).exists() {
+        fs::remove_dir_all(path).unwrap();
+    }
+    let repo = FjallRepo::new(path).unwrap();
+    let store = repo.store_get("test_table").await.unwrap();
+
+    // set_no_flag: create a new key.
+    let id1 = RecordId::new();
+    let key1 = RecordKey::from_slice(id1.as_bytes());
+    let value1 = InnerValue::Str("hello".to_string());
+    store
+        .set_no_flag(key1.clone(), value1.to_bytes().unwrap())
+        .await
+        .unwrap();
+    let retrieved1 = store.get(key1.clone()).await.unwrap();
+    assert_eq!(InnerValue::from_bytes(retrieved1).unwrap(), value1);
+
+    // set_no_flag: update the same key.
+    let value2 = InnerValue::Str("world".to_string());
+    store
+        .set_no_flag(key1.clone(), value2.to_bytes().unwrap())
+        .await
+        .unwrap();
+    let retrieved2 = store.get(key1.clone()).await.unwrap();
+    assert_eq!(InnerValue::from_bytes(retrieved2).unwrap(), value2);
+
+    // remove_no_flag: delete an existing key.
+    store.remove_no_flag(key1.clone()).await.unwrap();
+    assert!(store.get(key1.clone()).await.is_err());
+
+    // remove_no_flag: delete a non-existing key — must not error.
+    store.remove_no_flag(key1).await.unwrap();
+}
+
 #[tokio::test]
 async fn test_fjall_repo_basic() {
     let path = "./test_data/fjall_repo_basic";

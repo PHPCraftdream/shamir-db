@@ -388,6 +388,20 @@ impl Store for FjallStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
+    /// Fast-path `set` for callers that don't need the "was created" flag
+    /// (task #613) — skips the `contains_key` lookup `set` embeds to
+    /// derive that flag, halving the LSM point-lookup cost for this op.
+    async fn set_no_flag(&self, key: RecordKey, value: Bytes) -> DbResult<()> {
+        let keyspace = self.keyspace.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            keyspace
+                .insert(&key[..], &*value)
+                .map_err(|e| DbError::Storage(e.to_string()))
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<Bytes> {
@@ -553,6 +567,20 @@ impl Store for FjallStore {
             }
 
             Ok(existed)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    /// Fast-path `remove` for callers that don't need the "existed" flag
+    /// (task #613) — skips the `contains_key` lookup `remove` embeds to
+    /// derive that flag, halving the LSM point-lookup cost for this op.
+    async fn remove_no_flag(&self, key: RecordKey) -> DbResult<()> {
+        let keyspace = self.keyspace.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            keyspace
+                .remove(&key[..])
+                .map_err(|e| DbError::Storage(e.to_string()))
         })
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?
