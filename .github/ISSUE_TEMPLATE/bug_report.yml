@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a reproducible problem in ShamirDB
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Do not include credentials, private keys, personal data, or production database contents.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed behaviour and the expected behaviour.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest complete reproduction, including commands and configuration.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: "e.g. master at abc1234 or v0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - Other
+    validations:
+      required: true

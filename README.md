@@ -1,15 +1,28 @@
+בס״ד
+
+לכבוד הקדוש ברוך הוא — *for the glory of the Holy One, blessed be He*
+
 # S.H.A.M.I.R. Database
+
+[![CI](https://github.com/PHPCraftdream/shamir-db/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/PHPCraftdream/shamir-db/actions/workflows/ci.yml)
+[![Supply-chain checks](https://github.com/PHPCraftdream/shamir-db/actions/workflows/supply-chain.yml/badge.svg?branch=master)](https://github.com/PHPCraftdream/shamir-db/actions/workflows/supply-chain.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Rust 1.93.0](https://img.shields.io/badge/rust-1.93.0-orange.svg)](rust-toolchain.toml)
 
 **S**ecure, **H**igh-performance, **A**synchronous, **M**odular, **I**nterconnected, **R**epository
 
-A modern, modular embedded database written in Rust with pluggable storage backends, key interning, and async streaming.
+A modern, modular embedded database and server written in Rust, with pluggable storage, interned field names, asynchronous execution, authenticated transports, and a WASM extension boundary.
+
+> **Status: alpha.** The public API, wire protocol, storage formats, and operational guidance are still evolving. Do not use this project as the sole protection for production data without an independent review and tested backups.
+
+The repository is currently source-first: it provides a Cargo workspace, a server binary, Rust client crates, a TypeScript client, protocol specifications, and development documentation. Published binaries and stable release guarantees are not available yet.
 
 ## 🎯 Project Status
 
 **Version:** 0.1.0 (Alpha)
 
 **Current Features:**
-- ✅ 6 storage backend abstraction (Sled, Redb, Fjall, Nebari, Persy, Canopy) — feature-gated
+- ✅ Feature-gated storage abstraction with the current durable Fjall backend
 - ✅ Key interning system (strings → u64 for memory efficiency)
 - ✅ Async streaming with batch generators
 - ✅ High-level Table engine with UserValue/InnerValue transformations
@@ -25,7 +38,7 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 - ✅ Audit log with HMAC chain
 - ✅ ACID Transactions: single-batch + **interactive multi-call** (`begin → execute* → commit/rollback`) Snapshot Isolation (SI) + Serializable (SSI) with **predicate/range locks → phantom protection (true serializability)**, crash recovery via WAL V2
 - ✅ MVCC versioned reads, history store GC, max-tx-lifetime enforcement, interactive-tx idle/lifetime reaper + per-tx staging budget
-- ✅ 1600+ workspace tests (incl. proptest property tests for the version codec + SSI read-set validation)
+- ✅ Broad workspace test coverage, including property tests for the version codec and SSI read-set validation
 
 **Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
 - 🔜 Browser WASM client (Argon2id in Web Worker)
@@ -35,74 +48,45 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 
 ## 🏗️ Architecture
 
-Cargo workspace, layered from foundation upward:
+Cargo workspace, layered from foundation upward. The default workspace currently contains 23 Rust crates; `shamir-client-node` is built separately with the MSVC toolchain and the TypeScript client is managed by npm.
 
 ```
 crates/
 ├── shamir-types/         # Value model, identifiers, codecs, interner
-├── shamir-storage/       # Store/Repo traits + 7 backend impls (feature-gated)
-├── shamir-engine/        # Table engine + query language + batch executor
-├── shamir-query-types/   # Query DTOs (filter, read, write, batch — wire-shareable)
-├── shamir-db/            # Top-level facade: SystemStore, ShamirDb::execute(batch)
-├── shamir-connect/       # Wire protocol: SCRAM-Argon2id + envelopes + session
-├── shamir-transport-tcp/ # TLS 1.3 over TCP
-├── shamir-transport-ws/  # WebSocket (native WSS + browser WSS)
-├── shamir-transport-udp/ # UDP framing (experimental)
-└── shamir-server/        # ServerLauncher: bootstrap, listeners, RBAC, audit
+├── shamir-storage/       # Store/Repo traits and storage backends
+├── shamir-engine/        # Table engine, query language, and batch executor
+├── shamir-query-types/   # Wire-shareable query DTOs
+├── shamir-query-builder/ # Client-side typed query builder and macros
+├── shamir-db/            # Top-level database facade
+├── shamir-connect/       # Authenticated connection protocol
+├── shamir-transport-*/   # TCP and WebSocket transports
+├── shamir-server/        # Server binary, listeners, access control, audit
+├── shamir-sdk/           # WASM-facing SDK and macros
+└── shamir-wasm-host/     # WASM compilation and execution boundary
 ```
 
 Documentation:
 - **[docs/architecture/LOGIC_FLOW.md](docs/architecture/LOGIC_FLOW.md)** — view from above: how a request travels through the crates
 - **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — DB internals (storage, types, indexes)
-- **[docs/client-server-protocol-spec/](docs/client-server-protocol-spec/)** — wire protocol (auth, session, transports)
-- **[docs/roadmap/](docs/roadmap/)** — production hardening, server plan, feature roadmap
+- **[docs/client-server-protocol-spec/](docs/client-server-protocol-spec/README.md)** — wire protocol (auth, session, transports)
+- **[docs/guide/](docs/guide/README.md)** — progressive user and operator guide
+- **[docs/roadmap/](docs/roadmap/ROADMAP.md)** — production hardening, server plan, feature roadmap
 - **[docs/ops/](docs/ops/)** — capacity planning, perf tuning
 
 ## 🚀 Quick Start
 
-```rust
-use shamir_db::storage::storage_sled::SledRepo;
-use shamir_db::engine::Table;
-use shamir_db::types::value::Value;
+Start with the [five-minute server and TypeScript client walkthrough](docs/guide/00-quickstart.md). For a local build:
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open database
-    let repo = SledRepo::new("./my_db")?;
-
-    // Get/create table
-    let table = repo.table_get("users")?;
-
-    // Insert record
-    let user = Value::Object(map![
-        ("name".into(), Value::Str("Alice".into())),
-        ("age".into(), Value::Int(30))
-    ]);
-    let id = table.insert(user).await?;
-
-    // Stream all records (memory-efficient!)
-    let mut stream = table.list_stream(100); // 100 records per batch
-    while let Some(batch) = stream.next().await {
-        let batch = batch?;
-        for (id, record) in batch {
-            println!("{}: {:?}", id, record);
-        }
-    }
-
-    Ok(())
-}
+```bash
+cargo build --workspace
+cargo run -p shamir-server -- --help
 ```
 
 ## 📦 Storage Backends
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| **Sled** | ✅ Stable | Pure Rust, battle-tested |
-| **Redb** | ✅ Stable | Modern, MVCC-based |
-| **Fjall** | ✅ Stable | LSM-tree, high write throughput |
-| **Nebari** | ✅ Stable | BlueDB successor |
-| **Persy** | ✅ Stable | ACID transactions |
-| **Canopy** | ✅ Stable | B+-tree, LZ4 compression |
+| **Fjall** | ✅ Supported | Durable LSM-style backend used by the server |
 
 ## 🧪 Testing
 
@@ -115,6 +99,8 @@ cargo test -p shamir-engine
 cargo test -p shamir-server
 ```
 
+The repository's required pre-commit checks are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The Node.js end-to-end suite has separate prerequisites; see [tests/e2e/README.md](tests/e2e/README.md).
+
 ## 📊 Performance
 
 - **Interning**: ~70% memory reduction for string-heavy data
@@ -123,7 +109,16 @@ cargo test -p shamir-server
 
 ## 🤝 Contributing
 
-This is an alpha-stage research project. Architecture decisions are still evolving.
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before making changes. For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## 📚 Documentation
+
+- [Documentation index](docs/README.md)
+- [Guided usage documentation](docs/guide/README.md)
+- [Architecture](docs/architecture/ARCHITECTURE.md)
+- [Client/server protocol](docs/client-server-protocol-spec/README.md)
+- [Roadmap](docs/roadmap/ROADMAP.md)
+- [Security model and data protection](docs/security/data-protection.md)
 
 ## 📝 License
 

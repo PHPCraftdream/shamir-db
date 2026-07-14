@@ -43,3 +43,8 @@ devrust.cargo-target-bench/
 /bench-run.log
 /bench-history.log
 /bench-run-baselines.txt
+# Local history-rewrite and audit reports; never publish these by accident.
+/pre-history-rewrite-*.txt
+/pre-history-rewrite-*.patch
+# Agent and developer scratch space is local-only.
+/.scratch/
