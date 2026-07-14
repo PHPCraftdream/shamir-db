@@ -8,8 +8,8 @@
 
 #![allow(clippy::disallowed_types)]
 
-use rustc_hash::FxHasher;
 use indexmap::{IndexMap, IndexSet};
+use rustc_hash::FxHasher;
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hash};
