@@ -234,8 +234,9 @@ async fn step4b_reconcile_prevents_resurrect() {
     // Step 4b: reconcile-deletes
     if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
         let mut rids_to_delete: Vec<RecordId> = Vec::new();
-        del_rids.scan(|rid, ()| {
+        del_rids.iter_sync(|rid, ()| {
             rids_to_delete.push(*rid);
+            true
         });
         for r in rids_to_delete {
             let _ = new_arc.delete(r).await;
@@ -376,8 +377,9 @@ async fn stress_concurrent_mutations_during_compaction() {
             // Step 4b: reconcile-deletes
             if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
                 let mut rids_to_delete: Vec<RecordId> = Vec::new();
-                del_rids.scan(|rid, ()| {
+                del_rids.iter_sync(|rid, ()| {
                     rids_to_delete.push(*rid);
+                    true
                 });
                 for r in rids_to_delete {
                     let _ = new_adapter_arc.delete(r).await;
@@ -581,8 +583,9 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
 
             if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
                 let mut rids_to_delete: Vec<RecordId> = Vec::new();
-                del_rids.scan(|rid, ()| {
+                del_rids.iter_sync(|rid, ()| {
                     rids_to_delete.push(*rid);
+                    true
                 });
                 for r in rids_to_delete {
                     let _ = new_adapter_arc.delete(r).await;

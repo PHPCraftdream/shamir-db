@@ -11,7 +11,7 @@ shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 
 # Lock-free concurrent hashmap for the user-scalar layer (ScalarResolver).
-scc = "2.2"
+scc = "3.8"
 
 # Canonical-key serialisation for the order-independent record hash (/crypto
 # canonical_hash). serde gives the `Serialize` bound on map keys; rmp-serde

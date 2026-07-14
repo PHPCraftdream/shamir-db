@@ -213,7 +213,7 @@ impl Drop for SnapshotGuard {
             // Use the sync `entry` API — Drop is not async. `entry` takes
             // the per-entry exclusive lock, so we can read-and-decrement
             // atomically.
-            match self.snapshots.entry(v) {
+            match self.snapshots.entry_sync(v) {
                 scc::hash_map::Entry::Occupied(mut e) => {
                     let count = e.get_mut();
                     if *count <= 1 {
@@ -554,10 +554,11 @@ impl RepoTxGate {
             return 0;
         }
         let mut min = u64::MAX;
-        self.active_snapshots.scan(|k, _| {
+        self.active_snapshots.iter_sync(|k, _| {
             if *k < min {
                 min = *k;
             }
+            true
         });
         if min == u64::MAX {
             self.last_committed()
@@ -668,7 +669,7 @@ impl RepoTxGate {
         }
         let _ = self
             .commit_write_log
-            .insert(rec.commit_version, Arc::new(rec));
+            .insert_sync(rec.commit_version, Arc::new(rec));
     }
 
     /// PROPOSED (Phase C). True iff some committer in the window
@@ -691,7 +692,7 @@ impl RepoTxGate {
         dep: &crate::predicate_set::PredicateDep,
         snapshot: u64,
     ) -> bool {
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         let last = self.last_committed_version.load(Ordering::Acquire);
         if last <= snapshot {
             // Fast path: no new commits since snapshot.
@@ -749,7 +750,7 @@ impl RepoTxGate {
     ) -> Option<usize> {
         debug_assert!(!deps.is_empty(), "caller guards the empty case");
         // Single shared EBR guard for the ENTIRE validation — not one per dep.
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         let last = self.last_committed_version.load(Ordering::Acquire);
         if last <= snapshot {
             // Fast path: no new commits since snapshot.
@@ -774,9 +775,9 @@ impl RepoTxGate {
     /// The caller MUST pass `gate.min_alive()` — never anything higher.
     pub fn prune_commit_log_below(&self, floor: u64) -> usize {
         // Use `remove_range` for efficiency.
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         let count = self.commit_write_log.range(..=floor, &guard).count();
-        self.commit_write_log.remove_range(..=floor);
+        self.commit_write_log.remove_range_sync(..=floor);
         count
     }
 
@@ -784,7 +785,7 @@ impl RepoTxGate {
     /// Useful for telemetry and engine-side tests (GC prune assertions).
     /// Not on any hot path — walks the tree under an EBR guard.
     pub fn commit_log_len(&self) -> usize {
-        let guard = scc::ebr::Guard::new();
+        let guard = scc::Guard::new();
         self.commit_write_log.range::<u64, _>(.., &guard).count()
     }
 

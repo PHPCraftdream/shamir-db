@@ -336,7 +336,7 @@ async fn commit_with_non_empty_overlay_proceeds_with_warning() {
 
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(900), 0, 0, IsolationLevel::Snapshot);
-    let _ = tx.interner_overlay.insert("foo".to_string(), 12345);
+    let _ = tx.interner_overlay.insert_sync("foo".to_string(), 12345);
 
     // Commit succeeds despite non-empty overlay (warning-only path).
     let outcome = commit_tx(tx, &repo).await.unwrap();
@@ -804,8 +804,8 @@ async fn wal_ops_non_empty_overlay_produces_interner_merge_op() {
     use shamir_wal::WalOpV2;
 
     let tx = TxContext::new(TxId::new(10_002), 0, 0, IsolationLevel::Snapshot);
-    let _ = tx.interner_overlay.insert("field_a".to_string(), 42);
-    let _ = tx.interner_overlay.insert("field_b".to_string(), 43);
+    let _ = tx.interner_overlay.insert_sync("field_a".to_string(), 42);
+    let _ = tx.interner_overlay.insert_sync("field_b".to_string(), 43);
 
     let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
     let merge = ops

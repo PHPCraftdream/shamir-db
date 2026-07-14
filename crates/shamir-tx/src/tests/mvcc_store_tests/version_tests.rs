@@ -15,7 +15,7 @@ async fn version_cache_populated_on_set() {
         .await
         .unwrap();
 
-    let cached = mvcc.cells.read(key.as_ref(), |_, c| c.version);
+    let cached = mvcc.cells.read_sync(key.as_ref(), |_, c| c.version);
     assert!(
         cached.is_some(),
         "version_cache should contain key after set"

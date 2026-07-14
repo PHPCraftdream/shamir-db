@@ -139,7 +139,7 @@ async fn overlay_ordering_reader_sees_version_implies_value_overlay_arm() {
         readers.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
                 if let Err(msg) = read_once(&mvcc).await {
-                    let _ = violation.insert(id, msg);
+                    let _ = violation.insert_sync(id, msg);
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -179,7 +179,10 @@ async fn overlay_ordering_reader_sees_version_implies_value_overlay_arm() {
     // Assert no reader recorded an invariant violation.
     if !violation.is_empty() {
         let mut msgs = Vec::new();
-        violation.scan(|id, m| msgs.push(format!("reader {id}: {m}")));
+        violation.iter_sync(|id, m| {
+            msgs.push(format!("reader {id}: {m}"));
+            true
+        });
         panic!("overlay-arm invariant violated:\n{}", msgs.join("\n"));
     }
 
@@ -233,7 +236,7 @@ async fn overlay_ordering_reader_sees_version_implies_value_history_arm() {
         readers.push(tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
                 if let Err(msg) = read_once(&mvcc).await {
-                    let _ = violation.insert(id, msg);
+                    let _ = violation.insert_sync(id, msg);
                     return;
                 }
                 tokio::task::yield_now().await;
@@ -281,7 +284,10 @@ async fn overlay_ordering_reader_sees_version_implies_value_history_arm() {
 
     if !violation.is_empty() {
         let mut msgs = Vec::new();
-        violation.scan(|id, m| msgs.push(format!("reader {id}: {m}")));
+        violation.iter_sync(|id, m| {
+            msgs.push(format!("reader {id}: {m}"));
+            true
+        });
         panic!("history-arm invariant violated:\n{}", msgs.join("\n"));
     }
 

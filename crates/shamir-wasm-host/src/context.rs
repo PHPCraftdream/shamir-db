@@ -49,24 +49,27 @@ impl BatchContext {
     /// Insert or replace a value.
     pub fn put(&self, key: impl Into<String>, value: QueryValue) {
         let key = key.into();
-        let _ = self.data.remove(&key);
-        let _ = self.data.insert(key, value);
+        let _ = self.data.remove_sync(&key);
+        let _ = self.data.insert_sync(key, value);
     }
 
     /// Read a value (cloned out). Returns `None` if absent.
     pub fn get(&self, key: &str) -> Option<QueryValue> {
-        self.data.read(key, |_, v| v.clone())
+        self.data.read_sync(key, |_, v| v.clone())
     }
 
     /// Whether the key exists.
     pub fn contains(&self, key: &str) -> bool {
-        self.data.contains(key)
+        self.data.contains_sync(key)
     }
 
     /// All keys (snapshot).
     pub fn keys(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.data.scan(|k, _| out.push(k.clone()));
+        self.data.iter_sync(|k, _| {
+            out.push(k.clone());
+            true
+        });
         out
     }
 
@@ -91,7 +94,7 @@ impl BatchContext {
         key: &str,
         f: F,
     ) -> QueryValue {
-        match self.data.entry(key.to_string()) {
+        match self.data.entry_sync(key.to_string()) {
             scc::hash_map::Entry::Occupied(mut occ) => {
                 let old = occ.get().clone();
                 let new = f(Some(old));
@@ -160,29 +163,32 @@ impl GlobalVars {
     /// Insert or replace a global variable.
     pub fn set(&self, key: impl Into<String>, value: QueryValue) {
         let key = key.into();
-        let _ = self.data.remove(&key);
-        let _ = self.data.insert(key, value);
+        let _ = self.data.remove_sync(&key);
+        let _ = self.data.insert_sync(key, value);
     }
 
     /// Read a global variable (cloned out). Returns `None` if absent.
     pub fn get(&self, key: &str) -> Option<QueryValue> {
-        self.data.read(key, |_, v| v.clone())
+        self.data.read_sync(key, |_, v| v.clone())
     }
 
     /// Remove a global variable. Returns `true` if it existed.
     pub fn remove(&self, key: &str) -> bool {
-        self.data.remove(key).is_some()
+        self.data.remove_sync(key).is_some()
     }
 
     /// Whether the key exists.
     pub fn contains(&self, key: &str) -> bool {
-        self.data.contains(key)
+        self.data.contains_sync(key)
     }
 
     /// All keys (snapshot).
     pub fn keys(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.data.scan(|k, _| out.push(k.clone()));
+        self.data.iter_sync(|k, _| {
+            out.push(k.clone());
+            true
+        });
         out
     }
 
@@ -219,7 +225,7 @@ impl GlobalVars {
         key: &str,
         f: F,
     ) -> QueryValue {
-        match self.data.entry(key.to_string()) {
+        match self.data.entry_sync(key.to_string()) {
             scc::hash_map::Entry::Occupied(mut occ) => {
                 let old = occ.get().clone();
                 let new = f(Some(old));

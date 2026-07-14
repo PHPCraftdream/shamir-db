@@ -68,7 +68,7 @@ async fn get_mvcc(
     // expression). Mirrors `purge_history.rs::get_mvcc` exactly.
     let mvcc_arc = repo_instance
         .per_table_mvcc()
-        .get(&token)
+        .get_sync(&token)
         .expect("mvcc entry exists")
         .clone();
     mvcc_arc

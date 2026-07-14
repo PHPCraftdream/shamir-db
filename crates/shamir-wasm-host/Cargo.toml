@@ -23,7 +23,7 @@ wasmtime = { version = "45", default-features = false, features = [
     "pooling-allocator",
 ] }
 tempfile = "3.10.1"
-scc = "2.2"
+scc = "3.8"
 # Used by `compile_rust_source` to enforce a wall-clock timeout on the
 # guest `cargo build` (CRIT-6 / audit #440 part A). Already a transitive dep
 # in the workspace `Cargo.lock`; pinned here as a direct dependency.

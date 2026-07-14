@@ -50,14 +50,20 @@ fn make_repo() -> RepoInstance {
 /// Total overlay entries across every per-table `MvccStore` of `repo`.
 fn total_overlay_len(repo: &RepoInstance) -> usize {
     let mut sum = 0usize;
-    repo.per_table_mvcc().scan(|_, m| sum += m.overlay_len());
+    repo.per_table_mvcc().iter_sync(|_, m| {
+        sum += m.overlay_len();
+        true
+    });
     sum
 }
 
 /// Total `pending_ts` commit-stamp entries across every per-table store.
 fn total_pending_ts_len(repo: &RepoInstance) -> usize {
     let mut sum = 0usize;
-    repo.per_table_mvcc().scan(|_, m| sum += m.pending_ts_len());
+    repo.per_table_mvcc().iter_sync(|_, m| {
+        sum += m.pending_ts_len();
+        true
+    });
     sum
 }
 
