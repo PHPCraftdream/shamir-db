@@ -3,7 +3,7 @@
 //! Phase 0 of the native ↔ WASM parity campaign: a purely-additive field that
 //! lets later phases branch on whether a catalogue row backs a WASM module or
 //! a native Rust type. See
-//! `docs/design/native-wasm-parity-phase0-findings.md` for the full seam map.
+//! `docs/dev-artifacts/design/native-wasm-parity-phase0-findings.md` for the full seam map.
 //!
 //! Migration safety: catalogue rows persisted before this field existed have
 //! no `kind` key. [`ArtifactKind::from_record`] treats any missing or

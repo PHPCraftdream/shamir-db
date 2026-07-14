@@ -37,7 +37,7 @@
 //! - `PH_N_1M`  — set to `1` to also run n=1_000_000 (long run, env-gated).
 //!
 //! Output: a self-contained markdown block ready to paste into
-//! `docs/benchmarks/vector/<date>-persisted-hnsw.md`.
+//! `docs/dev-artifacts/benchmarks/vector/<date>-persisted-hnsw.md`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -294,7 +294,7 @@ fn print_report(cells: &[ColdStartMetrics]) {
     let now = chrono_like_date();
     let n = cells.first().map(|c| c.n).unwrap_or(0);
     let dim = cells.first().map(|c| c.dim).unwrap_or(0);
-    println!("<!-- persisted_hnsw — paste into docs/benchmarks/vector/{now}-persisted-hnsw.md -->");
+    println!("<!-- persisted_hnsw — paste into docs/dev-artifacts/benchmarks/vector/{now}-persisted-hnsw.md -->");
     println!();
     println!("## Persisted HNSW cold-start — {now}");
     println!();

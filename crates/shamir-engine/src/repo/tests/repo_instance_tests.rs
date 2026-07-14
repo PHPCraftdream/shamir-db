@@ -507,7 +507,7 @@ async fn l5_vacuum_does_not_resurrect_from_cache() {
 // A13 — remove_table must clean up per_table_mvcc (drop+recreate split-brain)
 // ============================================================================
 //
-// Audit finding A13 (`docs/audits/2026-07-06-concurrency-engine.md`):
+// Audit finding A13 (`docs/dev-artifacts/audits/2026-07-06-concurrency-engine.md`):
 // `remove_table` removed the catalogue (`configs`), the `TableManager`
 // cache (`tables`), and the reverse-index entry (`token_names`), but NOT
 // the `per_table_mvcc` registry entry. Since `table_token_for` is a

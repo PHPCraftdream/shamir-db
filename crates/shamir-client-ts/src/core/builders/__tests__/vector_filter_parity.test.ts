@@ -13,7 +13,7 @@
  * The authoritative wire contract is the Rust fixture
  * `crates/shamir-query-builder/tests/fixtures/vector_filter_msgpack.json`.
  *
- * See `docs/roadmap/VECTOR_PRODUCTION_EXECUTION.md` Phase P1, Sheet 1.1.
+ * See `docs/dev-artifacts/roadmap/VECTOR_PRODUCTION_EXECUTION.md` Phase P1, Sheet 1.1.
  */
 
 import { describe, it, expect } from 'vitest';

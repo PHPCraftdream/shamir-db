@@ -16,7 +16,7 @@
 //! # What it prints
 //!
 //! A self-contained markdown block ready to paste into
-//! `docs/benchmarks/vector/<date>-baseline.md`:
+//! `docs/dev-artifacts/benchmarks/vector/<date>-baseline.md`:
 //!
 //! - A **reproducibility header** (dataset params, seed, host info) per
 //!   the Release Benchmark Checklist in the roadmap doc.
@@ -324,7 +324,7 @@ fn print_report(
     cells: &[CellMetrics],
 ) {
     let now = chrono_like_date();
-    println!("<!-- vector_report — paste into docs/benchmarks/vector/{now}-baseline.md -->");
+    println!("<!-- vector_report — paste into docs/dev-artifacts/benchmarks/vector/{now}-baseline.md -->");
     println!();
     println!("## Vector baseline — {now}");
     println!();

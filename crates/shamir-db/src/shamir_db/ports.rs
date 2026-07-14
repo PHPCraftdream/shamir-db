@@ -10,7 +10,7 @@
 //!
 //! Both are `Option<Arc<dyn ...>>` fields on [`crate::shamir_db::ShamirDb`],
 //! defaulting to `None` (embedded/no-directory deployments). See
-//! `docs/design/identity-privilege-unification-548-549-decision.md` §3.1 for
+//! `docs/dev-artifacts/design/identity-privilege-unification-548-549-decision.md` §3.1 for
 //! the design rationale.
 //!
 //! ## Dependency direction

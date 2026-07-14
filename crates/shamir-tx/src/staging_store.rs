@@ -12,7 +12,7 @@
 //! and atomics from `scc::HashMap` added pure overhead with zero benefit.
 //!
 //! §5b floor (#61): staged Set/Remove operate on id-keyed storage bytes —
-//! recovery anchor. See `docs/perf/innervalue-floor.md` (Category 3).
+//! recovery anchor. See `docs/dev-artifacts/perf/innervalue-floor.md` (Category 3).
 
 use bytes::Bytes;
 use shamir_collections::TMap;

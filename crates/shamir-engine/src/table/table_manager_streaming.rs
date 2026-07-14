@@ -354,7 +354,7 @@ impl TableManager {
     ///
     /// §5b floor (#61): point-read API returns an OWNED `InnerValue` — the
     /// caller owns the deserialized record. Narrowing this to the lens would
-    /// ripple across all callers. See `docs/perf/innervalue-floor.md`
+    /// ripple across all callers. See `docs/dev-artifacts/perf/innervalue-floor.md`
     /// (Category 4 — owned-value boundaries).
     pub async fn read_one_tx(
         &self,

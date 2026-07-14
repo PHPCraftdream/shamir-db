@@ -61,7 +61,7 @@ scc = "3.8"
 # `MemBufferConfig` serializes into the engine's info_store via
 # bincode at the DDL boundary.
 serde = { version = "1", features = ["derive"] }
-# `KeyBytes` (§3 of docs/design/record-key-128-migration-plan.md) is a
+# `KeyBytes` (§3 of docs/dev-artifacts/design/record-key-128-migration-plan.md) is a
 # representation-transparent small-buffer key whose serde encoding MUST be
 # byte-identical to how `bytes::Bytes` is currently (de)serialized across the
 # WAL/storage boundary (see `shamir_wal::wal_entry_v2::serde_bytes_bytes`). We
@@ -108,7 +108,7 @@ harness = false
 # cold-cache scattered concurrent reads (which stay on the untouched
 # `spawn_blocking` path and MUST show no regression). Deliberately heavier than
 # `storage_fjall_pump`, whose small memtable-resident corpus can't expose write
-# contention or cold reads — see `docs/design/fjall-worker-loop-524-findings.md`.
+# contention or cold reads — see `docs/dev-artifacts/design/fjall-worker-loop-524-findings.md`.
 [[bench]]
 name = "storage_fjall_write_worker"
 harness = false

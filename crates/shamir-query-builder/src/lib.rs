@@ -22,7 +22,7 @@
 //! the builder produces what goes *inside* an `Execute`, the SDK wraps the
 //! envelope around it. This is by design, not a coverage gap.
 //!
-//! See `docs/roadmap/QUERY_BUILDER.md` for the full design.
+//! See `docs/dev-artifacts/roadmap/QUERY_BUILDER.md` for the full design.
 //!
 //! Modules are wired in here phase by phase as they land:
 //! - `val`      — `FilterValue` constructors (lit / col / func / qref).

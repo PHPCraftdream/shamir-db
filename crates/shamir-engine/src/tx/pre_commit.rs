@@ -189,7 +189,7 @@ pub(super) async fn pre_commit_prelock(
     // in base — without this pass, no surviving WAL delta would mention
     // that id, and a crash before the next checkpoint would leave the
     // later committer's records undecodable. See
-    // `docs/audits/2026-07-06-concurrency-engine.md` A8.
+    // `docs/dev-artifacts/audits/2026-07-06-concurrency-engine.md` A8.
     let has_staged_writes = !tx.write_set.is_empty();
     if !tx.interner_overlay.is_empty() || has_staged_writes {
         let repo_interner = repo.repo_interner().await?;

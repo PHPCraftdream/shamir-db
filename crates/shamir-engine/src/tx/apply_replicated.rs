@@ -6,7 +6,7 @@
 //! NO WAL-begin, NO high-level Set/Delete op resolution. The leader already
 //! ran the full write-path (validators, CAS, SSI-ledger, interner
 //! derivation); the follower is an executor of the decided result, not a
-//! re-decider. See `docs/roadmap/REPLICATION.md` §4.1 / §4.
+//! re-decider. See `docs/dev-artifacts/roadmap/REPLICATION.md` §4.1 / §4.
 //!
 //! ## Versions — local, not leader's
 //!

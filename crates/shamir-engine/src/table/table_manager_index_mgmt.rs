@@ -236,7 +236,7 @@ impl TableManager {
                     return Err(shamir_storage::error::DbError::Validation(format!(
                         "table '{}' already has a vector index; only ONE vector index per table \
                          is supported (staged-vector promote is keyed per-table, not per-index — \
-                         see docs/guide/06-search.md). Drop the existing vector index first, or \
+                         see docs/guide-docs/guide/06-search.md). Drop the existing vector index first, or \
                          track full multi-vector-index support in BACKLOG.md.",
                         self.name()
                     )));

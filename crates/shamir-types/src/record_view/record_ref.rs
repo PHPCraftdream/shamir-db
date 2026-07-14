@@ -91,7 +91,7 @@ pub trait RecordRef {
     ///
     /// §5b floor (#61): this is the documented escape hatch — it yields an
     /// owned `InnerValue` for containers / Dec / Big that the zero-copy
-    /// `ScalarRef` lens cannot represent. See `docs/perf/innervalue-floor.md`.
+    /// `ScalarRef` lens cannot represent. See `docs/dev-artifacts/perf/innervalue-floor.md`.
     fn materialize_at(&self, path: &[InternerKey]) -> Option<InnerValue>;
 
     /// Visit each top-level `(InternerKey, materialised InnerValue)` pair.

@@ -1,6 +1,6 @@
 //! A8 — interner-delta lost when the "first toucher" aborts before WAL.
 //!
-//! Reproduces the audit finding (A8, `docs/audits/2026-07-06-concurrency-
+//! Reproduces the audit finding (A8, `docs/dev-artifacts/audits/2026-07-06-concurrency-
 //! engine.md`): a later committer's records can reference an interner id
 //! that some OTHER tx created (via `touch_ind`) above
 //! `persisted_high_water()`, but that no surviving WAL delta mentions —

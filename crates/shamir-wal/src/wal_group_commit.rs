@@ -27,7 +27,7 @@
 //! verbatim liveness proof it carried lives on in git at
 //! `f62fe18:crates/shamir-tx/src/group_fsync.rs`, and the L1/L2/L3 arguments
 //! it established are reproduced below and in
-//! `docs/perf/capstone-subplan.md` §1:
+//! `docs/dev-artifacts/perf/capstone-subplan.md` §1:
 //!   - **L1 (no stranded committer):** leadership is released under the SAME
 //!     `pending` lock as `push` (in [`WalGroupCommit::lead_until_drained`]) —
 //!     a late push is either seen by the current leader or wins leadership
@@ -43,7 +43,7 @@
 //!
 //! A single-writer-task replacement for the rotating leader (this `pending`
 //! Mutex → bounded MPSC, the `flushing` CAS deleted) is designed in
-//! `docs/perf/capstone-subplan.md`. It was PROTOTYPED and REVERTED: a
+//! `docs/dev-artifacts/perf/capstone-subplan.md`. It was PROTOTYPED and REVERTED: a
 //! permanent writer task mandates a per-append cross-task `oneshot`
 //! round-trip that suspends the executor on every append, whereas this
 //! rotating leader drains the in-RAM `Mem` sink synchronously within one
@@ -133,7 +133,7 @@ pub struct WalGroupCommit {
     // group-commit coalescing makes each added committer CHEAPER.
     //
     // A single-writer-task replacement (this `Mutex` → bounded MPSC, leader
-    // CAS deleted) is designed in `docs/perf/capstone-subplan.md`. It was
+    // CAS deleted) is designed in `docs/dev-artifacts/perf/capstone-subplan.md`. It was
     // PROTOTYPED and REVERTED (subplan §5/§5-bis): the permanent writer task
     // mandates a per-append cross-task `oneshot` round-trip that suspends the
     // executor on every append, whereas this leader drains the in-RAM `Mem`

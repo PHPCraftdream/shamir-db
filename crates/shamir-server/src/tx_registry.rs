@@ -3,7 +3,7 @@
 //! Parks a live [`shamir_tx::TxContext`] + its [`shamir_tx::SnapshotGuard`]
 //! server-side between client round-trips, keyed by an opaque `tx_handle`
 //! (the engine-minted `TxId`) and bound to the authenticated session. See
-//! `docs/roadmap/PHASE_B_INTERACTIVE_TX.md` §4.
+//! `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §4.
 //!
 //! **Concurrency.** The server layer already builds on `dashmap` /
 //! `parking_lot` (unlike the engine, whose hot paths mandate `scc`); the

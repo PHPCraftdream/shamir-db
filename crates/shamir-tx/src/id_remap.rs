@@ -8,7 +8,7 @@
 //!
 //! §5b floor (#61): recovery anchor — replays staged id-keyed storage bytes
 //! during commit/recovery, where the name-keyed lens does not yet apply
-//! (no interner context at replay). See `docs/perf/innervalue-floor.md`
+//! (no interner context at replay). See `docs/dev-artifacts/perf/innervalue-floor.md`
 //! (Category 3 — recovery anchors).
 //!
 //! A8 fix: [`collect_referenced_ids`] walks the SAME `InnerValue` shape as

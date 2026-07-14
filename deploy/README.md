@@ -113,7 +113,7 @@ out of the box.
 
 ## See also
 
-* `docs/ops/CAPACITY_PLANNING.md` — sizing reference: per-unit RAM,
+* `docs/dev-artifacts/ops/CAPACITY_PLANNING.md` — sizing reference: per-unit RAM,
   CPU costs, disk growth rates, recommended VM sizes.
-* `docs/roadmap/PRODUCTION_HARDENING_ROADMAP.md` — what's still
+* `docs/dev-artifacts/roadmap/PRODUCTION_HARDENING_ROADMAP.md` — what's still
   outstanding for full production maturity.

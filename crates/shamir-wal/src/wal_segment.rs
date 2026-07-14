@@ -10,7 +10,7 @@
 //! tiers: [`append_batch`](WalSegment::append_batch) does `write()` +
 //! userspace flush (level 2), while [`sync`](WalSegment::sync) does
 //! `fsync` (level 3). This split is the foundation of the durability
-//! contract (see `docs/perf/durability-model.md`, "Реализация B").
+//! contract (see `docs/dev-artifacts/perf/durability-model.md`, "Реализация B").
 //!
 //! Live production primitive: composed into a [`crate::SegmentSet`]
 //! that the repo's [`WalSink::File`]` drives via
@@ -93,7 +93,7 @@ fn fsync_parent_dir(_path: &std::path::Path) -> DbResult<()> {
 /// lock-bound path would flatten. fsync dominates a durable append ~63×; the
 /// marginal ~10µs/append is `spawn_blocking` + `Notify`, not this sub-µs lock.
 ///
-/// A single-writer-task rewrite (CAPSTONE, `docs/perf/capstone-subplan.md`)
+/// A single-writer-task rewrite (CAPSTONE, `docs/dev-artifacts/perf/capstone-subplan.md`)
 /// would drop the `Mutex` (single ownership becomes type-level) but keep the
 /// `Arc` for `spawn_blocking`. It was PROTOTYPED and REVERTED: a permanent
 /// writer task mandates a per-append cross-task `oneshot` round-trip, which

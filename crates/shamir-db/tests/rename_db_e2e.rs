@@ -1,7 +1,7 @@
 //! End-to-end lifecycle tests for `RENAME DB` (campaign ②.1d — variant γ).
 //!
 //! Covers the rename-db contract documented in
-//! `docs/prompts/ddl-evolution/09-rename-db.md`:
+//! `docs/dev-artifacts/prompts/ddl-evolution/09-rename-db.md`:
 //! - rename a db that has a repo + table + index + schema + access-meta:
 //!   after rename, the old db name no longer resolves, the new name
 //!   resolves, ALL catalogue rows are re-keyed (db / repositories / tables,

@@ -7,7 +7,7 @@
 //! enough)
 //!
 //! The reverted task #524 prototype (see
-//! `docs/design/fjall-worker-loop-524-findings.md`) was benched against a
+//! `docs/dev-artifacts/design/fjall-worker-loop-524-findings.md`) was benched against a
 //! ~1 MiB, fully memtable-resident dataset with no write fan-out, so its
 //! numbers could not expose the two things that actually matter for a
 //! write-serialization redesign:

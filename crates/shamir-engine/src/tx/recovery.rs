@@ -10,7 +10,7 @@
 //! truncation is a watermark advance over the segment set, gated by
 //! the durable watermark + the A5 interner-hwm check.
 //!
-//! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
+//! Per stage 7.1 plan in docs/dev-artifacts/pre-transactional/08-tests-landing.md.
 
 use shamir_collections::TFxMap;
 use shamir_storage::error::{DbError, DbResult};

@@ -354,7 +354,7 @@ pub fn process_resume(
     // loudly fails instead of silently coexisting), and
     // `check_anti_downgrade` above already covers the adjacent
     // binding-strength-downgrade concern. See
-    // `docs/design/resumption-ticket-channel-binding-512-decision.md`
+    // `docs/dev-artifacts/design/resumption-ticket-channel-binding-512-decision.md`
     // for the full RFC 9266 reasoning and threat-model analysis.
 
     // Step 11: atomic per-(user, family) counter CAS.

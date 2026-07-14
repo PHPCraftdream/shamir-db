@@ -1,7 +1,7 @@
 //! Durability axis benchmark — `buffered` vs `synced` per-commit cost.
 //!
 //! `BatchRequest.durability` is a per-request knob (see
-//! `docs/roadmap/DURABILITY_LEVELS.md`, `shamir_query_types::DurabilityLevel`).
+//! `docs/dev-artifacts/roadmap/DURABILITY_LEVELS.md`, `shamir_query_types::DurabilityLevel`).
 //! Every user choosing a deployment config asks: what does the fsync gate
 //! cost me per commit? This bench answers it.
 //!

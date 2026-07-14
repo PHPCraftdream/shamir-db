@@ -3,7 +3,7 @@
 //! This crate hosts the engine-managed transactional machinery —
 //! version codec, `RepoTxGate`, `TxContext`, `MvccStore`, `StagingStore`,
 //! `IndexWriteOp`, `LayeredInterner`, `GcWorker`. The full design is
-//! laid out in `docs/pre-transactional/` and `docs/roadmap/TRANSACTIONS.md`.
+//! laid out in `docs/dev-artifacts/pre-transactional/` and `docs/dev-artifacts/roadmap/TRANSACTIONS.md`.
 //!
 //! ## Status
 //!
@@ -27,7 +27,7 @@
 //!   stores, zero-overhead when no snapshots are active.
 //!
 //! Stage 2 is now **complete** (RepoTxGate + TxContext + LayeredInterner +
-//! RepoWalManager). Upcoming stages (see `docs/pre-transactional/`):
+//! RepoWalManager). Upcoming stages (see `docs/dev-artifacts/pre-transactional/`):
 //! - Stage 6: `GcWorker`, `TxReaper`
 
 #[cfg(test)]

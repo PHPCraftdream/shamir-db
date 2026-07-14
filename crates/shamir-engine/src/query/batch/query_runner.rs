@@ -53,7 +53,7 @@ pub(super) fn build_resolved_refs(
 ///   outer batch's `BatchOp::Batch.bind` map for this execution scope.
 ///
 /// Per design decision D9 in
-/// `docs/pre-transactional/05-executor-isolation.md`.
+/// `docs/dev-artifacts/pre-transactional/05-executor-isolation.md`.
 pub struct QueryRunner<'a> {
     pub resolver: &'a dyn TableResolver,
     pub admin: Option<&'a dyn AdminExecutor>,

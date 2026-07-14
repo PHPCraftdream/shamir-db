@@ -16,7 +16,7 @@ use shamir_collections::THasher;
 /// Key shape: `(commit_version, db_id, repo_hash, change_index, mode_discriminant)`.
 /// **CV-first** so eviction is a `remove_range` over the leading u64, not a
 /// full-map scan. Migrated from `DashMap` to `scc::TreeIndex` — see Stage 2
-/// of the hidden-O(N) sweep (`docs/perf/hidden-on-sweep-stage0.md`).
+/// of the hidden-O(N) sweep (`docs/dev-artifacts/perf/hidden-on-sweep-stage0.md`).
 /// `db_id` is the `Arc<ShamirDb>` pointer address cast to `u64`, uniquely
 /// identifying the database instance (prevents cross-instance cache pollution
 /// in tests where multiple in-memory DBs share repo names and version ranges).

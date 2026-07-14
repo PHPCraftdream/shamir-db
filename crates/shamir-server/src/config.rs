@@ -427,7 +427,7 @@ pub struct ListenerConfig {
     #[serde(default)]
     pub path: Option<String>,
     /// Per-listener override of the default KDF parameters. Used to give
-    /// browser endpoints a softer floor (cf. `docs/roadmap/BROWSER_WASM_PLAN.md`).
+    /// browser endpoints a softer floor (cf. `docs/dev-artifacts/roadmap/BROWSER_WASM_PLAN.md`).
     #[serde(default)]
     pub kdf_override: Option<KdfConfig>,
     /// Origin header allowlist. REQUIRED for browser endpoints (`ws` +

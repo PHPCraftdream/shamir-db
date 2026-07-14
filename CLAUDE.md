@@ -397,7 +397,7 @@ survive — they must live in git, not in scratch dirs.
 **Before running ANY delegated stage** (a `/crush` agent, an `Agent`
 sub-agent, a `/workflows` phase — anything that generates code):
 
-1. **Write the brief to `docs/prompts/<area>/<NN>-<name>.md` and commit it**
+1. **Write the brief to `docs/dev-artifacts/prompts/<area>/<NN>-<name>.md` and commit it**
    (`docs(prompts): brief for <stage>`) *before* launching the agent. Never
    keep the only copy in `.crush/stdin/` — that dir is `.gitignore`d and will
    not survive a stray reset.
@@ -414,7 +414,7 @@ sub-agent, a `/workflows` phase — anything that generates code):
 
 This rule is not theoretical: on 2026-06-24 an agent ran `git reset --hard`
 and wiped hours of uncommitted work. Recovery was possible **only** because
-the briefs and test files were preserved. See `docs/prompts/README.md`.
+the briefs and test files were preserved. See `docs/dev-artifacts/prompts/README.md`.
 
 ---
 
@@ -435,7 +435,7 @@ JSON: add a one-line comment stating *why*. The documented exceptions:
   a builder would bypass what's under test.
 * **WASM-bridge conversion** — mapping an intermediate (e.g. WASM
   `QueryValue`) into a typed `Filter`/op.
-* **`docs/client-server-protocol-spec/`** — reference documentation of the
+* **`docs/guide-docs/client-server-protocol-spec/`** — reference documentation of the
   wire format itself (the builder is what *produces* these shapes).
 
 Everywhere else (user-facing guides, architecture/roadmap docs, engine and

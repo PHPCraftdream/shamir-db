@@ -5,7 +5,7 @@
 //!
 //! P1d-2 moves the expensive `history.transact` (the version-log DATA
 //! write) OFF the commit ack-path into a background task. The §8 refinement
-//! of `docs/perf/d2-p1d2-subplan.md` observes that this background work is
+//! of `docs/dev-artifacts/perf/d2-p1d2-subplan.md` observes that this background work is
 //! EXACTLY [`recover_inflight_v2`](crate::tx::recovery::recover_inflight_v2)
 //! prowled in a loop: the source of truth is the inflight tail of the WAL
 //! (`wal.recover()` → `Vec<WalEntryV2>`, each carrying `commit_version` +

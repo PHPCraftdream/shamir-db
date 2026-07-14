@@ -1,6 +1,6 @@
 //! #546 gate-coverage recommendation 2 — object×op coverage matrix.
 //!
-//! `docs/roadmap/ACCESS_HIERARCHY.md` documents the full securable-object ×
+//! `docs/dev-artifacts/roadmap/ACCESS_HIERARCHY.md` documents the full securable-object ×
 //! operation matrix the Shomer DAC model is supposed to enforce. This test
 //! drives that matrix as DATA (a table of `(object kind, Action)` pairs
 //! transcribed 1:1 from the doc's own table) against the REAL, single
@@ -22,7 +22,7 @@
 //! `execute_as(self.actor.clone(), ...)`, so it inherits this same coverage
 //! (confirmed by grep: `db_gateway.rs`'s 4 `execute_as` call sites).
 //!
-//! Matrix source (`docs/roadmap/ACCESS_HIERARCHY.md`'s "Object × operation
+//! Matrix source (`docs/dev-artifacts/roadmap/ACCESS_HIERARCHY.md`'s "Object × operation
 //! matrix" table), transcribed as `(object, Action)` cells that denote a
 //! REAL restriction (a `—` cell in the doc means "not applicable to this
 //! object" and is skipped):

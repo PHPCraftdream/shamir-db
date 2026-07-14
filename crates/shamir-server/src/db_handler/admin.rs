@@ -441,7 +441,7 @@ pub(super) async fn change_password_verify(
 }
 
 /// Explicit allowlist of admin/DDL ops exempted from the coarse wire-admin
-/// gate (task #553, per `docs/design/root-user-group-dac-posture-550-decision.md`
+/// gate (task #553, per `docs/dev-artifacts/design/root-user-group-dac-posture-550-decision.md`
 /// §2). Exactly the 4 ops the design decision named — `List`, `AccessTree`,
 /// `DescribeTable`, `GetTableSchema` — never derived from `is_write()` or
 /// any other classifier.

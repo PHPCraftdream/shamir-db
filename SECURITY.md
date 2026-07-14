@@ -120,6 +120,6 @@ role, `wasmtime` is treated as a **priority-upgrade dependency**:
   published registry versions bake; a security fix is the opposite case).
 
 This policy closes audit finding C5
-(`docs/audits/2026-07-06-security-compliance-supplychain.md`).
+(`docs/dev-artifacts/audits/2026-07-06-security-compliance-supplychain.md`).
 
 [gh-pvr]: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability

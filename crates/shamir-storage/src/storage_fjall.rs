@@ -29,7 +29,7 @@ use tokio::task;
 // keyspace truly in parallel; funnelling reads through one worker would cap a
 // hot table's read throughput at a single thread's serial rate. Reads
 // therefore stay on the existing per-op `spawn_blocking` path, untouched.
-// See `docs/design/fjall-worker-loop-524-findings.md` for the full analysis.
+// See `docs/dev-artifacts/design/fjall-worker-loop-524-findings.md` for the full analysis.
 //
 // Why `set`/`remove` are NOT routed here (measured, not assumed): both embed
 // a `contains_key` READ (to derive the `Store` trait's `bool` "existed"
@@ -38,7 +38,7 @@ use tokio::task;
 // this worker regressed it ~1.45× (1,124,693 -> 1,630,982 ns/op) — the
 // embedded cold `contains_key` reads, previously overlapped across the
 // `spawn_blocking` pool, got serialized onto one thread, exactly the
-// read-parallelism hazard `docs/design/fjall-worker-loop-524-findings.md`
+// read-parallelism hazard `docs/dev-artifacts/design/fjall-worker-loop-524-findings.md`
 // warned about, just resurfacing through the read embedded inside a write op
 // instead of a bare read op. `insert` has no such embedded read (the id is
 // freshly generated, no pre-check) and benched ~1.7× faster
@@ -370,7 +370,7 @@ impl Store for FjallStore {
             // read, previously overlapped across the `spawn_blocking` pool,
             // gets serialized onto one thread when routed through the
             // worker, reproducing the read-parallelism hazard
-            // `docs/design/fjall-worker-loop-524-findings.md` warned about.
+            // `docs/dev-artifacts/design/fjall-worker-loop-524-findings.md` warned about.
             // `insert`/`transact` have no such embedded read and DO route
             // through the worker (a measured ~1.7× win) — see the worker's
             // module comment.

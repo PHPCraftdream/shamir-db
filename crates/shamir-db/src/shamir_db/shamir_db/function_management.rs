@@ -152,7 +152,7 @@ impl ShamirDb {
         // admin-only (`Manage(Root)`) pending a real secrets-ACL — do not
         // invent a finer-grained check that doesn't actually exist (task
         // #554, per the signed-off design in
-        // `docs/design/root-user-group-dac-posture-550-decision.md` §3).
+        // `docs/dev-artifacts/design/root-user-group-dac-posture-550-decision.md` §3).
         if !opts.secret_grants.is_empty() {
             self.authorize_access(&actor, &ResourcePath::Root, Action::Manage)
                 .await

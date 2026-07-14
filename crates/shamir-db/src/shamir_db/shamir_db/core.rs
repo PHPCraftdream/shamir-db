@@ -712,7 +712,7 @@ impl ShamirDb {
     /// restrictive (empty = no egress) would silently lock every
     /// already-deployed function that calls `ctx.http_fetch()` with no
     /// `net_grants` ever set out of egress it currently has, with no
-    /// migration path (see `docs/prompts/audit/65-fix-544-*.md` and
+    /// migration path (see `docs/dev-artifacts/prompts/audit/65-fix-544-*.md` and
     /// `FunctionMeta::net_grants`'s doc comment for the full tradeoff). A
     /// non-empty `net_grants` list narrows the function to LESS than the DB
     /// default — there is no way to grant a function MORE than the DB

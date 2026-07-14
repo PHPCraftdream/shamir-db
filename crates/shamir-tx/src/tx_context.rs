@@ -242,7 +242,7 @@ pub struct TxContext {
     /// (nonzero) — the WAL entry and crash-injection seams gate on it — but
     /// the projected changefeed EVENT reports `tx_id = 0` to preserve the
     /// EXTERNAL "0 = non-tx write" subscription contract
-    /// (`docs/roadmap/LIVE_SUBSCRIPTIONS.md`). Default `false`.
+    /// (`docs/dev-artifacts/roadmap/LIVE_SUBSCRIPTIONS.md`). Default `false`.
     pub implicit: bool,
 
     /// Level-3 locked-key registry: every key this tx has acquired a

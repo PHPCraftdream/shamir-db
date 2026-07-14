@@ -7,7 +7,7 @@
 //! facade gate in `shamir-db` (meta resolution + ancestor traversal).
 //!
 //! The full object & operation hierarchy is specified in
-//! `docs/roadmap/ACCESS_HIERARCHY.md`.
+//! `docs/dev-artifacts/roadmap/ACCESS_HIERARCHY.md`.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -27,7 +27,7 @@ pub const OWNER_SYSTEM: u64 = 0;
 /// Pure truncation — NOT a hash of anything attacker-chosen. Uniqueness and
 /// non-zero-ness are enforced once, at mint time, by the directory that
 /// produces the 16 bytes (`FjallUserDirectory`, task #556) — this function
-/// only projects. See `docs/design/identity-privilege-unification-548-549-decision.md`
+/// only projects. See `docs/dev-artifacts/design/identity-privilege-unification-548-549-decision.md`
 /// §2.2 for the full rationale (why 63-bit projection over widening the
 /// catalogue to 128 bits).
 pub fn principal64(user_id: [u8; 16]) -> u64 {

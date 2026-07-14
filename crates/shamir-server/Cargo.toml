@@ -113,7 +113,7 @@ tempfile = "3"
 # mimalloc: pure-Rust safety guarantees. Measured on release builds
 # (opt-level=1 and opt-level=3): sefer-alloc is 17-22x faster than mimalloc
 # on alloc-heavy setup workloads (engine_perf --test, 103 variants) — see
-# docs/perf/sefer-alloc-rollout-2026-06-30.md. The earlier "mimalloc leads
+# docs/dev-artifacts/perf/sefer-alloc-rollout-2026-06-30.md. The earlier "mimalloc leads
 # +22% on db_handler_rps" note was measured at opt-level=0 (debug) and does
 # not hold at release opt levels.
 sefer-alloc = { version = "0.2.1", features = ["production"] }

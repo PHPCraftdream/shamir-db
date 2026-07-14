@@ -2,7 +2,7 @@
 # bench-vector.sh — single entry point for vector-index benchmarks.
 #
 # Runs BOTH vector tools and assembles a report skeleton under
-# docs/benchmarks/vector/<date>-baseline.md:
+# docs/dev-artifacts/benchmarks/vector/<date>-baseline.md:
 #
 #   1. V0.3 criterion latency bench (benches/vector_search.rs) — QUICK by
 #      default (or SMOKE via BENCH_SMOKE=1; 1M rung via BENCH_VECTOR_1M=1).
@@ -43,7 +43,7 @@ SUFFIX=""
 [ "${BENCH_SMOKE:-0}" = "1" ] && SUFFIX="${SUFFIX}-smoke"
 [ "${BENCH_VECTOR_1M:-0}" = "1" ] && SUFFIX="${SUFFIX}-1m"
 [ -z "$SUFFIX" ] && SUFFIX="-quick"
-REPORT="docs/benchmarks/vector/${DATE}${SUFFIX}-baseline.md"
+REPORT="docs/dev-artifacts/benchmarks/vector/${DATE}${SUFFIX}-baseline.md"
 
 echo "=== bench-vector.sh ==="
 echo "  CARGO_TARGET_DIR = $CARGO_TARGET_DIR"
@@ -53,7 +53,7 @@ echo "  BENCH_SMOKE      = ${BENCH_SMOKE:-0}"
 echo "  BENCH_VECTOR_1M  = ${BENCH_VECTOR_1M:-0}"
 date -u +%H:%M:%S
 
-mkdir -p docs/benchmarks/vector
+mkdir -p docs/dev-artifacts/benchmarks/vector
 
 # ── 1. criterion latency bench (V0.3) ──────────────────────────────
 # The bench reads BENCH_SMOKE / BENCH_VECTOR_1M itself (via

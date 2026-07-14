@@ -1,5 +1,5 @@
 //! STAGE 0 (re-measured) + STAGE 1 benchmarks for the RecordView migration
-//! (see `docs/perf/record-view-migration.md` §7, §9).
+//! (see `docs/dev-artifacts/perf/record-view-migration.md` §7, §9).
 //!
 //! Re-pointed at the STORAGE form: records are encoded via
 //! `InnerValue::to_bytes()` (id-keyed msgpack), NOT `inner_to_msgpack`

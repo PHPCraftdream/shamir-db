@@ -1,6 +1,6 @@
 //! End-to-end lifecycle tests for `RENAME TABLE` (Phase E.4 #244 — Object 1).
 //!
-//! Covers the rename contract documented in `docs/prompts/ddl-lifecycle/04-rename.md`:
+//! Covers the rename contract documented in `docs/dev-artifacts/prompts/ddl-lifecycle/04-rename.md`:
 //! - rename an empty table: old name stops resolving, new name resolves and
 //!   accepts/serves data, the catalogue reflects the new name only;
 //! - rename a populated table (Phase F.2): the MVCC overlay is force-drained

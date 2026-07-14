@@ -1,6 +1,6 @@
 //! Two-mode interner wrapper for tx-aware paths.
 //!
-//! See `docs/pre-transactional/03-repo-coordinator.md` §2.3 and D5 in
+//! See `docs/dev-artifacts/pre-transactional/03-repo-coordinator.md` §2.3 and D5 in
 //! `architectural-decisions.md` for rationale.
 
 use scc::HashMap as SccHashMap;

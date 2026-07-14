@@ -1,6 +1,6 @@
-//! Task #552 (`docs/prompts/audit/70-root-user-group-real-permissions.md`,
+//! Task #552 (`docs/dev-artifacts/prompts/audit/70-root-user-group-real-permissions.md`,
 //! per the signed-off design in
-//! `docs/design/root-user-group-dac-posture-550-decision.md` §1).
+//! `docs/dev-artifacts/design/root-user-group-dac-posture-550-decision.md` §1).
 //!
 //! Replaces the blanket `ResourcePath::Root | ResourcePath::User { .. } |
 //! ResourcePath::Group { .. } => Ok(ResourceMeta::open())` arm with three

@@ -121,7 +121,7 @@ impl Table {
     /// No conversion - returns InnerValue directly
     ///
     /// §5b floor (#61): owned point-read — returns a deserialized
-    /// `InnerValue` the caller owns. See `docs/perf/innervalue-floor.md`.
+    /// `InnerValue` the caller owns. See `docs/dev-artifacts/perf/innervalue-floor.md`.
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         // Alloc-free key construction: inline the 16-byte RecordId into a
         // `RecordKey` (`KeyBytes`) instead of a heap `Bytes::copy_from_slice`.

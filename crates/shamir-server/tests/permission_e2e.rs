@@ -1256,7 +1256,7 @@ async fn permission_open_default_allows_any_user() {
 // --------------------------------------------------------------------------
 //
 // Covers the test matrix from
-// `docs/prompts/audit/71-wire-admin-gate-explicit-allowlist.md`:
+// `docs/dev-artifacts/prompts/audit/71-wire-admin-gate-explicit-allowlist.md`:
 //   (a) non-superuser CAN DescribeTable/GetTableSchema a table they can Read
 //   (b) non-superuser CANNOT DescribeTable/GetTableSchema a table with no rights
 //   (c) AccessTree / List(Users) / List(Roles) stay DENIED for a non-superuser

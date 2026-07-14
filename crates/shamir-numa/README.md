@@ -81,4 +81,4 @@ out-of-CI — QEMU models topology, not latency asymmetry.
   `SortedIndexManager` #304, validator bindings #289) to `NodeReplicated`.
 - **Фаза 3** — pin critical threads (WAL writer, drainer) via config.
 
-See `docs/research/NUMA-DESIGN-2026-06-29.md` for the full design and sources.
+See `docs/dev-artifacts/research/NUMA-DESIGN-2026-06-29.md` for the full design and sources.

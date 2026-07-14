@@ -37,7 +37,7 @@
 //! fallback, the `NodeReplicated` primitive, the cache-padding helper, and the
 //! Linux `cpulist` parser ([`parse_cpulist`]). The real `LinuxTopology`
 //! (`/sys` probe + `sched_setaffinity`) and QEMU-based integration tests land
-//! in Фаза 1b — see `docs/research/NUMA-DESIGN-2026-06-29.md`.
+//! in Фаза 1b — see `docs/dev-artifacts/research/NUMA-DESIGN-2026-06-29.md`.
 
 mod cache_padded;
 mod cpulist;

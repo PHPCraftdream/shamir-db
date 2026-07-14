@@ -1,6 +1,6 @@
 //! Zero-copy borrowing lens over canonical (id-keyed) MessagePack record
 //! bytes — the Stage-1 primitive of the RecordView migration
-//! (see `docs/perf/record-view-migration.md` §2, §3, §8, §9).
+//! (see `docs/dev-artifacts/perf/record-view-migration.md` §2, §3, §8, §9).
 //!
 //! **ADDITIVE — not wired into the engine.** Stage 2 puts this behind a
 //! `RecordRef` trait; Stages 3-4 migrate consumers. Nothing in this crate

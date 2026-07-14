@@ -40,7 +40,7 @@ The repository is currently source-first: it provides a Cargo workspace, a serve
 - ✅ MVCC versioned reads, history store GC, max-tx-lifetime enforcement, interactive-tx idle/lifetime reaper + per-tx staging budget
 - ✅ Broad workspace test coverage, including property tests for the version codec and SSI read-set validation
 
-**Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
+**Planned Features (see [docs/dev-artifacts/roadmap/ROADMAP.md](docs/dev-artifacts/roadmap/ROADMAP.md)):**
 - 🔜 Browser WASM client (Argon2id in Web Worker)
 - 🔜 QUIC transport
 - 🔜 Post-quantum hybrid handshake
@@ -65,16 +65,16 @@ crates/
 ```
 
 Documentation:
-- **[docs/architecture/LOGIC_FLOW.md](docs/architecture/LOGIC_FLOW.md)** — view from above: how a request travels through the crates
-- **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — DB internals (storage, types, indexes)
-- **[docs/client-server-protocol-spec/](docs/client-server-protocol-spec/README.md)** — wire protocol (auth, session, transports)
-- **[docs/guide/](docs/guide/README.md)** — progressive user and operator guide
-- **[docs/roadmap/](docs/roadmap/ROADMAP.md)** — production hardening, server plan, feature roadmap
-- **[docs/ops/](docs/ops/)** — capacity planning, perf tuning
+- **[docs/guide-docs/architecture/LOGIC_FLOW.md](docs/guide-docs/architecture/LOGIC_FLOW.md)** — view from above: how a request travels through the crates
+- **[docs/guide-docs/architecture/ARCHITECTURE.md](docs/guide-docs/architecture/ARCHITECTURE.md)** — DB internals (storage, types, indexes)
+- **[docs/guide-docs/client-server-protocol-spec/](docs/guide-docs/client-server-protocol-spec/README.md)** — wire protocol (auth, session, transports)
+- **[docs/guide-docs/guide/](docs/guide-docs/guide/README.md)** — progressive user and operator guide
+- **[docs/dev-artifacts/roadmap/](docs/dev-artifacts/roadmap/ROADMAP.md)** — production hardening, server plan, feature roadmap
+- **[docs/dev-artifacts/ops/](docs/dev-artifacts/ops/)** — capacity planning, perf tuning
 
 ## 🚀 Quick Start
 
-Start with the [five-minute server and TypeScript client walkthrough](docs/guide/00-quickstart.md). For a local build:
+Start with the [five-minute server and TypeScript client walkthrough](docs/guide-docs/guide/00-quickstart.md). For a local build:
 
 ```bash
 cargo build --workspace
@@ -113,11 +113,11 @@ Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING
 ## 📚 Documentation
 
 - [Documentation index](docs/README.md)
-- [Guided usage documentation](docs/guide/README.md)
-- [Architecture](docs/architecture/ARCHITECTURE.md)
-- [Client/server protocol](docs/client-server-protocol-spec/README.md)
-- [Roadmap](docs/roadmap/ROADMAP.md)
-- [Security model and data protection](docs/security/data-protection.md)
+- [Guided usage documentation](docs/guide-docs/guide/README.md)
+- [Architecture](docs/guide-docs/architecture/ARCHITECTURE.md)
+- [Client/server protocol](docs/guide-docs/client-server-protocol-spec/README.md)
+- [Roadmap](docs/dev-artifacts/roadmap/ROADMAP.md)
+- [Security model and data protection](docs/guide-docs/security/data-protection.md)
 
 ## 📝 License
 

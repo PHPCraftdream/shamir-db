@@ -21,7 +21,7 @@ use shamir_types::access::Actor;
 //
 // ROLLBACK needs no function — dropping the parked `TxContext` is the RAII
 // rollback (no storage side effects). See
-// `docs/roadmap/PHASE_B_INTERACTIVE_TX.md` §5. These are thin wrappers: no
+// `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5. These are thin wrappers: no
 // new execution logic. `execute_in_open_tx` mirrors `execute_batch`
 // (plan → validate → run → filter) but routes through `execute_plan_tx`
 // with the caller's `&mut TxContext` and returns `transaction: None` because

@@ -103,7 +103,7 @@ fn gen_user(i: usize) -> QueryValue {
 /// Run an async setup future on a worker thread with an 8 MiB stack. Bench
 /// fixtures (`seeded`, `seed_users`, `create_*_index`) generate deep async
 /// state machines that, under `profile.bench` (opt-level=0), overflow the
-/// ~1 MiB Windows main-thread stack — see `docs/perf/sefer-alloc-rollout-…`.
+/// ~1 MiB Windows main-thread stack — see `docs/dev-artifacts/perf/sefer-alloc-rollout-…`.
 /// All bench-setup `rt.block_on(...)` calls should route through this helper.
 fn block_on_setup<F>(rt: &Runtime, fut: F) -> F::Output
 where

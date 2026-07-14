@@ -1,7 +1,7 @@
 //! A10 — TOCTOU race between `open_snapshot` (reads floor THEN registers)
 //! and `vacuum_key`'s fast path (checks `active_snapshots_empty()`).
 //!
-//! See `docs/audits/2026-07-06-concurrency-engine.md` finding A10.
+//! See `docs/dev-artifacts/audits/2026-07-06-concurrency-engine.md` finding A10.
 //!
 //! The fix is a THREE-LAYER defense:
 //!

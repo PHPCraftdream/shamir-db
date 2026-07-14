@@ -10,7 +10,7 @@
 //! Files are named `NNNNNNNN.wal` (zero-padded 8-digit seq, lexical =
 //! chronological). The active segment is never deleted nor rewritten — the
 //! append path and the truncation path therefore never touch the same file
-//! (zero writer↔truncator coordination, see `docs/perf/f6-subplan.md` §1).
+//! (zero writer↔truncator coordination, see `docs/dev-artifacts/perf/f6-subplan.md` §1).
 //!
 //! PURELY ADDITIVE (F6a): wired into nothing yet — production still runs a
 //! single [`WalSegment`] via `WalSink::File`. F6b cuts `repo_instance` over.

@@ -93,7 +93,7 @@ pub mod instance_defaults {
     /// more disk for longer. Smaller = finer truncation (disk released
     /// sooner) at the cost of more files and more frequent rotation. Start
     /// at 8 MiB — large enough that rotation is infrequent on typical
-    /// workloads. See `docs/perf/f6-subplan.md` §4.
+    /// workloads. See `docs/dev-artifacts/perf/f6-subplan.md` §4.
     ///
     /// Consumed by `SegmentSet::open` at the call-site (F6b wires
     /// `repo_instance`); `shamir-wal` itself takes the bound as a parameter

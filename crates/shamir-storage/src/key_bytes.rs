@@ -1,7 +1,7 @@
 //! Representation-transparent small-buffer key — `KeyBytes`.
 //!
 //! Implements step 1 of
-//! `docs/design/record-key-128-migration-plan.md` (task #491): a new
+//! `docs/dev-artifacts/design/record-key-128-migration-plan.md` (task #491): a new
 //! representation-transparent small-string-optimized byte-string type,
 //! fully tested, **with zero call-site changes anywhere else** in the
 //! workspace. `crates/shamir-storage/src/types.rs`'s `pub type

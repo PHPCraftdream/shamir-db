@@ -738,7 +738,7 @@ impl<'a> FieldIndex<'a> {
 /// A zero-copy borrowing cursor over canonical (id-keyed) MessagePack record
 /// bytes produced by `InnerValue::to_bytes()`. Read fields on demand without
 /// materialising an `InnerValue` tree — see the [module docs](super) and
-/// `docs/perf/record-view-migration.md` §9.
+/// `docs/dev-artifacts/perf/record-view-migration.md` §9.
 ///
 /// Map keys in the storage form are `InternerKey` serialised as msgpack `bin`
 /// (variable-width LE bytes). The lens matches keys by encoding the target

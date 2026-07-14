@@ -19,7 +19,7 @@
  * ordered to match the Rust `repl_ops.rs` struct field order, so raw byte
  * parity is achievable without a semantic fallback.
  *
- * See `docs/roadmap/REPLICATION-CLIENT-SURFACE.md` §4 and task #376.
+ * See `docs/dev-artifacts/roadmap/REPLICATION-CLIENT-SURFACE.md` §4 and task #376.
  */
 
 import { describe, it, expect } from 'vitest';

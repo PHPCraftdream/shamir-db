@@ -739,7 +739,7 @@ async fn repro24_concurrent_ssi_storm_multithread() {
 /// (A fully commits before B starts) and so cannot exercise the
 /// validate→publish window race that the P2c lock-free path opened.
 ///
-/// Scenario (from `docs/audits/2026-07-06-concurrency-engine.md` §A1):
+/// Scenario (from `docs/dev-artifacts/audits/2026-07-06-concurrency-engine.md` §A1):
 /// two Serializable txs, same snapshot, disjoint write-sets but a
 /// rw-antidependency cycle:
 ///   - tx_a reads x, writes y

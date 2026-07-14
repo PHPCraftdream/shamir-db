@@ -33,7 +33,7 @@ static GLOBAL: Lazy<DecodeCache> = Lazy::new(DecodeCache::new);
 /// so eviction is a `remove_range` over the leading u64, not a full-map
 /// scan. Migrated from `DashMap` (O(1) get, O(N) eviction) to
 /// `scc::TreeIndex` (O(log N) get, O(evicted + log N) eviction) — see
-/// Stage 2 of the hidden-O(N) sweep (`docs/perf/hidden-on-sweep-stage0.md`).
+/// Stage 2 of the hidden-O(N) sweep (`docs/dev-artifacts/perf/hidden-on-sweep-stage0.md`).
 ///
 /// `db_id` (the `ShamirDb` instance pointer) is part of the key to prevent
 /// cross-database collisions: distinct databases each own a repo named

@@ -3,7 +3,7 @@
 //! Boots a server, connects as the bootstrap admin via the high-level
 //! `Client`, creates a table in the pre-existing `default`/`main` store,
 //! PUTs a document via `set`, GETs it via `from`. This is the exact path
-//! documented in `docs/guide/00-quickstart.md` — keep them in sync.
+//! documented in `docs/guide-docs/guide/00-quickstart.md` — keep them in sync.
 
 use shamir_types::mpack;
 use tempfile::TempDir;

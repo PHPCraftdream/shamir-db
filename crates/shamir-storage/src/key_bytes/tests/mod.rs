@@ -1,6 +1,6 @@
 //! Test manifest for `key_bytes`. Topic-split files, one per the
 //! seven mandatory test categories in
-//! `docs/design/record-key-128-migration-plan.md` step 1.
+//! `docs/dev-artifacts/design/record-key-128-migration-plan.md` step 1.
 
 pub mod boundary_tests;
 pub mod conversions_tests;

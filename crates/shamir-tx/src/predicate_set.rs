@@ -1,5 +1,5 @@
 //! Per-transaction predicate / range read-set for SSI phantom
-//! protection (Phase C — see `docs/roadmap/PHASE_C_SERIALIZABLE.md`).
+//! protection (Phase C — see `docs/dev-artifacts/roadmap/PHASE_C_SERIALIZABLE.md`).
 //!
 //! Mirrors the point-key `TxContext.read_set` (tx_context.rs): a
 //! parallel append-only log of *predicate dependencies* captured at

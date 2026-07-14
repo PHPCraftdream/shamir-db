@@ -9,7 +9,7 @@
 //! resolver + admin pair `execute` uses, then drives one lifecycle step. The
 //! `TxContext` / `SnapshotGuard` flow back to the server registry via the
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
-//! types the server names. See `docs/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
+//! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{

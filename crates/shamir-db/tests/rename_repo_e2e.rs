@@ -1,7 +1,7 @@
 //! End-to-end lifecycle tests for `RENAME REPO` (Phase F.3).
 //!
 //! Covers the rename contract documented in
-//! `docs/prompts/ddl-lifecycle/07-rename-repo.md`:
+//! `docs/dev-artifacts/prompts/ddl-lifecycle/07-rename-repo.md`:
 //! - rename a repo that has a table + data + index: the old repo name
 //!   stops resolving, the new name resolves, and ALL table data + the
 //!   index remain intact and queryable under the new repo name;

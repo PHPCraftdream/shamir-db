@@ -4,7 +4,7 @@
 //! endpoints. Plain WS (ws://) carries no encryption AND no TLS exporter
 //! → MITM relay reads session_id in plaintext after auth_ok and owns the
 //! session. The protocol cannot defend against this without TLS or an
-//! inner secure-channel layer (Noise NK; see `docs/roadmap/BROWSER_WASM_PLAN.md` for
+//! inner secure-channel layer (Noise NK; see `docs/dev-artifacts/roadmap/BROWSER_WASM_PLAN.md` for
 //! v2 roadmap).
 //!
 //! [`WsListenerProfile`] enumerates the three valid combinations; plain

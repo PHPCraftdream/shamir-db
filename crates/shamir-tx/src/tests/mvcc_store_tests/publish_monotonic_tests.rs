@@ -1,6 +1,6 @@
 //! A2 regression guard — max-monotonic `publish_cell` / `seed_version`.
 //!
-//! Audit finding A2 (`docs/audits/2026-07-06-concurrency-engine.md`): both
+//! Audit finding A2 (`docs/dev-artifacts/audits/2026-07-06-concurrency-engine.md`): both
 //! `publish_cell` (the per-op drain/recovery seed path) and `seed_version`
 //! (the cold-read cache-seed path) unconditionally overwrote a cell's
 //! `version`. When a slow drainer or recovery replay races a NEWER in-memory
