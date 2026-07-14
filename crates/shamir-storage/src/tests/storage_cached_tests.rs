@@ -1,13 +1,18 @@
 #![allow(deprecated)]
 
+use crate::error::DbResult;
 use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::InMemoryStore;
 use crate::tests::types_tests::collect_stream;
 use crate::types::{KvOp, RecordKey, Store};
+use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::Stream;
 use futures::StreamExt;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -808,4 +813,163 @@ async fn test_scan_prefix_stream_no_matches() {
         .await
         .unwrap();
     assert!(collected.is_empty());
+}
+
+// ============================================================================
+// WriteMode::Async ordering (taskId #616 pt.2, security-remediation brief 13)
+// ============================================================================
+
+/// A `Store` wrapper that artificially delays `set`/`remove` in INVERSE
+/// call order: the Nth call sleeps for `(calls - N)` slice, so the FIRST
+/// call submitted is the SLOWEST to actually reach `inner`, and later
+/// calls finish sooner. This recreates the exact race the old
+/// "independent `tokio::spawn` per write" implementation was exposed to:
+/// if two background tasks for the same key are scheduled independently,
+/// nothing stops the scheduler from completing the newer write before
+/// the older one, leaving `inner` on a stale value.
+///
+/// Under the FIFO worker (the fix), submission order — not completion
+/// timing — determines what lands in `inner` last, so this delay
+/// ordering must NOT be able to reorder the final value.
+struct DelayedStore {
+    inner: Arc<dyn Store>,
+    call_no: AtomicUsize,
+    /// Total calls expected, so the first call can be given the longest
+    /// delay (`total - 1`) and the last call the shortest (`0`).
+    total_calls: usize,
+    delay_step_ms: u64,
+}
+
+#[async_trait]
+impl Store for DelayedStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        let n = self.call_no.fetch_add(1, Ordering::SeqCst);
+        let delay = self.total_calls.saturating_sub(n + 1) as u64 * self.delay_step_ms;
+        if delay > 0 {
+            sleep(Duration::from_millis(delay)).await;
+        }
+        self.inner.set(key, value).await
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.iter_stream(batch_size)
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// Regression test for the ordering bug the FIFO worker fixes: `set(k,
+/// v1)` immediately followed by `set(k, v2)` on the SAME key, where the
+/// backing store artificially finishes the FIRST call's work slower than
+/// the SECOND's. Under the old "independent spawn per write" code this
+/// would let `v1`'s background task land in `inner` AFTER `v2`'s,
+/// leaving `inner` stuck on the stale `v1` post-`flush()`. Under the
+/// FIFO worker, the queue processes `v1` fully before even starting
+/// `v2` (one `.await` at a time), so submission order always wins
+/// regardless of per-call latency.
+#[tokio::test]
+async fn test_async_mode_preserves_write_order_under_inverted_latency() {
+    let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let delayed_inner = Arc::new(DelayedStore {
+        inner: plain_inner.clone(),
+        call_no: AtomicUsize::new(0),
+        total_calls: 2,
+        // First call sleeps ~40ms, second call sleeps 0ms — the older
+        // write is the slower one to reach `inner`, worst case for the
+        // old independent-spawn code.
+        delay_step_ms: 40,
+    }) as Arc<dyn Store>;
+
+    let cached = CachedStore::new_async(delayed_inner).await.unwrap();
+
+    let key = RecordKey::from_slice(b"ordering-key");
+    let v1 = Bytes::from_static(b"v1-stale-if-buggy");
+    let v2 = Bytes::from_static(b"v2-fresh");
+
+    cached.set(key.clone(), v1.clone()).await.unwrap();
+    cached.set(key.clone(), v2.clone()).await.unwrap();
+
+    cached.flush().await.unwrap();
+
+    // The cache already held v2 synchronously (upsert on every `set`).
+    let from_cache = cached.get(key.clone()).await.unwrap();
+    assert_eq!(from_cache, v2, "cache always holds the latest value");
+
+    // The backing store — reached only through the background
+    // worker — must ALSO hold v2, not v1, once flush() has drained the
+    // ordered queue. A failure here (`v1`) proves the two writes
+    // reached `inner` out of submission order.
+    let from_inner = plain_inner.get(key).await.unwrap();
+    assert_eq!(
+        from_inner, v2,
+        "FIFO worker must apply writes to inner in submission order, \
+         even when an earlier write is artificially slower than a later one"
+    );
+}
+
+/// Broader stress variant: many rapid alternating `set`/`remove` calls
+/// on a SINGLE key. Whatever the final logical state is (from the
+/// sequence of calls), that's what must be observed directly on
+/// `inner` after `flush()` — proof the ordered queue doesn't let any
+/// later write/removal be overtaken by an earlier one still in flight.
+#[tokio::test]
+async fn test_async_mode_many_writes_same_key_land_in_order() {
+    let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let cached = CachedStore::new_async(inner.clone()).await.unwrap();
+
+    let key = RecordKey::from_slice(b"hot-key");
+    let mut last_was_set = false;
+    let mut last_value = Bytes::new();
+
+    for i in 0..50u32 {
+        if i % 5 == 4 {
+            // Every 5th op removes the key.
+            cached.remove(key.clone()).await.unwrap();
+            last_was_set = false;
+        } else {
+            let value = Bytes::from(format!("value-{:03}", i));
+            cached.set(key.clone(), value.clone()).await.unwrap();
+            last_was_set = true;
+            last_value = value;
+        }
+    }
+
+    cached.flush().await.unwrap();
+
+    if last_was_set {
+        let from_inner = inner.get(key).await.unwrap();
+        assert_eq!(
+            from_inner, last_value,
+            "inner must reflect the LAST logical set, not an earlier one \
+             that raced ahead of it"
+        );
+    } else {
+        assert!(
+            inner.get(key).await.is_err(),
+            "inner must reflect the LAST logical remove"
+        );
+    }
 }

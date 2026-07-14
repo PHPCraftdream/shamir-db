@@ -8,6 +8,7 @@ use scc::TreeIndex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 // ============================================================================
 // WriteMode - write strategy for CachedStore
@@ -23,6 +24,74 @@ pub enum WriteMode {
     /// Write-behind: write to cache immediately, disk write in background.
     /// Faster, but data may be lost on crash. Use for non-critical data.
     Async,
+}
+
+// ============================================================================
+// CacheWriteJob / async write worker - ordered background writes (§B8,
+// taskId #616 pt.2)
+// ============================================================================
+//
+// `WriteMode::Async` used to `tokio::spawn` an INDEPENDENT task per
+// `set`/`remove` call. Two independently-spawned tasks writing the same
+// key to `inner` have no ordering guarantee — the tokio scheduler may run
+// the task for an older value AFTER the task for a newer one, leaving
+// `inner` stuck on stale data while the cache (updated synchronously,
+// in-order) holds the fresh value. `flush()` only waited for
+// `pending_writes == 0`, which proves completion, not order.
+//
+// Fix: route every async `set`/`remove` through a single long-lived
+// background task that drains an `mpsc` queue strictly FIFO — one
+// `.await` at a time, never spawning nested tasks — so submission order
+// is preserved end-to-end. This mirrors `storage_fjall.rs`'s
+// `WriteWorker` pattern, but as a lightweight `tokio::spawn` task (not an
+// OS thread + `std::sync::mpsc`): `inner: Arc<dyn Store>` is an async
+// trait, so there is no blocking work to move off the async runtime.
+
+/// A unit of write work submitted to the async-mode background worker.
+/// Carries only `set`/`remove` — `insert` always awaits `inner` inline
+/// (Async mode only applies to `set`/`remove`, unchanged from before).
+enum CacheWriteJob {
+    Set { key: RecordKey, value: Bytes },
+    Remove { key: RecordKey },
+}
+
+/// Drains `rx` strictly one job at a time (single `.await` per
+/// iteration, no nested spawns), applying each to `inner` in submission
+/// order. Decrements `pending_writes` after each job completes, so
+/// `flush()`'s `pending_writes == 0` wait now also implies "and they
+/// landed in order" (not just "all done, order unspecified").
+///
+/// Exits when every `CacheWriteJob` sender has been dropped (the owning
+/// `CachedStore` was dropped) — `rx.recv()` then returns `None` and the
+/// loop ends naturally, no explicit shutdown signal needed.
+async fn run_async_write_worker(
+    mut rx: mpsc::UnboundedReceiver<CacheWriteJob>,
+    inner: Arc<dyn Store>,
+    pending: Arc<AtomicUsize>,
+) {
+    while let Some(job) = rx.recv().await {
+        match job {
+            CacheWriteJob::Set { key, value } => {
+                // §B8: WriteMode::Async is fire-and-forget by design,
+                // but a swallowed `Err` silently loses durability. Log
+                // so an operator gets a signal under sustained
+                // backing-store failure; the cache already holds the
+                // value so subsequent reads still succeed.
+                if let Err(e) = inner.set(key, value).await {
+                    log::error!("storage_cached async write to backing store failed: {}", e);
+                }
+            }
+            CacheWriteJob::Remove { key } => {
+                if let Err(e) = inner.remove(key).await {
+                    log::error!(
+                        "storage_cached async remove from backing store failed: {}",
+                        e
+                    );
+                }
+            }
+        }
+        pending.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 // ============================================================================
@@ -109,6 +178,12 @@ pub struct CachedStore {
     /// Tracks the number of entries in the cache.
     /// `TreeIndex` has no O(1) `len()`, so we maintain a counter ourselves.
     size: Arc<AtomicUsize>,
+    /// `Some` only for `WriteMode::Async` — the channel into the single
+    /// background write worker (see `run_async_write_worker` above) that
+    /// applies `set`/`remove` to `inner` strictly FIFO, guaranteeing the
+    /// backing store observes writes to the same key in submission
+    /// order. `None` for `WriteMode::Sync` (writes are inline, no worker).
+    async_write_tx: Option<mpsc::UnboundedSender<CacheWriteJob>>,
 }
 
 impl CachedStore {
@@ -129,12 +204,30 @@ impl CachedStore {
             }
         }
 
+        let pending_writes = Arc::new(AtomicUsize::new(0));
+
+        // Only Async mode needs the background write worker; Sync writes
+        // stay fully inline (await at the call site), so no channel/task
+        // is created for it.
+        let async_write_tx = if matches!(mode, WriteMode::Async) {
+            let (tx, rx) = mpsc::unbounded_channel::<CacheWriteJob>();
+            tokio::spawn(run_async_write_worker(
+                rx,
+                inner.clone(),
+                pending_writes.clone(),
+            ));
+            Some(tx)
+        } else {
+            None
+        };
+
         Ok(Self {
             inner,
             cache,
             mode,
-            pending_writes: Arc::new(AtomicUsize::new(0)),
+            pending_writes,
             size,
+            async_write_tx,
         })
     }
 
@@ -253,22 +346,30 @@ impl Store for CachedStore {
                 // Write to cache immediately
                 let created = self.cache_upsert(key.clone(), value.clone());
 
-                // Background write to inner store
-                let inner = self.inner.clone();
-                let pending = self.pending_writes.clone();
-
-                pending.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(async move {
-                    // §B8: WriteMode::Async is fire-and-forget by design,
-                    // but a swallowed `Err` silently loses durability.
-                    // Log so an operator gets a signal under sustained
-                    // backing-store failure; the cache already holds the
-                    // value so subsequent reads still succeed.
-                    if let Err(e) = inner.set(key, value).await {
-                        log::error!("storage_cached async write to backing store failed: {}", e);
-                    }
-                    pending.fetch_sub(1, Ordering::Relaxed);
-                });
+                // Enqueue onto the single ordered background worker
+                // instead of spawning an independent task per write —
+                // see `run_async_write_worker` for why: independently
+                // spawned tasks give no ordering guarantee, which could
+                // let a stale value win the race against `inner` for a
+                // key written twice in quick succession.
+                self.pending_writes.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = self
+                    .async_write_tx
+                    .as_ref()
+                    .expect("async_write_tx set for WriteMode::Async")
+                    .send(CacheWriteJob::Set { key, value })
+                {
+                    // Worker task is gone (channel closed) — this should
+                    // only happen if `CachedStore` is being torn down
+                    // concurrently. Undo the pending-writes bump (the
+                    // job will never run) and log loudly: durability is
+                    // silently lost otherwise.
+                    self.pending_writes.fetch_sub(1, Ordering::Relaxed);
+                    log::error!(
+                        "storage_cached async write worker channel closed, write dropped: {}",
+                        e
+                    );
+                }
 
                 Ok(created)
             }
@@ -302,24 +403,21 @@ impl Store for CachedStore {
         match self.mode {
             WriteMode::Sync => self.inner.remove(key).await,
             WriteMode::Async => {
-                // Background delete
-                let inner = self.inner.clone();
-                let pending = self.pending_writes.clone();
-
-                pending.fetch_add(1, Ordering::Relaxed);
-                tokio::spawn(async move {
-                    // §B8: WriteMode::Async is fire-and-forget by design,
-                    // but a swallowed `Err` silently loses durability.
-                    // Log so an operator gets a signal under sustained
-                    // backing-store failure.
-                    if let Err(e) = inner.remove(key).await {
-                        log::error!(
-                            "storage_cached async remove from backing store failed: {}",
-                            e
-                        );
-                    }
-                    pending.fetch_sub(1, Ordering::Relaxed);
-                });
+                // Enqueue onto the ordered background worker (see
+                // `set`'s Async branch above for the rationale).
+                self.pending_writes.fetch_add(1, Ordering::Relaxed);
+                if let Err(e) = self
+                    .async_write_tx
+                    .as_ref()
+                    .expect("async_write_tx set for WriteMode::Async")
+                    .send(CacheWriteJob::Remove { key })
+                {
+                    self.pending_writes.fetch_sub(1, Ordering::Relaxed);
+                    log::error!(
+                        "storage_cached async write worker channel closed, remove dropped: {}",
+                        e
+                    );
+                }
 
                 Ok(existed)
             }
