@@ -17,10 +17,10 @@
 //!
 //! 1. **Forbidden-macro scan** — the source is rejected if it contains
 //!    `include!` / `include_str!` / `include_bytes!` / `env!` /
-//!    `option_env!` as a macro invocation. This is NOT a complete defense
-//!    (a determined attacker can smuggle file/env access through a
-//!    proc-macro dependency or `concat_idents!`-style tricks), but it
-//!    closes the cheapest, most obvious exfiltration paths.
+//!    `option_env!` as a macro invocation. This closes the only realistic
+//!    compile-time host-execution channel available to guest source — see
+//!    task #617's analysis below for why "smuggle it through a dependency"
+//!    is not actually reachable here.
 //! 2. **Environment allowlist** — the child `cargo build` inherits ONLY
 //!    the handful of variables it actually needs (PATH, temp dirs, the
 //!    cargo/rustup homes when the host has them). No host secrets
@@ -45,6 +45,44 @@
 //! ACLs, or grants. The forbidden-macro scan / env allowlist / timeout
 //! above are the SECOND layer, defending the compilation process itself
 //! once an authorized actor has already been let through.
+//!
+//! ## Task #617 — why a source-level fs/net/import scanner is not needed
+//!
+//! The original ask was: also reject `use`/path-qualified filesystem or
+//! network access *inside the function body*, not just the compile-time
+//! macros above. Analysis (2026-07-14) found this is already structurally
+//! closed by two independent facts, confirmed by reading this module and
+//! [`super::wasm_sanitizer`]:
+//!
+//! 1. **The guest crate cannot declare its own dependencies.** `Cargo.toml`
+//!    below (see `write_cargo_toml`-equivalent code further down) is
+//!    entirely host-generated from a fixed template — the only dependency
+//!    is the first-party `shamir-sdk` (itself depending only on
+//!    `serde`/`rmp-serde`/optionally `shamir-query-builder`). There is no
+//!    `build.rs`, and guest source cannot smuggle in a malicious
+//!    proc-macro or build-script crate — it never gets a `[dependencies]`
+//!    section to edit. This makes the "smuggle file/env access through a
+//!    proc-macro dependency" caveat that used to be in this doc comment
+//!    factually unreachable, not just unlikely.
+//! 2. **`std::fs`/`std::net`/`std::env` inside the function body cannot
+//!    reach the host at runtime, on this target.** The compile target is
+//!    `wasm32-unknown-unknown` (bare, not WASI) — these modules exist in
+//!    libstd as stubs with no OS binding on this target; calling them
+//!    returns an `io::Error`/panics, generating no host import at all.
+//!    Even if one did, [`super::wasm_sanitizer`] structurally verifies the
+//!    compiled module's import section against
+//!    `SANCTIONED_HOST_IMPORTS` — "no WASI or any other import namespace
+//!    is ever registered" — before the module is ever instantiated.
+//!
+//! Net effect: writing `std::fs::File::open(...)` in a guest function body
+//! compiles (dead code, functionally inert) but cannot execute anything on
+//! the host, at either compile time or run time. A dedicated source-level
+//! scanner for this pattern would add complexity without closing a real
+//! gap — the forbidden-macro scan above already covers the one channel
+//! that *is* real (compile-time macro expansion on the host). Revisit if
+//! the compile target or guest dependency model ever changes (e.g. a
+//! future WASI target, or letting guests declare their own
+//! `Cargo.toml`/dependencies).
 
 use super::error::{FnResult, FunctionError};
 use std::fs;
