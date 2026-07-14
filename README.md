@@ -42,7 +42,6 @@ The repository is currently source-first: it provides a Cargo workspace, a serve
 
 **Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
 - 🔜 Browser WASM client (Argon2id in Web Worker)
-- 🔜 SQL-like query frontend (today: structured QueryValue/MessagePack queries)
 - 🔜 QUIC transport
 - 🔜 Post-quantum hybrid handshake
 
