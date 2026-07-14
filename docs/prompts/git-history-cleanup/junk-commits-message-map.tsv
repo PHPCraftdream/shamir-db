@@ -1,0 +1,202 @@
+44979e71b392d7a7223d9fa04dcd43eb6a66b39b|init|feat(repo): scaffold project with core value types
+788b40094c5641a5c47a3c0cd43ac5bfcb6d89ba|stogares|feat(storage): add codec, api and multi-backend storage skeleton
+d42ce774aee531f09d9462cb34cdf27a098185c0|...|feat(storage): add sled storage backend
+7c3364ac1298902f75a2509bbb96039dbf1f1f21|...|fix(storage): small sled backend tweak
+e1530966ffa42f1abb52a4893c600c7eff1555c0|storage|feat(storage): add nebari and persy storage backends
+2c0d9699a40b5d7a5cd61893119cf4626d642b4d|engine|feat(engine): add interner and table skeleton
+a0074ad4dee444fa6939e2964443698eb3995031|....|refactor(core): extend interner API
+a82b981236e2aa4b730ef56eacbf8be6c9dd4a26|....|refactor(core): extend transform pipeline
+cefa51592678c2e40a04f18dbdd2abe0e5851c7a|....|refactor(core): tidy transform logic
+ddf4854f0ca0a2c3288a592c1ac166db2cad1f3e|....|refactor(core): rework transform pipeline
+35bb5d78ebd4dfae2cae0603ba8fd294ff9aa103|....|feat(core): extend interner functionality
+413d7b74ef1e43a808f50242118772b1d0566cab|....|feat(types): add record id type
+02477c598647aeef6f0776807080d79bac392a0e|....|feat(types): extend value type
+716d865c83df27547ee80edd81dca991f93bc077|....|feat(types): expand value type surface
+3bd6f19fbcfb4799b74c0a7824eb44c580f8d756|....|refactor(types): restructure value type
+f4c660a37534c66d232405e238c87014438b5970|....|feat(types): extend value type further
+0a539d49229380943a6b892939557a8e54e89fc8|....|refactor(storage): rework storage types
+02efb2cc6173c96ae3d3184f875eeba75b53d416|....|refactor(types): clean up value type
+bfc20c4a5cd089d53618159e40c0f0fbd76f86d5|....|refactor(storage): simplify redb backend
+5dedb8ebf32f53fd26ba63797e7e7186c6c68a42|....|refactor(storage): simplify fjall backend
+db3cc474e243a0a72b5772685bb9ea081bc7d56c|....|refactor(storage): align fjall and redb backends
+1ab0caf53b0edc684050a205d3d0803d473569be|....|refactor(storage): tidy fjall backend
+aa7bcb7bbae08225b9675573b950d63979955a5b|....|refactor(storage): simplify canopy backend
+3d687350ce0c5844f2e1cf8938a7f8f4228039fe|....|refactor(storage): simplify fjall backend further
+4685f14301c41a83b638d3bcceb5bcff17d62c05|....|refactor(storage): simplify nebari backend
+987e1bc8869c00f44cf0bcce4ee267650b38b968|....|refactor(storage): simplify persy backend
+5654413a4471097674c2e12a6aa09ab45f73fd94|....|refactor(storage): simplify sled backend
+264b57344ec4b14eeede4a40afbac44a6254b404|....|refactor(storage): rework surreal backend
+ed3dc293744f4e2701fe035df71105ea6fd8957f|....|chore(storage): drop surreal backend
+eb9513d7a7366b072a1964c6bd562604f5791b78|....|refactor(engine): move interner logic into table
+1c50ce7088bce245479afbaedfc7ff32ca31a757|....|feat(engine): add interner and table implementation
+dda7a255f541be449ff4a787853110a97d02db9c|....|feat(storage): extend storage types
+e0c00027d9955ff0745ed1e576df83c8ccde54e8|....|feat(storage): add shared backend test scaffolding
+1938ac1d6219e8ce8e3c0f1ebb5c741fea1f0553|....|fix(storage): small redb/sled fixes
+894f1b7ec48fd07c67f04169a487911f16928744|....|docs(repo): add module READMEs
+52bb94f5a2f110380cab9b51f5cacc8cc42de364|....|refactor(storage): tidy storage types
+eb39f2e70554f77f0ca75db30251b2f3ec2e0b2b|....|refactor(storage): align backend implementations
+4c85403ecba2d4fa31638548626df68d7104dbed|....|feat(engine): extend table implementation
+e16592558a42bf7a1fdbb94ec23e12cf1015ccad|....|docs(engine): add index engine design docs
+98730550136c274aaa8d864026c30167373b4e59|....|feat(engine): add index types and wire into table
+99cd11125b1bdd7b01d9288ea3f7afb0d70c8fc1|....|refactor(engine): rework index module
+62eaae0ae052963f5f67c8f4d12324b4a5dadecf|....|docs(engine): add index creation design doc
+d2cea3adfff4dcee2cecf31be338871ddb89526a|....|feat(engine): extend table with index support
+878017aa8b64ef995401b14762d7e42f1dc94407|....|docs(engine): add table design doc and extend table
+64a3d61549a3d3ce6117a9b303849cb56bda08d0|....|docs(engine): expand index and table design docs
+e69f4e825d9f60e48c892bf3e0a4d272f8c68f27|....|docs(engine): add index comparison and in-memory/LRU indexing docs
+aab22fe936beb770761c399cec5dac4157048322|....|docs(engine): add index module README
+e2530dfdbaef8a4b45d8b0d55c70f8f421406b41|....|feat(engine): add concurrent index engine prototype
+ed8377b043a0d58d33c820d5f7b01c93ef55e4fb|....|chore(engine): drop obsolete index design docs and prototype
+0be18d89913844e93c47943d50deaa6c127f96ec|....|refactor(engine): rename index types module to target
+7422ca3912ef7fbd6aec5793c8f4b2aa316ab6d1|....|refactor(engine): extend index target module
+e67b003a910882a91424fa4062048cf10e4cf2c4|....|docs(repo): add agent rules doc
+b5818df148751e7ad823681d3fd25196b41442d3|....|refactor(engine): rename index def module to items
+15c22a8a7ffda8b12762c7c63533bf37551331fb|....|refactor(engine): rename index items module to item
+dc9320dae51b6966bb649398510b373862966b6b|....|refactor(engine): tidy table implementation
+b228536328693be5611c08c92627ceaad2638daf|....|refactor(engine): simplify table and index target
+1ddd8604a930492a8c8475bc963d54d8d7d9b897|....|chore(engine): remove dead code from table
+97311b96793c3cb158d4a1ebdc09f44ed259b441|....|refactor(engine): tidy table implementation
+c1798cf34d6cae20b9fa2acdaad583ae38ca342a|....|refactor(core): simplify interner
+396a0ae54b114f69b3576266ff48d19b184b6bfc|....|refactor(engine): remove dead code from table
+64d3f0b0c0cd7ccf71d8093e5839e85df473049b|....|feat(engine): add index manager
+b488ec6edb342119b5ea68f1a6265102f49d2873|....|refactor(engine): rename index modules for clarity
+e349b88496da18e1847b9551810f5d519a029086|....|feat(storage): extend backends with new operations
+b838458962bbc0b816b18ea5dd71148391df54ce|....|refactor(storage): tidy canopy and fjall backends
+33fa073c386f2a54979bd47992987a3a2204632f|....|refactor(storage): simplify backend type signatures
+5e5e177e28f01acac0d49c4b3736edb9b5f316cf|....|fix(engine): small table index manager fix
+a9dcfcbe8233936d511eccad555261180aa6e3f4|....|feat(engine): add index record scaffold
+fb26abf75936b6feb1b964561790192b210d05ef|....|feat(engine): implement index record
+b684fa19cc71b5f633ca0a2e69a6c73e575ac022|....|refactor(engine): tidy index info
+f857959bb9926c2b90a13c2bf3bc07112f6733f1|....|chore(storage): export storage module item
+091acc2e165aef4fa6a59a6168107ab41201893b|....|refactor(engine): extract index definition and slim table
+5fc889b3950684334376b17b2031e94d6bd73572|....|feat(storage): add in-memory storage backend
+d5914c7984e2acf538f016530e416ec5dae0d32b|....|feat(storage): add cached storage backend
+9eed810ca59d10031204eb7a9d3b905cfe9a3f30|....|refactor(storage): rework cached backend
+fb925ff984af46671bf278d08df41eeca9322b15|....|feat(storage): extend cached backend
+0f6936875db4246f277029a3f126889f705d067d|....|fix(storage): small cached backend fix
+a3b0556b2afcc8d34a09a70e38af3df924836f62|....|refactor(engine): rework index record
+df208d5494539f64e2af26e2ccac40e77964b92f|....|docs(repo): expand README documentation
+fdb961850f6570343558411efda2e1a26ee998bb|....|chore(deps): add new dependency
+170402075a2a34af0f1cb485947ab3496fd1dcb1|....|feat(engine): add codec and extend index/record types
+5be334acb3230ae41ee7bfad8aca6def7832b185|....|refactor(types): tidy record id
+53cbed5c22f3b68e73ddc50eb9cc05b2cc745e4c|....|feat(codecs): add interned json and msgpack codecs
+7a9c3df145808d27b7e3ab77326c9a325d949601|....|feat(codecs): extend interned codecs and value type
+4029fbb1646c04d9baae8b04850dca5e600a7b06|....|refactor(codecs): rework interned codecs and interner
+5f7d062a4b0b62185b7b897cc4584256c457083a|....|fix(engine): small table fix
+fa24b6b528f96fd63723f27781d927d0903d6d50|....|refactor(codecs): add bytes codec, drop old codec module
+7ff1c299cee1009a955d9c4f2526d7d94fd4101a|....|refactor(codecs): tidy interned codecs and index record
+a03bc085859b8b57cb8640bce60edecdac44e435|....|refactor(codecs): simplify interned json codec
+f0ef2f813ce6fb9c639c55a9e83a0314feb39571|....|refactor(codecs): rework interned json codec
+e3490950611e665ad7a1ca9e6d5d6f1e49d5f716|....|feat(codecs): extend interned json codec
+348be68cfcb43cb1895bb17c401c2d0377e24ffa|....|fix(codecs): small interned json fix
+39775d66d3a0743965c6cc5016978c5af59c50ba|....|refactor(codecs): rework interned msgpack codec
+178f3572181bdd555be0e9beaedc2ca2bc860d30|....|refactor(engine): tidy table index manager
+1fc0f769dd10b131039e871c958b1211eb34fb00|....|refactor(core): tidy interner and transform
+98fee3cea060fd2a318a0de05b47e2fe254ada06|....|feat(types): add string int58 type
+a43cca350b6faba7ebe91ca95e4ffc912fe2126c|....|refactor(core): rework interner internals
+fcff304d1eea5ccedf37d91bbba3d5f0f2083b76|....|refactor(core): tidy interner
+d40986339e289431911b2bf8db04b7fdaa7820f0|....|refactor(engine): split table module into submodules with tests
+c80f466013854c3bf3045a5b2731ebf7132b54dd|....|docs(engine): rework table design doc
+80874310d5c940a302c32cc0aa39d38cb4c9da9c|....|refactor(engine): extend table submodules and tests
+fc3dd1b0537130c015c81e2e274b2606ebc015ae|....|refactor(codecs): consolidate interned codec logic
+b7fc2410ee3ab24efeb92ce76d81ca2ac943139c|....|feat(engine): add dispatcher and repo modules
+753fc03964bfe9ad9efd513d4965da6a149205e6|....|refactor(engine): split table tests into dedicated files
+52c10efcc1f28fa951791816917d71d866def625|....|fix(engine): small table context fix
+4678ef3d901b000032dd102f997b73695fc64197|....|refactor(engine): rename interner/counter modules
+9f581a5ef5c15a8f824c6e17a2a220e6d5925842|....|refactor(engine): rework table context and dispatcher tests
+b44f114bda8e2493f9c0e8dafc1be7188f958937|....|feat(engine): extend dispatcher and repo manager
+51d5fc87ca4a39201ad372b7f9857eb6afec173a|....|refactor(codecs): drop legacy codec files, add dispatcher types
+d04f0dea2955ae7d5742a7b38aba6be6a49a7d66|....|feat(engine): add dispatcher config types
+3f9d926fa5983e9f07dfab1f1c75142df6d5e697|....|feat(engine): extend dispatcher types
+debe181621b959f5aa786123f5642766c267936c|....|feat(engine): add dispatcher config and repo manager instance
+54fbc31479e624a491b73af5fc7da2b04e61b84a|....|refactor(engine): rework dispatcher config and types
+4ee8e37786c09aff5fcf12d46abf903205876698|....|feat(engine): extend dispatcher config
+cf223ed59176ba43440b29ee032398fe7db587e1|....|test(engine): add codec, dispatcher and index test suites
+a7a3fd32e090b70d428132aef86209bea1e2f555|....|docs(repo): add config docs and expand README
+8aefb072c0852ffd8e2d839d049a26a54a844887|....|refactor(engine): drop legacy error module, tidy imports
+7c91f0d9608357a31975658e11636fead6ce8d50|....|refactor(engine): rework dispatcher config loader
+1ae9f12e90da1be672f2830a49801afa74e4a313|....|feat(storage): add storage error type
+4588d0b144de74e9eaca7b22f8a1adada29356cf|....|test(engine): tidy config validation tests
+5fc38c1be1e1e40b0b0e7e5f76e26918c6a558ff|....|fix(engine): small index record fix
+86be62b06adc184d1f33da14071010cbae3d8154|....|refactor(engine): rename index record to index record key
+972967251965b3e64a4cd651473e0efed0326ed2|....|refactor(engine): add index status and rework index info
+a47418193e246125aa7569a2b6508baa73ea3f4d|....|refactor(core): move config into core, split interner/transform tests
+1151e9b3f1dfd2719a7aff07ad9ee7e14f1716b9|....|test(core): extend interner and transform tests
+65002218d0339ffb151aebefff2ce59d0bdedd72|fmt|refactor(codecs): rework codec module structure and tests
+13340847a9fdf06ed15cf6a34b77c198d9054550|...|chore(deps): update Cargo.toml
+1bdb961c84109d92ae7c8c1abdf761eec58734ff|...|refactor(core): move db config into core module
+3ce2f86548d44297f98c19e96ebf9acd1a07c3b2|...|test(core): rework config, interner and transform tests
+31701aaad67b15bc667f615bf4dfbcc14a7368b0|...|refactor(engine): tidy dispatcher and table context tests
+41e84e249711d2c94a651b9e53e2ead3277bc347|...|docs(repo): extend agent rules and AGENTS.md
+e329a547c5e180e830951f04cdf960f090f661d1|...|docs(repo): expand config README and example
+22c4f581e2f43a56002659eb59ecd10c735b984b|...|chore(deps): update dependencies and record id
+c62e77beac47bd97889ea42ea5fdf4eb822754bb|...|docs(repo): extend config example
+1758d1b3564606d2a5257c4f596583bb69ddc055|...|refactor(core): tidy db config and config tests
+c556b5752011d0273731e61b0a016511d98ded80|...|refactor(core): rework interner, drop string_int58
+b741850d6d5f119cad3bfe9a10b1e2cecce43586|...|refactor(types): split value and record_id tests into dedicated files
+3242e117874d5a74a347a45d6e2562ca43940df2|...|docs(core): expand core README
+c6a533fdff9c033925bedc2acceb47e38bd90bf5|...|refactor(core): move db config into config submodule
+1848d23bddf104dfe0c38bc295c10ffa257b5a2d|...|fix(engine): small interner manager fix
+91511837a79ce003c1d08b06b238341a7871dd75|...|refactor(core): split interner into submodules
+fbd468f6a0ff827282f974e817356ca479015766|...|refactor(codecs): split interned codecs and transform tools into submodules
+75c8ea4a0c68f64e4c0ec18636d154f7616d2ef3|...|refactor(codecs): reorganize codecs into basic/interned/legacy submodules
+3dbf82be0eca829668ff219395c05a07830f473a|...|chore(codecs): drop empty transform submodule
+e673e6417e6efdd890c5d65b47e83621f4ca56dc|...|fix(codecs): tidy codecs module exports
+eae2523d184cf58272b2e5898566cb795b310ac5|...|refactor(codecs): extract shared interned codec helpers
+3797824a49433e1a42daa3f80485cee23660380d|...|refactor(codecs): tidy interned messagepack codec
+cc885aa4e293b096802b14cbfbee8e434f80a924|...|refactor(engine): rename dispatcher impl module
+1c4037f18c73303d8e75a5c43c4cb52713cfc02d|...|chore(repo): update crush config
+34f4127395f6eb9c93c479447c173c1432947a29|...|docs(repo): add architecture and agent knowledge docs
+888b526437fac2f7e3060313edc6501df6a0c254|...|docs(engine): add index types design doc
+cd8b6094fac3ab96d5428e2344dcab3cce7daa06|...|docs(engine): tidy index types design doc
+121f42917a05bbad68e16f8864902963da2ff802|...|feat(engine): extend table index manager
+84a40512b0568e36e14380d1c48a8b7e192ab326|...|refactor(engine): rework index record key
+7ac08ec830f24e084e344a821fd310b6abc537f7|...|refactor(core): rework interner and index record key
+1afae600473d6fbcca6922b56120bbd17e442869|...|refactor(engine): tidy index info and definition
+0900a8792b967ca234300497288e5d68aaba555e|...|feat(engine): extend index info and table index manager
+dc33655a05c85050071c01c288dbf771565bc5e3|...|refactor(engine): tidy index record key and table index manager
+75eb1a719007d92d9f404bb78e4db79073601810|...|refactor(engine): rework index definition, info and record key
+4581e21cdb42b7f5d5b8544159ef9c1b97888a20|...|refactor(storage): tidy backend implementations
+b0c9660b7edc651001ba57e5f4ceadcba2d0b2c2|...|fix(storage): small canopy backend fix
+1d62a8de902ba9244dabced268ce680f92bdea50|...|refactor(engine): rename table impl and extend storage types
+4d6d1e50c5247549e54721df61ec87adc98c41b9|...|test(engine): extend table index manager and table tests
+53b066544f60ff30de5ca4cc7e5cefd204f4d522|...|chore(engine): remove dead code from table
+f2c40b313b34e25a407516a2e87c7e1b47a7caa9|...|chore(storage): remove unused code from backend implementations
+d434ddd93a2ec682929e755c34936bfb742906d2|...|test(engine): tidy index info and concurrent tests
+56e9e33e17805944f06ce268555b384f2c7b48d5|...|feat(engine): extend table index manager
+dfa249e4eb81938df7006df9345f12c7f07f8f1b|...|fix(storage): small redb backend fix
+4885da94184e39b0110a84d45c281f83ca5700cb|...|refactor(engine): rename table index manager to index manager
+d56b274525320dbef61807030da96f972d2aa5cb|...|refactor(engine): tidy index manager
+361d003098b1cb706eda30e291ff9b46ba32573f|...|test(engine): extend index manager tests
+d39f10a34de6a19808c23fd3a34553f3832d001a|...|feat(engine): extend index manager
+a7da5ba9e5bc6f8f846238a1420de409df7ef0f9|...|feat(engine): extend index manager and table context
+10cea64e72c59cab8686d7f602a6fc733a925864|...|feat(engine): extend index manager with error handling
+1094cc990867e92c6d1e92965b406787553519d1|...|docs(repo): expand architecture and index docs
+7626913304ea8d92e4026609690731a6e4edbd47|...|test(engine): extend index manager tests
+9fe5831c5a1828e98c0735be23de236d427fc671|...|refactor(engine): rename table context to table manager
+93b74c6b96f1a406f8593e5ff7909087d8c09b1a|...|docs(repo): expand architecture doc, extend index manager
+d3ce0e1c8e2c20669fdf176636b10e46faaf2a9e|...|test(codecs): extend interned codec tests
+d8300287e9214857de7ba6a97765979efef57c05|...|feat(query): add query builder module scaffolding
+1951265b7e09623aebc48f176b6745efd41eea25|...|fix(types): small value fix
+bef4a03e2ff00764d401ca474879a0f2103214e0|...|feat(query): extend filter parser and types
+2f97626d9706dc7ba155e61e612cade5df4bae88|...|feat(query): add batch query module
+e5af226b61237f0fe71f15dbb66fec9be41c80b8|...|refactor(query): rework batch planner and types
+bc3138c30c3250b660d7ce0eb40fbac3d56ba5b2|...|feat(query): add write query module
+bc438ca5719b0254b27e6a68cd50fe2bbc95e9d1|...|test(query): add write op tests
+62f1d7738fe62a53157dac880352fcb8b7c9a746|...|docs(query): add write query docs and extend types
+20ef38f47dea5a8cf326c464a72384e72bc51cf8|...|feat(query): extend batch planner and types
+a27ed03fc8dfb6d52f0b529d2f21ce2ded080a4d|...|docs(query): add batch and read query docs
+ee1b2b8f3fd7bbcdbf22c459a85b5a1bb7df8102|...|feat(query): extend filter types and parser
+4d2df377db9ada9df79b26e703224c02d1aa96ba|...|refactor(engine): rename repo manager instance to repo instance
+e0ec03f795af414da5af90a794132f67b3e33a61|...|feat(engine): add layered architecture with table manager and repo instance
+254c7ceaed7be28c0395d3b9088681db962015f5|...|refactor(engine): rename dispatcher to db_instance, add shamir_db module
+73ef26e50f4d6e24b6a6f6bb72a31724847b8319|...|feat(engine): extend shamir_db with system metadata
+24d2abcab0fcdbac355e6964914db302a98d4dae|...|refactor(core): drop config submodule, extend db_instance and shamir_db
+51199c7816faca869021a233d032bff5af859357|...|refactor(engine): drop repo manager, extend table manager and shamir_db
+f5a1e309af264832981c8349cb8ea35259c33c6c|...|feat(repo): add cargo/mcp config, extend db_instance and repo types
+afaa746b271285934990a2eb98b7f5d73901691e|...|refactor(query): split filter and read modules into submodules
+42a7b42b2b6d0e564e146793ce6bb90fdcac4295|...|feat(query): add filter eval engine
+169d274dfc788a0161f151461c75d61038d975b7|...|feat(engine): extend table manager and filter eval
+46662f8345868007444bc855da60f06e1eb308b8|...|feat(query): add read query execution engine
+0f262d635ed760f7437974c47af286703063fb38|...|chore(repo): drop stale claude config files
+b42c65032cfbd580363de70126860d6c901ade49|main.md|chore(repo): trim CLAUDE.md and update AGENTS.md
