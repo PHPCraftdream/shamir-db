@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::RecordKey;
+use shamir_storage::types::KvOp;
 use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::TouchInd;
@@ -839,9 +839,14 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
         let stream = info_store.scan_prefix_stream(old_prefix.clone(), FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        // `RecordKey` keys — fed to the store `set_many` / `remove_many`.
-        let mut to_write: Vec<(RecordKey, Bytes)> = Vec::new();
-        let mut to_remove: Vec<RecordKey> = Vec::new();
+        // Task #616: one mixed-op batch per pass instead of a separate
+        // `set_many` followed by `remove_many` — the previous two-call
+        // shape was NOT atomic (a crash/failure between the two calls
+        // could leave entries visible under BOTH old_id and new_id, or
+        // drop the new_id write while the old_id entry was already gone).
+        // `Store::transact` commits the whole batch as one atomic unit.
+        let mut ops: Vec<KvOp> = Vec::new();
+        let mut moved_any = false;
 
         while let Some(batch) = stream.next().await {
             for (key, value) in batch? {
@@ -850,22 +855,18 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
                 }
                 let mut new_key = key.to_vec();
                 new_key[1..9].copy_from_slice(&new_id_bytes);
-                to_write.push((Bytes::from(new_key).into(), value));
-                to_remove.push(key);
+                ops.push(KvOp::Set(Bytes::from(new_key).into(), value));
+                ops.push(KvOp::Remove(key));
+                moved_any = true;
             }
         }
 
-        if to_write.is_empty() {
+        if !moved_any {
             // No old-id entries found this pass — settle complete.
             break;
         }
 
-        if !to_write.is_empty() {
-            let _ = info_store.set_many(to_write).await?;
-        }
-        if !to_remove.is_empty() {
-            let _ = info_store.remove_many(to_remove).await?;
-        }
+        info_store.transact(ops).await?;
     }
 
     Ok(())
