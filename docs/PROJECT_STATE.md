@@ -54,9 +54,9 @@ recovery). Dual-licensed **MIT OR Apache-2.0**.
 
 ---
 
-## 2. Architecture — 21 crates, layered bottom-up
+## 2. Architecture — 23 crates, layered bottom-up
 
-21 crates in the workspace. Plus 2 non-workspace packages: `shamir-client-node`
+23 crates in the workspace. Plus 2 non-workspace packages: `shamir-client-node`
 (napi/MSVC binding, excluded) and `shamir-client-ts` (pure-TypeScript package,
 no Cargo.toml).
 
@@ -64,7 +64,7 @@ no Cargo.toml).
 |---|---|
 | `shamir-collections` | TMap/TSet leaf, guest-lean, re-exported by `shamir-types` |
 | `shamir-types` | Value model, RecordId, codecs, **sort_codec**, string→u64 interner |
-| `shamir-storage` | `Store`/`Repo` trait + **6 backends** (Sled, Redb, Fjall, Nebari, Persy, Canopy), feature-gated |
+| `shamir-storage` | `Store`/`Repo` trait + Fjall (durable) and InMemory (tests) backends, feature-gated |
 | `shamir-tunables` | Runtime tunables — zero-overhead atomic knob reads |
 | `shamir-wal` | WAL V2 (crash recovery) |
 | `shamir-tx` | **MVCC over dumb-KV** — now a **single append-only version-log**; `RepoTxGate`, `TxContext`, SSI, predicate locks, **Level-3 pessimistic locking** |
@@ -82,6 +82,8 @@ no Cargo.toml).
 | `shamir-client` | Client SDK; **rid-demux multiplexer**, resume fast-path |
 | `shamir-sdk` | Function authoring SDK (guest): typed `#[scalar]`/`#[procedure]` kinds, builder-in-guest; builds to wasm32 |
 | `shamir-sdk-macros` | Proc-macros for `shamir-sdk` |
+| `shamir-numa` | NUMA topology abstraction + per-node replicated read-mostly state |
+| `shamir-bench-utils` | Shared benchmark harness utilities for workspace `[[bench]]` targets |
 
 The **Shomer access fabric** primitives live in `shamir-types` (`access`:
 `Actor`/`ResourcePath`/`Action`/the gate).
@@ -102,7 +104,7 @@ paths.
 
 ## 3. Capabilities (implemented)
 
-- 6 storage backends behind one trait; key interning (~70% memory cut on
+- Fjall + InMemory storage backends behind one trait; key interning (~70% memory cut on
   string-heavy data); async streaming with constant memory.
 - MessagePack batch query API (OQL): WHERE / SELECT (projections+aggregations) / GROUP BY
   / ORDER BY / LIMIT / pagination; cross-query refs (`{"$query": "@alias[].field"}`).
@@ -202,7 +204,7 @@ paths.
   restart compile); pooling allocator + CoW (+12 % concurrent); M1
   single-column columnar ORDER BY fast path; M2 streaming msgpack projection for
   SELECT * (3.4×); H₂ `Persistable` trait + `PersistRegistry`.
-- Quality: **21 crates, ~2912 lib tests** + integration; property tests
+- Quality: **23 crates, 4600+ lib tests** + integration; property tests
   (`proptest`: version codec + SSI read-set validation); **29 benchmarks**
   across engine/tx/storage/connect/server; green gate (`fmt --all --check`
   · `clippy --workspace --all-targets -D warnings` · `test --workspace

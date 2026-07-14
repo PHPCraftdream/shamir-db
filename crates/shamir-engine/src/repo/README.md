@@ -4,7 +4,8 @@
 
 Модуль `repo` управляет репозиториями — контейнерами таблиц, привязанными
 к конкретному storage engine. Один репозиторий = один движок хранения.
-Поддерживается 7 движков: InMemory, Sled, Redb, Fjall, Nebari, Persy, Canopy.
+Поддерживается 2 движка: InMemory (всегда доступен, используется тестами) и
+Fjall (durable production-backend), feature-gated.
 
 ## RepoInstance
 

@@ -24,14 +24,18 @@ S.H.A.M.I.R. Database Architecture Overview
 - Async: Tokio with full features
 - Serialization: rmp-serde (MessagePack), serde
 - Concurrency: DashMap, arc-swap, tokio::task::spawn_blocking
-- Storage backends: 6 supported engines (Sled, Redb, Fjall, Nebari, Persy, Canopy)
+- Storage backends: Fjall (durable production backend) + InMemory (tests), feature-gated
 - Error handling: thiserror, anyhow
 
 ## arch-002-storage
 
 Storage Backend Abstraction Layer
 
-S.H.A.M.I.R. provides a unified interface over 6 different embedded database engines.
+S.H.A.M.I.R. provides a unified interface over the storage layer: Fjall (the
+durable production backend) plus an always-available InMemory backend used
+by tests. Earlier prototypes explored several other embedded engines (Sled,
+Redb, Nebari, Persy, Canopy) before the workspace settled on Fjall; see
+`docs/perf/backend-decision-2026-06-19.md` for that decision record.
 
 **Core Traits:**
 
