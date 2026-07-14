@@ -12,7 +12,7 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
 use crate::server::session::{Session, SessionStore};
 use crate::server::user_record::UserRecord;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use zeroize::Zeroizing;

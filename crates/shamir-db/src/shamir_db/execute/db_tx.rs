@@ -17,7 +17,7 @@ use crate::query::batch::{
     BatchResponse, TransactionInfo,
 };
 
-use fxhash::FxHashMap;
+use rustc_hash::FxHashMap;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;

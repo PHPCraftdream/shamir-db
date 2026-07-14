@@ -1,4 +1,5 @@
 use base64::Engine;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
@@ -175,7 +176,9 @@ impl ShamirDb {
             .map_err(|e| DbError::Function(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
-        let wasm_hash = format!("{:016x}", fxhash::hash64(&wasm));
+        let mut hasher = rustc_hash::FxHasher::default();
+        wasm.hash(&mut hasher);
+        let wasm_hash = format!("{:016x}", hasher.finish());
 
         if !opts.replace && self.functions.contains(name) {
             return Err(DbError::Function(format!(

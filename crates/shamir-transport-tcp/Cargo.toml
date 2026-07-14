@@ -17,7 +17,9 @@ futures-util = "0.3"
 rustls = "0.23"
 tokio-rustls = "0.26"
 rcgen = "0.13"
-rustls-pemfile = "2"
+# PEM parsing via the `PemObject` trait — `rustls-pemfile` is unmaintained
+# (RUSTSEC-2025-0134); its own README points here as the direct replacement.
+rustls-pki-types = "1.9"
 
 # Errors
 thiserror = "2.0"

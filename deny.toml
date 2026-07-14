@@ -38,13 +38,26 @@ yanked = "deny"
 # binary with a WASM sandbox — we want both to fail the gate everywhere.
 unmaintained = "all"
 unsound = "all"
-# `ignore` is intentionally EMPTY. Adding an advisory ID here silences it; we do
-# not want any blanket silences in the base config. If a genuine, triaged
+# `ignore` is intentionally near-EMPTY. Adding an advisory ID here silences it;
+# we do not want any blanket silences in the base config. If a genuine, triaged
 # advisory needs a temporary ignore, add it as `{ id = "RUSTSEC-XXXX-XXXX",
 # reason = "..." }` with a justification and a tracking issue, then remove it
 # once the dep is patched. CI will fail on any untriaged advisory — that is the
 # point of the gate.
-ignore = []
+ignore = [
+    # bincode 1.3.3 — the bincode project ceased development permanently after
+    # a doxxing/harassment incident against a maintainer (RUSTSEC-2025-0141).
+    # There is NO safe upgrade: the only newer release on crates.io, 3.0.0, is
+    # a deliberate tombstone (README + `compile_error!("https://xkcd.com/2347/")`,
+    # no real API) — confirmed by inspecting the published crate source, not
+    # just the version string. 1.3.3 itself is not affected by any known
+    # vulnerability; the advisory is purely "unmaintained". Migrating off
+    # bincode touches ~30 on-disk-durable call sites (WAL entries, vector
+    # index snapshots, the interner) and needs its own format-versioning
+    # project — deliberately deferred, not silently ignored. Revisit when
+    # that migration is scheduled.
+    { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained (maintainer safety incident); no safe upgrade exists (3.0.0 is a deliberate tombstone); migration off bincode is a separate, deferred project touching on-disk WAL/snapshot/interner formats" },
+]
 
 [licenses]
 # Allow only permissive, OSI-approved licenses. This list is the union of what

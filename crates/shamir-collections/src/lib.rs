@@ -2,13 +2,13 @@
 //!
 //! `TMap`/`TSet` are `IndexMap`/`IndexSet` keyed by a fast `FxHasher`,
 //! giving deterministic insertion-order iteration. This crate is a
-//! dependency-light leaf (`indexmap` + `fxhash` only) so guest-facing
+//! dependency-light leaf (`indexmap` + `rustc-hash` only) so guest-facing
 //! crates (query DTOs, builder) can reuse the exact same types as the
 //! host without pulling the heavy `shamir-types` graph.
 
 #![allow(clippy::disallowed_types)]
 
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use indexmap::{IndexMap, IndexSet};
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};

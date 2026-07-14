@@ -10,6 +10,7 @@
 //! `docs/roadmap/ACCESS_HIERARCHY.md`.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use crate::types::common::new_map;
 use crate::types::value::QueryValue;
@@ -56,7 +57,9 @@ pub fn principal64(user_id: [u8; 16]) -> u64 {
 ///    recreate-inherits-identity bug — that property is tested against
 ///    real `Session`/`user_id` bytes instead, see this task's red tests).
 pub fn principal64_from_username(username: &str) -> u64 {
-    let hash = fxhash::hash64(username);
+    let mut hasher = rustc_hash::FxHasher::default();
+    username.hash(&mut hasher);
+    let hash = hasher.finish();
     let mut user_id = [0u8; 16];
     user_id[0..8].copy_from_slice(&hash.to_be_bytes());
     principal64(user_id)

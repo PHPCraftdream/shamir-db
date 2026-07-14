@@ -43,7 +43,7 @@
 use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_record_key::IndexRecordKey;
 use bytes::Bytes;
-use fxhash::FxHasher;
+use rustc_hash::FxHasher;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
 use shamir_types::record_view::ScalarRef;
