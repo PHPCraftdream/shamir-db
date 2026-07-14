@@ -581,9 +581,9 @@ checksum = "1c53ba0f290bfc610084c05582d9c5d421662128fc69f4bf236707af6fd321b9"
 
 [[package]]
 name = "captrack"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffa3b1339dee31736694e2663cffbc057a7ed1331c86f6f7ad8f2190ebccdbd9"
+checksum = "9e21ed7025339078b13d0d214308352543bd12c98d3e2ebf648bf7d9751bbe67"
 dependencies = [
  "bytes",
  "captrack-macros",
@@ -592,7 +592,7 @@ dependencies = [
  "fastrand",
  "hashbrown 0.15.5",
  "indexmap",
- "scc 2.4.0",
+ "scc",
  "serde",
  "serde_json",
  "smallvec",
@@ -3097,21 +3097,12 @@ dependencies = [
 
 [[package]]
 name = "scc"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46e6f046b7fef48e2660c57ed794263155d713de679057f2d0c169bfc6e756cc"
-dependencies = [
- "sdd 3.0.10",
-]
-
-[[package]]
-name = "scc"
 version = "3.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7800bc2c7e91b26aeae70c2ab6eaa653efc133104b7756e674c99304adff3fdb"
 dependencies = [
  "saa",
- "sdd 4.8.8",
+ "sdd",
 ]
 
 [[package]]
@@ -3128,12 +3119,6 @@ checksum = "b943eadf71d8b69e661330cb0e2656e31040acf21ee7708e2c238a0ec6af2bf4"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "sdd"
-version = "3.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490dcfcbfef26be6800d11870ff2df8774fa6e86d047e3e8c8a76b25655e41ca"
 
 [[package]]
 name = "sdd"
@@ -3254,24 +3239,23 @@ dependencies = [
 
 [[package]]
 name = "serial_test"
-version = "3.3.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d0b343e184fc3b7bb44dff0705fffcf4b3756ba6aff420dddd8b24ca145e555"
+checksum = "699f4197115b8a7e7ff19c9a315a4bd6fffec26cc4626ef45ecaea389e081c6d"
 dependencies = [
  "futures-executor",
  "futures-util",
  "log",
  "once_cell",
  "parking_lot",
- "scc 2.4.0",
  "serial_test_derive",
 ]
 
 [[package]]
 name = "serial_test_derive"
-version = "3.3.1"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f50427f258fb77356e4cd4aa0e87e2bd2c66dbcee41dc405282cae2bfc26c83"
+checksum = "94e153fc76e1c6a068703d6d29c508a0b15c061c4b7e43da59cc097bc342673c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3335,7 +3319,7 @@ dependencies = [
  "rand 0.9.4",
  "rmp-serde",
  "rustls",
- "scc 3.8.4",
+ "scc",
  "serde",
  "serde_bytes",
  "shamir-collections",
@@ -3454,7 +3438,7 @@ dependencies = [
  "rmpv",
  "rust_decimal",
  "rustc-hash 2.1.1",
- "scc 3.8.4",
+ "scc",
  "serde",
  "serde_bytes",
  "serial_test",
@@ -3493,7 +3477,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rust_decimal",
- "scc 3.8.4",
+ "scc",
  "serde",
  "sha2",
  "sha3",
@@ -3523,7 +3507,7 @@ dependencies = [
  "rust-stemmers",
  "rust_decimal",
  "rustc-hash 2.1.1",
- "scc 3.8.4",
+ "scc",
  "serde",
  "serial_test",
  "shamir-bench-utils",
@@ -3637,7 +3621,7 @@ dependencies = [
  "parking_lot",
  "rmp-serde",
  "rustls",
- "scc 3.8.4",
+ "scc",
  "sd-notify",
  "sefer-alloc",
  "serde",
@@ -3685,7 +3669,7 @@ dependencies = [
  "log",
  "moka",
  "rmp-serde",
- "scc 3.8.4",
+ "scc",
  "serde",
  "serde_bytes",
  "serial_test",
@@ -3754,7 +3738,7 @@ dependencies = [
  "log",
  "proptest",
  "rmp-serde",
- "scc 3.8.4",
+ "scc",
  "serde",
  "shamir-collections",
  "shamir-storage",
@@ -3820,7 +3804,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "log",
- "scc 3.8.4",
+ "scc",
  "serde",
  "shamir-collections",
  "shamir-funclib",
