@@ -275,50 +275,19 @@ async fn nested_three_level_cond_evaluates_correctly_over_real_wire() {
 /// result of a PRIOR query in the same batch — a cross-query conditional
 /// value.
 ///
-/// # KNOWN ENGINE BUG — found while writing this e2e test, NOT fixed here
+/// # Bug #642 — fixed in Epic03/B (`997532cc`), assertion updated
 ///
-/// Per this task's brief, production code from Phases A/B/C is out of
-/// scope — bugs are reported, not silently patched. This test documents a
-/// real gap rather than asserting the (currently unreachable) intended
-/// behavior:
-///
-/// `BatchPlanner::extract_deps_from_filter_value`
-/// (`crates/shamir-query-types/src/batch/planner.rs:342-358`) only
-/// recurses into `FilterValue::Array` and matches `FilterValue::QueryRef`
-/// directly:
-///
-/// ```ignore
-/// fn extract_deps_from_filter_value(value: &FilterValue, deps: &mut TSet<String>) {
-///     match value {
-///         FilterValue::Array(arr) => { for v in arr { Self::extract_deps_from_filter_value(v, deps); } }
-///         FilterValue::QueryRef { alias, .. } => { deps.insert(Self::extract_base_alias(alias)); }
-///         _ => {}   // <-- Cond, Expr, FnCall, FieldRef, Param all silently skipped
-///     }
-/// }
-/// ```
-///
-/// So a `$query` ref nested inside a `$cond` branch used as a WHERE-filter
-/// comparison value (exactly the `cross_cond` shape below) produces ZERO
-/// extracted dependencies — the batch planner never adds a `DataFlow`/`Both`
-/// edge for `rd -> threshold_lookup`. Even adding an EXPLICIT `after` edge
-/// does not help: `query_runner::build_resolved_refs`
-/// (`crates/shamir-engine/src/query/batch/query_runner.rs:31-48`) only
-/// copies a dependency's result into the dependent op's `FilterContext` for
-/// `EdgeKind::DataFlow`/`Both` edges (`kind.is_data_flow()`) — a pure
-/// `EdgeKind::Explicit` `after` edge is ordering-only by design (the
-/// Epic01/A guarantee) and must NOT leak data. Since the planner
-/// mis-classifies this edge as `Explicit` (having failed to detect the
-/// `$query` ref inside `$cond`), `threshold_lookup`'s result is legitimately
-/// absent from `rd`'s `resolved_refs` even with an explicit `after` — the
-/// `$cond`'s `$query`-ref branch resolves to `None` and the whole
-/// comparison silently misses (see `resolve_filter_query`'s documented
-/// silent-miss semantics, `crates/shamir-engine/src/query/filter/resolve.rs`).
-///
-/// This test therefore asserts the CURRENT (buggy) behavior — `heidi` is
-/// silently excluded even though she should match — so it fails loudly the
-/// moment `extract_deps_from_filter_value` gains a `Cond`/`Expr`/`FnCall`
-/// arm and the underlying bug is fixed (a welcome regression to catch).
-/// Track the real fix under a dedicated follow-up task, not Epic02/D.
+/// This test originally documented a known engine bug: `$query` refs
+/// nested inside a `$cond` branch (or `$expr`/`FnCall` args) were not
+/// recognized by `BatchPlanner::extract_deps_from_filter_value`
+/// (`crates/shamir-query-types/src/batch/planner.rs`), so `heidi`'s
+/// `$cond`-branch `$query`-ref onto `threshold_lookup` silently resolved
+/// to `None` and she was wrongly excluded from `rd`'s results. Bug #642
+/// added the missing `Cond`/`Expr`/`FnCall` recursion arms as part of
+/// Epic03/B's `when` implementation (both WHERE clauses and `when` share
+/// this one leaf extractor). The dependency is now correctly detected as
+/// `EdgeKind::DataFlow`, `threshold_lookup`'s result reaches `rd`'s
+/// `resolved_refs`, and `heidi` now matches as originally intended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cond_branch_referencing_prior_query_result_over_real_wire() {
     let (handle, client, _password) = boot().await;
@@ -346,22 +315,20 @@ async fn cond_branch_referencing_prior_query_result_over_real_wire() {
         Query::from("users").where_eq("name", "heidi"),
     );
 
-    // Intended semantics (currently unreachable — see bug note above):
     // WHERE tier == cond(score >= 100, <tier of heidi row>, "newbie")
-    // For heidi (score=100, tier="vip"): cond SHOULD evaluate to
+    // For heidi (score=100, tier="vip"): cond evaluates to
     // threshold_lookup's tier ("vip"), matching heidi's own tier.
     // For ivan (score=30, tier="newbie"): cond evaluates to the literal
-    // "newbie", which equals ivan's own tier -> he matches regardless of
-    // the bug (his branch has no $query ref).
+    // "newbie", which equals ivan's own tier -> he matches too.
     let cross_cond = cond(
         gte("score", 100_i64),
         threshold.first().field("tier"),
         "newbie",
     );
 
-    // Explicit `after` added defensively (harmless even though the planner
-    // bug above means it doesn't grant data access on its own) so this test
-    // exercises the best ordering guarantee available today.
+    // Explicit `after` is redundant now (the $query ref inside $cond is
+    // correctly auto-detected as a DataFlow dependency, #642) but kept for
+    // clarity/defense-in-depth ordering.
     let rd = q.query_after(
         "rd",
         Query::from("users").where_eq("tier", cross_cond),
@@ -379,20 +346,14 @@ async fn cond_branch_referencing_prior_query_result_over_real_wire() {
         .collect();
     names.sort_unstable();
 
-    // BUG-DOCUMENTING ASSERTION: `heidi` is missing today because the
-    // $query-ref branch of her `$cond` silently resolves to `None` (the
-    // dependency was never detected, so `threshold_lookup`'s result never
-    // reaches `rd`'s FilterContext). Only `ivan` matches, whose branch is a
-    // plain literal unaffected by the bug. When the planner bug is fixed,
-    // this assertion should be updated to `vec!["heidi", "ivan"]`.
+    // Both match now that bug #642 is fixed: heidi's $cond branch correctly
+    // resolves threshold_lookup's tier ("vip") via the now-detected DataFlow
+    // dependency; ivan matches via the plain literal "newbie" branch.
     assert_eq!(
         names,
-        vec!["ivan"],
-        "documents a known engine bug (see doc comment above this test): \
-         extract_deps_from_filter_value does not recurse into \
-         FilterValue::Cond, so a $query ref nested in a $cond branch never \
-         becomes a DataFlow dependency edge, and the branch silently \
-         resolves to None instead of heidi's tier. Got: {rd:?}"
+        vec!["heidi", "ivan"],
+        "expected both heidi (via the $query-ref $cond branch, now fixed by \
+         #642) and ivan (via the literal branch) to match. Got: {rd:?}"
     );
 
     client.close().await;
