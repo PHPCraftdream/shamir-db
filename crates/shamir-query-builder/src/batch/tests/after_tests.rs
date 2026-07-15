@@ -106,3 +106,70 @@ fn try_build_catches_self_after() {
         err
     );
 }
+
+#[test]
+fn try_build_catches_after_path_tail() {
+    let mut b = Batch::new();
+    let _mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
+    let rows = b.insert(
+        "rows",
+        write::insert("users").row(doc().set("name", "Alice")),
+    );
+    // Manually push a garbage path-tail into `after` (bypassing the fluent
+    // API, mirroring how the planner-side test constructs this case).
+    b.queries
+        .get_mut(rows.alias())
+        .unwrap()
+        .after
+        .push("mk_tbl[0].id".to_string());
+
+    let err = b.try_build().unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BuildError::AfterPathIgnored { alias, raw }
+                if alias == "rows" && raw == "mk_tbl[0].id"
+        ),
+        "expected AfterPathIgnored, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn query_after_registers_dependency_equivalent_to_post_hoc_after() {
+    use crate::query::Query;
+
+    let mut b = Batch::new();
+    let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
+    let rows = b.query_after("rows", Query::from("users"), &[&mk]);
+
+    let req = b.build();
+    let rows_entry = req.queries.get(rows.alias()).unwrap();
+    assert_eq!(rows_entry.after, vec!["mk_tbl".to_string()]);
+}
+
+#[test]
+fn insert_after_registers_dependency_equivalent_to_post_hoc_after() {
+    let mut b = Batch::new();
+    let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
+    let rows = b.insert_after(
+        "rows",
+        write::insert("users").row(doc().set("name", "Alice")),
+        &[&mk],
+    );
+
+    let via_fluent = b.build().queries.get(rows.alias()).unwrap().after.clone();
+
+    // Build an equivalent batch using the post-hoc `after()` and compare.
+    let mut b2 = Batch::new();
+    let mk2 = b2.create_table("mk_tbl", ddl::create_table("users").repo("main"));
+    let rows2 = b2.insert(
+        "rows",
+        write::insert("users").row(doc().set("name", "Alice")),
+    );
+    b2.after(&rows2, &mk2);
+    let via_post_hoc = b2.build().queries.get(rows2.alias()).unwrap().after.clone();
+
+    assert_eq!(via_fluent, via_post_hoc);
+    assert_eq!(via_fluent, vec!["mk_tbl".to_string()]);
+}

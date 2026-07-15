@@ -207,7 +207,20 @@ export class Batch {
     return this;
   }
 
-  /** Assemble the wire `BatchRequest`. */
+  /**
+   * Assemble the wire `BatchRequest`, validating every entry for dangling
+   * references:
+   *
+   *  (a) a `$query` ref whose `alias` is not declared in this batch;
+   *  (b) an `after` entry that names an undeclared alias (after normalizing
+   *      the leading `@` and rejecting a value-path tail — same rule the
+   *      server/Rust builder enforce, see `extractBaseAlias`/
+   *      `splitPathTail` below).
+   *
+   * Throws a descriptive `Error` on the first violation. The project has not
+   * shipped yet, so this validation lives directly in `build()` — no
+   * backward compatibility to preserve.
+   */
   build(): BatchRequest {
     const req: BatchRequest = {
       id: this.idValue,
@@ -224,50 +237,19 @@ export class Batch {
     if (this.returnOnlyValue !== undefined) req.return_only = this.returnOnlyValue;
     if (this.limitsValue !== undefined) req.limits = this.limitsValue;
 
+    validateBatchRequest(req);
+
     return req;
   }
 
   /**
-   * Validated build — assembles the wire `BatchRequest` (like {@link build})
-   * and then checks every entry for dangling references:
-   *
-   *  (a) a `$query` ref whose `alias` is not declared in this batch;
-   *  (b) an `after` entry that names an undeclared alias.
-   *
-   * Throws a descriptive `Error` on the first violation. On success returns
-   * the built request (identical to `build()`).
-   *
-   * `build()` itself remains unchecked for backward compatibility.
+   * Alias for {@link build}. Validation used to be opt-in here while
+   * `build()` was unchecked; both now validate identically. Kept as a
+   * separate method so existing call sites (and their tests) don't need to
+   * change.
    */
   tryBuild(): BatchRequest {
-    const req = this.build();
-    const declared = new Set(Object.keys(req.queries));
-
-    for (const [alias, entry] of Object.entries(req.queries)) {
-      // (a) $query refs anywhere in the entry's filter/value tree.
-      for (const ref of collectQueryRefs(entry)) {
-        if (!declared.has(ref)) {
-          throw new Error(
-            `Batch.tryBuild: entry '${alias}' references unknown $query alias '${ref}' ` +
-              `(declared: ${[...declared].sort().join(', ') || '∅'})`,
-          );
-        }
-      }
-
-      // (b) `after` dependencies must name declared aliases.
-      if (entry.after) {
-        for (const dep of entry.after) {
-          if (!declared.has(dep)) {
-            throw new Error(
-              `Batch.tryBuild: entry '${alias}' has after-dependency '${dep}' ` +
-                `that is not declared in this batch`,
-            );
-          }
-        }
-      }
-    }
-
-    return req;
+    return this.build();
   }
 
   /**
@@ -341,7 +323,88 @@ export class Batch {
   }
 }
 
-// ── $query-ref collection (for tryBuild validation) ───────────────────
+// ── alias normalization (mirrors shamir-query-types::batch::alias) ────
+//
+// JS port of `extract_base_alias`/`split_path_tail` — strips the leading
+// `@` reference marker and cuts at the first `[`/`.` so `after` strings
+// compare against declared aliases the same way the server and Rust
+// builder do (`@users[0].id` / `users.id` → base alias `users`).
+
+/** Strip leading `@` and cut at the first `[` or `.`. */
+function extractBaseAlias(s: string): string {
+  const stripped = s.startsWith('@') ? s.slice(1) : s;
+  const idx = findPathTailIndex(stripped);
+  return idx === -1 ? stripped : stripped.slice(0, idx);
+}
+
+/**
+ * If `s` carries a path tail (`[`/`.` after the base alias), return
+ * `[baseAlias, pathTail]`; otherwise `null`.
+ *
+ * `after` is alias-only ordering — it never resolves a value path the way
+ * `$query` does, so a path tail here is almost always a developer mistake
+ * ("I thought `after` pointed at a specific field").
+ */
+function splitPathTail(s: string): [string, string] | null {
+  const stripped = s.startsWith('@') ? s.slice(1) : s;
+  const idx = findPathTailIndex(stripped);
+  if (idx === -1) return null;
+  return [stripped.slice(0, idx), stripped.slice(idx)];
+}
+
+function findPathTailIndex(s: string): number {
+  const bracket = s.indexOf('[');
+  const dot = s.indexOf('.');
+  if (bracket === -1) return dot;
+  if (dot === -1) return bracket;
+  return Math.min(bracket, dot);
+}
+
+/**
+ * Validate every entry's `$query` refs and `after` dependencies against the
+ * batch's declared aliases. Throws a descriptive `Error` on the first
+ * violation (unknown alias in either, or a garbage path tail in `after`).
+ */
+function validateBatchRequest(req: BatchRequest): void {
+  const declared = new Set(Object.keys(req.queries));
+
+  for (const [alias, entry] of Object.entries(req.queries)) {
+    // (a) $query refs anywhere in the entry's filter/value tree.
+    for (const ref of collectQueryRefs(entry)) {
+      const base = extractBaseAlias(ref);
+      if (!declared.has(base)) {
+        throw new Error(
+          `Batch.build: entry '${alias}' references unknown $query alias '${base}' ` +
+            `(declared: ${[...declared].sort().join(', ') || '∅'})`,
+        );
+      }
+    }
+
+    // (b) `after` dependencies must name declared aliases, with no path tail.
+    if (entry.after) {
+      for (const dep of entry.after) {
+        const tail = splitPathTail(dep);
+        if (tail !== null) {
+          const [base, path] = tail;
+          throw new Error(
+            `Batch.build: entry '${alias}' has after-dependency '${base}${path}' that carries ` +
+              `a value-path tail, but 'after' is alias-only ordering and never resolves a path; ` +
+              `use a bare alias, or a '$query' reference if you need the value`,
+          );
+        }
+        const base = extractBaseAlias(dep);
+        if (!declared.has(base)) {
+          throw new Error(
+            `Batch.build: entry '${alias}' has after-dependency '${base}' ` +
+              `that is not declared in this batch`,
+          );
+        }
+      }
+    }
+  }
+}
+
+// ── $query-ref collection (for build() validation) ───────────────────
 //
 // These helpers recursively walk a built `QueryEntry` looking for
 // `{ $query: alias, path? }` values. They cover every position a

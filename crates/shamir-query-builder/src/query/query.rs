@@ -196,6 +196,13 @@ impl Query {
     /// The seek is **strictly greater** (ASC) or **strictly less** (DESC) than
     /// `key` — rows matching the seek tuple are excluded, so pages never
     /// overlap.
+    ///
+    /// Not to be confused with `Batch::after` (`crate::batch::Batch::after`)
+    /// — that's inter-query DAG ordering (which batch entry runs after
+    /// which); this is single-query result-set pagination. Two unrelated
+    /// meanings sharing a method name on different types (`Query` vs
+    /// `Batch`), kept as-is: the compiler already disambiguates by receiver
+    /// type, and both docstrings cross-reference each other for humans.
     pub fn after(mut self, key: Vec<QueryValue>, limit: Option<u64>) -> Self {
         self.pagination = Pagination::after(key, limit);
         self

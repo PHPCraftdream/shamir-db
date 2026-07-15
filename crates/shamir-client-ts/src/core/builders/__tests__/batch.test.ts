@@ -331,6 +331,7 @@ describe('Batch — subBatch', () => {
     const inner = Batch.create('i').add('q', Query.from('t')).build();
 
     const req = Batch.create('o')
+      .add('a', Query.from('users'))
       .subBatch('x', inner, { returnResult: false, after: ['a'] })
       .build();
 
@@ -531,12 +532,12 @@ describe('Batch — tryBuild (G4)', () => {
     expect(() => b.tryBuild()).toThrow(/unknown \$query alias 'undeclared'/);
   });
 
-  it('build() stays unchecked (does not throw on bad refs)', () => {
+  it('build() now validates too (project has not shipped; no back-compat to preserve)', () => {
     const b = Batch.create().add(
       'o',
       Query.from('orders').where(filter.eq('uid', filter.queryRef('ghost'))),
     );
-    expect(() => b.build()).not.toThrow();
+    expect(() => b.build()).toThrow(/unknown \$query alias 'ghost'/);
   });
 
   it('succeeds with no refs and no after deps', () => {
@@ -547,6 +548,29 @@ describe('Batch — tryBuild (G4)', () => {
       a: { from: 'users' },
       b: { from: 'orders' },
     });
+  });
+
+  it('normalizes a leading @ in after-deps before comparing to declared aliases', () => {
+    const b = Batch.create()
+      .add('a', Query.from('users'))
+      .add('b', Query.from('orders'), { after: ['@a'] });
+    // '@a' normalizes to 'a', which IS declared — must not throw.
+    expect(() => b.tryBuild()).not.toThrow();
+    expect(b.tryBuild().queries.b.after).toEqual(['@a']);
+  });
+
+  it('rejects an after-dep carrying a value-path tail (bracket form)', () => {
+    const b = Batch.create()
+      .add('a', Query.from('users'))
+      .add('b', Query.from('orders'), { after: ['a[0].id'] });
+    expect(() => b.tryBuild()).toThrow(/value-path tail/);
+  });
+
+  it('rejects an after-dep carrying a value-path tail (dot form)', () => {
+    const b = Batch.create()
+      .add('a', Query.from('users'))
+      .add('b', Query.from('orders'), { after: ['@a.id'] });
+    expect(() => b.tryBuild()).toThrow(/value-path tail/);
   });
 });
 

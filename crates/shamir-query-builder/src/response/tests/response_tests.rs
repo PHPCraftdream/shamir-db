@@ -42,6 +42,7 @@ fn batch_resp(
         execution_time_us: 0,
         transaction,
         interner_delta: TMap::default(),
+        edge_provenance: TMap::default(),
     }
 }
 

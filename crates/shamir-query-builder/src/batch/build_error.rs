@@ -13,6 +13,19 @@ pub enum BuildError {
         /// The alias that references itself.
         alias: String,
     },
+    /// An `after` entry carried a value-path tail (e.g. `"mk[0].id"`,
+    /// `"mk.id"`) that `after` silently ignores.
+    ///
+    /// `after` is alias-only ordering — it never resolves a value path the
+    /// way `$query` does. A path tail here is almost always a developer
+    /// mistake, so the builder rejects it up front (mirrors
+    /// `shamir_query_types::batch::BatchError::AfterPathIgnored`).
+    AfterPathIgnored {
+        /// The alias of the entry whose `after` list carries the bad ref.
+        alias: String,
+        /// The raw `after` string that carried the path tail.
+        raw: String,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -28,6 +41,15 @@ impl std::fmt::Display for BuildError {
             ),
             BuildError::SelfReference { alias } => {
                 write!(f, "alias '{}' references itself", alias)
+            }
+            BuildError::AfterPathIgnored { alias, raw } => {
+                write!(
+                    f,
+                    "'after' entry '{}' on '{}' carries a value-path tail, but 'after' is \
+                     alias-only ordering and never resolves a path; use a bare alias, or a \
+                     '$query' reference if you need the value",
+                    raw, alias
+                )
             }
         }
     }

@@ -1,4 +1,5 @@
 use shamir_collections::{new_map, TMap};
+use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
 };
@@ -155,9 +156,38 @@ impl Batch {
         self.add_entry(alias, BatchOp::Read(q.into()), false)
     }
 
+    /// Add a read query with explicit ordering dependencies, in one call.
+    ///
+    /// Equivalent to `query(...)` followed by `after(&handle, on)` for each
+    /// entry in `after`, but registers the dependency at the same call site
+    /// as the entry itself — no separate post-hoc statement, and no chance
+    /// of transposing `dependent`/`on` (a real risk with the two-`&Handle`
+    /// [`Batch::after`]).
+    pub fn query_after(
+        &mut self,
+        alias: impl Into<String>,
+        q: impl Into<ReadQuery>,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, BatchOp::Read(q.into()), true, after)
+    }
+
     /// Add an insert operation.
     pub fn insert(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Add an insert operation with explicit ordering dependencies.
+    ///
+    /// See [`Batch::query_after`] for the rationale (fluent, transposition-safe
+    /// `after` at the registration call site).
+    pub fn insert_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, op.into_batch_op(), true, after)
     }
 
     /// Add an update operation.
@@ -165,14 +195,50 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Add an update operation with explicit ordering dependencies.
+    ///
+    /// See [`Batch::query_after`] for the rationale.
+    pub fn update_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, op.into_batch_op(), true, after)
+    }
+
     /// Add an upsert (set) operation.
     pub fn upsert(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Add an upsert (set) operation with explicit ordering dependencies.
+    ///
+    /// See [`Batch::query_after`] for the rationale.
+    pub fn upsert_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, op.into_batch_op(), true, after)
+    }
+
     /// Add a delete operation.
     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Add a delete operation with explicit ordering dependencies.
+    ///
+    /// See [`Batch::query_after`] for the rationale.
+    pub fn delete_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, op.into_batch_op(), true, after)
     }
 
     // ── DDL: database ──────────────────────────────────────────────
@@ -632,6 +698,20 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), false)
     }
 
+    /// Escape hatch: add any `BatchOp` with explicit ordering dependencies —
+    /// the typical case is DDL→DML ordering (e.g. `create_table` then
+    /// `insert`) where there is no `$query` data-flow edge to imply it.
+    ///
+    /// See [`Batch::query_after`] for the rationale.
+    pub fn op_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+        after: &[&Handle],
+    ) -> Handle {
+        self.add_entry_after(alias, op.into_batch_op(), true, after)
+    }
+
     // ── wire encoding (build + encode in one step) ─────────────────
 
     /// Build and encode as msgpack (named fields) — primary wire format.
@@ -708,6 +788,17 @@ impl Batch {
 
             // Validate `after` refs.
             for raw in &entry.after {
+                // `after` is alias-only ordering; a value-path tail (e.g.
+                // "mk[0].id") is almost always a developer mistake expecting
+                // `after` to resolve like `$query` does — reject it instead
+                // of silently stripping to the base alias (mirrors the
+                // planner's `BatchError::AfterPathIgnored`, Phase A).
+                if let Some((base, path)) = split_path_tail(raw) {
+                    return Err(BuildError::AfterPathIgnored {
+                        alias: alias.clone(),
+                        raw: format!("{}{}", base, path),
+                    });
+                }
                 let base = extract_base_alias(raw);
                 if base == *alias {
                     return Err(BuildError::SelfReference {
@@ -728,7 +819,17 @@ impl Batch {
     // ── internal ───────────────────────────────────────────────────
 
     /// Declare that `dependent` must execute AFTER `on` (ordering edge).
-    /// Use for DDL→DML ordering, e.g. an insert after a create_table.
+    ///
+    /// `$query` creates an edge by itself; `after` is needed only where there
+    /// is no data flow (e.g. DDL→DML ordering). Prefer the `*_after`
+    /// registration methods (e.g. [`Batch::insert_after`]) when the
+    /// dependency is known at the entry's registration site — they avoid the
+    /// `dependent`/`on` argument-order footgun this post-hoc method has (both
+    /// arguments are `&Handle`, so the compiler can't catch a transposition).
+    ///
+    /// Not to be confused with `Query::after` (`crate::query::Query::after`)
+    /// — that's single-query keyset pagination; this is inter-query DAG
+    /// ordering. See that method's docstring for the reverse cross-reference.
     pub fn after(&mut self, dependent: &Handle, on: &Handle) -> &mut Self {
         if let Some(entry) = self.queries.get_mut(dependent.alias()) {
             entry.after.push(on.alias().to_string());
@@ -737,13 +838,23 @@ impl Batch {
     }
 
     fn add_entry(&mut self, alias: impl Into<String>, op: BatchOp, return_result: bool) -> Handle {
+        self.add_entry_after(alias, op, return_result, &[])
+    }
+
+    fn add_entry_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: BatchOp,
+        return_result: bool,
+        after: &[&Handle],
+    ) -> Handle {
         let alias = alias.into();
         self.queries.insert(
             alias.clone(),
             QueryEntry {
                 op,
                 return_result,
-                after: Vec::new(),
+                after: after.iter().map(|h| h.alias().to_string()).collect(),
             },
         );
         Handle { alias }
@@ -779,10 +890,16 @@ fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut 
     }
 }
 
-/// Strip leading `@` and cut at the first `[` or `.`.
-fn extract_base_alias(s: &str) -> String {
-    let s = s.strip_prefix('@').unwrap_or(s);
-    s.find(['[', '.'])
-        .map(|pos| s[..pos].to_string())
-        .unwrap_or_else(|| s.to_string())
+/// If `s` carries a path tail (`[`/`.` after the base alias), return
+/// `(base_alias, path_tail)`.
+///
+/// Local port of `shamir_query_types::batch::alias::split_path_tail`
+/// (that fn is `pub(crate)` there, not reachable from this crate) — kept in
+/// sync by the shared `extract_base_alias` this file already imports; the
+/// planner's version is the source of truth for the semantics.
+fn split_path_tail(s: &str) -> Option<(String, String)> {
+    let stripped = s.strip_prefix('@').unwrap_or(s);
+    stripped
+        .find(['[', '.'])
+        .map(|pos| (stripped[..pos].to_string(), stripped[pos..].to_string()))
 }

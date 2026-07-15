@@ -308,6 +308,12 @@ export class Query {
    * a page boundary are not silently dropped — the server resumes STRICTLY
    * past that specific row rather than past the bare sort value. Omitting it
    * keeps today's backward-compatible behavior.
+   *
+   * Not to be confused with `Batch`'s `opts.after` dependency list (see
+   * `batch.ts`'s `add()`) — that's inter-query DAG ordering; this is
+   * single-query result-set pagination. No name collision in TS (`Batch` has
+   * no `.after()` method, only an `after` option on `.add()`), but the two
+   * concepts share the word so it's worth the cross-reference.
    */
   after(key: WireValue[], limit?: number, afterId?: string): this {
     this.paginationMode = 'after';
