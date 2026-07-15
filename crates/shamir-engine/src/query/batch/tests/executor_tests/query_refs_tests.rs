@@ -135,3 +135,95 @@ async fn query_ref_does_not_resolve_under_id_encoding() {
          clients MUST keep ref-bearing batches name-keyed (Finding 1.4)"
     );
 }
+
+// ============================================================================
+// Edge provenance (task #628 — Epic01/A): `after`-only deps must NOT leak
+// resolved_refs into the dependent op's FilterContext.
+// ============================================================================
+
+/// Integration-level sanity check for edge provenance end-to-end through
+/// `execute_batch`: `marker` has `after: [active]` only (Explicit edge, no
+/// `$query` anywhere in `marker`'s own op) and must still be ordered after
+/// `active`; `leak_probe` separately references `active` via a real
+/// `$query` ref (DataFlow edge) and must resolve correctly. This proves
+/// Explicit ordering and DataFlow resolution both work through the full
+/// planner+executor pipeline post-#628.
+///
+/// The precise, regression-proof unit coverage for "an Explicit-only edge
+/// must not leak resolved_refs" lives at `build_resolved_refs` level in
+/// `query_runner_tests.rs` (`build_resolved_refs_excludes_explicit_only_edge`)
+/// — a black-box test cannot isolate that case because the planner always
+/// promotes any real `$query` ref that names an alias to at least
+/// `DataFlow` provenance, so an alias that is *only* ever named via `after`
+/// has, by construction, nothing in the op tree that would observably
+/// "leak" if resolved_refs were wrong.
+#[tokio::test]
+async fn after_only_dep_does_not_resolve_query_ref() {
+    let resolver = setup_resolver().await;
+
+    // Seed users.
+    let mut b = Batch::new();
+    b.id(1);
+    b.op_silent(
+        "seed",
+        write::insert("users")
+            .row(doc().set("name", "Alice").set("status", "active"))
+            .row(doc().set("name", "Bob").set("status", "inactive")),
+    );
+    let seed_req = b.build();
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // `active` — stage 0.
+    // `marker` — a plain Insert with `after: [active]` only (no $query ref
+    //   anywhere in its own op tree, so its only dependency edge on
+    //   `active` is Explicit).
+    // `leak_probe` — a Read whose WHERE clause tries to resolve
+    //   `$query @active[0].name` DIRECTLY (its own real `$query` ref, which
+    //   makes `leak_probe` depend on `active` via DataFlow — this is the
+    //   control to prove refs CAN resolve when the edge is DataFlow).
+    let mut b = Batch::new();
+    b.id(2);
+    let active = b.query("active", Query::from("users").where_eq("status", "active"));
+    let marker = b.op_silent(
+        "marker",
+        write::insert("users").row(doc().set("name", "Marker").set("status", "marker")),
+    );
+    b.after(&marker, &active);
+
+    // Control: leak_probe legitimately references `active` via $query — this
+    // MUST resolve (proves DataFlow edges still work after the change).
+    b.query(
+        "leak_probe",
+        Query::from("users").where_eq("name", active.first().field("name")),
+    );
+
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Sanity: `marker` really is ordered after `active` (Explicit edge).
+    let active_stage = resp
+        .execution_plan
+        .iter()
+        .position(|s| s.contains(&"active".to_string()))
+        .unwrap();
+    let marker_stage = resp
+        .execution_plan
+        .iter()
+        .position(|s| s.contains(&"marker".to_string()))
+        .unwrap();
+    assert!(
+        active_stage < marker_stage,
+        "marker must run after active (Explicit ordering)"
+    );
+
+    // The DataFlow control resolves correctly (proves $query refs still work).
+    assert_eq!(
+        resp.results["leak_probe"].records.len(),
+        1,
+        "leak_probe's own $query ref to active must resolve (DataFlow edge)"
+    );
+}

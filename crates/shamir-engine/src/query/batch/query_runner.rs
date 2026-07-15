@@ -22,15 +22,23 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::param_subst::{contains_param_ref, substitute_params};
 use shamir_query_types::filter::Filter;
 
-/// Build resolved_refs map containing only the declared dependencies.
+/// Build resolved_refs map containing only DataFlow-provenance dependencies.
+///
+/// `after`-only edges (`EdgeKind::Explicit`) are ordering hints, NOT data
+/// access grants — they must NOT leak the referenced alias's result into
+/// the dependent op's `FilterContext`. Only edges with a real `$query`
+/// reference (`EdgeKind::DataFlow` or `EdgeKind::Both`) resolve to data.
 pub(super) fn build_resolved_refs(
     all_results: &TMap<String, QueryResult>,
-    deps: Option<&shamir_types::types::common::TSet<String>>,
+    provenance: Option<&TMap<String, shamir_query_types::batch::EdgeKind>>,
 ) -> TMap<String, QueryResult> {
-    let cap = deps.map_or(0, |s| s.len());
+    let cap = provenance.map_or(0, |p| p.len());
     let mut refs = new_map_wc(cap);
-    if let Some(dep_set) = deps {
-        for dep_alias in dep_set {
+    if let Some(provenance) = provenance {
+        for (dep_alias, kind) in provenance {
+            if !kind.is_data_flow() {
+                continue;
+            }
             if let Some(result) = all_results.get(dep_alias) {
                 refs.insert(dep_alias.clone(), result.clone());
             }

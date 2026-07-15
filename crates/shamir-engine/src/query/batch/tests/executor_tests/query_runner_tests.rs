@@ -4,13 +4,15 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
-use shamir_query_types::batch::ResultEncoding;
+use shamir_query_types::batch::{EdgeKind, ResultEncoding};
 use shamir_types::access::Actor;
 use shamir_types::codecs::interned::record_view_to_query_value;
 use shamir_types::record_view::RecordView;
+use shamir_types::types::common::new_map;
 
+use crate::query::batch::query_runner::build_resolved_refs;
 use crate::query::batch::QueryRunner;
-use crate::query::read::QueryRecord;
+use crate::query::read::{QueryRecord, QueryResult};
 
 use super::common::setup_resolver;
 
@@ -256,5 +258,88 @@ async fn insert_returning_id_vs_name_encoding_parity() {
         id_qv.get("score").and_then(|v| v.as_i64()),
         name_qv.get("score").and_then(|v| v.as_i64()),
         "score field must match between Id and Name paths"
+    );
+}
+
+// ============================================================================
+// build_resolved_refs — edge provenance (task #628 — Epic01/A)
+// ============================================================================
+
+/// An `Explicit`-only edge (pure `after`, no `$query`) must NOT contribute
+/// its alias's result to `resolved_refs` — `after` is ordering only, never
+/// a data-access grant.
+#[test]
+fn build_resolved_refs_excludes_explicit_only_edge() {
+    let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
+    all_results.insert(
+        "a".to_string(),
+        QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+        },
+    );
+
+    let mut provenance = new_map();
+    provenance.insert("a".to_string(), EdgeKind::Explicit);
+
+    let refs = build_resolved_refs(&all_results, Some(&provenance));
+    assert!(
+        refs.is_empty(),
+        "Explicit-only edge must not leak its alias's result into resolved_refs"
+    );
+}
+
+/// A `DataFlow` edge (real `$query` ref) DOES contribute its alias's result.
+#[test]
+fn build_resolved_refs_includes_dataflow_edge() {
+    let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
+    all_results.insert(
+        "a".to_string(),
+        QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+        },
+    );
+
+    let mut provenance = new_map();
+    provenance.insert("a".to_string(), EdgeKind::DataFlow);
+
+    let refs = build_resolved_refs(&all_results, Some(&provenance));
+    assert!(
+        refs.contains_key("a"),
+        "DataFlow edge must resolve its alias's result"
+    );
+}
+
+/// A `Both` edge (after + $query on the same alias) still resolves — the
+/// `after` half is redundant ordering, but the real `$query` half still
+/// grants data access.
+#[test]
+fn build_resolved_refs_includes_both_edge() {
+    let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
+    all_results.insert(
+        "a".to_string(),
+        QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+        },
+    );
+
+    let mut provenance = new_map();
+    provenance.insert("a".to_string(), EdgeKind::Both);
+
+    let refs = build_resolved_refs(&all_results, Some(&provenance));
+    assert!(
+        refs.contains_key("a"),
+        "Both edge must still resolve its alias's result (real DataFlow half)"
     );
 }

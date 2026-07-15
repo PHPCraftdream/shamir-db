@@ -6,9 +6,10 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::doc;
 use shamir_query_builder::{ddl, write};
+use shamir_query_types::batch::EdgeKind;
 use shamir_types::mpack;
 
-use crate::query::batch::{BatchLimits, BatchPlanner, BatchRequest};
+use crate::query::batch::{BatchError, BatchLimits, BatchPlanner, BatchRequest};
 
 #[test]
 fn test_plan_empty() {
@@ -685,4 +686,126 @@ fn test_after_with_at_prefix_normalizes() {
     assert_eq!(plan.stages[0], vec!["a"]);
     assert_eq!(plan.stages[1], vec!["b"]);
     assert!(plan.dependencies["b"].contains("a"));
+}
+
+// ============================================================================
+// EDGE PROVENANCE TESTS (task #628 — Epic01/A)
+// ============================================================================
+
+#[test]
+fn edge_provenance_pure_after_is_explicit() {
+    // b `after` a, with no `$query` ref between them → Explicit only.
+    let mut b = Batch::new();
+    b.id(1);
+    let a = b.create_table("a", ddl::create_table("users").repo("main"));
+    let rows = b.insert("b", write::insert("users").row(doc().set("name", "Alice")));
+    b.after(&rows, &a);
+    let request = b.build();
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    let provenance = plan
+        .edge_provenance
+        .get("b")
+        .expect("b must have provenance entry");
+    assert_eq!(provenance.get("a"), Some(&EdgeKind::Explicit));
+}
+
+#[test]
+fn edge_provenance_pure_query_ref_is_dataflow() {
+    // orders depends on users purely via $query (where_eq) — no `after`.
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").where_eq("user_id", users.all()),
+    );
+    let request = b.build();
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have provenance entry");
+    assert_eq!(provenance.get("users"), Some(&EdgeKind::DataFlow));
+}
+
+#[test]
+fn edge_provenance_after_and_query_ref_on_same_alias_is_both() {
+    // orders both `after`s users AND references it via $query — dedup with
+    // both flags preserved (EdgeKind::Both), not an error.
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    let orders = b.query(
+        "orders",
+        Query::from("orders").where_eq("user_id", users.all()),
+    );
+    b.after(&orders, &users);
+    let request = b.build();
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have provenance entry");
+    assert_eq!(provenance.get("users"), Some(&EdgeKind::Both));
+}
+
+#[test]
+fn after_with_bracket_path_tail_is_rejected() {
+    // `after` naming a value-path tail (e.g. "users[0].id") is a documented
+    // developer mistake — `after` is alias-only ordering and never resolves
+    // a value path the way `$query` does. Planning must fail fast instead of
+    // silently stripping to the base alias.
+    let raw = mpack!({
+        "id": 1,
+        "queries": {
+            "users": {
+                "from": "users"
+            },
+            "b": {
+                "insert_into": "users",
+                "values": [{"name": "Bob"}],
+                "after": ["users[0].id"]
+            }
+        }
+    });
+    let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+    let request: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
+    let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            BatchError::AfterPathIgnored { alias, raw }
+            if alias == "b" && raw == "users[0].id"
+        ),
+        "expected AfterPathIgnored for 'users[0].id', got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn after_with_dot_path_tail_is_rejected() {
+    let raw = mpack!({
+        "id": 1,
+        "queries": {
+            "users": {
+                "from": "users"
+            },
+            "b": {
+                "insert_into": "users",
+                "values": [{"name": "Bob"}],
+                "after": ["users.id"]
+            }
+        }
+    });
+    let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+    let request: BatchRequest = rmp_serde::from_slice(&bytes).unwrap();
+    let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
+    assert!(
+        matches!(&err, BatchError::AfterPathIgnored { alias, raw } if alias == "b" && raw == "users.id"),
+        "expected AfterPathIgnored for 'users.id', got: {:?}",
+        err
+    );
 }

@@ -167,6 +167,7 @@ pub(super) fn execute_batch_impl<'a>(
             id: request.id.clone(),
             results,
             execution_plan: std::mem::take(&mut plan.stages),
+            edge_provenance: std::mem::take(&mut plan.edge_provenance),
             execution_time_us: elapsed.as_micros() as u64,
             transaction: tx_info,
             // Ambient interner deltas are attached server-side (shamir-db's
@@ -255,18 +256,22 @@ fn and_combine(
 ///
 /// For each stage, executes all queries sequentially within a stage.
 /// Each query's FilterContext gets only the resolved_refs from its
-/// declared dependencies — not all accumulated results.
+/// DataFlow-provenance dependencies (`plan.edge_provenance`) — not all
+/// accumulated results, and NOT `after`-only (`Explicit`) dependencies,
+/// which are pure ordering and grant no data access.
 ///
-/// **Note on parallelism.** The planner labels independent queries
-/// within one stage with the intent that they run in parallel.
-/// Driving them concurrently on a single task via
-/// `futures::future::try_join_all` was tried and measured as a
-/// no-op on in-memory CPU-bound workloads — there are no await
-/// suspension points inside the queries that would yield to peers.
-/// Real parallelism needs `tokio::spawn`-per-query, which in turn
-/// needs `Arc<dyn TableResolver>` / `Arc<dyn AdminExecutor>` (or a
+/// **Note on parallelism.** Stages are a LOGICAL grouping of mutually
+/// independent queries — the planner does not itself run anything, and
+/// nothing here currently drives a stage's queries concurrently. Driving
+/// them concurrently on a single task via `futures::future::try_join_all`
+/// was tried and measured as a no-op on in-memory CPU-bound workloads —
+/// there are no await suspension points inside the queries that would
+/// yield to peers. Real parallelism needs `tokio::spawn`-per-query, which
+/// in turn needs `Arc<dyn TableResolver>` / `Arc<dyn AdminExecutor>` (or a
 /// scoped-spawn helper); kept out of scope for now and tracked as a
-/// future opt.
+/// future opt. See
+/// `docs/dev-artifacts/design/oql-01-stage-parallelism-adr.md` for the
+/// decision record.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_plan_impl(
     plan: &mut BatchPlan,
@@ -291,7 +296,7 @@ pub(super) async fn execute_plan_impl(
             })?;
 
             // Build resolved_refs with ONLY declared dependencies
-            let deps = plan.dependencies.get(alias);
+            let deps = plan.edge_provenance.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
             let result = execute_single_impl(
@@ -373,7 +378,7 @@ pub(super) async fn execute_plan_tx_impl(
                 code: None,
             })?;
 
-            let deps = plan.dependencies.get(alias);
+            let deps = plan.edge_provenance.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
             let mut runner = QueryRunner {

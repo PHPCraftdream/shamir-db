@@ -59,6 +59,16 @@ pub enum BatchError {
     /// The op tree contains `BatchOp::Batch` nodes nested deeper than
     /// `BatchLimits::max_nesting_depth`.
     NestingTooDeep { depth: usize, max: usize },
+
+    /// An `after` entry carried a value-path tail (e.g. `"mk[0].id"`,
+    /// `"mk.id"`) that `after` silently ignores.
+    ///
+    /// `after` is alias-only ordering — it never resolves a value path the
+    /// way `$query` does. A path tail here is almost always a developer
+    /// mistake ("I thought `after` pointed at a specific field"), so we
+    /// reject it at planning time instead of silently stripping to the base
+    /// alias.
+    AfterPathIgnored { alias: String, raw: String },
 }
 
 impl std::fmt::Display for BatchError {
@@ -107,6 +117,15 @@ impl std::fmt::Display for BatchError {
             ),
             BatchError::NestingTooDeep { depth, max } => {
                 write!(f, "Sub-batch nesting too deep: {} (max: {})", depth, max)
+            }
+            BatchError::AfterPathIgnored { alias, raw } => {
+                write!(
+                    f,
+                    "'after' entry '{}' on '{}' carries a value-path tail, but 'after' is \
+                     alias-only ordering and never resolves a path; use a bare alias, or a \
+                     '$query' reference if you need the value",
+                    raw, alias
+                )
             }
         }
     }

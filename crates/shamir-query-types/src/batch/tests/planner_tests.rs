@@ -260,3 +260,150 @@ fn param_value_not_treated_as_dep() {
         proc_deps
     );
 }
+
+// -------------------------------------------------------------------------
+// Edge provenance tests (task #628 — Epic01/A)
+// -------------------------------------------------------------------------
+
+fn read_entry_with_query_ref(table: &str, dep_alias: &str) -> QueryEntry {
+    let q = ReadQuery {
+        from: crate::TableRef::new(table),
+        r#where: Some(crate::filter::Filter::Eq {
+            field: vec!["user_id".to_string()],
+            value: FilterValue::QueryRef {
+                alias: format!("@{dep_alias}[0].id"),
+                path: None,
+            },
+        }),
+        select: crate::read::Select::all(),
+        order_by: None,
+        pagination: crate::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: crate::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+    QueryEntry {
+        op: BatchOp::Read(q),
+        return_result: true,
+        after: Vec::new(),
+    }
+}
+
+#[test]
+fn edge_provenance_pure_after_is_explicit() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("users".to_string(), read_entry("users"));
+    let mut dependent = read_entry("orders");
+    dependent.after = vec!["users".to_string()];
+    queries.insert("orders".to_string(), dependent);
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have a provenance entry");
+    assert_eq!(
+        provenance.get("users"),
+        Some(&crate::batch::EdgeKind::Explicit),
+        "after-only edge must be tagged Explicit, got {:?}",
+        provenance
+    );
+}
+
+#[test]
+fn edge_provenance_pure_query_ref_is_dataflow() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("users".to_string(), read_entry("users"));
+    queries.insert(
+        "orders".to_string(),
+        read_entry_with_query_ref("orders", "users"),
+    );
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have a provenance entry");
+    assert_eq!(
+        provenance.get("users"),
+        Some(&crate::batch::EdgeKind::DataFlow),
+        "$query-only edge must be tagged DataFlow, got {:?}",
+        provenance
+    );
+}
+
+#[test]
+fn edge_provenance_after_and_query_ref_same_alias_is_both() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("users".to_string(), read_entry("users"));
+    let mut dependent = read_entry_with_query_ref("orders", "users");
+    dependent.after = vec!["users".to_string()];
+    queries.insert("orders".to_string(), dependent);
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have a provenance entry");
+    assert_eq!(
+        provenance.get("users"),
+        Some(&crate::batch::EdgeKind::Both),
+        "after + $query on the same alias must dedup to Both, got {:?}",
+        provenance
+    );
+
+    // Dedup: `dependencies` still has exactly one entry for "users", not two.
+    let deps = plan.dependencies.get("orders").expect("orders deps");
+    assert_eq!(deps.len(), 1);
+    assert!(deps.contains("users"));
+}
+
+#[test]
+fn after_garbage_bracket_path_is_rejected() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("users".to_string(), read_entry("users"));
+    let mut dependent = read_entry("orders");
+    dependent.after = vec!["users[0].id".to_string()];
+    queries.insert("orders".to_string(), dependent);
+
+    let limits = BatchLimits::default();
+    let err = BatchPlanner::plan(&queries, &limits).expect_err("garbage path must be rejected");
+    assert!(
+        matches!(
+            &err,
+            BatchError::AfterPathIgnored { alias, raw }
+            if alias == "orders" && raw == "users[0].id"
+        ),
+        "expected AfterPathIgnored, got {:?}",
+        err
+    );
+}
+
+#[test]
+fn after_garbage_dot_path_is_rejected() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("users".to_string(), read_entry("users"));
+    let mut dependent = read_entry("orders");
+    dependent.after = vec!["users.id".to_string()];
+    queries.insert("orders".to_string(), dependent);
+
+    let limits = BatchLimits::default();
+    let err = BatchPlanner::plan(&queries, &limits).expect_err("garbage path must be rejected");
+    assert!(
+        matches!(
+            &err,
+            BatchError::AfterPathIgnored { alias, raw }
+            if alias == "orders" && raw == "users.id"
+        ),
+        "expected AfterPathIgnored, got {:?}",
+        err
+    );
+}

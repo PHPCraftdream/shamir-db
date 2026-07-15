@@ -6,6 +6,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::read::QueryResult;
 
+use super::edge_kind::EdgeKind;
 use super::interner_delta::InternerDelta;
 use super::transaction_info::TransactionInfo;
 
@@ -20,6 +21,7 @@ use super::transaction_info::TransactionInfo;
 ///     "orders": [...]
 ///   },
 ///   "execution_plan": [["users", "products"], ["orders"], ["stats"]],
+///   "edge_provenance": { "orders": { "users": "data_flow", "products": "data_flow" } },
 ///   "execution_time_us": 1234,
 ///   "transaction": { "id": 1, "committed": true }
 /// }
@@ -37,6 +39,13 @@ pub struct BatchResponse {
     ///
     /// Each inner array contains queries that run in parallel.
     pub execution_plan: Vec<Vec<String>>,
+
+    /// Dependency-edge provenance (for debugging): alias -> dep_alias ->
+    /// whether the edge came from an explicit `after`, an auto-extracted
+    /// `$query` reference, or both. Lets the client tell ordering-only
+    /// edges apart from real data-flow edges in `execution_plan`.
+    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    pub edge_provenance: TMap<String, TMap<String, EdgeKind>>,
 
     /// Total execution time in microseconds.
     pub execution_time_us: u64,

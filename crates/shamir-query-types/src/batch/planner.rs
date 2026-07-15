@@ -8,7 +8,22 @@
 //! 1. **Extract Dependencies**: Scans all filters for `$query` references
 //! 2. **Validate**: Checks for unknown aliases and cycles
 //! 3. **Calculate Depth**: Ensures dependency chain isn't too deep
-//! 4. **Topological Sort**: Groups queries into parallel stages
+//! 4. **Topological Sort**: Groups queries into LOGICAL stages
+//!
+//! # Stages are a logical grouping, not a parallelism guarantee
+//!
+//! A "stage" groups queries whose dependencies are all satisfied by earlier
+//! stages — i.e. queries within one stage are independent of each other and
+//! COULD run concurrently. Whether the executor actually drives them
+//! concurrently is a separate, independent decision: the current executor
+//! (`shamir-engine::query::batch::batch_execute::execute_plan_impl`) runs
+//! every stage's queries sequentially on one task. A `try_join_all`-based
+//! concurrent-stage experiment was tried and measured as a no-op for
+//! in-memory CPU-bound workloads (no `.await` suspension points to yield
+//! on); see that module's doc comment for the measurement and the
+//! `tokio::spawn`-per-query design this is deferred to. See
+//! `docs/dev-artifacts/design/oql-01-stage-parallelism-adr.md` for the
+//! decision record.
 //!
 //! # $query Validation Strategy
 //!
@@ -44,7 +59,8 @@
 
 use std::collections::VecDeque;
 
-use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
+use crate::batch::alias::split_path_tail;
+use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, EdgeKind, QueryEntry};
 use crate::filter::Filter;
 use shamir_collections::{new_map, new_set, TFxSet, TMap, TSet};
 use shamir_types::types::value::QueryValue;
@@ -111,17 +127,42 @@ impl BatchPlanner {
         let aliases: TSet<String> = queries.keys().cloned().collect();
         let alias_order: Vec<String> = queries.keys().cloned().collect();
 
-        // Extract dependencies for each query
+        // Extract dependencies for each query, tagging each edge with its
+        // provenance (Explicit from `after`, DataFlow from `$query`, or
+        // Both when the same alias is named by both sources).
         let mut dependencies: TMap<String, TSet<String>> = new_map();
+        let mut edge_provenance: TMap<String, TMap<String, EdgeKind>> = new_map();
 
         for (alias, entry) in queries {
-            let mut deps = Self::extract_dependencies(&entry.op);
+            let data_flow_deps = Self::extract_dependencies(&entry.op);
 
-            // Merge explicit ordering dependencies from `after`.
-            for raw in &entry.after {
-                let base = Self::extract_base_alias(raw);
-                deps.insert(base);
+            let mut provenance: TMap<String, EdgeKind> = new_map();
+            for dep in &data_flow_deps {
+                provenance.insert(dep.clone(), EdgeKind::DataFlow);
             }
+
+            // Merge explicit ordering dependencies from `after`. A garbage
+            // path tail (e.g. "mk[0].id") is rejected: `after` is alias-only
+            // ordering and never resolves a value path the way `$query`
+            // does, so a path tail here is almost always the developer
+            // mistakenly expecting `after` to behave like `$query`. Failing
+            // fast at plan time is more useful than silently stripping to
+            // the base alias.
+            for raw in &entry.after {
+                if let Some((base, path)) = split_path_tail(raw) {
+                    return Err(BatchError::AfterPathIgnored {
+                        alias: alias.clone(),
+                        raw: format!("{}{}", base, path),
+                    });
+                }
+                let base = Self::extract_base_alias(raw);
+                provenance
+                    .entry(base)
+                    .and_modify(|kind| *kind = kind.merge(EdgeKind::Explicit))
+                    .or_insert(EdgeKind::Explicit);
+            }
+
+            let deps: TSet<String> = provenance.keys().cloned().collect();
 
             // Validate all referenced aliases exist
             for dep in &deps {
@@ -134,6 +175,7 @@ impl BatchPlanner {
             }
 
             dependencies.insert(alias.clone(), deps);
+            edge_provenance.insert(alias.clone(), provenance);
         }
 
         // Check for cycles
@@ -157,6 +199,7 @@ impl BatchPlanner {
             stages,
             aliases: alias_order,
             dependencies,
+            edge_provenance,
         })
     }
 
@@ -317,16 +360,12 @@ impl BatchPlanner {
     /// Extract base alias from a `$query` reference string like
     /// `"@users[0].id"` → `"users"`.
     ///
-    /// The leading `@` is the explicit reference marker (per spec) and
-    /// is stripped before lookup against the queries map (whose keys
-    /// never carry `@`). Both forms are accepted on input — `@user` and
-    /// bare `user` map to the same alias — but the canonical, documented
-    /// form is **with** the `@`.
+    /// Thin delegate to [`crate::batch::alias::extract_base_alias`], which
+    /// is the shared, crate-public normalization (Epic01/B reuses it from
+    /// `shamir-query-builder`). Kept as an inherent method here so the
+    /// existing `Self::extract_base_alias(..)` call sites are unchanged.
     fn extract_base_alias(s: &str) -> String {
-        let s = s.strip_prefix('@').unwrap_or(s);
-        s.find(['[', '.'])
-            .map(|pos| s[..pos].to_string())
-            .unwrap_or_else(|| s.to_string())
+        crate::batch::alias::extract_base_alias(s)
     }
 
     /// Detect cycle in dependency graph using DFS (white-gray-black algorithm).

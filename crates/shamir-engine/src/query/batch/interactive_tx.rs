@@ -96,6 +96,7 @@ pub async fn execute_in_open_tx(
         id: request.id.clone(),
         results,
         execution_plan: std::mem::take(&mut plan.stages),
+        edge_provenance: std::mem::take(&mut plan.edge_provenance),
         execution_time_us: elapsed.as_micros() as u64,
         // The tx is still open — there is no commit outcome yet.
         transaction: None,
