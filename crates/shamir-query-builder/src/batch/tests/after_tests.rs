@@ -173,3 +173,53 @@ fn insert_after_registers_dependency_equivalent_to_post_hoc_after() {
     assert_eq!(via_fluent, via_post_hoc);
     assert_eq!(via_fluent, vec!["mk_tbl".to_string()]);
 }
+
+// -------------------------------------------------------------------------
+// Naming collision regression guard (task #630 — Epic01/C gap #7)
+// -------------------------------------------------------------------------
+//
+// `Query::after` (keyset/seek pagination cursor, on `crate::query::Query`)
+// and `Batch::after` (dependency ordering, on `crate::batch::Batch`) share a
+// name but live on unrelated types with unrelated signatures. This is not a
+// bug today — Rust resolves each `.after(..)` call against its receiver's
+// inherent impl — but a future refactor that merges/re-exports these types
+// under a shared trait, or that moves one `after` onto a blanket impl,
+// could silently create an ambiguity or a wrong-method dispatch. This test
+// exercises BOTH `after` methods in the same file/scope, on both types, to
+// pin that today they coexist without a single compile-time or run-time
+// conflict.
+#[test]
+fn query_after_and_batch_after_coexist_without_naming_conflict() {
+    use crate::query::Query;
+    use shamir_types::types::value::QueryValue;
+
+    // `Query::after` — keyset pagination cursor.
+    let q = Query::from("users")
+        .order_by_asc("score")
+        .after(vec![QueryValue::Int(30)], Some(2));
+    let read_query = q.build();
+    assert!(
+        matches!(
+            read_query.pagination,
+            shamir_query_types::read::Pagination::After { .. }
+        ),
+        "Query::after must build keyset pagination, got {:?}",
+        read_query.pagination
+    );
+
+    // `Batch::after` — explicit dependency ordering.
+    let mut b = Batch::new();
+    let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
+    let rows = b.insert(
+        "rows",
+        write::insert("users").row(doc().set("name", "Alice")),
+    );
+    b.after(&rows, &mk);
+    let req = b.build();
+    assert_eq!(
+        req.queries.get("rows").unwrap().after,
+        vec!["mk_tbl".to_string()],
+        "Batch::after must register dependency ordering, unaffected by \
+         Query::after existing in the same scope"
+    );
+}

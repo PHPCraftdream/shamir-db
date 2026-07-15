@@ -809,3 +809,63 @@ fn after_with_dot_path_tail_is_rejected() {
         err
     );
 }
+
+// ============================================================================
+// Multi-hop mixed chain (task #630 — Epic01/C gap #1)
+// ============================================================================
+//
+// A -> B by pure `$query` (DataFlow), B -> C by pure `after` (Explicit),
+// C -> D by BOTH `after` and `$query` on the same alias (Both). Existing
+// coverage (edge_provenance_* tests above) only exercises each edge kind in
+// isolation between a single pair of aliases; this test walks a >=3-hop
+// chain mixing all three kinds end to end, and asserts both the stage
+// ordering and the provenance recorded at each hop.
+
+#[test]
+fn multi_hop_chain_mixes_dataflow_explicit_and_both_edges() {
+    let mut b = Batch::new();
+    b.id(1);
+
+    // A -> B: pure $query (DataFlow).
+    let a = b.query("a", Query::from("t"));
+    let b_h = b.query("b", Query::from("t").where_eq("x", a.all()));
+
+    // B -> C: pure `after` (Explicit) — C has no $query ref to b at all.
+    let c = b.query("c", Query::from("t"));
+    b.after(&c, &b_h);
+
+    // C -> D: BOTH `after` AND `$query` on the same alias (Both).
+    let d = b.query("d", Query::from("t").where_eq("y", c.all()));
+    b.after(&d, &c);
+
+    let request = b.build();
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    // Strict 4-stage chain: a < b < c < d.
+    assert_eq!(
+        plan.stages.len(),
+        4,
+        "expected 4 sequential stages: {plan:?}"
+    );
+    assert_eq!(plan.stages[0], vec!["a"]);
+    assert_eq!(plan.stages[1], vec!["b"]);
+    assert_eq!(plan.stages[2], vec!["c"]);
+    assert_eq!(plan.stages[3], vec!["d"]);
+
+    // Provenance per hop.
+    assert_eq!(
+        plan.edge_provenance.get("b").and_then(|p| p.get("a")),
+        Some(&EdgeKind::DataFlow),
+        "a->b must be DataFlow-only"
+    );
+    assert_eq!(
+        plan.edge_provenance.get("c").and_then(|p| p.get("b")),
+        Some(&EdgeKind::Explicit),
+        "b->c must be Explicit-only"
+    );
+    assert_eq!(
+        plan.edge_provenance.get("d").and_then(|p| p.get("c")),
+        Some(&EdgeKind::Both),
+        "c->d must be Both"
+    );
+}

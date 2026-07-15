@@ -6,8 +6,8 @@ use shamir_types::types::value::QueryValue;
 use crate::admin::{GroupRef, ResourceRef};
 use crate::admin::{ReplDirection, ReplMode, SubAction};
 use crate::batch::{
-    BatchLimits, BatchOp, BatchRequest, BatchResponse, InternerDelta, QueryEntry, ResultEncoding,
-    SubBatchOp, TransactionInfo,
+    BatchLimits, BatchOp, BatchRequest, BatchResponse, EdgeKind, InternerDelta, QueryEntry,
+    ResultEncoding, SubBatchOp, TransactionInfo,
 };
 use crate::filter::FilterValue;
 
@@ -760,6 +760,91 @@ fn batch_response_backward_compat_old_peer_no_field() {
     });
     let resp: BatchResponse = from_qv(qv);
     assert!(resp.interner_delta.is_empty());
+}
+
+// ========================================================================
+// edge_provenance field (task #630 — Epic01/C gap #4)
+// ========================================================================
+//
+// The internal `BatchPlan.edge_provenance` is unit-tested extensively
+// (planner_tests.rs, both crates). What was NOT covered anywhere: that
+// `BatchResponse.edge_provenance` — the wire-level DTO field a real client
+// actually deserializes off the socket — round-trips through msgpack with
+// its `EdgeKind` values intact, and is omitted when empty (mirroring the
+// `interner_delta` wire-compat tests directly above). This is the
+// serialization contract a server-round-trip integration test would rely
+// on; pinning it here at the DTO level is the precise, fast unit
+// counterpart.
+
+#[test]
+fn batch_response_edge_provenance_omitted_when_empty() {
+    let resp = BatchResponse {
+        id: QueryValue::Int(1),
+        results: TMap::default(),
+        execution_plan: vec![],
+        edge_provenance: TMap::default(),
+        execution_time_us: 0,
+        transaction: None,
+        interner_delta: TMap::default(),
+    };
+    let qv = to_qv(&resp);
+    assert!(
+        qv.get("edge_provenance").is_none(),
+        "empty edge_provenance must be omitted: {qv:?}"
+    );
+    let back: BatchResponse = from_qv(qv);
+    assert_eq!(resp, back);
+}
+
+#[test]
+fn batch_response_edge_provenance_roundtrip() {
+    let mut orders_provenance: TMap<String, EdgeKind> = TMap::default();
+    orders_provenance.insert("users".to_string(), EdgeKind::DataFlow);
+    orders_provenance.insert("marker".to_string(), EdgeKind::Explicit);
+
+    let mut edge_provenance: TMap<String, TMap<String, EdgeKind>> = TMap::default();
+    edge_provenance.insert("orders".to_string(), orders_provenance);
+
+    let resp = BatchResponse {
+        id: QueryValue::Int(1),
+        results: TMap::default(),
+        execution_plan: vec![
+            vec!["users".to_string(), "marker".to_string()],
+            vec!["orders".to_string()],
+        ],
+        edge_provenance,
+        execution_time_us: 42,
+        transaction: None,
+        interner_delta: TMap::default(),
+    };
+
+    let qv = to_qv(&resp);
+    assert!(
+        qv.get("edge_provenance").is_some(),
+        "non-empty edge_provenance must appear on the wire: {qv:?}"
+    );
+    let back: BatchResponse = from_qv(qv);
+    assert_eq!(resp, back);
+
+    let orders = back
+        .edge_provenance
+        .get("orders")
+        .expect("orders provenance entry");
+    assert_eq!(orders.get("users"), Some(&EdgeKind::DataFlow));
+    assert_eq!(orders.get("marker"), Some(&EdgeKind::Explicit));
+}
+
+#[test]
+fn batch_response_edge_provenance_backward_compat_old_peer_no_field() {
+    // An old server that predates edge_provenance sends a payload without it.
+    let qv = mpack!({
+        "id": 1_i64,
+        "results": {},
+        "execution_plan": [],
+        "execution_time_us": 0_i64
+    });
+    let resp: BatchResponse = from_qv(qv);
+    assert!(resp.edge_provenance.is_empty());
 }
 
 // ========================================================================

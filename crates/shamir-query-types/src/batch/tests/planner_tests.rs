@@ -407,3 +407,37 @@ fn after_garbage_dot_path_is_rejected() {
         err
     );
 }
+
+// -------------------------------------------------------------------------
+// Self-reference + path-tail precedence (task #630 — Epic01/C gap #3)
+// -------------------------------------------------------------------------
+//
+// `after` naming a path-tail on the SAME alias it belongs to (e.g.
+// `self_ref` after-ing `"self_ref[0].id"`) is simultaneously a garbage
+// path-tail AND a self-reference. `BatchPlanner::plan` validates the
+// path-tail shape (`split_path_tail`) BEFORE it ever builds the dependency
+// set that cycle-detection runs over (see `planner.rs`, the `after` loop
+// precedes `detect_cycle`), so `AfterPathIgnored` must win over
+// `CircularDependency` here. This pins that real, non-obvious precedence so
+// a future planner refactor that reorders the checks is caught.
+#[test]
+fn after_self_reference_with_path_tail_yields_after_path_ignored_not_circular() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    let mut self_ref = read_entry("t");
+    self_ref.after = vec!["self_ref[0].id".to_string()];
+    queries.insert("self_ref".to_string(), self_ref);
+
+    let limits = BatchLimits::default();
+    let err = BatchPlanner::plan(&queries, &limits)
+        .expect_err("self-reference with path tail must be rejected");
+    assert!(
+        matches!(
+            &err,
+            BatchError::AfterPathIgnored { alias, raw }
+            if alias == "self_ref" && raw == "self_ref[0].id"
+        ),
+        "AfterPathIgnored must win over CircularDependency for a self-\
+         referencing after with a path tail, got {:?}",
+        err
+    );
+}
