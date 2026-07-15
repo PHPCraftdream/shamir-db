@@ -245,6 +245,132 @@ fn switch_single_case_plus_default_generates_simple_complementary_guards() {
     );
 }
 
+/// Gap #6 (Epic03/D brief item 6): `switch` with 4 cases + default —
+/// confirms the NOT/OR chain accumulation is correct beyond the
+/// already-covered 1-2-case shapes: each case's guard must AND-in a NOT
+/// for every PRIOR case's condition (not just the immediately preceding
+/// one), and the default's guard must NOT(OR(all 4 conditions)).
+#[test]
+fn switch_four_cases_plus_default_accumulates_full_not_or_chain() {
+    let mut b = Batch::new();
+    let case1 = filter::eq("tier", "vip");
+    let case2 = filter::eq("tier", "regular");
+    let case3 = filter::eq("tier", "trial");
+    let case4 = filter::eq("tier", "guest");
+
+    let handles = b.switch(
+        vec![
+            (
+                "vip_email",
+                case1.clone(),
+                write::insert("emails").row(doc().set("kind", "vip")),
+            ),
+            (
+                "regular_email",
+                case2.clone(),
+                write::insert("emails").row(doc().set("kind", "regular")),
+            ),
+            (
+                "trial_email",
+                case3.clone(),
+                write::insert("emails").row(doc().set("kind", "trial")),
+            ),
+            (
+                "guest_email",
+                case4.clone(),
+                write::insert("emails").row(doc().set("kind", "guest")),
+            ),
+        ],
+        (
+            "default_email",
+            write::insert("emails").row(doc().set("kind", "default")),
+        ),
+    );
+
+    assert_eq!(handles.len(), 5);
+
+    let req = b.build();
+
+    // Case 1: guard == case1 (no priors).
+    assert_eq!(
+        req.queries.get("vip_email").unwrap().when,
+        Some(case1.clone())
+    );
+
+    // Case 2: guard == AND(NOT case1, case2).
+    assert_eq!(
+        req.queries.get("regular_email").unwrap().when,
+        Some(Filter::And {
+            filters: vec![
+                Filter::Not {
+                    filter: Box::new(case1.clone())
+                },
+                case2.clone(),
+            ]
+        })
+    );
+
+    // Case 3: guard == AND(NOT case2, AND(NOT case1, case3)) — folded
+    // left-to-right over all PRIOR conditions (case1, case2).
+    assert_eq!(
+        req.queries.get("trial_email").unwrap().when,
+        Some(Filter::And {
+            filters: vec![
+                Filter::Not {
+                    filter: Box::new(case2.clone())
+                },
+                Filter::And {
+                    filters: vec![
+                        Filter::Not {
+                            filter: Box::new(case1.clone())
+                        },
+                        case3.clone(),
+                    ]
+                },
+            ]
+        })
+    );
+
+    // Case 4: guard folds over ALL THREE priors (case1, case2, case3).
+    assert_eq!(
+        req.queries.get("guest_email").unwrap().when,
+        Some(Filter::And {
+            filters: vec![
+                Filter::Not {
+                    filter: Box::new(case3.clone())
+                },
+                Filter::And {
+                    filters: vec![
+                        Filter::Not {
+                            filter: Box::new(case2.clone())
+                        },
+                        Filter::And {
+                            filters: vec![
+                                Filter::Not {
+                                    filter: Box::new(case1.clone())
+                                },
+                                case4.clone(),
+                            ]
+                        },
+                    ]
+                },
+            ]
+        })
+    );
+
+    // Default: guard == NOT(OR(case1, case2, case3, case4)) — all four
+    // conditions collected, not just the last one.
+    let ed = req.queries.get("default_email").unwrap();
+    assert_eq!(
+        ed.when,
+        Some(Filter::Not {
+            filter: Box::new(Filter::Or {
+                filters: vec![case1, case2, case3, case4]
+            })
+        })
+    );
+}
+
 #[test]
 fn switch_entries_participate_in_try_build_validation() {
     let mut b = Batch::new();
