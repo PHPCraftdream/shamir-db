@@ -1884,14 +1884,15 @@ dependencies = [
 
 [[package]]
 name = "ktav"
-version = "0.3.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b944faa27a39c602b7798cc0e0280c23288a6f558f6f87aa8fb1a32757a748f4"
+checksum = "fe719f9d82e0037947fbdc767d986863bb195df42560cd2ca17767b466d5bd8c"
 dependencies = [
  "bumpalo",
  "compact_str",
  "indexmap",
  "itoa",
+ "memchr",
  "rustc-hash 2.1.1",
  "ryu",
  "serde",
