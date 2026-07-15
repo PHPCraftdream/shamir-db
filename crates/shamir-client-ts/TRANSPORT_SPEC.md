@@ -82,10 +82,15 @@ interface ConnectOptions {
   username: string;
   password: string;
   tls?: { rejectUnauthorized?: boolean };
-  acceptNewHost?: boolean;
-  trustedPin?: Uint8Array;
 }
 ```
+
+Note: unlike the napi/Node client, the TS client does not implement
+TOFU pinning of the server's Ed25519 identity — `acceptNewHost`/
+`trustedPin` were declared but never consulted, giving a false sense of
+protection (task #622). Removed from the type rather than left dead;
+real pinning (with a browser storage backend and an `acceptNewHost`
+UX) is unimplemented and would need its own design pass.
 
 ## ShamirClient API (mirror napi)
 ```ts

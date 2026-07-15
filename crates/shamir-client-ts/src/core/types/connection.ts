@@ -37,7 +37,16 @@ export interface ResumeOptions {
   connectTimeoutMs?: number;
 }
 
-/** Connection parameters (mirrors the napi `ConnectOptions`). */
+/**
+ * Connection parameters (mirrors the napi `ConnectOptions`).
+ *
+ * Unlike the napi/Node client, this TS client does NOT verify the server's
+ * `identity_sig` / do TOFU pinning of its Ed25519 identity (task #622) — a
+ * prior `acceptNewHost`/`trustedPin` pair was declared but never consulted
+ * anywhere, so it was removed rather than left dead. Real pinning needs a
+ * browser storage backend and an `acceptNewHost` UX design pass; until
+ * then this client is not MITM-resistant on the initial connection.
+ */
 export interface ConnectOptions {
   host: string;
   port: number;
@@ -50,8 +59,6 @@ export interface ConnectOptions {
    * `https://${host}`.
    */
   origin?: string;
-  acceptNewHost?: boolean;
-  trustedPin?: Uint8Array;
   /**
    * Per-request deadline in ms (Finding 2.2). A pending request that gets no
    * server response within this budget rejects with a {@link ShamirTimeoutError}
