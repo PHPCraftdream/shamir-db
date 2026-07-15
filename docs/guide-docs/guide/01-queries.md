@@ -319,6 +319,120 @@ const resp = await db.batch()
 исполнение последовательное (см.
 `docs/dev-artifacts/design/oql-01-stage-parallelism-adr.md`).
 
+### Условное исполнение: `when`/`switch`
+
+Каждый `.add(alias, op, { when: <Filter> })` — операция выполняется, только
+если `when` вычисляется в `true`. Без `when` (или `when` отсутствует) —
+поведение как раньше, op выполняется всегда. Это НЕ то же самое, что
+`$cond`/`switch_case` из §1 «Условные значения» — там условие выбирает
+одно из двух ЗНАЧЕНИЙ внутри уже выполняющегося запроса; `when` решает,
+выполнится ли САМА операция целиком (INSERT/UPDATE/DELETE/DDL/Call/
+под-батч) — см. ADR
+`docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`, Decision 1.
+
+> ⚠️ **Известное ограничение (задача #651, НЕ исправлена).** `when`-условия
+> на основе СРАВНЕНИЯ ПОЛЕЙ (`filter.eq`/`filter.gt`/`filter.gte`/
+> `filter.lt`/`filter.lte`/`filter.ne`/`filter.fieldEq` и т.п.) СЕГОДНЯ НЕ
+> РАБОТАЮТ КОРРЕКТНО — они компилируются против пустой синтетической записи
+> через одноразовый scratch-интернер, который не может разрешить путь к
+> полю НИ ДЛЯ ОДНОГО имени поля. В результате КАЖДОЕ такое сравнение
+> схлопывается в фиксированный результат (`Gt`/`Gte`/`Lt`/`Lte`/`Eq`/`Ne` →
+> всегда `false`, т.е. операция всегда пропускается) — **независимо от
+> реальных данных**. Канонический сценарий «спиши со счёта, если баланс >=
+> суммы» (`filter.gte('balance', filter.queryRef('@account', '[0].balance'))`)
+> СЕГОДНЯ НЕ РАБОТАЕТ и молча даёт неверный результат без единой ошибки.
+>
+> **Единственный сегодня надёжный `when`-паттерн** — `filter.isNull(field)`
+> / `filter.isNotNull(field)` против заведомо отсутствующего в схеме поля
+> (проверка наличия `$query`-рефа как guard'а, не сравнение значений).
+> **НЕ используйте `when` для полевых числовых/строковых сравнений до
+> фикса #651.**
+
+Базовый рабочий пример (`IsNull`/`IsNotNull`-guard, как в
+`crates/shamir-client/tests/batch_when_e2e.rs`, Epic03/E) — вместо
+недоступного сегодня «сравни баланс с суммой» ветвление проводится через
+заведомо `true`/`false` guard, выбранный на стороне вызывающего кода:
+
+```ts
+import { write, filter } from '@shamir/client';
+
+const resp = await db.batch()
+  .add('debit', write.insert('ledger', [{ kind: 'debit', amount: 40 }]), {
+    // "never_present_field" отсутствует в схеме -> IsNull всегда true
+    when: filter.isNull('never_present_field'),
+  })
+  .add('decline', write.insert('ledger', [{ kind: 'decline', amount: 40 }]), {
+    // IsNotNull того же отсутствующего поля -> всегда false -> decline пропускается
+    when: filter.isNotNull('never_present_field'),
+  })
+  .run();
+
+resp.results.debit.skipped;   // false — выполнился
+resp.results.decline.skipped; // true  — пропущен
+```
+
+### `switchCase` — несколько взаимоисключающих веток
+
+`batch.switchCase([...cases], defaultCase)` — синтаксический сахар:
+генерирует N `QueryEntry` с комплементарными `when`-фильтрами (`case1` →
+`AND(NOT case1, case2)` → ... → `default = NOT any_case`), гарантируя, что
+выполнится РОВНО одна ветка. Сегодня практически применим только с
+`isNull`/`isNotNull`-guard'ами (см. предупреждение выше). Сценарий с тремя
+ветками ЖЕЛАЕМОГО (но пока НЕработающего до фикса #651) вида «выбери ветку
+по сравнению значения» выглядел бы так — этот пример **намеренно
+использует ` filter.eq`/`filter.gte`, СЕГОДНЯ НЕ РАБОТАЕТ**, приведён
+только как целевой синтаксис после фикса #651:
+
+```ts
+// ⚠️ ЖЕЛАЕМЫЙ синтаксис — СЕГОДНЯ НЕ РАБОТАЕТ (см. #651 выше).
+// filter.eq/filter.gte внутри `when` всегда схлопываются в false.
+const handles = db.batch().switchCase(
+  [
+    { alias: 'gold',   op: write.insert('tier', [{ name: 'gold' }]),   condition: filter.gte('score', 90) },
+    { alias: 'silver', op: write.insert('tier', [{ name: 'silver' }]), condition: filter.gte('score', 50) },
+  ],
+  { alias: 'bronze', op: write.insert('tier', [{ name: 'bronze' }]) },
+);
+```
+
+Работающий сегодня трёхветочный пример использует `isNull`/`isNotNull`
+guard'ы вместо сравнения значений — см. `switch_three_branches_executes_exactly_one_over_real_wire`
+в `crates/shamir-client/tests/batch_when_e2e.rs`.
+
+### Каскадный skip
+
+Если алиас `A` пропущен (`when` дал `false`), и алиас `B` имеет
+`DataFlow`/`Both`-зависимость от `A` (реальная ссылка через `queryRef`, или
+`A` упомянут в `when` самого `B`) — `B` тоже пропускается автоматически,
+статус `skipped`, БЕЗ ошибки «cannot resolve». Это соответствует обычной
+if/else-интуиции: код внутри непройденной ветки (включая всё, что читает
+её вывод) просто не выполняется.
+
+**Чисто `after`-зависимость НЕ каскадируется** — `after` это порядок
+исполнения, не доступ к данным (см. §«`$query`/`queryRef` vs `after`»
+выше). Если `B after A` и `A` пропущен, `B` всё равно выполнится (если у
+`B` нет собственного `when` и нет `DataFlow`/`Both`-ребра на `A`) — просто
+без гарантии порядка, поскольку упорядочивать больше не с чем. Подробности
+— ADR `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`,
+Decision 2.
+
+### `skipped`-статус в ответе
+
+`resp.results[alias].skipped` — булево поле (по умолчанию `false`,
+опущено на wire когда `false`). Три разных состояния алиаса не путать:
+
+- **выполнен, есть данные**: `skipped: false`, `records: [...]`.
+- **выполнен, 0 совпадений**: `skipped: false`, `records: []`,
+  `stats` присутствует (например `records_scanned > 0`).
+- **пропущен `when`-условием (свой или каскад)**: `skipped: true`,
+  `records: []`, `stats`/`pagination`/`explain` отсутствуют. Алиас всё
+  равно фигурирует в `resp.execution_plan`/`resp.edge_provenance`
+  (статические артефакты плана, не зависят от runtime-решения о skip).
+- **отфильтрован `returnResult: false` / `returnOnly`**: алиас вообще
+  ОТСУТСТВУЕТ в `resp.results` — не путать с `skipped: true`. Это два
+  независимых механизма: `when` решает, выполнится ли операция;
+  `returnResult`/`returnOnly` решает, попадёт ли её результат в ответ.
+
 ## 3. Вторичные индексы
 
 Без индекса каждый `where` сканирует таблицу целиком (O(n)). Индекс
