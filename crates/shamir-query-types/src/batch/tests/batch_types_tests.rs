@@ -6,8 +6,8 @@ use shamir_types::types::value::QueryValue;
 use crate::admin::{GroupRef, ResourceRef};
 use crate::admin::{ReplDirection, ReplMode, SubAction};
 use crate::batch::{
-    BatchLimits, BatchOp, BatchRequest, BatchResponse, EdgeKind, InternerDelta, QueryEntry,
-    ResultEncoding, SubBatchOp, TransactionInfo,
+    BatchLimits, BatchOp, BatchRequest, BatchResponse, EdgeKind, ForEachOp, InternerDelta,
+    QueryEntry, ResultEncoding, SubBatchOp, TransactionInfo,
 };
 use crate::filter::FilterValue;
 
@@ -1178,6 +1178,85 @@ fn is_write_nested_subbatch_depth_2_is_true() {
         outer.is_write(),
         "nested sub-batch (depth 2) with a write at the leaf must be a write"
     );
+}
+
+// ========================================================================
+// ForEach pessimistic authorization (Epic04/D, #655 gap 3; ADR Decision 5)
+// ========================================================================
+//
+// "One layer up" from `for_each_op_tests.rs`'s `for_each_is_write_reflects_
+// body` unit test: mirrors `is_write_subbatch_with_read_and_insert_is_true`
+// / `is_write_nested_subbatch_depth_2_is_true` above, pinning the same
+// pessimistic (maximal-branch) classification for `ForEach` -- a write body
+// makes the WHOLE node a write, and (critically) `over` resolving to ZERO
+// elements at runtime plays NO role in this plan-time classification.
+
+#[test]
+fn is_write_for_each_with_only_reads_is_false() {
+    let inner_read = roundtrip_op(mpack!({"from": "users"}));
+    let fe = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::Array(vec![]),
+        bind_row: "row".to_string(),
+        batch: single_query_batch("r", inner_read),
+    });
+    assert!(!fe.is_write(), "for_each of pure reads must not be a write");
+}
+
+#[test]
+fn is_write_for_each_with_write_body_and_zero_iterations_is_true() {
+    // `over` is a literal empty array -- ZERO iterations at runtime -- yet
+    // the body contains an Insert, so classification must still be a
+    // write. This is the exact edge case ADR Decision 5 calls out: the
+    // pessimistic (maximal-branch) model classifies over the full static
+    // body, independent of runtime iteration count (including 0).
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let fe = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::Array(vec![]),
+        bind_row: "row".to_string(),
+        batch: single_query_batch("i", inner_insert),
+    });
+    assert!(
+        fe.is_write(),
+        "for_each with a write body must be classified is_write()==true \
+         even when `over` resolves to zero iterations at runtime"
+    );
+}
+
+#[test]
+fn is_write_nested_for_each_depth_2_is_true() {
+    // Depth-2 nesting: outer ForEach wraps a plain sub-batch that contains
+    // an inner ForEach whose body has an Insert. The recursion must reach
+    // down two levels, mirroring `is_write_nested_subbatch_depth_2_is_true`.
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let inner_for_each = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::Array(vec![]),
+        bind_row: "row".to_string(),
+        batch: single_query_batch("i", inner_insert),
+    });
+    let outer = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::Array(vec![]),
+        bind_row: "row".to_string(),
+        batch: single_query_batch("nested", inner_for_each),
+    });
+    assert!(
+        outer.is_write(),
+        "nested for_each (depth 2) with a write at the leaf must be a write"
+    );
+}
+
+#[test]
+fn required_access_none_for_for_each() {
+    // ForEach carries no table_ref() either -- mirrors
+    // `required_access_none_for_batch_and_subscribe` -- its body's ops are
+    // authorized recursively at execution time, once per iteration.
+    let inner_insert = roundtrip_op(mpack!({"insert_into": "users", "values": []}));
+    let fe = BatchOp::ForEach(ForEachOp {
+        over: FilterValue::Array(vec![]),
+        bind_row: "row".to_string(),
+        batch: single_query_batch("i", inner_insert),
+    });
+    assert!(fe.table_ref().is_none());
+    assert!(fe.required_access("mydb").is_none());
 }
 
 // ========================================================================
