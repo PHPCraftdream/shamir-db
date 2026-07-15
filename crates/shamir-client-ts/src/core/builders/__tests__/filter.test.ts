@@ -185,6 +185,37 @@ describe('index-accelerated operators', () => {
     });
   });
 
+  it('vector_similarity throws when ef_search exceeds MAX_EF_SEARCH (10_000)', () => {
+    expect(() =>
+      filter.vectorSimilarity('emb', [1, 0, 0.5], 10, { efSearch: 10_001 }),
+    ).toThrow(/MAX_EF_SEARCH/);
+  });
+
+  it('vector_similarity accepts ef_search exactly at MAX_EF_SEARCH (10_000)', () => {
+    const f = filter.vectorSimilarity('emb', [1, 0, 0.5], 10, {
+      efSearch: 10_000,
+    });
+    expect(f).toEqual({
+      op: 'vector_similarity',
+      field: ['emb'],
+      query: [1, 0, 0.5],
+      k: 10,
+      ef_search: 10_000,
+    });
+  });
+
+  it('vector_similarity throws when k is 0', () => {
+    expect(() => filter.vectorSimilarity('emb', [1, 0, 0.5], 0)).toThrow(
+      /k must be > 0/,
+    );
+  });
+
+  it('vector_similarity throws when k is negative', () => {
+    expect(() => filter.vectorSimilarity('emb', [1, 0, 0.5], -1)).toThrow(
+      /k must be > 0/,
+    );
+  });
+
   it('vs() chain builder .efSearch().oversample().build()', () => {
     const f = vs('emb', [1, 0, 0.5], 10)
       .efSearch(400)

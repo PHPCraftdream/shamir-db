@@ -113,6 +113,16 @@ describe('Batch — transactional', () => {
       .build();
     expect(req.transactional).toBeUndefined();
   });
+
+  it('a later no-arg transactional() call does not clear a previously-set isolation', () => {
+    const req = Batch.create()
+      .add('u', Query.from('users'))
+      .transactional('serializable')
+      .transactional()
+      .build();
+    expect(req.transactional).toBe(true);
+    expect(req.isolation).toBe('serializable');
+  });
 });
 
 // ── durability / name / returnOnly / limits ─────────────────────────

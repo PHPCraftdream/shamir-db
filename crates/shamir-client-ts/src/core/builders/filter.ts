@@ -184,6 +184,15 @@ export interface VectorSimilarityOpts {
 }
 
 /**
+ * Mirrors `MAX_EF_SEARCH` in
+ * `crates/shamir-index/src/vector/hnsw_adapter.rs:44`. The server silently
+ * clamps `ef_search` above this value instead of rejecting it; we reject
+ * explicitly on the client so the caller learns immediately rather than
+ * getting a silently-degraded (clamped) search.
+ */
+const MAX_EF_SEARCH = 10_000;
+
+/**
  * Top-k nearest-neighbor vector similarity search.
  *
  * Pass an optional 4th `opts` argument to tune the per-query recall/latency
@@ -204,6 +213,19 @@ export function vectorSimilarity(
   k: number,
   opts?: VectorSimilarityOpts,
 ): Filter {
+  if (k <= 0) {
+    throw new Error(
+      `vectorSimilarity: k must be > 0 (got ${k}) — the server would silently ` +
+        'return 0 results, which is easy to mistake for "no matches"',
+    );
+  }
+  if (opts?.efSearch !== undefined && opts.efSearch > MAX_EF_SEARCH) {
+    throw new Error(
+      `vectorSimilarity: ef_search (${opts.efSearch}) exceeds MAX_EF_SEARCH ` +
+        `(${MAX_EF_SEARCH}) — the server would silently clamp it instead of ` +
+        'rejecting it, which degrades recall without telling the caller',
+    );
+  }
   const f: Extract<Filter, { op: 'vector_similarity' }> = {
     op: 'vector_similarity',
     field: fp(field),

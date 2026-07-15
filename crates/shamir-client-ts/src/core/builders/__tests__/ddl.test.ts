@@ -121,14 +121,13 @@ describe('createIndex', () => {
     });
   });
 
-  it('unique=true + sorted=true + explicit repo', () => {
+  it('unique=true (sorted=false) + explicit repo', () => {
     const op = ddl.createIndex('idx_name', 'users', [['name']], {
       unique: true,
-      sorted: true,
       repo: 'analytics',
     });
     expect(op.unique).toBe(true);
-    expect(op.sorted).toBe(true);
+    expect(op.sorted).toBe(false);
     expect(op.repo).toBe('analytics');
   });
 
@@ -191,6 +190,12 @@ describe('createIndex', () => {
   it('omits empty include array', () => {
     const op = ddl.createIndex('idx', 't', [['f']], { include: [] });
     expect(op).not.toHaveProperty('include');
+  });
+
+  it('throws when unique + sorted are both requested (server rejects this combination)', () => {
+    expect(() =>
+      ddl.createIndex('idx_bad', 't', [['f']], { unique: true, sorted: true }),
+    ).toThrow(/cannot be both unique and sorted/);
   });
 });
 

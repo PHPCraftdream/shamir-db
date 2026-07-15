@@ -162,7 +162,7 @@ export class Batch {
    */
   transactional(isolation?: IsolationLevel): this {
     this.transactionalValue = true;
-    this.isolationValue = isolation;
+    if (isolation !== undefined) this.isolationValue = isolation;
     return this;
   }
 

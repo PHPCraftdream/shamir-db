@@ -174,6 +174,12 @@ export function createIndex(
     if_not_exists?: boolean;
   },
 ): CreateIndexOp {
+  if (opts?.unique && opts?.sorted) {
+    throw new Error(
+      'createIndex: an index cannot be both unique and sorted ' +
+        '(server rejects this combination — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
