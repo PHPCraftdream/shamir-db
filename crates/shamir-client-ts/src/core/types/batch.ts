@@ -205,11 +205,28 @@ export interface WireInternerDelta {
   entries: [number | bigint, string][];
 }
 
+/**
+ * Dependency-edge provenance tag (`EdgeKind`, `rename_all = "snake_case"`):
+ * whether a batch DAG edge came from an explicit `after`, an auto-extracted
+ * `$query` reference, or both. Mirrors
+ * `shamir-query-types::batch::edge_kind::EdgeKind` (OQL Epic 01 / Phase A).
+ */
+export type EdgeKind = 'explicit' | 'data_flow' | 'both';
+
 /** Batch response envelope. */
 export interface BatchResponse {
   id: WireValue;
   results: Record<string, QueryResult>;
   execution_plan: string[][];
+  /**
+   * Dependency-edge provenance (for debugging): alias -> dep_alias ->
+   * whether the edge came from an explicit `after`, an auto-extracted
+   * `$query` reference, or both. Lets the client tell ordering-only edges
+   * apart from real data-flow edges in `execution_plan`. Mirrors
+   * `BatchResponse.edge_provenance` (`#[serde(default,
+   * skip_serializing_if = "TMap::is_empty")]` — omitted when empty).
+   */
+  edge_provenance?: Record<string, Record<string, EdgeKind>>;
   execution_time_us: number;
   transaction?: TransactionInfo;
   /**

@@ -169,5 +169,6 @@ export type {
   QueryResult,
   TransactionInfo,
   BatchResponse,
+  EdgeKind,
 } from './batch.js';
 
