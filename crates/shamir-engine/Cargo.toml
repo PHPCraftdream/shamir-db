@@ -220,6 +220,10 @@ harness = false
 name = "when_skip_eval"
 harness = false
 
+[[bench]]
+name = "for_each_eval"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
