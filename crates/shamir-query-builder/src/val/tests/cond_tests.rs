@@ -71,6 +71,61 @@ fn cond_with_comparison() {
 }
 
 #[test]
+fn switch_case_matches_manual_nesting() {
+    // Same vip/regular/newbie scenario as `cond_nested_else`, built via
+    // `switch_case` instead of hand-nesting — must be structurally identical.
+    let vip_cond = Filter::Gte {
+        field: vec!["score".to_owned()],
+        value: lit(100_i64),
+    };
+    let regular_cond = Filter::Gte {
+        field: vec!["score".to_owned()],
+        value: lit(50_i64),
+    };
+
+    let built = switch_case(
+        vec![
+            (vip_cond.clone(), lit("vip")),
+            (regular_cond.clone(), lit("regular")),
+        ],
+        lit("newbie"),
+    );
+
+    let hand = cond(
+        vip_cond,
+        lit("vip"),
+        cond(regular_cond, lit("regular"), lit("newbie")),
+    );
+
+    assert_eq!(built, hand);
+
+    assert_wire(
+        built,
+        mpack!({
+            "$cond": {
+                "if": {
+                    "op": "gte",
+                    "field": ["score"],
+                    "value": 100
+                },
+                "then": "vip",
+                "else": {
+                    "$cond": {
+                        "if": {
+                            "op": "gte",
+                            "field": ["score"],
+                            "value": 50
+                        },
+                        "then": "regular",
+                        "else": "newbie"
+                    }
+                }
+            }
+        }),
+    );
+}
+
+#[test]
 fn cond_nested_else() {
     // Outer cond's else branch is itself a cond.
     let inner_cond = Filter::Gte {

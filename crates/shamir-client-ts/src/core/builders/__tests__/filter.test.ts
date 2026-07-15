@@ -475,6 +475,39 @@ describe('cond — conditional ($cond)', () => {
   });
 });
 
+describe('switchCase — switch-case sugar over $cond', () => {
+  it('switchCase with 3 branches equals hand-nested cond', () => {
+    const built = filter.switchCase(
+      [
+        [filter.gte('score', 100), 'vip'],
+        [filter.gte('score', 50), 'regular'],
+      ],
+      'newbie',
+    );
+
+    const hand = filter.cond(
+      filter.gte('score', 100),
+      'vip',
+      filter.cond(filter.gte('score', 50), 'regular', 'newbie'),
+    );
+
+    expect(built).toEqual(hand);
+    expect(built).toEqual({
+      $cond: {
+        if: { op: 'gte', field: ['score'], value: 100 },
+        then: 'vip',
+        else: {
+          $cond: {
+            if: { op: 'gte', field: ['score'], value: 50 },
+            then: 'regular',
+            else: 'newbie',
+          },
+        },
+      },
+    });
+  });
+});
+
 describe('param — batch parameter reference ($param)', () => {
   it('filter.param returns { $param: name }', () => {
     expect(filter.param('uid')).toEqual({ $param: 'uid' });

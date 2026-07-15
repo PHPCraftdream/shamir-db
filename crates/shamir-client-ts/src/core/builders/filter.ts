@@ -381,6 +381,35 @@ export function cond(
   return { $cond: { if: ifFilter, then, else: orElse } };
 }
 
+/**
+ * Switch-case sugar over {@link cond} — folds an ordered list of
+ * `[condition, value]` cases plus a `default` into a right-associated chain
+ * of nested `$cond`s, so 4+ branches don't require hand-nested parens.
+ *
+ * Cases are evaluated in order: the first `condition` that holds wins; if
+ * none hold, `default` is the result.
+ *
+ * ```ts
+ * switchCase(
+ *   [
+ *     [gte('score', 100), 'vip'],
+ *     [gte('score', 50), 'regular'],
+ *   ],
+ *   'newbie',
+ * )
+ * // == cond(gte('score', 100), 'vip', cond(gte('score', 50), 'regular', 'newbie'))
+ * ```
+ */
+export function switchCase(
+  cases: [Filter, FilterValue][],
+  defaultValue: FilterValue,
+): FilterValue {
+  return cases.reduceRight<FilterValue>(
+    (acc, [ifFilter, then]) => cond(ifFilter, then, acc),
+    defaultValue,
+  );
+}
+
 // ── Binary / u64 literal helpers ────────────────────────────────────
 
 /**
@@ -487,6 +516,7 @@ export const filter = {
   fn,
   expr,
   cond,
+  switchCase,
   bin,
   litU64,
 };
