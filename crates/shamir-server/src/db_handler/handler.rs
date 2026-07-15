@@ -531,7 +531,9 @@ impl ShamirDbHandler {
 pub(super) fn error_code(e: &BatchError) -> &str {
     match e {
         BatchError::TooManyQueries { .. } | BatchError::TooDeep { .. } => "limits",
-        BatchError::CircularDependency { .. } | BatchError::UnknownAlias { .. } => "validation",
+        BatchError::CircularDependency { .. }
+        | BatchError::UnknownAlias { .. }
+        | BatchError::AfterPathIgnored { .. } => "validation",
         BatchError::Timeout { .. } => "timeout",
         BatchError::LockTimeout { .. } => "lock_timeout",
         BatchError::QueryError {
