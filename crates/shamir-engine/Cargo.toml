@@ -126,6 +126,10 @@ name = "filter_eval"
 harness = false
 
 [[bench]]
+name = "cond_expr_eval"
+harness = false
+
+[[bench]]
 name = "group_by_keys"
 harness = false
 
