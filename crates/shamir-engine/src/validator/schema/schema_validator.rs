@@ -354,7 +354,11 @@ impl RecordValidator for SchemaValidator {
 ///
 /// Everything else (`FieldRef`, `QueryRef`, `FnCall`, `Expr`, `Cond`,
 /// `Param`) is an **expression** that requires evaluation at admission-time
-/// → routed through `collect_computed_defaults()`.
+/// → routed through `collect_computed_defaults()`. This holds regardless of
+/// `resolve_filter_query` now evaluating `Expr`/`Cond` (#635): admission-time
+/// default collection still needs to distinguish "static byte value known
+/// now" from "requires record + interner + FilterContext to evaluate",
+/// and `Expr`/`Cond` are squarely in the latter bucket.
 pub(crate) fn is_literal_filter_value(fv: &FilterValue) -> bool {
     matches!(
         fv,

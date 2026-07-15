@@ -207,8 +207,16 @@ pub(super) async fn resolve_table_mvcc(
 /// Literals (Null / Bool / Int / Float / String / Binary / Array) are mapped
 /// directly. `$query` / `QueryRef` variants are resolved against
 /// `resolved_refs` — the same value-first / records-second rules as the
-/// filter evaluator (Phase 2). Other dynamic variants (`$ref`, `$fn`, `$expr`,
-/// `$cond`) collapse to `Null` here; they are not meaningful as Call params.
+/// filter evaluator (Phase 2). Other dynamic variants (`$ref`, `$fn`,
+/// `$expr`, `$cond`) collapse to `Null` here — **not** because they're
+/// meaningless (they now evaluate correctly in `resolve_filter_query`,
+/// #635) but because this is a genuinely separate, record-free resolver
+/// for `Call` op positional params: there is no `RecordRef`/`Interner`/
+/// `FilterContext` in scope here to compile a `$cond`'s `Filter` condition
+/// or resolve a `$ref` field path against. Wiring those variants through
+/// would require plumbing a record + interner into every `Call`-param call
+/// site — out of scope for #635; tracked separately if Call params ever
+/// need `$cond`/`$expr`/`$fn`/`$ref` support.
 pub(super) fn filter_value_to_query_value(
     fv: &FilterValue,
     resolved_refs: &TMap<String, QueryResult>,

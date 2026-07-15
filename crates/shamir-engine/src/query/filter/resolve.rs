@@ -6,9 +6,10 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
+use super::compile::compile_filter;
 use super::eval_context::FilterContext;
 use super::filter_node::CompactPath;
-use crate::query::filter::FilterValue;
+use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
 
 /// Extract a value from an InnerValue by a path of interned keys.
@@ -198,7 +199,256 @@ pub fn resolve_filter_query(
             // scope is name-keyed (`QueryValue`) — returned directly, no conversion.
             ctx.params.get(name.as_str()).cloned()
         }
+        // `$cond` ternary (#635). `condition` is compiled and evaluated
+        // against the SAME `record`/`ctx` the caller already has, then the
+        // selected branch (`then`/`or_else`) is itself resolved recursively
+        // — it may be a literal, `$query`, `$fn`, or a nested `$cond`.
+        //
+        // Silent-miss inheritance: if `condition` references an undeclared
+        // `$query` alias (missing from `ctx.resolved_refs`) or any other
+        // unresolvable sub-value, `FilterNode::matches` treats the missing
+        // comparison as non-matching (`false`) — the same silent-miss
+        // semantics every other `FilterValue` already has in this codebase
+        // (see `$param`-silent-miss in
+        // `docs/dev-artifacts/research/oql/01-nested-batch-recursion.md`).
+        // `$cond`'s condition is not special-cased; it inherits this
+        // behaviour rather than introducing a new error path.
+        FilterValue::Cond { cond } => {
+            let node = compile_filter(&cond.condition, ctx.interner);
+            if node.matches(record, ctx) {
+                resolve_filter_query(&cond.then, record, ctx)
+            } else {
+                resolve_filter_query(&cond.or_else, record, ctx)
+            }
+        }
+        // `$expr` — arithmetic/string/logic/comparison operators that have
+        // no funclib scalar-fn equivalent (see ADR
+        // `docs/dev-artifacts/design/oql-02-expr-fate-adr.md`). Every arg is
+        // resolved recursively first (may itself be `$ref`/`$fn`/`$cond`/
+        // nested `$expr`), then the operator is applied over the resolved
+        // `QueryValue`s. Any unresolvable arg or type/arity mismatch
+        // collapses to `None` (absent), same as `FnCall`.
+        FilterValue::Expr { expr } => eval_filter_expr(expr, record, ctx),
         _ => None,
+    }
+}
+
+/// Evaluate a `FilterExpr` (`$expr`) into a `QueryValue`.
+///
+/// Args are resolved recursively via [`resolve_filter_query`] first. Type
+/// mismatches, wrong arity, or an unresolvable arg all collapse to `None`
+/// (absent) — mirroring `FnCall`'s error handling, since `$expr` fills the
+/// same "compute a scalar" role for operators funclib does not register.
+fn eval_filter_expr(
+    expr: &FilterExpr,
+    record: &(impl RecordRef + ?Sized),
+    ctx: &FilterContext,
+) -> Option<QueryValue> {
+    let mut args = Vec::with_capacity(expr.args.len());
+    for a in &expr.args {
+        args.push(resolve_filter_query(a, record, ctx)?);
+    }
+
+    #[inline]
+    fn as_f64(v: &QueryValue) -> Option<f64> {
+        match v {
+            QueryValue::Int(i) => Some(*i as f64),
+            QueryValue::F64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_str(v: &QueryValue) -> Option<&str> {
+        match v {
+            QueryValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn as_bool(v: &QueryValue) -> Option<bool> {
+        match v {
+            QueryValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// Numeric binary op — preserves `Int` when both operands are `Int`
+    /// (and the result is exact for `+`/`-`/`*`), otherwise promotes to `F64`.
+    #[inline]
+    fn numeric_binop(
+        a: &QueryValue,
+        b: &QueryValue,
+        int_op: impl Fn(i64, i64) -> Option<i64>,
+        float_op: impl Fn(f64, f64) -> f64,
+    ) -> Option<QueryValue> {
+        if let (QueryValue::Int(x), QueryValue::Int(y)) = (a, b) {
+            if let Some(r) = int_op(*x, *y) {
+                return Some(QueryValue::Int(r));
+            }
+        }
+        let x = as_f64(a)?;
+        let y = as_f64(b)?;
+        Some(QueryValue::F64(float_op(x, y)))
+    }
+
+    match expr.op {
+        FilterExprOp::Add => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            numeric_binop(a, b, |x, y| x.checked_add(y), |x, y| x + y)
+        }
+        FilterExprOp::Sub => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            numeric_binop(a, b, |x, y| x.checked_sub(y), |x, y| x - y)
+        }
+        FilterExprOp::Mul => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            numeric_binop(a, b, |x, y| x.checked_mul(y), |x, y| x * y)
+        }
+        FilterExprOp::Div => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            let x = as_f64(a)?;
+            let y = as_f64(b)?;
+            if y == 0.0 {
+                return None;
+            }
+            Some(QueryValue::F64(x / y))
+        }
+        FilterExprOp::Mod => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            if let (QueryValue::Int(x), QueryValue::Int(y)) = (a, b) {
+                if *y == 0 {
+                    return None;
+                }
+                return Some(QueryValue::Int(x % y));
+            }
+            let x = as_f64(a)?;
+            let y = as_f64(b)?;
+            if y == 0.0 {
+                return None;
+            }
+            Some(QueryValue::F64(x % y))
+        }
+        FilterExprOp::Neg => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            match a {
+                QueryValue::Int(i) => i.checked_neg().map(QueryValue::Int),
+                QueryValue::F64(f) => Some(QueryValue::F64(-f)),
+                _ => None,
+            }
+        }
+        FilterExprOp::Concat => {
+            let mut out = String::new();
+            for a in &args {
+                out.push_str(as_str(a)?);
+            }
+            Some(QueryValue::Str(out))
+        }
+        FilterExprOp::Lower => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Str(as_str(a)?.to_lowercase()))
+        }
+        FilterExprOp::Upper => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Str(as_str(a)?.to_uppercase()))
+        }
+        FilterExprOp::Trim => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Str(as_str(a)?.trim().to_string()))
+        }
+        FilterExprOp::Length => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Int(as_str(a)?.chars().count() as i64))
+        }
+        FilterExprOp::And => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(as_bool(a)? && as_bool(b)?))
+        }
+        FilterExprOp::Or => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(as_bool(a)? || as_bool(b)?))
+        }
+        FilterExprOp::Not => {
+            let [a] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(!as_bool(a)?))
+        }
+        FilterExprOp::Eq => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(
+                compare_values(a, b) == Some(Ordering::Equal),
+            ))
+        }
+        FilterExprOp::Ne => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(
+                compare_values(a, b) != Some(Ordering::Equal),
+            ))
+        }
+        FilterExprOp::Gt => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(
+                compare_values(a, b) == Some(Ordering::Greater),
+            ))
+        }
+        FilterExprOp::Gte => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(matches!(
+                compare_values(a, b),
+                Some(Ordering::Greater | Ordering::Equal)
+            )))
+        }
+        FilterExprOp::Lt => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(
+                compare_values(a, b) == Some(Ordering::Less),
+            ))
+        }
+        FilterExprOp::Lte => {
+            let [a, b] = args.as_slice() else {
+                return None;
+            };
+            Some(QueryValue::Bool(matches!(
+                compare_values(a, b),
+                Some(Ordering::Less | Ordering::Equal)
+            )))
+        }
     }
 }
 
