@@ -29,6 +29,7 @@ fn test_query_ref_eq() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -63,6 +64,7 @@ fn test_query_ref_no_match() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 

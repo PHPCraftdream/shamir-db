@@ -29,6 +29,7 @@ fn read_entry(table: &str) -> QueryEntry {
         op: BatchOp::Read(q),
         return_result: true,
         after: Vec::new(),
+        when: None,
     }
 }
 
@@ -37,6 +38,7 @@ fn sub_batch_entry(inner: BatchRequest, bind: TMap<String, FilterValue>) -> Quer
         op: BatchOp::Batch(SubBatchOp { batch: inner, bind }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     }
 }
 
@@ -288,6 +290,7 @@ fn read_entry_with_query_ref(table: &str, dep_alias: &str) -> QueryEntry {
         op: BatchOp::Read(q),
         return_result: true,
         after: Vec::new(),
+        when: None,
     }
 }
 
@@ -439,5 +442,244 @@ fn after_self_reference_with_path_tail_yields_after_path_ignored_not_circular() 
         "AfterPathIgnored must win over CircularDependency for a self-\
          referencing after with a path tail, got {:?}",
         err
+    );
+}
+
+// -------------------------------------------------------------------------
+// Bug #642 regression: extract_deps_from_filter_value must recurse into
+// $cond/$expr/$fn, not just Array/QueryRef (Epic03/B, #645 scope).
+// -------------------------------------------------------------------------
+
+#[test]
+fn where_query_ref_nested_in_cond_then_is_extracted_as_dependency() {
+    use crate::filter::{Cond, Filter};
+
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("check".to_string(), read_entry("check"));
+
+    // `orders` WHERE clause: eq(status, $cond{ if: true, then: $query(check), else: false })
+    // — the QueryRef lives inside the $cond's `then` branch, not at the
+    // top-level FilterValue position.
+    let q = ReadQuery {
+        from: crate::TableRef::new("orders"),
+        r#where: Some(Filter::Eq {
+            field: vec!["status".to_string()],
+            value: FilterValue::Cond {
+                cond: Box::new(Cond::new(
+                    Filter::Eq {
+                        field: vec!["dummy".to_string()],
+                        value: FilterValue::Bool(true),
+                    },
+                    FilterValue::query_ref_with_path("check", "[0].status"),
+                    FilterValue::Bool(false),
+                )),
+            },
+        }),
+        select: crate::read::Select::all(),
+        order_by: None,
+        pagination: crate::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: crate::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+    queries.insert(
+        "orders".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(q),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    // Before the #642 fix, `check` would NOT appear as a dependency of
+    // `orders` (silently dropped by the `_ => {}` catch-all), so `orders`
+    // would land in the SAME stage as `check` instead of a later one.
+    let deps = plan.dependencies.get("orders").expect("orders deps");
+    assert!(
+        deps.contains("check"),
+        "expected 'check' to be extracted as a dependency of 'orders' via \
+         the nested $cond.then QueryRef, got deps = {:?}",
+        deps
+    );
+
+    let check_stage = plan
+        .stages
+        .iter()
+        .position(|s| s.contains(&"check".to_string()))
+        .expect("check must be in some stage");
+    let orders_stage = plan
+        .stages
+        .iter()
+        .position(|s| s.contains(&"orders".to_string()))
+        .expect("orders must be in some stage");
+    assert!(
+        orders_stage > check_stage,
+        "orders (depends on check via nested $cond) must run in a later \
+         stage than check; got check_stage={check_stage}, orders_stage={orders_stage}"
+    );
+}
+
+#[test]
+fn where_query_ref_nested_in_expr_args_is_extracted_as_dependency() {
+    use crate::filter::{Filter, FilterExpr, FilterExprOp};
+
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("base".to_string(), read_entry("base"));
+
+    let q = ReadQuery {
+        from: crate::TableRef::new("derived"),
+        r#where: Some(Filter::Eq {
+            field: vec!["total".to_string()],
+            value: FilterValue::Expr {
+                expr: FilterExpr::new(
+                    FilterExprOp::Add,
+                    vec![
+                        FilterValue::Int(1),
+                        FilterValue::query_ref_with_path("base", "[0].amount"),
+                    ],
+                ),
+            },
+        }),
+        select: crate::read::Select::all(),
+        order_by: None,
+        pagination: crate::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: crate::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+    queries.insert(
+        "derived".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(q),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let deps = plan.dependencies.get("derived").expect("derived deps");
+    assert!(
+        deps.contains("base"),
+        "expected 'base' to be extracted as a dependency of 'derived' via \
+         the nested $expr.args QueryRef, got deps = {:?}",
+        deps
+    );
+}
+
+#[test]
+fn where_query_ref_nested_in_fn_call_args_is_extracted_as_dependency() {
+    use crate::filter::{Filter, FnCall};
+
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("src".to_string(), read_entry("src"));
+
+    let q = ReadQuery {
+        from: crate::TableRef::new("derived2"),
+        r#where: Some(Filter::Eq {
+            field: vec!["name".to_string()],
+            value: FilterValue::FnCall {
+                call: FnCall::complex(
+                    "COALESCE",
+                    vec![
+                        FilterValue::query_ref_with_path("src", "[0].name"),
+                        FilterValue::String("default".to_string()),
+                    ],
+                ),
+            },
+        }),
+        select: crate::read::Select::all(),
+        order_by: None,
+        pagination: crate::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: crate::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+    queries.insert(
+        "derived2".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(q),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let deps = plan.dependencies.get("derived2").expect("derived2 deps");
+    assert!(
+        deps.contains("src"),
+        "expected 'src' to be extracted as a dependency of 'derived2' via \
+         the nested $fn.args QueryRef, got deps = {:?}",
+        deps
+    );
+}
+
+// -------------------------------------------------------------------------
+// `when: Option<Filter>` DAG participation (Epic03/B, #645)
+// -------------------------------------------------------------------------
+
+#[test]
+fn when_query_ref_participates_in_dag_as_dataflow() {
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("check".to_string(), read_entry("check"));
+
+    let mut gated = read_entry("orders");
+    gated.when = Some(crate::filter::Filter::Eq {
+        field: vec!["dummy".to_string()],
+        value: FilterValue::query_ref_with_path("check", "[0].ok"),
+    });
+    queries.insert("orders".to_string(), gated);
+
+    let limits = BatchLimits::default();
+    let plan = BatchPlanner::plan(&queries, &limits).expect("plan should succeed");
+
+    let deps = plan.dependencies.get("orders").expect("orders deps");
+    assert!(
+        deps.contains("check"),
+        "expected 'check' to be extracted from `when` as a dependency of \
+         'orders', got deps = {:?}",
+        deps
+    );
+
+    let provenance = plan
+        .edge_provenance
+        .get("orders")
+        .expect("orders must have a provenance entry");
+    assert_eq!(
+        provenance.get("check"),
+        Some(&crate::batch::EdgeKind::DataFlow),
+        "`when`-only $query ref must be tagged DataFlow, got {:?}",
+        provenance
+    );
+
+    let check_stage = plan
+        .stages
+        .iter()
+        .position(|s| s.contains(&"check".to_string()))
+        .expect("check must be in some stage");
+    let orders_stage = plan
+        .stages
+        .iter()
+        .position(|s| s.contains(&"orders".to_string()))
+        .expect("orders must be in some stage");
+    assert!(
+        orders_stage > check_stage,
+        "orders (gated by `when` on check) must run in a later stage than \
+         check; got check_stage={check_stage}, orders_stage={orders_stage}"
     );
 }

@@ -80,4 +80,12 @@ pub struct QueryResult {
     /// EXPLAIN plan preview (present only when `ReadQuery::explain == true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explain: Option<ExplainPlan>,
+    /// Conditional-execution status (Epic03/B, #645): `true` when this
+    /// alias's op did NOT run — either its own `when` evaluated `false`, or
+    /// it was cascade-skipped because a `DataFlow`/`Both`-provenance
+    /// dependency was itself skipped. `false` (the default, omitted from
+    /// the wire) means the op executed normally; existing peers that don't
+    /// know this field never observe it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }

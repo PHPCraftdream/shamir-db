@@ -138,6 +138,7 @@ fn main() {
                             }),
                             return_result: true,
                             after: Vec::new(),
+                            when: None,
                         },
                     );
                     let request = BatchRequest {
@@ -192,6 +193,7 @@ fn main() {
                             }),
                             return_result: false,
                             after: Vec::new(),
+                            when: None,
                         },
                     );
                     let request = BatchRequest {
@@ -284,6 +286,7 @@ fn main() {
                             }),
                             return_result: false,
                             after: Vec::new(),
+                            when: None,
                         },
                     );
                     let request = BatchRequest {
@@ -543,6 +546,7 @@ fn main() {
                         }),
                         return_result: false,
                         after: Vec::new(),
+                        when: None,
                     },
                 );
                 let request = BatchRequest {
@@ -738,6 +742,7 @@ fn main() {
                         }),
                         return_result: false,
                         after: Vec::new(),
+                        when: None,
                     },
                 );
                 let request = BatchRequest {
@@ -773,6 +778,7 @@ fn main() {
                         op: BatchOp::Read(q.into()),
                         return_result: true,
                         after: Vec::new(),
+                        when: None,
                     },
                 );
                 BatchRequest {
@@ -814,6 +820,7 @@ fn main() {
                         op: BatchOp::Read(q.into()),
                         return_result: true,
                         after: Vec::new(),
+                        when: None,
                     },
                 );
                 BatchRequest {
@@ -855,6 +862,7 @@ fn main() {
                         op: BatchOp::Read(q.into()),
                         return_result: true,
                         after: Vec::new(),
+                        when: None,
                     },
                 );
                 BatchRequest {

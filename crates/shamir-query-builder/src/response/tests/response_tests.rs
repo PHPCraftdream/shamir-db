@@ -26,6 +26,7 @@ fn qresult(records: Vec<QueryRecord>) -> QueryResult {
         pagination: None,
         value: None,
         explain: None,
+        skipped: false,
     }
 }
 

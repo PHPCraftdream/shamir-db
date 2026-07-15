@@ -47,6 +47,99 @@ pub(super) fn build_resolved_refs(
     refs
 }
 
+/// Build the "did not run" [`QueryResult`] for a skipped alias (Epic03/B,
+/// #645) — own `when` evaluated `false`, or cascaded from a skipped
+/// `DataFlow`/`Both`-provenance dependency (ADR Decision 2/4). Empty
+/// records/stats/pagination/value/explain, `skipped: true` — recognizably
+/// empty-but-explicit, distinct from "0 rows matched" (`skipped: false`,
+/// `stats: Some(..)`) and from "filtered by `return_only`" (alias absent
+/// from `results` entirely, unrelated to this flag).
+pub(super) fn skipped_query_result() -> QueryResult {
+    QueryResult {
+        records: Vec::new(),
+        stats: None,
+        pagination: None,
+        value: None,
+        explain: None,
+        skipped: true,
+    }
+}
+
+/// True if `alias`'s dependencies (per `provenance`) contain at least one
+/// `DataFlow`/`Both`-provenance edge onto an already-skipped result in
+/// `all_results`.
+///
+/// `Explicit`-only (`after`) edges do NOT cascade — pure ordering, no data
+/// access, per Epic01/A's already-shipped invariant (see
+/// `build_resolved_refs`'s doc comment above). Only edges that actually
+/// grant data access propagate a skip: if `B` never observes `A`'s result
+/// (a plain `after` edge), `B` running or not running is independent of
+/// whether `A` ran.
+fn has_skipped_data_flow_dep(
+    all_results: &TMap<String, QueryResult>,
+    provenance: Option<&TMap<String, shamir_query_types::batch::EdgeKind>>,
+) -> bool {
+    let Some(provenance) = provenance else {
+        return false;
+    };
+    provenance.iter().any(|(dep_alias, kind)| {
+        kind.is_data_flow() && all_results.get(dep_alias).is_some_and(|r| r.skipped)
+    })
+}
+
+/// Decide whether `entry` should be skipped for this stage, and return the
+/// skip result if so.
+///
+/// Precedence (documented decision — the ADR does not state this
+/// explicitly, so Phase B fixes it here): **cascade wins over the entry's
+/// own `when`.** If a real data dependency was skipped, the current op's
+/// inputs are already missing/undefined (a `$query` ref onto a skipped
+/// alias would resolve to nothing) — evaluating the op's own `when` against
+/// an incomplete `resolved_refs` would be evaluating a condition over data
+/// that was never produced, not a meaningful "did the branch's guard hold"
+/// check. So cascade is checked FIRST and short-circuits before compiling
+/// or evaluating `entry.when` at all.
+pub(super) fn resolve_skip(
+    entry: &QueryEntry,
+    all_results: &TMap<String, QueryResult>,
+    provenance: Option<&TMap<String, shamir_query_types::batch::EdgeKind>>,
+    resolved_refs: &TMap<String, QueryResult>,
+    actor: &Actor,
+    params: &TMap<String, QueryValue>,
+) -> bool {
+    // Cascade: a genuine (DataFlow/Both) dependency was itself skipped.
+    // Takes precedence over the entry's own `when` — see this function's
+    // doc comment above for the rationale (undocumented in the ADR;
+    // decided here since a skipped dependency means this op's inputs are
+    // already missing, so evaluating its own `when` would be evaluating a
+    // condition over data that was never produced).
+    if has_skipped_data_flow_dep(all_results, provenance) {
+        return true;
+    }
+
+    let Some(filter) = &entry.when else {
+        return false;
+    };
+
+    // Evaluate `when` against an empty synthetic record via a scratch
+    // interner — `when` has no per-row context (ADR Decision 1): only
+    // `$query`/`$fn`/`$param`/literals are meaningful inside a `when`
+    // filter (no `FieldRef` support needed/meaningful), and
+    // `InnerValue::Null`'s `RecordRef` impl is exactly the "no field data"
+    // record already used for sub-batch `bind` resolution (see
+    // `QueryRunner::run`'s `dummy_record` below). A fresh `Interner::new()`
+    // is correct here (not the table's real interner) for the same reason
+    // the bind-resolution path uses one: any field path in `when` folds to
+    // `FilterNode::True`/`False` regardless of which interner is used,
+    // since no field ever actually resolves against a real record.
+    let scratch = shamir_types::core::interner::Interner::new();
+    let ctx = FilterContext::new(&scratch, resolved_refs)
+        .with_actor(actor.clone())
+        .with_params(params);
+    let node = crate::query::filter::compile_filter(filter, &scratch);
+    !node.matches(&InnerValue::Null, &ctx)
+}
+
 /// Encapsulates per-query execution context — resolver, admin, optional
 /// transaction state, and the [`Actor`] + db name (R2) for the
 /// transparent authorization gate.
@@ -210,6 +303,7 @@ impl<'a> QueryRunner<'a> {
                 pagination: None,
                 value,
                 explain: None,
+                skipped: false,
             });
         }
 
@@ -285,6 +379,7 @@ impl<'a> QueryRunner<'a> {
                 pagination: None,
                 value: Some(QueryValue::Map(grant_map)),
                 explain: None,
+                skipped: false,
             });
         }
 
@@ -299,6 +394,7 @@ impl<'a> QueryRunner<'a> {
                 pagination: None,
                 value: Some(QueryValue::Map(grant_map)),
                 explain: None,
+                skipped: false,
             });
         }
 
@@ -901,6 +997,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
         pagination: None,
         value: None,
         explain: None,
+        skipped: false,
     }
 }
 

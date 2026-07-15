@@ -59,6 +59,7 @@ impl FunctionInvoker for ShamirFunctionInvoker {
             pagination: None,
             value: Some(qv),
             explain: None,
+            skipped: false,
         })
     }
 }

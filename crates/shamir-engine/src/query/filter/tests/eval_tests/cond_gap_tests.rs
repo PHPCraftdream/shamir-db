@@ -231,6 +231,7 @@ fn test_cond_then_branch_is_query_ref() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
     let ctx = FilterContext::new(&interner, &refs);

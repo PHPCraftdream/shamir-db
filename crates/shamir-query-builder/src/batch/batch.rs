@@ -855,6 +855,10 @@ impl Batch {
                 op,
                 return_result,
                 after: after.iter().map(|h| h.alias().to_string()).collect(),
+                // Epic03/C (#646) adds builder-level `when` ergonomics; this
+                // mechanical field is required here only to keep the struct
+                // literal compiling after Epic03/B added `QueryEntry.when`.
+                when: None,
             },
         );
         Handle { alias }

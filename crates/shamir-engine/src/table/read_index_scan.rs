@@ -174,6 +174,7 @@ impl TableManager {
                                     pagination,
                                     value: None,
                                     explain: None,
+                                    skipped: false,
                                 });
                             }
 
@@ -198,6 +199,7 @@ impl TableManager {
                                 pagination,
                                 value: None,
                                 explain: None,
+                                skipped: false,
                             });
                         }
                     }
@@ -283,6 +285,7 @@ impl TableManager {
                 pagination,
                 value: None,
                 explain: None,
+                skipped: false,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -329,6 +332,7 @@ impl TableManager {
                     pagination,
                     value: None,
                     explain: None,
+                    skipped: false,
                 });
             }
 
@@ -354,6 +358,7 @@ impl TableManager {
                 pagination,
                 value: None,
                 explain: None,
+                skipped: false,
             })
         }
     }
@@ -426,6 +431,7 @@ impl TableManager {
             pagination: exec::fast_path_pagination(&query.pagination),
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 
@@ -566,6 +572,7 @@ impl TableManager {
             pagination: exec::fast_path_pagination(&query.pagination),
             value: None,
             explain: None,
+            skipped: false,
         })
     }
     ///
@@ -679,6 +686,7 @@ impl TableManager {
                 pagination,
                 value: None,
                 explain: None,
+                skipped: false,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -726,6 +734,7 @@ impl TableManager {
                     pagination,
                     value: None,
                     explain: None,
+                    skipped: false,
                 });
             }
 
@@ -757,6 +766,7 @@ impl TableManager {
                 pagination,
                 value: None,
                 explain: None,
+                skipped: false,
             })
         }
     }

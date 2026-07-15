@@ -220,6 +220,7 @@ impl TableManager {
                 pagination: None,
                 value: None,
                 explain: Some(plan),
+                skipped: false,
             });
         }
 
@@ -289,6 +290,7 @@ impl TableManager {
                                 pagination: None,
                                 value: None,
                                 explain: None,
+                                skipped: false,
                             });
                         }
                     }
@@ -313,6 +315,7 @@ impl TableManager {
                     pagination: None,
                     value: None,
                     explain: None,
+                    skipped: false,
                 });
             }
         }
@@ -416,6 +419,7 @@ impl TableManager {
                     pagination,
                     value: None,
                     explain: None,
+                    skipped: false,
                 });
             }
         }
@@ -464,6 +468,7 @@ impl TableManager {
                             pagination: None,
                             value: None,
                             explain: None,
+                            skipped: false,
                         });
                     }
                 }
@@ -539,6 +544,7 @@ impl TableManager {
                                 pagination: None,
                                 value: None,
                                 explain: None,
+                                skipped: false,
                             });
                         }
                     }
@@ -889,6 +895,7 @@ impl TableManager {
             pagination,
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 
@@ -998,6 +1005,7 @@ impl TableManager {
             pagination,
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 
@@ -1225,6 +1233,7 @@ impl TableManager {
             pagination,
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 
@@ -1582,6 +1591,7 @@ impl TableManager {
             },
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 
@@ -1831,6 +1841,7 @@ impl TableManager {
             },
             value: None,
             explain: None,
+            skipped: false,
         })
     }
 

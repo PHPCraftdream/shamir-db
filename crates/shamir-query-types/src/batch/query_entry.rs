@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use shamir_collections::{TFxSet, TMap};
 
+use crate::filter::Filter;
 use crate::read::ReadQuery;
 
 use super::batch_op::BatchOp;
@@ -48,6 +49,15 @@ pub struct QueryEntry {
     /// dependencies. Enables DDL→DML ordering (e.g. insert after create_table).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
+
+    /// Conditional-execution gate (Epic03/B, #645). When present, the op
+    /// executes iff `filter` evaluates to `true` against an empty synthetic
+    /// record (only `$query`/`$fn`/`$param`/literals are meaningful — see
+    /// `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`
+    /// Decision 1). `None` (the default) is today's unconditional-execution
+    /// behavior — omitted from the wire for full backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Filter>,
 }
 
 fn default_return() -> bool {
@@ -60,6 +70,7 @@ impl From<ReadQuery> for QueryEntry {
             op: BatchOp::Read(query),
             return_result: true,
             after: Vec::new(),
+            when: None,
         }
     }
 }

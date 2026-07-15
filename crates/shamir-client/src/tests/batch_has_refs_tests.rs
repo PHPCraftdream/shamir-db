@@ -41,6 +41,7 @@ fn batch_with(op: BatchOp) -> BatchRequest {
             op,
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     BatchRequest {

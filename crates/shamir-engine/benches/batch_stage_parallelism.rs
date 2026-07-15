@@ -105,6 +105,7 @@ fn build_independent_read_batch(n: usize) -> BatchRequest {
                 op: BatchOp::Read(read_q),
                 return_result: true,
                 after: Vec::new(),
+                when: None,
             },
         );
     }

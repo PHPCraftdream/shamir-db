@@ -134,7 +134,18 @@ impl BatchPlanner {
         let mut edge_provenance: TMap<String, TMap<String, EdgeKind>> = new_map();
 
         for (alias, entry) in queries {
-            let data_flow_deps = Self::extract_dependencies(&entry.op);
+            let mut data_flow_deps = Self::extract_dependencies(&entry.op);
+
+            // Epic03/B (#645): `when: Option<Filter>` participates in the
+            // DAG exactly like a WHERE clause's `$query` refs — a `when`
+            // that gates on another alias's result must run after that
+            // alias, and (per ADR Decision 2) must cascade-skip if that
+            // alias is itself skipped. Reuses the same (bug-#642-fixed)
+            // `extract_deps_from_filter`/`extract_deps_from_filter_value`
+            // leaf extractor as WHERE.
+            if let Some(when_filter) = &entry.when {
+                Self::extract_deps_from_filter(when_filter, &mut data_flow_deps);
+            }
 
             let mut provenance: TMap<String, EdgeKind> = new_map();
             for dep in &data_flow_deps {
@@ -340,6 +351,15 @@ impl BatchPlanner {
     }
 
     /// Extract dependencies from a filter value.
+    ///
+    /// Bug #642 fix: `FilterValue::Cond`/`Expr`/`FnCall` can each carry a
+    /// nested `FilterValue::QueryRef` (a `$query` reference inside a
+    /// `$cond`'s `then`/`or_else`, an `$expr`'s `args`, or a `FnCall`'s
+    /// `args`) — these must recurse into the same extractor, otherwise the
+    /// referenced alias silently drops out of the dependency graph (wrong
+    /// topological order, and — for `when` — no cascade on skip). This is
+    /// the single shared leaf-level extractor for both WHERE-`Filter` trees
+    /// and (Epic03/B) `when`-`Filter` trees; fixing it here benefits both.
     fn extract_deps_from_filter_value(value: &crate::filter::FilterValue, deps: &mut TSet<String>) {
         use crate::filter::FilterValue;
 
@@ -352,6 +372,21 @@ impl BatchPlanner {
             FilterValue::QueryRef { alias, .. } => {
                 let base_alias = Self::extract_base_alias(alias);
                 deps.insert(base_alias);
+            }
+            FilterValue::Cond { cond } => {
+                Self::extract_deps_from_filter(&cond.condition, deps);
+                Self::extract_deps_from_filter_value(&cond.then, deps);
+                Self::extract_deps_from_filter_value(&cond.or_else, deps);
+            }
+            FilterValue::Expr { expr } => {
+                for arg in &expr.args {
+                    Self::extract_deps_from_filter_value(arg, deps);
+                }
+            }
+            FilterValue::FnCall { call } => {
+                for arg in call.args() {
+                    Self::extract_deps_from_filter_value(arg, deps);
+                }
             }
             _ => {}
         }

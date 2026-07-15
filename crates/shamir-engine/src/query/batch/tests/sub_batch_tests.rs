@@ -100,6 +100,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut read_queries = new_map();
@@ -112,6 +113,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
             op: BatchOp::Read(crate::query::read::ReadQuery::from(read_q)),
             return_result: true,
             after: vec!["sub".to_string()],
+            when: None,
         },
     );
 
@@ -202,6 +204,7 @@ async fn sub_batch_bind_injects_param() {
             op: BatchOp::Read(inner_read),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -227,6 +230,7 @@ async fn sub_batch_bind_injects_param() {
         op: BatchOp::Read(crate::query::read::ReadQuery::from(outer_read_q)),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut bind = new_map();
@@ -244,6 +248,7 @@ async fn sub_batch_bind_injects_param() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -315,6 +320,7 @@ async fn sub_batch_atomic() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     inner_queries.insert(
@@ -328,6 +334,7 @@ async fn sub_batch_atomic() {
             }),
             return_result: true,
             after: vec!["good".to_string()],
+            when: None,
         },
     );
 
@@ -352,6 +359,7 @@ async fn sub_batch_atomic() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -435,6 +443,7 @@ async fn tx_in_tx_rejected() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -458,6 +467,7 @@ async fn tx_in_tx_rejected() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -556,6 +566,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
             op: BatchOp::Read(inner_read),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -580,6 +591,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -642,6 +654,7 @@ async fn unbound_param_in_bind_errors() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -673,6 +686,7 @@ async fn unbound_param_in_bind_errors() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -750,6 +764,7 @@ async fn param_in_insert_values() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -776,6 +791,7 @@ async fn param_in_insert_values() {
         op: BatchOp::Read(crate::query::read::ReadQuery::from(outer_read_q)),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut bind = new_map();
@@ -793,6 +809,7 @@ async fn param_in_insert_values() {
         }),
         return_result: true,
         after: vec!["user".to_string()],
+        when: None,
     };
 
     let read_back_q = shamir_query_builder::query::Query::from("orders").where_eq("user_id", 42i64);
@@ -800,6 +817,7 @@ async fn param_in_insert_values() {
         op: BatchOp::Read(crate::query::read::ReadQuery::from(read_back_q)),
         return_result: true,
         after: vec!["sub".to_string()],
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -873,6 +891,7 @@ async fn param_in_insert_nested() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -904,6 +923,7 @@ async fn param_in_insert_nested() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();
@@ -945,6 +965,7 @@ async fn param_in_insert_nested() {
             )),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let read_req = BatchRequest {
@@ -1004,6 +1025,7 @@ async fn param_in_insert_missing_param_errors() {
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_req = BatchRequest {
@@ -1028,6 +1050,7 @@ async fn param_in_insert_missing_param_errors() {
         }),
         return_result: true,
         after: Vec::new(),
+        when: None,
     };
 
     let mut outer_queries = new_map();

@@ -368,6 +368,7 @@ async fn test_filter_stream_with_query_ref() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -451,6 +452,7 @@ async fn test_filter_stream_query_ref_in_and() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
     refs.insert(
@@ -461,6 +463,7 @@ async fn test_filter_stream_query_ref_in_and() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -501,6 +504,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -540,6 +544,7 @@ async fn test_filter_stream_not_query_ref() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -577,6 +582,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
     refs.insert(
@@ -587,6 +593,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -678,6 +685,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -781,6 +789,7 @@ async fn test_filter_stream_in_query_ref_column() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -821,6 +830,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -866,6 +876,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
     refs.insert(
@@ -876,6 +887,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 
@@ -922,6 +934,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
 

@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
-use crate::query::batch::query_runner::{build_resolved_refs, execute_single_impl, QueryRunner};
+use crate::query::batch::query_runner::{
+    build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
+};
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
@@ -299,6 +301,13 @@ pub(super) async fn execute_plan_impl(
             let deps = plan.edge_provenance.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
+            // Epic03/B (#645): own `when` false, or cascaded from a
+            // skipped DataFlow/Both dependency — do NOT execute the op.
+            if resolve_skip(entry, &all_results, deps, &resolved_refs, actor, params) {
+                all_results.insert(alias.clone(), skipped_query_result());
+                continue;
+            }
+
             let result = execute_single_impl(
                 alias,
                 entry,
@@ -380,6 +389,13 @@ pub(super) async fn execute_plan_tx_impl(
 
             let deps = plan.edge_provenance.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
+
+            // Epic03/B (#645): own `when` false, or cascaded from a
+            // skipped DataFlow/Both dependency — do NOT execute the op.
+            if resolve_skip(entry, &all_results, deps, &resolved_refs, actor, params) {
+                all_results.insert(alias.clone(), skipped_query_result());
+                continue;
+            }
 
             let mut runner = QueryRunner {
                 resolver,

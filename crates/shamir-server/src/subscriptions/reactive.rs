@@ -59,6 +59,7 @@ pub(super) async fn execute_reactive_batch(
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
 
@@ -113,6 +114,7 @@ pub(super) async fn execute_reactive_call(
             op: BatchOp::Call(call_op.clone()),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let inner_batch = BatchRequest {
@@ -140,6 +142,7 @@ pub(super) async fn execute_reactive_call(
             }),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let wrapper = BatchRequest {

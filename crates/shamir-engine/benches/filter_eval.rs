@@ -348,6 +348,7 @@ fn main() {
             pagination: None,
             value: None,
             explain: None,
+            skipped: false,
         },
     );
     let refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(refs));

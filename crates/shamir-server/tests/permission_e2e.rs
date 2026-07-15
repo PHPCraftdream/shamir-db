@@ -668,6 +668,7 @@ fn single_batch_op_req(
             op,
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
     let batch = shamir_query_types::batch::BatchRequest {

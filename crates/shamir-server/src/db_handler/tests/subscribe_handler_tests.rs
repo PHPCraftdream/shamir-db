@@ -59,6 +59,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             op: BatchOp::Subscribe(subscribe_op),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
 
@@ -96,6 +97,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             pagination: None,
             value: Some(QueryValue::Map(initial_value)),
             explain: None,
+            skipped: false,
         },
     );
 
@@ -166,6 +168,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
                 op: make_op(),
                 return_result: true,
                 after: Vec::new(),
+                when: None,
             },
         );
     }
@@ -204,6 +207,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
                 pagination: None,
                 value: Some(QueryValue::Map(v)),
                 explain: None,
+                skipped: false,
             },
         );
     }
@@ -282,6 +286,7 @@ async fn bridge_self_exit_releases_registry_slot() {
             op: BatchOp::Subscribe(subscribe_op),
             return_result: true,
             after: Vec::new(),
+            when: None,
         },
     );
 
@@ -318,6 +323,7 @@ async fn bridge_self_exit_releases_registry_slot() {
             pagination: None,
             value: Some(QueryValue::Map(v)),
             explain: None,
+            skipped: false,
         },
     );
 
