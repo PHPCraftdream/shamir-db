@@ -77,11 +77,16 @@ export class Batch {
    * `return_result` when true and only emits `return_result: false` when
    * explicitly set to `false`.
    * `opts.after` is emitted only when non-empty.
+   * `opts.when` (Epic03/C, `#646`) is a conditional-execution guard — the
+   * op runs iff `when` evaluates to `true` (same `Filter` semantics as a
+   * WHERE clause; see
+   * `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`,
+   * Decision 1). Omitted from the wire when not provided.
    */
   add(
     alias: string,
     op: BatchOpInput | Buildable,
-    opts?: { returnResult?: boolean; after?: string[] },
+    opts?: { returnResult?: boolean; after?: string[]; when?: Filter },
   ): this {
     const resolved: BatchOpInput =
       typeof (op as Partial<Buildable>).build === 'function'
@@ -98,7 +103,48 @@ export class Batch {
       entry.after = opts.after;
     }
 
+    if (opts?.when !== undefined) {
+      entry.when = opts.when;
+    }
+
     this.queriesMap[alias] = entry;
+    return this;
+  }
+
+  /**
+   * Multi-branch conditional dispatch — builder-only sugar (no new wire
+   * primitive; mirrors `Batch::switch` on the Rust side, and the ADR's
+   * Decision 1: "Switch-case is confirmed as builder-only sugar").
+   *
+   * Registers one entry per case plus one for `defaultCase`, each tagged
+   * with a complementary `when` filter so exactly one branch's op runs at
+   * execution time:
+   * - case 1  → `when: case1.condition`
+   * - case 2  → `when: AND(NOT case1.condition, case2.condition)`
+   * - ...
+   * - default → `when: NOT(OR(case1.condition, case2.condition, ...))`
+   */
+  switchCase(
+    cases: Array<{ alias: string; condition: Filter; op: BatchOpInput | Buildable }>,
+    defaultCase: { alias: string; op: BatchOpInput | Buildable },
+  ): this {
+    const seenConditions: Filter[] = [];
+
+    for (const { alias, condition, op } of cases) {
+      const guard = seenConditions.reduceRight<Filter>(
+        (acc, prior) => ({ op: 'and', filters: [{ op: 'not', filter: prior }, acc] }),
+        condition,
+      );
+      this.add(alias, op, { when: guard });
+      seenConditions.push(condition);
+    }
+
+    const defaultGuard: Filter = {
+      op: 'not',
+      filter: { op: 'or', filters: seenConditions },
+    };
+    this.add(defaultCase.alias, defaultCase.op, { when: defaultGuard });
+
     return this;
   }
 
@@ -527,6 +573,13 @@ function collectFromEntry(e: Record<string, unknown>, out: string[]): void {
   // ReadQuery.where
   if (e.where && typeof e.where === 'object') {
     collectFromFilter(e.where as Filter, out);
+  }
+
+  // QueryEntry.when (Epic03/C, #646) — conditional-execution guard, same
+  // `Filter` grammar as `where`, so it may carry `$query` refs that must be
+  // validated identically (unknown-alias / self-reference checks).
+  if (e.when && typeof e.when === 'object') {
+    collectFromFilter(e.when as Filter, out);
   }
 
   // SubBatchOp: { batch: BatchRequest, bind?: Record<string, FilterValue> }

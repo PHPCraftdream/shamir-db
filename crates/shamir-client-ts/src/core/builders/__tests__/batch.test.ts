@@ -613,3 +613,127 @@ describe('Finding 1.3 — wire-type drift fixes', () => {
     expect(bare.explain).toBeUndefined();
   });
 });
+
+// ── when / switchCase (Epic03/C, #646) ──────────────────────────────
+
+describe('Batch — when (conditional execution guard)', () => {
+  it('omits when by default', () => {
+    const req = Batch.create()
+      .add('u', Query.from('users'))
+      .build();
+    expect(req.queries.u.when).toBeUndefined();
+  });
+
+  it('emits when when provided via opts', () => {
+    const cond = filter.eq('active', true);
+    const req = Batch.create()
+      .add('maybe', write.insert('users', { name: 'Alice' }), {
+        when: cond,
+      })
+      .build();
+    expect(req.queries.maybe.when).toEqual(cond);
+  });
+
+  it('when may carry a $query ref to another declared alias', () => {
+    const req = Batch.create()
+      .add('flag', Query.from('flags'))
+      .add(
+        'maybe',
+        write.insert('users', { name: 'Alice' }),
+        { when: filter.eq('x', filter.queryRef('flag', '[0].active')) },
+      )
+      .build();
+    expect(req.queries.maybe.when).toEqual({
+      op: 'eq',
+      field: ['x'],
+      value: { $query: 'flag', path: '[0].active' },
+    });
+    // Must not throw — $query ref inside `when` resolves to a declared alias.
+    expect(() => req).not.toThrow();
+  });
+
+  it('tryBuild rejects a when referencing an unknown alias', () => {
+    expect(() =>
+      Batch.create()
+        .add('maybe', write.insert('users', { name: 'Alice' }), {
+          when: filter.eq('x', filter.queryRef('nonexistent')),
+        })
+        .build(),
+    ).toThrow(/unknown \$query alias 'nonexistent'/);
+  });
+
+  it('does not reject a when referencing its own (declared) alias — TS validator checks alias declaration, not self-reference (matches existing `where`/`after` behavior)', () => {
+    // The TS build() validator only checks "is this alias declared", same as
+    // its existing `where`/`after` checks — it does not special-case a
+    // self-reference the way the Rust builder's `try_build()` does. Since
+    // `maybe` IS declared, this does not throw.
+    expect(() =>
+      Batch.create()
+        .add('maybe', write.insert('users', { name: 'Alice' }), {
+          when: filter.eq('x', filter.queryRef('maybe')),
+        })
+        .build(),
+    ).not.toThrow();
+  });
+});
+
+describe('Batch — switchCase (multi-branch conditional dispatch)', () => {
+  it('generates complementary when filters for two cases and a default', () => {
+    const case1 = filter.eq('tier', 'vip');
+    const case2 = filter.eq('tier', 'regular');
+
+    const req = Batch.create()
+      .switchCase(
+        [
+          { alias: 'vip_email', condition: case1, op: write.insert('emails', { kind: 'vip' }) },
+          { alias: 'regular_email', condition: case2, op: write.insert('emails', { kind: 'regular' }) },
+        ],
+        { alias: 'newbie_email', op: write.insert('emails', { kind: 'newbie' }) },
+      )
+      .build();
+
+    expect(req.queries.vip_email.when).toEqual(case1);
+    expect(req.queries.regular_email.when).toEqual({
+      op: 'and',
+      filters: [{ op: 'not', filter: case1 }, case2],
+    });
+    expect(req.queries.newbie_email.when).toEqual({
+      op: 'not',
+      filter: { op: 'or', filters: [case1, case2] },
+    });
+  });
+
+  it('single case plus default generates simple complementary guards', () => {
+    const case1 = filter.eq('active', true);
+
+    const req = Batch.create()
+      .switchCase(
+        [{ alias: 'when_active', condition: case1, op: write.insert('log', { msg: 'active' }) }],
+        { alias: 'when_inactive', op: write.insert('log', { msg: 'inactive' }) },
+      )
+      .build();
+
+    expect(req.queries.when_active.when).toEqual(case1);
+    expect(req.queries.when_inactive.when).toEqual({
+      op: 'not',
+      filter: { op: 'or', filters: [case1] },
+    });
+  });
+
+  it('switchCase entries participate in build() validation', () => {
+    expect(() =>
+      Batch.create()
+        .switchCase(
+          [
+            {
+              alias: 'when_active',
+              condition: filter.eq('active', true),
+              op: write.insert('emails', { kind: 'active' }),
+            },
+          ],
+          { alias: 'when_inactive', op: write.insert('emails', { kind: 'inactive' }) },
+        )
+        .build(),
+    ).not.toThrow();
+  });
+});

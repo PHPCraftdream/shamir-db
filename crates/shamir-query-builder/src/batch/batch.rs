@@ -4,10 +4,12 @@ use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
 };
 use shamir_query_types::call::CallOp;
-use shamir_query_types::filter::FilterValue;
+use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::subscribe::{SubscribeOp, UnsubscribeOp};
 use shamir_types::types::value::QueryValue;
+
+use crate::filter::{and, not, or};
 
 use super::build_error::BuildError;
 use super::durability::Durability;
@@ -812,6 +814,34 @@ impl Batch {
                     });
                 }
             }
+
+            // Validate `when` refs — a `when: Filter` may contain `$query`
+            // refs (e.g. `Filter::Eq { value: FilterValue::QueryRef{..} }`)
+            // that must resolve the same way WHERE-clause `$query` refs do:
+            // same alias-existence/self-reference checks, same walking
+            // approach (serialize to `QueryValue`, walk for `"$query"` keys).
+            if let Some(when) = &entry.when {
+                let bytes = rmp_serde::to_vec_named(when)
+                    .expect("Filter msgpack serialization is infallible");
+                let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
+                    .expect("Filter→QueryValue round-trip is infallible");
+                let mut refs = Vec::new();
+                collect_query_refs(&qv, &mut refs);
+                for raw_ref in &refs {
+                    let base = extract_base_alias(raw_ref);
+                    if base == *alias {
+                        return Err(BuildError::SelfReference {
+                            alias: alias.clone(),
+                        });
+                    }
+                    if !self.queries.contains_key(&base) {
+                        return Err(BuildError::UnknownAlias {
+                            alias: base,
+                            referenced_by: alias.clone(),
+                        });
+                    }
+                }
+            }
         }
         Ok(self.build())
     }
@@ -835,6 +865,81 @@ impl Batch {
             entry.after.push(on.alias().to_string());
         }
         self
+    }
+
+    /// Set (or replace) the `when` guard on an already-registered entry.
+    ///
+    /// The op behind `handle` executes iff `condition` evaluates to `true`
+    /// (via the same [`Filter`] evaluation machinery WHERE clauses use — see
+    /// `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`,
+    /// Decision 1). A skipped op produces a `skipped: true` result and
+    /// cascades the skip to any dependent with a real `$query`/`when` data-flow
+    /// edge onto it — `after`-only edges do not cascade (Decision 2).
+    ///
+    /// Post-hoc, mirroring [`Batch::after`]'s style: register the entry first
+    /// via `query`/`insert`/... , then attach the guard. Prefer this when the
+    /// condition is computed/known only after the entry's registration call
+    /// site; for the common "declare with its guard in one call" case, thread
+    /// `Filter` through the escape-hatch `op`/`op_after` call and set `when`
+    /// afterwards, or use [`Batch::switch`] for multi-branch dispatch.
+    pub fn when(&mut self, handle: &Handle, condition: Filter) -> &mut Self {
+        if let Some(entry) = self.queries.get_mut(handle.alias()) {
+            entry.when = Some(condition);
+        }
+        self
+    }
+
+    /// Multi-branch conditional dispatch — builder-only sugar (no new wire
+    /// primitive; see the ADR, Decision 1, "Switch-case is confirmed as
+    /// builder-only sugar").
+    ///
+    /// Registers one `QueryEntry` per case plus one for `default`, each
+    /// tagged with a complementary `when` filter so exactly one branch's op
+    /// runs at execution time for a given row of runtime values:
+    /// - case 1 → `when: case1_condition`
+    /// - case 2 → `when: AND(NOT case1_condition, case2_condition)`
+    /// - ...
+    /// - default → `when: NOT(case1_condition OR case2_condition OR ...)`
+    ///
+    /// `cases` is `(alias, condition, op)` triples; `default` is
+    /// `(alias, op)`. Returns the [`Handle`]s for every case (in order)
+    /// followed by the default's `Handle`.
+    ///
+    /// ```ignore
+    /// let handles = b.switch(
+    ///     vec![
+    ///         ("vip_email", is_vip.clone(), send_vip_email_op),
+    ///         ("regular_email", is_regular.clone(), send_regular_email_op),
+    ///     ],
+    ///     ("newbie_email", send_newbie_email_op),
+    /// );
+    /// ```
+    pub fn switch(
+        &mut self,
+        cases: Vec<(impl Into<String>, Filter, impl IntoBatchOp)>,
+        default: (impl Into<String>, impl IntoBatchOp),
+    ) -> Vec<Handle> {
+        let mut handles = Vec::with_capacity(cases.len() + 1);
+        let mut seen_conditions: Vec<Filter> = Vec::with_capacity(cases.len());
+
+        for (alias, condition, op) in cases {
+            let guard = seen_conditions
+                .iter()
+                .cloned()
+                .fold(condition.clone(), |acc, prior| and(vec![not(prior), acc]));
+            let handle = self.add_entry(alias, op.into_batch_op(), true);
+            self.when(&handle, guard);
+            handles.push(handle);
+            seen_conditions.push(condition);
+        }
+
+        let (default_alias, default_op) = default;
+        let default_guard = not(or(seen_conditions));
+        let default_handle = self.add_entry(default_alias, default_op.into_batch_op(), true);
+        self.when(&default_handle, default_guard);
+        handles.push(default_handle);
+
+        handles
     }
 
     fn add_entry(&mut self, alias: impl Into<String>, op: BatchOp, return_result: bool) -> Handle {

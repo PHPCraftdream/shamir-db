@@ -30,7 +30,7 @@ import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
 import type { DdlOp } from './ddl.js';
 import type { AdminOp } from './admin.js';
 import type { CallOp } from './call.js';
-import type { FilterValue } from './filter.js';
+import type { FilterValue, Filter } from './filter.js';
 import type { SubscribeOp, UnsubscribeOp } from './subscribe.js';
 
 // ── Sub-batch operation ─────────────────────────────────────────────
@@ -66,13 +66,19 @@ export type BatchOpInput =
 
 /**
  * One entry in the `queries` map. `#[serde(flatten)]` on the Rust side
- * means the op fields are spread at the same level as `return_result`
- * and `after`. The builder omits `return_result` when `true` (default)
- * and `after` when empty.
+ * means the op fields are spread at the same level as `return_result`,
+ * `after`, and `when`. The builder omits `return_result` when `true`
+ * (default), `after` when empty, and `when` when unset.
+ *
+ * `when` (Epic03/B, `#645`) is a conditional-execution guard: the op
+ * executes iff `when` is absent, or present and evaluates to `true` via the
+ * same `Filter` evaluation machinery WHERE clauses use. See
+ * `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`.
  */
 export type QueryEntry = BatchOpInput & {
   return_result?: boolean;
   after?: string[];
+  when?: Filter;
 };
 
 // ── Isolation / Durability ──────────────────────────────────────────

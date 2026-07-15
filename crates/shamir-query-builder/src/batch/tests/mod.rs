@@ -5,3 +5,4 @@ pub mod ddl_methods_tests;
 pub mod sub_batch_tests;
 pub mod subscribe_tests;
 pub mod to_request_via_msgpack_tests;
+pub mod when_tests;
