@@ -2,6 +2,8 @@
 //!
 //! - `batch_op` — dispatch enum over all supported operations.
 //! - `sub_batch_op` — nested sub-batch with parameter bindings.
+//! - `for_each_op` — data-dependent loop: run a nested batch K times, once
+//!   per element of `over`, binding the current element to `bind_row`.
 //! - `query_entry` — single operation slot + `distinct_repos` helper.
 //! - `batch_request` — top-level batch request DTO.
 //! - `batch_response` — top-level batch response DTO.
@@ -30,6 +32,7 @@ pub mod batch_plan;
 pub mod batch_request;
 pub mod batch_response;
 pub mod edge_kind;
+pub mod for_each_op;
 pub mod interner_delta;
 pub mod planner;
 pub mod query_entry;
@@ -49,6 +52,7 @@ pub use batch_plan::BatchPlan;
 pub use batch_request::BatchRequest;
 pub use batch_response::BatchResponse;
 pub use edge_kind::EdgeKind;
+pub use for_each_op::ForEachOp;
 pub use interner_delta::InternerDelta;
 pub use planner::BatchPlanner;
 pub use query_entry::{distinct_repos, QueryEntry};

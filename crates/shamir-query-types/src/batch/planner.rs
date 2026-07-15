@@ -123,6 +123,33 @@ impl BatchPlanner {
             });
         }
 
+        // Static DoS gate for `ForEach` nodes whose `over` is a literal
+        // array (Epic04/B, #653; ADR Decision 3): the iteration count is
+        // known at plan time, so fold `iterations × body.len()` into the
+        // SAME budget `max_queries` already enforces — a `ForEach` node
+        // contributes that product as "virtual op units" to the parent's
+        // total, not just its own single node. This closes the DoS hole a
+        // small-looking `ForEach` wrapping a large body would otherwise
+        // open. Dynamic `over` (a `$query`-column-ref) has no known length
+        // at plan time — the planner is a pure DTO crate with no I/O — so
+        // it is gated only by the runtime check immediately before
+        // iteration 0 (`BatchLimits::max_iterations`, engine-side).
+        for entry in queries.values() {
+            if let BatchOp::ForEach(fe) = &entry.op {
+                if let crate::filter::FilterValue::Array(items) = &fe.over {
+                    let iterations = items.len();
+                    let body_len = fe.batch.queries.len();
+                    let virtual_units = iterations.saturating_mul(body_len);
+                    if virtual_units > limits.max_queries {
+                        return Err(BatchError::TooManyQueries {
+                            count: virtual_units,
+                            max: limits.max_queries,
+                        });
+                    }
+                }
+            }
+        }
+
         // Aliases are keys in the map (no duplicates possible)
         let aliases: TSet<String> = queries.keys().cloned().collect();
         let alias_order: Vec<String> = queries.keys().cloned().collect();
@@ -257,6 +284,13 @@ impl BatchPlanner {
                 for fv in sub.bind.values() {
                     Self::extract_deps_from_filter_value(fv, &mut deps);
                 }
+            }
+            // ForEach loop (Epic04/B, #653): outer deps come exclusively
+            // from `over` — the iteration source. Do NOT descend into the
+            // loop body's queries — those are planned recursively at
+            // execution time (K times), mirroring `Batch(sub)` above.
+            BatchOp::ForEach(fe) => {
+                Self::extract_deps_from_filter_value(&fe.over, &mut deps);
             }
             // Admin ops have no query dependencies
             _ => {}
@@ -519,9 +553,18 @@ impl BatchPlanner {
 
         let mut max = current_depth;
         for op in ops {
-            if let BatchOp::Batch(sub) = op {
+            // ForEach's body nests exactly like Batch(sub)'s — it is
+            // planned once and re-planned recursively at execution time
+            // (Epic04/B, #653), so its static nesting depth must be walked
+            // the same way.
+            let child_batch = match op {
+                BatchOp::Batch(sub) => Some(&sub.batch),
+                BatchOp::ForEach(fe) => Some(&fe.batch),
+                _ => None,
+            };
+            if let Some(batch) = child_batch {
                 let child_depth = current_depth + 1;
-                let child_ops: Vec<&BatchOp> = sub.batch.queries.values().map(|e| &e.op).collect();
+                let child_ops: Vec<&BatchOp> = batch.queries.values().map(|e| &e.op).collect();
                 let d = Self::max_nesting_depth_of_ops(&child_ops, child_depth);
                 if d > max {
                     max = d;

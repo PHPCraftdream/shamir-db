@@ -447,6 +447,7 @@ fn batch_custom_limits() {
         max_execution_time_secs: 10,
         max_result_size: 1024,
         max_nesting_depth: 4,
+        max_iterations: 1000,
     };
     b.limits(custom.clone());
     let req = b.build();

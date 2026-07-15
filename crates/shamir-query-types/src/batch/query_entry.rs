@@ -77,7 +77,13 @@ impl From<ReadQuery> for QueryEntry {
 
 /// Returns the set of distinct repository names referenced by the
 /// data queries in `queries`. Admin ops (which return `none` from
-/// `BatchOp::table_ref`) do not contribute.
+/// `BatchOp::table_ref`) do not contribute. `BatchOp::Batch`/`BatchOp::
+/// ForEach` bodies are NOT walked — a nested sub-batch/loop body is planned
+/// and executed recursively as its own (typically non-transactional) scope,
+/// so its table references do not participate in the OUTER batch's
+/// cross-repo guard, matching `BatchOp::Batch`'s existing (pre-Epic04)
+/// behavior. This mirrors `BatchOp::table_ref()`, which likewise returns
+/// `None` for both variants.
 ///
 /// Used by the executor to enforce the cross-repo guard for
 /// transactional batches (Stage 4.C).

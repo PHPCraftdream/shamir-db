@@ -530,7 +530,9 @@ impl ShamirDbHandler {
 /// errors fall back to heuristic string-matching for backward compat.
 pub(super) fn error_code(e: &BatchError) -> &str {
     match e {
-        BatchError::TooManyQueries { .. } | BatchError::TooDeep { .. } => "limits",
+        BatchError::TooManyQueries { .. }
+        | BatchError::TooDeep { .. }
+        | BatchError::TooManyIterations { .. } => "limits",
         BatchError::CircularDependency { .. }
         | BatchError::UnknownAlias { .. }
         | BatchError::AfterPathIgnored { .. } => "validation",

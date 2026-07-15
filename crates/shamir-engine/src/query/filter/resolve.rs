@@ -229,7 +229,18 @@ pub fn resolve_filter_query(
         // `QueryValue`s. Any unresolvable arg or type/arity mismatch
         // collapses to `None` (absent), same as `FnCall`.
         FilterValue::Expr { expr } => eval_filter_expr(expr, record, ctx),
-        _ => None,
+        // Literal array (#653, ForEach's `over`): resolve each element
+        // recursively (an element may itself be `$query`/`$fn`/`$cond`/
+        // literal) and collect into a `QueryValue::List`. Any unresolvable
+        // element collapses the whole array to `None`, consistent with
+        // `FnCall`'s arg-resolution short-circuit above.
+        FilterValue::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(resolve_filter_query(item, record, ctx)?);
+            }
+            Some(QueryValue::List(out))
+        }
     }
 }
 
@@ -523,7 +534,7 @@ pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> O
 /// Supports `[].field` pattern — iterates all records, extracts `field` from each.
 ///
 /// C6 (#80): returns `Vec<QueryValue>` (name-keyed).
-pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<QueryValue> {
+pub(crate) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<QueryValue> {
     let path = match path {
         Some(p) => p,
         None => return Vec::new(),
@@ -591,6 +602,6 @@ pub(super) fn resolve_query_value_path<'a>(
     Some(cur)
 }
 
-pub(super) fn is_column_query_ref(fv: &FilterValue) -> bool {
+pub(crate) fn is_column_query_ref(fv: &FilterValue) -> bool {
     matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
 }

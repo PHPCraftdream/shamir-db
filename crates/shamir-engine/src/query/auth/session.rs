@@ -493,6 +493,11 @@ impl SessionPermissions {
             // inner batch's ops are checked recursively at execution time.
             BatchOp::Batch(_) => (Action::Read, Resource::Global),
 
+            // ForEach loop (Epic04/B, #653) — same as Batch(sub): no direct
+            // resource access at this level; the loop body's ops are
+            // checked recursively at execution time (once per iteration).
+            BatchOp::ForEach(_) => (Action::Read, Resource::Global),
+
             // Declarative schema DDL — Write on table (doc 05).
             // Maps to access::Action::Write in the live DAC layer
             // (admin_schema.rs). Both layers now agree on Write.

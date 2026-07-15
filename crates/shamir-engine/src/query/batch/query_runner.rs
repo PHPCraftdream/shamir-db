@@ -307,6 +307,157 @@ impl<'a> QueryRunner<'a> {
             });
         }
 
+        // ForEach loop (Epic04/B, #653) — recursive K-times execution,
+        // reusing the exact recursive seam BatchOp::Batch uses above,
+        // invoked in a loop instead of once. See
+        // `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md`.
+        if let BatchOp::ForEach(fe) = &entry.op {
+            // Guard: transactional loop body inside an already-open tx is
+            // not supported — identical rationale to the sub-batch guard
+            // above (two-phase commit across a shared TxContext is unsafe).
+            if fe.batch.transactional && self.tx.is_some() {
+                return Err(BatchError::query_coded(
+                    alias,
+                    "nested_tx_not_supported",
+                    "a transactional for_each body cannot run inside an outer transaction",
+                ));
+            }
+
+            // Resolve `over` against the CURRENT scope's resolved_refs and
+            // params, exactly like `SubBatchOp.bind`'s resolution above:
+            // a scratch Interner is safe here because `over` (like `bind`
+            // values) may only reference $query aliases, $param, or
+            // literals — never a record FieldRef (see ADR's bug #651
+            // independence analysis).
+            let dummy_record = InnerValue::Null;
+            let scratch = shamir_types::core::interner::Interner::new();
+            let over_ctx = FilterContext::new(&scratch, resolved_refs)
+                .with_actor(self.actor.clone())
+                .with_params(self.params);
+
+            // Column-ref form (`@alias[].field`) needs the "whole column"
+            // resolver (`resolve_query_ref_column`), not the scalar
+            // `resolve_filter_query` — a bare `resolve_filter_query` call on
+            // a `[]`-prefixed QueryRef path does not walk every record, only
+            // `resolve_query_ref_column` does (see Decision 1's discussion
+            // of `@alias[].field`). Every other `over` shape (literal
+            // array, `$param`, nested `$cond`/`$expr`) resolves through the
+            // normal scalar path and is expected to yield a
+            // `QueryValue::List`.
+            let elements: Vec<QueryValue> = if let crate::query::filter::FilterValue::QueryRef {
+                alias: over_alias,
+                path,
+            } = &fe.over
+            {
+                if crate::query::filter::is_column_query_ref(&fe.over) {
+                    let key = over_alias.strip_prefix('@').unwrap_or(over_alias.as_str());
+                    match resolved_refs.get(key) {
+                        Some(qr) => {
+                            crate::query::filter::resolve_query_ref_column(qr, path.as_deref())
+                        }
+                        None => Vec::new(),
+                    }
+                } else {
+                    match crate::query::filter::eval::resolve_filter_query(
+                        &fe.over,
+                        &dummy_record,
+                        &over_ctx,
+                    ) {
+                        Some(QueryValue::List(items)) => items,
+                        Some(_) | None => {
+                            return Err(BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: format!(
+                                    "for_each '{}': 'over' did not resolve to a list",
+                                    alias
+                                ),
+                                code: None,
+                            });
+                        }
+                    }
+                }
+            } else {
+                match crate::query::filter::eval::resolve_filter_query(
+                    &fe.over,
+                    &dummy_record,
+                    &over_ctx,
+                ) {
+                    Some(QueryValue::List(items)) => items,
+                    Some(_) | None => {
+                        return Err(BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "for_each '{}': 'over' did not resolve to a list",
+                                alias
+                            ),
+                            code: None,
+                        });
+                    }
+                }
+            };
+
+            // Runtime gate (ADR Decision 3): reject BEFORE iteration 0 if
+            // the resolved length exceeds max_iterations — never a partial
+            // run followed by a mid-loop abort.
+            let max_iterations = fe.batch.limits.max_iterations;
+            if elements.len() > max_iterations {
+                return Err(BatchError::TooManyIterations {
+                    alias: alias.to_string(),
+                    actual: elements.len(),
+                    max: max_iterations,
+                });
+            }
+
+            let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
+            for element in elements {
+                let mut resolved_params: TMap<String, QueryValue> = new_map();
+                resolved_params.insert(fe.bind_row.clone(), element);
+
+                // Recurse into the loop body — same seam as BatchOp::Batch,
+                // invoked in a loop instead of once (ADR Decision 1).
+                // Error semantics (ADR Decision 4): the `?` below propagates
+                // the FIRST error immediately — both the tx case (abort the
+                // whole containing batch) and the non-tx case (stop-at-
+                // first, no partial results collected) fall out of this
+                // same short-circuit, exactly like the existing sub-batch
+                // recursion and the executor's stage loop.
+                let inner_response = execute_batch_impl(
+                    &fe.batch,
+                    self.resolver,
+                    self.admin,
+                    self.invoker,
+                    self.actor.clone(),
+                    self.db_name,
+                    self.depth + 1,
+                    &resolved_params,
+                )
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("for_each '{}' iteration failed: {}", alias, e),
+                    code: e.code().map(str::to_owned),
+                })?;
+
+                // Same per-iteration value shape a single sub-batch already
+                // produces (round-trip via msgpack) — collected into a
+                // List, one entry per iteration (ADR Decision 2).
+                let value = rmp_serde::to_vec_named(&inner_response.results)
+                    .ok()
+                    .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok())
+                    .unwrap_or(QueryValue::Null);
+                iterations.push(value);
+            }
+
+            return Ok(QueryResult {
+                records: Vec::new(),
+                stats: None,
+                pagination: None,
+                value: Some(QueryValue::List(iterations)),
+                explain: None,
+                skipped: false,
+            });
+        }
+
         // Admin ops — delegate to AdminExecutor (no tx).
         if entry.op.is_admin() {
             return match self.admin {

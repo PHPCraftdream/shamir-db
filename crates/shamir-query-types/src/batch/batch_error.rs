@@ -69,6 +69,18 @@ pub enum BatchError {
     /// reject it at planning time instead of silently stripping to the base
     /// alias.
     AfterPathIgnored { alias: String, raw: String },
+
+    /// A `for_each` loop's `over` resolved to more elements than
+    /// `BatchLimits::max_iterations` allows.
+    ///
+    /// Checked at runtime, immediately BEFORE iteration 0 — never a partial
+    /// run followed by a mid-loop abort (ADR
+    /// `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md` Decision 3).
+    TooManyIterations {
+        alias: String,
+        actual: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for BatchError {
@@ -125,6 +137,13 @@ impl std::fmt::Display for BatchError {
                      alias-only ordering and never resolves a path; use a bare alias, or a \
                      '$query' reference if you need the value",
                     raw, alias
+                )
+            }
+            BatchError::TooManyIterations { alias, actual, max } => {
+                write!(
+                    f,
+                    "'for_each' loop '{}' resolved {} iterations, exceeding max_iterations ({})",
+                    alias, actual, max
                 )
             }
         }

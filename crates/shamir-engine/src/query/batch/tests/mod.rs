@@ -3,6 +3,7 @@ mod executor_tests;
 mod fk_actions_tests;
 mod fk_on_update_tests;
 mod fk_restrict_tests;
+mod for_each_tests;
 mod planner_tests;
 mod reference_tests;
 mod sub_batch_tests;

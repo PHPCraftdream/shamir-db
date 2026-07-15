@@ -25,6 +25,7 @@ use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
+use super::for_each_op::ForEachOp;
 use super::sub_batch_op::SubBatchOp;
 
 /// Batch operation - can be a read or a write operation.
@@ -142,6 +143,10 @@ pub enum BatchOp {
     /// Nested sub-batch — recursive execution with its own tx scope.
     Batch(SubBatchOp),
 
+    /// Data-dependent loop — recursive execution of a nested batch, once
+    /// per element of `over` (Epic04, #653).
+    ForEach(ForEachOp),
+
     /// Subscribe to table change events.
     Subscribe(SubscribeOp),
 
@@ -231,6 +236,7 @@ impl Serialize for BatchOp {
             BatchOp::ChangesSince(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
             BatchOp::Batch(op) => op.serialize(serializer),
+            BatchOp::ForEach(op) => op.serialize(serializer),
             BatchOp::Subscribe(op) => op.serialize(serializer),
             BatchOp::Unsubscribe(op) => op.serialize(serializer),
             BatchOp::CreateReplicationProfile(op) => op.serialize(serializer),
@@ -416,6 +422,8 @@ impl<'de> Deserialize<'de> for BatchOp {
             qv_to::<ReplicationStatusOp, _>(&bytes).map(BatchOp::ReplicationStatus)
         } else if has("call") {
             qv_to::<CallOp, _>(&bytes).map(BatchOp::Call)
+        } else if has("for_each") {
+            qv_to::<ForEachOp, _>(&bytes).map(BatchOp::ForEach)
         } else if has("batch") {
             qv_to::<SubBatchOp, _>(&bytes).map(BatchOp::Batch)
         } else if has("subscribe") {
@@ -524,6 +532,7 @@ impl BatchOp {
             | BatchOp::ChangesSince(_)
             | BatchOp::Call(_)
             | BatchOp::Batch(_)
+            | BatchOp::ForEach(_)
             | BatchOp::Subscribe(_)
             | BatchOp::Unsubscribe(_)
             | BatchOp::CreateReplicationProfile(_)
@@ -556,7 +565,10 @@ impl BatchOp {
             BatchOp::Update(u) => Some(&u.update),
             BatchOp::Set(s) => Some(&s.set),
             BatchOp::Delete(d) => Some(&d.delete_from),
-            BatchOp::Batch(_) | BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => None,
+            BatchOp::Batch(_)
+            | BatchOp::ForEach(_)
+            | BatchOp::Subscribe(_)
+            | BatchOp::Unsubscribe(_) => None,
             _ => None,
         }
     }
@@ -750,6 +762,13 @@ impl BatchOp {
             // ----- nested sub-batch --------------------------------------
             // Recursive: write if ANY nested op is a write.
             BatchOp::Batch(sub) => sub.batch.queries.values().any(|qe| qe.op.is_write()),
+
+            // ----- data-dependent loop (Epic04/B, #653) ------------------
+            // Recursive, identical to Batch(sub): write if ANY op in the
+            // loop body is a write, evaluated over the FULL static body,
+            // independent of the runtime iteration count (0, 1, or K) —
+            // per ADR Decision 5 (pessimistic/template authorization).
+            BatchOp::ForEach(fe) => fe.batch.queries.values().any(|qe| qe.op.is_write()),
         }
     }
 }

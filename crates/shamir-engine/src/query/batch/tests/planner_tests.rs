@@ -151,6 +151,7 @@ fn test_plan_custom_limits() {
         max_execution_time_secs: 30,
         max_result_size: 10_000_000,
         max_nesting_depth: 4,
+        max_iterations: 1000,
     });
     let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &request.limits).unwrap_err();
@@ -222,6 +223,7 @@ fn test_plan_dependency_depth() {
         max_execution_time_secs: 30,
         max_result_size: 10_000_000,
         max_nesting_depth: 4,
+        max_iterations: 1000,
     });
     let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &request.limits).unwrap_err();
