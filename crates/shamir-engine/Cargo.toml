@@ -216,6 +216,10 @@ harness = false
 name = "batch_stage_parallelism"
 harness = false
 
+[[bench]]
+name = "when_skip_eval"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
