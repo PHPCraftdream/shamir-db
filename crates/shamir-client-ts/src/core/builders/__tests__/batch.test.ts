@@ -340,6 +340,100 @@ describe('Batch — subBatch', () => {
   });
 });
 
+// ── forEach ──────────────────────────────────────────────────────────
+
+describe('Batch — forEach', () => {
+  it('produces { over, bind_row, for_each } wire shape with a literal-array over', () => {
+    const inner = Batch.create('inner')
+      .add('item', Query.from('items'))
+      .build();
+
+    const req = Batch.create('f')
+      .forEach('loop', [1, 2], 'row', inner)
+      .build();
+
+    expect(req.queries.loop).toEqual({
+      over: [1, 2],
+      bind_row: 'row',
+      for_each: inner,
+    });
+  });
+
+  it('accepts a $query-ref over', () => {
+    const inner = Batch.create('inner').add('q', Query.from('t')).build();
+
+    const req = Batch.create('f')
+      .add('orders', Query.from('orders'))
+      .forEach('loop', filter.queryRef('@orders', '[].id'), 'row', inner)
+      .build();
+
+    expect(req.queries.loop).toEqual({
+      over: { $query: '@orders', path: '[].id' },
+      bind_row: 'row',
+      for_each: inner,
+    });
+  });
+
+  it('accepts an $fn-call over', () => {
+    const inner = Batch.create('inner').add('q', Query.from('t')).build();
+
+    const req = Batch.create('f')
+      .forEach('loop', filter.fn('RANGE', [0, 10]), 'row', inner)
+      .build();
+
+    expect(req.queries.loop).toEqual({
+      over: { $fn: { name: 'RANGE', args: [0, 10] } },
+      bind_row: 'row',
+      for_each: inner,
+    });
+  });
+
+  it('accepts a Batch instance and calls .build()', () => {
+    const innerBuilder = Batch.create('b').add('q', Query.from('orders'));
+
+    const req = Batch.create('outer')
+      .forEach('loop', [1], 'row', innerBuilder)
+      .build();
+
+    const entry = req.queries.loop as { for_each: BatchRequest };
+    expect(entry.for_each).toEqual(innerBuilder.build());
+  });
+
+  it('respects returnResult and after opts', () => {
+    const inner = Batch.create('i').add('q', Query.from('t')).build();
+
+    const req = Batch.create('o')
+      .add('a', Query.from('users'))
+      .forEach('loop', [1], 'row', inner, { returnResult: false, after: ['a'] })
+      .build();
+
+    expect(req.queries.loop.return_result).toBe(false);
+    expect(req.queries.loop.after).toEqual(['a']);
+  });
+
+  it('wire round-trip: entry carries over/bind_row/for_each at top level, not nested under batch', () => {
+    const inner = Batch.create('inner').add('q', Query.from('t')).build();
+
+    const req = Batch.create('f').forEach('loop', [1, 2], 'row', inner).build();
+    const json = JSON.parse(JSON.stringify(req));
+
+    expect(json.queries.loop.over).toEqual([1, 2]);
+    expect(json.queries.loop.bind_row).toBe('row');
+    expect(json.queries.loop.for_each).toEqual(inner);
+    expect(json.queries.loop.batch).toBeUndefined();
+  });
+
+  it('validates $query refs inside over', () => {
+    const inner = Batch.create('inner').add('q', Query.from('t')).build();
+
+    expect(() =>
+      Batch.create('f')
+        .forEach('loop', filter.queryRef('@missing', '[].id'), 'row', inner)
+        .build(),
+    ).toThrow(/unknown \$query alias 'missing'/);
+  });
+});
+
 // ── response type smoke test ────────────────────────────────────────
 
 describe('Batch — response type smoke', () => {

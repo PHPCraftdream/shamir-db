@@ -1,7 +1,7 @@
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{
-    BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
+    BatchLimits, BatchOp, BatchRequest, ForEachOp, QueryEntry, ResultEncoding, SubBatchOp,
 };
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::{Filter, FilterValue};
@@ -668,6 +668,35 @@ impl Batch {
         inner: impl Into<BatchRequest>,
     ) -> Handle {
         self.sub_batch(alias, inner, new_map())
+    }
+
+    // ── for-each loop ─────────────────────────────────────────────────
+
+    /// Register a data-dependent for-each loop (`BatchOp::ForEach`, Epic04).
+    ///
+    /// `over` resolves to a list EXACTLY ONCE before the loop starts (it may be
+    /// a `$query` reference, an `$fn` call, or a literal array — anything
+    /// convertible to `FilterValue`). The loop body (`inner`) is planned once
+    /// and executed once per element, with the current element bound to the
+    /// parameter named `bind_row` — reference it inside `inner` via
+    /// [`crate::val::param`].
+    ///
+    /// See `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md` for the
+    /// primitive's full semantics (result shape, `max_iterations` limit, error
+    /// abort behavior).
+    pub fn for_each(
+        &mut self,
+        alias: impl Into<String>,
+        over: impl Into<FilterValue>,
+        bind_row: impl Into<String>,
+        inner: impl Into<BatchRequest>,
+    ) -> Handle {
+        let op = ForEachOp {
+            over: over.into(),
+            bind_row: bind_row.into(),
+            batch: inner.into(),
+        };
+        self.add_entry(alias, BatchOp::ForEach(op), true)
     }
 
     // ── subscriptions ─────────────────────────────────────────────

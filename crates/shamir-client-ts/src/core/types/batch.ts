@@ -46,6 +46,21 @@ export interface SubBatchOp {
   bind?: Record<string, FilterValue>;
 }
 
+/**
+ * A data-dependent for-each loop (Epic04, `{ "over": ..., "bind_row": ...,
+ * "for_each": <BatchRequest> }`). Mirrors the server's `ForEachOp`.
+ * `over` resolves to a list EXACTLY ONCE before the loop starts (it may be a
+ * `$query` ref, an `$fn` call, or a literal array); the body is executed
+ * once per element with the element bound to the parameter named
+ * `bind_row`. The inner `BatchRequest` field is wire-keyed `for_each` (not
+ * `batch`) to avoid colliding with `SubBatchOp`'s wire key.
+ */
+export interface ForEachOp {
+  over: FilterValue;
+  bind_row: string;
+  for_each: BatchRequest;
+}
+
 // ── Batch operation input ───────────────────────────────────────────
 
 /** Union of all wire-operation shapes accepted by a batch entry. */
@@ -59,6 +74,7 @@ export type BatchOpInput =
   | AdminOp
   | CallOp
   | SubBatchOp
+  | ForEachOp
   | SubscribeOp
   | UnsubscribeOp;
 

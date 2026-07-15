@@ -195,6 +195,50 @@ export class Batch {
     return this;
   }
 
+  /**
+   * Add a data-dependent for-each loop under `alias`.
+   *
+   * `over` resolves to a list EXACTLY ONCE before the loop starts — it may be
+   * a `$query` reference, an `$fn` call (`FilterValue` shape), or a literal
+   * array. `inner` may be a `Batch` instance (`.build()` called automatically)
+   * or a raw `BatchRequest`. The current element is bound to the parameter
+   * named `bindRow` — reference it inside `inner` via `{ "$param": bindRow }`.
+   *
+   * `opts.returnResult` and `opts.after` behave identically to `.add()`.
+   */
+  forEach(
+    alias: string,
+    over: FilterValue,
+    bindRow: string,
+    inner: Batch | BatchRequest,
+    opts?: {
+      returnResult?: boolean;
+      after?: string[];
+    },
+  ): this {
+    const resolved: BatchRequest =
+      typeof (inner as Partial<Batch>).build === 'function'
+        ? (inner as Batch).build()
+        : (inner as BatchRequest);
+
+    const entry: QueryEntry = {
+      over,
+      bind_row: bindRow,
+      for_each: resolved,
+    } as QueryEntry;
+
+    if (opts?.returnResult === false) {
+      entry.return_result = false;
+    }
+
+    if (opts?.after && opts.after.length > 0) {
+      entry.after = opts.after;
+    }
+
+    this.queriesMap[alias] = entry;
+    return this;
+  }
+
   /** Optional batch name for logging/debugging. */
   name(n: string): this {
     this.nameValue = n;
@@ -593,6 +637,22 @@ function collectFromEntry(e: Record<string, unknown>, out: string[]): void {
     }
     // recurse into the inner batch's queries.
     const sub = e.batch as { queries?: Record<string, unknown> };
+    if (sub.queries) {
+      for (const inner of Object.values(sub.queries)) {
+        if (inner && typeof inner === 'object') {
+          collectFromEntry(inner as Record<string, unknown>, out);
+        }
+      }
+    }
+  }
+
+  // ForEachOp: { over: FilterValue, bind_row: string, for_each: BatchRequest }
+  // — `over` lives on the entry itself, not inside `for_each`.
+  if (e.for_each && typeof e.for_each === 'object') {
+    if (e.over !== undefined) {
+      collectFromFilterValue(e.over as FilterValue, out);
+    }
+    const sub = e.for_each as { queries?: Record<string, unknown> };
     if (sub.queries) {
       for (const inner of Object.values(sub.queries)) {
         if (inner && typeof inner === 'object') {
