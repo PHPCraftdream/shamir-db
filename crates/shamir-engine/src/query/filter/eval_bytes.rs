@@ -607,6 +607,12 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
         | FilterNode::ComputedCompare { .. }
         | FilterNode::In { .. }
         | FilterNode::InSet { .. } => None,
+
+        // Value-vs-value comparison has no field path to probe in the raw
+        // msgpack bytes (both sides resolve via `resolve_filter_query`,
+        // which needs a `RecordRef`/`FilterContext`, not raw bytes) — fall
+        // back to full decode.
+        FilterNode::ValueCompare { .. } => None,
     }
 }
 

@@ -31,6 +31,46 @@ describe('comparison leaves', () => {
   });
 });
 
+describe('value-vs-value comparison (#651)', () => {
+  it('valueEq / valueNe / valueGt / valueGte / valueLt / valueLte', () => {
+    expect(filter.valueEq(1, 1)).toEqual({ op: 'value_compare', left: 1, cmp: 'eq', right: 1 });
+    expect(filter.valueNe(1, 2)).toEqual({ op: 'value_compare', left: 1, cmp: 'ne', right: 2 });
+    expect(filter.valueGt(100, 40)).toEqual({
+      op: 'value_compare',
+      left: 100,
+      cmp: 'gt',
+      right: 40,
+    });
+    expect(filter.valueGte(100, 40)).toEqual({
+      op: 'value_compare',
+      left: 100,
+      cmp: 'gte',
+      right: 40,
+    });
+    expect(filter.valueLt(10, 40)).toEqual({
+      op: 'value_compare',
+      left: 10,
+      cmp: 'lt',
+      right: 40,
+    });
+    expect(filter.valueLte(10, 40)).toEqual({
+      op: 'value_compare',
+      left: 10,
+      cmp: 'lte',
+      right: 40,
+    });
+  });
+
+  it('valueGte with a $query ref — the canonical `when` scenario shape', () => {
+    expect(filter.valueGte(filter.queryRef('balance_check', '[0].balance'), 40)).toEqual({
+      op: 'value_compare',
+      left: { $query: 'balance_check', path: '[0].balance' },
+      cmp: 'gte',
+      right: 40,
+    });
+  });
+});
+
 describe('field-equality shortcut', () => {
   it('serialises as op "field" (the FieldEq variant)', () => {
     expect(filter.fieldEq('status', 'active')).toEqual({

@@ -121,7 +121,26 @@ export type Filter =
       expr_args?: FilterValue[];
       cmp: string;
       value: FilterValue;
+    }
+  | {
+      op: 'value_compare';
+      left: FilterValue;
+      /**
+       * Named `cmp` (not `op`) to mirror the Rust `Filter::ValueCompare`
+       * field name — the enclosing `Filter` enum's own discriminant is
+       * already tagged `op`, so a per-variant field literally named `op`
+       * would collide with that.
+       */
+      cmp: ValueCompareOp;
+      right: FilterValue;
     };
 
 /** The `computed` filter variant, narrowed (used by the builder). */
 export type ComputedFilter = Extract<Filter, { op: 'computed' }>;
+
+/**
+ * Comparison operator for the `value_compare` filter variant — a
+ * value-vs-value comparison with no record/field involved. Mirrors Rust
+ * `ValueCompareOp` (`filter_enum.rs`).
+ */
+export type ValueCompareOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte';

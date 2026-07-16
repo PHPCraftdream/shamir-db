@@ -7,44 +7,30 @@
  * scenarios, ported to the TS builder (`Batch.add(alias, op, { when })` /
  * `Batch.switchCase` from Phase C, task #646).
  *
- * # KNOWN ENGINE BUG — found while writing the Rust twin of this test
- * (`crates/shamir-client/tests/batch_when_e2e.rs`), NOT fixed here per
- * this task's brief — production code from Phases A-D is out of scope,
- * report only.
+ * # #651 FIXED — real data-driven `when` conditions now work
  *
- * `QueryRunner::resolve_skip`
- * (`crates/shamir-engine/src/query/batch/query_runner.rs:120-140`)
- * evaluates a `when` filter against an EMPTY SYNTHETIC RECORD using a
- * FRESH scratch `Interner::new()`. `compile_filter`
- * (`crates/shamir-engine/src/query/filter/compile.rs`) resolves every
- * comparison operator's `field` path via a LOOKUP against that scratch
- * interner (`interner.get_ind(part)` — never an insert), which returns
- * `None` for ANY field name (the interner is empty). So
- * `Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq` inside a `when` ALWAYS fold to
- * `false` regardless of the RHS value — even a `$query` ref carrying real
- * cross-query data (e.g. a fetched `balance`) can never make a
- * field-based comparison true. `IsNull` always folds to `true`,
- * `IsNotNull` always folds to `false`, for the same reason.
+ * Earlier versions of this file documented a critical engine bug (#651):
+ * `QueryRunner::resolve_skip` evaluated `when` against an EMPTY SYNTHETIC
+ * RECORD through a FRESH scratch `Interner::new()`, so every field-based
+ * comparison variant (`eq`/`ne`/`gt`/`gte`/`lt`/`lte`/`field`) ALWAYS
+ * folded to a fixed result regardless of the RHS `$query` data.
  *
- * Net effect: the ADR's own canonical scenario — "run this op iff
- * `balance >= amount`" via a real `$query`-ref comparison — is NOT
- * reachable through any field-based `Filter` today, contradicting the
- * ADR's stated intent that `when` should support `$query`/`$fn`/`$param`
- * value comparisons
- * (`docs/dev-artifacts/design/oql-03-conditional-execution-adr.md:44-50`).
- * This was verified directly against the real engine while writing the
- * Rust twin of this file (a temporary probe, reverted, is described in
- * that file's header). Track the real fix under a dedicated follow-up
- * task, not Epic03/E.
+ * The fix: `filter.valueGte`/`valueLt`/etc. (`{ op: 'value_compare', left,
+ * cmp, right }`) — a value-vs-value comparison with NO field/record
+ * dependency. Both sides resolve via the same `$query`/`$fn`/`$param`
+ * resolution `$cond`/`$expr` already use, at MATCH time against the
+ * current query results, so a real cross-query comparison is finally
+ * reachable inside `when`. Using an OLD field-based comparison variant
+ * inside `when` is now REJECTED at plan time (`BatchError::InvalidWhenFilter`)
+ * instead of silently folding.
  *
- * Every scenario below therefore uses `filter.isNull`/`filter.isNotNull`
- * guards on a field that structurally never exists on the synthetic
- * record — the only deterministic true/false primitives available today
- * — to prove the wire round-trip's skip/cascade/`switchCase` semantics
- * over a REAL server. The "read balance -> debit or decline" narrative is
- * preserved by choosing which deterministic guard fires per scenario, and
- * each scenario cross-checks via a fresh read that exactly the expected
- * branch's row landed in the `ledger` table.
+ * Scenarios 1 and 2 below now drive the debit/decline branch selection
+ * from REAL query data (`balance_check`'s fetched balance vs. a literal
+ * `amount`) via `filter.valueGte`/`filter.valueLt` — the ADR's own
+ * canonical shape. Scenario 3 (`switchCase`) still uses
+ * `filter.isNull`/`filter.isNotNull` guards on a synthetic field — that
+ * remains a legitimate presence-guard idiom (ADR Decision 1), not a
+ * workaround for this bug.
  *
  * # SECOND BUG (TS client only) — found while writing this file, NOT fixed
  * here, same out-of-scope rule as above

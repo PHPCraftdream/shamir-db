@@ -5,7 +5,22 @@ use super::fts::like_pattern_to_regex;
 use super::resolve::{filter_value_to_query, intern_field_path, intern_field_path_compact};
 use crate::query::filter::{Filter, FilterValue};
 use regex::Regex;
+use shamir_query_types::filter::ValueCompareOp;
 use shamir_types::core::interner::Interner;
+
+/// Convert the DTO-level `ValueCompareOp` (defined in `shamir-query-types`,
+/// which does not depend on `shamir-engine`) into the engine's `CompareOp`
+/// used by the compiled `FilterNode` tree.
+fn value_compare_op_to_compare_op(op: ValueCompareOp) -> CompareOp {
+    match op {
+        ValueCompareOp::Eq => CompareOp::Eq,
+        ValueCompareOp::Ne => CompareOp::Ne,
+        ValueCompareOp::Gt => CompareOp::Gt,
+        ValueCompareOp::Gte => CompareOp::Gte,
+        ValueCompareOp::Lt => CompareOp::Lt,
+        ValueCompareOp::Lte => CompareOp::Lte,
+    }
+}
 
 /// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
 ///
@@ -20,6 +35,16 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::Lt { field, value } => compile_compare(field, value, CompareOp::Lt, interner),
         Filter::Lte { field, value } => compile_compare(field, value, CompareOp::Lte, interner),
         Filter::FieldEq { field, value } => compile_compare(field, value, CompareOp::Eq, interner),
+
+        // Value-vs-value comparison (#651 fix) — no field path to resolve,
+        // so no compile-time folding: both sides are resolved at MATCH
+        // time via `resolve_filter_query` (their `$query` refs vary per
+        // call). See `FilterNode::ValueCompare::matches` for the eval.
+        Filter::ValueCompare { left, cmp, right } => FilterNode::ValueCompare {
+            left: left.clone(),
+            op: value_compare_op_to_compare_op(*cmp),
+            right: right.clone(),
+        },
 
         Filter::And { filters } => FilterNode::And(
             filters

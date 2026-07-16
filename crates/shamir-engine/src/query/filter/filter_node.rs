@@ -121,6 +121,18 @@ pub enum FilterNode {
         pre_resolved: Option<QueryValue>,
         op: CompareOp,
     },
+    /// Value-vs-value comparison (`Filter::ValueCompare`) — no field path,
+    /// no record dependency. BOTH `left` and `right` are resolved via
+    /// `resolve_filter_query` at MATCH time (never compile time — unlike
+    /// `Compare` above, this can't be constant-folded since `$query` refs
+    /// resolve from `ctx.resolved_refs`, which varies per call). Meaningful
+    /// in ANY filter-evaluation context; the primary motivating use is
+    /// `when` guards, which have no record to compare a field against.
+    ValueCompare {
+        left: FilterValue,
+        op: CompareOp,
+        right: FilterValue,
+    },
     And(Vec<FilterNode>),
     Or(Vec<FilterNode>),
     Not(Box<FilterNode>),
@@ -262,6 +274,27 @@ impl FilterNode {
                                 scalar_ref_cmp_qv(a, b),
                                 Some(Ordering::Less | Ordering::Equal)
                             )
+                        }
+                    },
+                    (None, _) | (_, None) => matches!(op, CompareOp::Ne),
+                }
+            }
+
+            FilterNode::ValueCompare { left, op, right } => {
+                let lhs = resolve_filter_query(left, record, ctx);
+                let rhs = resolve_filter_query(right, record, ctx);
+                match (&lhs, &rhs) {
+                    (Some(a), Some(b)) => match op {
+                        CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
+                        CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                        CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
+                        CompareOp::Gte => matches!(
+                            compare_values(a, b),
+                            Some(Ordering::Greater | Ordering::Equal)
+                        ),
+                        CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
+                        CompareOp::Lte => {
+                            matches!(compare_values(a, b), Some(Ordering::Less | Ordering::Equal))
                         }
                     },
                     (None, _) | (_, None) => matches!(op, CompareOp::Ne),

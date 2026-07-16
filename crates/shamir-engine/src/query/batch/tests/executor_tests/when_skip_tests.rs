@@ -10,7 +10,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
-use shamir_query_types::filter::Filter;
+use shamir_query_types::filter::{Filter, FilterValue, ValueCompareOp};
 use shamir_types::access::Actor;
 
 use crate::query::batch::execute_batch;
@@ -559,10 +559,15 @@ async fn when_referencing_a_wholly_undeclared_alias_is_rejected_at_plan_time() {
     let mut req = b.build();
 
     // `$query` ref to an alias that is never declared anywhere in this
-    // request.
-    req.queries.get_mut("probe").unwrap().when = Some(Filter::Eq {
-        field: vec!["x".to_string()],
-        value: shamir_query_types::filter::FilterValue::QueryRef {
+    // request. Uses `ValueCompare` (not a field-based variant like `Eq`) so
+    // this test exercises the UnknownAlias plan-time check specifically,
+    // not the separate #651 `InvalidWhenFilter` field-based-comparison
+    // rejection (see `when_field_based_comparison_is_rejected_at_plan_time`
+    // below for that check).
+    req.queries.get_mut("probe").unwrap().when = Some(Filter::ValueCompare {
+        left: shamir_query_types::filter::FilterValue::Int(1),
+        cmp: shamir_query_types::filter::ValueCompareOp::Eq,
+        right: shamir_query_types::filter::FilterValue::QueryRef {
             alias: "totally_undeclared".to_string(),
             path: Some("[0].y".to_string()),
         },
@@ -586,4 +591,171 @@ async fn when_referencing_a_wholly_undeclared_alias_is_rejected_at_plan_time() {
         }
         other => panic!("expected BatchError::UnknownAlias, got: {other:?}"),
     }
+}
+
+/// #651 fix: `Filter::ValueCompare` makes the ADR's own canonical scenario
+/// — "run this op iff `$query_ref_A >= $query_ref_B`" (e.g. "debit iff
+/// balance >= amount") — actually work, over BOTH directions. Unlike the
+/// old field-based variants (which always folded to a fixed result against
+/// the empty synthetic record — see `when_field_based_comparison_is_rejected...`
+/// below), `ValueCompare` has no field/record dependency: both sides are
+/// resolved via `resolve_filter_query` against `ctx.resolved_refs` at
+/// match time, so a real cross-query comparison is finally reachable.
+#[tokio::test]
+async fn value_compare_makes_balance_gte_amount_scenario_work_sufficient_direction() {
+    let resolver = setup_resolver().await;
+
+    let mut seed = Batch::new();
+    seed.id(1);
+    seed.op_silent(
+        "seed",
+        write::insert("users").row(doc().set("name", "alice").set("balance", 100_i64)),
+    );
+    let seed_req = seed.build();
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    let balance_check = b.query(
+        "balance_check",
+        Query::from("users").where_eq("name", "alice"),
+    );
+    let debit = b.op_silent(
+        "debit",
+        write::insert("users").row(doc().set("name", "debit-row")),
+    );
+    let mut req = b.build();
+
+    // balance (100, via $query ref to balance_check's first row) >= amount
+    // (literal 40) — should evaluate true, so `debit` must run.
+    req.queries.get_mut(debit.alias()).unwrap().when = Some(Filter::ValueCompare {
+        left: balance_check.first().field("balance"),
+        cmp: ValueCompareOp::Gte,
+        right: FilterValue::Int(40),
+    });
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert!(
+        !resp.results["debit"].skipped,
+        "balance (100) >= amount (40) must evaluate true via ValueCompare \
+         and execute the debit: {:?}",
+        resp.results["debit"]
+    );
+}
+
+/// Complementary direction of the scenario above: insufficient balance ->
+/// `ValueCompare` evaluates false -> the op is skipped. Together the two
+/// tests prove the comparison is genuinely data-driven, not "always true by
+/// coincidence".
+#[tokio::test]
+async fn value_compare_makes_balance_gte_amount_scenario_work_insufficient_direction() {
+    let resolver = setup_resolver().await;
+
+    let mut seed = Batch::new();
+    seed.id(1);
+    seed.op_silent(
+        "seed",
+        write::insert("users").row(doc().set("name", "bob").set("balance", 10_i64)),
+    );
+    let seed_req = seed.build();
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    let balance_check = b.query(
+        "balance_check",
+        Query::from("users").where_eq("name", "bob"),
+    );
+    let debit = b.op_silent(
+        "debit",
+        write::insert("users").row(doc().set("name", "debit-row")),
+    );
+    let mut req = b.build();
+
+    // balance (10) >= amount (40) is false -> debit must be skipped.
+    req.queries.get_mut(debit.alias()).unwrap().when = Some(Filter::ValueCompare {
+        left: balance_check.first().field("balance"),
+        cmp: ValueCompareOp::Gte,
+        right: FilterValue::Int(40),
+    });
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert!(
+        resp.results["debit"].skipped,
+        "balance (10) >= amount (40) must evaluate false via ValueCompare \
+         and skip the debit: {:?}",
+        resp.results["debit"]
+    );
+}
+
+/// #651 safety net: an OLD field-based comparison variant (`Gte` here) used
+/// inside `when` must be REJECTED at plan time with a clear
+/// `BatchError::InvalidWhenFilter`, instead of silently folding to a fixed
+/// result the way it did before this fix (`Gte`/`Eq`/etc. always folded to
+/// `FilterNode::False` against the empty synthetic record's scratch
+/// interner). This turns the old silent-wrong-answer bug into a caught,
+/// explicit error that names the fix (`Filter::ValueCompare`).
+#[tokio::test]
+async fn when_field_based_comparison_is_rejected_at_plan_time() {
+    let resolver = setup_resolver().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("probe", Query::from("users"));
+    let mut req = b.build();
+
+    req.queries.get_mut("probe").unwrap().when = Some(Filter::Gte {
+        field: vec!["balance".to_string()],
+        value: FilterValue::Int(40),
+    });
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err(
+            "an old field-based comparison variant inside `when` must be \
+             rejected at plan time, not silently folded to a fixed result",
+        );
+
+    match err {
+        crate::query::batch::BatchError::InvalidWhenFilter { alias, message } => {
+            assert_eq!(alias, "probe");
+            assert!(
+                message.contains("ValueCompare"),
+                "error message must name the fix (Filter::ValueCompare): {message}"
+            );
+        }
+        other => panic!("expected BatchError::InvalidWhenFilter, got: {other:?}"),
+    }
+}
+
+/// `IsNull`/`IsNotNull` remain a legitimate presence-guard pattern inside
+/// `when` (ADR Decision 1) — they must NOT be rejected by the new #651
+/// defensive check, unlike the OLD field-based comparison variants above.
+#[tokio::test]
+async fn is_null_and_is_not_null_remain_accepted_inside_when() {
+    let resolver = setup_resolver().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    let probe = b.query("probe", Query::from("users"));
+    let mut req = b.build();
+
+    req.queries.get_mut(probe.alias()).unwrap().when = Some(Filter::IsNull {
+        field: vec!["anything".to_string()],
+    });
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect("IsNull inside `when` must remain accepted, not rejected");
+    assert!(!resp.results["probe"].skipped);
 }

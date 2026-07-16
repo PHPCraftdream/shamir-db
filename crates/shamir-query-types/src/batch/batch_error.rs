@@ -81,6 +81,16 @@ pub enum BatchError {
         actual: usize,
         max: usize,
     },
+
+    /// #651: `entry.when` contains an old record-field-based comparison
+    /// variant (`Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq`).
+    ///
+    /// `when` has no per-row record to resolve a `FieldPath` against — a
+    /// field-based comparison there ALWAYS folded (silently, before this
+    /// error existed) to a fixed result, since `compile_filter` compiles it
+    /// against an empty scratch interner. This turns that silent-wrong-
+    /// answer bug into a caught, explicit plan-time error.
+    InvalidWhenFilter { alias: String, message: String },
 }
 
 impl std::fmt::Display for BatchError {
@@ -145,6 +155,9 @@ impl std::fmt::Display for BatchError {
                     "'for_each' loop '{}' resolved {} iterations, exceeding max_iterations ({})",
                     alias, actual, max
                 )
+            }
+            BatchError::InvalidWhenFilter { alias, message } => {
+                write!(f, "invalid 'when' filter on '{}': {}", alias, message)
             }
         }
     }

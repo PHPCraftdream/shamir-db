@@ -5,7 +5,7 @@
 //! arguments into their wire representations and are reused by
 //! [`super::combinators`] via `pub(super)`.
 
-use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_query_types::filter::{Filter, FilterValue, ValueCompareOp};
 
 use crate::val::IntoFieldPath;
 
@@ -70,6 +70,70 @@ pub fn lte(field: impl IntoFieldPath, value: impl Into<FilterValue>) -> Filter {
     Filter::Lte {
         field: fp(field),
         value: fv(value),
+    }
+}
+
+// ── value-vs-value comparison (#651) ─────────────────────────────────
+//
+// Unlike `eq`/`ne`/`gt`/`gte`/`lt`/`lte` above (which compare a RECORD
+// FIELD against a value), these compare TWO independently-resolved
+// `FilterValue`s with no record involved — the only comparison shape
+// meaningful inside a `when` guard (`QueryEntry.when`), which has no
+// per-row record to resolve a field path against. Typical usage compares
+// two `$query` refs, e.g. `value_gte(val::query_ref("balance"),
+// val::query_ref("amount"))` for "run this op iff balance >= amount".
+
+/// `left == right` (value-vs-value, no field/record involved).
+pub fn value_eq(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Eq,
+        right: fv(right),
+    }
+}
+
+/// `left != right` (value-vs-value, no field/record involved).
+pub fn value_ne(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Ne,
+        right: fv(right),
+    }
+}
+
+/// `left > right` (value-vs-value, no field/record involved).
+pub fn value_gt(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Gt,
+        right: fv(right),
+    }
+}
+
+/// `left >= right` (value-vs-value, no field/record involved).
+pub fn value_gte(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Gte,
+        right: fv(right),
+    }
+}
+
+/// `left < right` (value-vs-value, no field/record involved).
+pub fn value_lt(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Lt,
+        right: fv(right),
+    }
+}
+
+/// `left <= right` (value-vs-value, no field/record involved).
+pub fn value_lte(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {
+    Filter::ValueCompare {
+        left: fv(left),
+        cmp: ValueCompareOp::Lte,
+        right: fv(right),
     }
 }
 

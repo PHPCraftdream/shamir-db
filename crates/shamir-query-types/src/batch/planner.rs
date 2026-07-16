@@ -171,6 +171,20 @@ impl BatchPlanner {
             // `extract_deps_from_filter`/`extract_deps_from_filter_value`
             // leaf extractor as WHERE.
             if let Some(when_filter) = &entry.when {
+                // #651 defensive check: reject OLD field-based comparison
+                // variants inside `when` BEFORE any execution — they
+                // resolve a `FieldPath` against a record that does not
+                // exist in a `when` context, and would otherwise silently
+                // fold to a fixed result (see `QueryRunner::resolve_skip`).
+                if Self::contains_field_based_comparison(when_filter) {
+                    return Err(BatchError::InvalidWhenFilter {
+                        alias: alias.clone(),
+                        message: "field-based comparisons are not meaningful inside `when` \
+                            (no record exists) — use Filter::ValueCompare for value-vs-value \
+                            comparisons instead"
+                            .to_string(),
+                    });
+                }
                 Self::extract_deps_from_filter(when_filter, &mut data_flow_deps);
             }
 
@@ -381,6 +395,36 @@ impl BatchPlanner {
                     }
                 }
             }
+            Filter::ValueCompare { left, right, .. } => {
+                Self::extract_deps_from_filter_value(left, deps);
+                Self::extract_deps_from_filter_value(right, deps);
+            }
+        }
+    }
+
+    /// #651 defensive check: return `true` iff `filter` contains, anywhere
+    /// in its tree, an OLD record-field-based comparison variant
+    /// (`Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq`). These variants resolve a
+    /// `FieldPath` against a REAL record — meaningless inside a `when` guard,
+    /// which has no record (see `QueryRunner::resolve_skip`). `IsNull` /
+    /// `IsNotNull` are intentionally EXCLUDED — they remain a legitimate
+    /// presence-guard pattern against the synthetic record (ADR Decision 1).
+    /// `And`/`Or`/`Not`/`ValueCompare` recurse/pass through without
+    /// themselves being flagged.
+    fn contains_field_based_comparison(filter: &Filter) -> bool {
+        match filter {
+            Filter::Eq { .. }
+            | Filter::Ne { .. }
+            | Filter::Gt { .. }
+            | Filter::Gte { .. }
+            | Filter::Lt { .. }
+            | Filter::Lte { .. }
+            | Filter::FieldEq { .. } => true,
+            Filter::And { filters } | Filter::Or { filters } => {
+                filters.iter().any(Self::contains_field_based_comparison)
+            }
+            Filter::Not { filter } => Self::contains_field_based_comparison(filter),
+            _ => false,
         }
     }
 

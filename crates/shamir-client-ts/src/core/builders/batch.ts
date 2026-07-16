@@ -579,6 +579,10 @@ function collectFromFilter(f: Filter, out: string[]): void {
       collectFromFilterValue(f.value, out);
       if (f.expr_args) for (const v of f.expr_args) collectFromFilterValue(v, out);
       return;
+    case 'value_compare':
+      collectFromFilterValue(f.left, out);
+      collectFromFilterValue(f.right, out);
+      return;
     // leaf filters with no FilterValue positions.
     case 'like':
     case 'i_like':

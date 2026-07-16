@@ -10,73 +10,33 @@
 //!
 //! Task #648 — OQL Epic 03 / Phase E.
 //!
-//! # KNOWN ENGINE BUG — found while writing this e2e test, NOT fixed here
+//! # #651 FIXED — real data-driven `when` conditions now work
 //!
-//! Per this task's brief, production code from Phases A-D is out of scope —
-//! bugs are reported, not silently patched. This file documents a real
-//! functional gap rather than exercising the (currently unreachable)
-//! canonical "read balance -> conditionally debit or decline" scenario the
-//! brief and the ADR describe:
+//! Earlier versions of this file documented a critical engine bug (#651):
+//! `QueryRunner::resolve_skip` evaluated `when` against an EMPTY SYNTHETIC
+//! RECORD through a FRESH scratch `Interner::new()`, so every field-based
+//! comparison variant (`Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq`) ALWAYS
+//! folded to a fixed result regardless of the RHS `$query` data — the ADR's
+//! own canonical scenario ("run this op iff `$query_ref_A >= $query_ref_B`",
+//! e.g. "debit iff balance >= amount") was silently unreachable.
 //!
-//! `QueryRunner::resolve_skip`
-//! (`crates/shamir-engine/src/query/batch/query_runner.rs:120-140`)
-//! evaluates a `when` filter against an EMPTY SYNTHETIC RECORD, using a
-//! FRESH scratch `Interner::new()` (never the real table interner):
+//! The fix: `Filter::ValueCompare { left, cmp, right }` — a value-vs-value
+//! comparison with NO field/record dependency. Both sides resolve via
+//! `resolve_filter_query` (the same `$query`/`$fn`/`$param`/literal
+//! resolution `$cond`/`$expr` already use) at MATCH time against the
+//! current `resolved_refs`, so a real cross-query comparison is finally
+//! reachable inside `when`. The old field-based variants are UNCHANGED for
+//! real per-row WHERE-clause filtering, but using one inside `when` is now
+//! REJECTED at plan time with `BatchError::InvalidWhenFilter` instead of
+//! silently folding — see `when_field_based_comparison_is_rejected_at_plan_time`
+//! in `crates/shamir-engine/src/query/batch/tests/executor_tests/when_skip_tests.rs`.
 //!
-//! ```ignore
-//! let scratch = shamir_types::core::interner::Interner::new();
-//! let ctx = FilterContext::new(&scratch, resolved_refs)...;
-//! let node = crate::query::filter::compile_filter(filter, &scratch);
-//! !node.matches(&InnerValue::Null, &ctx)
-//! ```
-//!
-//! `compile_filter` (`crates/shamir-engine/src/query/filter/compile.rs`)
-//! resolves EVERY comparison operator's `field` path via
-//! `intern_field_path_compact(field, interner)` — a LOOKUP
-//! (`interner.get_ind(part)`), never an insert. On the scratch interner
-//! (freshly created, zero registered field names) this lookup returns
-//! `None` for ANY field name, so `compile_compare` (used by
-//! `Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq`) ALWAYS folds to
-//! `FilterNode::False` — regardless of the RHS value, even when the RHS is
-//! a `$query` ref carrying real cross-query data. `IsNull` always folds to
-//! `FilterNode::True`, `IsNotNull` always folds to `FilterNode::False`, for
-//! the same reason (`compile.rs:38-45`).
-//!
-//! Net effect: there is NO way today to express a data-driven `when`
-//! condition of the ADR's own intended shape — "run this op iff
-//! `$query_ref_A >= $query_ref_B`" (e.g. "iff balance >= amount") —
-//! through any field-based `Filter` variant. The ADR's design note
-//! (`docs/dev-artifacts/design/oql-03-conditional-execution-adr.md:44-50`,
-//! "no `FieldRef` support needed/meaningful — only
-//! `$query`/`$fn`/`$param`/literals matter for `when`") states the INTENDED
-//! semantics (pure value-vs-value comparison, ignoring the record), but no
-//! `Filter` variant implements a field-free value-vs-value comparison — every
-//! comparison variant is hard-wired to a real field path that can never
-//! resolve against the synthetic record's fresh interner. Only the
-//! constant-fold outcomes (`IsNull` -> always true, `IsNotNull` -> always
-//! false, `Gte`/`Eq`/etc. -> always false) are reachable in practice.
-//!
-//! This was verified directly: a temporary probe test built exactly the
-//! ADR's canonical shape —
-//! `Filter::Gte { field: ["balance"], value: $query-ref-to-100 }` with
-//! `amount = 40` (should evaluate `true`, i.e. balance 100 >= 40) — and
-//! observed `skipped: true` (i.e. the filter evaluated `false`) regardless
-//! of the actual data. The probe was reverted; it is not part of this
-//! commit's diff. Track the real fix (implementing a field-free value
-//! comparison, or having `resolve_skip` special-case comparisons whose
-//! field cannot intern by treating them as a pure `FilterValue` compare
-//! ignoring the field) under a dedicated follow-up task, not Epic03/E.
-//!
-//! Every scenario below therefore uses `IsNull`/`IsNotNull`-based `when`
-//! guards — the deterministic true/false primitives Phase B/C's own unit
-//! tests (`when_skip_tests.rs`) rely on — which is the only mechanism able
-//! to prove the executor's skip/cascade/wire semantics over a REAL wire
-//! round-trip today. The "read balance -> debit or decline" narrative is
-//! preserved by choosing WHICH deterministic guard fires (i.e. we drive the
-//! branch decision from a Rust-side `bool` at test-authoring time, since the
-//! engine itself cannot yet derive it from real query data), and the ledger
-//! query in each scenario proves via real inserted rows that exactly the
-//! expected branch actually ran.
+//! Scenarios 1 and 2 below now drive the debit/decline branch selection
+//! from REAL query data (`balance_check`'s fetched balance vs. a literal
+//! `amount`) via `Filter::ValueCompare`, exactly the ADR's canonical shape.
+//! Scenario 3 (`switch`) still uses `IsNull`/`IsNotNull` guards on a
+//! synthetic field — that pattern remains a legitimate presence-guard
+//! idiom (ADR Decision 1), not a workaround for this bug.
 
 use std::path::PathBuf;
 
@@ -86,7 +46,7 @@ use zeroize::Zeroizing;
 use shamir_client::builder::batch::Batch;
 use shamir_client::builder::ddl;
 use shamir_client::builder::doc;
-use shamir_client::builder::filter::{is_not_null, is_null};
+use shamir_client::builder::filter::{is_not_null, is_null, value_gte, value_lt};
 use shamir_client::builder::write::insert;
 use shamir_client::builder::Query;
 use shamir_client::{Client, ConnectOptions};
@@ -201,15 +161,14 @@ async fn make_db(client: &Client, db: &str) {
         .expect("create repo+tables");
 }
 
-/// Scenario 1: sufficient-balance branch — the "debit" insert runs (guard
-/// `IsNull` on a field the empty synthetic record can never have -> always
-/// `true`), the "decline" insert is skipped (complementary `IsNotNull` on
-/// the same field -> always `false`). Both registered via `Batch::when`,
-/// inside `transactional()`, after a `balance_check` read — the canonical
-/// "read balance -> debit or decline" shape from the ADR/roadmap, modulo
-/// the field-based-comparison gap documented in this file's header (the
-/// guard direction is fixed at test-authoring time rather than derived from
-/// `balance_check`'s data, since the engine cannot do that yet).
+/// Scenario 1: sufficient-balance branch — the "debit" insert runs because
+/// its `value_gte` guard (`balance_check`'s fetched balance >= literal
+/// `amount`) genuinely evaluates `true` against the REAL seeded data
+/// (100 >= 40); the "decline" insert's complementary `value_lt` guard
+/// (`balance < amount`) evaluates `false` and is skipped. Both registered
+/// via `Batch::when`, inside `transactional()`, after a `balance_check`
+/// read — the ADR's own canonical "read balance -> debit or decline"
+/// shape, now genuinely data-driven (#651 fix).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn when_sufficient_balance_runs_debit_and_skips_decline_over_real_wire() {
     let (handle, client, _password) = boot().await;
@@ -233,38 +192,40 @@ async fn when_sufficient_balance_runs_debit_and_skips_decline_over_real_wire() {
         "balance_check",
         Query::from("accounts").where_eq("owner", "alice"),
     );
-    let _ = &balance_check;
 
     let debit = b.insert(
         "debit",
         insert("ledger").rows([doc! { "owner" => "alice", "kind" => "debit", "amount" => 40_i64 }]),
     );
-    // Guard that always evaluates true against the empty synthetic record
-    // (see file header for why a real balance-vs-amount comparison isn't
-    // reachable today): IsNull on a field that structurally can never be
-    // present.
-    b.when(&debit, is_null(vec!["never_present_field"]));
+    // Real data-driven guard (#651 fix): balance_check's fetched balance
+    // (100) >= the literal amount (40) genuinely evaluates true.
+    b.when(
+        &debit,
+        value_gte(balance_check.first().field("balance"), 40_i64),
+    );
 
     let decline = b.insert(
         "decline",
         insert("ledger")
             .rows([doc! { "owner" => "alice", "kind" => "decline", "amount" => 40_i64 }]),
     );
-    // Complementary guard: IsNotNull on the same never-present field always
-    // evaluates false.
-    b.when(&decline, is_not_null(vec!["never_present_field"]));
+    // Complementary guard: balance < amount genuinely evaluates false.
+    b.when(
+        &decline,
+        value_lt(balance_check.first().field("balance"), 40_i64),
+    );
 
     let resp = client.execute(db, b.build()).await.expect("txn-sufficient");
 
     let debit_result = resp.results.get("debit").expect("debit alias");
     assert!(
         !debit_result.skipped,
-        "debit must run (its when guard is IsNull(missing field) -> true): {debit_result:?}"
+        "debit must run (balance 100 >= amount 40 via ValueCompare): {debit_result:?}"
     );
     let decline_result = resp.results.get("decline").expect("decline alias");
     assert!(
         decline_result.skipped,
-        "decline must be skipped (its when guard is IsNotNull(missing field) -> false): {decline_result:?}"
+        "decline must be skipped (balance 100 < amount 40 is false via ValueCompare): {decline_result:?}"
     );
 
     // Cross-check via a fresh read: the ledger must contain exactly the
@@ -317,21 +278,26 @@ async fn when_insufficient_balance_skips_debit_and_runs_decline_over_real_wire()
         "balance_check",
         Query::from("accounts").where_eq("owner", "bob"),
     );
-    let _ = &balance_check;
 
     let debit = b.insert(
         "debit",
         insert("ledger").rows([doc! { "owner" => "bob", "kind" => "debit", "amount" => 40_i64 }]),
     );
-    // Swapped relative to Scenario 1: IsNotNull -> always false -> skipped.
-    b.when(&debit, is_not_null(vec!["never_present_field"]));
+    // Real data-driven guard: balance (10) >= amount (40) is false.
+    b.when(
+        &debit,
+        value_gte(balance_check.first().field("balance"), 40_i64),
+    );
 
     let decline = b.insert(
         "decline",
         insert("ledger").rows([doc! { "owner" => "bob", "kind" => "decline", "amount" => 40_i64 }]),
     );
-    // IsNull -> always true -> runs.
-    b.when(&decline, is_null(vec!["never_present_field"]));
+    // Complementary guard: balance (10) < amount (40) is true.
+    b.when(
+        &decline,
+        value_lt(balance_check.first().field("balance"), 40_i64),
+    );
 
     let resp = client
         .execute(db, b.build())
@@ -341,12 +307,12 @@ async fn when_insufficient_balance_skips_debit_and_runs_decline_over_real_wire()
     let debit_result = resp.results.get("debit").expect("debit alias");
     assert!(
         debit_result.skipped,
-        "debit must be skipped (guard IsNotNull(missing field) -> false): {debit_result:?}"
+        "debit must be skipped (balance 10 >= amount 40 is false via ValueCompare): {debit_result:?}"
     );
     let decline_result = resp.results.get("decline").expect("decline alias");
     assert!(
         !decline_result.skipped,
-        "decline must run (guard IsNull(missing field) -> true): {decline_result:?}"
+        "decline must run (balance 10 < amount 40 via ValueCompare): {decline_result:?}"
     );
 
     let mut q = Batch::new();
@@ -380,14 +346,14 @@ async fn when_insufficient_balance_skips_debit_and_runs_decline_over_real_wire()
 /// (`Batch::switch`'s AND(NOT prior) chaining) must make the other two
 /// skip, over the real engine — not merely in the builder's local state.
 ///
-/// Since case conditions built from real query data hit the same
-/// field-based-comparison gap documented in this file's header, this
-/// scenario drives the case selection through `IsNull`/`IsNotNull` guards
-/// on a synthetic field, structured so exactly one of the three
+/// This scenario drives the case selection through `IsNull`/`IsNotNull`
+/// guards on a synthetic field (a legitimate presence-guard idiom, ADR
+/// Decision 1 — not a workaround), structured so exactly one of the three
 /// `Batch::switch`-generated guards is true — proving the executor
 /// actually evaluates and enforces `switch`'s AND/NOT/OR combinator chain
 /// over the wire (a bug in that chaining would surface as either zero or
-/// more than one branch running).
+/// more than one branch running). Scenarios 1/2 above already cover the
+/// real data-driven `ValueCompare` path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn switch_three_branches_executes_exactly_one_over_real_wire() {
     let (handle, client, _password) = boot().await;

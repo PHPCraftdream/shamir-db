@@ -535,7 +535,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         | BatchError::TooManyIterations { .. } => "limits",
         BatchError::CircularDependency { .. }
         | BatchError::UnknownAlias { .. }
-        | BatchError::AfterPathIgnored { .. } => "validation",
+        | BatchError::AfterPathIgnored { .. }
+        | BatchError::InvalidWhenFilter { .. } => "validation",
         BatchError::Timeout { .. } => "timeout",
         BatchError::LockTimeout { .. } => "lock_timeout",
         BatchError::QueryError {

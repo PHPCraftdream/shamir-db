@@ -19,6 +19,7 @@ import type {
   FnCall,
   FilterExprValue,
   CondValue,
+  ValueCompareOp,
 } from '../types/filter.js';
 
 /** Normalise a field spec (bare string or path array) to the wire form. */
@@ -56,6 +57,55 @@ export function lt(field: string | string[], value: FilterValue): Filter {
 /** `field <= value` */
 export function lte(field: string | string[], value: FilterValue): Filter {
   return { op: 'lte', field: fp(field), value };
+}
+
+// ── Value-vs-value comparison (#651) ─────────────────────────────────
+//
+// Unlike `eq`/`ne`/`gt`/`gte`/`lt`/`lte` above (which compare a RECORD
+// FIELD against a value), these compare TWO independently-resolved
+// `FilterValue`s with no record involved — the only comparison shape
+// meaningful inside a `when` guard (`Batch.when`/`Batch.switch`), which has
+// no per-row record to resolve a field path against. Typical usage
+// compares two `$query` refs, e.g.
+// `valueGte(queryRef('balance_check', '[0].balance'), 40)` for
+// "run this op iff balance >= 40".
+
+function valueCompare(
+  left: FilterValue,
+  cmp: ValueCompareOp,
+  right: FilterValue,
+): Filter {
+  return { op: 'value_compare', left, cmp, right };
+}
+
+/** `left == right` (value-vs-value, no field/record involved). */
+export function valueEq(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'eq', right);
+}
+
+/** `left != right` (value-vs-value, no field/record involved). */
+export function valueNe(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'ne', right);
+}
+
+/** `left > right` (value-vs-value, no field/record involved). */
+export function valueGt(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'gt', right);
+}
+
+/** `left >= right` (value-vs-value, no field/record involved). */
+export function valueGte(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'gte', right);
+}
+
+/** `left < right` (value-vs-value, no field/record involved). */
+export function valueLt(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'lt', right);
+}
+
+/** `left <= right` (value-vs-value, no field/record involved). */
+export function valueLte(left: FilterValue, right: FilterValue): Filter {
+  return valueCompare(left, 'lte', right);
 }
 
 // ── Field equality shortcut ──────────────────────────────────────────
@@ -490,6 +540,12 @@ export const filter = {
   gte,
   lt,
   lte,
+  valueEq,
+  valueNe,
+  valueGt,
+  valueGte,
+  valueLt,
+  valueLte,
   fieldEq,
   in_,
   notIn,

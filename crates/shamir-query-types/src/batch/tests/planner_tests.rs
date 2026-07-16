@@ -639,9 +639,15 @@ fn when_query_ref_participates_in_dag_as_dataflow() {
     queries.insert("check".to_string(), read_entry("check"));
 
     let mut gated = read_entry("orders");
-    gated.when = Some(crate::filter::Filter::Eq {
-        field: vec!["dummy".to_string()],
-        value: FilterValue::query_ref_with_path("check", "[0].ok"),
+    // ValueCompare (not a field-based variant) — #651: field-based
+    // comparisons are now rejected inside `when` by a dedicated plan-time
+    // check (see `when_field_based_comparison_is_rejected_at_plan_time`),
+    // so this DAG-participation test uses the value-vs-value shape that
+    // remains valid inside `when`.
+    gated.when = Some(crate::filter::Filter::ValueCompare {
+        left: FilterValue::Bool(true),
+        cmp: crate::filter::ValueCompareOp::Eq,
+        right: FilterValue::query_ref_with_path("check", "[0].ok"),
     });
     queries.insert("orders".to_string(), gated);
 

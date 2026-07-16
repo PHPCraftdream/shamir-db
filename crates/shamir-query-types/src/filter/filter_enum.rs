@@ -135,6 +135,23 @@ pub enum Filter {
         value: FilterValue,
     },
 
+    /// Value-vs-value comparison — no record/field involved. Both `left`
+    /// and `right` are independently resolved (via `$query`/`$fn`/`$param`/
+    /// literal, exactly like `FilterValue::Expr`) at MATCH time, then
+    /// compared. This is the ONLY comparison shape meaningful inside a
+    /// `when` guard (see `QueryEntry.when`), which has no per-row record
+    /// to resolve a `FieldPath` against — unlike `Eq`/`Ne`/`Gt`/`Gte`/`Lt`/
+    /// `Lte`/`FieldEq` above, which stay strictly record-field-based and
+    /// are used for real per-row WHERE-clause filtering.
+    ValueCompare {
+        left: FilterValue,
+        /// Named `cmp` (not `op`) because the enclosing `Filter` enum uses
+        /// `#[serde(tag = "op")]` for its own variant discriminant — a
+        /// field literally named `op` would collide with that internal tag.
+        cmp: ValueCompareOp,
+        right: FilterValue,
+    },
+
     // ── Index-accelerated operators (Phase 0 — FTS / Functional / Vector) ──
     /// Full-text search on a text field.
     /// mode: "and" (all tokens must match) or "or" (any token matches).
@@ -179,6 +196,21 @@ pub enum Filter {
         cmp: String,
         value: FilterValue,
     },
+}
+
+/// Comparison operator for [`Filter::ValueCompare`] — a value-vs-value
+/// comparison with no record/field involved. Mirrors the 6 comparison
+/// variants of `shamir-engine`'s `CompareOp` (kept as a separate type here
+/// since `shamir-query-types` does not depend on `shamir-engine`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueCompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 /// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`.

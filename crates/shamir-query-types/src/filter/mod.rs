@@ -11,7 +11,7 @@ pub mod fn_call;
 mod tests;
 
 pub use cond::Cond;
-pub use filter_enum::{check_filter_depth, Filter, MAX_FILTER_DEPTH};
+pub use filter_enum::{check_filter_depth, Filter, ValueCompareOp, MAX_FILTER_DEPTH};
 pub use filter_expr::{FilterExpr, FilterExprOp};
 pub use filter_value::{filter_value_to_query_value, query_value_to_filter_value, FilterValue};
 pub use fn_call::FnCall;

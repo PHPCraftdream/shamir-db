@@ -110,6 +110,105 @@ fn test_field_eq() {
     );
 }
 
+// ── value-vs-value comparison (#651) ─────────────────────────────────
+
+#[test]
+fn test_value_eq() {
+    assert_wire(
+        value_eq(1_i64, 1_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 1,
+            "cmp": "eq",
+            "right": 1
+        }),
+    );
+}
+
+#[test]
+fn test_value_ne() {
+    assert_wire(
+        value_ne(1_i64, 2_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 1,
+            "cmp": "ne",
+            "right": 2
+        }),
+    );
+}
+
+#[test]
+fn test_value_gt() {
+    assert_wire(
+        value_gt(100_i64, 40_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 100,
+            "cmp": "gt",
+            "right": 40
+        }),
+    );
+}
+
+#[test]
+fn test_value_gte() {
+    assert_wire(
+        value_gte(100_i64, 40_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 100,
+            "cmp": "gte",
+            "right": 40
+        }),
+    );
+}
+
+#[test]
+fn test_value_lt() {
+    assert_wire(
+        value_lt(10_i64, 40_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 10,
+            "cmp": "lt",
+            "right": 40
+        }),
+    );
+}
+
+#[test]
+fn test_value_lte() {
+    assert_wire(
+        value_lte(10_i64, 40_i64),
+        mpack!({
+            "op": "value_compare",
+            "left": 10,
+            "cmp": "lte",
+            "right": 40
+        }),
+    );
+}
+
+/// `value_gte` with a `$query` ref on the LHS — the canonical `when`
+/// scenario shape ("balance >= amount").
+#[test]
+fn test_value_gte_with_query_ref() {
+    use shamir_query_types::filter::FilterValue;
+    assert_wire(
+        value_gte(
+            FilterValue::query_ref_with_path("balance_check", "[0].balance"),
+            40_i64,
+        ),
+        mpack!({
+            "op": "value_compare",
+            "left": { "$query": "balance_check", "path": "[0].balance" },
+            "cmp": "gte",
+            "right": 40
+        }),
+    );
+}
+
 // ── in / not_in ──────────────────────────────────────────────────────
 
 #[test]

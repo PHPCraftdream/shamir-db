@@ -330,73 +330,76 @@ const resp = await db.batch()
 под-батч) — см. ADR
 `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`, Decision 1.
 
-> ⚠️ **Известное ограничение (задача #651, НЕ исправлена).** `when`-условия
-> на основе СРАВНЕНИЯ ПОЛЕЙ (`filter.eq`/`filter.gt`/`filter.gte`/
-> `filter.lt`/`filter.lte`/`filter.ne`/`filter.fieldEq` и т.п.) СЕГОДНЯ НЕ
-> РАБОТАЮТ КОРРЕКТНО — они компилируются против пустой синтетической записи
-> через одноразовый scratch-интернер, который не может разрешить путь к
-> полю НИ ДЛЯ ОДНОГО имени поля. В результате КАЖДОЕ такое сравнение
-> схлопывается в фиксированный результат (`Gt`/`Gte`/`Lt`/`Lte`/`Eq`/`Ne` →
-> всегда `false`, т.е. операция всегда пропускается) — **независимо от
-> реальных данных**. Канонический сценарий «спиши со счёта, если баланс >=
-> суммы» (`filter.gte('balance', filter.queryRef('@account', '[0].balance'))`)
-> СЕГОДНЯ НЕ РАБОТАЕТ и молча даёт неверный результат без единой ошибки.
->
-> **Единственный сегодня надёжный `when`-паттерн** — `filter.isNull(field)`
-> / `filter.isNotNull(field)` против заведомо отсутствующего в схеме поля
-> (проверка наличия `$query`-рефа как guard'а, не сравнение значений).
-> **НЕ используйте `when` для полевых числовых/строковых сравнений до
-> фикса #651.**
+`when`-условия на основе СРАВНЕНИЯ ПОЛЕЙ записи (`filter.eq`/`filter.gt`/
+`filter.gte`/`filter.lt`/`filter.lte`/`filter.ne`/`filter.fieldEq`) внутри
+`when` не имеют смысла: `when` не исполняется против реальной строки — там
+попросту нет записи, к чьему полю можно было бы обратиться. Использование
+одного из этих вариантов внутри `when` теперь **явно отклоняется на этапе
+планирования** (`BatchError::InvalidWhenFilter`), а не молча схлопывается в
+фиксированный результат, как было до фикса задачи #651.
 
-Базовый рабочий пример (`IsNull`/`IsNotNull`-guard, как в
-`crates/shamir-client/tests/batch_when_e2e.rs`, Epic03/E) — вместо
-недоступного сегодня «сравни баланс с суммой» ветвление проводится через
-заведомо `true`/`false` guard, выбранный на стороне вызывающего кода:
+**Для сравнения значений внутри `when` используйте `filter.valueEq` /
+`filter.valueNe` / `filter.valueGt` / `filter.valueGte` / `filter.valueLt` /
+`filter.valueLte`** — сравнение ДВУХ независимо разрешаемых значений
+(`$query`/`$fn`/`$param`/литерал), без привязки к полю записи. Канонический
+сценарий «спиши со счёта, если баланс >= суммы» теперь работает напрямую:
 
 ```ts
 import { write, filter } from '@shamir/client';
 
 const resp = await db.batch()
+  .add('balance_check', Query.from('accounts').where(filter.eq('owner', 'alice')).build())
   .add('debit', write.insert('ledger', [{ kind: 'debit', amount: 40 }]), {
-    // "never_present_field" отсутствует в схеме -> IsNull всегда true
-    when: filter.isNull('never_present_field'),
+    // balance_check[0].balance >= 40 — реальное сравнение по данным.
+    when: filter.valueGte(filter.queryRef('balance_check', '[0].balance'), 40),
   })
   .add('decline', write.insert('ledger', [{ kind: 'decline', amount: 40 }]), {
-    // IsNotNull того же отсутствующего поля -> всегда false -> decline пропускается
-    when: filter.isNotNull('never_present_field'),
+    // Комплементарное условие: balance < 40.
+    when: filter.valueLt(filter.queryRef('balance_check', '[0].balance'), 40),
   })
   .run();
 
-resp.results.debit.skipped;   // false — выполнился
-resp.results.decline.skipped; // true  — пропущен
+resp.results.debit.skipped;   // false, если balance >= 40
+resp.results.decline.skipped; // true,  если balance >= 40
 ```
+
+`filter.isNull(field)` / `filter.isNotNull(field)` против заведомо
+отсутствующего в схеме поля остаются легитимным паттерном внутри `when`
+(проверка наличия/присутствия как guard, не сравнение значений) — они НЕ
+затронуты фиксом #651 и продолжают работать как задумано.
 
 ### `switchCase` — несколько взаимоисключающих веток
 
 `batch.switchCase([...cases], defaultCase)` — синтаксический сахар:
 генерирует N `QueryEntry` с комплементарными `when`-фильтрами (`case1` →
 `AND(NOT case1, case2)` → ... → `default = NOT any_case`), гарантируя, что
-выполнится РОВНО одна ветка. Сегодня практически применим только с
-`isNull`/`isNotNull`-guard'ами (см. предупреждение выше). Сценарий с тремя
-ветками ЖЕЛАЕМОГО (но пока НЕработающего до фикса #651) вида «выбери ветку
-по сравнению значения» выглядел бы так — этот пример **намеренно
-использует ` filter.eq`/`filter.gte`, СЕГОДНЯ НЕ РАБОТАЕТ**, приведён
-только как целевой синтаксис после фикса #651:
+выполнится РОВНО одна ветка. Условия веток могут использовать
+`filter.valueGte`/`filter.valueEq`/etc. (сравнение значений, #651) наравне с
+`isNull`/`isNotNull`-guard'ами — оба паттерна легитимны, выбор зависит от
+того, есть ли реальные данные для сравнения:
 
 ```ts
-// ⚠️ ЖЕЛАЕМЫЙ синтаксис — СЕГОДНЯ НЕ РАБОТАЕТ (см. #651 выше).
-// filter.eq/filter.gte внутри `when` всегда схлопываются в false.
-const handles = db.batch().switchCase(
-  [
-    { alias: 'gold',   op: write.insert('tier', [{ name: 'gold' }]),   condition: filter.gte('score', 90) },
-    { alias: 'silver', op: write.insert('tier', [{ name: 'silver' }]), condition: filter.gte('score', 50) },
-  ],
-  { alias: 'bronze', op: write.insert('tier', [{ name: 'bronze' }]) },
-);
+const handles = db.batch()
+  .add('rank_check', Query.from('players').where(filter.eq('id', playerId)).build())
+  .switchCase(
+    [
+      {
+        alias: 'gold',
+        op: write.insert('tier', [{ name: 'gold' }]),
+        condition: filter.valueGte(filter.queryRef('rank_check', '[0].score'), 90),
+      },
+      {
+        alias: 'silver',
+        op: write.insert('tier', [{ name: 'silver' }]),
+        condition: filter.valueGte(filter.queryRef('rank_check', '[0].score'), 50),
+      },
+    ],
+    { alias: 'bronze', op: write.insert('tier', [{ name: 'bronze' }]) },
+  );
 ```
 
-Работающий сегодня трёхветочный пример использует `isNull`/`isNotNull`
-guard'ы вместо сравнения значений — см. `switch_three_branches_executes_exactly_one_over_real_wire`
+Пример с `isNull`/`isNotNull`-guard'ами (presence-check вместо сравнения
+значений) — см. `switch_three_branches_executes_exactly_one_over_real_wire`
 в `crates/shamir-client/tests/batch_when_e2e.rs`.
 
 ### Каскадный skip
@@ -443,11 +446,10 @@ Decision 2.
 (`bind_row`) — читается внутри тела через `$param <bind_row>`. См. ADR
 `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md`.
 
-В отличие от `when` (§ выше, Epic03), у `for_each` НЕТ известного
-блокирующего бага — канонический сценарий (итерация по реальным строкам
-`$query`) работает как задумано и подтверждён e2e-тестом. Контраст: #651
-блокирует канонический сценарий `when`; у `for_each` эквивалентной
-проблемы нет.
+У `for_each` нет и не было аналога бага #651 — канонический сценарий
+(итерация по реальным строкам `$query`) работает как задумано и
+подтверждён e2e-тестом. `when` (§ выше, Epic03) имел этот баг для
+полевых сравнений и теперь исправлен через `filter.valueGte`/etc.
 
 Рабочий пример (канонический сценарий, `$query`-колонка-реф как `over`) —
 лифтован из `for_each_over_query_column_ref_inserts_one_audit_row_per_order_over_real_wire`

@@ -1189,6 +1189,10 @@ fn find_unsupported_subscription_filter(filter: &Filter) -> Option<&'static str>
         Filter::Fts { .. } => Some("fts"),
         Filter::VectorSimilarity { .. } => Some("vector_similarity"),
         Filter::Computed { .. } => Some("computed"),
+        // Value-vs-value comparison has no field/record involvement — not
+        // a per-row predicate the live subscription bridge evaluator can
+        // apply against a row's field data.
+        Filter::ValueCompare { .. } => Some("value_compare"),
     }
 }
 
