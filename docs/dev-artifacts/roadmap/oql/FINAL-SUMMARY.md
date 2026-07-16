@@ -103,12 +103,12 @@ needed.
   promised capability. The only reliable `when` pattern today is a
   presence guard (`isNull`/`isNotNull` against a field known to be
   absent), which the shipped docs document as the sole safe usage.
-- **#660 — bug.** `distinct_repos()`/`table_ref()` does not walk into
-  `Batch`/`ForEach` bodies, so a transactional batch whose ONLY
-  top-level entry is a bare `Batch`/`ForEach` fails to determine its repo
-  scope. Workaround: include at least one other top-level data operation
-  (`Read`/`Insert`/etc.) alongside the bare loop/sub-batch. Affects both
-  Epic01's `SubBatchOp` and Epic04's `ForEachOp` construction sites.
+- **#660 — FIXED (2026-07).** `distinct_repos()` now walks recursively
+  into `Batch`/`ForEach` bodies, so a transactional batch whose ONLY
+  top-level entry is a bare `Batch`/`ForEach` correctly determines its
+  repo scope (and nested cross-repo bodies are visible to the cross-repo
+  guard). `BatchOp::table_ref()` intentionally still returns `None` for
+  both variants — the recursion lives in `distinct_repos`'s collector.
 - **Benchmark-derived characteristic (not a bug)**: `ForEach` carries real
   per-iteration overhead vs. a hand-written flat batch — roughly
   1.5-1.6x slower for a one-op body, growing slightly with N rather than
@@ -166,7 +166,7 @@ needed.
    conditional execution); today `when` is only a reliable
    presence-guard/feature-flag mechanism, not the general
    conditional-execution-on-data primitive the roadmap set out to build.
-2. **Fix #660 next.** Small and mechanical — extend
+2. **Fix #660 next — DONE (2026-07).** Small and mechanical — extend
    `distinct_repos()`/`table_ref()` to walk into `Batch`/`ForEach` bodies;
    low risk, closes a real but narrow gap affecting both Epic01 and
    Epic04 constructs.

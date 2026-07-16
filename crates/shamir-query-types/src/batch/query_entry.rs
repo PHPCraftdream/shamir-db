@@ -78,18 +78,34 @@ impl From<ReadQuery> for QueryEntry {
 /// Returns the set of distinct repository names referenced by the
 /// data queries in `queries`. Admin ops (which return `none` from
 /// `BatchOp::table_ref`) do not contribute. `BatchOp::Batch`/`BatchOp::
-/// ForEach` bodies are NOT walked — a nested sub-batch/loop body is planned
-/// and executed recursively as its own (typically non-transactional) scope,
-/// so its table references do not participate in the OUTER batch's
-/// cross-repo guard, matching `BatchOp::Batch`'s existing (pre-Epic04)
-/// behavior. This mirrors `BatchOp::table_ref()`, which likewise returns
-/// `None` for both variants.
+/// ForEach` bodies ARE walked recursively (#660): a nested sub-batch/loop
+/// body executes WITHIN the outer transaction (Epic04 ADR Decision 4 — an
+/// iteration failure aborts the whole tx batch), so the repos its ops touch
+/// genuinely participate in the OUTER batch's cross-repo scope and must be
+/// visible to the cross-repo guard. Note `BatchOp::table_ref()` itself still
+/// returns `None` for both variants — a single `Option<&TableRef>` cannot
+/// express a nested body's multiple tables; the walk lives here.
 ///
 /// Used by the executor to enforce the cross-repo guard for
 /// transactional batches (Stage 4.C).
 pub fn distinct_repos(queries: &TMap<String, QueryEntry>) -> TFxSet<String> {
-    queries
-        .values()
-        .filter_map(|qe| qe.op.table_ref().map(|tr| tr.repo.clone()))
-        .collect()
+    let mut repos = TFxSet::default();
+    collect_repos(queries, &mut repos);
+    repos
+}
+
+/// Recursive collector behind [`distinct_repos`]: adds each entry's
+/// `table_ref()` repo (when present) and descends into `Batch`/`ForEach`
+/// bodies' `queries` maps so nested levels contribute too.
+fn collect_repos(queries: &TMap<String, QueryEntry>, repos: &mut TFxSet<String>) {
+    for qe in queries.values() {
+        if let Some(tr) = qe.op.table_ref() {
+            repos.insert(tr.repo.clone());
+        }
+        match &qe.op {
+            BatchOp::Batch(sub) => collect_repos(&sub.batch.queries, repos),
+            BatchOp::ForEach(fe) => collect_repos(&fe.batch.queries, repos),
+            _ => {}
+        }
+    }
 }

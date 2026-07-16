@@ -339,30 +339,14 @@ async fn for_each_zero_matching_orders_produces_empty_list_and_no_audit_rows_ove
 /// literal array of ids (not a `$query` ref), proving that source works
 /// over the real wire too (not just in-process).
 ///
-/// # NOTED ENGINE GAP — found while writing this test, NOT fixed here
-///
-/// A transactional batch whose ONLY top-level data-bearing entry is a bare
-/// `ForEach` (no other `Read`/`Insert`/etc. at the top level) fails with
-/// `"transactional batch has no data ops to target a repo"`
-/// (`crates/shamir-engine/src/query/batch/batch_execute.rs:449`), because
-/// `distinct_repos()` (`crates/shamir-query-types/src/batch/query_entry.rs:90`)
-/// determines the tx's repo purely via `BatchOp::table_ref()`
-/// (`crates/shamir-query-types/src/batch/batch_op.rs:561-573`), which
-/// returns `None` for both `BatchOp::Batch` and `BatchOp::ForEach` — it
-/// does NOT walk into the nested body's `queries` map. This directly
-/// contradicts the Epic04 ADR's own stated requirement
-/// (`docs/dev-artifacts/design/oql-04-loops-foreach-adr.md`, "distinct_repos
-/// ... A `ForEach` node's body's `table_ref()`s must therefore be visible to
-/// `distinct_repos()` the same way `Batch(sub)`'s are today ... walking
-/// into `fe.batch.queries`"): the walk the ADR mandates was never
-/// implemented for either `Batch` or `ForEach`. Worked around here by
-/// adding a harmless top-level `Read` (`orders_probe`) alongside the
-/// `ForEach`, which supplies `distinct_repos()` a `table_ref()` so the
-/// transactional batch can determine its repo — this does not touch or
-/// weaken what this scenario actually proves (literal-array `over` driving
-/// real per-iteration writes over the wire). Track the real fix (implement
-/// the ADR's mandated recursive `table_ref()`/`distinct_repos()` walk for
-/// `Batch`/`ForEach`) under a dedicated follow-up task, not Epic04/E.
+/// Also the #660 regression proof: the batch is transactional and its ONLY
+/// top-level entry is a bare `ForEach` (no other `Read`/`Insert` alongside).
+/// Before the fix `distinct_repos()` didn't walk into `Batch`/`ForEach`
+/// bodies, so this shape failed with `"transactional batch has no data ops
+/// to target a repo"` and this test carried a workaround (an extra
+/// `orders_probe` top-level `Read` solely to supply a `table_ref()`). #660
+/// is fixed — `distinct_repos()` now recurses into nested bodies — and the
+/// workaround is removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn for_each_over_literal_array_inserts_one_audit_row_per_literal_over_real_wire() {
     let (handle, client, _password) = boot().await;
@@ -372,9 +356,6 @@ async fn for_each_over_literal_array_inserts_one_audit_row_per_literal_over_real
     let mut b = Batch::new();
     b.id("txn-literal");
     b.transactional();
-    // Harmless top-level read so `distinct_repos()` can find a `table_ref()`
-    // — see this test's doc comment for the engine gap this works around.
-    b.query("orders_probe", Query::from("orders"));
     let over_literal = vec![lit(101_i64), lit(202_i64), lit(303_i64)];
     let inner = audit_insert_body("order_id");
     b.for_each("loop", over_literal, "order_id", inner);
