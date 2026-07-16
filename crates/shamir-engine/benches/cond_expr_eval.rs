@@ -66,13 +66,77 @@
 //!   allocation per row, which explains why it comes out even pricier
 //!   than the 3-level `$cond` here.
 //!
-//! **Not fixed here** — per the brief, this task only measures and
-//! documents; `resolve_filter_query`/`eval_filter_expr` are explicitly
-//! out of scope for optimization in this task. The clearest follow-up
-//! target (separate task) is hoisting `compile_filter` for a `$cond`'s
-//! `condition` out of the per-record loop — the `Filter` AST inside a
-//! `Cond` is static per-query, exactly like the top-level filter that is
-//! already compiled once outside the hot loop.
+//! **Not fixed here** (as originally written) — per the #639 brief, that
+//! task only measured and documented; `resolve_filter_query`/
+//! `eval_filter_expr` were explicitly out of scope for optimization there.
+//! The clearest follow-up target it named was hoisting `compile_filter` for
+//! a `$cond`'s `condition` out of the per-record loop — the `Filter` AST
+//! inside a `Cond` is static per-query, exactly like the top-level filter
+//! that is already compiled once outside the hot loop.
+//!
+//! ## #643 follow-up — opt-in `CondCache`, re-measured
+//!
+//! #643 implemented that follow-up as an **opt-in** cache
+//! (`crates/shamir-engine/src/query/filter/cond_cache.rs`): a
+//! pointer-keyed `CondCache` pre-compiles every nested `$cond`'s condition
+//! once (`prescan_cond_cache`), and `FilterContext::cond_cache` threads it
+//! into `resolve_filter_query`'s `Cond` arm. Wired into the proven
+//! production hot path, `SelectProjection::new()`/`project_value()`
+//! (`crates/shamir-engine/src/query/read/select_projection.rs`).
+//!
+//! **This bench does NOT exercise the cache.** It builds its
+//! `FilterContext` via the bare `FilterContext::new(interner, empty_refs)`
+//! (no `.with_cond_cache(..)`) — deliberately, since the fix is opt-in and
+//! this bench predates #643. Re-running it post-fix therefore measures the
+//! **uncached** path only, which is exactly what every caller that does
+//! not opt in (WHERE, `when`, `for_each`'s `over`, write-value resolution)
+//! still pays — by design, #643 leaves this path byte-for-byte unchanged.
+//!
+//! Re-run (`CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo bench -p
+//! shamir-engine --bench cond_expr_eval`, post-#643, same 1000
+//! records/iter):
+//!
+//! ```text
+//! cond_expr_eval/flat_literal_1000            135249 iters      8057.09 ns/op
+//! cond_expr_eval/cond_2branch_1000              4797 iters    198963.21 ns/op
+//! cond_expr_eval/cond_nested_3level_1000        1335 iters    707657.98 ns/op
+//! cond_expr_eval/expr_add_two_fields_1000        784 iters    967833.93 ns/op
+//! ```
+//!
+//! Re-verified again (same command, same iteration counts — separate
+//! machine session, run right after the `select_projection`/`cond_cache`
+//! wiring landed):
+//!
+//! ```text
+//! cond_expr_eval/flat_literal_1000            135249 iters      5067.51 ns/op
+//! cond_expr_eval/cond_2branch_1000              4797 iters    126675.65 ns/op
+//! cond_expr_eval/cond_nested_3level_1000        1335 iters    416684.57 ns/op
+//! cond_expr_eval/expr_add_two_fields_1000        784 iters    425076.40 ns/op
+//! ```
+//!
+//! The absolute ns/op swings noticeably between runs (e.g. `cond_2branch`
+//! ~213k → ~199k → ~127k ns/op across three sessions on the same machine) —
+//! this bench is sensitive to ambient machine load, not a regression or
+//! improvement signal by itself. What stays constant across every run is
+//! the **relative** shape: `cond_2branch`/`cond_nested_3level`/
+//! `expr_add_two_fields` remain one to two orders of magnitude above
+//! `flat_literal`, and this is **as expected**: this bench's `ctx` never
+//! calls `.with_cond_cache(..)`, so it never touches `CondCache` at all and
+//! takes the exact same `compile_filter`-per-row path it always did. This
+//! is the correct, honest result for this file: it confirms the "zero
+//! behavior/perf change for callers that don't pass a `cond_cache`"
+//! invariant #643 required, but it does NOT demonstrate the fix's benefit.
+//!
+//! The fix's actual payoff (repeated `compile_filter` calls collapsed to
+//! one compile at query-build time, reused via `Arc<FilterNode>` per row)
+//! is realized by `SelectProjection`-driven SELECT projections with
+//! `$cond`-bearing scalar-fn projections — not by this file, which
+//! measures `resolve_filter_query` in isolation from that call site. A
+//! bench exercising `SelectProjection::project_value` directly (with a
+//! `$cond` projection, cache populated via `SelectProjection::new`) would
+//! be needed to put numbers behind the cached path specifically; that is
+//! not part of this task's scope (see the #643 brief, which names
+//! `SelectProjection` wiring as the deliverable, not a new bench).
 
 use std::hint::black_box;
 

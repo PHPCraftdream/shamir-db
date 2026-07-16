@@ -7,6 +7,7 @@ use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
 use super::compile::compile_filter;
+use super::cond_cache::cond_cache_get;
 use super::eval_context::FilterContext;
 use super::filter_node::CompactPath;
 use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
@@ -214,8 +215,20 @@ pub fn resolve_filter_query(
         // `$cond`'s condition is not special-cased; it inherits this
         // behaviour rather than introducing a new error path.
         FilterValue::Cond { cond } => {
-            let node = compile_filter(&cond.condition, ctx.interner);
-            if node.matches(record, ctx) {
+            // #643: check the pre-compiled cache first (populated once by
+            // `prescan_cond_cache`, e.g. `SelectProjection::new`) — avoids
+            // re-walking/re-interning `cond.condition` on every record. When
+            // `ctx.cond_cache` is `None` (every caller that hasn't opted in:
+            // WHERE, `when`, `for_each`'s `over`, write-value resolution),
+            // behavior is IDENTICAL to before this cache existed.
+            let cached = ctx
+                .cond_cache
+                .and_then(|c| cond_cache_get(c, &cond.condition));
+            let matched = match cached {
+                Some(node) => node.matches(record, ctx),
+                None => compile_filter(&cond.condition, ctx.interner).matches(record, ctx),
+            };
+            if matched {
                 resolve_filter_query(&cond.then, record, ctx)
             } else {
                 resolve_filter_query(&cond.or_else, record, ctx)
@@ -255,7 +268,11 @@ fn eval_filter_expr(
     record: &(impl RecordRef + ?Sized),
     ctx: &FilterContext,
 ) -> Option<QueryValue> {
-    let mut args = Vec::with_capacity(expr.args.len());
+    // Inline up to 4 args (covers every unary/binary op — the vast
+    // majority — plus small `concat` calls) before spilling to heap,
+    // mirroring `CompactPath`'s SmallVec convention (filter_node.rs) —
+    // avoids a per-call heap allocation for the common small-arity case.
+    let mut args: SmallVec<[QueryValue; 4]> = SmallVec::with_capacity(expr.args.len());
     for a in &expr.args {
         args.push(resolve_filter_query(a, record, ctx)?);
     }

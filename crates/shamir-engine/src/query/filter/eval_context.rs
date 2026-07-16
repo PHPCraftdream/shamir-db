@@ -6,6 +6,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
+use super::cond_cache::CondCache;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -30,6 +31,14 @@ pub struct FilterContext<'a> {
     /// Injected sub-batch parameters (`$param` bindings). Empty at the
     /// top level; populated by the recursive sub-batch executor (P3).
     pub params: &'a TMap<String, QueryValue>,
+    /// Optional pre-compiled `$cond` condition cache (#643). Defaults to
+    /// `None` — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,
+    /// write-value resolution) is completely unaffected: `resolve_filter_query`
+    /// falls back to `compile_filter` on every `Cond` evaluation exactly as
+    /// before. Only callers that build a [`CondCache`] once (e.g.
+    /// `SelectProjection::new`) and inject it via
+    /// [`with_cond_cache`](Self::with_cond_cache) skip the per-row recompile.
+    pub cond_cache: Option<&'a CondCache>,
 }
 
 /// A permanently empty params map, shared across all top-level contexts
@@ -54,6 +63,7 @@ impl<'a> FilterContext<'a> {
             actor: Actor::System,
             scalars: builtins_only_resolver(),
             params: empty_params(),
+            cond_cache: None,
         }
     }
 
@@ -72,6 +82,16 @@ impl<'a> FilterContext<'a> {
     /// Builder: inject sub-batch params for `$param` resolution.
     pub fn with_params(mut self, params: &'a TMap<String, QueryValue>) -> Self {
         self.params = params;
+        self
+    }
+
+    /// Builder: inject a pre-compiled `$cond` condition cache (#643).
+    /// Only meaningful for callers that pre-scan a static `FilterValue` tree
+    /// once (e.g. `SelectProjection::new`) and reuse it across many records —
+    /// one-off evaluation contexts (WHERE, `when`, `for_each`, write-value
+    /// resolution) should leave this unset.
+    pub fn with_cond_cache(mut self, cache: &'a CondCache) -> Self {
+        self.cond_cache = Some(cache);
         self
     }
 }

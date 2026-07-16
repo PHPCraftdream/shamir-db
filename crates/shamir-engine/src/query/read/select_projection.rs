@@ -3,7 +3,7 @@
 use smallvec::SmallVec;
 
 use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
-use crate::query::filter::{FilterContext, FilterValue, FnCall};
+use crate::query::filter::{prescan_cond_cache, CondCache, FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -28,6 +28,15 @@ pub struct SelectProjection {
     /// Empty resolved-refs map so `project_value` can build a `FilterContext`
     /// without `$query` support (projection scalar fns see only the row).
     pub(super) empty_refs: TMap<String, QueryResult>,
+    /// Pre-compiled `$cond` condition cache (#643) — populated once in
+    /// `new()` by pre-scanning every `FilterValue` in `funcs` for nested
+    /// `Cond` nodes. `project_value` threads this into the per-record
+    /// `FilterContext` so `resolve_filter_query`'s `Cond` arm reuses the
+    /// compiled `FilterNode` instead of recompiling `cond.condition` on
+    /// every record. `SelectProjection` is built once per query and
+    /// `funcs`/this cache are never cloned — the pointer-identity cache key
+    /// stays valid for the projection's whole lifetime.
+    pub(super) funcs_cond_cache: CondCache,
 }
 
 impl SelectProjection {
@@ -63,11 +72,21 @@ impl SelectProjection {
             (fields, funcs)
         };
 
+        // #643: pre-scan every projected FilterValue once (at query-compile
+        // time, NOT per record) for nested `$cond` conditions, and compile
+        // each one now. `project_value` reuses this cache for every record
+        // instead of re-running `compile_filter` per row per `$cond`.
+        let mut funcs_cond_cache: CondCache = shamir_types::types::common::new_map();
+        for (_, fv) in &funcs {
+            prescan_cond_cache(fv, interner, &mut funcs_cond_cache);
+        }
+
         Self {
             is_all,
             fields,
             funcs,
             empty_refs: new_map_wc(0),
+            funcs_cond_cache,
         }
     }
 
@@ -100,7 +119,8 @@ impl SelectProjection {
             obj.insert(key.clone(), val);
         }
         if !self.funcs.is_empty() {
-            let ctx = FilterContext::new(interner, &self.empty_refs);
+            let ctx = FilterContext::new(interner, &self.empty_refs)
+                .with_cond_cache(&self.funcs_cond_cache);
             for (key, fv) in &self.funcs {
                 let val = resolve_filter_query(fv, record, &ctx).unwrap_or(QueryValue::Null);
                 obj.insert(key.clone(), val);

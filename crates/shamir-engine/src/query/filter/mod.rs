@@ -8,6 +8,7 @@
 //! stays in this crate because it touches Interner state.
 
 pub mod compile;
+pub mod cond_cache;
 pub mod eval;
 pub mod eval_bytes;
 pub mod eval_context;
@@ -18,6 +19,7 @@ pub mod resolve;
 
 // Re-export DTOs from the shared types crate.
 pub use compile::compile_filter;
+pub use cond_cache::{cond_cache_get, prescan_cond_cache, CondCache};
 pub use eval_context::FilterContext;
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
