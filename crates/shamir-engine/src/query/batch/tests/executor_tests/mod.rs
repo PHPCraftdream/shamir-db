@@ -8,3 +8,4 @@ pub mod query_runner_tests;
 pub mod ssi_tests;
 pub mod transactions_tests;
 pub mod when_skip_tests;
+pub mod write_value_resolution_tests;

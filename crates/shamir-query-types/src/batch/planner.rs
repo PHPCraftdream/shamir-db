@@ -313,18 +313,70 @@ impl BatchPlanner {
         deps
     }
 
-    /// Extract dependencies from a QueryValue.
+    /// Extract dependencies from a write-row `QueryValue`
+    /// (`InsertOp.values[i]`/`UpdateOp.set`/`SetOp.{key,value}`).
+    ///
+    /// #641 fix: this used to detect `$query` LOOSELY (`map.get("$query")`
+    /// anywhere in a map, regardless of what else the map contained) and did
+    /// NOT recurse into `$fn`'s args / `$cond`'s branches / `$expr`'s
+    /// operands — so a `$query` ref nested inside one of those (e.g.
+    /// `{"total": {"$expr": {"op": "add", "args": [{"$query": "@a"}, 1]}}}`)
+    /// silently dropped out of the dependency graph (wrong topological
+    /// order: the write could run BEFORE the alias it reads from). This now
+    /// matches the precision AND recursion depth of
+    /// [`Self::extract_deps_from_filter_value`] (the #642 fix for WHERE/
+    /// `when` trees): a marker is detected with the exact reserved-key-map
+    /// convention (mirroring `contains_param_ref`'s `is_marker_map` in
+    /// `shamir-engine`'s `param_subst.rs`), then the marker map is decoded
+    /// into a [`crate::filter::FilterValue`] via the same msgpack
+    /// round-trip `param_subst.rs` uses to RESOLVE it at execution time —
+    /// `FilterValue`'s wire encoding for `QueryRef`/`FnCall`/`Cond`/`Expr` IS
+    /// exactly this reserved-key map shape — and delegated to the shared
+    /// `extract_deps_from_filter_value` leaf extractor, so both extractors
+    /// recurse identically forever after (one shared implementation, no
+    /// drift).
+    ///
+    /// `$param` is intentionally NOT treated as a marker here: it carries no
+    /// alias to depend on (it reads from the sub-batch's `bind` scope, not
+    /// another query's result), so it contributes no dependency edge either
+    /// way — same as the old code's silent no-op for it.
     fn extract_deps_from_value(value: &QueryValue, deps: &mut TSet<String>) {
+        use crate::filter::FilterValue;
+
         match value {
             QueryValue::Map(map) => {
-                // Check for $query reference
-                if let Some(query_ref) = map.get("$query") {
-                    if let Some(alias) = query_ref.as_str() {
-                        let base_alias = Self::extract_base_alias(alias);
-                        deps.insert(base_alias);
+                // Reserved-key marker detection (mirrors
+                // `contains_param_ref`'s `is_marker_map` in
+                // `shamir-engine`'s `param_subst.rs`) — `$param` excluded
+                // (see doc comment above). `$query`'s serde shape is
+                // `{"$query": "<alias>", "path"?: "<path>"}` — a SECOND
+                // top-level `path` key is the normal, common case (any
+                // `$query` ref that carries a path), so a 2-key map with
+                // exactly `$query`+`path` is ALSO a marker, not just the
+                // 1-key case `$fn`/`$cond`/`$expr` always are.
+                let is_query_fn_cond_expr_marker = match map.len() {
+                    1 => ["$query", "$fn", "$cond", "$expr"]
+                        .iter()
+                        .any(|k| map.contains_key(*k)),
+                    2 => map.contains_key("$query") && map.contains_key("path"),
+                    _ => false,
+                };
+                if is_query_fn_cond_expr_marker {
+                    if let Some(fv) = rmp_serde::to_vec_named(value)
+                        .ok()
+                        .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
+                    {
+                        Self::extract_deps_from_filter_value(&fv, deps);
+                        return;
                     }
+                    // Malformed marker payload (fails to decode as a
+                    // FilterValue): fall through to plain recursion below —
+                    // execution-time resolution (`param_subst.rs`) is the
+                    // authority that rejects malformed markers with a clear
+                    // error; the planner's dependency pass stays best-effort.
                 }
-                // Recurse into nested objects
+                // Recurse into nested objects (also covers `$param` markers
+                // and non-marker maps).
                 for v in map.values() {
                     Self::extract_deps_from_value(v, deps);
                 }

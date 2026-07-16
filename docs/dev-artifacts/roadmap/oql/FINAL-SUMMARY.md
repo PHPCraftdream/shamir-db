@@ -81,11 +81,26 @@ needed.
 
 ## 3. What works with known limitations
 
-- **#641 — GAP**: `$cond`/`FilterValue` does not compose into write
-  SET-values (a `QueryValue` vs `FilterValue` type split in the current
-  model). Not a bug in the strict sense — a real design gap that needs its
-  own scoped design/ADR before it can be closed. Epic02's e2e coverage was
-  deliberately scoped to WHERE-position only because of this gap.
+- **#641 — FIXED (2026-07).** `InsertOp.values`/`UpdateOp.set`/
+  `SetOp.{key,value}` stay `QueryValue` on the wire (no wire-format change),
+  but a `QueryValue::Map` carrying exactly one reserved key
+  (`$param`/`$query`/`$fn`/`$cond`/`$expr`) is now recognized as a marker
+  and resolved to its real value at execution time — via a msgpack
+  round-trip into `FilterValue` + `resolve_filter_query`, reusing the exact
+  `FilterContext` (resolved_refs/actor/params) already in scope at the
+  Insert/Update/Set dispatch sites in `query_runner.rs`. `BatchPlanner`'s
+  `extract_deps_from_value` was tightened to the same single-key-map
+  detection and recursion depth as `extract_deps_from_filter_value` (the
+  #642 fix), so a `$query` ref nested inside `$fn`/`$cond`/`$expr` in a
+  write value now correctly participates in the DAG. `$ref`/`FieldRef`
+  (same-document field references) remains explicitly OUT OF SCOPE — at
+  the point write-value markers resolve, the document being written does
+  not exist yet as a real record to resolve a field path against; this
+  mirrors `when`'s documented exclusion of field-based comparisons for the
+  same "no record context" reason. A malformed marker (bad payload, unknown
+  alias/function) is a hard `BatchError` (`malformed_marker`), never a
+  silent literal pass-through. See
+  `docs/dev-artifacts/prompts/gap-641/01-write-value-resolution.md`.
 - **#643 — PERF**: `$cond`/`$expr` evaluation recompiles the filter on
   every row (roughly 29-190x overhead vs. an equivalent flat literal, per
   Epic02's benchmark). Correctness is unaffected; this is purely a
@@ -170,12 +185,13 @@ needed.
    `distinct_repos()`/`table_ref()` to walk into `Batch`/`ForEach` bodies;
    low risk, closes a real but narrow gap affecting both Epic01 and
    Epic04 constructs.
-3. **Scope #641 and #643 as their own dedicated efforts** — #641 needs a
-   real design decision (how `QueryValue` and `FilterValue` should unify
-   or interoperate for write SET-values) before implementation; #643 is a
-   pure performance investigation (likely caching compiled filters keyed
-   by their AST shape) that can proceed independently once #641's design
-   direction is settled.
+3. **#641 — DONE (2026-07).** Fixed with no wire-format change: a
+   `QueryValue::Map` carrying a single reserved key IS the interop point
+   between `QueryValue` and `FilterValue` (the same convention `$param`
+   already established), so no separate unification design was needed —
+   see section 3 above. **#643 remains open** — a pure performance
+   investigation (likely caching compiled filters keyed by their AST
+   shape) that can proceed independently.
 4. **Revisit #659 (while-style loops) as a fresh design exercise** only if
    there is still a real product need for per-step re-evaluated
    conditions after #651 is fixed — with `when` actually working

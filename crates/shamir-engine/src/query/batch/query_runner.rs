@@ -19,7 +19,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::param_subst::{contains_param_ref, substitute_params};
+use crate::query::batch::param_subst::{contains_param_ref, resolve_write_value, WriteValueError};
 use shamir_query_types::filter::Filter;
 
 /// Build resolved_refs map containing only DataFlow-provenance dependencies.
@@ -138,6 +138,24 @@ pub(super) fn resolve_skip(
         .with_params(params);
     let node = crate::query::filter::compile_filter(filter, &scratch);
     !node.matches(&InnerValue::Null, &ctx)
+}
+
+/// Map a [`WriteValueError`] (from [`resolve_write_value`]) to the
+/// [`BatchError`] shape every Insert/Update/Set dispatch arm already returns
+/// for its `$param`-only substitution failures — `unbound_param` keeps its
+/// pre-existing code, `malformed_marker` is new (a `$query`/`$fn`/`$cond`/
+/// `$expr` marker that failed to resolve).
+fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchError {
+    match err {
+        WriteValueError::UnboundParam(name) => BatchError::query_coded(
+            alias,
+            "unbound_param",
+            format!("$param '{}' is not bound in this sub-batch", name),
+        ),
+        WriteValueError::MalformedMarker(message) => {
+            BatchError::query_coded(alias, "malformed_marker", message)
+        }
+    }
 }
 
 /// Encapsulates per-query execution context — resolver, admin, optional
@@ -647,16 +665,17 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
-                // C2: substitute $param references inside each inserted value
-                // row — but ONLY when a row actually contains a `$param` node.
+                // #641: resolve reserved markers ($param/$query/$fn/$cond/
+                // $expr) inside each inserted value row — but ONLY when a row
+                // actually contains a marker node.
                 //
-                // The common bulk-insert path carries no params: a cheap scan
+                // The common bulk-insert path carries no markers: a cheap scan
                 // (`contains_param_ref`, no allocation) lets us borrow `op`
                 // directly — skipping the per-row clone-Vec AND the O(N) deep
                 // structural `values == op.values` compare that the old code
                 // paid on every insert to discover "nothing changed". Only when
-                // some row references a `$param` do we build the substituted op
-                // (and pay the clone), where substitution is genuinely needed.
+                // some row references a marker do we build the resolved op
+                // (and pay the clone), where resolution is genuinely needed.
                 let subst_op;
                 let needs_subst = op.values.iter().any(contains_param_ref);
                 let op_ref: &shamir_query_types::write::InsertOp = if !needs_subst {
@@ -666,13 +685,8 @@ impl<'a> QueryRunner<'a> {
                         .values
                         .iter()
                         .map(|v| {
-                            substitute_params(v, self.params).map_err(|name| {
-                                BatchError::query_coded(
-                                    alias,
-                                    "unbound_param",
-                                    format!("$param '{}' is not bound in this sub-batch", name),
-                                )
-                            })
+                            resolve_write_value(v, &ctx)
+                                .map_err(|e| write_value_error_to_batch_error(alias, e))
                         })
                         .collect::<Result<_, _>>()?;
                     subst_op = shamir_query_types::write::InsertOp {
@@ -743,15 +757,11 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
-                // Substitute $param references inside the `set` document.
-                // substitute_params has a fast path (clone) when no $param nodes exist.
-                let subst_set = substitute_params(&op.set, self.params).map_err(|name| {
-                    BatchError::query_coded(
-                        alias,
-                        "unbound_param",
-                        format!("$param '{}' is not bound in this sub-batch", name),
-                    )
-                })?;
+                // #641: resolve reserved markers ($param/$query/$fn/$cond/
+                // $expr) inside the `set` document. `resolve_write_value` has
+                // a fast path (clone) when no marker nodes exist.
+                let subst_set = resolve_write_value(&op.set, &ctx)
+                    .map_err(|e| write_value_error_to_batch_error(alias, e))?;
                 let subst_op;
                 let op_ref: &shamir_query_types::write::UpdateOp = if subst_set == op.set {
                     op
@@ -987,22 +997,14 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
-                // Substitute $param references inside the upsert `key` and `value`.
-                // substitute_params has a fast path (clone) when no $param nodes exist.
-                let subst_key = substitute_params(&op.key, self.params).map_err(|name| {
-                    BatchError::query_coded(
-                        alias,
-                        "unbound_param",
-                        format!("$param '{}' is not bound in this sub-batch", name),
-                    )
-                })?;
-                let subst_value = substitute_params(&op.value, self.params).map_err(|name| {
-                    BatchError::query_coded(
-                        alias,
-                        "unbound_param",
-                        format!("$param '{}' is not bound in this sub-batch", name),
-                    )
-                })?;
+                // #641: resolve reserved markers ($param/$query/$fn/$cond/
+                // $expr) inside the upsert `key` and `value`.
+                // `resolve_write_value` has a fast path (clone) when no
+                // marker nodes exist.
+                let subst_key = resolve_write_value(&op.key, &ctx)
+                    .map_err(|e| write_value_error_to_batch_error(alias, e))?;
+                let subst_value = resolve_write_value(&op.value, &ctx)
+                    .map_err(|e| write_value_error_to_batch_error(alias, e))?;
                 let subst_op;
                 let op_ref: &shamir_query_types::write::SetOp =
                     if subst_key == op.key && subst_value == op.value {
