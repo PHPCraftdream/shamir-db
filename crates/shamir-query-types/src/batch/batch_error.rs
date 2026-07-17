@@ -104,6 +104,16 @@ pub enum BatchError {
     /// result instead of erroring, exactly the #651 class of bug just one
     /// level deeper. This turns it into a caught, explicit plan-time error.
     InvalidCondCondition { alias: String, message: String },
+
+    /// #666: the batch's total execution time exceeded
+    /// `BatchLimits.max_execution_time_secs`.
+    ///
+    /// The in-flight `execute_batch_impl` future was cancelled by
+    /// `tokio::time::timeout` — if the batch was transactional, its
+    /// `TxContext` is owned by that cancelled future and is dropped without
+    /// commit (RAII rollback, the SAME mechanism `execute_transactional_impl`
+    /// already uses for any other `Err` — no new rollback logic needed).
+    ExecutionTimedOut { budget_secs: u64 },
 }
 
 impl std::fmt::Display for BatchError {
@@ -177,6 +187,13 @@ impl std::fmt::Display for BatchError {
                     f,
                     "invalid '$cond' condition in write value on '{}': {}",
                     alias, message
+                )
+            }
+            BatchError::ExecutionTimedOut { budget_secs } => {
+                write!(
+                    f,
+                    "batch execution exceeded its {}s time budget",
+                    budget_secs
                 )
             }
         }

@@ -532,7 +532,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
     match e {
         BatchError::TooManyQueries { .. }
         | BatchError::TooDeep { .. }
-        | BatchError::TooManyIterations { .. } => "limits",
+        | BatchError::TooManyIterations { .. }
+        | BatchError::ExecutionTimedOut { .. } => "limits",
         BatchError::CircularDependency { .. }
         | BatchError::UnknownAlias { .. }
         | BatchError::AfterPathIgnored { .. }

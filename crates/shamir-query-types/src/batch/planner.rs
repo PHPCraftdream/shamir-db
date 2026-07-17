@@ -106,6 +106,15 @@ impl BatchPlanner {
         queries: &TMap<String, QueryEntry>,
         limits: &BatchLimits,
     ) -> Result<BatchPlan, BatchError> {
+        // #666 finding 3 (documented, NOT fixed here): each nested
+        // Batch/ForEach body is independently re-planned at execution time
+        // with its OWN (independently client-supplied) `limits`, so
+        // `max_queries` is enforced per-level, not as a global cumulative
+        // budget across the whole recursive tree. Worst-case total op count
+        // is bounded by roughly `max_queries_per_level ^ max_nesting_depth`
+        // — large but finite, not literally unbounded, since
+        // `max_nesting_depth` IS composed globally. A true cross-level
+        // cumulative counter is a separate, larger task.
         // Check query count
         if queries.len() > limits.max_queries {
             return Err(BatchError::TooManyQueries {

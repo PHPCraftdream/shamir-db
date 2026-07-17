@@ -13,7 +13,7 @@ use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
-use shamir_query_types::batch::ResultEncoding;
+use shamir_query_types::batch::{BatchLimits, ResultEncoding};
 use shamir_types::access::{trace_access, Action, Actor, ResourcePath};
 use shamir_types::codecs::interned::query_value_to_storage_bytes_into;
 use shamir_types::core::interner::Interner;
@@ -22,6 +22,25 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::batch::param_subst::{contains_param_ref, resolve_write_value, WriteValueError};
 use shamir_query_types::filter::Filter;
+
+/// Absolute, server-enforced ceiling on `ForEach` iteration count —
+/// independent of whatever a client-supplied `BatchLimits.max_iterations`
+/// claims. Closes a DoS gap: `max_iterations` is entirely client-supplied
+/// wire data (#666), so a client could otherwise set it to `usize::MAX`
+/// and defeat the gate for a `ForEach` with a dynamic (non-literal-array)
+/// `over` source, whose iteration count the plan-time `virtual_units`
+/// check (`BatchPlanner::plan`) cannot see ahead of time.
+pub(crate) const ABSOLUTE_MAX_FOR_EACH_ITERATIONS: usize = 100_000;
+
+/// The effective `max_iterations` gate value for a `ForEach` body's
+/// `limits` — the client-supplied value, clamped down to the server's
+/// absolute ceiling (`ABSOLUTE_MAX_FOR_EACH_ITERATIONS`). A `min`, never a
+/// replacement: a client-supplied value BELOW the ceiling is respected
+/// unchanged (#653 behavior preserved), only a value AT OR ABOVE the
+/// ceiling is clamped down (#666).
+pub(crate) fn effective_max_iterations(limits: &BatchLimits) -> usize {
+    limits.max_iterations.min(ABSOLUTE_MAX_FOR_EACH_ITERATIONS)
+}
 
 /// Build resolved_refs map containing only DataFlow-provenance dependencies.
 ///
@@ -517,7 +536,7 @@ impl<'a> QueryRunner<'a> {
             // Runtime gate (ADR Decision 3): reject BEFORE iteration 0 if
             // the resolved length exceeds max_iterations — never a partial
             // run followed by a mid-loop abort.
-            let max_iterations = fe.batch.limits.max_iterations;
+            let max_iterations = effective_max_iterations(&fe.batch.limits);
             if elements.len() > max_iterations {
                 return Err(BatchError::TooManyIterations {
                     alias: alias.to_string(),

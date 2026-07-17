@@ -1,4 +1,5 @@
 mod cross_repo_guard_tests;
+mod dos_gate_tests;
 mod executor_tests;
 mod fk_actions_tests;
 mod fk_on_update_tests;

@@ -53,6 +53,17 @@ pub async fn open_interactive_tx(
 /// The single-repo guard is enforced here exactly as in [`execute_batch`];
 /// the caller additionally asserts that the batch targets the SAME repo the
 /// handle is pinned to (the engine tx is committed against one repo).
+///
+/// **#666: no wall-clock timeout here, by design.** `execute_batch`'s
+/// `max_execution_time_secs` enforcement (`tokio::time::timeout` wrapping
+/// the whole single-call execution) applies ONLY to that single-call entry
+/// point. An interactive transaction spans MULTIPLE separate
+/// `execute_in_open_tx` calls before an eventual `commit_interactive_tx` —
+/// the caller owns `tx: &mut TxContext` across all of them, so there is no
+/// single call whose wall-clock duration corresponds to "the whole
+/// transaction's lifetime". A per-session idle/total-duration timeout for
+/// interactive transactions, if ever needed, is a separate, larger feature
+/// (different lifecycle contract, out of scope for this fix).
 pub async fn execute_in_open_tx(
     request: &BatchRequest,
     resolver: &dyn TableResolver,

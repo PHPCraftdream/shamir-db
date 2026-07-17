@@ -23,6 +23,24 @@ use shamir_types::types::value::QueryValue;
 /// `actor` is threaded from the facade (R2) and carried into every
 /// resource-touch point via [`QueryRunner`]. `db_name` provides the
 /// database scope for [`ResourcePath`] construction.
+///
+/// **#666: wall-clock enforcement of `BatchLimits.max_execution_time_secs`.**
+/// This is the SINGLE top-level entry point that wraps the whole recursive
+/// execution (`execute_batch_impl`, and transitively any nested
+/// `Batch`/`ForEach` bodies) in a `tokio::time::timeout`. Nested re-entrant
+/// calls already run within the outer call's own budget transitively, so
+/// wrapping only here is sufficient — no nested-timeout complexity needed.
+/// `execute_in_open_tx` (interactive, multi-call transactions) is
+/// deliberately NOT wrapped — see its doc comment for why that lifecycle
+/// is out of scope for a single-call wall-clock timeout.
+///
+/// A client-supplied `max_execution_time_secs: 0` is treated as a (tiny,
+/// 1-second) budget, NOT as "no timeout" — `.max(1)` guards against a
+/// zero-duration timeout firing before any work happens, while still
+/// enforcing SOME ceiling. Interpreting `0` as "unlimited" would let a
+/// client opt out of the very DoS gate this fix adds, which defeats the
+/// purpose; treating it as "the smallest valid budget" keeps the gate
+/// mandatory regardless of what a client requests.
 pub async fn execute_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
@@ -31,17 +49,27 @@ pub async fn execute_batch(
     actor: Actor,
     db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
-    execute_batch_impl(
-        request,
-        resolver,
-        admin,
-        invoker,
-        actor,
-        db_name,
-        0,
-        &new_map(),
+    let budget = std::time::Duration::from_secs(request.limits.max_execution_time_secs.max(1));
+    match tokio::time::timeout(
+        budget,
+        execute_batch_impl(
+            request,
+            resolver,
+            admin,
+            invoker,
+            actor,
+            db_name,
+            0,
+            &new_map(),
+        ),
     )
     .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(BatchError::ExecutionTimedOut {
+            budget_secs: request.limits.max_execution_time_secs,
+        }),
+    }
 }
 
 /// Internal entry point that carries the sub-batch recursion state.
