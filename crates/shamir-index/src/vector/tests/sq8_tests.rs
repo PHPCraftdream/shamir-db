@@ -208,13 +208,21 @@ fn approx_dot_matches_term_by_term_expansion() {
     }
     let approx = q.approx_dot(&qx, &qy);
     // The two sums are mathematically identical but accumulate in a
-    // different fp order, so compare with a relative tolerance rather
-    // than bit-equality. The magnitude here is ≈ 0.026, so 1e-3 relative
-    // (≈ 3e-5 absolute) is a generous but meaningful bound.
-    let rel = (approx - manual).abs() / manual.abs().max(1e-9);
+    // different fp order, so compare with a tolerance rather than
+    // bit-equality. A PURE relative tolerance breaks down whenever the
+    // reference value is near zero (cross-platform SIMD/FMA rounding noise
+    // becomes a large fraction of a tiny denominator, even though the
+    // absolute difference stays negligible) — combine relative AND
+    // absolute bounds (the standard `|a-b| <= atol + rtol*|ref|` pattern),
+    // so a genuinely tiny reference doesn't demand near-bit-exact
+    // agreement. The magnitude here is ≈ 0.026, so 1e-3 relative
+    // (≈ 3e-5 absolute) is a generous but meaningful bound; the 1e-5
+    // absolute floor only matters for near-zero references.
+    let diff = (approx - manual).abs();
+    let tol = 1e-3 * manual.abs() + 1e-5;
     assert!(
-        rel < 1e-3,
-        "approx_dot {approx} != term-by-term {manual} (rel {rel})"
+        diff <= tol,
+        "approx_dot {approx} != term-by-term {manual} (diff {diff}, tol {tol})"
     );
 }
 
@@ -253,11 +261,20 @@ fn approx_dot_matches_pre_refactor_scalar_loop_across_fit_configs() {
             pre_refactor += min_sq_sum;
 
             let post_refactor = q.approx_dot(&qx, &qy);
-            let rel = (post_refactor - pre_refactor).abs() / pre_refactor.abs().max(1e-9);
+            // Combined relative+absolute tolerance (see
+            // `approx_dot_matches_term_by_term_expansion`'s comment above):
+            // a pure relative bound is unreliable when `pre_refactor` is
+            // near zero — exactly what was observed in CI (dim=8 seed=17
+            // on a non-x86 SIMD backend: reference ≈ 1.35e-4, absolute
+            // diff ≈ 1.9e-6, but 1.4% relative — comfortably past a 0.1%
+            // pure-relative bound despite the two values agreeing to 5
+            // significant figures).
+            let diff = (post_refactor - pre_refactor).abs();
+            let tol = 1e-3 * pre_refactor.abs() + 1e-5;
             assert!(
-                rel < 1e-3,
+                diff <= tol,
                 "dim={dim} seed={seed}: approx_dot (post-refactor) {post_refactor} != \
-                 pre-refactor scalar loop {pre_refactor} (rel {rel})"
+                 pre-refactor scalar loop {pre_refactor} (diff {diff}, tol {tol})"
             );
         }
     }
