@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use crate::query::batch::batch_execute::{execute_plan_tx, filter_results};
-use crate::query::batch::batch_validate::validate_tables;
+use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchRequest, BatchResponse};
 use shamir_types::access::Actor;
@@ -89,6 +89,10 @@ pub async fn execute_in_open_tx(
     let mut plan =
         shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
     validate_tables(&request.queries, resolver).await?;
+    // #670: mirrors execute_batch_impl / run_nested_body_in_outer_tx — this
+    // path previously skipped the filter-nesting-depth DoS guard, letting an
+    // interactive-tx client submit arbitrarily deeply nested filters.
+    validate_filter_depth(&request.queries)?;
 
     let all_results = execute_plan_tx(
         &mut plan,

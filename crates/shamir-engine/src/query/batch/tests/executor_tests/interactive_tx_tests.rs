@@ -4,10 +4,11 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
+use shamir_query_types::filter::Filter;
 use shamir_types::access::Actor;
 
 use crate::query::batch::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx,
+    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, BatchError,
 };
 
 use super::common::TxTestResolver;
@@ -550,5 +551,100 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         count, 0,
         "a crash mid-interactive-tx must leave NOTHING durable \
          (no wal.begin → clean abort)"
+    );
+}
+
+// ============================================================================
+// #670 — `execute_in_open_tx` must enforce the filter-nesting-depth DoS
+// guard, exactly like `execute_batch_impl`/`run_nested_body_in_outer_tx`
+// already do. Before the fix, `execute_in_open_tx` called `BatchPlanner::plan`
+// + `validate_tables` but never `validate_filter_depth`, letting an
+// interactive-tx client submit an arbitrarily deeply nested filter.
+// ============================================================================
+
+/// Build a `Filter::Not` chain `depth` levels deep, wrapping a trivial
+/// `IsNotNull` leaf — the cheapest way to exceed `MAX_FILTER_DEPTH` (64)
+/// without needing real field data.
+fn deeply_nested_not_filter(depth: usize) -> Filter {
+    let mut f = Filter::IsNotNull {
+        field: vec!["x".to_string()],
+    };
+    for _ in 0..depth {
+        f = Filter::Not {
+            filter: Box::new(f),
+        };
+    }
+    f
+}
+
+#[tokio::test]
+async fn execute_in_open_tx_rejects_deeply_nested_filter() {
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(1);
+    let mut read_q = Query::from("users").build();
+    read_q.r#where = Some(deeply_nested_not_filter(100));
+    b.query("r", read_q);
+    let req = b.build();
+
+    let err = execute_in_open_tx(&req, &resolver, None, None, &Actor::System, "test", &mut tx)
+        .await
+        .expect_err(
+            "a filter nesting 100 levels deep (> MAX_FILTER_DEPTH=64) must be \
+             rejected by execute_in_open_tx, exactly like execute_batch already \
+             rejects it",
+        );
+    assert!(
+        matches!(err, BatchError::QueryError { .. }),
+        "expected a QueryError naming the nesting-depth violation, got {:?}",
+        err
+    );
+
+    drop(tx);
+    drop(guard);
+}
+
+/// Regression pairing: the SAME shape over the plain `execute_batch` path
+/// must ALSO reject — proving both call sites now agree (before #670 they
+/// silently diverged: `execute_batch` rejected, `execute_in_open_tx` did not).
+#[tokio::test]
+async fn execute_batch_rejects_deeply_nested_filter_parity_check() {
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo };
+
+    let mut b = Batch::new();
+    b.id(1);
+    let mut read_q = Query::from("users").build();
+    read_q.r#where = Some(deeply_nested_not_filter(100));
+    b.query("r", read_q);
+    let req = b.build();
+
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("execute_batch must reject the same over-deep filter");
+    assert!(
+        matches!(err, BatchError::QueryError { .. }),
+        "expected a QueryError naming the nesting-depth violation, got {:?}",
+        err
     );
 }
