@@ -86,13 +86,26 @@ impl ExecutionDeadline {
     /// `0` as unlimited would let a client opt out of the DoS gate
     /// entirely, defeating its purpose. (`.max(1)` carried over unchanged
     /// from the original #666 entry point.)
+    ///
+    /// A huge `budget_secs` (e.g. `u64::MAX` — the sentinel
+    /// `QueryLimitsCap::UNLIMITED` uses, reachable when no operator cap
+    /// clamps it, such as the embedded/napi `execute_batch` path) must NOT
+    /// panic: `Instant`'s `Add<Duration>` panics on overflow, unlike
+    /// `tokio::time::timeout`'s internal `checked_add` (which the code this
+    /// replaces relied on implicitly). `checked_add` here falls back to
+    /// [`unbounded`](Self::unbounded) on overflow — a budget too large to
+    /// even represent as a deadline is, for every practical purpose,
+    /// equivalent to no budget at all; it can never actually elapse.
     pub fn from_budget_secs(budget_secs: u64) -> Self {
         let effective = budget_secs.max(1);
-        Self {
-            inner: Some(DeadlineInner {
-                deadline: Instant::now() + Duration::from_secs(effective),
-                budget_secs,
-            }),
+        match Instant::now().checked_add(Duration::from_secs(effective)) {
+            Some(deadline) => Self {
+                inner: Some(DeadlineInner {
+                    deadline,
+                    budget_secs,
+                }),
+            },
+            None => Self::unbounded(),
         }
     }
 

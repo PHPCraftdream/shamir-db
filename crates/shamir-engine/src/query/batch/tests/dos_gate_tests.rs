@@ -395,6 +395,49 @@ async fn execute_batch_within_time_budget_succeeds_unaffected() {
 }
 
 // ============================================================================
+// Test 4b — a huge client-supplied budget (the `QueryLimitsCap::UNLIMITED`
+// sentinel is `u64::MAX`, reachable whenever no operator cap clamps it, e.g.
+// the embedded/napi `execute_batch` path) must not panic. `Instant`'s
+// `Add<Duration>` panics on overflow; `ExecutionDeadline::from_budget_secs`
+// must use `checked_add` and fall back to an effectively-unbounded deadline
+// instead — a budget too large to represent can never actually elapse, so
+// treating it as unbounded is behaviorally correct, not just panic-safe.
+// ============================================================================
+
+#[test]
+fn execution_deadline_from_absurd_budget_does_not_panic() {
+    use crate::query::batch::ExecutionDeadline;
+
+    // Must not panic constructing the deadline...
+    let deadline = ExecutionDeadline::from_budget_secs(u64::MAX);
+    // ...and a normal (non-expired) checkpoint must still pass.
+    assert!(
+        deadline.check().is_ok(),
+        "a checked_add overflow must fall back to an unbounded deadline, \
+         not a deadline that is somehow already expired"
+    );
+}
+
+#[tokio::test]
+async fn execute_batch_with_absurd_budget_succeeds_without_panicking() {
+    let resolver = setup().await;
+
+    let mut req = insert_body_of("orders", "user_id", 3);
+    req.limits = BatchLimits {
+        max_execution_time_secs: u64::MAX, // the QueryLimitsCap::UNLIMITED sentinel
+        ..BatchLimits::default()
+    };
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect("a u64::MAX budget must not panic and must not spuriously time out");
+    assert!(
+        resp.results.get("ins").is_some(),
+        "the insert must have actually run and produced a result"
+    );
+}
+
+// ============================================================================
 // Test 5 — DECISIVE: a deadline that expires PARTWAY through a transactional
 // `ForEach` stops the loop at the next per-iteration checkpoint, surfaces
 // `ExecutionTimedOut` through the normal `Err` path, and rolls back the
