@@ -13,8 +13,8 @@
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
-    commit_interactive_tx, execute_in_open_tx, open_interactive_tx, BatchError, BatchRequest,
-    BatchResponse, TransactionInfo,
+    collect_required_access, commit_interactive_tx, execute_in_open_tx, open_interactive_tx,
+    BatchError, BatchRequest, BatchResponse, TransactionInfo,
 };
 
 use rustc_hash::FxHashMap;
@@ -129,10 +129,15 @@ impl ShamirDb {
 
         // Per-op DML authorization (mirrors execute_as).
         //
-        // `required_access` is the single source of truth for the
-        // BatchOp -> (Action, ResourcePath) mapping (was duplicated inline
-        // here and in `execute_as` — see `BatchOp::required_access`'s doc
-        // comment).
+        // `collect_required_access` recursively walks the WHOLE query tree,
+        // including nested `Batch`/`ForEach` bodies at any depth — a flat,
+        // one-level walk over `request.queries.values()` would see `None`
+        // for `Batch`/`ForEach` (they have no `table_ref()`) and silently
+        // skip authorizing whatever tables their nested body actually
+        // touches, letting an actor bypass a forbidden table's ACL by
+        // wrapping the op in a top-level `Batch`/`ForEach` (the #660-class
+        // bug, but for authorization). See `collect_required_access`'s doc
+        // comment (mirrors `distinct_repos`'s recursive-walk precedent).
         //
         // ACL inline cache: within a single tx_execute_as call every
         // (path, action) pair resolves to the same answer — the actor,
@@ -140,24 +145,24 @@ impl ShamirDb {
         // ops. The first call pays the full async traversal; subsequent
         // calls for the same key hit a HashMap and cost ~50 ns. The cache
         // is stack-local and dropped at function exit (no cross-call sharing).
+        // It stays correct over the recursively-collected list — it's keyed
+        // on `(ResourcePath, Action)`, unrelated to how the list was gathered.
         let mut acl_cache: FxHashMap<(ResourcePath, Action), bool> = FxHashMap::default();
-        for entry in request.queries.values() {
-            if let Some((action, path)) = entry.op.required_access(db_name) {
-                let key = (path.clone(), action);
-                let allowed = if let Some(&cached) = acl_cache.get(&key) {
-                    cached
-                } else {
-                    let ok = self.authorize_access(&actor, &path, action).await.is_ok();
-                    acl_cache.insert(key, ok);
-                    ok
-                };
-                if !allowed {
-                    return Err(BatchError::query_coded(
-                        "",
-                        "access_denied",
-                        format!("access denied: {:?} on {:?}", action, path),
-                    ));
-                }
+        for (action, path) in collect_required_access(&request.queries, db_name) {
+            let key = (path.clone(), action);
+            let allowed = if let Some(&cached) = acl_cache.get(&key) {
+                cached
+            } else {
+                let ok = self.authorize_access(&actor, &path, action).await.is_ok();
+                acl_cache.insert(key, ok);
+                ok
+            };
+            if !allowed {
+                return Err(BatchError::query_coded(
+                    "",
+                    "access_denied",
+                    format!("access denied: {:?} on {:?}", action, path),
+                ));
             }
         }
 

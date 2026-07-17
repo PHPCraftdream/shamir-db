@@ -1,7 +1,9 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
 use crate::access::{Action, Actor, ResourcePath};
-use crate::query::batch::{execute_batch, BatchError, BatchRequest, BatchResponse};
+use crate::query::batch::{
+    collect_required_access, execute_batch, BatchError, BatchRequest, BatchResponse,
+};
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -50,16 +52,19 @@ impl ShamirDb {
         // execute_admin). authorize_access traverses the db/store ancestors,
         // so the table path covers the whole chain. System bypasses.
         //
-        // `required_access` is the single source of truth for the
-        // BatchOp -> (Action, ResourcePath) mapping (was duplicated inline
-        // here and in `tx_execute_as` — see `BatchOp::required_access`'s
-        // doc comment).
-        for entry in request.queries.values() {
-            if let Some((action, path)) = entry.op.required_access(db_name) {
-                self.authorize_access(&actor, &path, action)
-                    .await
-                    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
-            }
+        // `collect_required_access` recursively walks the WHOLE query tree,
+        // including nested `Batch`/`ForEach` bodies at any depth — a flat,
+        // one-level walk over `request.queries.values()` would see `None`
+        // for `Batch`/`ForEach` (they have no `table_ref()`) and silently
+        // skip authorizing whatever tables their nested body actually
+        // touches, letting an actor bypass a forbidden table's ACL by
+        // wrapping the op in a top-level `Batch`/`ForEach` (the #660-class
+        // bug, but for authorization). See `collect_required_access`'s doc
+        // comment (mirrors `distinct_repos`'s recursive-walk precedent).
+        for (action, path) in collect_required_access(&request.queries, db_name) {
+            self.authorize_access(&actor, &path, action)
+                .await
+                .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
         }
 
         let resolver = DbTableResolver {

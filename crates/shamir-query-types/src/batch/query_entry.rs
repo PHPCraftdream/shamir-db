@@ -1,8 +1,10 @@
 //! [`QueryEntry`] — a single operation slot inside a [`BatchRequest`], plus
-//! the [`distinct_repos`] helper that inspects a map of entries.
+//! the [`distinct_repos`] / [`collect_required_access`] helpers that inspect
+//! a map of entries.
 
 use serde::{Deserialize, Serialize};
 use shamir_collections::{TFxSet, TMap};
+use shamir_types::access::{Action, ResourcePath};
 
 use crate::filter::Filter;
 use crate::read::ReadQuery;
@@ -105,6 +107,48 @@ fn collect_repos(queries: &TMap<String, QueryEntry>, repos: &mut TFxSet<String>)
         match &qe.op {
             BatchOp::Batch(sub) => collect_repos(&sub.batch.queries, repos),
             BatchOp::ForEach(fe) => collect_repos(&fe.batch.queries, repos),
+            _ => {}
+        }
+    }
+}
+
+/// Recursively collect every `(Action, ResourcePath)` authorization
+/// requirement across the WHOLE query tree — including inside nested
+/// `Batch`/`ForEach` bodies, at any depth. This is the single source of
+/// truth the per-op authorization pre-check loops (`ShamirDb::execute_as` /
+/// `tx_execute_as`) must use instead of a flat, one-level walk — a flat
+/// walk sees `None` for `Batch`/`ForEach` (they have no `table_ref()`) and
+/// silently skips whatever tables their nested body actually touches (the
+/// #660-class bug, but for authorization instead of repo detection: an
+/// actor with permission on SOME tables but not a forbidden one could
+/// read/write the forbidden table by simply wrapping the op in a
+/// top-level `Batch`/`ForEach`, since the inner op's own
+/// `required_access()` was never consulted).
+pub fn collect_required_access(
+    queries: &TMap<String, QueryEntry>,
+    db: &str,
+) -> Vec<(Action, ResourcePath)> {
+    let mut out = Vec::new();
+    collect_required_access_into(queries, db, &mut out);
+    out
+}
+
+/// Recursive collector behind [`collect_required_access`]: adds each
+/// entry's `required_access()` requirement (when present) and descends
+/// into `Batch`/`ForEach` bodies' `queries` maps so nested levels
+/// contribute too — mirrors [`collect_repos`]'s recursion shape exactly.
+fn collect_required_access_into(
+    queries: &TMap<String, QueryEntry>,
+    db: &str,
+    out: &mut Vec<(Action, ResourcePath)>,
+) {
+    for qe in queries.values() {
+        if let Some(req) = qe.op.required_access(db) {
+            out.push(req);
+        }
+        match &qe.op {
+            BatchOp::Batch(sub) => collect_required_access_into(&sub.batch.queries, db, out),
+            BatchOp::ForEach(fe) => collect_required_access_into(&fe.batch.queries, db, out),
             _ => {}
         }
     }

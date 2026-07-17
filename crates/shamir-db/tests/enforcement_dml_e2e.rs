@@ -4,6 +4,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::q;
+use shamir_query_builder::val::lit;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
 // ---------------------------------------------------------------------------
@@ -313,5 +314,556 @@ async fn tx_execute_as_enforces_table_acl() {
     assert!(
         msg.contains("denied") || msg.contains("Denied"),
         "error should mention denial, got: {msg}"
+    );
+}
+
+// ============================================================================
+// CRITICAL — `ForEach`/`Batch` per-table ACL bypass (security-fix brief
+// docs/dev-artifacts/prompts/security-fix/01-foreach-batch-acl-bypass.md).
+//
+// `BatchOp::required_access` returns `None` for `BatchOp::Batch`/
+// `BatchOp::ForEach` (no `table_ref()`), so a flat, one-level authorization
+// pre-check loop over `request.queries.values()` never inspects what a
+// nested `Batch`/`ForEach` body actually touches. An actor with permission
+// on SOME tables but explicitly NOT on a forbidden table could read/write
+// that forbidden table by simply wrapping the op in a top-level `ForEach`
+// (even a trivial single-iteration `over`) or a plain `Batch` sub-batch.
+// `collect_required_access` (mirroring `distinct_repos`'s #660 recursive
+// walk) closes this by recursing into nested bodies at any depth.
+//
+// `items` stays open (any actor may read/insert/delete it) while `secrets`
+// is locked to `Actor::User(1)` only (mode 0o700) — `Actor::User(2)` has
+// permission on `items` but explicitly NOT on `secrets`, the exact shape
+// the brief describes.
+// ============================================================================
+
+/// Extend `setup()` with a second table, `secrets`, restricted to
+/// `Actor::User(1)` only (owner-rwx, mode 0o700) — the FORBIDDEN table for
+/// `Actor::User(2)` in every bypass test below. `items` is explicitly opened
+/// here too (`setup()` only opens the db/store ancestors, not the table
+/// itself — G.4c defaults new tables to an enforced owner-only mode) so
+/// `Actor::User(2)` genuinely has permission on it — the ALLOWED table for
+/// the positive/regression tests.
+async fn setup_with_secrets() -> ShamirDb {
+    let shamir = setup().await;
+    shamir
+        .set_resource_meta(
+            &ResourcePath::table("testdb", "main", "items"),
+            &ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let config = RepoConfig::new("vault", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("secrets"));
+    shamir.add_repo("testdb", config).await.unwrap();
+    shamir
+        .set_resource_meta(
+            &ResourcePath::store("testdb", "vault"),
+            &ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let meta = ResourceMeta {
+        owner: Actor::User(1),
+        group: None,
+        mode: 0o700,
+    };
+    shamir
+        .set_resource_meta(&ResourcePath::table("testdb", "vault", "secrets"), &meta)
+        .await
+        .unwrap();
+    shamir
+}
+
+fn assert_access_denied<T: std::fmt::Debug>(result: Result<T, impl std::fmt::Debug>, ctx: &str) {
+    let err = match result {
+        Ok(v) => panic!("{ctx}: expected access_denied, got Ok({v:?})"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("denied") || msg.contains("Denied"),
+        "{ctx}: expected an access_denied error, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1. execute_as — top-level ForEach body touching the forbidden table must
+//    be denied (previously: silently succeeded).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_as_denies_forbidden_table_inside_top_level_for_each() {
+    let shamir = setup_with_secrets().await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from vault.secrets));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("bypass_foreach");
+    outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via top-level ForEach must be denied",
+    );
+}
+
+#[tokio::test]
+async fn execute_as_denies_forbidden_table_insert_inside_top_level_for_each() {
+    let shamir = setup_with_secrets().await;
+
+    let mut inner = Batch::new();
+    inner.insert(
+        "i",
+        q!(insert into vault.secrets values {
+            "value" => "leak"
+        }),
+    );
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("bypass_foreach_insert");
+    outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert_access_denied(
+        result,
+        "User(2) inserting into forbidden `secrets` via top-level ForEach must be denied",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. execute_as — same shape via plain Batch (non-transactional sub-batch).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_as_denies_forbidden_table_inside_top_level_batch() {
+    let shamir = setup_with_secrets().await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from vault.secrets));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("bypass_batch");
+    outer.sub_batch_no_bind("sub", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via top-level Batch must be denied",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3. execute_as — nested arbitrarily: Batch -> ForEach -> Batch, innermost
+//    body touches the forbidden table. Proves recursion isn't one level deep.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
+    let shamir = setup_with_secrets().await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from vault.secrets));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("bypass_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via Batch->ForEach->Batch must be denied",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Positive/regression — the SAME nested shapes touching the ALLOWED
+//    table (`items`) must still succeed. Don't just prove "now everything
+//    is denied" — prove legitimate nested usage still works (#661 depends
+//    on nested Batch/ForEach being usable).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_as_allows_permitted_table_inside_top_level_for_each() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from items));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("legit_foreach");
+    outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via top-level ForEach must still succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_as_allows_permitted_table_inside_top_level_batch() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from items));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("legit_batch");
+    outer.sub_batch_no_bind("sub", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via top-level Batch must still succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn execute_as_allows_permitted_table_nested_batch_foreach_batch() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from items));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("legit_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via nested Batch->ForEach->Batch must still succeed: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Both entry points — mirror tests 1-4 for tx_execute_as (transactional/
+//    interactive). The bug and the fix are symmetric across both call
+//    sites — the tx path additionally exercises the ACL inline cache.
+//
+// tx_execute_as enforces the SINGLE-repo constraint (the tx is opened
+// against one repo/handle), so these tx tests scope the nested bodies to
+// tables WITHIN the tx's own repo — `vault` (for the forbidden-table cases)
+// or `main` (for the permitted-table cases) — matching how a real
+// interactive tx is used.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tx_execute_as_denies_forbidden_table_inside_top_level_for_each() {
+    let shamir = setup_with_secrets().await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from vault.secrets));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_bypass_foreach");
+    outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    // User(2) has no rights on `vault/secrets` (owner-only User(1)), but the
+    // `vault` STORE itself is open (setup_with_secrets), so tx_begin_as
+    // succeeds — the forbidden table is the ForEach body's inner op, which
+    // is exactly what this bug lets bypass a flat one-level pre-check.
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "vault", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via top-level ForEach in tx_execute_as must be denied",
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_denies_forbidden_table_inside_top_level_batch() {
+    let shamir = setup_with_secrets().await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from vault.secrets));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_bypass_batch");
+    outer.sub_batch_no_bind("sub", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "vault", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via top-level Batch in tx_execute_as must be denied",
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
+    let shamir = setup_with_secrets().await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from vault.secrets));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_bypass_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "vault", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert_access_denied(
+        result,
+        "User(2) reading forbidden `secrets` via nested Batch->ForEach->Batch in tx_execute_as must be denied",
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_allows_permitted_table_inside_top_level_for_each() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from items));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_legit_foreach");
+    outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via top-level ForEach in tx_execute_as must still succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_allows_permitted_table_inside_top_level_batch() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut inner = Batch::new();
+    inner.query("r", q!(from items));
+    let inner_req = inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_legit_batch");
+    outer.sub_batch_no_bind("sub", inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via top-level Batch in tx_execute_as must still succeed: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_allows_permitted_table_nested_batch_foreach_batch() {
+    let shamir = setup_with_secrets().await;
+    seed_record(&shamir).await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from items));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_legit_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::User(2), "testdb", &req, &mut tx)
+        .await;
+    assert!(
+        result.is_ok(),
+        "User(2) reading permitted `items` via nested Batch->ForEach->Batch in tx_execute_as must still succeed: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Actor::System unaffected — the admin bypass must still work through
+//    nested Batch/ForEach exactly as before (System should never hit a
+//    denial), for both execute_as and tx_execute_as.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn execute_as_system_bypasses_nested_batch_foreach_on_forbidden_table() {
+    let shamir = setup_with_secrets().await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from vault.secrets));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("system_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let result = shamir.execute_as(Actor::System, "testdb", &req).await;
+    assert!(
+        result.is_ok(),
+        "Actor::System must bypass nested Batch/ForEach ACL checks: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn tx_execute_as_system_bypasses_nested_batch_foreach_on_forbidden_table() {
+    let shamir = setup_with_secrets().await;
+
+    let mut innermost = Batch::new();
+    innermost.query("r", q!(from vault.secrets));
+    let innermost_req = innermost.build();
+
+    let mut middle = Batch::new();
+    middle.sub_batch_no_bind("innermost", innermost_req);
+    let middle_req = middle.build();
+
+    let mut outer_inner = Batch::new();
+    outer_inner.for_each(
+        "loop",
+        vec![lit(1000_i64), lit(2000_i64)],
+        "row",
+        middle_req,
+    );
+    let outer_inner_req = outer_inner.build();
+
+    let mut outer = Batch::new();
+    outer.id("tx_system_nested");
+    outer.sub_batch_no_bind("outer_sub", outer_inner_req);
+    let req = outer.to_request_via_msgpack();
+
+    let (mut tx, _guard) = shamir
+        .tx_begin_as(Actor::System, "testdb", "vault", "snapshot")
+        .await
+        .unwrap();
+
+    let result = shamir
+        .tx_execute_as(Actor::System, "testdb", &req, &mut tx)
+        .await;
+    assert!(
+        result.is_ok(),
+        "Actor::System must bypass nested Batch/ForEach ACL checks in tx_execute_as: {result:?}"
     );
 }

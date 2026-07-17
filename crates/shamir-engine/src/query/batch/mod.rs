@@ -158,9 +158,9 @@ pub use query_runner::{
     commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, QueryRunner,
 };
 pub use shamir_query_types::batch::{
-    BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
-    InternerDelta, QueryEntry, QueryPath, QueryReference, ReferenceParseError, ResultEncoding,
-    TransactionInfo,
+    collect_required_access, BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner,
+    BatchRequest, BatchResponse, InternerDelta, QueryEntry, QueryPath, QueryReference,
+    ReferenceParseError, ResultEncoding, TransactionInfo,
 };
 
 // Retained for engine-level unit tests; not accessible outside test builds.

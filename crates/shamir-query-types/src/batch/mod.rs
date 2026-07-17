@@ -4,7 +4,8 @@
 //! - `sub_batch_op` — nested sub-batch with parameter bindings.
 //! - `for_each_op` — data-dependent loop: run a nested batch K times, once
 //!   per element of `over`, binding the current element to `bind_row`.
-//! - `query_entry` — single operation slot + `distinct_repos` helper.
+//! - `query_entry` — single operation slot + `distinct_repos` /
+//!   `collect_required_access` helpers.
 //! - `batch_request` — top-level batch request DTO.
 //! - `batch_response` — top-level batch response DTO.
 //! - `transaction_info` — MVCC transaction metadata.
@@ -55,7 +56,7 @@ pub use edge_kind::EdgeKind;
 pub use for_each_op::ForEachOp;
 pub use interner_delta::InternerDelta;
 pub use planner::BatchPlanner;
-pub use query_entry::{distinct_repos, QueryEntry};
+pub use query_entry::{collect_required_access, distinct_repos, QueryEntry};
 pub use reference::{QueryPath, QueryReference, ReferenceParseError};
 pub use result_encoding::ResultEncoding;
 pub use sub_batch_op::SubBatchOp;
