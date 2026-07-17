@@ -77,6 +77,16 @@ pub(super) fn intern_field_path_compact(
 /// aggregator path (`InnerValue`, until S4) with ZERO conversion at either
 /// call site (anti-formal: no inner↔query bridge added). The ordering is
 /// byte-identical to the previous `InnerValue`-only form.
+///
+/// #667: `(Null, Null) => Some(Equal)` below is a DELIBERATE choice, not an
+/// oversight that happened to fall out of the match arms' ordering — callers
+/// rely on it, specifically `FilterNode::ValueCompare::matches`
+/// (`filter_node.rs`), which treats two resolved-to-literal-`null` operands
+/// as genuinely equal (`Eq`/`Gte`/`Lte` all `true`). This is intentionally
+/// different from that same `matches()`'s OTHER "nothing to compare" path —
+/// a genuinely unresolvable operand (`resolve_filter_query` returning
+/// `None`) — which instead makes only `Ne` `true`. See the doc comment on
+/// `FilterNode::ValueCompare` for the full 3-way breakdown.
 #[inline]
 pub fn compare_values<K>(a: &Value<K>, b: &Value<K>) -> Option<Ordering>
 where

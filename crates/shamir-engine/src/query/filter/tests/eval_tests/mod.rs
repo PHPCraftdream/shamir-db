@@ -15,3 +15,4 @@ mod null_exists_tests;
 mod query_ref_tests;
 mod resolve_compare_tests;
 mod string_regex_tests;
+mod value_compare_null_tests;

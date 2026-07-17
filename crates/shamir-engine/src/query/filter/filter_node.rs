@@ -128,6 +128,49 @@ pub enum FilterNode {
     /// resolve from `ctx.resolved_refs`, which varies per call). Meaningful
     /// in ANY filter-evaluation context; the primary motivating use is
     /// `when` guards, which have no record to compare a field against.
+    ///
+    /// ## Null / "nothing to compare" semantics (#667)
+    ///
+    /// `matches()` resolves `left`/`right` independently and then dispatches
+    /// on `(Option<QueryValue>, Option<QueryValue>)`. Reading that dispatch
+    /// together with [`compare_values`](super::resolve::compare_values)
+    /// (`resolve.rs:81`) yields **three distinct "nothing to compare"
+    /// shapes**, only one of which behaves the way a reader might naively
+    /// guess:
+    ///
+    /// 1. **Genuinely unresolvable operand** (either side) — `resolve_filter_query`
+    ///    itself returns `None` (unbound `$query` alias, errored `$fn` call,
+    ///    unbound `$param`, ...): an ABSENCE, not a value. Hits the outer
+    ///    `(None, _) | (_, None)` arm — this does NOT distinguish
+    ///    left-absent from right-absent from both-absent. Result: only `Ne`
+    ///    is `true`; `Eq`/`Gt`/`Gte`/`Lt`/`Lte` are all `false`.
+    /// 2. **Both operands resolve to the LITERAL value `null`** (e.g. both
+    ///    sides are `FilterValue::Null`, or a `$query` ref whose target
+    ///    field is genuinely `null`) — this is `Some(QueryValue::Null)` on
+    ///    BOTH sides, so it reaches the inner `(Some(a), Some(b))` arm and
+    ///    calls `compare_values(&Null, &Null)`, which deliberately returns
+    ///    `Some(Ordering::Equal)`. Result: `Eq`/`Gte`/`Lte` are `true`;
+    ///    `Ne`/`Gt`/`Lt` are `false` — the OPPOSITE of case 1. An explicit,
+    ///    resolved `null` on both sides is treated as a genuinely
+    ///    COMPARABLE, EQUAL value — closer to JS's `null === null` than to
+    ///    SQL's three-valued `NULL = NULL` (which is `UNKNOWN`, not `TRUE`).
+    /// 3. **One operand resolves to the literal value `null`, the other to
+    ///    a non-null value of a different type** — both sides ARE
+    ///    `Some(..)`, so this also reaches the inner arm, but
+    ///    `compare_values(&Null, &Int(_))` (etc.) falls through to
+    ///    `compare_values`'s `_ => None` catch-all (no same-type arm
+    ///    matches). Result: only `Ne` is `true` — outwardly IDENTICAL to
+    ///    case 1's boolean shape, but reached via a resolved type MISMATCH,
+    ///    not an absent operand. Worth keeping distinct in the mental model:
+    ///    a reader auditing `compare_values` alone needs to know this is
+    ///    intentional, not an oversight.
+    ///
+    /// This 3-way distinction is intentional and covered by tests in
+    /// `crates/shamir-engine/src/query/filter/tests/eval_tests/value_compare_null_tests.rs`
+    /// and `crates/shamir-engine/src/query/batch/tests/executor_tests/when_skip_tests.rs`.
+    /// It is NOT a bug — case 1 and case 3 happening to produce the same
+    /// boolean outcome as each other, while case 2 produces the opposite,
+    /// is the documented, adopted contract.
     ValueCompare {
         left: FilterValue,
         op: CompareOp,
