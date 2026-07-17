@@ -139,6 +139,7 @@
 
 mod batch_execute;
 mod batch_validate;
+mod execution_deadline;
 mod executor_traits;
 mod fk_actions;
 mod fk_on_update;
@@ -151,6 +152,7 @@ mod query_runner;
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported
 // here so callers keep using `shamir_db::query::batch::*` paths.
+pub use execution_deadline::ExecutionDeadline;
 pub use executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 pub use query_runner::{
     commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, QueryRunner,

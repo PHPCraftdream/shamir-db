@@ -108,11 +108,18 @@ pub enum BatchError {
     /// #666: the batch's total execution time exceeded
     /// `BatchLimits.max_execution_time_secs`.
     ///
-    /// The in-flight `execute_batch_impl` future was cancelled by
-    /// `tokio::time::timeout` — if the batch was transactional, its
-    /// `TxContext` is owned by that cancelled future and is dropped without
-    /// commit (RAII rollback, the SAME mechanism `execute_transactional_impl`
-    /// already uses for any other `Err` — no new rollback logic needed).
+    /// Raised by a COOPERATIVE deadline checkpoint (shamir-engine's
+    /// `ExecutionDeadline::check`, consulted before each stage-alias
+    /// dispatch, each `ForEach` iteration, each nested-body entry, and
+    /// immediately before commit) — never by external future cancellation.
+    /// It flows through the executor's ordinary error path, so for a
+    /// transactional batch it reaches `execute_transactional_impl`'s
+    /// existing `Err` arm: pessimistic locks are released, `commit_tx` is
+    /// never called, and the `TxContext` is dropped without commit (RAII
+    /// rollback) — the SAME cleanup any other op failure gets. In
+    /// particular this error is only ever produced BEFORE the commit
+    /// decision: a batch that reports `ExecutionTimedOut` has durably
+    /// committed nothing.
     ExecutionTimedOut { budget_secs: u64 },
 }
 

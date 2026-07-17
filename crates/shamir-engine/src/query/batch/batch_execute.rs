@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
+use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::query_runner::{
     build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
@@ -24,23 +25,37 @@ use shamir_types::types::value::QueryValue;
 /// resource-touch point via [`QueryRunner`]. `db_name` provides the
 /// database scope for [`ResourcePath`] construction.
 ///
-/// **#666: wall-clock enforcement of `BatchLimits.max_execution_time_secs`.**
-/// This is the SINGLE top-level entry point that wraps the whole recursive
+/// **#666 (redesigned): wall-clock enforcement of
+/// `BatchLimits.max_execution_time_secs` via COOPERATIVE deadline
+/// checkpoints.** This SINGLE top-level entry point computes an
+/// [`ExecutionDeadline`] once and threads it through the whole recursive
 /// execution (`execute_batch_impl`, and transitively any nested
-/// `Batch`/`ForEach` bodies) in a `tokio::time::timeout`. Nested re-entrant
-/// calls already run within the outer call's own budget transitively, so
-/// wrapping only here is sufficient — no nested-timeout complexity needed.
-/// `execute_in_open_tx` (interactive, multi-call transactions) is
-/// deliberately NOT wrapped — see its doc comment for why that lifecycle
-/// is out of scope for a single-call wall-clock timeout.
+/// `Batch`/`ForEach` bodies — nested re-entrant calls inherit the outer
+/// call's deadline, so the whole tree shares one budget). At each safe
+/// checkpoint (before every stage-alias dispatch, before every `ForEach`
+/// iteration, at nested-batch entry, and immediately BEFORE `commit_tx`)
+/// an expired budget surfaces as an ordinary
+/// `Err(BatchError::ExecutionTimedOut)` through the normal return path.
 ///
-/// A client-supplied `max_execution_time_secs: 0` is treated as a (tiny,
-/// 1-second) budget, NOT as "no timeout" — `.max(1)` guards against a
-/// zero-duration timeout firing before any work happens, while still
-/// enforcing SOME ceiling. Interpreting `0` as "unlimited" would let a
-/// client opt out of the very DoS gate this fix adds, which defeats the
-/// purpose; treating it as "the smallest valid budget" keeps the gate
-/// mandatory regardless of what a client requests.
+/// The original #666 mechanism (`tokio::time::timeout` wrapping the whole
+/// future) was removed: it raced `commit_tx` — which is explicitly
+/// non-cancel-safe at the API boundary (see its doc comment in
+/// `tx/commit.rs`; a drop between WAL-begin and completion leaves the tx
+/// durably committed while the client sees a timeout error) — and it
+/// bypassed `execute_transactional_impl`'s `Err`-arm
+/// `release_pessimistic_locks` cleanup by dropping the future mid-plan
+/// (`TxContext` has no `Drop` impl for Level-3 locks), leaking pessimistic
+/// locks permanently. With cooperative checkpoints nothing is ever
+/// externally cancelled, so both hazards are structurally impossible. See
+/// `execution_deadline.rs` for the full rationale.
+///
+/// `execute_in_open_tx` (interactive, multi-call transactions) remains
+/// deliberately un-budgeted — see its doc comment for why that lifecycle
+/// is out of scope for a single-call wall-clock budget.
+///
+/// A client-supplied `max_execution_time_secs: 0` is treated as the
+/// smallest valid budget (1 second), NOT as "no timeout" — see
+/// [`ExecutionDeadline::from_budget_secs`].
 pub async fn execute_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
@@ -49,27 +64,19 @@ pub async fn execute_batch(
     actor: Actor,
     db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
-    let budget = std::time::Duration::from_secs(request.limits.max_execution_time_secs.max(1));
-    match tokio::time::timeout(
-        budget,
-        execute_batch_impl(
-            request,
-            resolver,
-            admin,
-            invoker,
-            actor,
-            db_name,
-            0,
-            &new_map(),
-        ),
+    let deadline = ExecutionDeadline::from_budget_secs(request.limits.max_execution_time_secs);
+    execute_batch_impl(
+        request,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        0,
+        &new_map(),
+        deadline,
     )
     .await
-    {
-        Ok(result) => result,
-        Err(_elapsed) => Err(BatchError::ExecutionTimedOut {
-            budget_secs: request.limits.max_execution_time_secs,
-        }),
-    }
 }
 
 /// Internal entry point that carries the sub-batch recursion state.
@@ -77,6 +84,11 @@ pub async fn execute_batch(
 /// - `depth` — current nesting level (0 at the public entry).
 /// - `params` — injected `$param` bindings from the outer batch's
 ///   `BatchOp::Batch.bind` map, resolved to concrete `InnerValue`s.
+/// - `deadline` — the #666 cooperative wall-clock budget, computed once in
+///   [`execute_batch`] and INHERITED unchanged by nested `Batch`/`ForEach`
+///   bodies (a nested body's own `limits.max_execution_time_secs` is not
+///   consulted — the outer call owns the budget, matching the original
+///   #666 "one top-level budget covers the whole tree" semantics).
 ///
 /// Called recursively by [`QueryRunner::run`] when it encounters a
 /// `BatchOp::Batch` entry; callers above the public entry always pass
@@ -96,11 +108,19 @@ pub(super) fn execute_batch_impl<'a>(
     db_name: &'a str,
     depth: usize,
     params: &'a TMap<String, QueryValue>,
+    deadline: ExecutionDeadline,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send + 'a>,
 > {
     Box::pin(async move {
         let start = Instant::now();
+
+        // #666 checkpoint: nested-batch entry (each `BatchOp::Batch` /
+        // `ForEach`-iteration recursion re-enters here on the non-tx path).
+        // Free at the top-level call (the deadline was minted microseconds
+        // ago); decisive for a recursion that starts after the budget
+        // already elapsed.
+        deadline.check()?;
 
         // 4.C: cross-repo guard for transactional batches.
         if request.transactional {
@@ -137,6 +157,7 @@ pub(super) fn execute_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
+                deadline,
             )
             .await?
         } else {
@@ -151,6 +172,7 @@ pub(super) fn execute_batch_impl<'a>(
                 depth,
                 params,
                 request.result_encoding,
+                deadline,
             )
             .await?;
             (r, None)
@@ -314,11 +336,18 @@ pub(super) async fn execute_plan_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
+    deadline: ExecutionDeadline,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
     for stage in &plan.stages {
         for alias in stage {
+            // #666 checkpoint: once per stage-alias, BEFORE dispatching the
+            // op. An expired budget stops the batch from starting any
+            // further unit of work; the error propagates through the normal
+            // `?` return path like any other op failure.
+            deadline.check()?;
+
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
                 message: "Query entry not found".to_string(),
@@ -348,6 +377,7 @@ pub(super) async fn execute_plan_impl(
                 depth,
                 params,
                 result_encoding,
+                deadline,
             )
             .await?;
             all_results.insert(alias.clone(), result);
@@ -364,6 +394,10 @@ pub(super) async fn execute_plan_impl(
 /// with a shared `&TxContext` (Vector I.1), so a Serializable batch's
 /// SELECT populates the read-set and SSI write-skew detection is live
 /// end-to-end through this wire path.
+///
+/// Passes an [`ExecutionDeadline::unbounded`] deadline: this entry serves
+/// the interactive-tx path (`execute_in_open_tx`), which #666 deliberately
+/// keeps outside the single-call wall-clock budget (see its doc comment).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_plan_tx(
     plan: &mut BatchPlan,
@@ -387,6 +421,7 @@ pub(super) async fn execute_plan_tx(
         0,
         &new_map(),
         ResultEncoding::Name,
+        ExecutionDeadline::unbounded(),
     )
     .await
 }
@@ -404,11 +439,20 @@ pub(super) async fn execute_plan_tx_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
+    deadline: ExecutionDeadline,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
     for stage in &plan.stages {
         for alias in stage {
+            // #666 checkpoint: once per stage-alias, BEFORE dispatching the
+            // op. The `Err` this raises flows out of `execute_plan_tx_impl`
+            // into `execute_transactional_impl`'s existing `Err` arm — the
+            // one that releases pessimistic locks and never calls
+            // `commit_tx` — so timeout cleanup is byte-identical to any
+            // other op failure's cleanup.
+            deadline.check()?;
+
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
                 message: "Query entry not found".to_string(),
@@ -435,6 +479,7 @@ pub(super) async fn execute_plan_tx_impl(
                 depth,
                 params,
                 result_encoding,
+                deadline,
             };
             let result = runner.run(alias, entry, &resolved_refs).await?;
             all_results.insert(alias.clone(), result);
@@ -460,6 +505,7 @@ pub(super) async fn execute_transactional_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
+    deadline: ExecutionDeadline,
 ) -> Result<
     (
         TMap<String, QueryResult>,
@@ -527,8 +573,21 @@ pub(super) async fn execute_transactional_impl(
         depth,
         params,
         result_encoding,
+        deadline,
     )
     .await;
+
+    // #666 checkpoint: the LAST consultation of the deadline, immediately
+    // BEFORE the commit decision. If the budget elapsed while the final
+    // op was executing, the tx must NOT be committed — folding the check
+    // into `plan_result` here routes the expired-budget case through the
+    // very same `Err` arm below (pessimistic-lock release + RAII rollback,
+    // `commit_tx` never called). Once `commit_tx` is entered, the deadline
+    // is never consulted again: `commit_tx` always runs to completion,
+    // uncancelled, and its outcome is always observed and reported
+    // truthfully (its doc comment forbids racing it under
+    // `tokio::select!`/`tokio::time::timeout`).
+    let plan_result = plan_result.and_then(|results| deadline.check().map(|()| results));
 
     match plan_result {
         Err(plan_err) => {
@@ -538,6 +597,18 @@ pub(super) async fn execute_transactional_impl(
             // dropping TxContext alone does not free them). No-op for
             // Snapshot / Serializable (locked_keys is empty).
             crate::tx::release_pessimistic_locks(&tx, &repo).await;
+
+            // #666: a deadline-exceeded abort keeps its identity all the
+            // way to the caller — `ExecutionTimedOut` is a top-level batch
+            // outcome (the server maps it to the `limits` error category),
+            // not a per-query failure to be folded into an
+            // `aborted`-TransactionInfo `Ok` response. The lock release +
+            // RAII rollback above have already run at this point, so the
+            // cleanup is identical either way.
+            if matches!(plan_err, BatchError::ExecutionTimedOut { .. }) {
+                return Err(plan_err);
+            }
+
             let info = shamir_query_types::batch::TransactionInfo::aborted(
                 tx_id,
                 format!("{:?}", plan_err),

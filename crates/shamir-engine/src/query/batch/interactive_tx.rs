@@ -54,10 +54,12 @@ pub async fn open_interactive_tx(
 /// the caller additionally asserts that the batch targets the SAME repo the
 /// handle is pinned to (the engine tx is committed against one repo).
 ///
-/// **#666: no wall-clock timeout here, by design.** `execute_batch`'s
-/// `max_execution_time_secs` enforcement (`tokio::time::timeout` wrapping
-/// the whole single-call execution) applies ONLY to that single-call entry
-/// point. An interactive transaction spans MULTIPLE separate
+/// **#666: no wall-clock budget here, by design.** `execute_batch`'s
+/// `max_execution_time_secs` enforcement (cooperative deadline checkpoints
+/// threaded through the whole single-call execution — see
+/// `execution_deadline.rs`) applies ONLY to that single-call entry
+/// point; this path runs with `ExecutionDeadline::unbounded()` (via
+/// `execute_plan_tx`). An interactive transaction spans MULTIPLE separate
 /// `execute_in_open_tx` calls before an eventual `commit_interactive_tx` —
 /// the caller owns `tx: &mut TxContext` across all of them, so there is no
 /// single call whose wall-clock duration corresponds to "the whole

@@ -5,6 +5,7 @@
 
 use crate::query::batch::batch_execute::{execute_batch_impl, execute_plan_tx_impl};
 use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
+use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
@@ -203,8 +204,13 @@ fn run_nested_body_in_outer_tx<'a>(
     depth: usize,
     params: &'a TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
+    deadline: ExecutionDeadline,
 ) -> NestedTxBodyFuture<'a> {
     Box::pin(async move {
+        // #666 checkpoint: nested-body entry — mirrors the check at the top
+        // of `execute_batch_impl` for the non-tx recursion path.
+        deadline.check()?;
+
         let mut plan = shamir_query_types::batch::BatchPlanner::plan(&body.queries, &body.limits)?;
         validate_tables(&body.queries, resolver).await?;
         validate_filter_depth(&body.queries)?;
@@ -221,6 +227,7 @@ fn run_nested_body_in_outer_tx<'a>(
             depth,
             params,
             result_encoding,
+            deadline,
         )
         .await
     })
@@ -274,6 +281,12 @@ pub struct QueryRunner<'a> {
     /// server de-interns to name-keyed `QueryValue`; `Id` = server
     /// returns raw id-keyed storage msgpack (client de-interns).
     pub result_encoding: ResultEncoding,
+    /// #666 cooperative wall-clock budget for the whole execution tree —
+    /// consulted before each `ForEach` iteration and threaded into every
+    /// nested `Batch`/`ForEach` body recursion. `ExecutionDeadline::
+    /// unbounded()` on paths outside the single-call budget (interactive
+    /// tx). See `execution_deadline.rs`.
+    pub deadline: ExecutionDeadline,
 }
 
 impl<'a> QueryRunner<'a> {
@@ -380,6 +393,14 @@ impl<'a> QueryRunner<'a> {
             // reachable case here. When there is no open outer tx
             // (`self.tx.is_none()`), keep the original `execute_batch_impl`
             // path byte-identical.
+            // #666: a nested body's `ExecutionTimedOut` keeps its identity
+            // (not wrapped into an alias-scoped `QueryError`) — the deadline
+            // is ONE budget shared by the whole execution tree, so a
+            // deadline exceeded inside a nested body IS the outer batch's
+            // timeout. Preserving the variant lets
+            // `execute_transactional_impl`'s `Err` arm re-raise it as the
+            // top-level outcome, identical to a timeout detected at any
+            // outer checkpoint.
             let inner_results = match self.tx.as_deref_mut() {
                 Some(tx) => run_nested_body_in_outer_tx(
                     &sub.batch,
@@ -392,12 +413,16 @@ impl<'a> QueryRunner<'a> {
                     self.depth + 1,
                     &resolved_params,
                     self.result_encoding,
+                    self.deadline,
                 )
                 .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: format!("sub-batch '{}' failed: {}", alias, e),
-                    code: e.code().map(str::to_owned),
+                .map_err(|e| match e {
+                    timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                    e => BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("sub-batch '{}' failed: {}", alias, e),
+                        code: e.code().map(str::to_owned),
+                    },
                 })?,
                 None => {
                     execute_batch_impl(
@@ -409,12 +434,16 @@ impl<'a> QueryRunner<'a> {
                         self.db_name,
                         self.depth + 1,
                         &resolved_params,
+                        self.deadline,
                     )
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("sub-batch '{}' failed: {}", alias, e),
-                        code: e.code().map(str::to_owned),
+                    .map_err(|e| match e {
+                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        e => BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!("sub-batch '{}' failed: {}", alias, e),
+                            code: e.code().map(str::to_owned),
+                        },
                     })?
                     .results
                 }
@@ -547,6 +576,15 @@ impl<'a> QueryRunner<'a> {
 
             let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
             for element in elements {
+                // #666 checkpoint: once per iteration, BEFORE recursing into
+                // the loop body — the canonical "many cheap iterations
+                // accumulating wall-clock time" DoS shape. An expired budget
+                // propagates through the normal `?` return path below
+                // (unwrapped — see the map_err pass-through), reaching the
+                // outer tx's `Err`-arm cleanup like any other iteration
+                // failure.
+                self.deadline.check()?;
+
                 let mut resolved_params: TMap<String, QueryValue> = new_map();
                 resolved_params.insert(fe.bind_row.clone(), element);
 
@@ -575,6 +613,10 @@ impl<'a> QueryRunner<'a> {
                 // case here. When there is no open outer tx
                 // (`self.tx.is_none()`), keep the original
                 // `execute_batch_impl` path byte-identical.
+                // #666: same `ExecutionTimedOut` identity-preserving
+                // pass-through as the sub-batch recursion above — the
+                // shared budget's timeout is never demoted to a per-alias
+                // `QueryError`.
                 let inner_results = match self.tx.as_deref_mut() {
                     Some(tx) => run_nested_body_in_outer_tx(
                         &fe.batch,
@@ -587,12 +629,16 @@ impl<'a> QueryRunner<'a> {
                         self.depth + 1,
                         &resolved_params,
                         self.result_encoding,
+                        self.deadline,
                     )
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("for_each '{}' iteration failed: {}", alias, e),
-                        code: e.code().map(str::to_owned),
+                    .map_err(|e| match e {
+                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        e => BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!("for_each '{}' iteration failed: {}", alias, e),
+                            code: e.code().map(str::to_owned),
+                        },
                     })?,
                     None => {
                         execute_batch_impl(
@@ -604,12 +650,16 @@ impl<'a> QueryRunner<'a> {
                             self.db_name,
                             self.depth + 1,
                             &resolved_params,
+                            self.deadline,
                         )
                         .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: format!("for_each '{}' iteration failed: {}", alias, e),
-                            code: e.code().map(str::to_owned),
+                        .map_err(|e| match e {
+                            timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                            e => BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: format!("for_each '{}' iteration failed: {}", alias, e),
+                                code: e.code().map(str::to_owned),
+                            },
                         })?
                         .results
                     }
@@ -1238,6 +1288,7 @@ pub(super) async fn execute_single_impl(
     depth: usize,
     params: &TMap<String, QueryValue>,
     result_encoding: ResultEncoding,
+    deadline: ExecutionDeadline,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
         resolver,
@@ -1249,6 +1300,7 @@ pub(super) async fn execute_single_impl(
         depth,
         params,
         result_encoding,
+        deadline,
     };
     runner.run(alias, entry, resolved_refs).await
 }
