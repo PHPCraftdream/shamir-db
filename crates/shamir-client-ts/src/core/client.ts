@@ -27,7 +27,7 @@ import {
   RESUME_OK_SERVER_QUERY_VERSION,
 } from './protocol.js';
 import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
-import { signCanonical } from './hmac.js';
+import { signCanonical, canonicalCreateScramUser } from './hmac.js';
 import { setSuperuser } from './builders/admin.js';
 import { listUsers } from './builders/ddl.js';
 import { Db } from './db.js';
@@ -920,20 +920,24 @@ export class ShamirClient {
 
   /**
    * Create a SCRAM-authenticatable user (one that can log in over the wire).
-   * Requires a superuser session. The server runs Argon2id with its KDF
-   * defaults and writes the durable user record. `roles: ["superuser"]`
-   * grants admin powers; other strings are app-defined.
+   * Requires a superuser session AND an HMAC confirmation tag — the tag is
+   * unconditional (every call signs it), mirroring `setSuperuser`'s gate
+   * (task #604). The server runs Argon2id with its KDF defaults and writes
+   * the durable user record. `roles: ["superuser"]` grants admin powers;
+   * other strings are app-defined.
    */
   async createScramUser(
     name: string,
     password: string,
     roles: string[] = [],
   ): Promise<ScramUserCreated> {
+    const canonical = canonicalCreateScramUser(name, roles);
     const r = await this.sendDbRequest({
       op: 'create_scram_user',
       name,
       password,
       roles,
+      hmac: this.hmacTagHex(canonical),
     });
     if (r.kind === 'user_created') {
       return { name: r.name as string, user_id: r.user_id as Uint8Array };

@@ -189,6 +189,22 @@ export function canonicalCreateUser(username: string): Uint8Array {
 }
 
 /**
+ * `b"create_scram_user\0<name>\0<role1>\0<role2>\0..."`. Password is NEVER
+ * part of the canonical input (same convention as `canonicalCreateUser`) —
+ * the tag confirms "you meant to create this SCRAM-login account with these
+ * roles", not the credential. Roles are joined in the order given — caller
+ * and verifier must agree on ordering (no sorting), matching the Rust
+ * `canonical_create_scram_user`'s `Vec<String>` as-is traversal. HMAC on
+ * `create_scram_user` is UNCONDITIONAL (task #604) — every call signs it.
+ */
+export function canonicalCreateScramUser(
+  name: string,
+  roles: string[],
+): Uint8Array {
+  return joinNull(['create_scram_user', name, ...roles]);
+}
+
+/**
  * Wire-encodable reference to a securable resource — byte-for-byte mirror
  * of the Rust `ResourceRef` (untagged, single-key object). Only the
  * shape needed to compute a canonical string is declared here; the full

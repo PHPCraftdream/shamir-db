@@ -24,8 +24,19 @@ created.name;    // 'alice'
 created.user_id; // Uint8Array(16)
 ```
 
-Пользователь получает стабильный числовой ID (hash от имени). Этот ID
-используется в `chown`, `chgrp`, группах.
+Пользователю сервер присваивает случайный 64-битный `principal64`
+(проекция от 16-байтового `user_id`, НЕ hash от имени — таск #548/#569).
+Этот ID используется в `chown`, `addGroupMember`/`removeGroupMember` и
+т.д. Клиент не может вычислить его локально: нужно резолвить имя через
+`client.resolvePrincipal(username)` (реальный round-trip к серверному
+каталогу):
+
+```ts
+const ownerId = await client.resolvePrincipal('alice'); // bigint
+await Batch.create('chown-db')
+  .add('ch', admin.chown(client, admin.refDatabase('mydb'), ownerId))
+  .execute(client, 'mydb');
+```
 
 ### Подключение
 

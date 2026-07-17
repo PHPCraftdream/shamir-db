@@ -23,6 +23,7 @@ import {
   canonicalCommitMigration,
   canonicalRollbackMigration,
   canonicalCreateFunction,
+  canonicalCreateScramUser,
 } from '../hmac.js';
 import { NodePlatform } from '../../platform/node.js';
 
@@ -97,6 +98,25 @@ describe('canonical inputs are null-separated (hmac.rs vectors)', () => {
     expect(
       arr(canonicalCreateFunction('f', 'invoker', ['B', 'A', 'B'])),
     ).toEqual(b('create_function\0f\0invoker\0B,A,B'));
+  });
+  // Regression coverage for #634's real root cause: `createScramUser` never
+  // sent the `hmac` field the server has required since task #604 (the
+  // Rust `shamir-client` crate was updated; `shamir-client-ts` was not),
+  // which silently broke every e2e test that provisions a user via
+  // `createScramUser` (cascading into a `resolvedId` left `undefined` on
+  // the wire — msgpack-encoded as `nil`, rejected by the server as
+  // "invalid type: unit value, expected u64" on the *next* op). This byte
+  // vector mirrors `canonical_create_scram_user` in `hmac.rs` so a missing
+  // or wrong canonical for this op is caught here, not only in an e2e run.
+  it('create_scram_user — no roles', () => {
+    expect(arr(canonicalCreateScramUser('bob', []))).toEqual(
+      b('create_scram_user\0bob'),
+    );
+  });
+  it('create_scram_user — roles joined in given order (NOT sorted/deduped)', () => {
+    expect(
+      arr(canonicalCreateScramUser('alice', ['reader', 'writer'])),
+    ).toEqual(b('create_scram_user\0alice\0reader\0writer'));
   });
 });
 

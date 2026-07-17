@@ -76,6 +76,15 @@ describe.skipIf(!SERVER_AVAILABLE)(
       resolvedId = await adminClient!.resolvePrincipal(TEST_USER);
       expect(typeof resolvedId).toBe('bigint');
       expect(resolvedId).toBeGreaterThan(0n);
+      // `principal64` is a FIXED 63-bit projection of the directory's 16-byte
+      // user_id (`principal64()` masks with `& i64::MAX`, clearing bit 63 —
+      // see `crates/shamir-types/src/access.rs`), by deliberate design so the
+      // catalogue's `i64` owner/group-member columns are always safe. A real
+      // server-assigned principal64 NEVER has the high bit set — pin that
+      // invariant here so nobody "fixes" a future regression by chasing the
+      // (incorrect) hypothesis that principal64 spans the full unsigned
+      // 64-bit range and needs high-bit-set msgpack wire-format handling.
+      expect(resolvedId < 1n << 63n).toBe(true);
 
       // Cross-check: the same id appears in the GLOBAL accessTree's
       // principals.users list.
@@ -132,6 +141,50 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(dbNode).toBeDefined();
       const owner = BigInt(dbNode!.owner as number | bigint);
       expect(owner).toBe(resolvedId);
+    });
+
+    // Regression coverage for #634: the wire failure this task actually
+    // fixed (a resolvedId silently left `undefined` — see the
+    // `createScramUser` HMAC fix in `client.ts` — encodes as msgpack `nil`
+    // and the server rejects it with "invalid type: unit value, expected
+    // u64") is an all-or-nothing failure mode, NOT one that depends on a
+    // random id's bit pattern (a real principal64 never has the u64 high
+    // bit set — see the invariant pinned in test 1 above). Still, chown
+    // against SEVERAL independently resolved principal64 ids in one run
+    // guards against any per-id flakiness silently regressing again.
+    it('chown works across several independently resolved principal64 ids', async () => {
+      const N = 4;
+      for (let i = 0; i < N; i += 1) {
+        const user = `pid_chown_multi_${process.pid}_${i}`;
+        await adminClient!.createScramUser(user, 'multi-chown test pw', []);
+        const id = await adminClient!.resolvePrincipal(user);
+        expect(typeof id).toBe('bigint');
+        expect(id).toBeGreaterThan(0n);
+        expect(id < 1n << 63n).toBe(true);
+
+        const db = await setupDb(adminClient!, `pid_chown_m${i}`, ['items']);
+        br(await adminClient!.execute(db, {
+          id: `chown-user-${i}`,
+          queries: {
+            ch: admin.chown(adminClient!, admin.refDatabase(db), id),
+          },
+        }));
+
+        const resp = br(await adminClient!.execute(db, {
+          id: `at-chown-${i}`,
+          queries: {
+            t: admin.accessTree({ db }),
+          },
+        }));
+        const rec = resp.results.t.records[0] as Record<string, unknown>;
+        const tree = rec.access_tree as Record<string, unknown>;
+        const resources = tree.resources as Record<string, unknown>;
+        const children = resources.children as Array<Record<string, unknown>>;
+        const dbNode = children.find((c) => c.name === db);
+        expect(dbNode).toBeDefined();
+        const owner = BigInt(dbNode!.owner as number | bigint);
+        expect(owner).toBe(id);
+      }
     });
 
     // ── 3. addGroupMember round-trip ─────────────────────────────────────
