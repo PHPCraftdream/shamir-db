@@ -113,6 +113,77 @@ fn insert_order_body(bind_row: &str) -> BatchRequest {
     }
 }
 
+/// Build a `for_each` loop body like [`insert_order_body`], but with an
+/// EXTRA `guard` field computed via `$fn: math/mod(1, $param <bind_row>)`
+/// (`crates/shamir-funclib/src/math.rs`'s `"mod"` entry, dispatch name
+/// `"math/mod"`, registered `FnEntry::pure`). `math/mod` returns
+/// `Err(ScalarError::new("div_by_zero"))` when its divisor argument is
+/// zero — `resolve_filter_query`'s `FnCall` arm collapses any scalar error
+/// to `None` (`crates/shamir-engine/src/query/filter/resolve.rs`), and
+/// `resolve_write_value`'s marker resolution turns that `None` into a hard
+/// `WriteValueError::MalformedMarker` (`crates/shamir-engine/src/query/batch/
+/// param_subst.rs`), which surfaces as a genuine `Err` out of the Insert
+/// dispatch — NOT a silent skip.
+///
+/// This gives a PURE function of the current iteration's own `bind_row`
+/// value (no cross-iteration state observation needed, unlike a unique
+/// index — see this module's `#661` test section below for why a
+/// unique-index-based mid-tx failure does NOT work across iterations of
+/// the SAME uncommitted transaction: unique-key validation only checks
+/// against DURABLE committed state, both at insert-time
+/// (`validate_unique_for_create`) and at commit-time re-validation
+/// (`tx::pre_commit::pre_commit_prelock`'s per-guard check against
+/// `info_store`) — two inserts claiming the same key within ONE
+/// still-uncommitted tx never cross-check each other and both silently
+/// pass). A bind_row value of `0` makes THIS iteration's own insert fail,
+/// independent of what any other iteration did.
+fn insert_order_body_with_div_guard(bind_row: &str) -> BatchRequest {
+    let mut param_obj = new_map();
+    param_obj.insert("$param".to_string(), QueryValue::Str(bind_row.to_string()));
+    let mut fn_args = new_map();
+    fn_args.insert("name".to_string(), QueryValue::Str("math/mod".to_string()));
+    fn_args.insert(
+        "args".to_string(),
+        QueryValue::List(vec![QueryValue::Int(1), QueryValue::Map(param_obj.clone())]),
+    );
+    let mut fn_marker = new_map();
+    fn_marker.insert("$fn".to_string(), QueryValue::Map(fn_args));
+
+    let mut insert_value = new_map();
+    insert_value.insert("user_id".to_string(), QueryValue::Map(param_obj));
+    insert_value.insert("note".to_string(), QueryValue::Str("fe".to_string()));
+    insert_value.insert("guard".to_string(), QueryValue::Map(fn_marker));
+
+    let mut queries = new_map();
+    queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![QueryValue::Map(insert_value)],
+                records_idmsgpack: Vec::new(),
+                select: None,
+            }),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    BatchRequest {
+        id: QueryValue::Int(101),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    }
+}
+
 fn wrap_for_each(fe: ForEachOp) -> BatchRequest {
     let mut queries = new_map();
     queries.insert(
@@ -490,6 +561,264 @@ async fn for_each_iteration_error_aborts_whole_tx_batch() {
         count, 0,
         "tx abort must roll back the 'good' insert that ran before the failing for_each; found {} rows",
         count
+    );
+}
+
+// ============================================================================
+// #661 — thread the outer tx into ForEach body recursion.
+//
+// `for_each_iteration_error_aborts_whole_tx_batch` above makes EVERY
+// iteration fail at validation time (table `nonexistent_table` never
+// exists), so it never actually exercised "a successful iteration's write
+// gets rolled back" -- only "zero successful iterations happened, and the
+// pre-loop 'good' insert rolled back". Before #661's fix, a nested ForEach
+// body reused the outer TxContext ONLY conceptually: `execute_batch_impl`
+// always independently decided transactional-vs-not from the body's own
+// `transactional` flag, so with `body.transactional == false` (the only
+// reachable case once `nested_tx_not_supported` rejects the other combo)
+// each iteration's write committed through its own implicit per-op
+// transaction, entirely disconnected from the outer TxContext -- a
+// genuinely-successful iteration 0 would durably survive even though the
+// outer batch reports "aborted". This section adds the DATA-DEPENDENT
+// mid-loop-failure case that would have caught that gap.
+// ============================================================================
+
+/// A TRANSACTIONAL outer batch containing a `ForEach` over `[1, 0, 2]`
+/// (`bind_row` = `uid`) where:
+///   - iteration 0 (`uid=1`) SUCCEEDS -- a real row is written (`user_id=1`).
+///   - iteration 1 (`uid=0`) FAILS on a genuine data-dependent condition:
+///     the body's own `guard` field is `$fn: math/mod(1, $param uid)`,
+///     which errors with `div_by_zero` when `uid == 0` (see
+///     `insert_order_body_with_div_guard`'s doc comment for why this
+///     technique is used instead of a unique-index violation — the
+///     "obvious" unique-index approach does NOT actually detect a conflict
+///     across iterations of the SAME still-open transaction, since
+///     unique-key validation only ever checks against DURABLE committed
+///     state, never against another iteration's own uncommitted stage in
+///     the same tx).
+///   - iteration 2 never runs.
+///
+/// Before #661's fix, this test would FAIL: iteration 0's insert routed
+/// through `execute_batch_impl`'s non-transactional path (an implicit,
+/// independently-committing single-op transaction) because the ForEach
+/// body itself has `transactional: false` -- entirely disconnected from
+/// the outer TxContext. The outer batch would still report
+/// `tx_info.status == "aborted"` (the top-level `execute_transactional_impl`
+/// correctly aborts ITS OWN tx, which touched nothing), but iteration 0's
+/// row would durably survive in the table regardless, because it was never
+/// part of that tx to begin with. This test's decisive assertion -- a
+/// FRESH read of `orders` shows ZERO rows after the abort -- is exactly the
+/// assertion the old code could not satisfy. After the fix, iteration 0's
+/// write flows through the SAME outer `TxContext` (via
+/// `run_nested_body_in_outer_tx`/`execute_plan_tx_impl`), so the outer
+/// tx's RAII rollback-on-error (dropping the tx without commit) genuinely
+/// undoes it.
+#[tokio::test]
+async fn for_each_partial_iterations_roll_back_on_later_failure() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("orders")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![
+            FilterValue::Int(1), // iteration 0: succeeds, writes user_id=1
+            FilterValue::Int(0), // iteration 1: math/mod(1, 0) -> div_by_zero -> Err
+            FilterValue::Int(2), // must never run
+        ]),
+        bind_row: "uid".to_string(),
+        batch: insert_order_body_with_div_guard("uid"),
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert(
+        "loop".to_string(),
+        QueryEntry {
+            op: BatchOp::ForEach(fe),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let outer_req = BatchRequest {
+        id: QueryValue::Int(661),
+        name: None,
+        transactional: true, // atomic — must roll back iteration 0's write
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect("execute_batch itself succeeds; the abort is reported via TransactionInfo");
+
+    let tx_info = resp
+        .transaction
+        .as_ref()
+        .expect("transactional batch must carry TransactionInfo");
+    assert_eq!(
+        tx_info.status, "aborted",
+        "iteration 1's math/mod div_by_zero failure must abort the whole tx batch"
+    );
+
+    // Decisive assertion (the one #661 broke): a FRESH read of `orders`
+    // must show ZERO rows — iteration 0's already-succeeded write must be
+    // genuinely rolled back along with the rest of the tx, not durably
+    // committed independently.
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders"),
+            )),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: QueryValue::Int(662),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        0,
+        "iteration 0's write must be rolled back along with the rest of the \
+         outer tx — found {} row(s); this is the exact case #661 broke: an \
+         already-succeeded iteration silently committing independently of \
+         the outer transaction",
+        read_resp.results["r"].records.len()
+    );
+}
+
+/// Positive/happy-path regression guard: a TRANSACTIONAL outer batch with a
+/// multi-iteration `ForEach` where EVERY iteration succeeds must still
+/// COMMIT normally and all rows must be visible afterward — the #661 fix
+/// (threading the outer tx through nested recursion) must not break the
+/// common, all-succeed case.
+#[tokio::test]
+async fn for_each_all_iterations_succeed_commits_and_all_rows_visible() {
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![TableConfig::new("users"), TableConfig::new("orders")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let fe = ForEachOp {
+        over: FilterValue::Array(vec![
+            FilterValue::Int(1),
+            FilterValue::Int(2),
+            FilterValue::Int(3),
+        ]),
+        bind_row: "uid".to_string(),
+        batch: insert_order_body("uid"),
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert(
+        "loop".to_string(),
+        QueryEntry {
+            op: BatchOp::ForEach(fe),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let outer_req = BatchRequest {
+        id: QueryValue::Int(663),
+        name: None,
+        transactional: true,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect("all-iterations-succeed for_each must not error");
+
+    let tx_info = resp
+        .transaction
+        .as_ref()
+        .expect("transactional batch must carry TransactionInfo");
+    assert_eq!(
+        tx_info.status, "committed",
+        "when every iteration succeeds, the outer tx must commit normally"
+    );
+
+    let list = resp.results["loop"]
+        .value
+        .as_ref()
+        .unwrap()
+        .as_array()
+        .expect("loop value must be a List");
+    assert_eq!(list.len(), 3, "three elements → three iterations");
+
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders"),
+            )),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: QueryValue::Int(664),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        3,
+        "all 3 committed iterations' rows must be visible after the tx commits"
     );
 }
 

@@ -3,7 +3,8 @@
 //! Executes a BatchPlan stage by stage, passing results between
 //! dependent queries via FilterContext::resolved_refs.
 
-use crate::query::batch::batch_execute::execute_batch_impl;
+use crate::query::batch::batch_execute::{execute_batch_impl, execute_plan_tx_impl};
+use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
@@ -138,6 +139,72 @@ pub(super) fn resolve_skip(
         .with_params(params);
     let node = crate::query::filter::compile_filter(filter, &scratch);
     !node.matches(&InnerValue::Null, &ctx)
+}
+
+/// Run a nested `Batch`/`ForEach` body (which is NOT itself marked
+/// `transactional` — the only reachable case once the `nested_tx_not_supported`
+/// guard has already rejected `body.transactional && tx.is_some()`) so its
+/// writes are genuine participants in the ALREADY-OPEN outer transaction
+/// `tx`, instead of each write silently committing independently via
+/// `execute_batch_impl`'s non-transactional (implicit-per-op-tx) path (#661).
+///
+/// This replicates the setup steps `execute_batch_impl` performs internally
+/// (plan via `BatchPlanner::plan`, `validate_tables`, `validate_filter_depth`)
+/// and then drives the plan directly through [`execute_plan_tx_impl`],
+/// reusing `tx` — so a failure anywhere in the nested body propagates as an
+/// `Err` out of the SAME `TxContext` the outer `execute_transactional_impl`
+/// already knows how to roll back on `Err` (RAII: the tx is dropped without
+/// commit), with zero changes needed to that commit/abort logic.
+///
+/// Returns the per-alias results map (the same shape `BatchResponse::results`
+/// carries), which callers wrap into the outer `QueryResult.value` exactly
+/// like the `execute_batch_impl` path already does.
+///
+/// Returns a boxed future for the same reason `execute_batch_impl` does:
+/// this function is mutually recursive with `QueryRunner::run` (`run` calls
+/// this fn for a nested `Batch`/`ForEach` body reusing the outer tx, which
+/// calls `execute_plan_tx_impl`, which constructs a `QueryRunner` and calls
+/// `run` again for the nested body's own entries) — Rust requires boxing to
+/// give the async state machine a statically known size.
+type NestedTxBodyFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<TMap<String, QueryResult>, BatchError>> + Send + 'a,
+    >,
+>;
+
+#[allow(clippy::too_many_arguments)]
+fn run_nested_body_in_outer_tx<'a>(
+    body: &'a crate::query::batch::BatchRequest,
+    resolver: &'a dyn TableResolver,
+    admin: Option<&'a dyn AdminExecutor>,
+    invoker: Option<&'a dyn FunctionInvoker>,
+    actor: &'a Actor,
+    db_name: &'a str,
+    tx: &'a mut shamir_tx::TxContext,
+    depth: usize,
+    params: &'a TMap<String, QueryValue>,
+    result_encoding: ResultEncoding,
+) -> NestedTxBodyFuture<'a> {
+    Box::pin(async move {
+        let mut plan = shamir_query_types::batch::BatchPlanner::plan(&body.queries, &body.limits)?;
+        validate_tables(&body.queries, resolver).await?;
+        validate_filter_depth(&body.queries)?;
+
+        execute_plan_tx_impl(
+            &mut plan,
+            &body.queries,
+            resolver,
+            admin,
+            invoker,
+            actor,
+            db_name,
+            tx,
+            depth,
+            params,
+            result_encoding,
+        )
+        .await
+    })
 }
 
 /// Map a [`WriteValueError`] (from [`resolve_write_value`]) to the
@@ -283,25 +350,58 @@ impl<'a> QueryRunner<'a> {
                 }
             }
 
-            // Recurse into the sub-batch.
-            let inner_response = execute_batch_impl(
-                &sub.batch,
-                self.resolver,
-                self.admin,
-                self.invoker,
-                self.actor.clone(),
-                self.db_name,
-                self.depth + 1,
-                &resolved_params,
-            )
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("sub-batch '{}' failed: {}", alias, e),
-                code: e.code().map(str::to_owned),
-            })?;
+            // Recurse into the sub-batch. When we're already inside an
+            // open outer transaction (`self.tx.is_some()`), thread that
+            // SAME `TxContext` through so the sub-batch's writes are
+            // genuine participants in the outer tx — an error anywhere in
+            // the sub-batch then aborts the WHOLE outer transaction via the
+            // outer `execute_transactional_impl`'s existing RAII rollback
+            // (#661). The `nested_tx_not_supported` guard above already
+            // ensures `sub.batch.transactional == false` is the only
+            // reachable case here. When there is no open outer tx
+            // (`self.tx.is_none()`), keep the original `execute_batch_impl`
+            // path byte-identical.
+            let inner_results = match self.tx.as_deref_mut() {
+                Some(tx) => run_nested_body_in_outer_tx(
+                    &sub.batch,
+                    self.resolver,
+                    self.admin,
+                    self.invoker,
+                    &self.actor,
+                    self.db_name,
+                    tx,
+                    self.depth + 1,
+                    &resolved_params,
+                    self.result_encoding,
+                )
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("sub-batch '{}' failed: {}", alias, e),
+                    code: e.code().map(str::to_owned),
+                })?,
+                None => {
+                    execute_batch_impl(
+                        &sub.batch,
+                        self.resolver,
+                        self.admin,
+                        self.invoker,
+                        self.actor.clone(),
+                        self.db_name,
+                        self.depth + 1,
+                        &resolved_params,
+                    )
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("sub-batch '{}' failed: {}", alias, e),
+                        code: e.code().map(str::to_owned),
+                    })?
+                    .results
+                }
+            };
 
-            // Wrap the inner BatchResponse into a QueryResult for the outer
+            // Wrap the inner results into a QueryResult for the outer
             // $query path resolution.
             //
             // `resolve_query_ref_value` in eval.rs checks `qr.value` first
@@ -312,7 +412,7 @@ impl<'a> QueryRunner<'a> {
             //
             // Round-trip via msgpack: QueryResult's Serialize is well-defined
             // and produces the same wire shape as QueryValue's Deserialize expects.
-            let value = rmp_serde::to_vec_named(&inner_response.results)
+            let value = rmp_serde::to_vec_named(&inner_results)
                 .ok()
                 .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok());
             return Ok(QueryResult {
@@ -439,27 +539,67 @@ impl<'a> QueryRunner<'a> {
                 // first, no partial results collected) fall out of this
                 // same short-circuit, exactly like the existing sub-batch
                 // recursion and the executor's stage loop.
-                let inner_response = execute_batch_impl(
-                    &fe.batch,
-                    self.resolver,
-                    self.admin,
-                    self.invoker,
-                    self.actor.clone(),
-                    self.db_name,
-                    self.depth + 1,
-                    &resolved_params,
-                )
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: format!("for_each '{}' iteration failed: {}", alias, e),
-                    code: e.code().map(str::to_owned),
-                })?;
+                //
+                // When we're already inside an open outer transaction
+                // (`self.tx.is_some()`), thread that SAME `TxContext`
+                // through every iteration — a re-borrow via
+                // `as_deref_mut()` fresh on each loop pass, since a `&mut`
+                // reborrow cannot be reused by value across iterations —
+                // so all iterations' writes are genuine participants in
+                // the outer tx and a failure on ANY iteration aborts the
+                // WHOLE outer transaction via the outer
+                // `execute_transactional_impl`'s existing RAII rollback
+                // (#661), rather than each already-succeeded iteration
+                // having committed independently and survived the abort.
+                // The `nested_tx_not_supported` guard above already ensures
+                // `fe.batch.transactional == false` is the only reachable
+                // case here. When there is no open outer tx
+                // (`self.tx.is_none()`), keep the original
+                // `execute_batch_impl` path byte-identical.
+                let inner_results = match self.tx.as_deref_mut() {
+                    Some(tx) => run_nested_body_in_outer_tx(
+                        &fe.batch,
+                        self.resolver,
+                        self.admin,
+                        self.invoker,
+                        &self.actor,
+                        self.db_name,
+                        tx,
+                        self.depth + 1,
+                        &resolved_params,
+                        self.result_encoding,
+                    )
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("for_each '{}' iteration failed: {}", alias, e),
+                        code: e.code().map(str::to_owned),
+                    })?,
+                    None => {
+                        execute_batch_impl(
+                            &fe.batch,
+                            self.resolver,
+                            self.admin,
+                            self.invoker,
+                            self.actor.clone(),
+                            self.db_name,
+                            self.depth + 1,
+                            &resolved_params,
+                        )
+                        .await
+                        .map_err(|e| BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!("for_each '{}' iteration failed: {}", alias, e),
+                            code: e.code().map(str::to_owned),
+                        })?
+                        .results
+                    }
+                };
 
                 // Same per-iteration value shape a single sub-batch already
                 // produces (round-trip via msgpack) — collected into a
                 // List, one entry per iteration (ADR Decision 2).
-                let value = rmp_serde::to_vec_named(&inner_response.results)
+                let value = rmp_serde::to_vec_named(&inner_results)
                     .ok()
                     .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok())
                     .unwrap_or(QueryValue::Null);

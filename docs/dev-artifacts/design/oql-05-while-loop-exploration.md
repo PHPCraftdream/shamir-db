@@ -314,13 +314,17 @@ real caveats:
    iteration's body**, so that `when`'s `Filter::ValueCompare` sees the
    post-previous-iteration value, not a stale one resolved before the
    loop started. This is achievable: each iteration's body can `Read`
-   `@escrow_account` again (each iteration is its own `execute_batch_impl`
-   recursive call with its own fresh `resolved_refs`,
-   `query_runner.rs:442-451`), so the read genuinely re-executes and sees
-   the latest committed state from the prior iteration (assuming the
-   loop runs inside one transaction so prior iterations' writes are
-   visible — same transactional-batch mechanics `ForEach` already
-   provides). So the DATA side of the workaround is real, not fake.
+   `@escrow_account` again (each iteration is its own recursive call with
+   its own fresh `resolved_refs`, `query_runner.rs:429-458`), so the read
+   genuinely re-executes and sees the latest state from the prior
+   iteration — **as of #661's fix**, a transactional outer batch threads
+   the SAME `TxContext` through every iteration
+   (`run_nested_body_in_outer_tx`), so prior iterations' writes really are
+   visible to (and, on any later failure, really do roll back alongside)
+   subsequent iterations; before that fix, each iteration's writes
+   committed independently the moment the iteration finished, regardless
+   of the outer batch's `transactional` flag. So the DATA side of the
+   workaround is real, not fake.
 2. **The upper bound must be guessed, and guessing wrong is a real
    failure mode in both directions.** Too small (fewer placeholder
    elements than iterations actually needed): the loop exhausts its

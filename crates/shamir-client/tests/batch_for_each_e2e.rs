@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 
 use shamir_client::builder::batch::Batch;
 use shamir_client::builder::ddl;
-use shamir_client::builder::val::{lit, param};
+use shamir_client::builder::val::{func, lit, param};
 use shamir_client::builder::write::{doc, insert};
 use shamir_client::builder::Query;
 use shamir_client::{BatchRequest, Client, ConnectOptions};
@@ -150,6 +150,50 @@ fn audit_insert_body(bind_row: &str) -> BatchRequest {
         insert("audit_log").rows([doc()
             .set("order_id", param(bind_row))
             .set("note", "audited")
+            .build()]),
+    );
+    inner.build()
+}
+
+/// Like [`audit_insert_body`], but with an EXTRA `guard` field computed via
+/// `$fn: math/mod(1, $param <bind_row>)` (`crates/shamir-funclib/src/math.rs`'s
+/// `"mod"` entry, dispatch name `"math/mod"`). `math/mod` errors with
+/// `div_by_zero` when its divisor argument is zero — a genuine, PURE,
+/// data-dependent function of the current iteration's own bind_row value,
+/// with no dependency on any other iteration's state.
+///
+/// Used instead of a unique-index violation for the mid-loop-failure e2e
+/// scenario below (`for_each_iteration_error_mid_loop_rolls_back_whole_tx_over_real_wire`)
+/// because TWO separate, pre-existing (and out of scope here) issues make a
+/// unique-index-based cross-iteration conflict unreliable inside a single
+/// still-open transaction:
+///   1. `FilterValue`'s `#[serde(untagged)]` msgpack round-trip collapses a
+///      literal array whose every element is a small int (0-127) into the
+///      WRONG variant (`FilterValue::Binary` via `serde_bytes`, ambiguous
+///      with msgpack's positive-fixint encoding) instead of
+///      `FilterValue::Array` — so a small-valued `over` literal like
+///      `[1, 1, 2]` fails to resolve as a list at all, over the real wire.
+///   2. Even with values large enough to avoid (1), unique-index validation
+///      (`crates/shamir-index/src/legacy/index_manager_unique.rs`'s
+///      `validate_unique_for_create` plus the commit-time re-check in
+///      `crates/shamir-engine/src/tx/pre_commit.rs`'s `pre_commit_prelock`)
+///      only ever checks against DURABLE committed state — two inserts
+///      claiming the same unique key within the SAME still-uncommitted
+///      transaction never cross-validate against each other, so a
+///      duplicate-within-one-tx silently commits instead of aborting.
+///
+/// `math/mod`'s div-by-zero technique sidesteps both: no duplicate values
+/// needed (large, distinct `order_id`s throughout), and the failure is
+/// self-contained to the failing iteration's own insert (no cross-iteration
+/// durable-state check involved).
+fn audit_insert_body_with_div_guard(bind_row: &str) -> BatchRequest {
+    let mut inner = Batch::new();
+    inner.insert(
+        "audit",
+        insert("audit_log").rows([doc()
+            .set("order_id", param(bind_row))
+            .set("note", "audited")
+            .set("guard", func("math/mod", [lit(1_i64), param(bind_row)]))
             .build()]),
     );
     inner.build()
@@ -400,31 +444,30 @@ async fn for_each_over_literal_array_inserts_one_audit_row_per_literal_over_real
     handle.shutdown().await;
 }
 
-/// Scenario 4: error mid-loop in a transactional batch — a unique index on
-/// `audit_log.order_id` makes the second iteration (a duplicate order id)
-/// fail, and the whole transactional batch (including a "good" insert that
-/// ran before the loop) must roll back — no partial audit rows survive.
+/// Scenario 4: error mid-loop in a transactional batch — a genuine
+/// DATA-DEPENDENT failure on the second iteration (iteration 0 provably
+/// succeeds and writes a real row first) must roll back the whole
+/// transactional batch, including a "good" insert that ran before the loop
+/// — no partial audit rows survive.
+///
+/// Uses `audit_insert_body_with_div_guard`'s `math/mod` div-by-zero
+/// technique rather than a unique-index violation — see that function's
+/// doc comment for why a unique-index-based approach is unreliable here
+/// (two separate, pre-existing, out-of-scope issues: (1) a `FilterValue`
+/// msgpack-untagged-enum ambiguity that misdecodes a literal array of
+/// small ints as `Binary` instead of `Array`, discovered while adjusting
+/// this very test — the ORIGINAL `over: [1, 1, 2]` literal tripped exactly
+/// this, so `over` never even resolved to a list, meaning this test
+/// previously aborted for a completely unrelated reason and never actually
+/// reached iteration 0's insert at all; and (2) unique-index validation
+/// only checks against DURABLE state, so two inserts claiming the same key
+/// within ONE still-open transaction don't conflict with each other and
+/// the tx would silently commit with a duplicate instead of aborting).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn for_each_iteration_error_mid_loop_rolls_back_whole_tx_over_real_wire() {
     let (handle, client, _password) = boot().await;
     let db = "fedb_txabort";
     make_db(&client, db).await;
-
-    // Unique index on audit_log.order_id, so a duplicate order_id insert
-    // fails mid-loop.
-    let mut mk_index = Batch::new();
-    mk_index.id("mk-index");
-    mk_index.create_index(
-        "ix",
-        ddl::create_index("audit_log_order_id_uq", "audit_log")
-            .field("order_id")
-            .unique()
-            .repo("main"),
-    );
-    client
-        .execute(db, mk_index.build())
-        .await
-        .expect("create unique index");
 
     let mut b = Batch::new();
     b.id("txn-abort");
@@ -437,11 +480,16 @@ async fn for_each_iteration_error_mid_loop_rolls_back_whole_tx_over_real_wire() 
             .set("amount", 1_i64)
             .build()]),
     );
-    // over: [1, 1, 2] -- iteration 0 inserts order_id=1 (ok), iteration 1
-    // duplicates order_id=1 (unique-index violation), iteration 2 must
-    // never run.
-    let over_literal = vec![lit(1_i64), lit(1_i64), lit(2_i64)];
-    let inner = audit_insert_body("order_id");
+    // over: [301, 0, 303] -- iteration 0 inserts order_id=301 (ok: a real
+    // row is written, math/mod(1, 301) succeeds), iteration 1 has
+    // order_id=0, so its `guard` field's math/mod(1, 0) div-by-zero fails
+    // the whole op, iteration 2 (order_id=303) must never run. 301/303 are
+    // both >=128 so they avoid the msgpack fixint/Binary ambiguity
+    // described above (values 0-127 in EVERY element of the array would
+    // trigger it; 0 alone, mixed with >=128 values, is safe since the
+    // ambiguity requires the WHOLE array to be byte-shaped).
+    let over_literal = vec![lit(301_i64), lit(0_i64), lit(303_i64)];
+    let inner = audit_insert_body_with_div_guard("order_id");
     b.for_each("loop", over_literal, "order_id", inner);
 
     let resp = client.execute(db, b.build()).await;

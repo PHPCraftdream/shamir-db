@@ -404,6 +404,194 @@ async fn sub_batch_atomic() {
 }
 
 // ============================================================================
+// #661 — thread the outer tx into Batch (sub-batch) body recursion.
+//
+// `sub_batch_atomic` above covers a sub-batch that is ITSELF
+// `transactional: true` — a fully independent nested transaction, which
+// never touches this bug (its recursion path is `execute_batch_impl` ->
+// `execute_transactional_impl`, opening its OWN tx; #661 only affects the
+// case where the sub-batch body is NOT itself transactional but runs
+// nested inside an ALREADY-OPEN outer transaction). This test exercises
+// exactly that gap: a plain (non-transactional) `Batch(SubBatchOp)` whose
+// body succeeds (a real write), running inside a TRANSACTIONAL outer batch,
+// followed by a top-level sibling op that fails. Before #661's fix, the
+// sub-batch's write would have routed through `execute_batch_impl`'s
+// non-transactional path (an implicit, independently-committing single-op
+// transaction) — entirely disconnected from the outer TxContext — so it
+// would durably survive the outer tx's abort. After the fix, the write
+// flows through the SAME outer `TxContext`, so the outer tx's RAII
+// rollback-on-error genuinely undoes it.
+// ============================================================================
+
+#[tokio::test]
+async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
+    use futures::StreamExt;
+
+    let factory = BoxRepoFactory::in_memory();
+    let repo = RepoInstance::from_factory("test".into(), factory, vec![TableConfig::new("users")])
+        .await
+        .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Inner (sub-batch) body: a single, non-transactional insert that
+    // SUCCEEDS.
+    let mut inner_queries = new_map();
+    inner_queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(shamir_query_types::write::InsertOp {
+                insert_into: crate::query::TableRef::new("users"),
+                values: vec![mpack!({ "name": "sub_batch_partial_test" })],
+                records_idmsgpack: Vec::new(),
+                select: None,
+            }),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let inner_req = BatchRequest {
+        id: QueryValue::Int(6611),
+        name: None,
+        transactional: false, // the body itself is NOT transactional
+        isolation: None,
+        durability: None,
+        queries: inner_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let sub_entry = QueryEntry {
+        op: BatchOp::Batch(SubBatchOp {
+            batch: inner_req,
+            bind: new_map(),
+        }),
+        return_result: true,
+        after: Vec::new(),
+        when: None,
+    };
+
+    // Top-level sibling op that fails, forced to run AFTER the sub-batch so
+    // the sub-batch's write genuinely happens first.
+    //
+    // IMPORTANT: this must NOT be a static/plan-time failure (like a
+    // nonexistent table) — `execute_in_open_tx`/`execute_batch`'s
+    // `validate_tables` call validates EVERY table ref across the WHOLE
+    // outer `request.queries` map BEFORE any op executes (including the
+    // sub-batch's own body), so a nonexistent-table sibling would reject
+    // the ENTIRE outer batch up front and the sub-batch's insert would
+    // never run at all — that would not exercise the recursion this test
+    // targets. Instead, use a genuine RUNTIME, data-dependent failure: an
+    // Insert whose value contains `$fn: math/mod(1, 0)`, which resolves
+    // successfully past `validate_tables` (the `users` table is real) but
+    // fails during marker resolution at execution time with `div_by_zero`
+    // (see `crates/shamir-funclib/src/math.rs`'s `"mod"` entry and
+    // `crates/shamir-engine/src/query/batch/param_subst.rs`'s
+    // `WriteValueError::MalformedMarker` conversion) — same technique as
+    // `for_each_tests.rs`'s `insert_order_body_with_div_guard`.
+    let mut fn_args = new_map();
+    fn_args.insert("name".to_string(), QueryValue::Str("math/mod".to_string()));
+    fn_args.insert(
+        "args".to_string(),
+        QueryValue::List(vec![QueryValue::Int(1), QueryValue::Int(0)]),
+    );
+    let mut fn_marker = new_map();
+    fn_marker.insert("$fn".to_string(), QueryValue::Map(fn_args));
+    let mut bad_value = new_map();
+    bad_value.insert("guard".to_string(), QueryValue::Map(fn_marker));
+    let bad_entry = QueryEntry {
+        op: BatchOp::Insert(shamir_query_types::write::InsertOp {
+            insert_into: crate::query::TableRef::new("users"),
+            values: vec![QueryValue::Map(bad_value)],
+            records_idmsgpack: Vec::new(),
+            select: None,
+        }),
+        return_result: true,
+        after: vec!["sub".to_string()],
+        when: None,
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert("sub".to_string(), sub_entry);
+    outer_queries.insert("bad".to_string(), bad_entry);
+
+    // Outer batch is NOT transactional itself here — we drive it via an
+    // already-open tx using `execute_in_open_tx` (same pattern
+    // `tx_in_tx_rejected` below uses), so the runner sees `tx: Some(...)`
+    // for the sub-batch recursion, exactly like a genuinely transactional
+    // outer batch would.
+    let outer_req = BatchRequest {
+        id: QueryValue::Int(661),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let (mut tx, guard) =
+        crate::query::batch::open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+
+    let result = crate::query::batch::execute_in_open_tx(
+        &outer_req,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await;
+
+    let err =
+        result.expect_err("the top-level 'bad' op's failure must propagate as an error; got Ok");
+    assert_eq!(
+        err.code(),
+        Some("malformed_marker"),
+        "the failure must genuinely originate from the 'bad' op's runtime \
+         math/mod div_by_zero (not from an unrelated up-front validation \
+         failure) — proving the sub-batch's insert ran to completion \
+         first; got {:?}",
+        err
+    );
+
+    // Roll back the interactive tx exactly like a real caller would on
+    // error (dropping the guard/tx without committing).
+    drop(tx);
+    drop(guard);
+
+    // Decisive assertion (the one #661 broke): the table must be EMPTY —
+    // the sub-batch's already-succeeded write must be genuinely rolled
+    // back along with the rest of the outer tx, not durably committed
+    // independently via its own implicit per-op transaction.
+    let tbl = repo.get_table("users").await.unwrap();
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(batch) = stream.next().await {
+        count += batch.unwrap().len();
+    }
+    assert_eq!(
+        count, 0,
+        "the sub-batch's write must be rolled back along with the rest of \
+         the outer tx; found {} row(s) — this is the exact case #661 broke: \
+         a non-transactional sub-batch body silently committing its writes \
+         independently of an already-open outer transaction",
+        count
+    );
+}
+
+// ============================================================================
 // Test 4: tx_in_tx_rejected
 //
 // A transactional sub-batch inside an already-open interactive tx →
