@@ -219,8 +219,9 @@ impl MvccStore {
         Ok(out)
     }
 
-    /// cancel-safe: yes — a single `version_cache.upsert_async`, which is
-    /// CAS-based and either lands or leaves the map unchanged on cancel.
+    /// cancel-safe: yes — a single synchronous `cells.entry_sync`
+    /// modify-or-insert; the fn no longer suspends, so cancellation can only
+    /// happen before the whole update runs or after it completed.
     ///
     /// Seed the in-memory version cache for a recovered key.
     ///
@@ -240,7 +241,7 @@ impl MvccStore {
     /// for SSI conflict detection if the recovered key is immediately
     /// re-written inside a new transaction.
     ///
-    /// `entry_async` (occupied/vacant) — NOT `upsert_async` — so that on the
+    /// `entry_sync` (occupied/vacant) — NOT `upsert` — so that on the
     /// OCCUPIED branch the cell's `version` is advanced ONLY when `version`
     /// is strictly greater than the cell's current value (max-monotonic,
     /// matching `publish_cell`). This prevents a cold read racing the FIRST
@@ -249,8 +250,17 @@ impl MvccStore {
     /// SSI conflicts). A re-replay of the same key with an equal or lower
     /// version is a no-op; the VACANT branch always seeds at the offered
     /// version.
+    ///
+    /// DEADLOCK FIX (#589 root cause): `entry_sync`, NOT `entry_async` —
+    /// same reasoning as [`MvccStore::publish_cell`](super::MvccStore): an
+    /// async-granted bucket lock is held by a task parked in tokio's run
+    /// queue, and the SYNCHRONOUS `read_sync` readers (`current_version`)
+    /// park worker threads on that same bucket; if all workers park, the
+    /// lock-owning task is never polled again → whole-runtime deadlock. The
+    /// fn stays `async` to keep its call sites unchanged; it no longer
+    /// suspends.
     pub async fn seed_version(&self, key: RecordKey, version: u64) {
-        match self.cells.entry_async(key).await {
+        match self.cells.entry_sync(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 if version > e.get().version {
                     e.get_mut().version = version;

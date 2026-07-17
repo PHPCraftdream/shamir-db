@@ -513,14 +513,24 @@ impl MvccStore {
     /// (newer) current entry. That is why the threshold is `min_alive` and
     /// not the (possibly larger) `min_version` history-GC argument.
     ///
-    /// `retain_async` keeps entries for which the predicate returns `true`,
+    /// `retain_sync` keeps entries for which the predicate returns `true`,
     /// so we keep `*v >= min_alive` and drop the rest. A key re-written
     /// after this prune simply re-populates its entry via the next upsert.
+    ///
+    /// DEADLOCK FIX (#589 root cause): `retain_sync`, NOT `retain_async` —
+    /// same reasoning as [`MvccStore::publish_cell`](super::MvccStore): the
+    /// cells map is read via the SYNCHRONOUS `read_sync` on every hot read
+    /// path, which parks the OS thread while a bucket is exclusively locked.
+    /// scc's async lock waits are lock-HANDOFF (the releaser grants the
+    /// bucket lock to the suspended waiter task), so a `retain_async` task
+    /// sitting in tokio's run queue can hold a bucket's writer lock while
+    /// every runtime worker parks in `read_sync` on that same bucket — a
+    /// whole-runtime deadlock. `retain_sync` holds each bucket lock only
+    /// while RUNNING (bounded wait for readers); the full-map synchronous
+    /// walk is acceptable here — this is the off-hot-path GC prune.
     pub(super) async fn prune_version_cache(&self) {
         let min_alive = self.gate.min_alive();
-        self.cells
-            .retain_async(|_key, c| c.version >= min_alive)
-            .await;
+        self.cells.retain_sync(|_key, c| c.version >= min_alive);
     }
 
     /// cancel-safe: NO — delegates to `gc_below`, which is non-cancel-

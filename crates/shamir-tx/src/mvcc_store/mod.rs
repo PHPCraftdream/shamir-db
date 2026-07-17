@@ -472,8 +472,27 @@ impl MvccStore {
     /// cell always seeds at the offered version). The NORMAL non-racing
     /// drain path always offers `<=` the current version, so this guard is a
     /// no-op there.
+    ///
+    /// DEADLOCK FIX (#589 root cause): `entry_sync`, NOT `entry_async`. The
+    /// cells map is read on every hot read path via the SYNCHRONOUS
+    /// `read_sync` (`current_version` / `version_of` / `live_version`), which
+    /// PARKS the calling OS thread while the bucket is exclusively locked
+    /// (scc's `Reader::lock_sync` → saa `share_sync`). `entry_async`'s wait
+    /// path is lock-HANDOFF: on release, saa GRANTS the exclusive lock to the
+    /// suspended waiter task, which then holds it while sitting in tokio's
+    /// run queue until next polled. If, in that window, every runtime worker
+    /// thread enters `read_sync` on the same (hot-key) bucket, all workers
+    /// park, the lock-owning task can never be polled again, and the whole
+    /// runtime deadlocks — reproduced deterministically by the D2
+    /// overlay-ordering history-arm test under CPU contention (CI timeout;
+    /// see `tests/mvcc_store_tests/overlay_ordering_tests.rs`). With
+    /// `entry_sync` the exclusive lock is only ever held by a RUNNING thread
+    /// for a few instructions (same contract as `finalize_reservation` /
+    /// `try_reserve` on this same map), so every `read_sync` wait is bounded.
+    /// The fn stays `async` to keep its many call sites / public shape
+    /// unchanged; it no longer suspends.
     pub(super) async fn publish_cell(&self, key: RecordKey, version: u64) {
-        match self.cells.entry_async(key).await {
+        match self.cells.entry_sync(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 if version > e.get().version {
                     e.get_mut().version = version;
@@ -698,7 +717,7 @@ impl MvccStore {
         // when it was written as current. No other store is written.
         //
         // Bump-first: assign version, update cell, then perform the physical
-        // write. CRIT-2: `publish_cell` uses entry_async (modify-or-insert)
+        // write. CRIT-2: `publish_cell` uses entry_sync (modify-or-insert)
         // so repeated writes to the same key advance the cached version
         // monotonically.
         // P0b: take a RAII VersionGuard so the non-tx path goes through the
@@ -790,7 +809,7 @@ impl MvccStore {
         // Phase 1 (bump-first): assign a fresh version per key and update the
         // cell BEFORE the physical log write. Prior versions are already in
         // the log from when they were written as current.
-        // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
+        // CRIT-2: `publish_cell` uses entry_sync modify-or-insert so the
         // cached version advances monotonically.
         let mut max_v = 0u64;
         let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
@@ -968,7 +987,7 @@ impl MvccStore {
         // it was written as current.
         //
         // Bump-first: assign version, update cell, then write the tombstone.
-        // CRIT-2: `publish_cell` uses entry_async (modify-or-insert) so the
+        // CRIT-2: `publish_cell` uses entry_sync (modify-or-insert) so the
         // cached version advances monotonically.
         // L6: capture old_v BEFORE publish_cell bumps the cell.
         let old_v = self.current_version(&key);
