@@ -12,15 +12,18 @@ use shamir_collections::new_map;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter;
 use shamir_query_builder::query::Query;
-use shamir_query_builder::val::{cond, func, param};
+use shamir_query_builder::val::{col, cond, func, param};
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_query_types::filter::FilterValue;
 use shamir_types::access::Actor;
+use shamir_types::core::interner::Interner;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::execute_batch;
+use crate::query::batch::param_subst::resolve_write_value;
+use crate::query::filter::FilterContext;
 
 use super::common::setup_resolver;
 
@@ -220,6 +223,153 @@ async fn insert_value_with_fn_call_literal_arg_resolves() {
         Some(QueryValue::Str("eve".to_string())),
         "the $fn marker inside the INSERT value must resolve to the REAL \
          computed value, not be stored as the literal marker map"
+    );
+}
+
+// ============================================================================
+// Regression (CI-fix #01): a $fn call whose args contain a same-document
+// $ref must pass through resolve_write_value COMPLETELY UNCHANGED, so it
+// reaches the table layer's resolve_computed_record (write_helpers.rs),
+// which resolves $ref against the row's own literal sibling fields. This
+// resolver has no real per-row record, so it must not attempt (and fail)
+// resolution itself — see param_subst.rs's own "$ref is out of scope" doc.
+// ============================================================================
+
+/// `FilterValue` and `QueryValue` share the same serde wire encoding (the
+/// same convention `Doc::set` relies on) — round-trip a marker-shaped
+/// `FilterValue` (e.g. `func(...)`, `cond(...)`) into the `QueryValue` a
+/// write op actually carries on the wire.
+fn fv_to_qv(fv: &FilterValue) -> QueryValue {
+    let bytes =
+        rmp_serde::to_vec_named(fv).expect("FilterValue msgpack serialization is infallible");
+    rmp_serde::from_slice(&bytes).expect("FilterValue→QueryValue round-trip is infallible")
+}
+
+/// Unit-level: `resolve_write_value` passes a `$fn`+`$ref` marker through
+/// byte-for-byte unresolved (same shape in, same shape out) rather than
+/// erroring or altering it.
+#[test]
+fn resolve_write_value_passes_through_fn_call_with_field_ref_unchanged() {
+    let interner = Interner::new();
+    let resolved_refs = new_map();
+    let ctx = FilterContext::new(&interner, &resolved_refs);
+
+    let value = fv_to_qv(&func("strings/lower", [col("email")]));
+    let resolved = resolve_write_value(&value, &ctx).expect(
+        "a $fn+$ref marker must pass through unresolved, not error — \
+         resolving $ref is the table layer's job, not this resolver's",
+    );
+    assert_eq!(
+        resolved, value,
+        "the $fn marker's shape must be COMPLETELY UNCHANGED (not resolved, \
+         not altered) when its args contain a $ref anywhere"
+    );
+}
+
+/// Unit-level: a `$fn` call with a `$ref` nested two levels down (inside an
+/// `$expr` that is itself an argument of the `$fn`) is also detected and
+/// passed through unresolved — the "anywhere, recursively" requirement.
+#[test]
+fn resolve_write_value_passes_through_fn_call_with_nested_field_ref_unchanged() {
+    use shamir_query_builder::val::add;
+
+    let interner = Interner::new();
+    let resolved_refs = new_map();
+    let ctx = FilterContext::new(&interner, &resolved_refs);
+
+    let value = fv_to_qv(&func("math/abs", [add(col("a"), 1_i64)]));
+    let resolved = resolve_write_value(&value, &ctx).expect(
+        "a $fn call with a $ref nested inside an $expr argument must still \
+         pass through unresolved",
+    );
+    assert_eq!(
+        resolved, value,
+        "the outer $fn marker must be left completely unchanged when a $ref \
+         is found anywhere in its (possibly nested) args"
+    );
+}
+
+/// Non-regression: a `$fn` call with NO `$ref` anywhere in its args (the
+/// #641 case this resolver already supports) still resolves fully, exactly
+/// as before this fix.
+#[test]
+fn resolve_write_value_still_resolves_fn_call_without_field_ref() {
+    let interner = Interner::new();
+    let resolved_refs = new_map();
+    let ctx = FilterContext::new(&interner, &resolved_refs);
+
+    let value = fv_to_qv(&func("strings/lower", [FilterValue::from("EVE")]));
+    let resolved = resolve_write_value(&value, &ctx).unwrap();
+    assert_eq!(
+        resolved,
+        QueryValue::Str("eve".to_string()),
+        "a $fn call with no $ref in its args must still resolve to its real \
+         computed value (unaffected by the $ref pass-through fix)"
+    );
+}
+
+/// Integration/end-to-end: a single INSERT row carries BOTH a `$fn`+`$ref`
+/// field (must be left for the table layer's `resolve_computed_record`) AND
+/// a genuine `$query` field (must be resolved by `resolve_write_value` as
+/// #641 already does) — both must end up correct after the full insert
+/// pipeline. This is the exact regression shape from `functions_e2e.rs`'s
+/// `seed_users`, plus a `$query` sibling to prove the two resolution paths
+/// coexist correctly in the same row.
+#[tokio::test]
+async fn insert_row_with_fn_ref_and_query_ref_siblings_both_resolve_correctly() {
+    let resolver = setup_resolver().await;
+
+    let mut seed = Batch::new();
+    seed.id(1);
+    seed.op_silent(
+        "seed_users",
+        write::insert("users").row(doc().set("name", "Judy")),
+    );
+    let seed_req = seed.build();
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    let users = b.query("users", Query::from("users"));
+    let make_row = b.op_silent(
+        "make_row",
+        write::insert("orders").row(
+            doc()
+                .set("email", "J@X.COM")
+                // Table-layer computed value: $fn+$ref against the SAME row's
+                // sibling "email" field — must be left untouched here and
+                // resolved by write_helpers::resolve_computed_record instead.
+                .set("email_norm", func("strings/lower", [col("email")]))
+                // Batch-level resolution: a genuine $query ref to another
+                // query's result in this same batch — must be resolved HERE
+                // by resolve_write_value, exactly as #641 already does.
+                .set("owner", users.first().field("name")),
+        ),
+    );
+    let check = b.query("check", Query::from("orders"));
+    b.after(&check, &make_row);
+    let req = b.build();
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let rows = &resp.results["check"].records;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].as_value().get("email_norm").cloned(),
+        Some(QueryValue::Str("j@x.com".to_string())),
+        "the $fn+$ref field must be resolved by the table layer against the \
+         row's own literal 'email' field"
+    );
+    assert_eq!(
+        rows[0].as_value().get("owner").cloned(),
+        Some(QueryValue::Str("Judy".to_string())),
+        "the sibling $query field must still resolve at the batch level, \
+         proving the $ref pass-through fix doesn't break #641's own \
+         resolution path when both marker kinds appear in the same row"
     );
 }
 

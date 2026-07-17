@@ -47,6 +47,43 @@ use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
 use crate::query::filter::{resolve_filter_query, FilterContext, FilterValue};
 
+/// `true` iff `fv` is a `FilterValue::FieldRef` (`$ref`) itself, or contains
+/// one ANYWHERE at any depth inside its operands.
+///
+/// Used to detect the one write-value shape the batch-level resolver
+/// (`resolve_write_value`) must NOT attempt to resolve: a `$fn` call whose
+/// `args` reference a sibling field in the SAME row via `$ref` (e.g.
+/// `{"$fn": {"name": "strings/lower", "args": [{"$ref": ["email"]}]}}`).
+/// That reference is only meaningful once the real per-row record exists —
+/// which is the table layer's job (`write_helpers::resolve_computed_record`),
+/// not this pre-execution marker resolver (see the `DUMMY_RECORD` doc comment
+/// above for why `$ref` is out of scope here).
+///
+/// Recurses into `FnCall` args, `Expr` args, `Cond`'s `then`/`or_else`
+/// branches, and `Array` elements. `Cond`'s `condition` field is a `Filter`
+/// (a much larger, differently-shaped tree — `Eq`/`And`/`Or`/`ValueCompare`/…)
+/// rather than a `FilterValue`; walking it fully would need a parallel
+/// `Filter`-level recursion for a shape `is_computed_field` (table layer)
+/// never supports wrapped in `$cond` anyway (see this module's own out-of-
+/// scope note and the brief this fix implements). Instead, conservatively
+/// treat ANY `Cond` as "may contain a `$ref`" — this only affects whether a
+/// `$cond`-wrapped value takes the pass-through-to-table-layer path (which
+/// the table layer doesn't understand either and will error on) vs. the
+/// resolve-now path (which already errors on `$ref` misses today); either
+/// way an actual `$ref` inside a `$cond`'s condition was never resolvable by
+/// this resolver, so this is not a behavior regression for any case that
+/// worked before.
+fn filter_value_contains_field_ref(fv: &FilterValue) -> bool {
+    match fv {
+        FilterValue::FieldRef { .. } => true,
+        FilterValue::FnCall { call } => call.args().iter().any(filter_value_contains_field_ref),
+        FilterValue::Expr { expr } => expr.args.iter().any(filter_value_contains_field_ref),
+        FilterValue::Cond { .. } => true,
+        FilterValue::Array(items) => items.iter().any(filter_value_contains_field_ref),
+        _ => false,
+    }
+}
+
 /// The reserved marker keys this resolver recognizes.
 const RESERVED_MARKER_KEYS: [&str; 5] = ["$param", "$query", "$fn", "$cond", "$expr"];
 
@@ -193,6 +230,22 @@ fn resolve_write_value_inner(
                             value
                         ))
                     })?;
+                // `$fn` calls whose args contain a `$ref` (anywhere, at any
+                // depth) are explicitly out of scope for THIS resolver (see
+                // the module doc comment's "$ref is explicitly OUT OF SCOPE"
+                // section) — resolving `$ref` needs the real per-row record,
+                // which only exists at the table layer. Pass the marker
+                // through COMPLETELY UNCHANGED so it reaches
+                // `write_helpers::resolve_computed_record`, the existing
+                // mechanism that already knows how to resolve `$fn`+`$ref`
+                // against the row's own literal sibling fields. Every other
+                // marker kind (`$query`/`$cond`/`$expr`, and a `$fn` with no
+                // `$ref` in its args) keeps resolving here exactly as before.
+                if let FilterValue::FnCall { call } = &fv {
+                    if call.args().iter().any(filter_value_contains_field_ref) {
+                        return Ok(value.clone());
+                    }
+                }
                 return resolve_filter_query(&fv, &DUMMY_RECORD, ctx).ok_or_else(|| {
                     WriteValueError::MalformedMarker(format!(
                         "marker {:?} failed to resolve (unknown alias/function, or a nested \
