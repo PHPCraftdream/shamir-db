@@ -123,6 +123,13 @@ export interface BatchLimits {
   max_result_size: number;
   /** Maximum sub-batch nesting depth. 0 = no nesting allowed. */
   max_nesting_depth: number;
+  /**
+   * Maximum `for_each` loop iterations (Epic04, #653). Rust-side
+   * `#[serde(default = "default_max_iterations")]` (#662) means a `limits`
+   * map omitting this field still deserializes, defaulting to `1000` — but
+   * the TS builder always fills it explicitly (see `DEFAULT_LIMITS`).
+   */
+  max_iterations: number;
 }
 
 // ── BatchRequest ────────────────────────────────────────────────────

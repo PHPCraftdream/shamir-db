@@ -1,3 +1,4 @@
+pub mod batch_limits_tests;
 pub mod batch_types_tests;
 pub mod distinct_repos_tests;
 pub mod for_each_op_tests;

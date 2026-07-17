@@ -163,33 +163,37 @@ describe('Batch — durability, name, returnOnly, limits', () => {
     expect(req.return_only).toEqual(['u']);
   });
 
-  it('limits fills missing fields with defaults (full 5-field Rust BatchLimits parity)', () => {
+  it('limits fills missing fields with defaults (full 6-field Rust BatchLimits parity)', () => {
     const req = Batch.create()
       .add('u', Query.from('users'))
       .limits({ max_queries: 20 })
       .build();
-    // Exact 5-field shape mirroring Rust `BatchLimits::default()` — a
-    // missing `max_nesting_depth` here would have caused the old bug to
-    // pass silently (server rejects the whole batch with
-    // `invalid_request: missing field 'max_nesting_depth'`).
+    // Exact 6-field shape mirroring Rust `BatchLimits::default()` — a
+    // missing field here would have caused the old bug to pass silently
+    // (server rejects the whole batch with
+    // `invalid_request: missing field '<name>'` on servers built before
+    // #662's `#[serde(default)]` fix, and drifts from Rust's default value
+    // on newer ones).
     expect(req.limits).toEqual({
       max_queries: 20,
       max_dependency_depth: 10,
       max_execution_time_secs: 30,
       max_result_size: 10_485_760,
       max_nesting_depth: 4,
+      max_iterations: 1000,
     });
-    // Precise key-set check: catches a future 6th field drift too.
+    // Precise key-set check: catches a future 7th field drift too.
     expect(Object.keys(req.limits!).sort()).toEqual([
       'max_dependency_depth',
       'max_execution_time_secs',
+      'max_iterations',
       'max_nesting_depth',
       'max_queries',
       'max_result_size',
     ]);
   });
 
-  it('limits round-trips through JSON with all 5 fields present', () => {
+  it('limits round-trips through JSON with all 6 fields present', () => {
     // This is the regression test that would have caught CRIT-8 pre-fix:
     // the server deserialises `BatchLimits` with all-fields-required
     // serde semantics, so every field must survive a JSON encode/decode.
@@ -204,8 +208,17 @@ describe('Batch — durability, name, returnOnly, limits', () => {
       max_execution_time_secs: 30,
       max_result_size: 10_485_760,
       max_nesting_depth: 4,
+      max_iterations: 1000,
     });
-    expect(Object.keys(decoded.limits)).toHaveLength(5);
+    expect(Object.keys(decoded.limits)).toHaveLength(6);
+  });
+
+  it('limits honours an explicit max_iterations override (#662)', () => {
+    const req = Batch.create()
+      .add('u', Query.from('users'))
+      .limits({ max_iterations: 5 })
+      .build();
+    expect(req.limits?.max_iterations).toBe(5);
   });
 
   it('limits honours an explicit max_nesting_depth override', () => {

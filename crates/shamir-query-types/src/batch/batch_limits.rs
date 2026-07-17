@@ -57,7 +57,19 @@ pub struct BatchLimits {
     /// `$query`-column-ref whose length is only known at runtime) still has
     /// a hard, finite bound, checked immediately before iteration 0 — see
     /// `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md` Decision 3.
+    ///
+    /// `#[serde(default = ...)]` (#662): this field was added after clients
+    /// already shipped `limits` maps with only the original 5 fields. Without
+    /// a default, serde makes it mandatory and rejects every such payload
+    /// with `"missing field \`max_iterations\`"`. Defaulting to the same
+    /// `1000` as [`BatchLimits::default`] keeps older/partial `limits`
+    /// payloads (e.g. the TS client before it learns this field) wire-compatible.
+    #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+}
+
+fn default_max_iterations() -> usize {
+    1000
 }
 
 impl Default for BatchLimits {
