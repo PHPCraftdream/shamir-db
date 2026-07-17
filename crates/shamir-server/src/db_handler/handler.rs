@@ -536,7 +536,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         BatchError::CircularDependency { .. }
         | BatchError::UnknownAlias { .. }
         | BatchError::AfterPathIgnored { .. }
-        | BatchError::InvalidWhenFilter { .. } => "validation",
+        | BatchError::InvalidWhenFilter { .. }
+        | BatchError::InvalidCondCondition { .. } => "validation",
         BatchError::Timeout { .. } => "timeout",
         BatchError::LockTimeout { .. } => "lock_timeout",
         BatchError::QueryError {

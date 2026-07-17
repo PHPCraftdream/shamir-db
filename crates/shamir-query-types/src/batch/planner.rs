@@ -161,7 +161,7 @@ impl BatchPlanner {
         let mut edge_provenance: TMap<String, TMap<String, EdgeKind>> = new_map();
 
         for (alias, entry) in queries {
-            let mut data_flow_deps = Self::extract_dependencies(&entry.op);
+            let mut data_flow_deps = Self::extract_dependencies(&entry.op, alias)?;
 
             // Epic03/B (#645): `when: Option<Filter>` participates in the
             // DAG exactly like a WHERE clause's `$query` refs — a `when`
@@ -256,7 +256,12 @@ impl BatchPlanner {
     }
 
     /// Extract all query references from a batch operation.
-    fn extract_dependencies(op: &BatchOp) -> TSet<String> {
+    ///
+    /// `alias` is the batch alias `op` belongs to — threaded through purely
+    /// for error attribution: #663's `InvalidCondCondition` (raised deep
+    /// inside [`Self::extract_deps_from_value`] when a write-value `$cond`'s
+    /// condition is field-based) needs to name the offending alias.
+    fn extract_dependencies(op: &BatchOp, alias: &str) -> Result<TSet<String>, BatchError> {
         let mut deps = new_set();
 
         match op {
@@ -269,18 +274,18 @@ impl BatchPlanner {
                 if let Some(filter) = &update.where_clause {
                     Self::extract_deps_from_filter(filter, &mut deps);
                 }
-                Self::extract_deps_from_value(&update.set, &mut deps);
+                Self::extract_deps_from_value(&update.set, &mut deps, alias)?;
             }
             BatchOp::Set(set) => {
-                Self::extract_deps_from_value(&set.key, &mut deps);
-                Self::extract_deps_from_value(&set.value, &mut deps);
+                Self::extract_deps_from_value(&set.key, &mut deps, alias)?;
+                Self::extract_deps_from_value(&set.value, &mut deps, alias)?;
             }
             BatchOp::Delete(delete) => {
                 Self::extract_deps_from_filter(&delete.where_clause, &mut deps);
             }
             BatchOp::Insert(insert) => {
                 for value in &insert.values {
-                    Self::extract_deps_from_value(value, &mut deps);
+                    Self::extract_deps_from_value(value, &mut deps, alias)?;
                 }
             }
             // Stored-procedure call: scan positional params for `$query` refs
@@ -310,7 +315,7 @@ impl BatchPlanner {
             _ => {}
         }
 
-        deps
+        Ok(deps)
     }
 
     /// Extract dependencies from a write-row `QueryValue`
@@ -340,7 +345,21 @@ impl BatchPlanner {
     /// alias to depend on (it reads from the sub-batch's `bind` scope, not
     /// another query's result), so it contributes no dependency edge either
     /// way — same as the old code's silent no-op for it.
-    fn extract_deps_from_value(value: &QueryValue, deps: &mut TSet<String>) {
+    ///
+    /// #663 Gap 3 fix: when the decoded marker is a `FilterValue::Cond`, its
+    /// `condition` is validated with the SAME `contains_field_based_
+    /// comparison` guard `when` already uses — `resolve_write_value`
+    /// (`shamir-engine`'s `param_subst.rs`) evaluates a write-value `$cond`'s
+    /// condition against a record-less dummy, exactly like `when`'s
+    /// `resolve_skip`, so a field-based comparison there is equally
+    /// meaningless and would otherwise silently fold instead of erroring.
+    /// `alias` is threaded through purely for error attribution on that new
+    /// `BatchError::InvalidCondCondition`.
+    fn extract_deps_from_value(
+        value: &QueryValue,
+        deps: &mut TSet<String>,
+        alias: &str,
+    ) -> Result<(), BatchError> {
         use crate::filter::FilterValue;
 
         match value {
@@ -366,8 +385,30 @@ impl BatchPlanner {
                         .ok()
                         .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
                     {
+                        if let FilterValue::Cond { cond } = &fv {
+                            // Check the top-level condition, then recurse
+                            // into `then`/`or_else` in case the guard-worthy
+                            // `$cond` is nested deeper inside a branch value
+                            // (a `$cond`'s branches can themselves be
+                            // `$cond`s).
+                            let invalid = Self::contains_field_based_comparison(&cond.condition)
+                                || Self::filter_value_contains_field_based_comparison(&cond.then)
+                                || Self::filter_value_contains_field_based_comparison(
+                                    &cond.or_else,
+                                );
+                            if invalid {
+                                return Err(BatchError::InvalidCondCondition {
+                                    alias: alias.to_string(),
+                                    message: "field-based comparisons are not meaningful \
+                                        inside `$cond`'s condition when used in a write value \
+                                        (no record exists) — use Filter::ValueCompare for \
+                                        value-vs-value comparisons instead"
+                                        .to_string(),
+                                });
+                            }
+                        }
                         Self::extract_deps_from_filter_value(&fv, deps);
-                        return;
+                        return Ok(());
                     }
                     // Malformed marker payload (fails to decode as a
                     // FilterValue): fall through to plain recursion below —
@@ -378,16 +419,17 @@ impl BatchPlanner {
                 // Recurse into nested objects (also covers `$param` markers
                 // and non-marker maps).
                 for v in map.values() {
-                    Self::extract_deps_from_value(v, deps);
+                    Self::extract_deps_from_value(v, deps, alias)?;
                 }
             }
             QueryValue::List(arr) => {
                 for v in arr {
-                    Self::extract_deps_from_value(v, deps);
+                    Self::extract_deps_from_value(v, deps, alias)?;
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Extract dependencies from a filter.
@@ -454,15 +496,33 @@ impl BatchPlanner {
         }
     }
 
-    /// #651 defensive check: return `true` iff `filter` contains, anywhere
-    /// in its tree, an OLD record-field-based comparison variant
-    /// (`Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte`/`FieldEq`). These variants resolve a
-    /// `FieldPath` against a REAL record — meaningless inside a `when` guard,
-    /// which has no record (see `QueryRunner::resolve_skip`). `IsNull` /
-    /// `IsNotNull` are intentionally EXCLUDED — they remain a legitimate
-    /// presence-guard pattern against the synthetic record (ADR Decision 1).
-    /// `And`/`Or`/`Not`/`ValueCompare` recurse/pass through without
-    /// themselves being flagged.
+    /// #651/#663 defensive check: return `true` iff `filter` contains,
+    /// anywhere in its tree (including nested inside any `FilterValue`
+    /// operand it carries — e.g. a `$cond` embedded in `ValueCompare.left`),
+    /// an OLD record-field-based comparison variant. These variants resolve
+    /// a `FieldPath` against a REAL record — meaningless inside a `when`
+    /// guard, which has no record (see `QueryRunner::resolve_skip`).
+    ///
+    /// Field-based variants (#651 + #663 Gap 1): `Eq`/`Ne`/`Gt`/`Gte`/`Lt`/
+    /// `Lte`/`FieldEq`/`Like`/`ILike`/`Regex`/`In`/`NotIn`/`Contains`/
+    /// `ContainsAny`/`ContainsAll`/`Between`/`Fts`/`VectorSimilarity`/
+    /// `Computed` — every variant that carries a `field: FieldPath` and
+    /// resolves it against a record, EXCEPT the presence-guard variants
+    /// below.
+    ///
+    /// `IsNull`/`IsNotNull`/`Exists`/`NotExists` are intentionally EXCLUDED —
+    /// they remain a legitimate presence-guard pattern against the synthetic
+    /// record (ADR Decision 1). Do not add them here.
+    ///
+    /// `And`/`Or`/`Not` recurse structurally. `ValueCompare` is never itself
+    /// flagged (it is genuinely record-free) but — like every other variant
+    /// that carries one or more `FilterValue` operands — its operands are
+    /// checked via [`Self::filter_value_contains_field_based_comparison`]
+    /// (#663 Gap 2), since a `FilterValue::Cond` operand can embed its own
+    /// field-based `condition`. The already-field-based variants below are
+    /// unconditionally `true` regardless of their operands, so their
+    /// `value`/`values`/`from`/`to`/`expr_args` are not separately walked —
+    /// there is no additional signal a `true`-anyway variant could add.
     fn contains_field_based_comparison(filter: &Filter) -> bool {
         match filter {
             Filter::Eq { .. }
@@ -471,11 +531,67 @@ impl BatchPlanner {
             | Filter::Gte { .. }
             | Filter::Lt { .. }
             | Filter::Lte { .. }
-            | Filter::FieldEq { .. } => true,
+            | Filter::FieldEq { .. }
+            | Filter::Contains { .. }
+            | Filter::Like { .. }
+            | Filter::ILike { .. }
+            | Filter::Regex { .. }
+            | Filter::Fts { .. }
+            | Filter::VectorSimilarity { .. }
+            | Filter::In { .. }
+            | Filter::NotIn { .. }
+            | Filter::ContainsAny { .. }
+            | Filter::ContainsAll { .. }
+            | Filter::Between { .. }
+            | Filter::Computed { .. } => true,
             Filter::And { filters } | Filter::Or { filters } => {
                 filters.iter().any(Self::contains_field_based_comparison)
             }
             Filter::Not { filter } => Self::contains_field_based_comparison(filter),
+            Filter::ValueCompare { left, right, .. } => {
+                Self::filter_value_contains_field_based_comparison(left)
+                    || Self::filter_value_contains_field_based_comparison(right)
+            }
+            Filter::IsNull { .. }
+            | Filter::IsNotNull { .. }
+            | Filter::Exists { .. }
+            | Filter::NotExists { .. } => false,
+        }
+    }
+
+    /// #663 Gap 2: return `true` iff `fv` — a `FilterValue` operand slot on
+    /// some `Filter` variant — contains, anywhere inside it, a nested
+    /// field-based comparison. This closes the gap where
+    /// [`Self::contains_field_based_comparison`] only walked the
+    /// STRUCTURAL `Filter` tree (`And`/`Or`/`Not`) and never looked inside
+    /// the `FilterValue` operands every comparison variant carries — so a
+    /// `FilterValue::Cond` embedding its own field-based `condition` (e.g.
+    /// `Filter::ValueCompare { left: Cond{ if: Filter::Like{..}, .. }, .. }`)
+    /// sailed through undetected.
+    ///
+    /// `QueryRef`/`Param`/`FieldRef`/literals are never themselves a
+    /// field-based-comparison issue — a `$query`/`$param` reference is not a
+    /// record-field lookup.
+    fn filter_value_contains_field_based_comparison(fv: &crate::filter::FilterValue) -> bool {
+        use crate::filter::FilterValue;
+
+        match fv {
+            FilterValue::Cond { cond } => {
+                Self::contains_field_based_comparison(&cond.condition)
+                    || Self::filter_value_contains_field_based_comparison(&cond.then)
+                    || Self::filter_value_contains_field_based_comparison(&cond.or_else)
+            }
+            FilterValue::Expr { expr } => expr
+                .args
+                .iter()
+                .any(Self::filter_value_contains_field_based_comparison),
+            FilterValue::FnCall { call } => call
+                .args()
+                .iter()
+                .any(Self::filter_value_contains_field_based_comparison),
+            FilterValue::Array(items) => items
+                .iter()
+                .any(Self::filter_value_contains_field_based_comparison),
             _ => false,
         }
     }

@@ -91,6 +91,19 @@ pub enum BatchError {
     /// against an empty scratch interner. This turns that silent-wrong-
     /// answer bug into a caught, explicit plan-time error.
     InvalidWhenFilter { alias: String, message: String },
+
+    /// #663: a `$cond` marker embedded inside a write value
+    /// (`InsertOp.values`/`UpdateOp.set`/`SetOp.{key,value}`) has a
+    /// `condition` that contains an old record-field-based comparison
+    /// variant.
+    ///
+    /// Write-value `$cond` resolution (`resolve_write_value` in
+    /// `shamir-engine`'s `param_subst.rs`) evaluates `condition` against the
+    /// SAME kind of record-less dummy `when`'s `resolve_skip` does — a
+    /// field-based comparison there ALWAYS folds (silently) to a fixed
+    /// result instead of erroring, exactly the #651 class of bug just one
+    /// level deeper. This turns it into a caught, explicit plan-time error.
+    InvalidCondCondition { alias: String, message: String },
 }
 
 impl std::fmt::Display for BatchError {
@@ -158,6 +171,13 @@ impl std::fmt::Display for BatchError {
             }
             BatchError::InvalidWhenFilter { alias, message } => {
                 write!(f, "invalid 'when' filter on '{}': {}", alias, message)
+            }
+            BatchError::InvalidCondCondition { alias, message } => {
+                write!(
+                    f,
+                    "invalid '$cond' condition in write value on '{}': {}",
+                    alias, message
+                )
             }
         }
     }
