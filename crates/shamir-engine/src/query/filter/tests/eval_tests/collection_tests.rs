@@ -497,6 +497,150 @@ fn test_contains_all_set_match() {
 }
 
 // ============================================================================
+// $contains_all — duplicate-element correctness (ContainsAllSet fast path)
+// ============================================================================
+
+#[test]
+fn test_contains_all_list_duplicate_stands_in_for_missing_value() {
+    // Fast-path closure of the duplicate-counting bug: `tags = ["a", "a"]`
+    // must NOT satisfy `$contains_all: ["a", "b"]` — "b" is genuinely absent,
+    // even though both "a" elements are members of the required set. The
+    // all-literal value list selects ContainsAllSet; the old raw-hit count
+    // wrongly returned a match here.
+    let interner = Interner::new();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let mut map = new_map();
+    let k_tags = interner.touch_ind("tags").unwrap().into_key();
+    map.insert(
+        k_tags,
+        InnerValue::List(vec![
+            InnerValue::Str("a".to_string()),
+            InnerValue::Str("a".to_string()),
+        ]),
+    );
+    let record = InnerValue::Map(map);
+
+    let filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("a".to_string()),
+            FilterValue::String("b".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(
+        !cb.matches(&record, &ctx),
+        "duplicate 'a' must not stand in for the absent required value 'b'"
+    );
+}
+
+#[test]
+fn test_contains_all_list_duplicate_with_all_values_present() {
+    // Positive counterpart: a field that duplicates a required value AND
+    // genuinely contains every required value still matches.
+    let interner = Interner::new();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let mut map = new_map();
+    let k_tags = interner.touch_ind("tags").unwrap().into_key();
+    map.insert(
+        k_tags,
+        InnerValue::List(vec![
+            InnerValue::Str("a".to_string()),
+            InnerValue::Str("b".to_string()),
+            InnerValue::Str("a".to_string()),
+        ]),
+    );
+    let record = InnerValue::Map(map);
+
+    let filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("a".to_string()),
+            FilterValue::String("b".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_all_fast_slow_parity() {
+    // The all-literal form compiles to ContainsAllSet (the O(field_len) fast
+    // path). Replacing one value with a `$ref` forces the ContainsAll slow
+    // path (its value resolves at match time to the same literal). Both paths
+    // must agree on every input — in particular the duplicate-elements case
+    // that previously diverged.
+    let interner = Interner::new();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let k_tags = interner.touch_ind("tags").unwrap().into_key();
+    let k_needle = interner.touch_ind("needle").unwrap().into_key();
+
+    // Fast path: all-literal `["a", "b"]` -> ContainsAllSet.
+    let fast_filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("a".to_string()),
+            FilterValue::String("b".to_string()),
+        ],
+    };
+    let fast_cb = compile_filter(&fast_filter, &interner);
+
+    // Slow path: `["a", {"$ref": "needle"}]` -> ContainsAll. The record carries
+    // `needle: "b"`, so the resolved value set is identical to the fast path's.
+    let slow_filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("a".to_string()),
+            FilterValue::field_ref("needle"),
+        ],
+    };
+    let slow_cb = compile_filter(&slow_filter, &interner);
+
+    // (tags, expected_match). The required set is always {"a", "b"}.
+    let cases: &[(&[&str], bool)] = &[
+        (&["a", "a"], false),     // duplicate, missing "b" — the original bug
+        (&["a", "b", "a"], true), // duplicate, all present
+        (&["a", "b"], true),      // exact
+        (&["a", "b", "c"], true), // superset
+        (&["a"], false),          // subset, missing "b"
+        (&[], false),             // empty field
+    ];
+
+    for (tags, expected) in cases {
+        let mut map = new_map();
+        map.insert(
+            k_tags.clone(),
+            InnerValue::List(
+                tags.iter()
+                    .map(|t| InnerValue::Str((*t).to_string()))
+                    .collect(),
+            ),
+        );
+        map.insert(k_needle.clone(), InnerValue::Str("b".to_string()));
+        let record = InnerValue::Map(map);
+
+        let fast = fast_cb.matches(&record, &ctx);
+        let slow = slow_cb.matches(&record, &ctx);
+        assert_eq!(
+            fast, slow,
+            "fast/slow divergence for tags={:?}: fast={} slow={}",
+            tags, fast, slow
+        );
+        assert_eq!(
+            fast, *expected,
+            "unexpected result for tags={:?}: got {} want {}",
+            tags, fast, expected
+        );
+    }
+}
+
+// ============================================================================
 // Between
 // ============================================================================
 

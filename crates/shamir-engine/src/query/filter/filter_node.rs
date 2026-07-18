@@ -609,19 +609,40 @@ impl FilterNode {
                     Ok(qv) => qv,
                     Err(_) => return false,
                 };
-                // Count how many required values appear in the field array/set.
-                // Pass when every required value was found (count == values.len()).
-                let required = values.len();
-                let found = match &field_qv {
+                // Pass only when EVERY required value is genuinely present in
+                // the field's array/set. Counting raw element hits is wrong
+                // here: a field like `["a", "a"]` would let two copies of one
+                // required value numerically stand in for a second, absent
+                // required value (the `$contains_all` slow path `ContainsAll`
+                // already gets this right via per-value membership, so the two
+                // must agree).
+                //
+                // Single pass over the field list with a scratch set of
+                // not-yet-found required values preserves the documented
+                // O(field_len) cost: each field element is one O(1) hash probe
+                // (`swap_remove`), and we short-circuit the instant the last
+                // required value is located. The only allocation is the cloned
+                // scratch set, bounded by `values.len()`.
+                let mut remaining = values.clone();
+                match &field_qv {
                     QueryValue::List(list) => {
-                        list.iter().filter(|item| values.contains(*item)).count()
+                        for item in list.iter() {
+                            if remaining.swap_remove(item) && remaining.is_empty() {
+                                return true;
+                            }
+                        }
+                        remaining.is_empty()
                     }
                     QueryValue::Set(set) => {
-                        set.iter().filter(|item| values.contains(*item)).count()
+                        for item in set.iter() {
+                            if remaining.swap_remove(item) && remaining.is_empty() {
+                                return true;
+                            }
+                        }
+                        remaining.is_empty()
                     }
-                    _ => return false,
-                };
-                found >= required
+                    _ => false,
+                }
             }
 
             FilterNode::Between {
