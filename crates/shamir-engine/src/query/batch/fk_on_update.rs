@@ -162,7 +162,7 @@ pub(crate) async fn plan_fk_on_update(
     }
 
     // 2. No-op gate: intersect set-fields with parent ref_fields.
-    let mut relevant_refs: Vec<&OnUpdateRef> = on_update_refs
+    let relevant_refs: Vec<&OnUpdateRef> = on_update_refs
         .iter()
         .filter(|r| set_fields.contains_key(&r.parent_ref_field))
         .collect();
@@ -173,11 +173,22 @@ pub(crate) async fn plan_fk_on_update(
     }
 
     // 3. Validate the new_value is a supported literal scalar for each
-    //    relevant ref_field.  Computed / non-scalar → reject (least-surprise).
+    //    distinct relevant ref_field.  Computed / non-scalar → reject
+    //    (least-surprise).
+    //
+    //    NOTE: we do NOT dedup `relevant_refs` itself — every `OnUpdateRef`
+    //    must survive into the `by_table` grouping (step 5) so each individual
+    //    FK reference gets its own cascade/setnull/restrict action, even when
+    //    several references share the same parent field.  Only the derived
+    //    field-name lists (`new_values` below, `ref_fields` in step 4) are
+    //    de-duplicated — mirroring the delete path in `fk_actions.rs`, which
+    //    dedups only a derived `parent_ref_fields` vector and keeps the full
+    //    `action_refs` vector intact.  Previously this deduped `relevant_refs`
+    //    by `parent_ref_field`, which silently collapsed distinct FK
+    //    references sharing a parent field to one, so only one got its action
+    //    applied (the rest — possibly a RESTRICT — were dropped entirely).
     let mut new_values: shamir_collections::TFxMap<String, QueryValue> =
         shamir_collections::TFxMap::default();
-    relevant_refs.sort_unstable_by(|a, b| a.parent_ref_field.cmp(&b.parent_ref_field));
-    relevant_refs.dedup_by(|a, b| a.parent_ref_field == b.parent_ref_field);
     for rref in &relevant_refs {
         if !new_values.contains_key(&rref.parent_ref_field) {
             let new = set_fields
@@ -201,11 +212,17 @@ pub(crate) async fn plan_fk_on_update(
 
     // 4. Collect old parent ref_field values from rows matched by where.
     //    `where_clause = None` means update-all (no filter) — match every row.
-    let ref_fields: Vec<&str> = relevant_refs
-        .iter()
-        .map(|r| r.parent_ref_field.as_str())
-        // already deduped above
-        .collect();
+    //    De-dup the field names only (one scan per distinct parent field);
+    //    every reference survives for the `by_table` fan-out below.
+    let ref_fields: Vec<&str> = {
+        let mut fields: Vec<&str> = relevant_refs
+            .iter()
+            .map(|r| r.parent_ref_field.as_str())
+            .collect();
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    };
     let old_parent_values = collect_parent_values(
         parent_table,
         update_op.where_clause.as_ref(),
@@ -353,49 +370,39 @@ pub(crate) async fn plan_fk_on_update(
                     code: Some("fk_on_update".to_string()),
                 })?;
 
-                // For this row, find the first matching probe.  Cascade
-                // dominates SetNull (a re-keyed row's SetNull is irrelevant).
-                let mut row_action: Option<FkAction> = None;
-                let mut row_field: Option<&str> = None;
-                let mut row_new: Option<&QueryValue> = None;
+                // For this row, apply EVERY matching probe.  Unlike the
+                // delete path (where Cascade dominates SetNull because a
+                // deleted row can't be nulled), the UPDATE path is
+                // PER-FIELD: a single row may carry two distinct FK fields
+                // that both reference the old value (e.g. `sender_id` +
+                // `receiver_id` → `users.id`), and each must be re-keyed or
+                // nulled according to its own FK's action.  A field is a
+                // single FK with a single action, and a row's field value
+                // can equal at most one `old` value, so at most one probe
+                // per field matches a given row — there is no per-field
+                // Cascade/SetNull conflict to resolve.
                 for (old, new, action, field) in &probes {
-                    if record_field_matches_qv(bytes.as_ref(), field, old, interner) {
-                        match action {
-                            FkAction::Cascade => {
-                                row_action = Some(FkAction::Cascade);
-                                row_field = Some(field);
-                                row_new = Some(new);
-                                break;
-                            }
-                            FkAction::SetNull => {
-                                if row_action.is_none() {
-                                    row_action = Some(FkAction::SetNull);
-                                    row_field = Some(field);
-                                }
-                            }
-                            _ => {}
+                    if !record_field_matches_qv(bytes.as_ref(), field, old, interner) {
+                        continue;
+                    }
+                    match action {
+                        FkAction::Cascade => {
+                            mutations.push(PendingMutation::UpdateField {
+                                table: child_table.clone(),
+                                id,
+                                field: field.to_string(),
+                                new_value: (*new).clone(),
+                            });
                         }
+                        FkAction::SetNull => {
+                            mutations.push(PendingMutation::SetNull {
+                                table: child_table.clone(),
+                                id,
+                                field: field.to_string(),
+                            });
+                        }
+                        _ => {}
                     }
-                }
-
-                match (row_action, row_field) {
-                    (Some(FkAction::Cascade), Some(field)) => {
-                        let new_value = row_new.cloned().unwrap_or(QueryValue::Null);
-                        mutations.push(PendingMutation::UpdateField {
-                            table: child_table.clone(),
-                            id,
-                            field: field.to_string(),
-                            new_value,
-                        });
-                    }
-                    (Some(FkAction::SetNull), Some(field)) => {
-                        mutations.push(PendingMutation::SetNull {
-                            table: child_table.clone(),
-                            id,
-                            field: field.to_string(),
-                        });
-                    }
-                    _ => {}
                 }
             }
         }
