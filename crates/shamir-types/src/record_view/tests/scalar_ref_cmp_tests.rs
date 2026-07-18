@@ -155,18 +155,36 @@ fn null_null_equal() {
     );
 }
 
-// ── Non-comparable pairs → None ─────────────────────────────────────────────
+// ── Cross-type Dec/Big comparison (no longer None) ─────────────────────────
 
 #[test]
-fn dec_returns_none() {
-    // Dec is not a ScalarRef variant, so this tests InnerValue::Dec on the
-    // right side. ScalarRef::Int vs InnerValue::Dec → None.
+fn dec_cross_type_int() {
+    // Int↔Dec is exact (Decimal represents every i64 exactly).
     assert_eq!(
         scalar_ref_cmp(
             ScalarRef::Int(1),
             &InnerValue::Dec(rust_decimal::Decimal::new(1, 0))
         ),
-        None,
+        Some(Ordering::Equal),
+    );
+    assert_eq!(
+        scalar_ref_cmp(
+            ScalarRef::Int(5),
+            &InnerValue::Dec(rust_decimal::Decimal::new(10, 0))
+        ),
+        Some(Ordering::Less),
+    );
+}
+
+#[test]
+fn dec_cross_type_f64() {
+    // F64↔Dec uses the f64 fallback.
+    assert_eq!(
+        scalar_ref_cmp(
+            ScalarRef::F64(5.0),
+            &InnerValue::Dec(rust_decimal::Decimal::new(10, 0))
+        ),
+        Some(Ordering::Less),
     );
 }
 

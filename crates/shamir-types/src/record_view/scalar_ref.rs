@@ -13,6 +13,8 @@
 use std::cmp::Ordering;
 
 use crate::types::value::{InnerValue, QueryValue};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 /// A borrowed scalar leaf extracted from a record. The cross-impl currency
 /// that makes `InnerValue` and `RecordView` interchangeable at the trait level.
@@ -23,8 +25,12 @@ use crate::types::value::{InnerValue, QueryValue};
 ///   `compare_values` (tree path) and `compare_raw_to_filter` (bytes path)
 ///   can compare. They are the scalar types that filter-eval and index-extract
 ///   (the first Stage-3 consumers) need.
-/// * **Dec / Big** — `compare_values` returns `None` for these (not comparable
-///   as scalars in the current filter algebra). Mapped to `None` by both impls.
+/// * **Dec / Big** — NOT directly extractable as a `ScalarRef`; `scalar_at`
+///   returns `None` for these (the container fallback `materialize_at` is the
+///   lens path for them). The comparison helpers (`scalar_ref_cmp` /
+///   `scalar_ref_cmp_qv`) DO bridge `Int`/`F64` record fields against `Dec`/
+///   `Big` filter operands cross-type (exact for `Int`↔`Dec`, f64 fallback
+///   otherwise) so a `$fn` returning `Dec` matches numerically.
 /// * **List / Set / Map** — containers, not scalars. Mapped to `None`.
 ///
 /// # NaN caveat
@@ -63,11 +69,29 @@ impl<'a> PartialEq for ScalarRef<'a> {
 
 impl<'a> Eq for ScalarRef<'a> {}
 
+/// Lossy `Decimal` → `f64` (NaN on overflow). Used for cross-type comparison
+/// where one side is a float — mirrors the accepted f64-precision tradeoff of
+/// the existing `Int`↔`F64` arms.
+#[inline]
+fn dec_to_f64(d: &Decimal) -> f64 {
+    d.to_f64().unwrap_or(f64::NAN)
+}
+
+/// Lossy `BigInt` → `f64` (NaN on overflow). Precision loss for large values
+/// is an accepted, separately-tracked tradeoff; this only stops `Big` from
+/// being a silent `None`/no-match.
+#[inline]
+fn big_to_f64(b: &num_bigint::BigInt) -> f64 {
+    b.to_f64().unwrap_or(f64::NAN)
+}
+
 /// Compare a borrowed [`ScalarRef`] against an [`InnerValue`] scalar literal.
 ///
 /// Mirrors `compare_values` (engine `resolve.rs`) arm-for-arm — Null==Null,
-/// Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str. Returns `None`
-/// for non-comparable pairs (Dec, Big, containers, mismatched type families).
+/// Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str, plus the
+/// `Dec`/`Big` cross-type arms (record-field `Int`/`F64` vs filter-literal
+/// `Dec`/`Big`). Returns `None` for non-comparable pairs (mismatched type
+/// families that have no numeric bridge, containers, `Bin`).
 ///
 /// This is the reusable comparison helper that Stage-3 consumers call after
 /// extracting a `ScalarRef` via [`RecordRef::scalar_at`], replacing the old
@@ -84,6 +108,14 @@ pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
         (ScalarRef::F64(a), InnerValue::Int(b)) => a.partial_cmp(&(*b as f64)),
         (ScalarRef::F64(a), InnerValue::F64(b)) => a.partial_cmp(b),
         (ScalarRef::Str(a), InnerValue::Str(b)) => Some(a.cmp(b.as_str())),
+        // Dec cross-type: record field (Int/F64) vs literal Dec. Int↔Dec is
+        // exact (`Decimal` represents every `i64`); F64↔Dec uses the f64
+        // fallback (mirrors the Int↔F64 tradeoff).
+        (ScalarRef::Int(a), InnerValue::Dec(b)) => Some(Decimal::from(a).cmp(b)),
+        (ScalarRef::F64(a), InnerValue::Dec(b)) => a.partial_cmp(&dec_to_f64(b)),
+        // Big cross-type: f64 fallback (precision loss accepted — see `big_to_f64`).
+        (ScalarRef::Int(a), InnerValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
+        (ScalarRef::F64(a), InnerValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
         _ => None,
     }
 }
@@ -104,6 +136,12 @@ pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
         (ScalarRef::F64(a), QueryValue::Int(b)) => a.partial_cmp(&(*b as f64)),
         (ScalarRef::F64(a), QueryValue::F64(b)) => a.partial_cmp(b),
         (ScalarRef::Str(a), QueryValue::Str(b)) => Some(a.cmp(b.as_str())),
+        // Dec cross-type (see `scalar_ref_cmp` for rationale).
+        (ScalarRef::Int(a), QueryValue::Dec(b)) => Some(Decimal::from(a).cmp(b)),
+        (ScalarRef::F64(a), QueryValue::Dec(b)) => a.partial_cmp(&dec_to_f64(b)),
+        // Big cross-type (see `scalar_ref_cmp` for rationale).
+        (ScalarRef::Int(a), QueryValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
+        (ScalarRef::F64(a), QueryValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
         _ => None,
     }
 }

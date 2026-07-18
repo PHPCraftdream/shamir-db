@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
@@ -69,6 +71,15 @@ pub(super) fn intern_field_path_compact(
     Some(keys)
 }
 
+/// Lossy numeric → `f64` for cross-type comparison (NaN on overflow). Works
+/// for both `Decimal` and `BigInt` via the shared `ToPrimitive` trait.
+/// Mirrors the accepted f64-precision tradeoff of the existing `Int`↔`F64`
+/// cross-type arms; Big precision loss is a separately-tracked item.
+#[inline]
+fn lossy_f64<T: ToPrimitive>(v: &T) -> f64 {
+    v.to_f64().unwrap_or(f64::NAN)
+}
+
 /// Compare two `Value<K>` scalars. Returns an `Ordering` if comparable.
 ///
 /// C6 (#80): generic over the key type. Only the scalar arms
@@ -100,6 +111,22 @@ where
         (Value::F64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
         (Value::F64(a), Value::F64(b)) => a.partial_cmp(b),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // Dec: exact for Dec/Dec and Int↔Dec (`Decimal` represents every
+        // `i64` exactly); F64↔Dec uses the f64 fallback.
+        (Value::Dec(a), Value::Dec(b)) => Some(a.cmp(b)),
+        (Value::Int(a), Value::Dec(b)) => Some(Decimal::from(*a).cmp(b)),
+        (Value::Dec(a), Value::Int(b)) => Some(a.cmp(&Decimal::from(*b))),
+        (Value::F64(a), Value::Dec(b)) => a.partial_cmp(&lossy_f64(b)),
+        (Value::Dec(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
+        // Big: f64 fallback throughout (precision loss accepted —
+        // separately-tracked finding).
+        (Value::Big(a), Value::Big(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
+        (Value::Int(a), Value::Big(b)) => (*a as f64).partial_cmp(&lossy_f64(b)),
+        (Value::Big(a), Value::Int(b)) => lossy_f64(a).partial_cmp(&(*b as f64)),
+        (Value::F64(a), Value::Big(b)) => a.partial_cmp(&lossy_f64(b)),
+        (Value::Big(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
+        (Value::Dec(a), Value::Big(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
+        (Value::Big(a), Value::Dec(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
         _ => None,
     }
 }
@@ -292,6 +319,10 @@ fn eval_filter_expr(
         match v {
             QueryValue::Int(i) => Some(*i as f64),
             QueryValue::F64(f) => Some(*f),
+            // Dec operand (e.g. a `$fn` result): convert via f64 so `$expr`
+            // arithmetic works over Dec-valued operands. Precision loss for
+            // extreme scale is accepted (same tradeoff as compare_values).
+            QueryValue::Dec(d) => d.to_f64(),
             _ => None,
         }
     }

@@ -50,6 +50,10 @@ serde_bytes = "0.11"      # efficient byte-slice serde for shadow log
 thiserror = "2.0"         # error types throughout engine
 scc = "3.8"               # lock-free concurrent hashmap (repo, validator)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (table_manager)
+# Decimal cross-type comparison in the filter / order-by layers (Dec
+# operands and Dec sort keys). Same version as shamir-types; already a
+# transitive dep via shamir-types / shamir-funclib, so zero new compilation.
+rust_decimal = { version = "1.40.0", features = ["serde"] }
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
@@ -92,9 +96,8 @@ shamir-bench-utils = { path = "../shamir-bench-utils" }
 # GetProcessMemoryInfo on Windows) — order-of-magnitude only, never a
 # precise allocation profile (use `peak_mem` / `dhat` for that).
 memory-stats = "1.2"
-# Constructing `Value::Dec` / `Value::Big` in the round-trip identity test
-# (validator/query_value_conv_tests.rs). Same versions as shamir-types.
-rust_decimal = { version = "1.40.0", features = ["serde"] }
+# Constructing `Value::Big` in the round-trip identity test
+# (validator/query_value_conv_tests.rs). Same version as shamir-types.
 num-bigint = { version = "0.4", features = ["serde"] }
 # Tests build queries via the typed query builder instead of raw wire values.
 # query-builder depends only on query-types/types — no cycle on engine.

@@ -10,6 +10,7 @@
 //! concrete assertions against known-correct QueryValue results.
 
 use bytes::Bytes;
+use rust_decimal::Decimal;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
@@ -17,8 +18,8 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::{apply_distinct_qv, apply_pagination, apply_select_value};
 use crate::query::read::order::{apply_order_by_qv, apply_order_by_topk};
 use crate::query::read::{
-    apply_aggregate_all, apply_group_by, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
-    Pagination, Select,
+    aggregate::AggAccum, apply_aggregate_all, apply_group_by, AggFunc, AggregateField, GroupBy,
+    NullsOrder, OrderBy, OrderByItem, OrderDirection, Pagination, Select,
 };
 use shamir_query_builder::select;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
@@ -323,9 +324,9 @@ fn order_by_qv_desc_nulls_first_last() {
 }
 
 #[test]
-fn order_by_qv_dec_lexicographic() {
-    // Dec values sort lexicographically by their string form
-    // (Dec→String canonical key). "10.0" < "2.0" < "9.0" lexicographically.
+fn order_by_qv_dec_numeric() {
+    // Dec values sort numerically (Dec sort-key variant, exact Decimal: Ord).
+    // [9.0, 10.0, 2.0] → numeric ascending: 2.0, 9.0, 10.0.
     let mut qvs = vec![
         qv_map(&[("d", QueryValue::Dec("9.0".parse().unwrap()))]),
         qv_map(&[("d", QueryValue::Dec("10.0".parse().unwrap()))]),
@@ -335,14 +336,14 @@ fn order_by_qv_dec_lexicographic() {
     let order = OrderBy::asc("d");
     apply_order_by_qv(&mut qvs, &order);
 
-    // Lexicographic order: "10.0" < "2.0" < "9.0"
+    // Numeric order: 2.0 < 9.0 < 10.0
     let extract_dec_str = |qv: &QueryValue| match qv {
         QueryValue::Dec(d) => d.to_string(),
         _ => panic!("expected Dec"),
     };
-    assert_eq!(extract_dec_str(&qvs[0]["d"]), "10.0");
-    assert_eq!(extract_dec_str(&qvs[1]["d"]), "2.0");
-    assert_eq!(extract_dec_str(&qvs[2]["d"]), "9.0");
+    assert_eq!(extract_dec_str(&qvs[0]["d"]), "2.0");
+    assert_eq!(extract_dec_str(&qvs[1]["d"]), "9.0");
+    assert_eq!(extract_dec_str(&qvs[2]["d"]), "10.0");
 }
 
 #[test]
@@ -460,23 +461,23 @@ fn combined_distinct_order_paginate_qv() {
 
 #[test]
 fn combined_with_dec_divergence_case() {
-    // Dec("1.0") and Str("1.0") should dedup to one row (canonical-key),
-    // then sort correctly among other values.
+    // Dec("1.0") appearing twice should dedup to one row (canonical-key),
+    // then sort numerically among other Dec values.
     let qvs = vec![
         qv_map(&[("v", QueryValue::Dec("3.0".parse().unwrap()))]),
-        qv_map(&[("v", QueryValue::Str("1.0".into()))]),
+        qv_map(&[("v", QueryValue::Dec("1.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Dec("1.0".parse().unwrap()))]),
         qv_map(&[("v", QueryValue::Dec("2.0".parse().unwrap()))]),
     ];
 
     let q_distinct = apply_distinct_qv(qvs);
-    // Dec("3.0"), Str("1.0") [kept, Dec("1.0") deduped], Dec("2.0") → 3 rows
+    // Dec("3.0"), Dec("1.0") [kept, second Dec("1.0") deduped], Dec("2.0")
     assert_eq!(q_distinct.len(), 3);
 
     let mut q_sorted = q_distinct;
     apply_order_by_qv(&mut q_sorted, &OrderBy::asc("v"));
 
-    // Lex order of string forms: "1.0" < "2.0" < "3.0"
+    // Numeric order: 1.0 < 2.0 < 3.0
     let str_of = |qv: &QueryValue| match qv {
         QueryValue::Str(s) => s.clone(),
         QueryValue::Dec(d) => d.to_string(),
@@ -899,4 +900,158 @@ fn apply_order_by_topk_byte_identical() {
         expected_bytes, topk_bytes,
         "topk with skip must be byte-identical to full-sort+skip+take"
     );
+}
+
+// ============================================================================
+// Dec aggregate + ORDER BY regression coverage (the "Dec blind spot" fix)
+// ============================================================================
+
+/// Build a record: `{ name: Str, price: Dec }` — a genuine in-memory Dec
+/// field. `scalar_at` returns `None` for this (no `ScalarRef::Dec` variant),
+/// so Sum/Avg/Min/Max must use the `materialize_at` fallback.
+///
+/// NOTE: Dec does not survive the msgpack round-trip (it serialises as a
+/// string and deserialises as `Str`), so these records are fed to `AggAccum`
+/// directly as in-memory `InnerValue` rather than through `to_bytes_records`.
+fn make_dec_record(interner: &Interner, name: &str, price: Decimal) -> InnerValue {
+    let mut map = new_map();
+    map.insert(
+        InternerKey::new(intern(interner, "name")),
+        InnerValue::Str(name.into()),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "price")),
+        InnerValue::Dec(price),
+    );
+    InnerValue::Map(map)
+}
+
+fn make_dec_test_records(interner: &Interner) -> Vec<InnerValue> {
+    // Non-monotonic insertion order: 9.5, 10.5, 2.0, 2.0.
+    vec![
+        make_dec_record(interner, "A", "9.5".parse().unwrap()),
+        make_dec_record(interner, "B", "10.5".parse().unwrap()),
+        make_dec_record(interner, "C", "2.0".parse().unwrap()),
+        make_dec_record(interner, "D", "2.0".parse().unwrap()),
+    ]
+}
+
+/// `sum(price)` over a Dec column: 9.5 + 10.5 + 2.0 + 2.0 = 24.0. Before the
+/// fix, Sum silently skipped every Dec row (`scalar_at` → None, no fallback)
+/// and returned `Int(0)`.
+#[test]
+fn aggregate_sum_over_dec_column() {
+    let interner = Interner::default();
+    let records = make_dec_test_records(&interner);
+    let field = AggregateField::Field(vec!["price".into()]);
+    let mut acc = AggAccum::new(AggFunc::Sum, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    // Dec values flow into the f64 lane via the materialize fallback.
+    assert_eq!(acc.finish(&interner), QueryValue::F64(24.0));
+}
+
+/// `avg(price)` over a Dec column: 24.0 / 4 = 6.0. Before the fix, Avg
+/// returned `Null` (count stayed 0).
+#[test]
+fn aggregate_avg_over_dec_column() {
+    let interner = Interner::default();
+    let records = make_dec_test_records(&interner);
+    let field = AggregateField::Field(vec!["price".into()]);
+    let mut acc = AggAccum::new(AggFunc::Avg, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    assert_eq!(acc.finish(&interner), QueryValue::F64(6.0));
+}
+
+/// `min(price)` over a Dec column: inserted in order [9.5, 10.5, 2.0, 2.0] —
+/// the true min is 2.0 (not whichever row was scanned first). This proves the
+/// existing Min container fallback now correctly compares Dec-vs-Dec once
+/// `compare_values` has the new Dec arms.
+#[test]
+fn aggregate_min_over_dec_column() {
+    let interner = Interner::default();
+    let records = make_dec_test_records(&interner);
+    let field = AggregateField::Field(vec!["price".into()]);
+    let mut acc = AggAccum::new(AggFunc::Min, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    assert_eq!(
+        acc.finish(&interner),
+        QueryValue::Dec("2.0".parse().unwrap())
+    );
+}
+
+/// `max(price)` over a Dec column: true max is 10.5 (not the first row 9.5).
+#[test]
+fn aggregate_max_over_dec_column() {
+    let interner = Interner::default();
+    let records = make_dec_test_records(&interner);
+    let field = AggregateField::Field(vec!["price".into()]);
+    let mut acc = AggAccum::new(AggFunc::Max, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    assert_eq!(
+        acc.finish(&interner),
+        QueryValue::Dec("10.5".parse().unwrap())
+    );
+}
+
+/// ORDER BY over a Dec column: [9.5, 10.5, 2.0] must sort numerically as
+/// [2.0, 9.5, 10.5], NOT lexicographically as ["10.5", "2.0", "9.5"].
+#[test]
+fn order_by_dec_numeric_not_lexicographic() {
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Dec("9.5".parse().unwrap()))]),
+        qv_map(&[("v", QueryValue::Dec("10.5".parse().unwrap()))]),
+        qv_map(&[("v", QueryValue::Dec("2.0".parse().unwrap()))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    // Numeric ascending: 2.0, 9.5, 10.5.
+    assert_eq!(qvs[0]["v"], QueryValue::Dec("2.0".parse().unwrap()));
+    assert_eq!(qvs[1]["v"], QueryValue::Dec("9.5".parse().unwrap()));
+    assert_eq!(qvs[2]["v"], QueryValue::Dec("10.5".parse().unwrap()));
+}
+
+/// ORDER BY DESC over Dec: [9.5, 10.5, 2.0] → [10.5, 9.5, 2.0].
+#[test]
+fn order_by_dec_desc() {
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Dec("9.5".parse().unwrap()))]),
+        qv_map(&[("v", QueryValue::Dec("10.5".parse().unwrap()))]),
+        qv_map(&[("v", QueryValue::Dec("2.0".parse().unwrap()))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::desc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Dec("10.5".parse().unwrap()));
+    assert_eq!(qvs[1]["v"], QueryValue::Dec("9.5".parse().unwrap()));
+    assert_eq!(qvs[2]["v"], QueryValue::Dec("2.0".parse().unwrap()));
+}
+
+/// Cross-type ORDER BY: a mix of Dec, Int, and F64 values in the same sort
+/// key position — they must compare numerically against each other, not fall
+/// to the `_ => Equal` arbitrary-order arm.
+#[test]
+fn order_by_cross_type_dec_int_f64() {
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Dec("9.5".parse().unwrap()))]),
+        qv_map(&[("v", QueryValue::Int(2))]),
+        qv_map(&[("v", QueryValue::F64(10.5))]),
+        qv_map(&[("v", QueryValue::Dec("5.0".parse().unwrap()))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    // Numeric ascending: Int(2), Dec(5.0), Dec(9.5), F64(10.5).
+    assert_eq!(qvs[0]["v"], QueryValue::Int(2));
+    assert_eq!(qvs[1]["v"], QueryValue::Dec("5.0".parse().unwrap()));
+    assert_eq!(qvs[2]["v"], QueryValue::Dec("9.5".parse().unwrap()));
+    assert_eq!(qvs[3]["v"], QueryValue::F64(10.5));
 }

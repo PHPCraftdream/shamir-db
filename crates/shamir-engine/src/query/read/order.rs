@@ -2,6 +2,8 @@
 
 use std::collections::BinaryHeap;
 
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use smallvec::SmallVec;
 
 use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
@@ -14,10 +16,11 @@ use shamir_types::types::value::QueryValue;
 /// Sort `QueryValue` rows by ORDER BY items.
 ///
 /// Uses the canonical-key approach: sort keys are extracted to match the
-/// semantics of the pre-J1 ORDER BY exactly — in particular
-/// `Dec`/`Big` values are compared as their `to_string()` form
-/// (lexicographic, preserving prior coercion semantics), and `Bin`/`Set` map to
-/// `Other` (unsortable, preserving insertion order via stable sort).
+/// semantics of the pre-J1 ORDER BY exactly — in particular `Dec` values are
+/// compared numerically (via a dedicated `Dec` sort-key variant), `Big`
+/// values are compared as their `to_string()` form (lexicographic — a
+/// separate, lower-priority item), and `Bin`/`Set` map to `Other` (unsortable,
+/// preserving insertion order via stable sort).
 pub fn apply_order_by_qv(records: &mut Vec<QueryValue>, order_by: &OrderBy) {
     if order_by.items.is_empty() || records.len() <= 1 {
         return;
@@ -151,15 +154,18 @@ pub fn apply_order_by_topk(
 }
 
 /// Owned sort key for QueryValue fields. Unlike the legacy `SortKey<'a>` this
-/// does not borrow from the source records, because `Dec`/`Big` require an
-/// owned `String` (the `to_string()` canonical form). Comparison semantics are
-/// identical to the former `compare_sort_keys`.
+/// does not borrow from the source records. `Dec` is preserved as a dedicated
+/// numeric variant (exact `Decimal: Ord` comparison); `Big` falls back to an
+/// owned `String` canonical form (lexicographic — a separate, lower-priority
+/// item). Comparison semantics match the former `compare_sort_keys` for every
+/// non-Dec type, and are numeric for Dec.
 #[derive(Clone)]
 enum QvSortKey {
     Null,
     Bool(bool),
     I64(i64),
     F64(f64),
+    Dec(Decimal),
     Str(String),
     Other,
 }
@@ -167,8 +173,8 @@ enum QvSortKey {
 impl QvSortKey {
     /// Extract a canonical sort key from a `QueryValue` field reference.
     /// - `Int` -> I64, `F64` -> F64, `Bool` -> Bool, `Str` -> Str (cloned)
-    /// - `Dec(d)` -> Str(d.to_string()) -- canonical string form
-    /// - `Big(b)` -> Str(b.to_string()) -- canonical string form
+    /// - `Dec(d)` -> Dec(*d) -- numeric comparison (exact via `Decimal: Ord`)
+    /// - `Big(b)` -> Str(b.to_string()) -- canonical string form (lexicographic)
     /// - `Null` / missing -> Null
     /// - `Bin`, `Set`, `List`, `Map` -> Other (unsortable)
     fn from_query_value(v: &QueryValue) -> Self {
@@ -178,7 +184,7 @@ impl QvSortKey {
             QueryValue::Int(i) => QvSortKey::I64(*i),
             QueryValue::F64(f) => QvSortKey::F64(*f),
             QueryValue::Str(s) => QvSortKey::Str(s.clone()),
-            QueryValue::Dec(d) => QvSortKey::Str(d.to_string()),
+            QueryValue::Dec(d) => QvSortKey::Dec(*d),
             QueryValue::Big(b) => QvSortKey::Str(b.to_string()),
             QueryValue::Bin(_) | QueryValue::Set(_) | QueryValue::List(_) | QueryValue::Map(_) => {
                 QvSortKey::Other
@@ -273,6 +279,19 @@ fn compare_qv_sort_keys(
             .unwrap_or(std::cmp::Ordering::Equal),
         (QvSortKey::F64(x), QvSortKey::I64(y)) => x
             .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        // Dec: exact for Dec/Dec and I64↔Dec (`Decimal` represents every i64
+        // exactly); F64↔Dec uses the f64 fallback (mirrors I64↔F64 style).
+        (QvSortKey::Dec(x), QvSortKey::Dec(y)) => x.cmp(y),
+        (QvSortKey::I64(x), QvSortKey::Dec(y)) => Decimal::from(*x).cmp(y),
+        (QvSortKey::Dec(x), QvSortKey::I64(y)) => x.cmp(&Decimal::from(*y)),
+        (QvSortKey::F64(x), QvSortKey::Dec(y)) => x
+            .partial_cmp(&y.to_f64().unwrap_or(f64::NAN))
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (QvSortKey::Dec(x), QvSortKey::F64(y)) => x
+            .to_f64()
+            .unwrap_or(f64::NAN)
+            .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
         (QvSortKey::Str(x), QvSortKey::Str(y)) => x.cmp(y),
         (QvSortKey::Bool(x), QvSortKey::Bool(y)) => x.cmp(y),

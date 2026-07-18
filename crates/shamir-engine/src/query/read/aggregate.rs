@@ -21,6 +21,7 @@ use std::cmp::Ordering;
 
 use bytes::Bytes;
 use indexmap::map::Entry;
+use rust_decimal::prelude::ToPrimitive;
 
 use crate::function::builtin_aggs;
 use crate::query::filter::eval::{compare_values, resolve_filter_query};
@@ -398,6 +399,25 @@ impl AggAccum {
                         }
                         _ => {}
                     }
+                } else {
+                    // Dec/Big/container fallback — materialize this one
+                    // field (§5b: one `materialize_at` per row, only when
+                    // `scalar_at` returned None, i.e. the field is Dec/Big/
+                    // container). Dec/Big flow into the f64 lane; containers
+                    // (Map/List/Set) contribute nothing (unchanged).
+                    let owned = if self.all_field {
+                        None
+                    } else {
+                        self.field_path
+                            .as_deref()
+                            .and_then(|p| record.materialize_at(p))
+                    };
+                    if let Some(v) = owned {
+                        if let Some(f) = agg_leaf_to_f64(&v) {
+                            *has_float = true;
+                            *sum_f += f;
+                        }
+                    }
                 }
             }
             AggState::Avg { sum, count } => {
@@ -412,6 +432,23 @@ impl AggAccum {
                             *count += 1;
                         }
                         _ => {}
+                    }
+                } else {
+                    // Dec/Big/container fallback — mirrors Sum's fallback
+                    // above. Dec/Big values are converted to f64 and flow
+                    // into the same accumulator lane as F64.
+                    let owned = if self.all_field {
+                        None
+                    } else {
+                        self.field_path
+                            .as_deref()
+                            .and_then(|p| record.materialize_at(p))
+                    };
+                    if let Some(v) = owned {
+                        if let Some(f) = agg_leaf_to_f64(&v) {
+                            *sum += f;
+                            *count += 1;
+                        }
                     }
                 }
             }
@@ -557,6 +594,21 @@ impl AggAccum {
 // ============================================================================
 // Small helpers — keep the impl above readable.
 // ============================================================================
+
+/// Extract a numeric `f64` from a materialised `InnerValue` leaf for the
+/// Sum/Avg container fallback. Only `Dec`/`Big` produce a value; all other
+/// leaves (containers, Null, Str, Bool, Bin) return `None` and contribute
+/// nothing — matching the pre-existing behaviour where non-numeric fields
+/// were silently skipped. `Big` uses the lossy f64 conversion (precision-loss
+/// tradeoff accepted, separately tracked).
+#[inline]
+fn agg_leaf_to_f64(v: &InnerValue) -> Option<f64> {
+    match v {
+        InnerValue::Dec(d) => d.to_f64(),
+        InnerValue::Big(b) => Some(b.to_f64().unwrap_or(f64::NAN)),
+        _ => None,
+    }
+}
 
 /// Intern a `&[String]` path into `InternerKey`s (the lens path currency).
 /// `None` on any un-internable segment (mirrors `intern_field_path`'s old
