@@ -81,6 +81,99 @@ impl CascadePlan {
     }
 }
 
+/// RAII guard for **per-path** cascade cycle detection.
+///
+/// Inserts the table name into the `visited` set on construction (returning
+/// `Err(fk_cascade_depth)` if the table is already on the current recursion
+/// path — a genuine cycle like `A→B→A`), and **removes** the entry on [`Drop`].
+/// Because the entry is removed whenever the branch that inserted it returns —
+/// whether via `Ok`, an early `?`, or a propagated `Err` — a table reachable
+/// via two distinct non-cyclic paths (a legal diamond/DAG FK topology) is no
+/// longer mistaken for a cycle.  The entry thus lives only while the branch
+/// that inserted it is on the call stack.
+///
+/// Callers that need to recurse pass [`CascadePathGuard::visited_mut`] (a
+/// reborrow) to the callee, which constructs its own guard from that reborrow.
+/// The [`CASCADE_DEPTH_LIMIT`] check remains as a secondary safety valve.
+struct CascadePathGuard<'a> {
+    visited: &'a mut shamir_collections::TFxSet<String>,
+    table: String,
+}
+
+impl<'a> CascadePathGuard<'a> {
+    /// Mark `table` as on the current cascade path.  Returns `Err` if the
+    /// table is already present (genuine cycle on this path).
+    fn enter(
+        visited: &'a mut shamir_collections::TFxSet<String>,
+        table: String,
+        alias: &str,
+    ) -> Result<Self, BatchError> {
+        if visited.insert(table.clone()) {
+            Ok(Self { visited, table })
+        } else {
+            Err(BatchError::query_coded(
+                alias,
+                "fk_cascade_depth",
+                format!(
+                    "cascade cycle detected at table '{}'; possible FK cycle",
+                    table
+                ),
+            ))
+        }
+    }
+
+    /// Reborrow the visited set so a recursive call can construct its own
+    /// [`CascadePathGuard`].  The reborrow is released when the callee
+    /// returns, leaving the caller's guard (and its `visited` entry) intact.
+    fn visited_mut(&mut self) -> &mut shamir_collections::TFxSet<String> {
+        self.visited
+    }
+}
+
+impl Drop for CascadePathGuard<'_> {
+    fn drop(&mut self) {
+        self.visited.remove(&self.table);
+    }
+}
+
+/// Row-level dedup state for cascade mutation scheduling.
+///
+/// Prevents the same row from being scheduled twice when it is reachable via
+/// two distinct cascade paths (a diamond/DAG topology).  Deletes are deduped
+/// by `(table, id)`; SetNulls by `(table, id, field)` so that nulling two
+/// different FK fields of the same row is still allowed.  A SetNull for a row
+/// already scheduled for Delete is skipped — the row will be removed, making
+/// the null pointless and potentially erroring if applied post-delete.
+struct MutationDedup {
+    deletes: shamir_collections::TFxSet<(String, RecordId)>,
+    setnulls: shamir_collections::TFxSet<(String, RecordId, String)>,
+}
+
+impl MutationDedup {
+    fn new() -> Self {
+        Self {
+            deletes: shamir_collections::TFxSet::default(),
+            setnulls: shamir_collections::TFxSet::default(),
+        }
+    }
+
+    /// Returns `true` if this is the first Delete scheduled for `(table, id)`.
+    fn try_delete(&mut self, table: &str, id: RecordId) -> bool {
+        self.deletes.insert((table.to_string(), id))
+    }
+
+    /// Returns `true` if this SetNull should be scheduled: the row is not
+    /// already slated for Delete and this `(table, id, field)` triple hasn't
+    /// been scheduled yet.
+    fn try_set_null(&mut self, table: &str, id: RecordId, field: &str) -> bool {
+        if self.deletes.contains(&(table.to_string(), id)) {
+            return false;
+        }
+        self.setnulls
+            .insert((table.to_string(), id, field.to_string()))
+    }
+}
+
 /// Discover + resolve the full cascade/setnull plan.
 ///
 /// Walks the cascade tree recursively (up to [`CASCADE_DEPTH_LIMIT`]) at
@@ -97,6 +190,7 @@ pub(crate) async fn plan_cascade(
 ) -> Result<CascadePlan, BatchError> {
     let mut mutations = Vec::new();
     let mut visited: shamir_collections::TFxSet<String> = shamir_collections::TFxSet::default();
+    let mut dedup = MutationDedup::new();
 
     plan_cascade_recursive(
         resolver,
@@ -107,6 +201,7 @@ pub(crate) async fn plan_cascade(
         alias,
         0,
         &mut mutations,
+        &mut dedup,
         &mut visited,
     )
     .await?;
@@ -129,6 +224,7 @@ async fn plan_cascade_recursive(
     alias: &str,
     depth: usize,
     mutations: &mut Vec<PendingMutation>,
+    dedup: &mut MutationDedup,
     visited: &mut shamir_collections::TFxSet<String>,
 ) -> Result<(), BatchError> {
     if depth >= CASCADE_DEPTH_LIMIT {
@@ -142,21 +238,13 @@ async fn plan_cascade_recursive(
         ));
     }
 
-    // Cycle guard: track tables we've already cascaded through.  A table
-    // appearing twice means there's a FK cycle (e.g. X→Y→X); we stop to avoid
-    // infinite recursion.  The depth limit is a secondary safety valve.
-    if !visited.insert(parent_table_ref.table.clone()) {
-        // Already cascaded through this table — FK cycle detected.
-        return Err(BatchError::query_coded(
-            alias,
-            "fk_cascade_depth",
-            format!(
-                "cascade cycle detected at table '{}'; \
-                 possible FK cycle",
-                parent_table_ref.table
-            ),
-        ));
-    }
+    // Per-path cycle guard: a table already on the *current* recursion path
+    // means a genuine FK cycle (e.g. X→Y→X).  The [`CascadePathGuard`] removes
+    // the entry on drop — whether this branch returns `Ok` or `Err` — so that
+    // a descendant reachable via two distinct non-cyclic paths (a legal
+    // diamond/DAG topology) is not mistaken for a cycle.  The depth limit
+    // above is the secondary safety valve.
+    let mut path_guard = CascadePathGuard::enter(visited, parent_table_ref.table.clone(), alias)?;
 
     // 1. Discover reverse-FK references with Cascade or SetNull.
     let action_refs = discover_action_refs(resolver, parent_table_ref).await?;
@@ -300,11 +388,15 @@ async fn plan_cascade_recursive(
         }
 
         // ── Record CASCADE deletes ──────────────────────────────────────
+        // Dedup by (table, id): a row reachable via two cascade paths
+        // (diamond/DAG topology) must be scheduled exactly once.
         for &id in &cascade_ids {
-            mutations.push(PendingMutation::Delete {
-                table: child_table.clone(),
-                id,
-            });
+            if dedup.try_delete(&child_name, id) {
+                mutations.push(PendingMutation::Delete {
+                    table: child_table.clone(),
+                    id,
+                });
+            }
         }
 
         // ── Record SET NULL updates ─────────────────────────────────────
@@ -322,11 +414,15 @@ async fn plan_cascade_recursive(
                     ),
                 ));
             }
-            mutations.push(PendingMutation::SetNull {
-                table: child_table.clone(),
-                id: *id,
-                field: field.clone(),
-            });
+            // Dedup by row identity: skip if already scheduled (deleted or
+            // nulled via another cascade path).
+            if dedup.try_set_null(&child_name, *id, field) {
+                mutations.push(PendingMutation::SetNull {
+                    table: child_table.clone(),
+                    id: *id,
+                    field: field.clone(),
+                });
+            }
         }
 
         // ── Recurse for grandchildren (Cascade only) ────────────────────
@@ -345,7 +441,8 @@ async fn plan_cascade_recursive(
                 alias,
                 depth + 1,
                 mutations,
-                visited,
+                dedup,
+                path_guard.visited_mut(),
             ))
             .await?;
         }
@@ -364,6 +461,7 @@ async fn plan_cascade_for_ids(
     alias: &str,
     depth: usize,
     mutations: &mut Vec<PendingMutation>,
+    dedup: &mut MutationDedup,
     visited: &mut shamir_collections::TFxSet<String>,
 ) -> Result<(), BatchError> {
     if depth >= CASCADE_DEPTH_LIMIT {
@@ -377,18 +475,8 @@ async fn plan_cascade_for_ids(
         ));
     }
 
-    // Cycle guard: same as plan_cascade_recursive.
-    if !visited.insert(parent_table_ref.table.clone()) {
-        return Err(BatchError::query_coded(
-            alias,
-            "fk_cascade_depth",
-            format!(
-                "cascade cycle detected at table '{}'; \
-                 possible FK cycle",
-                parent_table_ref.table
-            ),
-        ));
-    }
+    // Per-path cycle guard: see plan_cascade_recursive.
+    let mut path_guard = CascadePathGuard::enter(visited, parent_table_ref.table.clone(), alias)?;
 
     let action_refs = discover_action_refs(resolver, parent_table_ref).await?;
     if action_refs.is_empty() {
@@ -553,10 +641,12 @@ async fn plan_cascade_for_ids(
         }
 
         for &id in &gc_cascade_ids {
-            mutations.push(PendingMutation::Delete {
-                table: child_table.clone(),
-                id,
-            });
+            if dedup.try_delete(&child_name, id) {
+                mutations.push(PendingMutation::Delete {
+                    table: child_table.clone(),
+                    id,
+                });
+            }
         }
         for (id, field) in &gc_setnull_ids {
             if !field_is_nullable(&child_table, field).await {
@@ -570,11 +660,13 @@ async fn plan_cascade_for_ids(
                     ),
                 ));
             }
-            mutations.push(PendingMutation::SetNull {
-                table: child_table.clone(),
-                id: *id,
-                field: field.clone(),
-            });
+            if dedup.try_set_null(&child_name, *id, field) {
+                mutations.push(PendingMutation::SetNull {
+                    table: child_table.clone(),
+                    id: *id,
+                    field: field.clone(),
+                });
+            }
         }
 
         // Recurse deeper if there are cascaded grandchildren.
@@ -587,7 +679,8 @@ async fn plan_cascade_for_ids(
                 alias,
                 depth + 1,
                 mutations,
-                visited,
+                dedup,
+                path_guard.visited_mut(),
             ))
             .await?;
         }

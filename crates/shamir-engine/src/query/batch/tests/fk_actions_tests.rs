@@ -394,6 +394,150 @@ async fn cascade_cycle_triggers_depth_guard() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CASCADE diamond: A←B←D and A←C←D (D reachable via two distinct paths)
+//
+// This is a legal acyclic DAG (diamond), NOT a cycle.  Before the per-path
+// cycle-guard fix, the global `visited` set kept "D" after the B-branch
+// returned, so the C-branch's attempt to cascade through D tripped a false
+// `fk_cascade_depth` error — aborting a perfectly legal DELETE.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cascade_diamond_topology_succeeds() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![
+            TableConfig::new("a"),
+            TableConfig::new("b"),
+            TableConfig::new("c"),
+            TableConfig::new("d"),
+        ],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    // B.a_id CASCADE→A, C.a_id CASCADE→A (two independent branches).
+    bind_fk_validator(
+        &db,
+        &registry,
+        "b",
+        "b_fk_a",
+        "a_id",
+        "a",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+    bind_fk_validator(
+        &db,
+        &registry,
+        "c",
+        "c_fk_a",
+        "a_id",
+        "a",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+    // D.b_id CASCADE→B, D.c_id CASCADE→C — D is reachable from A via BOTH
+    // branches, forming a diamond: A ← B ← D and A ← C ← D.
+    bind_fk_validator(
+        &db,
+        &registry,
+        "d",
+        "d_fk_b",
+        "b_id",
+        "b",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+    bind_fk_validator(
+        &db,
+        &registry,
+        "d",
+        "d_fk_c",
+        "c_id",
+        "c",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // Insert A(id=1), B(id=2, a_id=1), C(id=3, a_id=1), D(id=4, b_id=2, c_id=3).
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert("ia", write::insert("a").row(doc().set("id", 1)));
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "ib",
+        write::insert("b").row(doc().set("id", 2).set("a_id", 1)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.insert(
+        "ic",
+        write::insert("c").row(doc().set("id", 3).set("a_id", 1)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(4);
+    b.insert(
+        "id_row",
+        write::insert("d").row(doc().set("id", 4).set("b_id", 2).set("c_id", 3)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert_eq!(count_rows(&resolver, "a").await, 1);
+    assert_eq!(count_rows(&resolver, "b").await, 1);
+    assert_eq!(count_rows(&resolver, "c").await, 1);
+    assert_eq!(count_rows(&resolver, "d").await, 1);
+
+    // Delete A → cascade through B and C, both reaching D.
+    // This must SUCCEED (not error with fk_cascade_depth), and D must be
+    // deleted exactly once (no double-delete error mid-cascade).
+    let mut b = Batch::new();
+    b.id(5);
+    b.delete("da", write::delete("a").where_(filter::eq("id", 1)));
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(resp.results.contains_key("da"));
+
+    // All four tables should be empty — the whole diamond was cascade-deleted.
+    assert_eq!(count_rows(&resolver, "a").await, 0);
+    assert_eq!(count_rows(&resolver, "b").await, 0);
+    assert_eq!(count_rows(&resolver, "c").await, 0);
+    assert_eq!(count_rows(&resolver, "d").await, 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // SET NULL: delete parent → child survives with FK field == Null
 // ═══════════════════════════════════════════════════════════════════════════════
 
