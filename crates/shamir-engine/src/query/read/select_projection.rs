@@ -5,6 +5,7 @@ use smallvec::SmallVec;
 use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
 use crate::query::filter::{prescan_cond_cache, CondCache, FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
@@ -37,11 +38,15 @@ pub struct SelectProjection {
     /// `funcs`/this cache are never cloned — the pointer-identity cache key
     /// stays valid for the projection's whole lifetime.
     pub(super) funcs_cond_cache: CondCache,
+    /// Scalar resolver (user + builtin layers) for `$fn` projections.
+    /// Stored once in `new()`, cloned per-record into the `FilterContext`
+    /// (cheap — `ScalarResolver` wraps an `Arc`).
+    pub(super) scalars: ScalarResolver,
 }
 
 impl SelectProjection {
     /// Build a reusable projection from a Select + Interner.
-    pub fn new(select: &Select, interner: &Interner) -> Self {
+    pub fn new(select: &Select, interner: &Interner, scalars: ScalarResolver) -> Self {
         let is_all =
             select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
 
@@ -87,6 +92,7 @@ impl SelectProjection {
             funcs,
             empty_refs: new_map_wc(0),
             funcs_cond_cache,
+            scalars,
         }
     }
 
@@ -120,6 +126,7 @@ impl SelectProjection {
         }
         if !self.funcs.is_empty() {
             let ctx = FilterContext::new(interner, &self.empty_refs)
+                .with_scalars(self.scalars.clone())
                 .with_cond_cache(&self.funcs_cond_cache);
             for (key, fv) in &self.funcs {
                 let val = resolve_filter_query(fv, record, &ctx).unwrap_or(QueryValue::Null);

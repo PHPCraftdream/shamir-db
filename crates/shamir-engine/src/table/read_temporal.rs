@@ -127,7 +127,9 @@ impl TableManager {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
 
-        if let Some((paged, pagination)) = try_project_page_only_bytes(query, &matched, interner) {
+        if let Some((paged, pagination)) =
+            try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())
+        {
             let records_returned = paged.len() as u64;
             return Ok(QueryResult {
                 records: paged,
@@ -148,9 +150,9 @@ impl TableManager {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
-            exec::apply_aggregate_all(&matched, &query.select, interner)
+            exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
         } else {
-            apply_select_value_bytes(&matched, &query.select, interner)
+            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())
         };
 
         if query.select.distinct {
@@ -323,8 +325,12 @@ impl TableManager {
             // transient InnerValue inside the helper). A corrupt entry
             // (engine-written bytes — should never fire) yields a Null row
             // rather than being skipped.
-            let mut projected =
-                apply_select_value_bytes(&[(id, value_bytes)], &query.select, interner);
+            let mut projected = apply_select_value_bytes(
+                &[(id, value_bytes)],
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+            );
             // apply_select_value returns one QueryValue per input record.
             let row_qv = projected
                 .pop()

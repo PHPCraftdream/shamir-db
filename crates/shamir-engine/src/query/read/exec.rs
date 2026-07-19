@@ -12,6 +12,7 @@ pub use crate::query::read::order::{apply_order_by_qv, apply_order_by_topk};
 pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use indexmap::IndexSet;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -28,8 +29,9 @@ pub fn apply_select_value(
     records: &[(RecordId, InnerValue)],
     select: &Select,
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> Vec<QueryValue> {
-    let proj = SelectProjection::new(select, interner);
+    let proj = SelectProjection::new(select, interner, scalars);
     records
         .iter()
         .map(|(_, record)| proj.project_value(record, interner))

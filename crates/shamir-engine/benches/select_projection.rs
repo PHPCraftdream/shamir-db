@@ -23,6 +23,7 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_engine::query::read::exec::apply_select_value;
 use shamir_engine::query::read::{Select, SelectItem};
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
@@ -104,7 +105,12 @@ fn main() {
         let select_all = select_all.clone();
         let interner = Arc::clone(&interner);
         h.bench("select_all/select_all_1k", move || {
-            let projected = apply_select_value(&raw_records, &select_all, &interner);
+            let projected = apply_select_value(
+                &raw_records,
+                &select_all,
+                &interner,
+                ScalarResolver::builtins_only(),
+            );
             black_box(projected);
         });
     }
@@ -115,7 +121,12 @@ fn main() {
         let select_few = select_few.clone();
         let interner = Arc::clone(&interner);
         h.bench("select_few_fields/select_2_of_6_fields_1k", move || {
-            let projected = apply_select_value(&raw_records, &select_few, &interner);
+            let projected = apply_select_value(
+                &raw_records,
+                &select_few,
+                &interner,
+                ScalarResolver::builtins_only(),
+            );
             black_box(projected);
         });
     }
@@ -128,7 +139,12 @@ fn main() {
         h.bench(
             "select_then_serialize/select_all_then_serialize_1k",
             move || {
-                let projected = apply_select_value(&raw_records, &select_all, &interner);
+                let projected = apply_select_value(
+                    &raw_records,
+                    &select_all,
+                    &interner,
+                    ScalarResolver::builtins_only(),
+                );
                 let bytes = rmp_serde::to_vec_named(&projected).unwrap();
                 black_box(bytes);
             },

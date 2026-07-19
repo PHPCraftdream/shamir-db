@@ -10,12 +10,12 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
-use shamir_query_types::filter::{Filter, FilterValue, ValueCompareOp};
+use shamir_query_types::filter::{Filter, FilterValue, FnCall, ValueCompareOp};
 use shamir_types::access::Actor;
 
 use crate::query::batch::execute_batch;
 
-use super::common::{setup_resolver, TxTestResolver};
+use super::common::{setup_resolver, setup_resolver_with_scalars, TxTestResolver};
 
 /// A `when` that evaluates to `true` (against the empty synthetic record)
 /// executes the op normally: `skipped: false`, real records.
@@ -758,4 +758,51 @@ async fn is_null_and_is_not_null_remain_accepted_inside_when() {
         .await
         .expect("IsNull inside `when` must remain accepted, not rejected");
     assert!(!resp.results["probe"].skipped);
+}
+
+/// Fix 2 (Finding 8) — a user-registered scalar referenced in a `when`
+/// guard's `ValueCompare` must resolve correctly (not silently fall back to
+/// builtins-only → Null → wrong skip/execute decision).
+///
+/// The `when` guard uses `$fn: my_double(21)` compared `Eq` against the
+/// literal `42`. With the user scalar resolver threaded into `resolve_skip`
+/// (via `.with_scalars(scalars)` at ~line 161 in `query_runner.rs`),
+/// `my_double(21)` resolves to `Int(42)`, the `ValueCompare` evaluates
+/// `42 == 42` → `true`, and the op executes normally.
+///
+/// **Pre-fix behavior** (builtins-only `ScalarResolver`): `my_double` is an
+/// unknown function → `resolve_filter_query` returns `None` → the
+/// `ValueCompare` arm `(None, _)` evaluates `false` for `Eq` → the op is
+/// **skipped**. The test would fail at `!resp.results["probe"].skipped`
+/// because the probe would be skipped instead of executed.
+#[tokio::test]
+async fn when_user_scalar_resolves_correctly_not_skipped() {
+    let resolver = setup_resolver_with_scalars().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    let probe = b.query("probe", Query::from("users"));
+    let mut req = b.build();
+
+    // `$fn: my_double(21)` == 42 → true (op executes).
+    // my_double is a user-registered scalar that doubles its Int argument.
+    req.queries.get_mut(probe.alias()).unwrap().when = Some(Filter::ValueCompare {
+        left: FilterValue::FnCall {
+            call: FnCall::complex("my_double", vec![FilterValue::Int(21)]),
+        },
+        cmp: ValueCompareOp::Eq,
+        right: FilterValue::Int(42),
+    });
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert!(
+        !resp.results["probe"].skipped,
+        "when: $fn my_double(21) == 42 must evaluate true (user scalar resolved) \
+         and execute the op — if skipped, the user scalar was not threaded into \
+         resolve_skip's FilterContext: {:?}",
+        resp.results["probe"]
+    );
 }

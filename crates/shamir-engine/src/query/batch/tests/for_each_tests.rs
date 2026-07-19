@@ -4,6 +4,8 @@
 //! `$param`, `max_iterations` exceeded before iteration 0, and tx-abort
 //! semantics when an iteration fails inside a transactional batch.
 
+use shamir_funclib::registry::{FnEntry, ScalarResult};
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{self, doc};
 use shamir_query_types::batch::{
@@ -67,6 +69,79 @@ impl TableResolver for TxTestResolver {
 
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
+    }
+}
+
+// ============================================================================
+// Fix 2 — resolver variant with a user-registered scalar for over tests.
+// ============================================================================
+
+/// Build a ScalarResolver with a user-registered scalar `my_double`.
+fn resolver_with_user_scalar() -> ScalarResolver {
+    let layer = UserScalarLayer::new();
+    layer.register(
+        "my_double",
+        FnEntry::pure(
+            |args: &[QueryValue]| -> ScalarResult {
+                match &args[0] {
+                    QueryValue::Int(n) => Ok(QueryValue::Int(n * 2)),
+                    _ => Err(shamir_funclib::registry::ScalarError::new("type_mismatch")),
+                }
+            },
+            1,
+            Some(1),
+        ),
+    );
+    // A second scalar that returns a singleton List — used by the
+    // `for_each` `over` test, where `over` must resolve to `QueryValue::List`.
+    layer.register(
+        "make_singleton_list",
+        FnEntry::pure(
+            |args: &[QueryValue]| -> ScalarResult {
+                match &args[0] {
+                    QueryValue::Int(n) => Ok(QueryValue::List(vec![QueryValue::Int(*n)])),
+                    _ => Err(shamir_funclib::registry::ScalarError::new("type_mismatch")),
+                }
+            },
+            1,
+            Some(1),
+        ),
+    );
+    ScalarResolver::new(std::sync::Arc::new(layer))
+}
+
+struct TestResolverWithScalars {
+    db: DbInstance,
+    scalars: ScalarResolver,
+}
+
+#[async_trait::async_trait]
+impl TableResolver for TestResolverWithScalars {
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.db.get_table("default", &table_ref.table).await
+    }
+
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+        self.db.get_repo("default").ok_or_else(|| {
+            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+        })
+    }
+
+    fn scalar_resolver(&self) -> ScalarResolver {
+        self.scalars.clone()
+    }
+}
+
+async fn setup_with_scalars() -> TestResolverWithScalars {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("users"), TableConfig::new("orders")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    TestResolverWithScalars {
+        db,
+        scalars: resolver_with_user_scalar(),
     }
 }
 
@@ -1530,4 +1605,85 @@ async fn for_each_when_true_runs_loop_normally() {
         .as_array()
         .expect("loop value must be a List");
     assert_eq!(list.len(), 2, "both iterations must have run");
+}
+
+// ============================================================================
+// Fix 2 (Finding 8) — user-registered scalar in `for_each`'s `over` expression.
+// ============================================================================
+
+/// `for_each`'s `over` expression uses a user-registered scalar
+/// (`$fn: make_singleton_list(7)`). With the scalar resolver threaded into
+/// the over-resolution `FilterContext` (via
+/// `.with_scalars(self.resolver.scalar_resolver())` at ~line 504 in
+/// `query_runner.rs`), `make_singleton_list(7)` resolves to
+/// `List([Int(7)])`, the loop iterates once with `bind_row = 7`, and the
+/// body inserts an order with `user_id = 7`.
+///
+/// **Pre-fix behavior** (builtins-only `ScalarResolver`):
+/// `make_singleton_list` is an unknown function → `resolve_filter_query`
+/// returns `None` → the `over` resolution arm hits `Some(_) | None =>` and
+/// returns `Err(BatchError::QueryError { "for_each 'loop': 'over' did not
+/// resolve to a list" })`. The test would fail at
+/// `resp.unwrap()` because the batch would return `Err`.
+#[tokio::test]
+async fn for_each_over_user_scalar_resolves_correctly() {
+    let resolver = setup_with_scalars().await;
+
+    // `over` = $fn: make_singleton_list(7) → List([7]) → 1 iteration.
+    let fe = ForEachOp {
+        over: FilterValue::FnCall {
+            call: FnCall::complex("make_singleton_list", vec![FilterValue::Int(7)]),
+        },
+        bind_row: "uid".to_string(),
+        batch: insert_order_body("uid"),
+    };
+    let req = wrap_for_each(fe);
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let value = resp.results["loop"].value.as_ref().unwrap();
+    let list = value.as_array().expect("loop value must be a List");
+    assert_eq!(
+        list.len(),
+        1,
+        "make_singleton_list(7) → List([7]) → exactly 1 iteration"
+    );
+
+    // Verify the order was actually inserted with user_id == 7 (bind_row
+    // resolved from the scalar-produced list element).
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders").where_eq("user_id", 7i64),
+            )),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let read_req = BatchRequest {
+        id: QueryValue::Int(2),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_resp.results["r"].records.len(),
+        1,
+        "bind_row's value (7) must have been passed into the body as $param uid"
+    );
 }

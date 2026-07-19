@@ -35,6 +35,7 @@ use shamir_engine::query::read::exec::{apply_order_by_qv, apply_pagination, appl
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
 };
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
@@ -128,7 +129,12 @@ fn main() {
     };
 
     let t1 = Instant::now();
-    let projected = apply_select_value(&raw, &select_all, &interner);
+    let projected = apply_select_value(
+        &raw,
+        &select_all,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     let t_select = t1.elapsed();
     let (a2, b2, d2) = snapshot();
 

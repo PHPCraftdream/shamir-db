@@ -3,12 +3,14 @@
 //! Covers: bind resolution, param injection, tx-in-tx guard,
 //! unbound_param error, and sub-batch atomicity.
 
+use shamir_funclib::registry::{FnEntry, ScalarResult};
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{self, doc};
 use shamir_query_types::batch::{
     BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
 };
-use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_query_types::filter::{Filter, FilterValue, FnCall};
 use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;
 use shamir_types::mpack;
@@ -68,6 +70,64 @@ impl TableResolver for TxTestResolver {
 
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
+    }
+}
+
+// ============================================================================
+// Fix 2 — resolver variant with a user-registered scalar for bind tests.
+// ============================================================================
+
+/// Build a ScalarResolver with a user-registered scalar `my_double`.
+fn resolver_with_user_scalar() -> ScalarResolver {
+    let layer = UserScalarLayer::new();
+    layer.register(
+        "my_double",
+        FnEntry::pure(
+            |args: &[QueryValue]| -> ScalarResult {
+                match &args[0] {
+                    QueryValue::Int(n) => Ok(QueryValue::Int(n * 2)),
+                    _ => Err(shamir_funclib::registry::ScalarError::new("type_mismatch")),
+                }
+            },
+            1,
+            Some(1),
+        ),
+    );
+    ScalarResolver::new(std::sync::Arc::new(layer))
+}
+
+struct TestResolverWithScalars {
+    db: DbInstance,
+    scalars: ScalarResolver,
+}
+
+#[async_trait::async_trait]
+impl TableResolver for TestResolverWithScalars {
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.db.get_table("default", &table_ref.table).await
+    }
+
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
+        self.db.get_repo("default").ok_or_else(|| {
+            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+        })
+    }
+
+    fn scalar_resolver(&self) -> ScalarResolver {
+        self.scalars.clone()
+    }
+}
+
+async fn setup_with_scalars() -> TestResolverWithScalars {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("users"), TableConfig::new("orders")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    TestResolverWithScalars {
+        db,
+        scalars: resolver_with_user_scalar(),
     }
 }
 
@@ -1267,5 +1327,139 @@ async fn param_in_insert_missing_param_errors() {
         Some("unbound_param"),
         "expected unbound_param, got {:?}",
         err
+    );
+}
+
+// ============================================================================
+// Fix 2 (Finding 8) — user-registered scalar in sub-batch `bind` resolution.
+// ============================================================================
+
+/// A sub-batch's `bind` value uses a user-registered scalar (`$fn:
+/// my_double(21)`). With the scalar resolver threaded into the bind
+/// `FilterContext` (via `.with_scalars(self.resolver.scalar_resolver())` at
+/// ~line 350 in `query_runner.rs`), the bind resolves `my_double(21)` to
+/// `Int(42)`, injects it as the `$param doubled`, and the inner read's
+/// WHERE clause (`score == $param doubled`) matches the seeded row with
+/// `score = 42`.
+///
+/// **Pre-fix behavior** (builtins-only `ScalarResolver`): `my_double` is an
+/// unknown function → `resolve_filter_query` returns `None` for the bind
+/// value → the bind resolution fails with `BatchError::QueryError` ("cannot
+/// resolve filter value"), and the sub-batch never executes. The test
+/// would fail at `resp.unwrap()` because the batch would return `Err`.
+#[tokio::test]
+async fn sub_batch_bind_user_scalar_resolves_correctly() {
+    let resolver = setup_with_scalars().await;
+
+    // Seed a user with score=42.
+    let mut seed = Batch::new();
+    seed.id(0);
+    seed.op_silent(
+        "seed",
+        write::insert("users").row(doc().set("name", "bind_scalar").set("score", 42i64)),
+    );
+    execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Inner batch: read users where score == $param doubled.
+    let inner_where = Filter::Eq {
+        field: vec!["score".to_string()],
+        value: FilterValue::Param {
+            name: "doubled".to_string(),
+        },
+    };
+    let inner_read = shamir_query_types::read::ReadQuery {
+        from: crate::query::TableRef::new("users"),
+        r#where: Some(inner_where),
+        select: shamir_query_types::read::Select::all(),
+        order_by: None,
+        pagination: shamir_query_types::read::Pagination::default(),
+        group_by: None,
+        count_total: false,
+        temporal: shamir_query_types::read::Temporal::default(),
+        with_version: false,
+        explain: false,
+    };
+
+    let mut inner_queries = new_map();
+    inner_queries.insert(
+        "match".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(inner_read),
+            return_result: true,
+            after: Vec::new(),
+            when: None,
+        },
+    );
+    let inner_req = BatchRequest {
+        id: QueryValue::Int(30),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: inner_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    // Outer: sub-batch with bind: { doubled: $fn my_double(21) }.
+    // my_double(21) = 42, so $param doubled = 42 inside the inner batch.
+    let mut bind = new_map();
+    bind.insert(
+        "doubled".to_string(),
+        FilterValue::FnCall {
+            call: FnCall::complex("my_double", vec![FilterValue::Int(21)]),
+        },
+    );
+    let sub_entry = QueryEntry {
+        op: BatchOp::Batch(SubBatchOp {
+            batch: inner_req,
+            bind,
+        }),
+        return_result: true,
+        after: Vec::new(),
+        when: None,
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert("sub".to_string(), sub_entry);
+
+    let outer_req = BatchRequest {
+        id: QueryValue::Int(3),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+        interner_epochs: Default::default(),
+        result_encoding: ResultEncoding::default(),
+    };
+
+    let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // The sub-batch's inner read must have found the user with score=42.
+    let sub_val = resp.results["sub"].value.as_ref().unwrap();
+    let match_records = sub_val["match"]["records"]
+        .as_array()
+        .expect("match.records must be an array");
+    assert_eq!(
+        match_records.len(),
+        1,
+        "inner $param-filtered read should return exactly 1 record (score=42, \
+         matched by $param doubled = my_double(21) = 42); got {:?}",
+        match_records
+    );
+    assert_eq!(
+        match_records[0]["score"], 42i64,
+        "the returned record should have score=42"
     );
 }

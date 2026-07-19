@@ -157,9 +157,12 @@ impl TableManager {
 
                             // Pipeline tail: no residual, no group_by, no aggregates,
                             // no order_by (all excluded by the eligibility guard above).
-                            if let Some((paged, pagination)) =
-                                try_project_page_only(query, &matched, interner)
-                            {
+                            if let Some((paged, pagination)) = try_project_page_only(
+                                query,
+                                &matched,
+                                interner,
+                                ctx.scalars.clone(),
+                            ) {
                                 let records_returned = paged.len() as u64;
                                 return Ok(QueryResult {
                                     records: paged,
@@ -178,8 +181,12 @@ impl TableManager {
                                 });
                             }
 
-                            let result_qv =
-                                exec::apply_select_value(&matched, &query.select, interner);
+                            let result_qv = exec::apply_select_value(
+                                &matched,
+                                &query.select,
+                                interner,
+                                ctx.scalars.clone(),
+                            );
                             let (paged_qv, pagination) = exec::apply_pagination(
                                 result_qv,
                                 &query.pagination,
@@ -262,7 +269,7 @@ impl TableManager {
                 let group_by = query.group_by.as_ref().unwrap();
                 exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
             } else {
-                exec::apply_aggregate_all(&matched, &query.select, interner)
+                exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
             };
 
             if let Some(ref order_by) = query.order_by {
@@ -318,7 +325,7 @@ impl TableManager {
 
             // Opt #3a (LIMIT push-down)
             if let Some((paged, pagination)) =
-                try_project_page_only_bytes(query, &matched, interner)
+                try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())
             {
                 let records_returned = paged.len() as u64;
                 return Ok(QueryResult {
@@ -336,7 +343,8 @@ impl TableManager {
                 });
             }
 
-            let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
+            let mut result_qv =
+                apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone());
 
             if let Some(ref order_by) = query.order_by {
                 exec::apply_order_by_qv(&mut result_qv, order_by);
@@ -370,7 +378,7 @@ impl TableManager {
     pub(super) async fn read_order_limit_fast(
         &self,
         query: &ReadQuery,
-        _ctx: &FilterContext<'_>,
+        ctx: &FilterContext<'_>,
         interner: &Interner,
         index_name: u64,
         take: usize,
@@ -413,7 +421,8 @@ impl TableManager {
             }
         }
 
-        let result_qv = apply_select_value_bytes(&matched, &query.select, interner);
+        let result_qv =
+            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone());
         let records_returned = result_qv.len() as u64;
         let result: Vec<QueryRecord> = result_qv.into_iter().map(QueryRecord::Direct).collect();
 
@@ -449,7 +458,7 @@ impl TableManager {
     pub(super) async fn read_keyset_seek(
         &self,
         query: &ReadQuery,
-        _ctx: &FilterContext<'_>,
+        ctx: &FilterContext<'_>,
         interner: &Interner,
         index_name: u64,
         encoded_key: &[u8],
@@ -536,7 +545,8 @@ impl TableManager {
 
         // Project to QueryValue in value order — no sort, no exclusion
         // filter (both are now handled by the ordered early-stop walk).
-        let result_qv = apply_select_value_bytes(&matched, &query.select, interner);
+        let result_qv =
+            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone());
 
         let records_scanned = matched.len() as u64;
         let records_returned = result_qv.len() as u64;
@@ -657,7 +667,7 @@ impl TableManager {
                 let group_by = query.group_by.as_ref().unwrap();
                 exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
             } else {
-                exec::apply_aggregate_all(&matched, &query.select, interner)
+                exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
             };
 
             if query.select.distinct {
@@ -719,7 +729,7 @@ impl TableManager {
 
             // Opt #3a (LIMIT push-down)
             if let Some((paged, pagination)) =
-                try_project_page_only_bytes(query, &matched, interner)
+                try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())
             {
                 let elapsed = start.elapsed();
                 let records_returned = paged.len() as u64;
@@ -738,7 +748,8 @@ impl TableManager {
                 });
             }
 
-            let mut result_qv = apply_select_value_bytes(&matched, &query.select, interner);
+            let mut result_qv =
+                apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone());
 
             if query.select.distinct {
                 result_qv = exec::apply_distinct_qv(result_qv);

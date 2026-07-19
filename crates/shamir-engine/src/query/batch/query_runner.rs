@@ -14,6 +14,7 @@ use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use serde_bytes::ByteBuf;
 use shamir_collections::TFxSet;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::{BatchLimits, ResultEncoding};
 use shamir_types::access::{trace_access, Action, Actor, ResourcePath};
 use shamir_types::codecs::interned::query_value_to_storage_bytes_into;
@@ -127,6 +128,7 @@ pub(super) fn resolve_skip(
     resolved_refs: &TMap<String, QueryResult>,
     actor: &Actor,
     params: &TMap<String, QueryValue>,
+    scalars: ScalarResolver,
 ) -> bool {
     // Cascade: a genuine (DataFlow/Both) dependency was itself skipped.
     // Takes precedence over the entry's own `when` — see this function's
@@ -156,6 +158,7 @@ pub(super) fn resolve_skip(
     let scratch = shamir_types::core::interner::Interner::new();
     let ctx = FilterContext::new(&scratch, resolved_refs)
         .with_actor(actor.clone())
+        .with_scalars(scalars)
         .with_params(params);
     let node = crate::query::filter::compile_filter(filter, &scratch);
     !node.matches(&InnerValue::Null, &ctx)
@@ -347,6 +350,7 @@ impl<'a> QueryRunner<'a> {
             let scratch = shamir_types::core::interner::Interner::new();
             let bind_ctx = FilterContext::new(&scratch, resolved_refs)
                 .with_actor(self.actor.clone())
+                .with_scalars(self.resolver.scalar_resolver())
                 .with_params(self.params);
             let mut resolved_params: TMap<String, QueryValue> = new_map();
             for (key, fv) in &sub.bind {
@@ -499,6 +503,7 @@ impl<'a> QueryRunner<'a> {
             let scratch = shamir_types::core::interner::Interner::new();
             let over_ctx = FilterContext::new(&scratch, resolved_refs)
                 .with_actor(self.actor.clone())
+                .with_scalars(self.resolver.scalar_resolver())
                 .with_params(self.params);
 
             // Column-ref form (`@alias[].field`) needs the "whole column"

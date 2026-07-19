@@ -360,7 +360,15 @@ pub(super) async fn execute_plan_impl(
 
             // Epic03/B (#645): own `when` false, or cascaded from a
             // skipped DataFlow/Both dependency — do NOT execute the op.
-            if resolve_skip(entry, &all_results, deps, &resolved_refs, actor, params) {
+            if resolve_skip(
+                entry,
+                &all_results,
+                deps,
+                &resolved_refs,
+                actor,
+                params,
+                resolver.scalar_resolver(),
+            ) {
                 all_results.insert(alias.clone(), skipped_query_result());
                 continue;
             }
@@ -464,7 +472,15 @@ pub(super) async fn execute_plan_tx_impl(
 
             // Epic03/B (#645): own `when` false, or cascaded from a
             // skipped DataFlow/Both dependency — do NOT execute the op.
-            if resolve_skip(entry, &all_results, deps, &resolved_refs, actor, params) {
+            if resolve_skip(
+                entry,
+                &all_results,
+                deps,
+                &resolved_refs,
+                actor,
+                params,
+                resolver.scalar_resolver(),
+            ) {
                 all_results.insert(alias.clone(), skipped_query_result());
                 continue;
             }

@@ -9,6 +9,9 @@
 
 use std::sync::Arc;
 
+use shamir_funclib::registry::FnEntry;
+use shamir_funclib::registry::ScalarResult;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -42,7 +45,7 @@ fn project_value_select_all_returns_all_fields() {
     );
 
     let select = Select::all();
-    let proj = SelectProjection::new(&select, &interner);
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -82,7 +85,7 @@ fn project_value_field_projection_returns_named_fields_only() {
         ],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner);
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -129,7 +132,7 @@ fn project_value_missing_field_is_null() {
         ],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner);
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -154,7 +157,7 @@ fn project_value_empty_items_returns_all() {
         items: vec![],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner);
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -216,7 +219,7 @@ fn project_value_cond_function_projection_caches_and_evaluates_per_record() {
 
     // Built ONCE — this is what populates `funcs_cond_cache` internally via
     // `prescan_cond_cache`, the real production call site under test.
-    let proj = SelectProjection::new(&select, &interner);
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
 
     let record_high = make_record(&interner, vec![("score", InnerValue::Int(80))]);
     let record_low = make_record(&interner, vec![("score", InnerValue::Int(20))]);
@@ -247,5 +250,94 @@ fn project_value_cond_function_projection_caches_and_evaluates_per_record() {
             );
         }
         _ => panic!("expected QueryValue::Map, got {:?}", qval_low),
+    }
+}
+
+// ============================================================================
+// Fix 2 (Finding 8) — user-registered scalars available in SELECT projections
+// ============================================================================
+
+/// Build a ScalarResolver with a user-registered scalar `my_double` that
+/// doubles its Int argument.
+fn resolver_with_user_scalar() -> ScalarResolver {
+    let layer = UserScalarLayer::new();
+    layer.register(
+        "my_double",
+        FnEntry::pure(
+            |args: &[QueryValue]| -> ScalarResult {
+                match &args[0] {
+                    QueryValue::Int(n) => Ok(QueryValue::Int(n * 2)),
+                    _ => Err(shamir_funclib::registry::ScalarError::new("type_mismatch")),
+                }
+            },
+            1,
+            Some(1),
+        ),
+    );
+    ScalarResolver::new(std::sync::Arc::new(layer))
+}
+
+#[test]
+fn project_value_user_scalar_resolves_through_projection() {
+    // Site 5: SELECT projection scalar-function must resolve user-registered
+    // scalars. Before Fix 2, `SelectProjection::new` built a builtins-only
+    // FilterContext, so `$fn: my_double` silently fell back to "unknown
+    // function" → Null. After Fix 2, the resolver is threaded through.
+    let interner = Interner::new();
+    interner.touch_ind("n").unwrap();
+
+    let select = Select {
+        items: vec![SelectItem::Function {
+            name: "my_double".to_string(),
+            args: vec![FilterValue::field_ref("n")],
+            alias: Some("doubled".to_string()),
+        }],
+        distinct: false,
+    };
+
+    let resolver = resolver_with_user_scalar();
+    let proj = SelectProjection::new(&select, &interner, resolver);
+
+    let record = make_record(&interner, vec![("n", InnerValue::Int(21))]);
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(
+                m.get("doubled"),
+                Some(&QueryValue::Int(42)),
+                "user-registered scalar 'my_double' must resolve in SELECT projection"
+            );
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
+}
+
+#[test]
+fn project_value_builtins_only_still_works() {
+    // Regression: builtins-only resolver (no user scalars) still works
+    // for built-in scalar functions.
+    let interner = Interner::new();
+    interner.touch_ind("s").unwrap();
+
+    let select = Select {
+        items: vec![SelectItem::Function {
+            name: "strings/upper".to_string(),
+            args: vec![FilterValue::field_ref("s")],
+            alias: Some("upper_s".to_string()),
+        }],
+        distinct: false,
+    };
+
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+
+    let record = make_record(&interner, vec![("s", InnerValue::Str("hello".into()))]);
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("upper_s"), Some(&QueryValue::Str("HELLO".into())));
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
     }
 }

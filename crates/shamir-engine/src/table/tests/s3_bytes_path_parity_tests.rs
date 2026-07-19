@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::filter::{FieldPath, Filter, FilterValue};
 use shamir_query_types::read::select::Select;
 use shamir_query_types::read::{OrderBy, Pagination, ReadQuery};
@@ -141,7 +142,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         })
         .collect();
 
-    let proj = SelectProjection::new(&query.select, interner);
+    let proj = SelectProjection::new(&query.select, interner, ScalarResolver::builtins_only());
     let records: Vec<QueryRecord> = matched
         .iter()
         .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner)))

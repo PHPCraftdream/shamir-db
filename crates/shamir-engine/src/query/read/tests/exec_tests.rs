@@ -1,8 +1,10 @@
 //! Tests for the read query execution pipeline (exec.rs).
 
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::mpack;
 
 use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::FilterValue;
 use crate::query::read::exec::*;
 use crate::query::read::*;
 use bytes::Bytes;
@@ -70,7 +72,12 @@ fn select_all() {
     let records = make_records(&interner);
     let select = Select::all();
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 4);
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["age"], 30_i64);
@@ -82,7 +89,12 @@ fn select_specific_fields() {
     let records = make_records(&interner);
     let select = Select::fields(["name", "age"]);
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 4);
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["age"], 30_i64);
@@ -102,7 +114,12 @@ fn select_with_alias() {
         distinct: false,
     };
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result[0]["user_name"], "Alice");
     match &result[0] {
         QueryValue::Map(m) => assert!(!m.contains_key("name")),
@@ -119,7 +136,12 @@ fn select_nonexistent_field_returns_null() {
         distinct: false,
     };
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result[0]["name"], "Alice");
     assert!(result[0]["nonexistent"].is_null());
 }
@@ -141,7 +163,12 @@ fn select_scalar_function_projection() {
         distinct: false,
     };
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["upper_name"], "ALICE");
     assert_eq!(result[1]["upper_name"], "BOB");
@@ -161,7 +188,12 @@ fn select_scalar_function_nested_and_literal() {
         distinct: false,
     };
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result[0]["shout"], "NYC!");
 }
 
@@ -174,7 +206,12 @@ fn select_scalar_function_unknown_is_null() {
         distinct: false,
     };
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     match &result[0] {
         QueryValue::Map(m) => assert_eq!(m.get("x"), Some(&QueryValue::Null)),
         _ => panic!("expected QueryValue::Map"),
@@ -372,7 +409,12 @@ fn aggregate_all_count_sum() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["total"], 4_i64);
     assert_eq!(result[0]["sum_age"], 115_i64);
@@ -689,7 +731,12 @@ fn aggregate_fn_count_distinct_all_rows() {
     };
     assert!(has_aggregates(&select));
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 1);
     // Distinct cities across the four rows: NYC, LA -> 2.
     assert_eq!(result[0]["cities"], 2_i64);
@@ -704,8 +751,61 @@ fn aggregate_fn_unknown_name_is_null() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 1);
     // An unregistered aggregate yields a null cell, never a panic.
     assert!(result[0]["x"].is_null());
+}
+
+// ============================================================================
+// Fix 2 (Finding 8) — user-registered scalars in group-SELECT / aggregate-all
+// ============================================================================
+
+/// Build a ScalarResolver with a user-registered scalar `my_double`.
+fn resolver_with_user_scalar() -> ScalarResolver {
+    let layer = shamir_funclib::scalar_resolver::UserScalarLayer::new();
+    layer.register(
+        "my_double",
+        shamir_funclib::registry::FnEntry::pure(
+            |args: &[QueryValue]| -> shamir_funclib::registry::ScalarResult {
+                match &args[0] {
+                    QueryValue::Int(n) => Ok(QueryValue::Int(n * 2)),
+                    _ => Err(shamir_funclib::registry::ScalarError::new("type_mismatch")),
+                }
+            },
+            1,
+            Some(1),
+        ),
+    );
+    ScalarResolver::new(std::sync::Arc::new(layer))
+}
+
+#[test]
+fn aggregate_all_user_scalar_resolves() {
+    // Site 4: group-SELECT scalar-function projections must resolve
+    // user-registered scalars. Before Fix 2, `build_aggregate_object`
+    // built a builtins-only FilterContext — user scalars silently fell back
+    // to Null. After Fix 2, the resolver is threaded through from `ctx`.
+    let interner = Interner::default();
+    let records = make_records(&interner);
+
+    let select = Select {
+        items: vec![SelectItem::Function {
+            name: "my_double".to_string(),
+            args: vec![FilterValue::field_ref("age")],
+            alias: Some("doubled_age".to_string()),
+        }],
+        distinct: false,
+    };
+
+    let resolver = resolver_with_user_scalar();
+    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner, resolver);
+    assert_eq!(result.len(), 1);
+    // The first record's age is 30 (from make_records), so my_double(30) = 60.
+    assert_eq!(result[0]["doubled_age"], 60_i64);
 }

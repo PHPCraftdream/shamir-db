@@ -11,6 +11,7 @@
 
 use bytes::Bytes;
 use rust_decimal::Decimal;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
@@ -587,7 +588,12 @@ fn select_value_specific_fields() {
     let records = make_test_records(&interner);
     let select = Select::fields(["name", "age", "city"]);
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 4);
 
     assert_eq!(result[0]["name"], QueryValue::Str("Alice".into()));
@@ -605,7 +611,12 @@ fn select_value_all_returns_all_fields() {
     let records = make_test_records(&interner);
     let select = Select::all();
 
-    let result = apply_select_value(&records, &select, &interner);
+    let result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 4);
 
     // All four fields present
@@ -622,7 +633,12 @@ fn path_b_distinct_order_qv() {
     let records = make_test_records(&interner);
     let select = Select::fields(["city", "age"]);
 
-    let qv_result = apply_select_value(&records, &select, &interner);
+    let qv_result = apply_select_value(
+        &records,
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     // 4 rows: {city:NYC,age:30},{city:LA,age:25},{city:NYC,age:35},{city:LA,age:25}
     // After distinct: {NYC,30},{LA,25},{NYC,35} → 3 distinct rows
     let q_distinct = apply_distinct_qv(qv_result);
@@ -698,7 +714,12 @@ fn aggregate_sum_float_serialisation() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 1);
 
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
@@ -759,7 +780,12 @@ fn aggregate_avg_float_serialisation() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     assert_eq!(result.len(), 1);
 
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
@@ -789,7 +815,12 @@ fn aggregate_count_as_int() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
 
     let expected_map = QueryValue::Map({
@@ -822,7 +853,12 @@ fn aggregate_all_no_group() {
         distinct: false,
     };
 
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner);
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["cnt"], QueryValue::Int(4));

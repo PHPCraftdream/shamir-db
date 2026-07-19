@@ -29,6 +29,7 @@ use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::Aggregator;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
@@ -638,6 +639,7 @@ pub(super) fn build_aggregate_object(
     select: &Select,
     group_key_values: Option<&[(String, QueryValue)]>,
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> QueryValue {
     let mut obj: indexmap::IndexMap<String, QueryValue, shamir_collections::THasher> =
         new_map_wc(select.items.len());
@@ -798,7 +800,7 @@ pub(super) fn build_aggregate_object(
     // record (mirrors the field-projection fallback above).
     if !func_slots.is_empty() {
         let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
-        let ctx = FilterContext::new(interner, &empty_refs);
+        let fn_ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars.clone());
         for (key, fv) in func_slots {
             let val = group_records
                 .first()
@@ -810,7 +812,7 @@ pub(super) fn build_aggregate_object(
                             Err(_) => return None,
                         },
                     };
-                    view.with_ref(|r| resolve_filter_query(&fv, r, &ctx))
+                    view.with_ref(|r| resolve_filter_query(&fv, r, &fn_ctx))
                 })
                 .unwrap_or(QueryValue::Null);
             obj.insert(key, val);
@@ -984,6 +986,7 @@ pub fn apply_group_by(
             select,
             Some(key_vals),
             interner,
+            ctx.scalars.clone(),
         ));
     }
 
@@ -1055,7 +1058,8 @@ pub fn apply_aggregate_all(
     records: &[(RecordId, Bytes)],
     select: &Select,
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> Vec<QueryValue> {
-    let obj = build_aggregate_object(records, select, None, interner);
+    let obj = build_aggregate_object(records, select, None, interner, scalars);
     vec![obj]
 }

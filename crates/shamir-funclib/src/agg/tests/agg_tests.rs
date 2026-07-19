@@ -3,6 +3,7 @@
 
 use crate::agg::{self, AggRegistry};
 use rust_decimal::Decimal;
+use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::value::QueryValue;
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,61 @@ fn count_distinct_basic() {
 #[test]
 fn count_distinct_empty() {
     assert_eq!(run("count_distinct", &[]).unwrap(), int(0));
+}
+
+#[test]
+fn count_distinct_distinct_maps_same_length() {
+    // Two structurally-DIFFERENT single-entry Maps of equal length. Before
+    // the compare.rs fix they compared Equal (length-only), so count_distinct
+    // returned 1. Now they are distinct → count_distinct returns 2.
+    let m1 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("a".to_owned(), int(1));
+        m
+    });
+    let m2 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("b".to_owned(), int(2));
+        m
+    });
+    let r = run("count_distinct", &[m1, m2]).unwrap();
+    assert_eq!(r, int(2));
+}
+
+#[test]
+fn count_distinct_identical_maps_different_order() {
+    // Two structurally-identical Maps with different insertion order must
+    // still count as one distinct value.
+    let m1 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("a".to_owned(), int(1));
+        m.insert("b".to_owned(), int(2));
+        m
+    });
+    let m2 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("b".to_owned(), int(2));
+        m.insert("a".to_owned(), int(1));
+        m
+    });
+    let r = run("count_distinct", &[m1, m2]).unwrap();
+    assert_eq!(r, int(1));
+}
+
+#[test]
+fn count_distinct_distinct_sets_same_length() {
+    let s1 = QueryValue::Set({
+        let mut s = new_set();
+        s.insert(int(1));
+        s
+    });
+    let s2 = QueryValue::Set({
+        let mut s = new_set();
+        s.insert(int(2));
+        s
+    });
+    let r = run("count_distinct", &[s1, s2]).unwrap();
+    assert_eq!(r, int(2));
 }
 
 // ---------------------------------------------------------------------------
@@ -348,6 +404,43 @@ fn mode_basic() {
 #[test]
 fn mode_empty() {
     assert_eq!(run("mode", &[]).unwrap_err().code, "empty");
+}
+
+#[test]
+fn mode_over_maps_correct_mode() {
+    // mode over [{"a":1}, {"b":2}, {"b":2}] → {"b":2} (the value that
+    // appears twice). Before the compare.rs fix, the length-only equality
+    // caused all same-length maps to compare Equal, so run-length counting
+    // merged them and the result was arbitrary.
+    let m_a1 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("a".to_owned(), int(1));
+        m
+    });
+    let m_b2 = QueryValue::Map({
+        let mut m = new_map();
+        m.insert("b".to_owned(), int(2));
+        m
+    });
+    let r = run("mode", &[m_a1.clone(), m_b2.clone(), m_b2.clone()]).unwrap();
+    assert_eq!(r, m_b2);
+}
+
+#[test]
+fn mode_over_sets_correct_mode() {
+    // mode over [{1}, {2}, {1}] → {1} (appears twice).
+    let s1 = QueryValue::Set({
+        let mut s = new_set();
+        s.insert(int(1));
+        s
+    });
+    let s2 = QueryValue::Set({
+        let mut s = new_set();
+        s.insert(int(2));
+        s
+    });
+    let r = run("mode", &[s1.clone(), s2, s1.clone()]).unwrap();
+    assert_eq!(r, s1);
 }
 
 // ---------------------------------------------------------------------------

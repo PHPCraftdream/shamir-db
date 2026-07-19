@@ -31,6 +31,7 @@ use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, ReadQuery, Select, SelectItem,
 };
 use shamir_engine::repo::{BoxRepo, RepoInstance};
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::{new_map, new_map_wc};
@@ -146,20 +147,35 @@ fn main() {
         let records = records.clone();
         let select_5 = select_5.clone();
         h.bench("apply_select_value/5_fields_1000_records", move || {
-            black_box(apply_select_value(&records, &select_5, interner));
+            black_box(apply_select_value(
+                &records,
+                &select_5,
+                interner,
+                ScalarResolver::builtins_only(),
+            ));
         });
     }
     {
         let records = records.clone();
         let select_all = select_all.clone();
         h.bench("apply_select_value/select_all_1000_records", move || {
-            black_box(apply_select_value(&records, &select_all, interner));
+            black_box(apply_select_value(
+                &records,
+                &select_all,
+                interner,
+                ScalarResolver::builtins_only(),
+            ));
         });
     }
 
     // Projected QueryValues for ORDER BY bench. Build once, clone per
     // iteration so the sort is the only measured work.
-    let projected: Vec<QueryValue> = apply_select_value(&records, &select_5, interner);
+    let projected: Vec<QueryValue> = apply_select_value(
+        &records,
+        &select_5,
+        interner,
+        ScalarResolver::builtins_only(),
+    );
     let order_by_single = OrderBy {
         items: vec![OrderByItem {
             field: vec!["age".to_string()],

@@ -75,6 +75,79 @@ fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
     }
 }
 
+/// Probe a `TSet<QueryValue>` for membership using the SAME coercion rules
+/// as `scalar_ref_cmp_qv` (which the old per-row linear scan used) — the
+/// `QueryValue`-native sibling of [`set_contains_coercing`].
+///
+/// This closes the gap acknowledged in the `InSet` comment (~line 448):
+/// the all-literal fast-path nodes (`InSet`, `ContainsAnySet`,
+/// `ContainsAllSet`) previously used exact `TSet::contains`/`swap_remove`,
+/// so `{"$in": [1.0]}` against an `Int(1)` field did NOT match — while the
+/// dynamic branch (`FilterNode::In`) DID match via `set_contains_coercing`
+/// /`scalar_ref_cmp_qv`. A filter's answer must not depend on whether its
+/// value list happens to be fully literal.
+///
+/// Coercion rules (identical to [`set_contains_coercing`]):
+/// - `Int(n)`  → probe `Int(n)` AND `F64(n as f64)`.
+/// - `F64(f)`  → probe `F64(f)` AND if `f.fract()==0 && f.is_finite()` and
+///   `f` fits in `i64`, also `Int(f as i64)`.
+/// - Other types → single exact probe (no cross-type coercion).
+#[inline]
+fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> bool {
+    match qv {
+        QueryValue::Int(n) => {
+            // Same-type probe + cross-type F64 probe.
+            set.contains(qv) || set.contains(&QueryValue::F64(*n as f64))
+        }
+        QueryValue::F64(f) => {
+            // Same-type probe.
+            if set.contains(qv) {
+                return true;
+            }
+            // Cross-type Int probe — only when f is a whole number in i64 range.
+            if f.is_finite() && f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                return set.contains(&QueryValue::Int(*f as i64));
+            }
+            false
+        }
+        // All other types: exact match (no coercion in scalar_ref_cmp_qv).
+        _ => set.contains(qv),
+    }
+}
+
+/// Coercing `swap_remove` for `ContainsAllSet`'s scratch set.
+///
+/// Mirrors [`set_contains_coercing_qv`] but actually REMOVES whichever
+/// coercion-equivalent representation is present in the set (so `remaining`
+/// shrinks correctly — the O(field_len) early-exit and the final "all
+/// required values found" check both depend on `remaining` shrinking).
+#[inline]
+fn swap_remove_coercing_qv(set: &mut TSet<QueryValue>, qv: &QueryValue) -> bool {
+    match qv {
+        QueryValue::Int(n) => {
+            if set.swap_remove(qv) {
+                true
+            } else {
+                set.swap_remove(&QueryValue::F64(*n as f64))
+            }
+        }
+        QueryValue::F64(f) => {
+            if set.swap_remove(qv) {
+                true
+            } else if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64
+            {
+                set.swap_remove(&QueryValue::Int(*f as i64))
+            } else {
+                false
+            }
+        }
+        _ => set.swap_remove(qv),
+    }
+}
+
 /// Compact field-path representation for `FilterNode` variants.
 /// Inline up to 4 segments (typical: `"name"` → 1, `"address.city"` → 2);
 /// spills to heap for deeper paths. Replaces a `Vec<u64>` per compiled
@@ -372,7 +445,7 @@ impl FilterNode {
                 // here and never re-converted).
                 let found = match record.materialize_at(&ipath) {
                     Some(v) => match inner_value_to_query_value(&v, ctx.interner) {
-                        Ok(qv) => values.contains(&qv),
+                        Ok(qv) => set_contains_coercing_qv(values, &qv),
                         Err(_) => false,
                     },
                     None => false,
@@ -445,9 +518,12 @@ impl FilterNode {
                         // equality semantics of the old `scalar_ref_cmp_qv`
                         // linear scan (Int↔F64 cross-type coercion).
                         //
-                        // NOTE: `InSet` (all-literals fast-path) uses
-                        // non-coercing `TSet::contains` — that is a known
-                        // pre-existing difference, NOT touched by this task.
+                        // `InSet`/`ContainsAnySet`/`ContainsAllSet` (all-
+                        // literals fast-paths) now use the same coercion
+                        // via `set_contains_coercing_qv` /
+                        // `swap_remove_coercing_qv`, closing the gap this
+                        // comment previously acknowledged as a known
+                        // pre-existing difference.
                         if let Some(set) = &col_sets[i] {
                             if set_contains_coercing(set, field_val) {
                                 found = true;
@@ -564,8 +640,12 @@ impl FilterNode {
                     Err(_) => return false,
                 };
                 match &field_qv {
-                    QueryValue::List(list) => list.iter().any(|item| values.contains(item)),
-                    QueryValue::Set(set) => set.iter().any(|item| values.contains(item)),
+                    QueryValue::List(list) => list
+                        .iter()
+                        .any(|item| set_contains_coercing_qv(values, item)),
+                    QueryValue::Set(set) => set
+                        .iter()
+                        .any(|item| set_contains_coercing_qv(values, item)),
                     _ => false,
                 }
             }
@@ -627,7 +707,8 @@ impl FilterNode {
                 match &field_qv {
                     QueryValue::List(list) => {
                         for item in list.iter() {
-                            if remaining.swap_remove(item) && remaining.is_empty() {
+                            if swap_remove_coercing_qv(&mut remaining, item) && remaining.is_empty()
+                            {
                                 return true;
                             }
                         }
@@ -635,7 +716,8 @@ impl FilterNode {
                     }
                     QueryValue::Set(set) => {
                         for item in set.iter() {
-                            if remaining.swap_remove(item) && remaining.is_empty() {
+                            if swap_remove_coercing_qv(&mut remaining, item) && remaining.is_empty()
+                            {
                                 return true;
                             }
                         }

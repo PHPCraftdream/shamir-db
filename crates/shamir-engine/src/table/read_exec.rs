@@ -16,6 +16,7 @@ use crate::query::read::{
 };
 use bytes::Bytes;
 use serde_bytes::ByteBuf;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::record_view_to_id_msgpack;
@@ -762,7 +763,11 @@ impl TableManager {
         let mut raw_acc: Vec<(RecordId, Bytes)> = Vec::new();
         let mut rec_acc: Vec<crate::query::read::QueryRecord> = Vec::new();
         let proj = if !needs_raw {
-            Some(exec::SelectProjection::new(&query.select, interner))
+            Some(exec::SelectProjection::new(
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+            ))
         } else {
             None
         };
@@ -826,7 +831,7 @@ impl TableManager {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
         } else if has_agg {
-            exec::apply_aggregate_all(&raw_acc, &query.select, interner)
+            exec::apply_aggregate_all(&raw_acc, &query.select, interner, ctx.scalars.clone())
         } else {
             rec_acc
                 .into_iter()
@@ -921,7 +926,7 @@ impl TableManager {
         let skip = skip as usize;
         let limit = take.map(|t| t as usize);
 
-        let proj = exec::SelectProjection::new(&query.select, interner);
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -1058,7 +1063,7 @@ impl TableManager {
         // If projection interning failed, fall back to Name for the whole query.
         let use_id_encoding = use_id_encoding && (id_is_all || id_projection_ids.is_some());
 
-        let proj = exec::SelectProjection::new(&query.select, interner);
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -1421,6 +1426,7 @@ impl TableManager {
                                 .build_filtered_vector_result(
                                     query,
                                     interner,
+                                    ctx,
                                     tx,
                                     start,
                                     &ranked,
@@ -1450,6 +1456,7 @@ impl TableManager {
                                 .build_filtered_vector_result(
                                     query,
                                     interner,
+                                    ctx,
                                     tx,
                                     start,
                                     &ranked,
@@ -1554,7 +1561,7 @@ impl TableManager {
 
         // Project survivors into query records — bytes already resolved in the
         // loop, so no second round-trip to the store/staging.
-        let proj = exec::SelectProjection::new(&query.select, interner);
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
         let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
         for bytes in &last_survivors {
             let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -1789,10 +1796,12 @@ impl TableManager {
     /// V3.2: shared helper for pre-filter and co-filter paths. Takes the
     /// ranked `(RecordId, f32)` pairs, resolves them to record bytes,
     /// projects, and returns the QueryResult with the given `index_tag`.
+    #[allow(clippy::too_many_arguments)]
     async fn build_filtered_vector_result(
         &self,
         query: &ReadQuery,
         interner: &Interner,
+        ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
         start: Instant,
         ranked: &[(RecordId, f32)],
@@ -1800,7 +1809,7 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
         let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
-        let proj = exec::SelectProjection::new(&query.select, interner);
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
         let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
         for maybe_bytes in raw_records.iter() {
             let bytes = match maybe_bytes {
@@ -2028,6 +2037,7 @@ pub(super) fn try_project_page_only(
     query: &ReadQuery,
     matched: &[(RecordId, InnerValue)],
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
     // Gate: every condition below disables the push-down.
     if query.order_by.is_some()
@@ -2060,7 +2070,7 @@ pub(super) fn try_project_page_only(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner);
+    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone());
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
@@ -2103,6 +2113,7 @@ pub(super) fn try_project_page_only_bytes(
     query: &ReadQuery,
     matched: &[(RecordId, Bytes)],
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
     // Same eligibility gate as the InnerValue variant.
     if query.order_by.is_some()
@@ -2126,7 +2137,7 @@ pub(super) fn try_project_page_only_bytes(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner);
+    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone());
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -2167,8 +2178,9 @@ pub(super) fn apply_select_value_bytes(
     matched: &[(RecordId, Bytes)],
     select: &crate::query::read::Select,
     interner: &Interner,
+    scalars: ScalarResolver,
 ) -> Vec<QueryValue> {
-    let proj = exec::SelectProjection::new(select, interner);
+    let proj = exec::SelectProjection::new(select, interner, scalars.clone());
     matched
         .iter()
         .map(
