@@ -212,6 +212,49 @@ fn computed_default_skipped_on_update_path() {
     assert!(!has_key(&rec, "score"));
 }
 
+/// ComputedDefault `$ref` resolves against sibling fields already stamped by
+/// `apply_defaults` (happy path — regression: the literal context works).
+#[test]
+fn computed_default_ref_resolves_against_sibling_field() {
+    // `role` defaults to the value of an already-stamped `source_role` field.
+    let mut rec = map_with(&[("source_role", QueryValue::Str("guest".into()))]);
+    let transforms = vec![spec(
+        "role",
+        TransformSpec::ComputedDefault(FilterValue::field_ref("source_role")),
+    )];
+
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), NOW_NS, true);
+
+    assert_eq!(get_str(&rec, "role"), Some("guest".to_string()));
+}
+
+/// ComputedDefault evaluation failure is FAIL-OPEN: the record is still
+/// written WITHOUT the field (no error surfaced to the caller), and a
+/// `warn!` log line is emitted naming the field.  Here the default `$ref`s
+/// a field that is not present in the record, so `eval_write_value`
+/// returns `Err("$ref ... not found")`.
+///
+/// The log line itself is verified by code inspection — there is no
+/// log-capture test harness in the `shamir-engine` crate (the
+/// `tracing_subscriber`-based capture lives only in `shamir-server`).
+/// This test asserts the observable behavior: fail-open preservation.
+#[test]
+fn computed_default_eval_failure_is_fail_open() {
+    // `score` defaults to a `$ref` to a field that is NOT present.
+    let mut rec = map_with(&[("name", QueryValue::Str("dave".into()))]);
+    let transforms = vec![spec(
+        "score",
+        TransformSpec::ComputedDefault(FilterValue::field_ref("nonexistent_field")),
+    )];
+
+    apply_transforms(&mut rec, &transforms, builtin_scalars(), NOW_NS, true);
+
+    // Fail-open: the field is simply absent — no error, no stamp.
+    assert!(!has_key(&rec, "score"));
+    // The original record content is untouched.
+    assert_eq!(get_str(&rec, "name"), Some("dave".to_string()));
+}
+
 // ── Non-map record ────────────────────────────────────────────────────────────
 
 #[test]

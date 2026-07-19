@@ -200,10 +200,12 @@ pub(super) fn apply_defaults(rec: &mut QueryValue, defaults: &[(Vec<String>, Que
 /// - **MVP scope: single-segment paths only.** Multi-segment paths are
 ///   silently skipped (matching `apply_defaults` MVP — future work).
 /// - [`TransformSpec::ComputedDefault`]: on evaluation error the stamp is
-///   skipped silently (fail-open), consistent with the scalar-bridge
-///   fail-open precedent from Phase B.  The record map at the time of
-///   evaluation is passed as the `literal` context so `$ref` can address
-///   sibling fields already stamped by `apply_defaults`.
+///   skipped (fail-open — the record is written without the field), consistent
+///   with the scalar-bridge fail-open precedent from Phase B.  The skip is
+///   surfaced via a `warn!` log naming the field path and the error so an
+///   operator can discover a typo'd or failing default expression.  The record
+///   map at the time of evaluation is passed as the `literal` context so `$ref`
+///   can address sibling fields already stamped by `apply_defaults`.
 ///
 /// Non-map records are returned unchanged (transforms are field-scoped).
 /// The caller is expected to fast-skip when `transforms` is empty (the
@@ -249,15 +251,27 @@ pub(crate) fn apply_transforms(
                     // avoids a self-borrow conflict between `m` (mut) and the
                     // literal slice passed to eval_write_value.
                     let literal: TMap<String, QueryValue> = m.clone();
-                    // Fail-open on error: skip the stamp silently rather than
-                    // aborting the write.  This matches the scalar-bridge
-                    // fail-open precedent (Phase B, ValidatorCtx::scalars =
-                    // None → skip silently).  A future strict mode could
-                    // surface the error as a ValidatorFailure, but
-                    // ComputedDefault is a best-effort default, not a hard
-                    // integrity constraint — that role belongs to CHECK rules.
-                    if let Ok(v) = eval_write_value(expr, &literal, scalars) {
-                        m.insert(field.clone(), v);
+                    // Fail-open on error: skip the stamp (the record is
+                    // written without the field) rather than aborting the
+                    // write.  This matches the scalar-bridge fail-open
+                    // precedent (Phase B, ValidatorCtx::scalars =
+                    // None → skip).  A future strict mode could surface the
+                    // error as a ValidatorFailure, but ComputedDefault is a
+                    // best-effort default, not a hard integrity constraint —
+                    // that role belongs to CHECK rules.  The skip is logged
+                    // at warn-level so a failing/typo'd default expression is
+                    // discoverable rather than completely silent.
+                    match eval_write_value(expr, &literal, scalars) {
+                        Ok(v) => {
+                            m.insert(field.clone(), v);
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "computed default for field '{}' failed to \
+                                 evaluate, skipping stamp (fail-open): {e}",
+                                field
+                            );
+                        }
                     }
                 }
             }

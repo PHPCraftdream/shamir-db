@@ -278,8 +278,23 @@ pub(super) fn filter_value_to_query_value(
                 QueryValue::Null
             }
         }
-        // $ref / $fn / $expr / $cond — not meaningful as positional params.
-        _ => QueryValue::Null,
+        // $ref / $fn / $expr / $cond / $param — not meaningful as positional
+        // params here (no record context to resolve against): collapse to
+        // Null.  Logged at warn-level so a dynamic marker silently reaching a
+        // function's positional arg is discoverable rather than invisible.
+        fv @ (FilterValue::FieldRef { .. }
+        | FilterValue::FnCall { .. }
+        | FilterValue::Expr { .. }
+        | FilterValue::Cond { .. }
+        | FilterValue::Param { .. }) => {
+            log::warn!(
+                "Call param resolver: {:?} marker is not supported here \
+                 (no record context for $ref/$fn/$expr/$cond) — collapsing to \
+                 Null",
+                fv
+            );
+            QueryValue::Null
+        }
     }
 }
 

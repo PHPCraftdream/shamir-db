@@ -44,3 +44,6 @@ mod db_tx;
 mod function_invoker;
 mod helpers;
 mod table_resolver;
+
+#[cfg(test)]
+mod tests;
