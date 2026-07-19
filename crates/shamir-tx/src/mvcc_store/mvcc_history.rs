@@ -457,8 +457,11 @@ impl MvccStore {
             }
         }
 
-        // Update the in-memory cell for every touched key (CRIT-2: entry_async
-        // modify-or-insert). After this, readers at `>= commit_version` resolve
+        // Update the in-memory cell for every touched key. This loop calls
+        // the synchronous `finalize_reservation` (CRIT-2: synchronous scc
+        // `entry` modify-or-insert — detailed in the S2 note below), which
+        // atomically publishes `version = commit_version` and clears the
+        // reservation. After this, readers at `>= commit_version` resolve
         // the value from the overlay.
         //
         // SSI fix S2 — FINALIZE the cell-reservation here instead of a plain

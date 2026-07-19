@@ -45,6 +45,40 @@ fn touch_sync_direct_returns_base_id() {
 }
 
 #[tokio::test]
+async fn touch_and_touch_sync_equivalent_on_shared_overlay() {
+    // H6 DEADLOCK FIX guard. The async `touch` now delegates to the
+    // SYNCHRONOUS `touch_sync` (both acquire the per-`TxContext` overlay
+    // map's bucket lock via the synchronous `entry_sync`, NOT
+    // `entry_async`'s lock-HANDOFF path — see the DEADLOCK FIX note on
+    // `touch`). This is a behavioral-equivalence guard on a SHARED overlay,
+    // NOT a concurrency stress test: the overlay map is per-`TxContext` and
+    // single-task-at-a-time today, so there is no realistic cross-task
+    // interleaving to exercise. The invariant pinned here is that the two
+    // entry points agree: whichever allocates a key first wins, the other
+    // observes the occupied entry — i.e. `touch` is now a faithful wrapper
+    // around `touch_sync`, so they can never diverge on id allocation.
+    let base = Interner::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+
+    // `touch` allocates, `touch_sync` then observes the occupied entry.
+    let id_async_first = li.touch("k1").await;
+    let id_sync_then = li.touch_sync("k1");
+    assert_eq!(id_async_first, id_sync_then);
+
+    // Reverse order: `touch_sync` allocates, `touch` then observes it.
+    let id_sync_first = li.touch_sync("k2");
+    let id_async_then = li.touch("k2").await;
+    assert_eq!(id_sync_first, id_async_then);
+
+    // Both new allocations are overlay ids; they are distinct keys.
+    assert!(id_async_first >= OVERLAY_ID_BASE);
+    assert!(id_sync_first >= OVERLAY_ID_BASE);
+    assert_ne!(id_async_first, id_sync_first);
+}
+
+#[tokio::test]
 async fn direct_mode_no_overhead() {
     let base = Interner::new();
     let li = LayeredInterner::Direct(&base);
