@@ -92,7 +92,7 @@ async fn backfill_if_absent_skips_deleted_rids() {
     adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
     adapter.delete(rid(1)).await.unwrap();
     if let Some(ref del_rids) = adapter.compaction_deleted_rids {
-        let _ = del_rids.insert_async(rid(1), ()).await;
+        let _ = del_rids.insert_sync(rid(1), ());
     }
 
     // Backfill should NOT resurrect rid(1)
@@ -228,7 +228,7 @@ async fn step4b_reconcile_prevents_resurrect() {
 
     // Now simulate the double-write delete that was recorded in compaction_deleted_rids
     if let Some(ref del_rids) = new_hnsw.compaction_deleted_rids {
-        let _ = del_rids.insert_async(rid(5), ()).await;
+        let _ = del_rids.insert_sync(rid(5), ());
     }
 
     // Step 4b: reconcile-deletes
@@ -341,7 +341,7 @@ async fn stress_concurrent_mutations_during_compaction() {
                         let _ = target.adapter.delete(r).await;
                         if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
                             if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                                let _ = del_rids.insert_async(r, ()).await;
+                                let _ = del_rids.insert_sync(r, ());
                             }
                         }
                     }
@@ -517,7 +517,9 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
         (0..n_initial).map(rid).collect::<TFxSet<RecordId>>(),
     ));
     let op_counter = Arc::new(AtomicU64::new(0));
-    let barrier = Arc::new(Barrier::new(5));
+    // Barrier: 4 upsert/delete workers + 1 dedicated delete-only hammer
+    // (H3 regression extension) + 1 compaction task = 6.
+    let barrier = Arc::new(Barrier::new(6));
 
     let mut handles = Vec::new();
     for worker in 0..4u16 {
@@ -548,7 +550,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
                         let _ = target.adapter.delete(r).await;
                         if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
                             if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                                let _ = del_rids.insert_async(r, ()).await;
+                                let _ = del_rids.insert_sync(r, ());
                             }
                         }
                     }
@@ -559,6 +561,40 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
                 }
 
                 op_counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }));
+    }
+
+    // H3 regression extension: dedicated DELETE-ONLY hammer targeting
+    // `compaction_deleted_rids`'s hazard specifically. This map is genuinely
+    // shared/hammered during double-write (unlike the other four maps'
+    // spread-key nature), so a dedicated delete task increases the
+    // contention on `insert_sync` racing `contains_sync` (backfill guard)
+    // and `iter_sync` (Step4b reconcile) — the exact mixed-sync-accessor
+    // pattern the fix addresses. Deletes target existing initial rids,
+    // simulating user deletes during the compaction window.
+    {
+        let compaction_target = Arc::clone(&compaction_target);
+        let expected_live = Arc::clone(&expected_live);
+        let barrier = Arc::clone(&barrier);
+        let old_adapter = Arc::clone(&old_adapter);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            for i in 0..(n_concurrent_ops / 2) {
+                let r = rid(i % n_initial);
+                old_adapter.delete(r).await.unwrap();
+                if let Some(target) = compaction_target.load_full() {
+                    if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
+                        if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
+                            let _ = del_rids.insert_sync(r, ());
+                        }
+                    }
+                    let _ = target.adapter.delete(r).await;
+                }
+                {
+                    let mut live = expected_live.lock().await;
+                    live.remove(&r);
+                }
             }
         }));
     }

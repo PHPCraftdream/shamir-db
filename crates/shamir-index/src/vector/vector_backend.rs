@@ -336,7 +336,19 @@ impl IndexBackend for VectorBackend {
             if let Some(target) = self.compaction_target.load_full() {
                 if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
                     if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                        let _ = del_rids.insert_async(rid, ()).await;
+                        // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2
+                        // commit `621776bd`): `insert_sync`, NOT
+                        // `insert_async`. The `compaction_deleted_rids` map is
+                        // probed via `contains_sync` (backfill guard, both
+                        // pre- and under-entry-lock re-checks in
+                        // `backfill_if_absent`) and scanned via `iter_sync`
+                        // (Step4b reconcile, below) on the SAME runtime
+                        // worker threads. `insert_async`'s lock-HANDOFF wait
+                        // risks a whole-runtime deadlock against those sync
+                        // accessors. This map is genuinely shared/hammered
+                        // during the double-write compaction window, making
+                        // it the highest-reachability hazard of the five.
+                        let _ = del_rids.insert_sync(rid, ());
                     }
                 }
                 let _ = target.adapter.delete(rid).await;
@@ -362,7 +374,10 @@ impl IndexBackend for VectorBackend {
         if let Some(target) = self.compaction_target.load_full() {
             if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
                 if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                    let _ = del_rids.insert_async(rid, ()).await;
+                    // DEADLOCK FIX (#589 class): `insert_sync`, not
+                    // `insert_async` — see `plan_update` for the full
+                    // rationale.
+                    let _ = del_rids.insert_sync(rid, ());
                 }
             }
             let _ = target.adapter.delete(rid).await;
@@ -524,7 +539,10 @@ impl IndexBackend for VectorBackend {
             if let Some(target) = self.compaction_target.load_full() {
                 if let Some(hnsw) = target.adapter.as_hnsw_adapter() {
                     if let Some(ref del_rids) = hnsw.compaction_deleted_rids {
-                        let _ = del_rids.insert_async(rid, ()).await;
+                        // DEADLOCK FIX (#589 class): `insert_sync`, not
+                        // `insert_async` — see `plan_update` for the full
+                        // rationale.
+                        let _ = del_rids.insert_sync(rid, ());
                     }
                 }
                 let _ = target.adapter.delete(rid).await;

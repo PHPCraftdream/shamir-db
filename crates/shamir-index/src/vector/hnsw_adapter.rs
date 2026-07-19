@@ -721,7 +721,8 @@ impl HnswAdapter {
 
     /// V4.2 (#408) — Insert (rid, vec) ONLY if rid is absent from
     /// `rid_to_internal` AND absent from `compaction_deleted_rids`.
-    /// Uses `entry_async` for atomic check-and-insert per rid.
+    /// Uses `entry_sync` for atomic check-and-insert per rid (see the
+    /// DEADLOCK FIX comment at the `entry_sync` call site below).
     ///
     /// #428 (VR-6) — quantization-aware routing.
     ///
@@ -751,7 +752,29 @@ impl HnswAdapter {
             }
             // Atomic check: only insert if absent
             use scc::hash_map::Entry::{Occupied, Vacant};
-            match self.rid_to_internal.entry_async(*rid).await {
+            // DEADLOCK FIX (same class as #589 / `cells` map, commit
+            // `7a4abf62`, and the H1+H2 fix commit `621776bd`):
+            // `entry_sync`, NOT `entry_async`. The `rid_to_internal` map
+            // is scanned on EVERY compaction via the SYNCHRONOUS
+            // `collect_live_vectors` → `iter_sync`, and probed via
+            // `contains_sync` (`contains_rid`). `entry_async`'s wait path
+            // is lock-HANDOFF: on release saa GRANTS the exclusive bucket
+            // lock to the suspended waiter TASK, which then holds it while
+            // sitting in tokio's run queue until next polled. A worker
+            // parked in `iter_sync`/`contains_sync` on the same bucket
+            // during the handoff window deadlocks. With `entry_sync` the
+            // exclusive lock is only held by a RUNNING thread for a few
+            // instructions. The fn stays `async` to keep call sites
+            // unchanged; this call no longer suspends (the rest of the fn
+            // still legitimately awaits the CPU-bound graph insert etc.).
+            //
+            // AMPLIFIER: this `entry_sync` guard is held across the
+            // `compaction_deleted_rids.contains_sync` re-check AND the
+            // `vac.insert_entry` below — once this is `entry_sync` (not
+            // `entry_async`), a worker can no longer PARK while owning the
+            // `rid_to_internal` bucket across an `.await`, so it cannot
+            // chain a second map (e.g. `deleted`) into the deadlock.
+            match self.rid_to_internal.entry_sync(*rid) {
                 Occupied(_) => continue, // double-write already placed a fresher value
                 Vacant(vac) => {
                     // Re-check deleted_rids under the entry lock to close the race
@@ -820,7 +843,14 @@ impl HnswAdapter {
                     .await
                     .map_err(|e| VectorError::Internal(e.to_string()))?;
 
-                    let _ = self.vectors.insert_async(internal, vec.clone()).await;
+                    // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+                    // `insert_sync`, NOT `insert_async`. The `vectors` map
+                    // is scanned via `iter_sync` (fit snapshot/delta/
+                    // catch-up, `for_each_vector`, `collect_live_vectors`)
+                    // and read via `read_sync` on the SAME runtime worker
+                    // threads. `insert_async`'s handoff wait path risks a
+                    // whole-runtime deadlock against those sync readers.
+                    let _ = self.vectors.insert_sync(internal, vec.clone());
                     let _ = self.rid_map.insert_async(internal, *rid).await;
 
                     // Self-migration re-check (mirrors `upsert`, Б-1/#423):
@@ -875,7 +905,10 @@ impl HnswAdapter {
                         // lost, or tombstoned) — a claimed/tombstoned internal
                         // must not linger in the f32 `vectors` map (mirrors
                         // `upsert`'s post-guard cleanup).
-                        let _ = self.vectors.remove_async(&internal).await;
+                        // DEADLOCK FIX (#589 class): `remove_sync`, not
+                        // `remove_async` — same `vectors` map hazard as
+                        // the `insert_sync` above.
+                        let _ = self.vectors.remove_sync(&internal);
                     }
                 }
             }
@@ -1076,14 +1109,25 @@ impl HnswAdapter {
         }
     }
 
-    /// Async twin of [`claim_and_publish_u8`] for the upsert paths (which
-    /// run inside an async context and prefer `insert_async` to avoid the
-    /// synchronous bucket spin on contention). Identical semantics: wins
-    /// iff the slot was vacant, bumps `migrated_pre_flip` for pre-flip
-    /// internals. See [`claim_and_publish_u8`] for the dedup authority
-    /// argument.
+    /// Async twin of [`claim_and_publish_u8`] for the upsert paths.
+    ///
+    /// DEADLOCK FIX (#589 class, commit `7a4abf62`): formerly used
+    /// `insert_async` to "avoid the synchronous bucket spin on
+    /// contention" — that rationale is now WRONG because the
+    /// `vectors_u8` map is read via the SYNCHRONOUS `read_sync`
+    /// (`collect_live_vectors`, `search_quantized_graph`,
+    /// `search_cofilter_quantized`, `search_prefilter`), scanned via
+    /// `iter_sync` (`search_quantized_bruteforce`, `for_each_vector_u8`,
+    /// the fit catch-up drain), and probed via `contains_sync` (fit
+    /// catch-up loop, `test_vectors_u8_contains`) on the SAME runtime
+    /// worker threads. Mixing `insert_async`'s lock-HANDOFF wait with
+    /// those sync accessors risks a whole-runtime deadlock. The fn stays
+    /// `async` to keep call sites unchanged; this call no longer
+    /// suspends. Identical semantics: wins iff the slot was vacant,
+    /// bumps `migrated_pre_flip` for pre-flip internals. See
+    /// [`claim_and_publish_u8`] for the dedup authority argument.
     async fn claim_and_publish_u8_async(&self, internal: usize, codes: Vec<u8>) -> Option<()> {
-        if self.vectors_u8.insert_async(internal, codes).await.is_ok() {
+        if self.vectors_u8.insert_sync(internal, codes).is_ok() {
             let nif = self.next_id_at_flip.load(Ordering::Acquire);
             if internal < nif {
                 self.migrated_pre_flip.fetch_add(1, Ordering::Relaxed);
@@ -1739,7 +1783,12 @@ impl HnswAdapter {
         let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
         for (internal, codes) in pairs {
-            if self.deleted.contains_async(&internal).await {
+            // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+            // `contains_sync`, NOT `contains_async`. The `deleted` map is
+            // written via `insert_sync` (upsert/upsert_batch/delete) and
+            // scanned via `iter_sync` (`for_each_deleted`, snapshot
+            // serialisation) on the SAME worker threads.
+            if self.deleted.contains_sync(&internal) {
                 continue;
             }
             if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
@@ -1784,10 +1833,17 @@ impl HnswAdapter {
         let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
         for n in neighbors {
-            if self.deleted.contains_async(&n.d_id).await {
+            // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+            // `contains_sync`, NOT `contains_async` — same `deleted` map
+            // hazard as `search_quantized_bruteforce`.
+            if self.deleted.contains_sync(&n.d_id) {
                 continue;
             }
-            let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+            // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async` —
+            // `vectors_u8` is scanned via `iter_sync` (this fn's bruteforce
+            // twin, fit catch-up drain) and read via `read_sync`
+            // (`collect_live_vectors`) on the SAME worker threads.
+            let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
             if let Some(codes) = codes_opt {
                 if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
                     let exact = ctx.score(&codes);
@@ -1838,7 +1894,12 @@ impl HnswAdapter {
         let ctx = RescoreCtx::new(self.metric, quantizer, query);
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
         for n in neighbors {
-            let codes_opt = self.vectors_u8.read_async(&n.d_id, |_, c| c.clone()).await;
+            // DEADLOCK FIX (#589 class, commit `7a4abf62`): `read_sync`,
+            // NOT `read_async` — `vectors_u8` is scanned via `iter_sync`
+            // (`search_quantized_bruteforce`, fit catch-up drain) and
+            // mutated via `insert_sync`/`remove_sync` on the SAME worker
+            // threads.
+            let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
             if let Some(codes) = codes_opt {
                 if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
                     let exact = ctx.score(&codes);
@@ -1931,25 +1992,37 @@ impl HnswAdapter {
 
         let mut scored: Vec<(RecordId, f32)> = Vec::with_capacity(candidates.len());
         for &rid in candidates {
-            let internal = match self.rid_to_internal.read_async(&rid, |_, v| *v).await {
+            // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+            // `read_sync`, NOT `read_async`. The `rid_to_internal` map is
+            // scanned via `iter_sync` (snapshot serialisation,
+            // `collect_live_vectors`) and probed via `contains_sync` on the
+            // SAME worker threads.
+            let internal = match self.rid_to_internal.read_sync(&rid, |_, v| *v) {
                 Some(i) => i,
                 None => continue,
             };
-            if self.deleted.contains_async(&internal).await {
+            // DEADLOCK FIX (#589 class): `contains_sync`, NOT
+            // `contains_async` — `deleted` is mutated via `insert_sync`
+            // and scanned via `iter_sync` on the SAME worker threads.
+            if self.deleted.contains_sync(&internal) {
                 continue;
             }
             if let Some(ctx) = &rescore_ctx {
                 // Post-fit: read codes, dequant + exact rescore.
-                let codes_opt = self
-                    .vectors_u8
-                    .read_async(&internal, |_, c| c.clone())
-                    .await;
+                // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async`
+                // — `vectors_u8` is scanned via `iter_sync` and mutated via
+                // `insert_sync`/`remove_sync` on the SAME worker threads.
+                let codes_opt = self.vectors_u8.read_sync(&internal, |_, c| c.clone());
                 if let Some(codes) = codes_opt {
                     let d = ctx.score(&codes);
                     scored.push((rid, d));
                 }
             } else {
-                let vec_opt = self.vectors.read_async(&internal, |_, v| v.clone()).await;
+                // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async`
+                // — `vectors` is scanned via `iter_sync` (fit snapshot/
+                // delta/catch-up) and mutated via `insert_sync`/`remove_sync`
+                // on the SAME worker threads.
+                let vec_opt = self.vectors.read_sync(&internal, |_, v| v.clone());
                 if let Some(v) = vec_opt {
                     let d = dist.eval(query, &v);
                     scored.push((rid, d));
@@ -2047,8 +2120,13 @@ impl HnswAdapter {
         // Build allow-set of internal IDs from the candidate RIDs.
         let mut allow_set = shamir_collections::TFxSet::<usize>::with_hasher(THasher::default());
         for &rid in candidates {
-            if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-                if !self.deleted.contains_async(&internal).await {
+            // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+            // `read_sync`/`contains_sync`, NOT `read_async`/`contains_async`.
+            // Both `rid_to_internal` and `deleted` are accessed via sync
+            // accessors (`iter_sync`, `insert_sync`, `contains_sync`) on
+            // the SAME worker threads.
+            if let Some(internal) = self.rid_to_internal.read_sync(&rid, |_, v| *v) {
+                if !self.deleted.contains_sync(&internal) {
                     allow_set.insert(internal);
                 }
             }
@@ -2160,8 +2238,8 @@ impl VectorAdapter for HnswAdapter {
         // the loser's internal stayed un-tombstoned, so the rid surfaced
         // TWICE in search (and `len()` skewed) until the next rebuild-on-open.
         //
-        // `entry_async` serialises the slot: the second upsert blocks on the
-        // bucket entry until the first has published its internal, then sees
+        // `entry_sync` serialises the slot: the second upsert blocks on
+        // the bucket entry until the first has published its internal, then sees
         // it as the "old" occupant and tombstones it. The transition
         // (read old → tombstone in `deleted` → write new internal) is done
         // entirely synchronously while the entry is held, so it is atomic
@@ -2171,11 +2249,22 @@ impl VectorAdapter for HnswAdapter {
         // tombstoning the loser's internal does not depend on its graph
         // insert having completed: it is in `deleted` before it can ever be
         // observed live (search filters `deleted` before resolving `rid_map`).
+        //
+        // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2 commit
+        // `621776bd`): `entry_sync`, NOT `entry_async`. The
+        // `rid_to_internal` map is scanned via `iter_sync` (snapshot
+        // serialisation, `collect_live_vectors`) and probed via
+        // `contains_sync` on the SAME worker threads. `entry_async`'s
+        // handoff wait path risks a whole-runtime deadlock. AMPLIFIER: this
+        // guard is held across the `deleted.insert_sync` tombstone below —
+        // `entry_sync` (not `entry_async`) ensures a worker can never PARK
+        // while owning the `rid_to_internal` bucket, closing the
+        // cross-map chain into `deleted`.
         let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut replaced: Option<usize> = None;
         {
             use scc::hash_map::Entry::{Occupied, Vacant};
-            match self.rid_to_internal.entry_async(rid).await {
+            match self.rid_to_internal.entry_sync(rid) {
                 Occupied(mut occ) => {
                     let old_internal = *occ.get();
                     // Tombstone the previous (or concurrently-serialised) internal.
@@ -2206,7 +2295,10 @@ impl VectorAdapter for HnswAdapter {
             // `quantized_fastpath_publish`.
             self.quantized_fastpath_publish(internal, vec).await?;
             if let Some(old) = replaced {
-                let _ = self.vectors_u8.remove_async(&old).await;
+                // DEADLOCK FIX (#589 class): `remove_sync`, not
+                // `remove_async` — `vectors_u8` is scanned via `iter_sync`
+                // and read via `read_sync` on the SAME worker threads.
+                let _ = self.vectors_u8.remove_sync(&old);
             }
             let _ = self.rid_map.insert_async(internal, rid).await;
             return Ok(());
@@ -2230,14 +2322,15 @@ impl VectorAdapter for HnswAdapter {
         .map_err(|e| VectorError::Internal(e.to_string()))?;
         // `internal` is freshly allocated (monotonic `next_id`) so this never
         // collides — the insert always lands.
-        let _ = self
-            .vectors
-            .insert_async(internal, vec_for_store.clone())
-            .await;
+        // DEADLOCK FIX (#589 class): `insert_sync`, not `insert_async` —
+        // `vectors` is scanned via `iter_sync` (fit snapshot/delta/catch-up)
+        // and read via `read_sync` on the SAME worker threads.
+        let _ = self.vectors.insert_sync(internal, vec_for_store.clone());
         if let Some(old) = replaced {
             // Drop the superseded vector so brute-force never scans stale data
             // and memory stays bounded under upsert churn.
-            let _ = self.vectors.remove_async(&old).await;
+            // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
+            let _ = self.vectors.remove_sync(&old);
         }
         let _ = self.rid_map.insert_async(internal, rid).await;
 
@@ -2295,7 +2388,8 @@ impl VectorAdapter for HnswAdapter {
             // Remove from f32 buffer so the catch-up drain sees it as done
             // (whether we claimed it, lost the claim, or it was already
             // tombstoned by a concurrent racer).
-            let _ = self.vectors.remove_async(&internal).await;
+            // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
+            let _ = self.vectors.remove_sync(&internal);
             return Ok(());
         }
 
@@ -2320,7 +2414,7 @@ impl VectorAdapter for HnswAdapter {
     /// and leaves the graph untouched.
     ///
     /// **D12 across a batch:** we claim the rid slot per row through the same
-    /// `entry_async` protocol as single `upsert` — the slot is the
+    /// `entry_sync` protocol as single `upsert` — the slot is the
     /// serialization point. Two concurrent operations (batch ↔ batch, or
     /// batch ↔ single) racing on the SAME rid both go through the rid's
     /// bucket entry: the loser observes the winner's freshly-published
@@ -2359,7 +2453,11 @@ impl VectorAdapter for HnswAdapter {
             let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
             {
                 use scc::hash_map::Entry::{Occupied, Vacant};
-                match self.rid_to_internal.entry_async(*rid).await {
+                // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2 commit
+                // `621776bd`): `entry_sync`, NOT `entry_async` — same
+                // rationale as single `upsert` (amplifier: this guard is
+                // held across the `deleted.insert_sync` tombstone below).
+                match self.rid_to_internal.entry_sync(*rid) {
                     Occupied(mut occ) => {
                         let old_internal = *occ.get();
                         // Tombstone the previous (or concurrently-serialised /
@@ -2430,7 +2528,10 @@ impl VectorAdapter for HnswAdapter {
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
             }
             for old in replaced {
-                let _ = self.vectors_u8.remove_async(&old).await;
+                // DEADLOCK FIX (#589 class): `remove_sync`, not
+                // `remove_async` — `vectors_u8` has sync accessors on the
+                // SAME worker threads (see `claim_and_publish_u8_async` doc).
+                let _ = self.vectors_u8.remove_sync(&old);
             }
             return Ok(());
         }
@@ -2477,7 +2578,10 @@ impl VectorAdapter for HnswAdapter {
         let mut migrated_graph_batch: Vec<(usize, Vec<u8>)> = Vec::new();
         let mut any_migrated = false;
         for (internal, rid, vec) in insert_rows.into_iter() {
-            let _ = self.vectors.insert_async(internal, vec.clone()).await;
+            // DEADLOCK FIX (#589 class): `insert_sync`, not `insert_async`
+            // — `vectors` is scanned via `iter_sync` on the SAME worker
+            // threads.
+            let _ = self.vectors.insert_sync(internal, vec.clone());
             let _ = self.rid_map.insert_async(internal, rid).await;
 
             if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
@@ -2500,7 +2604,9 @@ impl VectorAdapter for HnswAdapter {
                         migrated_graph_batch.push((internal, codes));
                     }
                 }
-                let _ = self.vectors.remove_async(&internal).await;
+                // DEADLOCK FIX (#589 class): `remove_sync`, not
+                // `remove_async`.
+                let _ = self.vectors.remove_sync(&internal);
             }
         }
         // #423 (Б-1) — install the graph nodes for the rows this batch
@@ -2519,7 +2625,8 @@ impl VectorAdapter for HnswAdapter {
             .map_err(|e| VectorError::Internal(e.to_string()))?;
         }
         for old in replaced {
-            let _ = self.vectors.remove_async(&old).await;
+            // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
+            let _ = self.vectors.remove_sync(&old);
         }
 
         // V5.2 (#411) — deferred fit trigger (same rationale as single
@@ -2531,13 +2638,23 @@ impl VectorAdapter for HnswAdapter {
     }
 
     async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
-        if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-            if self.deleted.insert_async(internal, ()).await.is_ok() {
+        // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2 commit
+        // `621776bd`): EVERY lock-acquiring op in this fn is now `_sync`.
+        // All five maps touched here (`rid_to_internal`, `deleted`,
+        // `vectors`, `vectors_u8`) have SYNCHRONOUS accessors
+        // (`iter_sync`, `contains_sync`, `read_sync`, `insert_sync`) on
+        // the SAME runtime worker threads (search/compaction/snapshot
+        // serialisation are ordinary async fns). Mixing any `_async`
+        // call's lock-HANDOFF wait with those sync accessors risks a
+        // whole-runtime deadlock. The fn stays `async` (trait shape
+        // unchanged); it no longer suspends.
+        if let Some(internal) = self.rid_to_internal.read_sync(&rid, |_, v| *v) {
+            if self.deleted.insert_sync(internal, ()).is_ok() {
                 self.deleted_count.fetch_add(1, Ordering::Relaxed);
                 self.bump_migrated_on_tombstone(internal);
             }
-            let _ = self.rid_to_internal.remove_async(&rid).await;
-            let _ = self.vectors.remove_async(&internal).await;
+            let _ = self.rid_to_internal.remove_sync(&rid);
+            let _ = self.vectors.remove_sync(&internal);
             // V5.2 (#411) — also drop codes from the u8 buffer post-fit.
             // The graph node stays (hnsw_rs has no delete) but search
             // filters tombstoned internals, so it's invisible.
@@ -2551,10 +2668,10 @@ impl VectorAdapter for HnswAdapter {
             // here would leak the code if a concurrent fitter's
             // `claim_and_publish_u8` (snapshot/delta pass) had already
             // inserted codes for this internal before we read the flag as
-            // `false`. `scc::HashMap::remove_async` on a missing key is a
-            // no-op (returns `Ok(None)`), so this is safe both pre-fit
+            // `false`. `scc::HashMap::remove_sync` on a missing key is a
+            // no-op (returns `None`), so this is safe both pre-fit
             // (buffer empty) and post-fit.
-            let _ = self.vectors_u8.remove_async(&internal).await;
+            let _ = self.vectors_u8.remove_sync(&internal);
         }
         Ok(())
     }
@@ -2641,7 +2758,11 @@ impl VectorAdapter for HnswAdapter {
                 });
                 let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
                 for (internal, v) in pairs {
-                    if self.deleted.contains_async(&internal).await {
+                    // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+                    // `contains_sync`, NOT `contains_async` — `deleted` is
+                    // mutated via `insert_sync` and scanned via `iter_sync`
+                    // on the SAME worker threads.
+                    if self.deleted.contains_sync(&internal) {
                         continue;
                     }
                     if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
@@ -2724,7 +2845,10 @@ impl VectorAdapter for HnswAdapter {
 
                 let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
                 for n in neighbors {
-                    if self.deleted.contains_async(&n.d_id).await {
+                    // DEADLOCK FIX (#589 class, commit `7a4abf62`):
+                    // `contains_sync`, NOT `contains_async` — same
+                    // `deleted` map hazard as the bruteforce branch above.
+                    if self.deleted.contains_sync(&n.d_id) {
                         continue;
                     }
                     if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {

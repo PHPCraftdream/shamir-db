@@ -2,6 +2,7 @@ pub mod brute_force_tests;
 pub mod cofilter_prefilter_tests;
 pub mod compaction_tests;
 pub mod crash_recovery_tests;
+pub mod deadlock_regression_tests;
 pub mod delta_log_tests;
 pub mod hnsw_adapter_tests;
 pub mod hnsw_rs_contract_tests;
