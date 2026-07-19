@@ -393,7 +393,17 @@ impl AggAccum {
             } => {
                 if let Some(s) = scalar {
                     match s {
-                        ScalarRef::Int(i) => *sum_i += i,
+                        ScalarRef::Int(i) => match sum_i.checked_add(i) {
+                            Some(new_sum) => *sum_i = new_sum,
+                            None => {
+                                // Integer overflow — divert to the existing
+                                // float lane (same mechanism Dec/Big/F64 rows
+                                // use). Keeps `sum_i` always-exact so finish()'s
+                                // `sum_f + sum_i as f64` is correct.
+                                *has_float = true;
+                                *sum_f += i as f64;
+                            }
+                        },
                         ScalarRef::F64(f) => {
                             *has_float = true;
                             *sum_f += f;

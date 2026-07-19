@@ -2,6 +2,7 @@
 //! cross-type min/max.
 
 use crate::agg::{self, AggRegistry};
+use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::value::QueryValue;
@@ -39,6 +40,9 @@ fn str_v(s: &str) -> QueryValue {
 }
 fn bool_v(b: bool) -> QueryValue {
     QueryValue::Bool(b)
+}
+fn big(b: BigInt) -> QueryValue {
+    QueryValue::Big(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +133,28 @@ fn count_distinct_distinct_sets_same_length() {
     });
     let r = run("count_distinct", &[s1, s2]).unwrap();
     assert_eq!(r, int(2));
+}
+
+#[test]
+fn count_distinct_int_big_precision() {
+    // i64::MAX and Big(i64::MAX - 1) are genuinely distinct values. Before
+    // the compare.rs fix, both rounded to the same f64 and compared Equal,
+    // so count_distinct returned 1. Now exact via BigInt → 2.
+    let r = run(
+        "count_distinct",
+        &[int(i64::MAX), big(BigInt::from(i64::MAX) - 1)],
+    )
+    .unwrap();
+    assert_eq!(r, int(2));
+}
+
+#[test]
+fn min_max_int_big_precision() {
+    // min/max over Int(i64::MAX) and Big(i64::MAX - 1): i64::MAX is greater.
+    let hi = int(i64::MAX);
+    let lo = big(BigInt::from(i64::MAX) - 1);
+    assert_eq!(run("min", &[hi.clone(), lo.clone()]).unwrap(), lo);
+    assert_eq!(run("max", &[hi.clone(), lo.clone()]).unwrap(), hi);
 }
 
 // ---------------------------------------------------------------------------

@@ -124,6 +124,10 @@ fn cast_to_int(v: &QueryValue) -> Result<QueryValue, ScalarError> {
                 Err(ScalarError::new("cast_failed"))
             }
         }
+        QueryValue::Big(b) => b
+            .to_i64()
+            .map(v_int)
+            .ok_or_else(|| ScalarError::new("cast_failed")),
         QueryValue::Str(s) => parse_int_str(s),
         _ => Err(ScalarError::new("cast_failed")),
     }
@@ -139,6 +143,20 @@ fn cast_to_dec(v: &QueryValue) -> Result<QueryValue, ScalarError> {
         QueryValue::F64(f) => Decimal::from_f64_retain(*f)
             .map(v_dec)
             .ok_or_else(|| ScalarError::new("cast_failed")),
+        QueryValue::Big(b) => {
+            // Mirror agg::to_dec: i64 first (exact), then f64 fallback (lossy),
+            // then error. BigInt has arbitrary precision so only values that
+            // genuinely don't fit as a Decimal fail here.
+            if let Some(n) = b.to_i64() {
+                Ok(v_dec(Decimal::from(n)))
+            } else if let Some(f) = b.to_f64() {
+                Decimal::from_f64_retain(f)
+                    .map(v_dec)
+                    .ok_or_else(|| ScalarError::new("cast_failed"))
+            } else {
+                Err(ScalarError::new("cast_failed"))
+            }
+        }
         QueryValue::Str(s) => parse_dec_str(s),
         _ => Err(ScalarError::new("cast_failed")),
     }

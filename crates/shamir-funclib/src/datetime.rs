@@ -208,7 +208,10 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let x = arg_i64(a, 0)?;
                 let y = arg_i64(a, 1)?;
-                Ok(v_int(div_floor(x - y, 1000)))
+                let diff = x
+                    .checked_sub(y)
+                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                Ok(v_int(div_floor(diff, 1000)))
             },
             2,
             Some(2),

@@ -400,7 +400,13 @@ fn eval_filter_expr(
                 if *y == 0 {
                     return None;
                 }
-                return Some(QueryValue::Int(x % y));
+                if let Some(r) = x.checked_rem(*y) {
+                    return Some(QueryValue::Int(r));
+                }
+                // i64::MIN % -1 — two's-complement overflow artifact, not a
+                // real undefined case (mathematically 0). Fall through to the
+                // float path, mirroring numeric_binop's overflow-to-float
+                // behaviour for Add/Sub/Mul.
             }
             let x = as_f64(a)?;
             let y = as_f64(b)?;

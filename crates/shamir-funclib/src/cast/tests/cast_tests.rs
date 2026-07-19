@@ -3,6 +3,7 @@
 
 use crate::cast;
 use crate::registry::{v_bool, v_int, v_str, ScalarRegistry};
+use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use shamir_types::types::value::QueryValue;
 
@@ -207,5 +208,81 @@ fn try_cast_dispatch_and_unknown_type() {
         .unwrap_err()
         .code,
         "cast_failed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Big support in cast_to_int / cast_to_dec (mirrors agg::to_dec)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cast_big_to_int_ok_and_overflow() {
+    let r = reg();
+    // Big(42) fits i64 → Int(42).
+    assert_eq!(
+        r.call("to_int", &[QueryValue::Big(BigInt::from(42))])
+            .unwrap(),
+        v_int(42)
+    );
+    // try_cast with "int" target.
+    assert_eq!(
+        r.call(
+            "try_cast",
+            &[
+                QueryValue::Big(BigInt::from(42)),
+                QueryValue::Str("int".into())
+            ]
+        )
+        .unwrap(),
+        v_int(42)
+    );
+    // Big(i64::MAX + 1) overflows i64 → cast_failed (not truncated/wrapped).
+    assert_eq!(
+        r.call("to_int", &[QueryValue::Big(BigInt::from(i64::MAX) + 1)])
+            .unwrap_err()
+            .code,
+        "cast_failed"
+    );
+}
+
+#[test]
+fn cast_big_to_dec_exact_and_f64_fallback() {
+    let r = reg();
+    // Big(42) fits i64 → exact Decimal(42).
+    assert_eq!(
+        r.call("to_dec", &[QueryValue::Big(BigInt::from(42))])
+            .unwrap(),
+        dec("42")
+    );
+    // Big(i64::MAX + 1) doesn't fit i64 but fits f64/Decimal → succeeds via
+    // the f64 fallback (same behaviour as agg::to_dec for the same input).
+    let huge = QueryValue::Big(BigInt::from(i64::MAX) + 1);
+    let result = r.call("to_dec", &[huge]).unwrap();
+    assert!(matches!(result, QueryValue::Dec(_)));
+    // A genuinely unrepresentable Big (far beyond f64 range) → cast_failed.
+    // 10^400 cannot be converted to f64 or i64.
+    let absurd = QueryValue::Big(BigInt::from(10).pow(400));
+    assert_eq!(r.call("to_dec", &[absurd]).unwrap_err().code, "cast_failed");
+}
+
+#[test]
+fn cast_big_to_float_is_dec() {
+    let r = reg();
+    // "float" target dispatches to cast_to_dec.
+    assert_eq!(
+        r.call(
+            "try_cast",
+            &[
+                QueryValue::Big(BigInt::from(42)),
+                QueryValue::Str("float".into())
+            ]
+        )
+        .unwrap(),
+        dec("42")
+    );
+    assert_eq!(
+        r.call("to_float", &[QueryValue::Big(BigInt::from(42))])
+            .unwrap(),
+        dec("42")
     );
 }

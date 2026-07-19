@@ -1091,3 +1091,59 @@ fn order_by_cross_type_dec_int_f64() {
     assert_eq!(qvs[2]["v"], QueryValue::Dec("9.5".parse().unwrap()));
     assert_eq!(qvs[3]["v"], QueryValue::F64(10.5));
 }
+
+// ============================================================================
+// Sum integer-overflow regression (the "Sum accumulator unchecked i64
+// overflow" fix): values that individually fit in i64 but whose running
+// total crosses ±2^63 must NOT panic and must lift to the F64 lane.
+// ============================================================================
+
+/// Build a record: `{ v: Int }` — a genuine in-memory Int field. `scalar_at`
+/// returns `ScalarRef::Int`, so Sum's integer accumulator is exercised.
+fn make_int_record(interner: &Interner, v: i64) -> InnerValue {
+    let mut map = new_map();
+    map.insert(InternerKey::new(intern(interner, "v")), InnerValue::Int(v));
+    InnerValue::Map(map)
+}
+
+/// `sum(v)` over two Int rows whose total exceeds `i64::MAX`: must NOT panic
+/// and must return a `F64` close to the true mathematical sum, not a
+/// wrapped/garbage `Int`.
+#[test]
+fn aggregate_sum_int_overflow_lifts_to_f64() {
+    let interner = Interner::default();
+    let half = i64::MAX / 2 + 1; // 4611686018427387904
+    let records = vec![
+        make_int_record(&interner, half),
+        make_int_record(&interner, half),
+    ];
+    let field = AggregateField::Field(vec!["v".into()]);
+    let mut acc = AggAccum::new(AggFunc::Sum, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    // True sum = 2 * half = i64::MAX + 1 = 9223372036854775808.
+    let result = acc.finish(&interner);
+    match result {
+        QueryValue::F64(f) => assert!((f - (i64::MAX as f64 + 1.0)).abs() < 1.0),
+        other => panic!("expected F64 after overflow, got {other:?}"),
+    }
+}
+
+/// `sum(v)` over all-Int values that stay well within `i64` range must still
+/// return `Int`, not be lifted to float unnecessarily.
+#[test]
+fn aggregate_sum_int_no_overflow_stays_int() {
+    let interner = Interner::default();
+    let records = vec![
+        make_int_record(&interner, 1),
+        make_int_record(&interner, 2),
+        make_int_record(&interner, 3),
+    ];
+    let field = AggregateField::Field(vec!["v".into()]);
+    let mut acc = AggAccum::new(AggFunc::Sum, &field, &interner);
+    for rec in &records {
+        acc.step(rec);
+    }
+    assert_eq!(acc.finish(&interner), QueryValue::Int(6));
+}

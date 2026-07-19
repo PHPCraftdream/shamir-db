@@ -207,6 +207,72 @@ fn test_expr_div_by_zero_is_none() {
     assert_eq!(resolve_filter_query(&fv, &record, &ctx), None);
 }
 
+/// `$expr` `mod` with `i64::MIN % -1` must NOT panic — the two's-complement
+/// overflow artifact falls through to the float path, yielding `0`.
+#[test]
+fn test_expr_mod_int_min_neg_one_no_panic() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let fv = FilterValue::Expr {
+        expr: FilterExpr::new(
+            FilterExprOp::Mod,
+            vec![FilterValue::Int(i64::MIN), FilterValue::Int(-1)],
+        ),
+    };
+
+    // Falls through to the float lane: i64::MIN as f64 % (-1.0) = 0.0.
+    assert_eq!(
+        resolve_filter_query(&fv, &record, &ctx),
+        Some(QueryValue::F64(0.0))
+    );
+}
+
+/// `$expr` `mod` regressions: basic, negative operands, float operands, and
+/// zero-divisor → None for both int and float paths.
+#[test]
+fn test_expr_mod_regressions() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let helper = |a: FilterValue, b: FilterValue| {
+        resolve_filter_query(
+            &FilterValue::Expr {
+                expr: FilterExpr::new(FilterExprOp::Mod, vec![a, b]),
+            },
+            &record,
+            &ctx,
+        )
+    };
+
+    // Basic: 7 % 3 = 1 (stays Int).
+    assert_eq!(
+        helper(FilterValue::Int(7), FilterValue::Int(3)),
+        Some(QueryValue::Int(1))
+    );
+    // Negative operands: -7 % 3 = -1 (Rust truncated-remainder semantics).
+    assert_eq!(
+        helper(FilterValue::Int(-7), FilterValue::Int(3)),
+        Some(QueryValue::Int(-1))
+    );
+    // Float operands: 7.5 % 2.0 = 1.5.
+    assert_eq!(
+        helper(FilterValue::Float(7.5), FilterValue::Float(2.0)),
+        Some(QueryValue::F64(1.5))
+    );
+    // Int zero-divisor → None.
+    assert_eq!(helper(FilterValue::Int(7), FilterValue::Int(0)), None);
+    // Float zero-divisor → None.
+    assert_eq!(
+        helper(FilterValue::Float(7.5), FilterValue::Float(0.0)),
+        None
+    );
+}
+
 /// `$cond` whose `then` branch is a nested `$expr` — cross-feature recursion.
 #[test]
 fn test_cond_then_branch_is_expr() {

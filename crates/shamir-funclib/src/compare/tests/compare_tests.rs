@@ -71,6 +71,44 @@ fn numeric_cross_subtype_ordering() {
 }
 
 // ---------------------------------------------------------------------------
+// Int↔Big precision: previously both sides were converted to f64, which
+// rounds i64::MAX and i64::MAX-1 to the SAME float. Now exact via BigInt.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn int_big_exact_comparison_at_i64_max() {
+    // The exact trigger: f64 rounds both i64::MAX and i64::MAX-1 to the same
+    // float, so the old f64 fallback reported Equal.
+    let max = int(i64::MAX);
+    let just_below_max = QueryValue::Big(BigInt::from(i64::MAX) - 1);
+    assert_eq!(compare(&max, &just_below_max), Ordering::Greater);
+    assert_eq!(compare(&just_below_max, &max), Ordering::Less);
+}
+
+#[test]
+fn int_big_equal_values() {
+    assert_eq!(compare(&int(5), &big(5)), Ordering::Equal);
+    assert_eq!(compare(&big(0), &int(0)), Ordering::Equal);
+}
+
+#[test]
+fn int_big_ordering() {
+    assert_eq!(compare(&int(3), &big(10)), Ordering::Less);
+    assert_eq!(compare(&big(10), &int(3)), Ordering::Greater);
+    assert_eq!(compare(&int(-1), &big(0)), Ordering::Less);
+}
+
+#[test]
+fn big_big_and_dec_dec_regression() {
+    // Big↔Big unaffected.
+    assert_eq!(compare(&big(1), &big(2)), Ordering::Less);
+    assert_eq!(compare(&big(5), &big(5)), Ordering::Equal);
+    // Dec↔Dec unaffected.
+    assert_eq!(compare(&dec("1.5"), &dec("2.5")), Ordering::Less);
+    assert_eq!(compare(&dec("3.0"), &dec("3.0")), Ordering::Equal);
+}
+
+// ---------------------------------------------------------------------------
 // Cross-type rank ordering
 // ---------------------------------------------------------------------------
 

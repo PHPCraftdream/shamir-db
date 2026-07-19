@@ -94,9 +94,12 @@ fn type_rank(v: &QueryValue) -> u8 {
 /// Strategy:
 /// - Int vs Int: direct i64 comparison.
 /// - Dec vs Dec: direct Decimal comparison.
+/// - Big vs Big: direct BigInt comparison.
 /// - Int vs Dec / Dec vs Int: promote Int to Decimal.
-/// - Anything involving F64: convert both sides to f64.
-/// - Anything involving Big: try Decimal first (if Big fits); else f64.
+/// - Int vs Big / Big vs Int: exact via BigInt comparison (arbitrary
+///   precision, no lossy conversion).
+/// - Anything involving F64, or Dec vs Big: convert both sides to f64
+///   (lossy; a full Dec↔Big exact path is out of scope here).
 /// - NaN sorts last; NaN == NaN for totality.
 fn compare_numeric(a: &QueryValue, b: &QueryValue) -> Ordering {
     // Fast paths for same-subtype.
@@ -112,10 +115,13 @@ fn compare_numeric(a: &QueryValue, b: &QueryValue) -> Ordering {
     match (a, b) {
         (QueryValue::Int(x), QueryValue::Dec(d)) => return Decimal::from(*x).cmp(d),
         (QueryValue::Dec(d), QueryValue::Int(y)) => return d.cmp(&Decimal::from(*y)),
+        // Int↔Big: exact via BigInt (arbitrary precision, no lossy f64 rounding).
+        (QueryValue::Int(x), QueryValue::Big(y)) => return BigInt::from(*x).cmp(y),
+        (QueryValue::Big(x), QueryValue::Int(y)) => return x.cmp(&BigInt::from(*y)),
         _ => {}
     }
 
-    // Anything else (F64 or Big involved) -- convert to f64.
+    // Anything else (F64 or Dec↔Big involved) -- convert to f64.
     let fa = to_f64(a);
     let fb = to_f64(b);
     cmp_f64(fa, fb)

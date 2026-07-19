@@ -174,6 +174,25 @@ fn arithmetic() {
 }
 
 #[test]
+fn diff_secs_overflow_returns_error() {
+    let r = reg();
+    // i64::MAX - i64::MIN overflows i64 — must return "out_of_range", not panic.
+    assert_eq!(
+        r.call("diff_secs", &[ts(i64::MAX), ts(i64::MIN)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    // Reverse direction also overflows.
+    assert_eq!(
+        r.call("diff_secs", &[ts(i64::MIN), ts(i64::MAX)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+}
+
+#[test]
 fn period_starts() {
     let r = reg();
     assert_eq!(
