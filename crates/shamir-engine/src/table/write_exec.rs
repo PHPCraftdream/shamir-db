@@ -856,47 +856,19 @@ impl TableManager {
         let mut resolved_value = resolve_computed_record(&op.value, interner)
             .map_err(shamir_storage::error::DbError::Codec)?;
 
-        // ③.2d UPSERT-path: apply transforms with is_insert=true.
-        // `op.value` is a FULL record (insert-semantics): AutoNow + AutoNowAdd
-        // both apply.  For the MERGE branch this means AutoNowAdd may write
-        // `created_at` into the set-map, which then merges over the old record.
-        // TODO(③.2d): UPSERT MERGE created_at: if the existing record already
-        // has created_at and the caller did not supply one, the absence-guard in
-        // AutoNowAdd will stamp it into the set-map, overwriting the old value.
-        // A correct fix requires knowing at transform-time whether we are in the
-        // INSERT or MERGE branch — which we can't know until after the key lookup.
-        // For now we use is_insert=true (full-record semantics per brief) and
-        // accept that UPSERT MERGE may inadvertently overwrite created_at when
-        // the caller omits it. Track and fix in a follow-up if needed.
-        let transforms = self.schema_transforms();
-        if !transforms.is_empty() {
-            let now_ns: u64 = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            apply_transforms(
-                resolved_value.to_mut(),
-                &transforms,
-                builtin_scalars(),
-                now_ns,
-                true,
-            );
-        }
-
-        // Intern field names through the tx overlay, then release the
-        // immutable borrow on `tx` before the mutable staging calls. Two
-        // artefacts come out of this block:
-        //   * `key_fields` — TINY scalar InnerValue keys for the lookup
-        //     (`lookup_existing_for_set` takes `(Vec<u64>, InnerValue)`; these
-        //      are scalar key values, NOT the record tree — out of scope).
-        //   * `set_map` — the interned-key InnerValue overlay that
-        //     `merge_storage_bytes` patches onto the old bytes (the same shape
-        //     W3c's update path builds).
-        let (key_fields, set_map, new_bytes_fresh) = {
+        // Derive the scalar key fields from `op.key` and run the existing-record
+        // lookup BEFORE applying transforms. `key_fields` depends only on
+        // `op.key` (never on the transformed value), so the lookup can run
+        // earlier without missing information. The MERGE-vs-INSERT decision it
+        // returns then drives `is_insert` for `apply_transforms` below — this is
+        // load-bearing because `AutoNowAdd` (created_at) and `ComputedDefault`
+        // are INSERT-only: running them with is_insert=true on a MERGE would
+        // stamp a fresh created_at into the merge overlay whenever the caller
+        // omits it, silently overwriting the existing row's real creation time.
+        let key_fields: Vec<(Vec<u64>, InnerValue)> = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
-
-            let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
+            match &op.key {
                 Value::Map(map) => {
                     let mut fields = Vec::with_capacity(map.len());
                     for (k, v) in map {
@@ -912,7 +884,40 @@ impl TableManager {
                         "SET key must be a map object".to_string(),
                     ))
                 }
-            };
+            }
+        };
+
+        let found = self
+            .lookup_existing_for_set(&key_fields, batch_size)
+            .await?;
+
+        let transforms = self.schema_transforms();
+        if !transforms.is_empty() {
+            let now_ns: u64 = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            apply_transforms(
+                resolved_value.to_mut(),
+                &transforms,
+                builtin_scalars(),
+                now_ns,
+                found.is_none(),
+            );
+        }
+
+        // Intern the (now correctly transformed) value's field names through
+        // the tx overlay, then release the immutable borrow on `tx` before the
+        // mutable staging calls. Two artefacts come out of this block:
+        //   * `set_map` — the interned-key InnerValue overlay that
+        //     `merge_storage_bytes` patches onto the old bytes (the same shape
+        //     W3c's update path builds).
+        //   * `new_bytes_fresh` — INSERT-branch bytes: the resolved value
+        //     encoded directly via the tree-free storage encoder (same call
+        //     `execute_insert_tx` makes).
+        let (set_map, new_bytes_fresh) = {
+            let layered = make_layered_interner(interner, tx);
+            let intern_fn = intern_via_layered(&layered);
 
             let new_inner = query_value_to_inner_with(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
@@ -925,12 +930,10 @@ impl TableManager {
                 }
             };
 
-            // INSERT-branch bytes: encode the resolved value directly via the
-            // tree-free storage encoder (same call `execute_insert_tx` makes).
             let new_bytes_fresh = query_value_to_storage_bytes(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
-            (key_fields, set_map, new_bytes_fresh)
+            (set_map, new_bytes_fresh)
         };
 
         // Check whether any Upsert validators are registered BEFORE the
@@ -947,10 +950,6 @@ impl TableManager {
             let bindings = self.validator_bindings();
             bindings.iter().any(|b| b.ops.contains(&WriteOp::Upsert))
         };
-
-        let found = self
-            .lookup_existing_for_set(&key_fields, batch_size)
-            .await?;
 
         let result_record = if let Some((id, _existing)) = found {
             // ----- MERGE branch (tree-free, mirrors W3c execute_update_tx) -----

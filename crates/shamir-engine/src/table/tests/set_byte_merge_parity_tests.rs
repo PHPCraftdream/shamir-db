@@ -40,11 +40,14 @@ use shamir_types::mpack;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
+use smallvec::smallvec;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::TableManager;
 use crate::table::tests::write_exec_tests::{insert_via_tx, setup_empty_table};
+use crate::validator::schema::{rule, SchemaValidator};
+use crate::validator::{RecordValidator, ValidatorBinding, ValidatorRegistry, WriteOp};
 
 // ============================================================================
 // Helpers
@@ -598,5 +601,171 @@ async fn set_tx_noop_skips_staging() {
     assert!(
         tx.index_write_set.is_empty(),
         "no-op SET must not stage any index ops"
+    );
+}
+
+// ============================================================================
+// 5. Transform ordering: AutoNowAdd created_at preserved on UPSERT MERGE
+// ============================================================================
+//
+// Regression for the UPSERT-MERGE created_at overwrite bug. Previously
+// `execute_set_tx` applied `apply_transforms` with a hardcoded
+// `is_insert=true` BEFORE the existing-record lookup, so an `AutoNowAdd`
+// rule stamped a fresh `created_at` into the merge overlay even when the
+// caller omitted the field — silently overwriting the row's real creation
+// timestamp. The lookup now runs first and `is_insert` reflects the actual
+// branch (`found.is_none()`), so `AutoNowAdd` fires only on a true INSERT.
+//
+// Guarantees:
+//   A. MERGE omitting `created_at` → original value preserved (the bug).
+//   B. INSERT of a brand-new key → `created_at` still stamped (regression).
+//   C. MERGE explicitly supplying `created_at` → supplied value wins
+//      (the absence-guard's own semantics are unchanged by the fix).
+//   D. `AutoNow` (`updated_at`) still fires on BOTH branches — the fix must
+//      not regress the unconditional stamp.
+
+/// Bind a `SchemaValidator` declaring `created_at` (AutoNowAdd) and
+/// `updated_at` (AutoNow) to `table`, scoped to `WriteOp::Upsert`. This is
+/// the schema shape that exposes the created_at-merge bug.
+async fn bind_timestamp_schema(table: &mut crate::table::TableManager) {
+    let rules = vec![
+        rule(["created_at"]).int().auto_now_add().build(),
+        rule(["updated_at"]).int().auto_now().build(),
+    ];
+    let sv = SchemaValidator::new(rules);
+    let val_id = RecordId::system("ts_schema");
+    let reg = Arc::new(ValidatorRegistry::new());
+    reg.register(
+        val_id,
+        "ts_schema",
+        Arc::new(sv) as Arc<dyn RecordValidator>,
+    )
+    .unwrap();
+    table.set_validator_registry(reg);
+    table
+        .add_validator_binding(ValidatorBinding {
+            validator_id: val_id,
+            ops: smallvec![WriteOp::Upsert],
+            priority: 1000,
+        })
+        .await
+        .unwrap();
+}
+
+/// Extract an `i64` field from an `InsertedRecord`'s value map.
+fn int_field(rec: &crate::query::write::InsertedRecord, field: &str) -> Option<i64> {
+    match rec.get_value_owned(field) {
+        Some(QueryValue::Int(i)) => Some(i),
+        _ => None,
+    }
+}
+
+/// (A) MERGE omitting `created_at` must preserve the original stamp — the
+/// exact bug. A fresh stamp would overwrite the real creation timestamp with
+/// the merge-time `now`, silently corrupting the row.
+#[tokio::test]
+async fn set_merge_omitting_created_at_preserves_original() {
+    let (mut table, repo) = setup_empty_table().await;
+    bind_timestamp_schema(&mut table).await;
+
+    // INSERT branch: created_at stamped by AutoNowAdd.
+    let op_ins = write::upsert("users")
+        .key(doc().set("email", "a@b.c"))
+        .value(doc().set("email", "a@b.c").set("name", "alice"))
+        .build();
+    let res_ins = set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
+    assert_eq!(
+        res_ins.records[0].get_value_owned("_created"),
+        Some(QueryValue::Bool(true)),
+        "first upsert on a fresh key must be an INSERT"
+    );
+    let created_at_original =
+        int_field(&res_ins.records[0], "created_at").expect("created_at stamped on INSERT");
+
+    // Sleep so a buggy fresh stamp (merge-time `now`) is detectably different.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // MERGE branch: same key, created_at OMITTED.
+    let op_merge = write::upsert("users")
+        .key(doc().set("email", "a@b.c"))
+        .value(doc().set("name", "ALICE"))
+        .build();
+    let res_merge = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();
+    assert_eq!(
+        res_merge.records[0].get_value_owned("_created"),
+        Some(QueryValue::Bool(false)),
+        "second upsert on the same key must be a MERGE"
+    );
+    assert_eq!(
+        int_field(&res_merge.records[0], "created_at"),
+        Some(created_at_original),
+        "MERGE must preserve the original created_at when the caller omits it"
+    );
+    // (D) AutoNow (updated_at) is unconditional — must still be present on MERGE.
+    assert!(
+        int_field(&res_merge.records[0], "updated_at").is_some(),
+        "AutoNow (updated_at) must still fire on the MERGE branch"
+    );
+}
+
+/// (B) INSERT of a brand-new key still stamps `created_at` via AutoNowAdd —
+/// the regression guard. The INSERT branch's behaviour must not change.
+#[tokio::test]
+async fn set_insert_new_key_still_stamps_created_at() {
+    let (mut table, repo) = setup_empty_table().await;
+    bind_timestamp_schema(&mut table).await;
+
+    let op = write::upsert("users")
+        .key(doc().set("email", "new@b.c"))
+        .value(doc().set("email", "new@b.c").set("name", "newbie"))
+        .build();
+    let res = set_via_implicit_tx(&repo, &table, &op).await.unwrap();
+    assert_eq!(
+        res.records[0].get_value_owned("_created"),
+        Some(QueryValue::Bool(true)),
+        "upsert on a fresh key must be an INSERT"
+    );
+    let created = int_field(&res.records[0], "created_at");
+    assert!(
+        created.is_some() && created.unwrap() > 0,
+        "INSERT branch must stamp created_at via AutoNowAdd (regression)"
+    );
+    assert!(
+        int_field(&res.records[0], "updated_at").is_some(),
+        "INSERT branch must stamp updated_at via AutoNow"
+    );
+}
+
+/// (C) MERGE explicitly supplying `created_at` — the supplied value wins.
+/// The absence-guard only fires when the field is OMITTED, so this path is
+/// unaffected by the is_insert fix; it guards the guard's own semantics.
+#[tokio::test]
+async fn set_merge_explicit_created_at_is_used() {
+    let (mut table, repo) = setup_empty_table().await;
+    bind_timestamp_schema(&mut table).await;
+
+    // Seed a row first.
+    let op_ins = write::upsert("users")
+        .key(doc().set("email", "a@b.c"))
+        .value(doc().set("email", "a@b.c").set("name", "alice"))
+        .build();
+    set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
+
+    // MERGE with an explicit created_at — must override the original.
+    let explicit_ts: i64 = 1_234_567_890;
+    let op_merge = write::upsert("users")
+        .key(doc().set("email", "a@b.c"))
+        .value(doc().set("created_at", explicit_ts))
+        .build();
+    let res = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();
+    assert_eq!(
+        res.records[0].get_value_owned("_created"),
+        Some(QueryValue::Bool(false)),
+        "must be a MERGE"
+    );
+    assert_eq!(
+        int_field(&res.records[0], "created_at"),
+        Some(explicit_ts),
+        "explicitly-supplied created_at on MERGE must be used verbatim"
     );
 }
