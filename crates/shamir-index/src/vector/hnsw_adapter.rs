@@ -827,7 +827,19 @@ impl HnswAdapter {
                         // `vectors_u8.insert_async` here undercounts
                         // convergence and hangs the fitter.
                         self.quantized_fastpath_publish(internal, vec).await?;
-                        let _ = self.rid_map.insert_async(internal, *rid).await;
+                        // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                        // commit `dcfaf825`): `insert_sync`, NOT `insert_async`. The
+                        // `rid_map` is scanned via the SYNCHRONOUS `iter_sync` in
+                        // `for_each_rid_map` (snapshot serialisation) on the SAME
+                        // runtime worker threads. `insert_async`'s wait path is
+                        // lock-HANDOFF: saa grants the suspended waiter TASK the
+                        // exclusive bucket lock, which it then holds while sitting
+                        // in tokio's run queue unpolled; a worker parked in that
+                        // `iter_sync` on the same bucket during the handoff window
+                        // can whole-runtime deadlock. `insert_sync` holds the lock
+                        // only while a thread is RUNNING. The fn stays `async`
+                        // (call sites unchanged); this call no longer suspends.
+                        let _ = self.rid_map.insert_sync(internal, *rid);
                         continue;
                     }
 
@@ -851,7 +863,12 @@ impl HnswAdapter {
                     // threads. `insert_async`'s handoff wait path risks a
                     // whole-runtime deadlock against those sync readers.
                     let _ = self.vectors.insert_sync(internal, vec.clone());
-                    let _ = self.rid_map.insert_async(internal, *rid).await;
+                    // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                    // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
+                    // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                    // (snapshot serialisation) on the SAME worker threads; same
+                    // hazard as the sibling `rid_map.insert_sync` above in this fn.
+                    let _ = self.rid_map.insert_sync(internal, *rid);
 
                     // Self-migration re-check (mirrors `upsert`, Б-1/#423):
                     // a concurrent fit may have flipped `is_fitted` true
@@ -1791,7 +1808,11 @@ impl HnswAdapter {
             if self.deleted.contains_sync(&internal) {
                 continue;
             }
-            if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+            // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+            // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+            // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+            // (snapshot serialisation) on the SAME worker threads.
+            if let Some(rid) = self.rid_map.read_sync(&internal, |_, r| *r) {
                 let d = ctx.score(&codes);
                 out.push((rid, d));
             }
@@ -1845,7 +1866,11 @@ impl HnswAdapter {
             // (`collect_live_vectors`) on the SAME worker threads.
             let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
             if let Some(codes) = codes_opt {
-                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+                // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                // (snapshot serialisation) on the SAME worker threads.
+                if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
                     let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
@@ -1901,7 +1926,11 @@ impl HnswAdapter {
             // threads.
             let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
             if let Some(codes) = codes_opt {
-                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+                // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                // (snapshot serialisation) on the SAME worker threads.
+                if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
                     let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
@@ -2208,7 +2237,11 @@ impl HnswAdapter {
 
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize);
         for n in neighbors {
-            if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+            // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+            // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+            // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+            // (snapshot serialisation) on the SAME worker threads.
+            if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
                 out.push((rid, n.distance));
             }
         }
@@ -2300,7 +2333,11 @@ impl VectorAdapter for HnswAdapter {
                 // and read via `read_sync` on the SAME worker threads.
                 let _ = self.vectors_u8.remove_sync(&old);
             }
-            let _ = self.rid_map.insert_async(internal, rid).await;
+            // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+            // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
+            // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+            // (snapshot serialisation) on the SAME worker threads.
+            let _ = self.rid_map.insert_sync(internal, rid);
             return Ok(());
         }
 
@@ -2332,7 +2369,11 @@ impl VectorAdapter for HnswAdapter {
             // DEADLOCK FIX (#589 class): `remove_sync`, not `remove_async`.
             let _ = self.vectors.remove_sync(&old);
         }
-        let _ = self.rid_map.insert_async(internal, rid).await;
+        // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+        // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
+        // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+        // (snapshot serialisation) on the SAME worker threads.
+        let _ = self.rid_map.insert_sync(internal, rid);
 
         // #423 (Б-1) — self-migration re-check: if `is_fitted` flipped
         // true between our initial `quantized_active()` check and now, our
@@ -2513,7 +2554,11 @@ impl VectorAdapter for HnswAdapter {
                 {
                     graph_batch.push((internal, codes));
                 }
-                let _ = self.rid_map.insert_async(internal, rid).await;
+                // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
+                // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                // (snapshot serialisation) on the SAME worker threads.
+                let _ = self.rid_map.insert_sync(internal, rid);
             }
             if !graph_batch.is_empty() {
                 let hnsw_u8 = self
@@ -2582,7 +2627,11 @@ impl VectorAdapter for HnswAdapter {
             // — `vectors` is scanned via `iter_sync` on the SAME worker
             // threads.
             let _ = self.vectors.insert_sync(internal, vec.clone());
-            let _ = self.rid_map.insert_async(internal, rid).await;
+            // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+            // commit `dcfaf825`): `insert_sync`, NOT `insert_async` —
+            // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+            // (snapshot serialisation) on the SAME worker threads.
+            let _ = self.rid_map.insert_sync(internal, rid);
 
             if self.quantization.is_some() && self.is_fitted.load(Ordering::Acquire) {
                 any_migrated = true;
@@ -2765,7 +2814,11 @@ impl VectorAdapter for HnswAdapter {
                     if self.deleted.contains_sync(&internal) {
                         continue;
                     }
-                    if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+                    // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                    // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+                    // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                    // (snapshot serialisation) on the SAME worker threads.
+                    if let Some(rid) = self.rid_map.read_sync(&internal, |_, r| *r) {
                         out.push((rid, dist.eval(query, &v)));
                     }
                 }
@@ -2851,7 +2904,11 @@ impl VectorAdapter for HnswAdapter {
                     if self.deleted.contains_sync(&n.d_id) {
                         continue;
                     }
-                    if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                    // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
+                    // commit `dcfaf825`): `read_sync`, NOT `read_async` —
+                    // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
+                    // (snapshot serialisation) on the SAME worker threads.
+                    if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
                         out.push((rid, n.distance));
                     }
                 }

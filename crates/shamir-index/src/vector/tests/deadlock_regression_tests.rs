@@ -28,6 +28,13 @@
 //!   `vector_backend.rs`) — `insert_async` (double-write delete path in
 //!   `vector_backend.rs`) mixed with `contains_sync` (backfill guard) and
 //!   `iter_sync` (Step4b reconcile).
+//! * **`rid_map`** (`scc::HashMap<usize, RecordId, THasher>`, reverse of
+//!   `rid_to_internal`) — the SIXTH map, found during the H3 sweep and fixed
+//!   in a follow-up. `insert_async` (upsert/upsert_batch/backfill_if_absent,
+//!   6 sites) and `read_async` (every search path — bruteforce/graph/cofilter/
+//!   prefilter + the f32 branches, 6 sites) mixed with the SYNCHRONOUS
+//!   `iter_sync` in `for_each_rid_map` (snapshot serialisation). Same class
+//!   as the five maps above.
 //!
 //! The interleaving that deadlocked before the fix (single-map `deleted`
 //! variant):
@@ -42,11 +49,11 @@
 //!    task is never polled → whole-runtime deadlock. On a
 //!    `worker_threads=1` runtime, one search racing one delete suffices.
 //!
-//! **Fix**: EVERY lock-acquiring op on all five maps is now synchronous
-//! (`insert_sync`/`remove_sync`/`entry_sync`/`read_sync`/`contains_sync`).
-//! None of the closures involved suspend (simple inserts/removes/reads/
-//! containment checks), so the conversion is mechanical — same reasoning
-//! as the prior two fixes in this sweep.
+//! **Fix**: EVERY lock-acquiring op on all five maps plus `rid_map` is now
+//! synchronous (`insert_sync`/`remove_sync`/`entry_sync`/`read_sync`/
+//! `contains_sync`). None of the closures involved suspend (simple inserts/
+//! removes/reads/containment checks), so the conversion is mechanical — same
+//! reasoning as the prior two fixes in this sweep.
 //!
 //! **Why these tests exist** (mirrors the established style from
 //! `active_snapshots_deadlock_tests.rs`): this hazard is a RACE WINDOW,
@@ -341,5 +348,176 @@ async fn h3_deadlock_rid_to_internal_amplifier_chain() {
          racing search_prefilter hung past 60s timeout — the \
          `rid_to_internal`-held-while-`deleted`-parks amplifier chain has \
          regressed."
+    );
+}
+
+/// `rid_map` (the SIXTH vector-index map, `scc::HashMap<usize, RecordId,
+/// THasher>`, reverse of `rid_to_internal`) — same structural class as the
+/// five maps fixed in H3 (commit `dcfaf825`) and #589's `cells` map (commit
+/// `7a4abf62`). The hazard: `iter_sync` in `for_each_rid_map` (snapshot
+/// serialisation) mixed with `insert_async` (upsert/upsert_batch/
+/// backfill_if_absent) and `read_async` (every search path —
+/// `search_quantized_bruteforce`, `search_quantized_graph`,
+/// `search_cofilter_quantized`, `search_prefilter`, the f32 bruteforce +
+/// approximate branches) on the SAME runtime worker threads.
+///
+/// The interleaving that deadlocked before the fix:
+/// 1. A worker running `for_each_rid_map` (snapshot serialisation) PARKS its
+///    OS thread in `iter_sync` on a `rid_map` bucket saa just handed off to a
+///    suspended `insert_async`/`read_async` task (concurrent upsert/search).
+/// 2. That lock-owning task holds the exclusive bucket lock while sitting in
+///    tokio's run queue, unpolled.
+/// 3. With enough workers piling up the same way, the lock-owning task is
+///    never polled again → whole-runtime deadlock.
+///
+/// **Fix**: every `insert_async`/`read_async` on `rid_map` is now
+/// `insert_sync`/`read_sync` (12 sites); the fn stays `async` (call sites
+/// unchanged) and the calls no longer suspend. Same mechanical reasoning as
+/// the H3 five-map fix — none of the closures suspend.
+///
+/// This test races concurrent upsert (hits `rid_map.insert_sync`) + search
+/// (hits `rid_map.read_sync`) against a tight-loop `for_each_rid_map` (the
+/// `iter_sync` accessor) on a constrained runtime. As with the H3 tests
+/// above, this is a RACE-WINDOW regression guard, not a deterministic
+/// reproducer — nextest's parallelism has a real chance to catch a future
+/// regression, and the NAMED bounded `tokio::time::timeout` ensures a real
+/// regression fails fast and identifiably instead of hanging the whole suite.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rid_map_deadlock_iter_sync_racing_upsert_search() {
+    let adapter = build_fitted_bruteforce_adapter().await;
+    let hot_rid = rid(3);
+    let hot_vec = random_vec(8, 3);
+    let query = random_vec(8, 42);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Upsert hammer: tight-loops upsert on hot_rid — each upsert publishes
+    // the reverse id via `rid_map.insert_sync` (was `insert_async`).
+    let muta = Arc::clone(&adapter);
+    let stop_a = Arc::clone(&stop);
+    let hot_rid_a = hot_rid;
+    let hot_vec_a = hot_vec.clone();
+    let hammer_a = tokio::spawn(async move {
+        for i in 0..HAMMER_ITERS {
+            // Alternate the vector so each upsert replaces the previous
+            // (allocates a fresh internal → a fresh `rid_map` insert).
+            let mut v = hot_vec_a.clone();
+            v[0] = (i as f32) * 0.001;
+            let _ = muta.upsert(hot_rid_a, &v).await;
+            tokio::task::yield_now().await;
+            if stop_a.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    });
+
+    // Search hammer: on a fitted ≤512 adapter `search` dispatches to
+    // `search_quantized_bruteforce`, which `read_sync`s `rid_map` for every
+    // candidate (was `read_async`).
+    let mutb = Arc::clone(&adapter);
+    let stop_b = Arc::clone(&stop);
+    let query_b = query.clone();
+    let hammer_b = tokio::spawn(async move {
+        for _ in 0..HAMMER_ITERS {
+            let _ = mutb.search(&query_b, 10, SearchOpts::default(), None).await;
+            tokio::task::yield_now().await;
+            if stop_b.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    });
+
+    // Snapshot-serialisation hammer: tight-loops `for_each_rid_map`, the
+    // SYNCHRONOUS `iter_sync` accessor on `rid_map` — the exact sync reader
+    // that, before the fix, parked worker threads against an `insert_async`/
+    // `read_async` task holding a handed-off bucket lock.
+    let mutc = Arc::clone(&adapter);
+    let stop_c = Arc::clone(&stop);
+    let hammer_c = tokio::spawn(async move {
+        let mut sink: Vec<(usize, RecordId)> = Vec::new();
+        for _ in 0..HAMMER_ITERS {
+            sink.clear();
+            mutc.for_each_rid_map(|internal, r| sink.push((internal, r)));
+            tokio::task::yield_now().await;
+            if stop_c.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        hammer_a.await.unwrap();
+        hammer_b.await.unwrap();
+        hammer_c.await.unwrap();
+    })
+    .await;
+
+    stop.store(true, Ordering::Relaxed);
+
+    assert!(
+        result.is_ok(),
+        "rid_map DEADLOCK REGRESSION: upsert (rid_map insert) + search \
+         (rid_map read) racing for_each_rid_map (rid_map iter_sync) hung past \
+         60s timeout — the `rid_map` `_async`/`_sync` mixing hazard (same \
+         class as #589/`cells`, commit `7a4abf62`; H3 commit `dcfaf825`) has \
+         regressed. Check that every lock-acquiring op on `rid_map` is `_sync` \
+         (only `for_each_rid_map`'s `iter_sync` may remain synchronous)."
+    );
+}
+
+/// Ultra-constrained variant: `worker_threads = 1`. On a single-worker
+/// runtime ONE upsert racing ONE `for_each_rid_map` scan suffices to expose
+/// the pre-fix hazard (the sole worker parks in `iter_sync` while the upsert
+/// task holds the handed-off `rid_map` bucket lock in the run queue,
+/// unpolled).
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rid_map_deadlock_single_worker_upsert_racing_iter_sync() {
+    let adapter = build_fitted_bruteforce_adapter().await;
+    let hot_rid = rid(4);
+    let hot_vec = random_vec(8, 4);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let muta = Arc::clone(&adapter);
+    let stop_a = Arc::clone(&stop);
+    let hammer_a = tokio::spawn(async move {
+        for i in 0..HAMMER_ITERS {
+            let mut v = hot_vec.clone();
+            v[0] = (i as f32) * 0.001;
+            let _ = muta.upsert(hot_rid, &v).await;
+            tokio::task::yield_now().await;
+            if stop_a.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    });
+
+    // Snapshot-serialisation hammer: `for_each_rid_map`'s `iter_sync`.
+    let mutb = Arc::clone(&adapter);
+    let stop_b = Arc::clone(&stop);
+    let hammer_b = tokio::spawn(async move {
+        let mut sink: Vec<(usize, RecordId)> = Vec::new();
+        for _ in 0..HAMMER_ITERS {
+            sink.clear();
+            mutb.for_each_rid_map(|internal, r| sink.push((internal, r)));
+            tokio::task::yield_now().await;
+            if stop_b.load(Ordering::Relaxed) {
+                return;
+            }
+        }
+    });
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        hammer_a.await.unwrap();
+        hammer_b.await.unwrap();
+    })
+    .await;
+
+    stop.store(true, Ordering::Relaxed);
+
+    assert!(
+        result.is_ok(),
+        "rid_map DEADLOCK REGRESSION (single-worker): upsert (rid_map \
+         insert) racing for_each_rid_map (rid_map iter_sync) hung past 60s \
+         timeout on a worker_threads=1 runtime — the `rid_map` \
+         `_async`/`_sync` mixing hazard has regressed."
     );
 }
