@@ -51,7 +51,28 @@ impl MvccStore {
     ) -> DbResult<()> {
         // Get-or-insert the KeyLock for this key. The Arc is shared between
         // concurrent requesters so they coordinate on the same Mutex/Notify.
-        let lock = match self.locks.entry_async(key).await {
+        //
+        // DEADLOCK FIX (same class as #589 / `cells` map, commit `7a4abf62`):
+        // `entry_sync`, NOT `entry_async`. The `locks` map is read on EVERY
+        // Level-3 commit AND abort via the SYNCHRONOUS `release_locks` →
+        // `self.locks.get_sync(key)` (`get_sync` takes a shared bucket lock
+        // and PARKS the calling OS thread while the bucket is exclusively
+        // owned). `entry_async`'s wait path is lock-HANDOFF: on release,
+        // saa GRANTS the exclusive bucket lock to the suspended waiter
+        // TASK, which then holds it while sitting in tokio's run queue
+        // until next polled. The pessimistic-locking hot-key case — many
+        // txs contending for the SAME `RecordKey` — funnels onto ONE
+        // bucket by construction. If, in the lock-handoff window, every
+        // runtime worker thread runs `release_locks` → `get_sync(k)` on
+        // that same bucket, all workers park and the lock-owning
+        // `lock_key` task can never be polled again → whole-runtime
+        // deadlock. With `entry_sync` the exclusive lock is only ever
+        // held by a RUNNING thread for a few instructions (an
+        // `Arc::clone`-or-insert), so every `get_sync` wait is bounded.
+        // The fn stays `async` to keep its call sites unchanged; this
+        // particular call no longer suspends (the rest of the fn still
+        // legitimately awaits the per-key `state` Mutex / Notify).
+        let lock = match self.locks.entry_sync(key) {
             scc::hash_map::Entry::Occupied(e) => Arc::clone(e.get()),
             scc::hash_map::Entry::Vacant(e) => {
                 let arc = Arc::new(KeyLock::new());

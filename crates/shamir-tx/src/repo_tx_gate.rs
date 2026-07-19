@@ -300,11 +300,15 @@ impl RepoTxGate {
         self.last_committed_version.load(Ordering::Acquire)
     }
 
-    /// cancel-safe: yes — the `entry_async` calls are CAS-based and either
-    /// complete or leave the map unchanged on cancellation. If the future is
-    /// dropped after a registration but before returning the guard, the
-    /// snapshot entry leaks (no Drop runs); since callers always await this
-    /// to completion or never call it, in practice this is cancel-safe.
+    /// cancel-safe: yes — the `entry_sync` calls in `bump_refcount`
+    /// (formerly `entry_async`; switched to the synchronous accessor to
+    /// close the same-class whole-runtime deadlock hazard fixed for the
+    /// `cells` map in #589 / commit `7a4abf62`) are CAS-based and either
+    /// complete or leave the map unchanged on cancellation. The function
+    /// no longer suspends. If the future is dropped after a registration
+    /// but before returning the guard, the snapshot entry leaks (no Drop
+    /// runs); since callers always await this to completion or never call
+    /// it, in practice this is cancel-safe.
     ///
     /// Register a snapshot at the current `last_committed` version and
     /// return a RAII guard. On drop the snapshot is removed (refcount-
@@ -409,10 +413,35 @@ impl RepoTxGate {
 
     /// Atomically insert-or-bump the refcount for `version` in
     /// `active_snapshots`. Uses the per-entry exclusive lock held by
-    /// `entry_async` so the read-modify-write is race-free against
+    /// `entry_sync` so the read-modify-write is race-free against
     /// concurrent openers and droppers.
+    ///
+    /// DEADLOCK FIX (same class as #589 / `cells` map, commit `7a4abf62`):
+    /// `entry_sync`, NOT `entry_async`. This map is read on EVERY
+    /// transaction end via the SYNCHRONOUS `SnapshotGuard::drop` →
+    /// `entry_sync(v)` (`active_snapshots.entry_sync`), which PARKS the
+    /// calling OS thread while the bucket is exclusively locked (scc's
+    /// synchronous accessor parks the worker until the lock is free), and
+    /// also scanned via the SYNCHRONOUS `min_alive` / `active_snapshots_empty`
+    /// GC-tick paths (`iter_sync` / `is_empty`). `entry_async`'s wait path
+    /// is lock-HANDOFF: on release, saa GRANTS the exclusive bucket lock to
+    /// the suspended waiter TASK, which then holds it while sitting in
+    /// tokio's run queue until next polled. This map is keyed by version,
+    /// and EVERY concurrent `open_snapshot` targets the SAME key — the
+    /// CURRENT `last_committed` version — so all contention funnels onto
+    /// ONE bucket by construction. If, in the lock-handoff window, every
+    /// runtime worker thread runs a `SnapshotGuard::drop` (every tx end)
+    /// or a GC-tick `iter_sync` on that same bucket, all workers park and
+    /// the lock-owning `bump_refcount` task can never be polled again →
+    /// whole-runtime deadlock. With `entry_sync` the exclusive lock is
+    /// only ever held by a RUNNING thread for a few instructions (a
+    /// saturating increment), so every synchronous-reader wait is
+    /// structurally bounded — the deadlock window is closed by
+    /// construction, not papered over with a longer timeout. The fn stays
+    /// `async` to keep its call sites / public shape unchanged; it no
+    /// longer suspends.
     async fn bump_refcount(&self, version: u64) {
-        match self.active_snapshots.entry_async(version).await {
+        match self.active_snapshots.entry_sync(version) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 *e.get_mut() = e.get().saturating_add(1);
             }

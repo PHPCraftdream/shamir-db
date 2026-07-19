@@ -2,6 +2,7 @@ mod helpers;
 mod test_stores;
 
 pub mod a10_toctou_tests;
+pub mod active_snapshots_deadlock_tests;
 pub mod append_only_fast_path_tests;
 pub mod cell_reservation_tests;
 pub mod crud_tests;
@@ -11,6 +12,7 @@ pub mod gc_tests;
 pub mod get_current_many_tests;
 pub mod history_tests;
 pub mod lock_tests;
+pub mod locks_deadlock_tests;
 pub mod overlay_dualwrite_tests;
 pub mod overlay_merge_tests;
 pub mod overlay_ordering_tests;
