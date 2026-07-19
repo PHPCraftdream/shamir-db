@@ -38,7 +38,7 @@ use futures::StreamExt;
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::filter::Filter;
-use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
+use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -856,11 +856,7 @@ async fn discover_action_refs(
     let mut refs = Vec::new();
 
     for name in &table_names {
-        // Skip the parent table itself — self-referential FKs would cause
-        // infinite recursion in cascade.
-        if name == &parent_table_ref.table {
-            continue;
-        }
+        let is_self_ref = name == &parent_table_ref.table;
         let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
         let child_table = match resolver.resolve(&child_ref).await {
             Ok(t) => t,
@@ -873,6 +869,17 @@ async fn discover_action_refs(
             }
             let action = fk.on_delete;
             if action == FkAction::Cascade || action == FkAction::SetNull {
+                // Self-referential CASCADE is not supported by the table-name
+                // cascade cycle-guard (it would false-positive as a cycle even
+                // for the shallowest self-ref case); it is rejected at DDL time
+                // (`validate_no_self_referential_cascade`) and skipped here as
+                // defense-in-depth for any pre-existing schema predating that
+                // check.  Self-referential SET NULL is safe — it is a
+                // single-level mutation that never recurses (see the
+                // "Recurse for grandchildren (Cascade only)" gate below).
+                if is_self_ref && action == FkAction::Cascade {
+                    continue;
+                }
                 refs.push(DiscoveredRef {
                     child_table: name.clone(),
                     child_field: field_path.join("."),
@@ -979,15 +986,11 @@ fn record_field_matches_qv(
 }
 
 fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
-    match (actual, value) {
-        (ScalarRef::Null, QueryValue::Null) => true,
-        (ScalarRef::Bool(a), QueryValue::Bool(b)) => a == b,
-        (ScalarRef::Int(a), QueryValue::Int(b)) => a == b,
-        (ScalarRef::F64(a), QueryValue::F64(b)) => a == b,
-        (ScalarRef::Str(a), QueryValue::Str(b)) => *a == b.as_str(),
-        (ScalarRef::Bin(a), QueryValue::Bin(b)) => *a == b.as_slice(),
-        _ => false,
-    }
+    // Delegate to the cross-type-comparing `scalar_ref_cmp_qv` so that a parent
+    // key stored as `Int(5)` matches a child FK field stored as `F64(5.0)` (and
+    // vice-versa) — consistent with every other comparison layer in the engine
+    // (`scalar_ref_cmp_qv`, `compare_values`, the coercing-set probes).
+    scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {

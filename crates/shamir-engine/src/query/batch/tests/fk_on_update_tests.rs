@@ -1237,3 +1237,471 @@ async fn on_update_cascade_single_fk_non_regression() {
         "stale reference to 5 must not survive, got: {user_ids:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fix 1 (Finding 11) — Int↔F64 coercion on the ON UPDATE path.
+//
+// `scalar_ref_matches_qv` in `fk_on_update.rs` (an independent copy from
+// `fk_actions.rs`) now delegates to `scalar_ref_cmp_qv`, so a parent key stored
+// as `Int(5)` matches a child FK stored as `F64(5.0)` on the update path too.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn on_update_cascade_int_parent_f64_child_coercion() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        9320,
+        "child_fk_cascade_coerce",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // Parent key Int(5); child FK F64(5.0) — cross-type reference.
+    insert_row(
+        &resolver,
+        "ip",
+        "parent",
+        doc().set("id", 5_i64).set("name", "P5"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic",
+        "child",
+        doc()
+            .set("cid", 50_i64)
+            .set("parent_id", 5.0_f64)
+            .set("label", "c"),
+    )
+    .await;
+
+    // Update parent.id 5 → 7 → child.parent_id (F64) must re-key to 7 via
+    // coercion (previously the strict match left the child invisible).
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd_parent",
+        write::update("parent")
+            .where_(filter::eq("id", 5_i64))
+            .set(doc().set("id", 7_i64)),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(resp.results.contains_key("upd_parent"));
+
+    assert_eq!(
+        read_first_field(&resolver, "child", "parent_id").await,
+        Some(QueryValue::Int(7)),
+        "F64-typed child FK must be re-keyed to 7 via Int↔F64 coercion"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fix 2 Site B — self-referential ON UPDATE actions.
+//
+// `fk_on_update.rs` is entirely single-level (no recursion for ANY action —
+// see the module doc comment), so removing the self-ref skip is safe for all
+// three actions (Restrict / Cascade / SetNull).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Bind a self-referential on_update FK to a single-table hierarchy.
+fn bind_self_ref_on_update(
+    db: &DbInstance,
+    registry: &Arc<ValidatorRegistry>,
+    validator_id: u64,
+    validator_name: &str,
+    on_update: FkAction,
+) {
+    let schema = SchemaValidator::new(vec![FieldRule {
+        path: vec!["manager_id".to_string()],
+        ty: TypeTag::Int,
+        constraints: Constraints {
+            foreign_key: Some(ForeignKeyRef::with_on_update("employees", "id", on_update)),
+            required: false,
+            nullable: true,
+            ..Default::default()
+        },
+    }]);
+
+    let vid = RecordId::from_ts(validator_id as i64);
+    registry
+        .register(vid, validator_name, Arc::new(schema))
+        .unwrap();
+
+    let binding = ValidatorBinding {
+        validator_id: vid,
+        ops: smallvec![WriteOp::Delete],
+        priority: 1000,
+    };
+
+    let mut table = futures::executor::block_on(db.get_table("default", "employees")).unwrap();
+    table.set_validator_registry(Arc::clone(registry));
+    futures::executor::block_on(table.add_validator_binding(binding)).unwrap();
+}
+
+fn setup_self_ref_db() -> DbInstance {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("employees")],
+    };
+    futures::executor::block_on(DbInstance::with_repos(vec![repo_config])).unwrap()
+}
+
+/// Self-ref ON UPDATE CASCADE: re-keying a manager's `id` cascades the new
+/// value to all subordinates' `manager_id`.
+#[tokio::test]
+async fn self_ref_on_update_cascade_rekeys_subordinates() {
+    let db = setup_self_ref_db();
+    let registry = Arc::new(ValidatorRegistry::new());
+    bind_self_ref_on_update(
+        &db,
+        &registry,
+        9321,
+        "self_ref_cascade_upd",
+        FkAction::Cascade,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // CEO(id=10), Sub1(manager_id=10), Sub2(manager_id=10).
+    insert_row(
+        &resolver,
+        "i1",
+        "employees",
+        doc()
+            .set("id", 10_i64)
+            .set("name", "CEO")
+            .set("manager_id", QueryValue::Null),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i2",
+        "employees",
+        doc()
+            .set("id", 20_i64)
+            .set("name", "S1")
+            .set("manager_id", 10_i64),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i3",
+        "employees",
+        doc()
+            .set("id", 30_i64)
+            .set("name", "S2")
+            .set("manager_id", 10_i64),
+    )
+    .await;
+
+    // Re-key CEO id 10 → 77 → both subordinates must cascade to 77.
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd",
+        write::update("employees")
+            .where_(filter::eq("id", 10_i64))
+            .set(doc().set("id", 77_i64)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mgr_ids = read_field_all(&resolver, "employees", "manager_id").await;
+    // CEO's manager_id is Null; both subordinates should be 77.
+    assert!(
+        mgr_ids
+            .iter()
+            .filter(|v| **v == QueryValue::Int(77))
+            .count()
+            == 2,
+        "both subordinates must cascade to 77, got: {mgr_ids:?}"
+    );
+    assert!(
+        !mgr_ids.contains(&QueryValue::Int(10)),
+        "stale reference to old id 10 must not survive, got: {mgr_ids:?}"
+    );
+}
+
+/// Self-ref ON UPDATE RESTRICT: re-keying a manager's `id` is blocked when a
+/// subordinate still references the old value.
+#[tokio::test]
+async fn self_ref_on_update_restrict_blocks_rekey() {
+    let db = setup_self_ref_db();
+    let registry = Arc::new(ValidatorRegistry::new());
+    bind_self_ref_on_update(
+        &db,
+        &registry,
+        9322,
+        "self_ref_restrict_upd",
+        FkAction::Restrict,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_row(
+        &resolver,
+        "i1",
+        "employees",
+        doc()
+            .set("id", 10_i64)
+            .set("name", "CEO")
+            .set("manager_id", QueryValue::Null),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i2",
+        "employees",
+        doc()
+            .set("id", 20_i64)
+            .set("name", "Sub")
+            .set("manager_id", 10_i64),
+    )
+    .await;
+
+    // Re-key CEO id 10 → 77 → must be REJECTED (Sub still references 10).
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd",
+        write::update("employees")
+            .where_(filter::eq("id", 10_i64))
+            .set(doc().set("id", 77_i64)),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
+
+    match resp {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("fk_restrict"),
+                "self-ref on_update restrict should block, got: {msg}"
+            );
+        }
+        Ok(_) => panic!("Expected fk_restrict on self-ref rekey with subordinate"),
+    }
+
+    // Data unchanged after restrict rollback: both CEO (id=10) and Sub (id=20)
+    // must survive with their original ids.
+    let ids = read_field_all(&resolver, "employees", "id").await;
+    assert!(
+        ids.contains(&QueryValue::Int(10)),
+        "CEO id=10 should be unchanged after restrict rollback, got: {ids:?}"
+    );
+    assert!(
+        ids.contains(&QueryValue::Int(20)),
+        "Sub id=20 should be unchanged after restrict rollback, got: {ids:?}"
+    );
+}
+
+/// Self-ref ON UPDATE SET NULL: re-keying a manager's `id` nulls the
+/// subordinates' `manager_id`.
+#[tokio::test]
+async fn self_ref_on_update_set_null_nulls_subordinates() {
+    let db = setup_self_ref_db();
+    let registry = Arc::new(ValidatorRegistry::new());
+    bind_self_ref_on_update(
+        &db,
+        &registry,
+        9323,
+        "self_ref_setnull_upd",
+        FkAction::SetNull,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_row(
+        &resolver,
+        "i1",
+        "employees",
+        doc()
+            .set("id", 10_i64)
+            .set("name", "CEO")
+            .set("manager_id", QueryValue::Null),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i2",
+        "employees",
+        doc()
+            .set("id", 20_i64)
+            .set("name", "Sub")
+            .set("manager_id", 10_i64),
+    )
+    .await;
+
+    // Re-key CEO id 10 → 77 → Sub.manager_id must be nulled.
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd",
+        write::update("employees")
+            .where_(filter::eq("id", 10_i64))
+            .set(doc().set("id", 77_i64)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mgr_ids = read_field_all(&resolver, "employees", "manager_id").await;
+    assert!(
+        mgr_ids.contains(&QueryValue::Null),
+        "Sub.manager_id should be nulled, got: {mgr_ids:?}"
+    );
+    assert!(
+        !mgr_ids.contains(&QueryValue::Int(10)),
+        "stale reference to old id 10 must not survive, got: {mgr_ids:?}"
+    );
+}
+
+/// Self-loop edge case: co-updated parent rows must NOT be incorrectly
+/// re-matched as their own children.  Two roots are updated in one operation;
+/// neither references the other's old value, so neither should be cascaded —
+/// only the genuine child (which references one of the old values) is affected.
+///
+/// Hierarchy:
+///   R1(id=10, manager_id=null)  — root, co-updated
+///   R2(id=20, manager_id=null)  — root, co-updated (does NOT ref R1)
+///   R3(id=30, manager_id=10)    — genuine child of R1, NOT co-updated
+///
+/// UPDATE employees SET id=99 WHERE id IN (10, 20):
+///   • old values = {10, 20}
+///   • R1.manager_id=null → NOT matched (co-updated parent, no ref) ✓
+///   • R2.manager_id=null → NOT matched (co-updated parent, no ref) ✓
+///   • R3.manager_id=10 → matched (genuine child of R1) → cascade to 99 ✓
+#[tokio::test]
+async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
+    let db = setup_self_ref_db();
+    let registry = Arc::new(ValidatorRegistry::new());
+    bind_self_ref_on_update(&db, &registry, 9324, "self_ref_loop_upd", FkAction::Cascade);
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_row(
+        &resolver,
+        "i1",
+        "employees",
+        doc()
+            .set("id", 10_i64)
+            .set("name", "R1")
+            .set("manager_id", QueryValue::Null),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i2",
+        "employees",
+        doc()
+            .set("id", 20_i64)
+            .set("name", "R2")
+            .set("manager_id", QueryValue::Null),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "i3",
+        "employees",
+        doc()
+            .set("id", 30_i64)
+            .set("name", "R3")
+            .set("manager_id", 10_i64),
+    )
+    .await;
+
+    // Re-key BOTH R1 (10→99) and R2 (20→99) in one operation.
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd",
+        write::update("employees")
+            .where_(filter::in_("id", [10_i64, 20_i64]))
+            .set(doc().set("id", 99_i64)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let ids = read_field_all(&resolver, "employees", "id").await;
+    let mgr_ids = read_field_all(&resolver, "employees", "manager_id").await;
+
+    // 3 rows survive.
+    assert_eq!(ids.len(), 3);
+
+    // Exactly TWO rows now have id=99 (R1 and R2 were re-keyed).
+    assert_eq!(
+        ids.iter().filter(|v| **v == QueryValue::Int(99)).count(),
+        2,
+        "R1 and R2 should be re-keyed to 99, got ids: {ids:?}"
+    );
+    // R3 keeps id=30.
+    assert!(
+        ids.contains(&QueryValue::Int(30)),
+        "R3 (not matched by WHERE) keeps id=30, got ids: {ids:?}"
+    );
+
+    // Only R3 (the genuine child of R1) should have manager_id=99. R1 and R2
+    // (co-updated parents with manager_id=null) must NOT have been incorrectly
+    // re-matched as children — their manager_id stays Null.
+    assert_eq!(
+        mgr_ids
+            .iter()
+            .filter(|v| **v == QueryValue::Int(99))
+            .count(),
+        1,
+        "only R3 (genuine child) should be cascaded to 99, got: {mgr_ids:?}"
+    );
+    assert_eq!(
+        mgr_ids.iter().filter(|v| **v == QueryValue::Null).count(),
+        2,
+        "R1 and R2 (co-updated parents) must keep manager_id=Null, got: {mgr_ids:?}"
+    );
+    assert!(
+        !mgr_ids.contains(&QueryValue::Int(10)),
+        "no stale ref to old id 10, got: {mgr_ids:?}"
+    );
+}

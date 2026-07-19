@@ -198,6 +198,48 @@ fn validate_nested_path_transforms(rules: &[FieldRuleDto]) -> Result<(), BatchEr
     Ok(())
 }
 
+/// Validate that no foreign-key reference declares a self-referential
+/// `on_delete: Cascade`. Returns an error
+/// (`self_referential_cascade_not_supported`) if any FK has
+/// `ref_table == table` (the table being defined) and
+/// `on_delete == FkAction::Cascade`.
+///
+/// The DELETE-path cascade planner (`fk_actions.rs::plan_cascade_recursive`)
+/// uses a table-NAME-based per-path cycle guard (`CascadePathGuard`). A
+/// self-referential CASCADE would re-enter the same table name on the very
+/// first recursion level — which the guard cannot distinguish from a genuine
+/// cross-table cycle — and is therefore silently skipped at runtime as
+/// defense-in-depth. This DDL-time check converts that silent skip into an
+/// explicit, honest error so an operator never declares an action the engine
+/// cannot honor.
+///
+/// Self-referential `SetNull` / `Restrict` are safe (single-level, no
+/// recursion) and are NOT rejected here.
+///
+/// Called at DDL time (set_table_schema, add_schema_rule) — the same entry
+/// points that call `validate_unique_indexes` / `validate_nested_path_transforms`.
+fn validate_no_self_referential_cascade(
+    table: &str,
+    rules: &[FieldRuleDto],
+) -> Result<(), BatchError> {
+    for rule in rules {
+        if let Some(fk) = &rule.constraints.foreign_key {
+            if fk.ref_table == table && fk.on_delete == FkAction::Cascade {
+                return Err(err_code(
+                    "self_referential_cascade_not_supported",
+                    format!(
+                        "foreign_key on {:?}: self-referential ON DELETE CASCADE is not \
+                         supported (the cascade cycle-guard is table-name based and cannot \
+                         resolve a table cascading into itself); use SET NULL or RESTRICT instead",
+                        rule.path
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate that all FK references in the rule set have a backing index on
 /// the parent table. Returns an error (`fk_requires_index`) if any FK
 /// reference lacks a single-field index on `(ref_table, ref_field)`.
@@ -318,6 +360,11 @@ impl ShamirAdminExecutor {
         // (the write path silently skips multi-segment paths — convert that
         // silent skip into an explicit error, mirroring validate_unique_indexes).
         validate_nested_path_transforms(&op.schema)?;
+
+        // Reject self-referential ON DELETE CASCADE at DDL time (the cascade
+        // cycle-guard cannot resolve a table cascading into itself — convert
+        // the silent runtime skip into an explicit error).
+        validate_no_self_referential_cascade(table, &op.schema)?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
         let schema_qv = serialise_rules(&op.schema, interner);
@@ -443,6 +490,9 @@ impl ShamirAdminExecutor {
 
         // Reject nested-path default/auto_now/auto_now_add rules at DDL time.
         validate_nested_path_transforms(std::slice::from_ref(new_rule))?;
+
+        // Reject self-referential ON DELETE CASCADE at DDL time.
+        validate_no_self_referential_cascade(table, std::slice::from_ref(new_rule))?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);

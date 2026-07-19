@@ -24,7 +24,7 @@ use futures::StreamExt;
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::filter::Filter;
-use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
+use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::batch::TableResolver;
@@ -156,10 +156,6 @@ async fn discover_restrict_refs(
     let mut refs = Vec::new();
 
     for name in &table_names {
-        // Skip the parent table itself — self-referential FKs are a separate concern.
-        if name == &parent_table_ref.table {
-            continue;
-        }
         let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
         let child_table = match resolver.resolve(&child_ref).await {
             Ok(t) => t,
@@ -335,15 +331,10 @@ fn record_field_matches(
 }
 
 fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
-    match (actual, value) {
-        (ScalarRef::Null, QueryValue::Null) => true,
-        (ScalarRef::Bool(a), QueryValue::Bool(b)) => a == b,
-        (ScalarRef::Int(a), QueryValue::Int(b)) => a == b,
-        (ScalarRef::F64(a), QueryValue::F64(b)) => a == b,
-        (ScalarRef::Str(a), QueryValue::Str(b)) => *a == b.as_str(),
-        (ScalarRef::Bin(a), QueryValue::Bin(b)) => *a == b.as_slice(),
-        _ => false,
-    }
+    // Delegate to the cross-type-comparing `scalar_ref_cmp_qv` so that a parent
+    // key stored as `Int(5)` matches a child FK field stored as `F64(5.0)` (and
+    // vice-versa) — consistent with every other comparison layer in the engine.
+    scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {
