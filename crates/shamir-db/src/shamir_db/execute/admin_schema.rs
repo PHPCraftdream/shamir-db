@@ -161,6 +161,43 @@ async fn validate_unique_indexes(
     Ok(())
 }
 
+/// Validate that no `default` / `auto_now` / `auto_now_add` rule uses a
+/// multi-segment path. Returns an error
+/// (`nested_path_transform_not_supported`) if any such rule has
+/// `path.len() != 1`.
+///
+/// Mirrors `validate_unique_indexes`'s DDL-time guard pattern: the write path
+/// (`apply_defaults` / `apply_transforms` in `write_helpers.rs`) silently skips
+/// multi-segment paths (MVP single-segment scope — see the `match path.first()`
+/// guards there). Without this DDL-time check a multi-segment
+/// `default`/`auto_now`/`auto_now_add` rule would be silently accepted at DDL
+/// time and then silently dropped on every insert/update forever — an
+/// asymmetry with `validate_unique_indexes`, which already rejects a
+/// multi-segment `unique` at DDL time. This function closes that asymmetry by
+/// rejecting the rule up-front instead of letting it be silently ignored at
+/// write time.
+///
+/// Called at DDL time (set_table_schema, add_schema_rule) — the same entry
+/// points that call `validate_unique_indexes`.
+fn validate_nested_path_transforms(rules: &[FieldRuleDto]) -> Result<(), BatchError> {
+    for rule in rules {
+        let has_transform = rule.constraints.default.is_some()
+            || rule.constraints.auto_now
+            || rule.constraints.auto_now_add;
+        if has_transform && rule.path.len() != 1 {
+            return Err(err_code(
+                "nested_path_transform_not_supported",
+                format!(
+                    "default/auto_now/auto_now_add on {:?}: only single-segment field paths \
+                     are supported for default and transform rules",
+                    rule.path
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate that all FK references in the rule set have a backing index on
 /// the parent table. Returns an error (`fk_requires_index`) if any FK
 /// reference lacks a single-field index on `(ref_table, ref_field)`.
@@ -276,6 +313,11 @@ impl ShamirAdminExecutor {
 
         // Phase C3 — validate unique index requirements before persisting.
         validate_unique_indexes(&self.shamir, db, repo, table, &op.schema).await?;
+
+        // Reject nested-path default/auto_now/auto_now_add rules at DDL time
+        // (the write path silently skips multi-segment paths — convert that
+        // silent skip into an explicit error, mirroring validate_unique_indexes).
+        validate_nested_path_transforms(&op.schema)?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
         let schema_qv = serialise_rules(&op.schema, interner);
@@ -398,6 +440,9 @@ impl ShamirAdminExecutor {
             std::slice::from_ref(new_rule),
         )
         .await?;
+
+        // Reject nested-path default/auto_now/auto_now_add rules at DDL time.
+        validate_nested_path_transforms(std::slice::from_ref(new_rule))?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);

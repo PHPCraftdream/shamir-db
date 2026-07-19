@@ -1,3 +1,4 @@
+mod call_tx_tests;
 mod cross_repo_guard_tests;
 mod dos_gate_tests;
 mod executor_tests;

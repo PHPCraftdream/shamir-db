@@ -699,6 +699,23 @@ impl<'a> QueryRunner<'a> {
 
         // Call ops — delegate to FunctionInvoker (autocommit, no tx).
         if let BatchOp::Call(call_op) = &entry.op {
+            // A Call delegates to FunctionInvoker with autocommit semantics —
+            // the function's own writes commit independently of any outer
+            // transaction. Inside a transactional batch (self.tx.is_some()
+            // because execute_transactional_impl opened a TxContext) or an
+            // interactive tx (self.tx.is_some() because execute_in_open_tx
+            // threaded the caller's TxContext), that breaks atomicity
+            // silently: the outer abort would not roll back the Call's writes.
+            // Reject explicitly instead, mirroring the nested_tx_not_supported
+            // guard for transactional sub-batches above.
+            if self.tx.is_some() {
+                return Err(BatchError::query_coded(
+                    alias,
+                    "call_in_tx_not_supported",
+                    "a Call operation cannot run inside a transaction \
+                     (its writes would commit independently of the outer transaction)",
+                ));
+            }
             return match self.invoker {
                 Some(inv) => inv.invoke_call(call_op, &self.actor, resolved_refs).await,
                 None => Err(BatchError::QueryError {
