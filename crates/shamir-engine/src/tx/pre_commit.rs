@@ -74,9 +74,23 @@ async fn claim_write_set(
         // so claim and finalize meet on the same cell. A table absent from
         // `per_table_mvcc` (system / unattached table) has no cell to claim —
         // it also has no overlay/cell finalize, so it is correctly skipped.
-        let Some(store) = mvcc_map
-            .read_async(table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
-            .await
+        //
+        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+        // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
+        // `per_table_mvcc` map is also touched SYNCHRONOUSLY — `read_sync`
+        // (version_provider.rs, EVERY Serializable `validate_read_set` commit),
+        // `get_sync` (commit.rs pessimistic-lock release; rename-table) and
+        // `iter_sync` (flush_all_history; drainer F6a overlay GC) — and
+        // EXCLUSIVELY by `insert_sync` (table attach) / `remove_sync` (drop
+        // table). `read_async`'s wait is lock-HANDOFF: saa grants the shared
+        // bucket lock to the suspended reader TASK, which then holds it while
+        // unpolled in tokio's run queue. A DDL exclusive writer (attach/drop)
+        // racing sustained commit/drain traffic can park every worker in
+        // `read_sync`/`get_sync`/`insert_sync` behind that unpolled reader →
+        // whole-runtime deadlock. `read_sync`'s bucket lock is held only by a
+        // RUNNING thread for a few instructions (an `Arc::clone`), bounding
+        // every wait. The fn stays `async`; this call no longer suspends.
+        let Some(store) = mvcc_map.read_sync(table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
         else {
             continue;
         };

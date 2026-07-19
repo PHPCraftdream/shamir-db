@@ -485,10 +485,25 @@ impl Drainer {
             shamir_collections::TFxSet::default();
 
         for (table_id, pass) in &table_batches {
+            // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+            // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
+            // `per_table_mvcc` map is also touched SYNCHRONOUSLY — `read_sync`
+            // (version_provider.rs, EVERY Serializable `validate_read_set`
+            // commit), `get_sync` (commit.rs pessimistic-lock release;
+            // rename-table) and `iter_sync` (flush_all_history; the F6a overlay
+            // GC loop right below in this same file) — and EXCLUSIVELY by
+            // `insert_sync` (table attach) / `remove_sync` (drop table).
+            // `read_async`'s wait is lock-HANDOFF: saa grants the shared bucket
+            // lock to the suspended reader TASK, which then holds it while
+            // unpolled in tokio's run queue. A DDL exclusive writer
+            // (attach/drop) racing sustained drain traffic can park every
+            // worker behind that unpolled reader → whole-runtime deadlock.
+            // `read_sync`'s bucket lock is held only by a RUNNING thread for a
+            // few instructions (an `Arc::clone`), bounding every wait. The fn
+            // stays `async`; this call no longer suspends.
             if let Some(mvcc) = repo
                 .per_table_mvcc()
-                .read_async(table_id, |_, m| std::sync::Arc::clone(m))
-                .await
+                .read_sync(table_id, |_, m| std::sync::Arc::clone(m))
             {
                 if let Err(e) = mvcc.write_committed_batch_to_history(pass).await {
                     log::warn!(

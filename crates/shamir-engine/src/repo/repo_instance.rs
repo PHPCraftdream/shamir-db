@@ -1173,10 +1173,20 @@ impl RepoInstance {
     /// resolved name always still has a config; `get_table` re-validates
     /// against `configs` inside its init closure regardless.
     pub async fn table_by_token(&self, token: u64) -> DbResult<Option<TableManager>> {
-        let name = self
-            .token_names
-            .read_async(&token, |_, name| name.clone())
-            .await;
+        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+        // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
+        // `token_names` map is also touched SYNCHRONOUSLY by `register_token`'s
+        // `insert_sync` + `read_sync` (DDL — table create/rename) and by
+        // drop-table's `remove_if_sync` (DDL). `read_async`'s wait is
+        // lock-HANDOFF: saa grants the shared bucket lock to the suspended
+        // reader TASK, which then holds it while unpolled in tokio's run queue;
+        // a DDL exclusive writer (create/rename/drop) racing sustained
+        // commit-pipeline / V2-WAL-recovery `read_async` traffic can park every
+        // worker behind that unpolled reader → whole-runtime deadlock.
+        // `read_sync`'s bucket lock is held only by a RUNNING thread for a few
+        // instructions (a `String` clone), bounding every wait. The fn stays
+        // `async`; this call no longer suspends.
+        let name = self.token_names.read_sync(&token, |_, name| name.clone());
         match name {
             Some(name) => {
                 let tbl = self.get_table(&name).await?;
@@ -1210,10 +1220,24 @@ impl RepoInstance {
     /// `None` here exactly equivalent to "table needs no barrier" for this
     /// check's purposes.
     pub(crate) async fn table_by_token_if_live(&self, token: u64) -> Option<TableManager> {
-        let name = self
-            .token_names
-            .read_async(&token, |_, name| name.clone())
-            .await?;
+        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+        // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async` (same
+        // `token_names` map `table_by_token` above also now uses). The map is
+        // written EXCLUSIVELY by DDL (`register_token`'s `insert_sync`;
+        // drop-table's `remove_if_sync`), and `read_async`'s wait is
+        // lock-HANDOFF — a DDL writer racing sustained commit/recovery reads can
+        // park every worker behind an unpolled handed-off reader →
+        // whole-runtime deadlock. `read_sync`'s bucket lock is held only by a
+        // RUNNING thread for a few instructions (a `String` clone), bounding
+        // every wait.
+        //
+        // NON-INSTANTIATING PROPERTY PRESERVED: this change is purely the
+        // lock-acquisition mechanism. The lookup still reads the dormant
+        // `tables` OnceCell map DIRECTLY (`self.tables.get(&name)`) and does
+        // NOT call the lazily-instantiating `get_table` — so the documented
+        // reason this fn exists (Phase 2.5's barrier check must NOT force table
+        // instantiation as a side effect) is unaffected.
+        let name = self.token_names.read_sync(&token, |_, name| name.clone())?;
         let cell = self
             .tables
             .get(&name)
@@ -1436,12 +1460,25 @@ impl RepoInstance {
     /// Returns total number of history entries deleted across all tables.
     pub async fn run_gc(&self) -> DbResult<usize> {
         let mut stores: Vec<Arc<shamir_tx::MvccStore>> = Vec::new();
-        self.per_table_mvcc
-            .iter_async(|_, mvcc| {
-                stores.push(Arc::clone(mvcc));
-                true
-            })
-            .await;
+        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+        // H1+H2 commit `621776bd`): `iter_sync`, NOT `iter_async`. This is the
+        // SAME `per_table_mvcc` map `flush_all_history` (above) already scans
+        // with `iter_sync`, and that is also touched by `read_sync`
+        // (version_provider.rs, EVERY Serializable `validate_read_set`), `get_sync`
+        // (commit.rs pessimistic-lock release; rename-table) and EXCLUSIVELY by
+        // `insert_sync` (table attach) / `remove_sync` (drop table). `iter_async`'s
+        // wait is lock-HANDOFF: saa grants the bucket lock to the suspended
+        // iterator TASK, which then holds it while unpolled in tokio's run queue;
+        // a DDL exclusive writer (attach/drop) racing a GC tick can park every
+        // worker behind that unpolled iterator → whole-runtime deadlock. `iter_sync`
+        // only holds each bucket lock for a RUNNING thread's few instructions (an
+        // `Arc::clone` + push), bounding every wait. The fn stays `async` (the
+        // per-store `gc().await` below still legitimately suspends); this scan no
+        // longer suspends.
+        self.per_table_mvcc.iter_sync(|_, mvcc| {
+            stores.push(Arc::clone(mvcc));
+            true
+        });
 
         let mut total = 0usize;
         for mvcc in stores {

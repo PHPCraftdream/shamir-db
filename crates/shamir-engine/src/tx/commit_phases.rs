@@ -507,10 +507,24 @@ pub(crate) async fn apply_data_batch(
         }
     }
 
+    // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
+    // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
+    // `per_table_mvcc` map is also touched SYNCHRONOUSLY — `read_sync`
+    // (version_provider.rs, EVERY Serializable `validate_read_set` commit),
+    // `get_sync` (commit.rs pessimistic-lock release; rename-table) and
+    // `iter_sync` (flush_all_history; drainer F6a overlay GC) — and
+    // EXCLUSIVELY by `insert_sync` (table attach) / `remove_sync` (drop
+    // table). `read_async`'s wait is lock-HANDOFF: saa grants the shared
+    // bucket lock to the suspended reader TASK, which then holds it while
+    // unpolled in tokio's run queue. A DDL exclusive writer (attach/drop)
+    // racing sustained commit/drain traffic can park every worker in
+    // `read_sync`/`get_sync`/`insert_sync` behind that unpolled reader →
+    // whole-runtime deadlock. `read_sync`'s bucket lock is held only by a
+    // RUNNING thread for a few instructions (an `Arc::clone`), bounding
+    // every wait. The fn stays `async`; this call no longer suspends.
     let mvcc_found = repo
         .per_table_mvcc()
-        .read_async(&table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
-        .await;
+        .read_sync(&table_id, |_, mvcc| std::sync::Arc::clone(mvcc));
     match mvcc_found {
         // D2 P1d-2b CUTOVER: the ack-path writes ONLY the in-memory visible
         // half (overlay + cell + floor). It no longer writes `history` inline
