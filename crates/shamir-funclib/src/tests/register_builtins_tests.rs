@@ -26,6 +26,7 @@ fn register_builtins_contains_a_sample_from_each_category() {
     // One representative name per category, now folder-qualified.
     let samples = [
         ("math", "math/abs"),
+        ("null", "null/coalesce"),
         ("strings", "strings/lower"),
         ("arrays", "arrays/length"),
         ("cast", "cast/to_int"),

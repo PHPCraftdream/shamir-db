@@ -33,6 +33,7 @@ pub mod crypto;
 pub mod datetime;
 pub mod encode;
 pub mod math;
+pub mod null;
 pub mod object;
 pub mod strings;
 pub mod text;
@@ -47,6 +48,7 @@ pub mod value_nav;
 pub fn register_builtins() -> registry::ScalarRegistry {
     let mut reg = registry::ScalarRegistry::new();
     reg.in_folder("math", math::register);
+    reg.in_folder("null", null::register);
     reg.in_folder("strings", strings::register);
     reg.in_folder("arrays", arrays::register);
     reg.in_folder("cast", cast::register);
