@@ -36,7 +36,7 @@ disallowed_types = "deny"
 [profile.dev]
 opt-level = 0
 codegen-units = 14
-incremental = true
+incremental = false
 # `line-tables-only` keeps panic backtraces with file:line but drops the
 # bulk of debug info (full `.pdb` per binary). With `--all-targets` +
 # nextest building dozens of separate test binaries, full debuginfo was
@@ -53,7 +53,7 @@ lto = "fat"
 # as a JS-bundled native module.
 opt-level = 3
 codegen-units = 14
-incremental = true
+incremental = false
 debug = false
 strip = true
 panic = "abort"
@@ -73,7 +73,7 @@ panic = "abort"
 [profile.bench]
 inherits = "release"
 lto = false
-incremental = true
+incremental = false
 # Benches ALWAYS build at opt-level=1 — never 0, never 3. Two reasons:
 #
 # 1. Build speed: what hurts iterative /opti is the BUILD step, not the

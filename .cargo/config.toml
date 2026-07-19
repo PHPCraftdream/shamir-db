@@ -30,7 +30,7 @@ debug = false
 # shrinking the linked exe by megabytes.
 [profile.test]
 codegen-units = 256
-incremental = true
+incremental = false
 debug = 1
 
 # ---------------------------------------------------------------------------
