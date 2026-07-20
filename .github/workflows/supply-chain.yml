@@ -33,18 +33,15 @@ name: supply-chain
 #    more information than a single merged SBOM), then uploads them as a
 #    GitHub Actions build artifact.
 #
-#    Cadence: `workflow_dispatch`-only today because this project has not yet
-#    published a tagged release (CHANGELOG.md: "has not published a stable
-#    release"; the only git tag is a backup marker). When a real release-
-#    tagging convention is established, add a tag trigger here:
-#
-#      on:
-#        push:
-#          tags: ['v*']   # ← uncomment/add when release tags exist
-#
-#    and change the job's `if:` to also include `github.event_name == 'push'`
-#    (or `startsWith(github.ref, 'refs/tags/v')` for tag-only). Until then,
-#    manual dispatch is the honest trigger.
+#    Cadence: `workflow_dispatch`-only for on-demand/scheduled SBOM
+#    generation. Release-tag SBOMs (`v*` tag push) are now produced by the
+#    dedicated release pipeline in `.github/workflows/release.yml`, whose
+#    `sbom` job mirrors this one's pinned cargo-cyclonedx recipe (0.5.9,
+#    CycloneDX 1.5, per-crate `*.cdx.json`) so the GitHub Release can attach
+#    them in the same run (`needs:` cannot span separately-triggered
+#    workflows, and widening THIS file's `on.push` to `tags: ['v*']` would
+#    also make the `deny` job run on every release tag for no release value).
+#    This job is retained for between-release / on-demand SBOM generation.
 
 on:
   push:

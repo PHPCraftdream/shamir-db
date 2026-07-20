@@ -1,0 +1,483 @@
+name: release
+
+# Tag-based release pipeline (release-infra RI-4).
+#
+# Fires on push of a `v*` tag (e.g. `v0.1.0-alpha.1`) and produces, for that
+# exact tag:
+#
+#   1. a GATE (fmt + clippy + test, mirroring ci.yml) that every downstream
+#      job depends on, so a red gate blocks the whole release;
+#   2. multi-OS release binaries (Linux x86_64, macOS aarch64, Windows
+#      x86_64) packaged as versioned archives + per-archive sha256 checksums;
+#   3. a Docker image build + real smoke test (boot the container, poll
+#      /healthz to 200, then graceful-stop and assert a clean exit) — closes
+#      the P0#2 Docker-smoke gap from the release review;
+#   4. a CycloneDX SBOM (mirrors .github/workflows/supply-chain.yml's `sbom`
+#      job recipe — same pinned cargo-cyclonedx, same output glob); duplicated
+#      here rather than triggered there so that `github-release` can `needs:`
+#      it and attach the `.cdx.json` files in the same run (cross-workflow
+#      `needs:` is not supported; adding a tag trigger to supply-chain.yml's
+#      job would also widen the `deny` job's cadence for no release value);
+#   5. keyless sigstore/cosign signatures of every archive (via GitHub OIDC —
+#      no key material, no secrets), and
+#   6. a final job that creates a GitHub Release for the tag, marked
+#      `prerelease: true` (this is an alpha), attaching all archives,
+#      checksums, SBOM, and signatures.
+#
+# The release is marked PRERELEASE because every tag today is an alpha
+# (CHANGELOG.md: "has not published a stable release"). Do not let it default
+# to "latest". Node/TS e2e (RI-5) is intentionally NOT wired in here.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Least-privilege default. Jobs that need more override it per-job:
+# `github-release` -> contents: write (create the release on the tag);
+# `sign` -> id-token: write (keyless cosign via GitHub OIDC).
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  # GATE. Mirrors ci.yml's `fmt` + `clippy` + `test` jobs verbatim. These are
+  # duplicated inline rather than invoked via the reusable-workflow
+  # (`workflow_call`) pattern because ci.yml's triggers are deliberately
+  # push/PR-to-master only (out of scope to change), and promoting ci.yml to a
+  # reusable workflow would require restructuring its triggers/guards. The
+  # integration job is intentionally NOT re-run here — the brief scopes the
+  # release gate to fmt+clippy+test, and the docker smoke test below provides
+  # real runtime validation of the built artifact. Every downstream job
+  # `needs:` these three so a red gate blocks the whole release.
+  # --------------------------------------------------------------------------
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # See ci.yml's `clippy` job for why this is matrixed across OSes: the
+  # `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` branches only compile
+  # (and thus only lint) on the matching OS.
+  clippy:
+    name: cargo clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: cargo test lib (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      # Pinned to the nextest version that matches the perimeter-guard
+      # baseline in .config/nextest.toml — see ci.yml's `test` job for the
+      # full rationale. `./scripts/test.sh` (not raw `cargo test`) is the
+      # sanctioned runner: the cargo-runner guard in .cargo/config.toml
+      # fail-closes on anything that does not set the $NEXTEST marker.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/test.sh --locked
+        shell: bash
+
+  # --------------------------------------------------------------------------
+  # 2. MULTI-OS RELEASE BINARY BUILD + PACKAGE + CHECKSUM
+  # --------------------------------------------------------------------------
+  #
+  # Targets (per brief):
+  #   - x86_64-unknown-linux-gnu  on ubuntu-latest  (native)
+  #   - aarch64-apple-darwin      on macos-latest   (native: macos-latest is
+  #                                                 Apple Silicon / arm64 as
+  #                                                 of 2024; if GitHub ever
+  #                                                 regresses macos-latest to
+  #                                                 x86_64, a cross-linker
+  #                                                 must be added here)
+  #   - x86_64-pc-windows-msvc    on windows-latest (native)
+  #
+  # `targets:` is passed to the toolchain action for every leg — a no-op for
+  # the host target (defensive against the runner-arch drift noted above) and
+  # ensures `--target` never fails on a missing stdlib.
+  #
+  # `--locked` honours the committed Cargo.lock (no network resolution drift
+  # between gate and release artifact). Each binary is packaged into a
+  # `shamir-server-<tag>-<target>.{tar.gz,zip}` archive with a matching
+  # `<archive>.sha256` (coreutils sha256sum format). Unix = tar.gz, Windows =
+  # zip per the brief.
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: [fmt, clippy, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked -p shamir-server --target ${{ matrix.target }}
+      - name: Stage binary
+        # Copy the built binary into a clean staging dir so the archive
+        # contains only `shamir-server` (not the whole target/ tree). Git
+        # Bash on Windows provides `cp`; RUNNER_OS distinguishes the .exe.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/shamir-server.exe" stage/shamir-server.exe
+          else
+            cp "target/${{ matrix.target }}/release/shamir-server" stage/shamir-server
+          fi
+      - name: Package (tar.gz) + checksum
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="shamir-server-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar -C stage -czf "${ARCHIVE}" shamir-server
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+      - name: Package (zip)
+        # Windows: Compress-Archive (PowerShell) — Git Bash's `zip` is not
+        # guaranteed on windows-latest, and bsdtar-vs-GNU-tar ambiguity makes
+        # `tar -a -cf x.zip` unreliable across shells. Compress-Archive is the
+        # deterministic native option.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $archive = "shamir-server-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path stage/shamir-server.exe -DestinationPath $archive
+      - name: Checksum (zip)
+        # sha256sum ships with Git for Windows (Git Bash), so the checksum
+        # step is uniform across all three OSes.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="shamir-server-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            shamir-server-${{ github.ref_name }}-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # 3. DOCKER IMAGE BUILD + SMOKE TEST
+  # --------------------------------------------------------------------------
+  #
+  # Closes the P0#2 Docker-smoke gap. Builds the multi-stage image from
+  # deploy/Dockerfile (rust:1.93-bookworm builder → debian:bookworm-slim
+  # runtime, RI-2 fixes already in tree), boots a container with a minimal
+  # generated config, polls /healthz to 200, then gracefully stops and
+  # asserts the container exited cleanly (ExitCode 0) — proving the SIGTERM
+  # graceful-shutdown path (shamir-server's foreground_shutdown() handler)
+  # ran, not a forced SIGKILL (which would show ExitCode 137).
+  #
+  # Runs on ubuntu-latest where Docker is native. The minimal config uses the
+  # KDF floors (spec §3.7.2), a single loopback tls_exporter listener, and
+  # loopback observability on 9090. The TLS cert/key files need not exist —
+  # the boot path generates a self-signed pair on first start (see
+  # TlsConfig doc comment in config.rs). /healthz is polled via `docker exec`
+  # from INSIDE the container at 127.0.0.1:9090 — the exact same endpoint and
+  # topology as the Dockerfile's own HEALTHCHECK — so no public-metrics opt-in
+  # is required.
+
+  docker:
+    name: docker build + smoke test
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - name: Build image
+        run: docker build -f deploy/Dockerfile -t shamir-db:${{ github.ref_name }} .
+      - name: Generate minimal smoke-test config
+        run: |
+          mkdir -p smoke
+          cat > smoke/server.ktav <<'KTAV'
+          data_dir: /var/lib/shamir-db
+
+          kdf_defaults: {
+              memory_kb: 19456
+              time: 2
+              parallelism: 1
+              argon2_version: 19
+          }
+
+          listeners: [
+              {
+                  kind: tcp
+                  addr: 127.0.0.1:7331
+                  profile: tls_exporter
+              }
+          ]
+
+          tls: {
+              cert_path: /var/lib/shamir-db/cert.pem
+              key_path:  /var/lib/shamir-db/key.pem
+          }
+
+          observability: {
+              addr: 127.0.0.1:9090
+          }
+          KTAV
+      - name: Run container + poll /healthz + graceful stop
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Boot detached with a scratch named volume for the data dir and
+          # the generated config bind-mounted read-only at the path the
+          # Dockerfile's CMD expects.
+          docker run -d \
+            --name shamir-smoke \
+            -v shamir-smoke-data:/var/lib/shamir-db \
+            -v "$(pwd)/smoke/server.ktav:/etc/shamir/server.ktav:ro" \
+            shamir-db:${{ github.ref_name }} >/dev/null
+
+          # Poll /healthz (same endpoint as the Dockerfile HEALTHCHECK) until
+          # 200 or a 30s timeout. `docker exec` runs curl inside the
+          # container (curl + ca-certificates are installed by the Dockerfile).
+          ok=0
+          for i in $(seq 1 30); do
+            if docker exec shamir-smoke curl -fsS http://127.0.0.1:9090/healthz >/tmp/healthz.out 2>/dev/null; then
+              echo "/healthz -> 200: $(cat /tmp/healthz.out)"
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "::error::/healthz did not return 200 within 30s"
+            docker logs shamir-smoke || true
+            docker stop -t 5 shamir-smoke >/dev/null 2>&1 || true
+            docker rm -f shamir-smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          # Graceful stop: `docker stop -t 30` sends SIGTERM and allows up to
+          # 30s for the server's graceful-shutdown path before SIGKILL. The
+          # container's real ExitCode (inspected below) is the signal: 0 =
+          # clean SIGTERM shutdown, 137 = SIGKILLed (graceful path failed).
+          docker stop -t 30 shamir-smoke >/dev/null
+          EXIT_CODE="$(docker inspect --format '{{.State.ExitCode}}' shamir-smoke)"
+
+          echo "--- container logs (tail) ---"
+          docker logs shamir-smoke --tail 50 || true
+          echo "container ExitCode=${EXIT_CODE}"
+
+          docker rm -f shamir-smoke >/dev/null 2>&1 || true
+
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "::error::container did not shut down cleanly (ExitCode=${EXIT_CODE}, expected 0)"
+            exit 1
+          fi
+
+  # --------------------------------------------------------------------------
+  # 4. SBOM (CycloneDX) — mirrors supply-chain.yml's `sbom` job recipe.
+  # --------------------------------------------------------------------------
+  #
+  # Same pinned cargo-cyclonedx (0.5.9), same `-f json --spec-version 1.5`,
+  # same per-crate output glob. Duplicated here (not triggered via
+  # supply-chain.yml) so `github-release` can `needs:` it in the same run and
+  # attach the `.cdx.json` files — cross-workflow `needs:` is not supported,
+  # and adding a `v*` tag trigger to supply-chain.yml's `sbom` job would also
+  # widen that file's `deny` job to run on every release tag (its
+  # `on.push` is workflow-level). supply-chain.yml's `sbom` job remains
+  # workflow_dispatch-only for on-demand/scheduled SBOM generation.
+
+  sbom:
+    name: cargo cyclonedx (SBOM)
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - name: Install cargo-cyclonedx
+        # Pinned to 0.5.9 to match .github/workflows/supply-chain.yml's `sbom`
+        # job exactly — single source of truth for the SBOM recipe. `--locked`
+        # pins cargo-cyclonedx's own build; `--version` pins the published
+        # release.
+        run: cargo install --locked --version 0.5.9 cargo-cyclonedx
+      - name: Generate CycloneDX SBOM
+        # One `<crate-name>.cdx.json` per workspace member, written next to
+        # each crate's Cargo.toml.
+        run: cargo cyclonedx -f json --spec-version 1.5
+      - name: Stage SBOM files
+        # Flatten the per-crate .cdx.json into one dir so the release job can
+        # attach them with a single glob. Crate names are unique in the
+        # workspace, so no filename collisions.
+        run: |
+          mkdir -p sbom
+          find crates -name '*.cdx.json' -exec cp {} sbom/ \;
+          ls -1 sbom/
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # 5. ARTIFACT SIGNING (keyless sigstore/cosign via GitHub OIDC)
+  # --------------------------------------------------------------------------
+  #
+  # Signs every released archive. Keyless cosign uses the ambient OIDC token
+  # (the `id-token: write` permission below) — no key material, no extra
+  # secrets, no KMS — so per the brief's criterion this is the
+  # "straightforward" path (not the "key management / extra secrets" path
+  # that would warrant a TODO skip). For each archive it emits a `.sig`
+  # (signature), `.pem` (signing certificate), and `.bundle` (self-contained
+  # Sigstore bundle with cert + signature + Rekor tlog entry for offline
+  # verification via `cosign verify-blob --bundle <archive>.bundle <archive>`).
+
+  sign:
+    name: cosign sign (keyless)
+    needs: [fmt, clippy, test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for keyless cosign (GitHub OIDC)
+    steps:
+      - name: Download archive artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: Sign archives (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for f in *.tar.gz *.zip; do
+            found=1
+            echo "signing ${f}"
+            cosign sign-blob --yes \
+              --bundle "${f}.bundle" \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "${f}"
+          done
+          if [ "$found" != "1" ]; then
+            echo "::error::no archives found to sign" >&2
+            exit 1
+          fi
+      - name: Upload signature artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: |
+            *.bundle
+            *.sig
+            *.pem
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # 6. GITHUB RELEASE
+  # --------------------------------------------------------------------------
+  #
+  # Final job: downloads every artifact (archives, checksums, SBOM,
+  # signatures), extracts this tag's notes from CHANGELOG.md (heading-grep
+  # with an honest "see CHANGELOG.md" fallback — no fragile parser; the only
+  # section today is [Unreleased], so the first alpha release will use the
+  # fallback), and creates a GitHub Release for the tag marked PRERELEASE.
+
+  github-release:
+    name: create GitHub Release
+    # Needs the gate (fmt+clippy+test) explicitly AND build/docker/sbom/sign.
+    # The gate is also transitively required via the other four, but the brief
+    # specifies the final job `needs:` the gate directly — listing it makes a
+    # red gate's "block the whole release" semantics explicit, not implicit.
+    needs: [fmt, clippy, test, build, docker, sbom, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create a release on the pushed tag
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Extract release notes from CHANGELOG
+        # Heading-grep for `## [<version>]` (tag with leading `v` stripped).
+        # Falls back to a short note pointing at CHANGELOG.md when no section
+        # matches — today only [Unreleased] exists, so the first alpha tag
+        # degrades to the fallback (explicitly acceptable per the brief).
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v ver="${VER}" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            flag && $0 ~ "^## \\[" { flag=0 }
+            flag { print }
+          ' CHANGELOG.md)"
+          if [ -z "${NOTES}" ]; then
+            NOTES="Pre-release build of ${GITHUB_REF_NAME}.
+
+          Compatibility: this is an alpha release — alpha-to-alpha
+          compatibility is NOT guaranteed. See [CHANGELOG.md](CHANGELOG.md)
+          for the versioning scheme and the no-alpha-to-alpha-compatibility
+          statement."
+          fi
+          printf '%s\n' "${NOTES}" > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+      - name: Create GitHub Release (prerelease)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          prerelease: true
+          files: |
+            artifacts/shamir-server-*.tar.gz
+            artifacts/shamir-server-*.tar.gz.sha256
+            artifacts/shamir-server-*.zip
+            artifacts/shamir-server-*.zip.sha256
+            artifacts/*.cdx.json
+            artifacts/*.bundle
+            artifacts/*.sig
+            artifacts/*.pem
