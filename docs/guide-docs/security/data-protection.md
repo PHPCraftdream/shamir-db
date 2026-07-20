@@ -212,10 +212,17 @@ Compose the primitives:
    version older than "now" for that table. Combined with step 2's
    tombstones, this reclaims the **values** of all prior versions.
 4. **Wait for WAL truncation + LSM compaction** (§2.3) before claiming the
-   data is physically gone from disk.
+   data is physically gone from disk. If the table carries a **vector (HNSW)
+   index**, also account for index-resident embeddings that survive until HNSW
+   compaction — a separate, slower reclamation path (§2.5). FTS postings ride
+   the same LSM cadence as the rows and need no extra step.
 5. **Repeat for every table** where the subject's data may live.
-6. **Document the residual** (§2.4) honestly in the erasure response —
-   specifically the interner caveat.
+6. **Purge every replica separately** — `PurgeHistory`/delete-vacuum do not
+   propagate through replication; each node that has pulled the subject's data
+   must be purged independently (§2.6).
+7. **Document the residuals** honestly in the erasure response — the interner
+   caveat (§2.4), the HNSW index-residual caveat (§2.5), and the replica caveat
+   (§2.6).
 
 For **time-based retention** (e.g. "drop all data older than 90 days"),
 `SetRetention` is the right tool: set `max_age_secs: 86400 * 90` once and
@@ -331,6 +338,123 @@ the data directory on encrypted storage (§1.3) so the interner chunks on
 disk are ciphertext, making the residual unrecoverable without the volume
 key. A future "interner GC" feature that prunes entries no longer
 referenced by any record is a tracked gap, not a current capability.
+
+### 2.5 Residual: secondary-index copies (HNSW / FTS) until compaction
+
+**This is the residual the audit specifically flagged, documented honestly.**
+
+The §2.2 erasure procedure reclaims the **data store** (the `history` log + WAL +
+LSM). It does **not**, by itself, reclaim copies of the subject's data that live
+in **secondary indexes**. There are two distinct index types and they behave
+differently — an operator must understand both.
+
+#### Vector index (HNSW) — soft-delete tombstones, persisted into the snapshot
+
+Vector deletion is a **soft-delete tombstone**, not a removal. The HNSW adapter
+(`crates/shamir-index/src/vector/hnsw_adapter.rs`) documents this in its module
+header (`:7-8` — "Deletion via soft-delete tombstone set; search over-scans ×2
+to compensate"). The `delete` path (`:2689-2725`) inserts a tombstone into the
+`deleted` set and drops the brute-force / quantized side-copies, **but the graph
+node itself stays** — verbatim from the code (`:2708`):
+
+> "The graph node stays (hnsw_rs has no delete) but search filters tombstoned
+> internals, so it's invisible."
+
+"Invisible" means **excluded from live query results** — it does **not** mean
+"gone from disk." The tombstoned vector embedding is physically present in the
+HNSW graph and is **persisted into the on-disk index snapshot**: the snapshot
+codec (`crates/shamir-index/src/vector/snapshot.rs`) serialises the graph dump
+(`.hnsw.graph` / `.hnsw.data` chunk files — `:14-20`) which carry **all** nodes
+including tombstoned ones (the graph has no notion of deletion), and the sidecar
+(`:22-24`) explicitly persists the adapter's maps including the `tombstones`
+set. The tombstone-iteration hook used for serialisation is
+`HnswAdapter::for_each_deleted` (`hnsw_adapter.rs:503-509`).
+
+The tombstoned vectors are **physically removed from the snapshot only when a
+compaction rebuilds the graph from the live (non-tombstoned) set**. Compaction
+is triggered by `VectorBackend::trigger_compaction_check`
+(`vector_backend.rs:982-1009`) when the tombstone ratio crosses the threshold
+(`deleted_ratio() >= 0.3` **AND** `live_count >= 1000` — constants at
+`crates/shamir-tunables/src/lib.rs:155,159`; gating at `vector_backend.rs:993`).
+The rebuild writes a **new generation** of the snapshot and **removes the old
+generation's chunk files** (`snapshot.rs:1298-1316` — `KvOp::Remove` for each
+old `graph`/`data`/`sidecar` chunk). Only after that flip are the tombstoned
+embeddings physically absent from the on-disk snapshot.
+
+**There is no operator API to force a compaction** — it fires on the
+ratio/threshold schedule above, on the next qualifying delete. An operator who
+deletes a single subject's vectors from a large index may wait a long time for
+the ratio to cross 30 %.
+
+#### Full-text-search index (FTS) — postings live in the regular data store
+
+The FTS backend (`crates/shamir-index/src/fts_backend.rs`) stores postings as
+type-tagged keys in the **regular data `Store`** (LSM), not in a separate
+structure. Its `plan_delete` (`:177-191`) emits `IndexWriteOp::RemovePosting`
+ops that delete the posting keys from the store. A posting deletion therefore
+writes an **LSM tombstone** and the original posting bytes survive in SST files
+until fjall compaction — which is **exactly the latency story §2.3 already
+documents** for the data layer. FTS postings are **not** a separate compaction
+model; they ride the same LSM-compaction cadence as the row data itself. (The
+ranked/BM25 FTS variant, `fts_ranked_backend.rs`, follows the same
+posting-in-store model.)
+
+#### What this means for the §2.2 erasure procedure
+
+* **FTS indexes:** no additional step beyond §2.2 step 4 (wait for LSM
+  compaction). The postings are reclaimed on the same cadence as the rows.
+* **Vector (HNSW) indexes:** this is a **real gap in the erasure procedure's
+  completeness**. An operator who has completed §2.2 (Delete + PurgeHistory +
+  WAL/LSM reclamation) has **not** achieved physical erasure of the subject's
+  **embeddings** until an HNSW compaction has run and flipped the snapshot
+  generation. The embeddings remain readable (to anyone with raw-disk access who
+  decodes the snapshot chunks) for an unbounded window that depends on future
+  delete traffic crossing the 30 % ratio. As with §2.3's LSM residual, §1.3's
+  encrypted-volume requirement converts "physically present for a compaction
+  window" into ciphertext — the residual bytes are unrecoverable without the
+  volume key. A future "force-compaction-on-erasure" operator command is a
+  tracked gap, not a current capability.
+
+### 2.6 Residual: purge does not propagate to replicas
+
+**This is the residual the audit specifically flagged, documented honestly.**
+
+Replication is a **leader-side pull API** (`crates/shamir-server/src/db_handler/repl_handler.rs:1-15`,
+:42-77): a follower holding the `replicator` capability (or a superuser — gate at
+`:50`) calls `Hello` to discover readable repos, then `Pull` to read a batch of
+**commit changelog events** for one repo (`handle_pull` →
+`read_changelog_from_journal`, `repl_handler.rs:123-128,155,191`). The changelog
+carries **committed data writes** (insert/update/delete of row versions) — it is
+the replication transport, and it records nothing else.
+
+`PurgeHistory` and delete-vacuum are **garbage-collection operations**, not
+commits. `PurgeHistory` (`crates/shamir-db/src/shamir_db/execute/admin_retention.rs:138-139`)
+calls `MvccStore::purge_below_ts` (`crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:396`),
+which reclaims history versions **directly** out of the leader's `history` log.
+This reclamation does **not** emit a changelog event — the changefeed records
+commits, not GC — so a follower that has **already pulled** copies of the
+now-purged versions never learns that they were purged. Those copies persist on
+the replica until the replica's **own** retention/vacuum/purge reclaims them (and
+then its own WAL/LSM/index compaction runs per §2.3/§2.5).
+
+**Consequence for GDPR Art. 17:** in a replicated deployment there is **no
+single "purge everywhere" command** today. An operator satisfying a right-to-
+erasure request across a replicated topology **must separately purge each
+replica** — issue the §2.2 procedure (Delete + PurgeHistory + wait for
+WAL/LSM/HNSW reclamation) on **every** node that has pulled the subject's data.
+The leader's purge reclaims only the leader's copy.
+
+This is adjacent to — but distinct from — the existing requirement at §1.3's
+deployment table (line 85: "Backups / snapshots / replicas — the encryption
+obligation follows the data"). That line establishes that replica volumes must be
+**encrypted** (so residual bytes are ciphertext); it does **not** address
+**purge propagation**, which is an independent, additive obligation: even on
+encrypted storage, the logical data must be actively purged on each replica to
+satisfy an erasure request — encryption alone does not constitute erasure.
+
+A future "purge-propagation" feature (propagating `PurgeHistory`/delete-vacuum
+through the changelog so followers reclaim in lockstep) is a tracked gap, not a
+current capability.
 
 ---
 
