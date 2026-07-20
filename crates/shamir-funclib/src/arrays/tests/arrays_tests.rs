@@ -300,16 +300,73 @@ fn distinct_large_unique_matches_naive() {
 }
 
 #[test]
-fn sort_numeric_and_non_numeric_error() {
+fn sort_numeric_and_string() {
     let r = reg();
+    // Regression: numeric sort still works (same values, same order).
     assert_eq!(
         r.call("sort", &[ints(&[3, 1, 2, -5])]).unwrap(),
         ints(&[-5, 1, 2, 3])
     );
-    // error: non-numeric element
+    // The bug fix: string arrays now sort lexicographically instead of
+    // failing with type_mismatch.
     assert_eq!(
-        r.call("sort", &[strs(&["a", "b"])]).unwrap_err().code,
-        "type_mismatch"
+        r.call("sort", &[strs(&["banana", "apple", "cherry"])])
+            .unwrap(),
+        strs(&["apple", "banana", "cherry"])
+    );
+}
+
+#[test]
+fn sort_cross_type_by_rank() {
+    let r = reg();
+    // Mixed-type array: numeric rank (2) < Str rank (3), so ints sort
+    // before strings. Within each rank, value ordering applies.
+    let input = list(vec![
+        QueryValue::Int(2),
+        QueryValue::Str("a".into()),
+        QueryValue::Int(1),
+    ]);
+    assert_eq!(
+        r.call("sort", &[input]).unwrap(),
+        list(vec![
+            QueryValue::Int(1),
+            QueryValue::Int(2),
+            QueryValue::Str("a".into()),
+        ])
+    );
+}
+
+#[test]
+fn sort_numeric_cross_subtype_by_value() {
+    let r = reg();
+    // Homogeneous numeric array mixing Int/Dec/F64 subtypes — all numeric
+    // rank (2), so compared by VALUE via compare_numeric's cross-subtype
+    // arms, not by subtype discriminant.
+    let input = list(vec![QueryValue::Int(3), dec("1.5"), QueryValue::F64(2.0)]);
+    assert_eq!(
+        r.call("sort", &[input]).unwrap(),
+        list(vec![dec("1.5"), QueryValue::F64(2.0), QueryValue::Int(3)])
+    );
+}
+
+#[test]
+fn sort_desc_numeric() {
+    let r = reg();
+    // sort_desc returns the exact reverse of sort.
+    assert_eq!(
+        r.call("sort_desc", &[ints(&[3, 1, 2, -5])]).unwrap(),
+        ints(&[3, 2, 1, -5])
+    );
+}
+
+#[test]
+fn sort_desc_strings() {
+    let r = reg();
+    // Reverse-lexicographic order.
+    assert_eq!(
+        r.call("sort_desc", &[strs(&["apple", "banana", "cherry"])])
+            .unwrap(),
+        strs(&["cherry", "banana", "apple"])
     );
 }
 

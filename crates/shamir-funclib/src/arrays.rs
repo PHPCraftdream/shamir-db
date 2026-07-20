@@ -2,8 +2,8 @@
 //! value.
 //!
 //! Functions registered (plain names, no folder prefix):
-//! `length get slice contains index_of first last flatten distinct sort join
-//!  sum min max avg`.
+//! `length get slice contains index_of first last flatten distinct sort
+//!  sort_desc join sum min max avg`.
 //!
 //! Conventions (mirroring [`crate::math`]):
 //! - The array argument is always a `List`, extracted via [`arg_list`]; a
@@ -17,7 +17,11 @@
 //!   via [`arg_dec`] and return a `Dec`, preserving precision; a non-numeric
 //!   element yields `type_mismatch` and an empty array yields
 //!   `ScalarError("empty")`.
-//! - `sort` orders elements by their decimal value (numeric arrays only).
+//! - `sort` / `sort_desc` order elements by [`crate::compare::compare`] (the
+//!   cross-type total order — same as `min`/`max`). This handles string
+//!   arrays, mixed-type arrays, and numeric arrays uniformly; `compare`'s
+//!   own same-subtype numeric fast paths (`Int vs Int`, `Dec vs Dec`, etc.)
+//!   keep the homogeneous-numeric case fast with no separate branch.
 //! - Accessors over an empty array (`first`, `last`) yield
 //!   `ScalarError("empty")`; out-of-bounds `get` yields `out_of_range`.
 //!
@@ -178,13 +182,22 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                // Numeric sort by decimal value; non-numeric element -> type_mismatch.
-                let mut keyed: Vec<(Decimal, QueryValue)> = Vec::with_capacity(arr.len());
-                for i in 0..arr.len() {
-                    keyed.push((arg_dec(arr, i)?, arr[i].clone()));
-                }
-                keyed.sort_by(|x, y| x.0.cmp(&y.0));
-                Ok(v_list(keyed.into_iter().map(|(_, v)| v).collect()))
+                let mut out = arr.to_vec();
+                out.sort_by(compare);
+                Ok(v_list(out))
+            },
+            1,
+            Some(1),
+        ),
+    );
+    reg.register(
+        "sort_desc",
+        FnEntry::pure(
+            |a| {
+                let arr = arg_list(a, 0)?;
+                let mut out = arr.to_vec();
+                out.sort_by(|x, y| compare(x, y).reverse());
+                Ok(v_list(out))
             },
             1,
             Some(1),
