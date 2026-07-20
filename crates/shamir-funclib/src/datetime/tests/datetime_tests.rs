@@ -273,3 +273,145 @@ fn baseline_constant_is_consistent() {
             .timestamp_millis()
     );
 }
+
+// ============================================================================
+// strftime-pattern format / parse
+// ============================================================================
+
+#[test]
+fn format_with_pattern() {
+    let r = reg();
+    // 2021-06-02T15:30:45Z → "%Y-%m-%d" = "2021-06-02".
+    assert_eq!(
+        r.call("format", &[ts(WED_MS), v_str("%Y-%m-%d".into())])
+            .unwrap(),
+        v_str("2021-06-02".into())
+    );
+    // Full date+time pattern.
+    assert_eq!(
+        r.call("format", &[ts(WED_MS), v_str("%Y-%m-%d %H:%M:%S".into())])
+            .unwrap(),
+        v_str("2021-06-02 15:30:45".into())
+    );
+}
+
+#[test]
+fn format_with_malformed_pattern_returns_err_not_panic() {
+    // CRITICAL: chrono's `DateTime::format(pattern)` returns a LAZY
+    // `DelayedFormat` that only interprets specifiers when displayed. An
+    // unknown specifier like `%Q` causes a PANIC at `.to_string()` time, not
+    // an `Err`. The `validate_pattern` pre-check (using `StrftimeItems`)
+    // converts this panic into a clean `ScalarError("parse")`.
+    //
+    // This test would FAIL BY PANICKING (crashing the test binary) if the
+    // `StrftimeItems` pre-validation step were removed — proving the
+    // footgun-prevention works.
+    let r = reg();
+    // %Q is not a valid chrono strftime specifier.
+    assert_eq!(
+        r.call("format", &[ts(WED_MS), v_str("%Y-%Q-%d".into())])
+            .unwrap_err()
+            .code,
+        "parse"
+    );
+    // %J is also not a valid chrono specifier (distinct from %q = quarter).
+    assert_eq!(
+        r.call("format", &[ts(WED_MS), v_str("%J".into())])
+            .unwrap_err()
+            .code,
+        "parse"
+    );
+}
+
+#[test]
+fn parse_date_only_pattern() {
+    let r = reg();
+    // "2024-03-15" with "%Y-%m-%d" → midnight UTC epoch-millis.
+    let result = r
+        .call(
+            "parse",
+            &[v_str("2024-03-15".into()), v_str("%Y-%m-%d".into())],
+        )
+        .unwrap();
+    let expected = Utc
+        .with_ymd_and_hms(2024, 3, 15, 0, 0, 0)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(result, v_int(expected));
+}
+
+#[test]
+fn parse_datetime_pattern() {
+    let r = reg();
+    // Full date+time pattern with time component.
+    let result = r
+        .call(
+            "parse",
+            &[
+                v_str("2024-03-15 10:30:00".into()),
+                v_str("%Y-%m-%d %H:%M:%S".into()),
+            ],
+        )
+        .unwrap();
+    let expected = Utc
+        .with_ymd_and_hms(2024, 3, 15, 10, 30, 0)
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(result, v_int(expected));
+}
+
+#[test]
+fn parse_mismatched_input_returns_err() {
+    let r = reg();
+    // Input doesn't match pattern → Err, not panic or garbage.
+    assert_eq!(
+        r.call(
+            "parse",
+            &[v_str("not-a-date".into()), v_str("%Y-%m-%d".into())]
+        )
+        .unwrap_err()
+        .code,
+        "parse"
+    );
+    // Right shape, wrong values (month 13).
+    assert_eq!(
+        r.call(
+            "parse",
+            &[v_str("2024-13-01".into()), v_str("%Y-%m-%d".into())]
+        )
+        .unwrap_err()
+        .code,
+        "parse"
+    );
+}
+
+#[test]
+fn parse_malformed_pattern_returns_err_not_panic() {
+    // Same footgun-prevention as format: a bad pattern must not panic.
+    let r = reg();
+    assert_eq!(
+        r.call(
+            "parse",
+            &[v_str("2024-03-15".into()), v_str("%Y-%Q-%d".into())]
+        )
+        .unwrap_err()
+        .code,
+        "parse"
+    );
+}
+
+#[test]
+fn format_parse_roundtrip() {
+    let r = reg();
+    // Round-trip through a second-granularity pattern. The pattern has no
+    // sub-second precision, so we use a timestamp with zero milliseconds
+    // (WED_MS = 1_622_647_845_000, which is exactly on a second boundary).
+    let pattern = "%Y-%m-%d %H:%M:%S";
+    let formatted = r
+        .call("format", &[ts(WED_MS), v_str(pattern.into())])
+        .unwrap();
+    let reparsed = r
+        .call("parse", &[formatted, v_str(pattern.into())])
+        .unwrap();
+    assert_eq!(reparsed, v_int(WED_MS));
+}

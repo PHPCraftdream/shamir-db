@@ -3,9 +3,9 @@
 //!
 //! Functions registered (plain names, no folder prefix):
 //! `now to_epoch_s to_epoch_ms from_epoch_s from_epoch_ms parse_rfc3339
-//!  format_rfc3339 year month day hour minute second weekday is_weekend
-//!  add_secs add_days diff_secs start_of_day start_of_week start_of_month
-//!  truncate age`.
+//!  format_rfc3339 parse format year month day hour minute second weekday
+//!  is_weekend add_secs add_days diff_secs start_of_day start_of_week
+//!  start_of_month truncate age`.
 //!
 //! Conventions (mirroring `math.rs`):
 //! - The canonical timestamp is `i64` epoch-millis UTC. Component extractors
@@ -16,13 +16,18 @@
 //!   and impure** (`pure:false, deterministic:false`); every other function is
 //!   `pure + deterministic` and may back a functional index.
 //! - Errors are machine codes only: `"out_of_range"` for un-representable
-//!   timestamps, `"parse"` for an unparseable RFC-3339 string, `"bad_unit"` for
-//!   an unknown `truncate` unit.
+//!   timestamps, `"parse"` for an unparseable RFC-3339 string, a strftime
+//!   pattern containing an invalid specifier, or an input string that does
+//!   not match the given pattern, and `"bad_unit"` for an unknown `truncate`
+//!   unit.
 
 use crate::registry::{
     arg_i64, arg_str, v_bool, v_int, v_str, FnEntry, ScalarError, ScalarRegistry,
 };
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc, Weekday};
+use chrono::format::{Item, StrftimeItems};
+use chrono::{
+    DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday,
+};
 use shamir_types::types::value::QueryValue;
 
 /// Convert epoch-millis UTC into a `DateTime<Utc>`, or `"out_of_range"`.
@@ -36,6 +41,19 @@ fn to_dt(ms: i64) -> Result<DateTime<Utc>, ScalarError> {
 /// First epoch-millis argument decoded into a `DateTime<Utc>`.
 fn dt_arg(a: &[QueryValue], i: usize) -> Result<DateTime<Utc>, ScalarError> {
     to_dt(arg_i64(a, i)?)
+}
+
+/// Validate a strftime `pattern` BEFORE it reaches `DateTime::format` (which
+/// panics on unknown specifiers via a lazy `DelayedFormat`). `StrftimeItems`
+/// parses the pattern eagerly and emits [`Item::Error`] for any invalid
+/// specifier; scanning for that variant converts the panic into a clean
+/// `ScalarError("parse")` without ever constructing the panicking
+/// `DelayedFormat`.
+fn validate_pattern(pattern: &str) -> Result<(), ScalarError> {
+    if StrftimeItems::new(pattern).any(|item| matches!(item, Item::Error)) {
+        return Err(ScalarError::new("parse"));
+    }
+    Ok(())
 }
 
 /// Register the `/datetime` functions.
@@ -118,6 +136,40 @@ pub fn register(reg: &mut ScalarRegistry) {
             },
             1,
             Some(1),
+        ),
+    );
+
+    // ---- strftime-pattern parse / format ----------------------------------
+    reg.register(
+        "parse",
+        FnEntry::pure(
+            |a| {
+                let s = arg_str(a, 0)?;
+                let pattern = arg_str(a, 1)?;
+                validate_pattern(pattern)?;
+                let ndt = NaiveDateTime::parse_from_str(s, pattern)
+                    .or_else(|_| {
+                        NaiveDate::parse_from_str(s, pattern)
+                            .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
+                    })
+                    .map_err(|_| ScalarError::new("parse"))?;
+                Ok(v_int(ndt.and_utc().timestamp_millis()))
+            },
+            2,
+            Some(2),
+        ),
+    );
+    reg.register(
+        "format",
+        FnEntry::pure(
+            |a| {
+                let dt = dt_arg(a, 0)?;
+                let pattern = arg_str(a, 1)?;
+                validate_pattern(pattern)?;
+                Ok(v_str(dt.format(pattern).to_string()))
+            },
+            2,
+            Some(2),
         ),
     );
 

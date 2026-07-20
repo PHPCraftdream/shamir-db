@@ -76,7 +76,7 @@ Procedural functions (random / uuid / argon2 / asym / PQC) stay in the existing
 | `/str` regex family | scalar | is_reg_match(s,pat)→bool, reg_query(s,pat)→first match/capture, reg_query_all→array, reg_captures→groups, reg_replace(s,pat,repl with $1), reg_split→array, reg_count→int, reg_find_index→int |
 | `/array` | scalar | length, get, slice, contains, index_of, first, last, flatten, distinct, sort, join, sum/min/max/avg-over-elements |
 | `/cast` | scalar | to_int, to_float, to_dec, to_string, to_bool, parse_int, parse_float, try_cast |
-| `/datetime` | scalar | now (unixtime), parse(rfc3339), format, year, month, day, hour, minute, second, weekday, is_weekend, add/sub(secs/days), diff_secs, start_of(day/week/month), truncate(unit), to_epoch_ms/s, from_epoch_ms/s, age |
+| `/datetime` | scalar | now (unixtime), parse_rfc3339, format_rfc3339, parse(s,pattern), format(ts,pattern), year, month, day, hour, minute, second, weekday, is_weekend, add/sub(secs/days), diff_secs, start_of(day/week/month), truncate(unit), to_epoch_ms/s, from_epoch_ms/s, age |
 | `/value` | scalar | get/path, array_length, keys, type, exists |
 | `/validate` | scalar (→ pairs with #142) | is_email, is_url, is_uuid, is_ipv4/v6, is_phone, luhn (card), in_range, matches(regex), is_value, is_empty, len_between |
 | `/encode` | scalar | base64_enc/dec, base64url, hex_enc/dec, base32, url_encode/decode, html_escape, value_escape |
