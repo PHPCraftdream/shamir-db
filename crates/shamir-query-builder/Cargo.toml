@@ -1,6 +1,7 @@
 [package]
 name = "shamir-query-builder"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Fluent client-side builder for ShamirDB batch requests (CodeIgniter-Active-Record-style queries, typed inter-query dependencies, funclib function calls). A thin layer over shamir-query-types — produces only wire DTOs, WASM-friendly."
 license = "MIT OR Apache-2.0"

@@ -1,6 +1,7 @@
 [package]
 name = "shamir-server"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "ShamirDB production server — wires shamir-connect auth + transports + durable state into a runnable binary."
 license = "MIT OR Apache-2.0"

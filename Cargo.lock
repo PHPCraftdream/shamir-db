@@ -3307,14 +3307,14 @@ dependencies = [
 
 [[package]]
 name = "shamir-bench-utils"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "peak_alloc",
 ]
 
 [[package]]
 name = "shamir-client"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rand 0.9.4",
  "rmp-serde",
@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-collections"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "indexmap",
  "rustc-hash 2.1.1",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-connect"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-db"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3418,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-engine"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-funclib"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "argon2",
  "base64",
@@ -3493,7 +3493,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-index"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3529,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-numa"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "libc",
@@ -3539,7 +3539,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-query-builder"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "rmp-serde",
  "serde",
@@ -3552,7 +3552,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-query-builder-macros"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3561,7 +3561,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-query-types"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "bench-scale-tool",
  "hmac",
@@ -3576,7 +3576,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-sdk"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "num-bigint",
  "rmp-serde",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-sdk-macros"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3598,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-server"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3658,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-storage"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -3686,7 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-transport-tcp"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "bench-scale-tool",
  "futures-util",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-transport-ws"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "futures-util",
  "hex",
@@ -3726,11 +3726,11 @@ dependencies = [
 
 [[package]]
 name = "shamir-tunables"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "shamir-tx"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3754,7 +3754,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-types"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "base-x",
@@ -3785,7 +3785,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-wal"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "bench-scale-tool",
  "bincode",
@@ -3803,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "shamir-wasm-host"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "argon2",
  "async-trait",

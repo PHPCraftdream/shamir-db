@@ -1,6 +1,7 @@
 [package]
 name = "shamir-connect"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "ShamirDB connection protocol — SCRAM-Argon2id auth + Ed25519 server identity. Server and client modules in one library."
 license = "MIT OR Apache-2.0"

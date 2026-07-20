@@ -1,6 +1,7 @@
 [package]
 name = "shamir-query-builder-macros"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Proc-macros for shamir-query-builder: filter! and q! DSLs."
 license = "MIT OR Apache-2.0"

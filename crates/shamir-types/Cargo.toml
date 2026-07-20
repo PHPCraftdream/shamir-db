@@ -1,6 +1,7 @@
 [package]
 name = "shamir-types"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Foundation types for ShamirDB — value model, IDs, codecs, interner."
 license = "MIT OR Apache-2.0"

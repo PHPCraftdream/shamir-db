@@ -1,6 +1,7 @@
 [package]
 name = "shamir-funclib"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Built-in scalar function library for ShamirDB (math, strings, arrays, cast, datetime, value_nav, validate, encode, object, text, crypto)."
 license = "MIT OR Apache-2.0"

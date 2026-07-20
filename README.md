@@ -19,7 +19,7 @@ The repository is currently source-first: it provides a Cargo workspace, a serve
 
 ## 🎯 Project Status
 
-**Version:** 0.1.0 (Alpha)
+**Version:** 0.1.0-alpha.1
 
 **Current Features:**
 - ✅ Feature-gated storage abstraction with the current durable Fjall backend

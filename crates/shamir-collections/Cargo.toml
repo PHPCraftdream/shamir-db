@@ -1,6 +1,7 @@
 [package]
 name = "shamir-collections"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Insertion-ordered collection aliases (TMap/TSet over IndexMap/IndexSet with FxHasher) shared by host and guest — a WASM-friendly leaf crate."
 license = "MIT OR Apache-2.0"

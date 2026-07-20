@@ -1,6 +1,7 @@
 [package]
 name = "shamir-query-types"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "Pure DTOs for ShamirDB's SDBQL query language (Filter, ReadQuery, BatchRequest, ...)."
 license = "MIT OR Apache-2.0"

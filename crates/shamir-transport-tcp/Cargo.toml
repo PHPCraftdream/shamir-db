@@ -1,6 +1,7 @@
 [package]
 name = "shamir-transport-tcp"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
+publish = false
 edition = "2021"
 description = "ShamirDB TCP transport binding — TLS 1.3 + length-prefix msgpack framing."
 license = "MIT OR Apache-2.0"
