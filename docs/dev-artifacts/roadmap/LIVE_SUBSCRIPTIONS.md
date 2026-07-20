@@ -2,10 +2,18 @@
 
 # LIVE SUBSCRIPTIONS — server-push changefeed to clients (#201)
 
-**Status:** design doc (revision 2026-06-09). The client-facing
-live-subscription layer: a long-lived connection that stays open and
-receives pushed change events in real time, building on the existing
-Phase 3b changefeed (hybrid live-push + durable journal).
+**Status:** **DONE** — implemented and tested (design revision
+2026-06-09). The client-facing live-subscription layer: a long-lived
+connection that stays open and receives pushed change events in real
+time, building on the existing Phase 3b changefeed (hybrid live-push +
+durable journal). See `crates/shamir-server/src/subscriptions/`
+(`bridge.rs`, `registry.rs`, `target_match.rs`, `filter_eval.rs`,
+`reactive.rs`, `push.rs`, `decode_cache.rs`, `deliver_cache.rs`,
+`payload.rs`) and wire ops `BatchOp::Subscribe`/`Unsubscribe`
+(`crates/shamir-query-types/src/batch/batch_op.rs`). Tests:
+`subscriptions::tests::{bridge_tests, registry_tests,
+target_match_tests, filter_eval_tests, filter_lens_parity_tests,
+cache_eviction_tests, cache_depth_probe_tests, reactive_limits_tests}`.
 
 Companion: [`TEMPORAL.md`](./TEMPORAL.md) (§2 — the `Temporal` selector
 and `changes_since` resumable pull). This doc covers the *push* transport
