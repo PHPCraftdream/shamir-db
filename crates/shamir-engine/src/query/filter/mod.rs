@@ -16,6 +16,7 @@ pub mod field_path_cache;
 pub mod filter_node;
 pub mod fts;
 pub mod index_range;
+pub mod query_ref_cache;
 pub mod resolve;
 
 // Re-export DTOs from the shared types crate.
@@ -25,6 +26,7 @@ pub use eval_context::FilterContext;
 pub use field_path_cache::{prescan_field_path_cache, FieldPathCache};
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
+pub use query_ref_cache::{prescan_query_ref_cache, QueryRefCache};
 pub use resolve::{
     compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path, resolve_field,
     resolve_field_ref, resolve_filter_query, resolve_filter_value,

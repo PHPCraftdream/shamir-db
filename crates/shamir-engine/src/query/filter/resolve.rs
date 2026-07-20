@@ -236,6 +236,48 @@ pub fn resolve_filter_query(
                 .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok())
         }
         FilterValue::QueryRef { alias, path } => {
+            // F2: check the lazy per-scan cache first (slot RESERVED once by
+            // `prescan_query_ref_cache`, e.g. `SelectProjection::new`; VALUE
+            // filled lazily on the first row that hits this node via
+            // `OnceLock::get_or_init`). Avoids re-running
+            // `alias.strip_prefix` + `resolved_refs.get` (cheap already), the
+            // STRING PATH PARSING (`find`/`usize::parse`/prefix strips, one
+            // pass per segment), and the multi-step Map/List navigation walk
+            // to locate the target value — on EVERY row after the first.
+            //
+            // UNLIKE F1's `FieldPathCache` (eagerly populated at prescan
+            // time), this cache is LAZY: the resolved value depends on
+            // `ctx.resolved_refs` (runtime scan data) that does NOT exist at
+            // `SelectProjection::new()` time — so the prescan can only
+            // RESERVE an empty `OnceLock` slot, not fill it. This is the same
+            // shape `In`'s `ref_column_sets` (`filter_node.rs`) already uses.
+            //
+            // The cache key is pointer identity of THIS `QueryRef` node
+            // (`fv as *const FilterValue as usize`), which stays stable for
+            // the lifetime of a `SelectProjection`-owned tree — see
+            // `query_ref_cache.rs`'s safety comment. When
+            // `ctx.query_ref_cache` is `None` (every caller that hasn't
+            // opted in: WHERE, `when`, `for_each`'s `over`, write-value
+            // resolution), behavior is IDENTICAL to before this cache
+            // existed.
+            //
+            // The final `QueryValue::clone` of the resolved target is NOT
+            // removed by this cache (cache hit or miss) — it is unavoidable
+            // within this function's `Option<QueryValue>` (owned) contract;
+            // see `query_ref_cache.rs`'s "What this caches" honesty section.
+            if let Some(cell) = ctx
+                .query_ref_cache
+                .and_then(|c| c.get(&(fv as *const FilterValue as usize)))
+            {
+                return cell
+                    .get_or_init(|| {
+                        let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+                        ctx.resolved_refs
+                            .get(key)
+                            .and_then(|qr| resolve_query_ref_value(qr, path.as_deref()))
+                    })
+                    .clone();
+            }
             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
             let qr = ctx.resolved_refs.get(key)?;
             resolve_query_ref_value(qr, path.as_deref())

@@ -8,6 +8,7 @@ use shamir_types::types::value::QueryValue;
 
 use super::cond_cache::CondCache;
 use super::field_path_cache::FieldPathCache;
+use super::query_ref_cache::QueryRefCache;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -49,6 +50,19 @@ pub struct FilterContext<'a> {
     /// via [`with_field_path_cache`](Self::with_field_path_cache) skip the
     /// per-row `Vec` alloc + per-segment `DashMap` lookup.
     pub field_path_cache: Option<&'a FieldPathCache>,
+    /// Optional lazily-populated `$query`/`QueryRef` resolution cache (F2).
+    /// Defaults to `None` — every EXISTING caller (WHERE, `when`, `for_each`'s
+    /// `over`, write-value resolution) is completely unaffected:
+    /// `resolve_filter_query` re-parses the `path` string and re-walks the
+    /// referenced `QueryResult` on every `QueryRef` evaluation exactly as
+    /// before. Only callers that build a [`QueryRefCache`] once (e.g.
+    /// `SelectProjection::new`) and inject it via
+    /// [`with_query_ref_cache`](Self::with_query_ref_cache) skip the per-row
+    /// path parsing + Map/List navigation walk (the slot is filled lazily
+    /// on the first row, since the resolved value depends on
+    /// `resolved_refs`, which is not available at prescan time — unlike
+    /// F1's eagerly-populated `FieldPathCache`).
+    pub query_ref_cache: Option<&'a QueryRefCache>,
 }
 
 /// A permanently empty params map, shared across all top-level contexts
@@ -75,6 +89,7 @@ impl<'a> FilterContext<'a> {
             params: empty_params(),
             cond_cache: None,
             field_path_cache: None,
+            query_ref_cache: None,
         }
     }
 
@@ -113,6 +128,19 @@ impl<'a> FilterContext<'a> {
     /// resolution) should leave this unset.
     pub fn with_field_path_cache(mut self, cache: &'a FieldPathCache) -> Self {
         self.field_path_cache = Some(cache);
+        self
+    }
+
+    /// Builder: inject a lazily-populated `$query`/`QueryRef` resolution
+    /// cache (F2). Only meaningful for callers that pre-scan a static
+    /// `FilterValue` tree once (e.g. `SelectProjection::new`) and reuse it
+    /// across many records — one-off evaluation contexts (WHERE, `when`,
+    /// `for_each`, write-value resolution) should leave this unset. The
+    /// cache slots are filled lazily on the first row of each scan (not
+    /// eagerly at prescan time), because the resolved value depends on
+    /// `resolved_refs` runtime data.
+    pub fn with_query_ref_cache(mut self, cache: &'a QueryRefCache) -> Self {
+        self.query_ref_cache = Some(cache);
         self
     }
 }
