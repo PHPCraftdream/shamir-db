@@ -131,6 +131,7 @@ fn make_test_config(temp: &TempDir) -> Config {
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
+            allow_public_metrics: false,
         },
         replication: None,
     }

@@ -70,6 +70,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
+            allow_public_metrics: false,
         },
         replication: None,
     }

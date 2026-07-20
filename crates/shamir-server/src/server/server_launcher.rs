@@ -662,22 +662,36 @@ impl ServerLauncher {
             // that specific failure (recorder already installed = OK,
             // we use the existing one) and continue without an exporter
             // handle in that case.
-            // M-tier audit M5: pass `allow_public_metrics = false`. A
-            // non-loopback `addr` is rejected up-front. Operators that
-            // need a public scrape endpoint can promote this to a
-            // config flag in a follow-up.
-            let handle =
-                match crate::observability::spawn(addr, state.clone(), true, None, false).await {
-                    Ok(h) => h,
-                    Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
-                        // Recorder already installed (typical in test process):
-                        // re-spawn without trying to install again.
-                        crate::observability::spawn(addr, state.clone(), false, None, false)
-                            .await
-                            .map_err(|e| BootError::Bind(format!("observability: {e}")))?
-                    }
-                    Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
-                };
+            // M-tier audit M5: `allow_public_metrics` comes straight from
+            // the parsed config (`ObservabilityConfig::allow_public_metrics`,
+            // default `false`). A non-loopback `addr` is rejected up-front
+            // unless the operator has explicitly opted in.
+            let allow_public_metrics = config.observability.allow_public_metrics;
+            let handle = match crate::observability::spawn(
+                addr,
+                state.clone(),
+                true,
+                None,
+                allow_public_metrics,
+            )
+            .await
+            {
+                Ok(h) => h,
+                Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
+                    // Recorder already installed (typical in test process):
+                    // re-spawn without trying to install again.
+                    crate::observability::spawn(
+                        addr,
+                        state.clone(),
+                        false,
+                        None,
+                        allow_public_metrics,
+                    )
+                    .await
+                    .map_err(|e| BootError::Bind(format!("observability: {e}")))?
+                }
+                Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
+            };
             handle.state.mark_ready();
             Some(handle)
         };

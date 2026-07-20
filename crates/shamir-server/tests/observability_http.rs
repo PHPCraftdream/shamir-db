@@ -26,6 +26,19 @@ fn fast_kdf() -> KdfConfig {
 }
 
 fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
+    make_config_with_public_metrics(temp, obs_addr, false)
+}
+
+/// Same as [`make_config`] but with the `allow_public_metrics` knob
+/// threaded through — used by the non-loopback-bind-allowed coverage
+/// below, which exercises the real `server_launcher.rs` boot path (not
+/// just `observability::spawn` directly) to prove the CONFIG FIELD
+/// itself reaches the enforcement parameter.
+fn make_config_with_public_metrics(
+    temp: &TempDir,
+    obs_addr: &str,
+    allow_public_metrics: bool,
+) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
@@ -53,6 +66,7 @@ fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
         audit: Default::default(),
         observability: ObservabilityConfig {
             addr: obs_addr.into(),
+            allow_public_metrics,
         },
         replication: None,
     }
@@ -201,4 +215,92 @@ async fn refuses_non_loopback_bind_without_opt_in() {
             other.as_ref().err()
         ),
     }
+}
+
+/// Proves the `ObservabilityConfig.allow_public_metrics` config field
+/// actually reaches `observability::spawn`'s enforcement parameter
+/// through the REAL `server_launcher.rs` boot path — not just that the
+/// low-level `spawn` function honors a literal `true` when called
+/// directly (that's already covered by `refuses_non_loopback_bind_
+/// without_opt_in` for the `false` side, and by the M5 doc comment's
+/// design for the `true` side). Before this brief, `server_launcher.rs`
+/// hardcoded `false` at both call sites — there was no way for a config
+/// value to change this outcome, so this test would have failed (the
+/// launcher would return `BootError::Bind` for a non-loopback addr no
+/// matter what the config said) prior to threading
+/// `config.observability.allow_public_metrics` through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boot_path_allows_non_loopback_bind_when_config_opts_in() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let temp = TempDir::new().unwrap();
+    // Reserve a free port, then bind the observability server to the
+    // wildcard (non-loopback) address on that same port. If the config
+    // field weren't wired through, `server_launcher.rs` would still pass
+    // the old hardcoded `false` and this bind would be rejected with
+    // `BootError::Bind` before any socket opens.
+    let probe = pick_free_port().await;
+    let obs_addr_str = format!("0.0.0.0:{}", probe.port());
+    let cfg = make_config_with_public_metrics(&temp, &obs_addr_str, true);
+    let launcher = ServerLauncher {
+        config: cfg,
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(b"hunter2".to_vec()),
+        },
+    };
+    let handle = launcher
+        .launch()
+        .await
+        .expect("boot must succeed: allow_public_metrics=true in config must let a non-loopback observability bind through");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // `0.0.0.0` accepts connections addressed to loopback too — hitting
+    // `/healthz` over 127.0.0.1 on the same port proves the server is
+    // really listening on the wildcard bind the config asked for (not
+    // silently falling back to loopback-only).
+    let loopback_addr: SocketAddr = format!("127.0.0.1:{}", probe.port()).parse().unwrap();
+    let (status, body) = http_get(loopback_addr, "/healthz").await;
+    assert_eq!(status, 200, "healthz status on the opted-in wildcard bind");
+    assert!(body.contains("ok"), "healthz body should say ok");
+
+    handle.shutdown().await;
+}
+
+/// Regression companion to the test above: the SAME non-loopback addr,
+/// but with `allow_public_metrics` omitted from the config (so it
+/// defaults to `false` via `#[serde(default)]`/`Default`), must still be
+/// rejected through the real boot path. Confirms adding the new field
+/// did not change the safe-by-default behavior for existing configs
+/// that don't mention it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn boot_path_still_rejects_non_loopback_bind_by_default() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let temp = TempDir::new().unwrap();
+    let cfg = make_config_with_public_metrics(&temp, "0.0.0.0:0", false);
+    let launcher = ServerLauncher {
+        config: cfg,
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(b"hunter2".to_vec()),
+        },
+    };
+    // `ServerHandle` doesn't implement `Debug`, so `Result::expect_err`
+    // (which requires `T: Debug` for its panic message) isn't usable
+    // here — match manually instead.
+    let result = launcher.launch().await;
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!(
+            "boot must fail: allow_public_metrics defaults to false, \
+             non-loopback bind must be rejected"
+        ),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("observability"),
+        "error should mention the observability bind rejection, got: {msg}"
+    );
 }

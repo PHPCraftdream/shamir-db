@@ -160,12 +160,23 @@ pub struct ObservabilityConfig {
     /// liveness probe — typically you don't want this in production).
     #[serde(default = "default_observability_addr")]
     pub addr: String,
+    /// M-tier audit M5: explicit opt-in required to bind the
+    /// observability server to a non-loopback `addr`. Defaults to
+    /// `false` — a non-loopback `addr` is rejected at boot unless this
+    /// is set. `/metrics` exposes `auth_attempts_total` labelled by
+    /// result (including `locked_out`), a useful side-channel for
+    /// distributed credential probing, so operators that need a public
+    /// scrape endpoint must opt in explicitly and front the port with
+    /// reverse-proxy auth (bearer token, mTLS, or IP allowlist).
+    #[serde(default)]
+    pub allow_public_metrics: bool,
 }
 
 impl Default for ObservabilityConfig {
     fn default() -> Self {
         Self {
             addr: default_observability_addr(),
+            allow_public_metrics: false,
         }
     }
 }

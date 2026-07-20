@@ -247,12 +247,10 @@ Prometheus text format. Метрики:
 ### Безопасность observability
 
 Loopback-only по умолчанию. Для non-loopback — нужно явно разрешить
-`allow_public_metrics: true` (не рекомендуется). Экспозиция метрик на
-public network — M-tier audit event (M5).
+`allow_public_metrics: true` в блоке `observability` (не рекомендуется).
+Экспозиция метрик на public network — M-tier audit event (M5).
 
 Пустой `addr: ""` отключает observability-сервер полностью.
-
-<!-- TODO: verify allow_public_metrics field name in ObservabilityConfig — see config.rs -->
 
 ## 4. Логирование
 

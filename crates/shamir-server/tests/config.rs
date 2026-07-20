@@ -233,6 +233,99 @@ tls: {
 }
 
 #[test]
+fn parses_allow_public_metrics_true_when_set() {
+    // M-tier audit M5 follow-up: `observability.allow_public_metrics`
+    // must round-trip to `true` when the operator explicitly opts in —
+    // this is the config-file-level knob that lets a non-loopback
+    // observability bind through `server_launcher.rs`'s enforcement.
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 0.0.0.0:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+
+observability: {
+    addr: 0.0.0.0:9090
+    allow_public_metrics: true
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert_eq!(cfg.observability.addr, "0.0.0.0:9090");
+    assert!(
+        cfg.observability.allow_public_metrics,
+        "allow_public_metrics: true in the source must round-trip to true"
+    );
+}
+
+#[test]
+fn defaults_allow_public_metrics_to_false_when_omitted() {
+    // Regression: whether the whole `observability` block is omitted, or
+    // present but without `allow_public_metrics`, the field must default
+    // to `false` — preserving today's safe-by-default behavior for every
+    // existing config file that doesn't mention this new knob.
+    let cfg: Config = ktav::from_str(minimal_tcp_tls()).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert!(
+        !cfg.observability.allow_public_metrics,
+        "allow_public_metrics must default to false when the whole \
+         observability block is omitted"
+    );
+
+    let src_with_block_but_no_field = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 0.0.0.0:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+
+observability: {
+    addr: 127.0.0.1:9090
+}
+";
+    let cfg2: Config = ktav::from_str(src_with_block_but_no_field).expect("parse ok");
+    cfg2.validate().expect("validate ok");
+    assert!(
+        !cfg2.observability.allow_public_metrics,
+        "allow_public_metrics must default to false when the \
+         observability block is present but doesn't mention the field"
+    );
+}
+
+#[test]
 fn loads_from_file() {
     use std::io::Write;
     let dir = tempfile::tempdir().expect("tempdir");

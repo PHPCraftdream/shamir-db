@@ -134,6 +134,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
         audit: Default::default(),
         observability: ObservabilityConfig {
             addr: String::new(),
+            allow_public_metrics: false,
         },
         replication: None,
     }

@@ -62,6 +62,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
         audit: Default::default(),
         observability: ObservabilityConfig {
             addr: String::new(),
+            allow_public_metrics: false,
         },
         replication: None,
     }
