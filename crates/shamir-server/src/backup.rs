@@ -2,20 +2,32 @@
 //!
 //! v1: stop-and-copy. Operator stops the server, runs
 //! `shamir-server backup --from <data_dir> --to <dest>` which recursively
-//! copies every file under `data_dir` (redb files + wire-table registries +
-//! audit log + rotated audit files + TLS PEMs). The destination is
-//! `<dest>/<timestamp>/` so a single `--to` can collect daily snapshots.
+//! copies every file under `data_dir` (fjall database directories — each a
+//! directory tree of journal and LSM segment files — plus wire-table
+//! registries, audit log, rotated audit files, and TLS PEMs). The
+//! destination is `<dest>/<timestamp>/` so a single `--to` can collect
+//! daily snapshots.
 //!
-//! Why stop-and-copy instead of redb's online `Database::backup()`:
-//! redb 3.x doesn't expose that API on `Database` directly — copying the
-//! file while the writer is paused (i.e. server stopped) is the simplest
-//! path. redb's per-page CRC32 + atomic-commit design also means a copy
-//! taken during a quiescent window between commits is recoverable as the
-//! pre-commit state on the next open.
+//! Why stop-and-copy instead of an online backup: fjall exposes no live /
+//! online backup API on `Database` (its public surface is `insert`/`get`/
+//! `range`/`persist`/`batch`; the closest analogue, `Snapshot`, is just a
+//! seqno read snapshot, not a file-level backup). Copying the database
+//! directory while the writer is paused (i.e. server stopped) is the
+//! simplest path. Fjall is journal-based: every commit is appended to the
+//! journal as a *batch* (`Start → items → End(xxh3 checksum)`), and the
+//! default recovery mode (`RecoveryMode::TolerateCorruptTail`) discards a
+//! corrupt/torn tail batch and truncates the journal back to the last
+//! fully-checksummed batch boundary. So a copy taken during a quiescent
+//! window between commits recovers, on next open, to that last complete
+//! batch — a consistent pre-stop point. (A copy that races an in-flight
+//! append merely loses the torn tail batch; it does not corrupt earlier
+//! committed batches.) See `shamir-storage`'s `storage_fjall.rs` for how
+//! `flush()` maps to `Database::persist(PersistMode::SyncAll)`.
 //!
-//! Future enhancement (P2): in-process snapshot via `system_store`'s
-//! existing redb handle so an `admin` op can trigger a backup without
-//! downtime. Not done here because it requires a wire-protocol change.
+//! Future enhancement (P2): an in-process / online snapshot triggered by an
+//! `admin` op, going through the engine's own repo handles (not this
+//! offline CLI, which has no access to any live handle). Not done here
+//! because it requires a wire-protocol change.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,8 +144,9 @@ fn copy_dir_recursive(
             *bytes += n;
             *files += 1;
         } else {
-            // Symlinks / sockets / fifos: skip with a warning. A redb file
-            // shouldn't normally be one of these.
+            // Symlinks / sockets / fifos: skip with a warning. A fjall
+            // database is a directory tree of journal (`*.jnl`) + LSM
+            // segment files — none of those should normally be one of these.
             tracing::warn!(path = %path.display(), "backup: skipping non-regular file");
         }
     }
