@@ -1,7 +1,5 @@
 //! Pre-resolved SELECT projection — avoids re-interning paths per record.
 
-use smallvec::SmallVec;
-
 use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
 use crate::query::filter::{
     prescan_cond_cache, prescan_field_path_cache, prescan_query_ref_cache, CondCache,
@@ -23,8 +21,11 @@ use shamir_types::types::value::QueryValue;
 pub struct SelectProjection {
     /// true → just convert whole record to QueryValue
     pub(super) is_all: bool,
-    /// (interned_path, pre-built output key)
-    pub(super) fields: Vec<(Option<Vec<u64>>, String)>,
+    /// (interned_path, pre-built output key). F10: path segments are stored
+    /// as `InternerKey` (not raw `u64`) so `project_value` can pass the path
+    /// straight to `RecordRef::materialize_at` without re-wrapping each
+    /// segment per record.
+    pub(super) fields: Vec<(Option<Vec<InternerKey>>, String)>,
     /// Scalar-function projections: (output key, FnCall-shaped FilterValue).
     /// Evaluated per record via `resolve_filter_value`, reusing the filter
     /// value model (`$ref` / literals / nested `$fn`).
@@ -86,7 +87,11 @@ impl SelectProjection {
             for item in &select.items {
                 match item {
                     SelectItem::Field { path, alias } => {
-                        let interned = intern_field_path(path, interner);
+                        // F10: convert raw `u64` IDs to `InternerKey` ONCE at
+                        // projection-build time so `project_value` avoids
+                        // re-wrapping every segment per record.
+                        let interned = intern_field_path(path, interner)
+                            .map(|ids| ids.iter().map(|&id| InternerKey::new(id)).collect());
                         let key = alias
                             .clone()
                             .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
@@ -152,13 +157,11 @@ impl SelectProjection {
         }
         let mut obj = shamir_types::types::common::new_map_wc(self.fields.len() + self.funcs.len());
         for (interned_path, key) in &self.fields {
+            // F10: `interned_path` is already `&Vec<InternerKey>` — pass
+            // directly to `materialize_at` (no per-row `SmallVec` rebuild).
             let val = interned_path
                 .as_ref()
-                .and_then(|p| {
-                    let ipath: SmallVec<[InternerKey; 4]> =
-                        p.iter().map(|&id| InternerKey::new(id)).collect();
-                    record.materialize_at(&ipath)
-                })
+                .and_then(|p| record.materialize_at(p))
                 .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
                 .unwrap_or(QueryValue::Null);
             obj.insert(key.clone(), val);

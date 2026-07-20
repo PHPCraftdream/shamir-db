@@ -56,17 +56,22 @@ pub fn intern_field_path(field: &[String], interner: &Interner) -> Option<Vec<u6
 
 /// Inline-allocated variant of [`intern_field_path`] for hot compile paths.
 ///
-/// Returns a `CompactPath` (`SmallVec<[u64; 4]>`) so `FilterNode` callers
-/// that store the result in `field_path` avoid a heap allocation for the
-/// typical 1-3 segment case.
+/// Returns a `CompactPath` (`SmallVec<[InternerKey; 4]>`) so `FilterNode`
+/// callers that store the result in `field_path` avoid a heap allocation for
+/// the typical 1-3 segment case AND can pass the path straight to `RecordRef`
+/// methods without re-wrapping each segment into an `InternerKey` per row
+/// (F10 — previously returned `SmallVec<[u64; 4]>` and every `matches()` arm
+/// rebuilt a `SmallVec<[InternerKey; 4]>` from it).
 pub(super) fn intern_field_path_compact(
     field: &[String],
     interner: &Interner,
 ) -> Option<CompactPath> {
     let mut keys: CompactPath = SmallVec::with_capacity(field.len());
     for part in field {
-        let interned = interner.get_ind(part)?;
-        keys.push(interned.id());
+        // `get_ind` returns `InternerKey` directly — store it as-is so
+        // `matches()` arms can pass `field_path` to `RecordRef` methods
+        // without re-wrapping each segment per row (F10).
+        keys.push(interner.get_ind(part)?);
     }
     Some(keys)
 }

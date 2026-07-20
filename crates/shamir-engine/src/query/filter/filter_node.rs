@@ -152,7 +152,13 @@ fn swap_remove_coercing_qv(set: &mut TSet<QueryValue>, qv: &QueryValue) -> bool 
 /// Inline up to 4 segments (typical: `"name"` → 1, `"address.city"` → 2);
 /// spills to heap for deeper paths. Replaces a `Vec<u64>` per compiled
 /// node — saves a heap alloc + dereference on every `matches()` walk.
-pub(super) type CompactPath = SmallVec<[u64; 4]>;
+///
+/// F10: stores `InternerKey` directly (not raw `u64`) so each `matches()`
+/// arm can pass `field_path` straight to `RecordRef` methods without
+/// re-wrapping every segment per row. `InternerKey` is a `u64` newtype
+/// (`pub struct InternerKey(u64)`), so `SmallVec<[InternerKey; 4]>` has
+/// identical size/layout to the previous `SmallVec<[u64; 4]>`.
+pub(super) type CompactPath = SmallVec<[InternerKey; 4]>;
 
 // ============================================================================
 // CompareOp — comparison operator enum used by FilterNode and compile_filter.
@@ -364,9 +370,7 @@ impl FilterNode {
                 pre_resolved,
                 op,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_val = record.scalar_at(&ipath);
+                let field_val = record.scalar_at(field_path);
                 let owned_rhs;
                 let filter_val: Option<&QueryValue> = if let Some(pre) = pre_resolved {
                     Some(pre)
@@ -421,35 +425,37 @@ impl FilterNode {
             FilterNode::Or(children) => children.iter().any(|c| c.matches(record, ctx)),
             FilterNode::Not(inner) => !inner.matches(record, ctx),
 
-            FilterNode::IsNull { field_path } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                record.is_null_at(&ipath)
-            }
-            FilterNode::IsNotNull { field_path } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                !record.is_null_at(&ipath)
-            }
+            FilterNode::IsNull { field_path } => record.is_null_at(field_path),
+            FilterNode::IsNotNull { field_path } => !record.is_null_at(field_path),
 
             FilterNode::InSet {
                 field_path,
                 values,
                 negate,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                // The membership set is name-keyed (`TSet<QueryValue>`); the
-                // materialised field is InnerValue today, so convert once at
-                // this boundary (NOT a round-trip — the field is consumed
-                // here and never re-converted).
-                let found = match record.materialize_at(&ipath) {
-                    Some(v) => match inner_value_to_query_value(&v, ctx.interner) {
-                        Ok(qv) => set_contains_coercing_qv(values, &qv),
-                        Err(_) => false,
-                    },
-                    None => false,
+                // F6: probe via the borrow-based `scalar_at` → `ScalarRef` (zero
+                // clone for scalar fields, the common case) + `set_contains_coercing`
+                // — the SAME `ScalarRef`-based coercing probe the sibling
+                // `FilterNode::In`'s dynamic branch uses. Previously this arm
+                // called `materialize_at` (an OWNED `InnerValue` clone of the
+                // field — expensive for container fields) + `inner_value_to_query_value`
+                // (a second conversion pass) + `set_contains_coercing_qv`.
+                //
+                // Semantics for a NON-scalar field (Map/List/Set/Bin) now match
+                // `FilterNode::In` exactly: `scalar_at` returns `None`, so the
+                // field is treated as ABSENT (`$in` → false, `$nin` → true).
+                // The previous `materialize_at`-based form would have walked
+                // INTO a container and converted it to a `QueryValue::Map/List/`
+                // `Set` for an exact-match probe — but a literal `$in` set never
+                // realistically contains an entire container, so the practical
+                // outcome (no match) is unchanged; the documented contract is
+                // now the consistent one shared with `In`. See
+                // `inset_against_container_field_*` regression tests.
+                let field_val = match record.scalar_at(field_path) {
+                    Some(v) => v,
+                    None => return *negate,
                 };
+                let found = set_contains_coercing(values, field_val);
                 if *negate {
                     !found
                 } else {
@@ -464,9 +470,7 @@ impl FilterNode {
                 ref_column_sets,
                 negate,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_val = match record.scalar_at(&ipath) {
+                let field_val = match record.scalar_at(field_path) {
                     Some(v) => v,
                     None => return *negate,
                 };
@@ -547,9 +551,7 @@ impl FilterNode {
             }
 
             FilterNode::Like { field_path, regex } | FilterNode::Regex { field_path, regex } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                match record.str_at(&ipath) {
+                match record.str_at(field_path) {
                     Some(s) => regex.is_match(s),
                     None => false,
                 }
@@ -560,9 +562,7 @@ impl FilterNode {
                 value,
                 pre_resolved,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_owned = match record.materialize_at(&ipath) {
+                let field_owned = match record.materialize_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -601,9 +601,7 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAny { field_path, values } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_owned = match record.materialize_at(&ipath) {
+                let field_owned = match record.materialize_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -629,9 +627,7 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAnySet { field_path, values } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_owned = match record.materialize_at(&ipath) {
+                let field_owned = match record.materialize_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -651,9 +647,7 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAll { field_path, values } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_owned = match record.materialize_at(&ipath) {
+                let field_owned = match record.materialize_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -679,9 +673,7 @@ impl FilterNode {
             }
 
             FilterNode::ContainsAllSet { field_path, values } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_owned = match record.materialize_at(&ipath) {
+                let field_owned = match record.materialize_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -734,9 +726,7 @@ impl FilterNode {
                 pre_from,
                 pre_to,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let field_val = match record.scalar_at(&ipath) {
+                let field_val = match record.scalar_at(field_path) {
                     Some(v) => v,
                     None => return false,
                 };
@@ -769,25 +759,15 @@ impl FilterNode {
                 )
             }
 
-            FilterNode::Exists { field_path } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                record.exists_at(&ipath)
-            }
-            FilterNode::NotExists { field_path } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                !record.exists_at(&ipath)
-            }
+            FilterNode::Exists { field_path } => record.exists_at(field_path),
+            FilterNode::NotExists { field_path } => !record.exists_at(field_path),
 
             FilterNode::FtsMatch {
                 field_path,
                 query_tokens,
                 mode_and,
             } => {
-                let ipath: SmallVec<[InternerKey; 4]> =
-                    field_path.iter().map(|&id| InternerKey::new(id)).collect();
-                let text = match record.str_at(&ipath) {
+                let text = match record.str_at(field_path) {
                     Some(s) => s,
                     None => return false,
                 };

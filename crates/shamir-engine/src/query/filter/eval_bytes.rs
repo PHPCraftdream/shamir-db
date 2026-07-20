@@ -41,6 +41,7 @@ use std::cmp::Ordering;
 
 use super::filter_node::{CompareOp, FilterNode};
 use crate::query::filter::FilterValue;
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::QueryValue;
 
 // ── key encoding (unchanged) ──────────────────────────────────────────────────
@@ -280,15 +281,15 @@ fn seek_map_key(bytes: &[u8], map_pos: usize, target_key_bytes: &[u8]) -> Option
 
 /// Navigate a multi-segment field path through nested msgpack maps.
 ///
-/// Each segment in `path` names one interned `u64` key.  Returns the byte
+/// Each segment in `path` names one interned key.  Returns the byte
 /// offset of the innermost value, or `None` if any segment is absent or the
 /// bytes are malformed.
-fn find_field_pos(bytes: &[u8], path: &[u64]) -> Option<usize> {
+fn find_field_pos(bytes: &[u8], path: &[InternerKey]) -> Option<usize> {
     // Start at offset 0 (the root map).
     let mut cur_map_pos = 0usize;
     let mut segments = path.iter().peekable();
-    while let Some(&id) = segments.next() {
-        let key_buf = interned_key_bytes(id);
+    while let Some(seg) = segments.next() {
+        let key_buf = interned_key_bytes(seg.id());
         let value_pos = seek_map_key(bytes, cur_map_pos, key_buf.as_ref())?;
         if segments.peek().is_some() {
             // More segments → the value must itself be a map; descend.
