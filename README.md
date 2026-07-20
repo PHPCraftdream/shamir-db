@@ -89,13 +89,17 @@ cargo run -p shamir-server -- --help
 
 ## 🧪 Testing
 
+Tests run through the `cargo-nextest` wrapper — raw `cargo test` is blocked
+by a perimeter guard in `.cargo/config.toml` (see `CLAUDE.md`'s "Centralised
+test entry point" section for why).
+
 ```bash
-# Full workspace test sweep (1178+ tests, ~90s)
-bash scripts/test-all.sh
+# Full workspace test sweep (lib tests, all crates — fastest signal)
+./scripts/test.sh
 
 # Specific crate
-cargo test -p shamir-engine
-cargo test -p shamir-server
+./scripts/test.sh -p shamir-engine
+./scripts/test.sh -p shamir-server
 ```
 
 The repository's required pre-commit checks are documented in [CONTRIBUTING.md](CONTRIBUTING.md). The Node.js end-to-end suite has separate prerequisites; see [tests/e2e/README.md](tests/e2e/README.md).

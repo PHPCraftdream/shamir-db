@@ -1,16 +1,27 @@
 # Contributing to ShamirDB
 
-## TL;DR — run this before every push (it IS the CI gate)
+## TL;DR — run this before every push (it mirrors the CI gate)
 
 ```bash
 cargo fmt --all -- --check                              # 1. formatting
 cargo clippy --workspace --all-targets -- -D warnings   # 2. lints (deny warnings)
-cargo test  --workspace --lib                           # 3. unit tests
-cargo test  --workspace --test '*'                      # 4. integration tests
+./scripts/test.sh                                       # 3. unit tests (cargo tl)
+./scripts/test.sh --full -E 'kind(test)'                # 4. integration tests (cargo t -E 'kind(test)')
 ```
 
-All four must be **green**. These are the exact four jobs in
-`.github/workflows/ci.yml` — if they pass locally, CI passes. No surprises.
+All four must be **green**. Raw `cargo test` is blocked outright by a
+perimeter guard in `.cargo/config.toml` — the wrapper above (backed by
+`cargo-nextest`) is the only way past it; see `CLAUDE.md`'s "Centralised
+test entry point" section.
+
+These four local commands correspond to 4 of the 5 jobs in
+`.github/workflows/ci.yml` (`fmt`, `clippy`, `test`, `integration` — each of
+those four also runs as an OS matrix across Ubuntu/Windows/macOS in CI, and
+CI's actual `test`/`integration` steps invoke `./scripts/test.sh --locked`
+and `./scripts/test.sh --full --locked -E 'kind(test)'`). There's a fifth
+job, `cooldown` (a supply-chain dependency-freshness check), which isn't
+part of this local gate. If the four above pass locally, the matching CI
+jobs will pass too. No surprises.
 
 ---
 
@@ -61,7 +72,8 @@ Pinning trades currency for stability — bump deliberately, not by accident:
 2. Run the full gate (the four commands above). A newer clippy will likely
    surface new lints — fix them in a dedicated `chore(clippy): …` commit.
 3. Bump the matching `dtolnay/rust-toolchain@<version>` refs in
-   **all four jobs** of `.github/workflows/ci.yml` to the same version.
+   **all five jobs** (`fmt`, `clippy`, `test`, `integration`, `cooldown`) of
+   `.github/workflows/ci.yml` to the same version.
 4. Push and confirm CI is green (`gh run watch <id> --exit-status`).
 
 Keep `rust-toolchain.toml` and the `ci.yml` refs in lock-step — that's the
@@ -71,10 +83,12 @@ whole point.
 
 ## What CI does NOT run
 
-- **Benchmarks never execute in CI.** The test jobs use `--lib` and
-  `--test '*'`, which select unit and `[[test]]` integration targets only —
-  not `[[bench]]`. `clippy --all-targets` *compiles* benches (catches bitrot)
-  but never runs them. Run benches manually: `cargo bench`.
+- **Benchmarks never execute in CI.** The `test` job runs lib tests only
+  (`./scripts/test.sh --locked`) and the `integration` job selects only
+  `[[test]]` integration targets (`./scripts/test.sh --full --locked -E
+  'kind(test)'`) — neither ever touches `[[bench]]` targets.
+  `clippy --all-targets` *compiles* benches (catches bitrot) but never runs
+  them. Run benches manually: `cargo bench`.
 - The Node.js e2e suite under `tests/e2e/` is not wired into per-PR CI
   (needs `npm install` + a release build + the MSVC-only `shamir-client-node`
   napi binding). Run it manually per `tests/e2e/README.md`.
