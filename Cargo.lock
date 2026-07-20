@@ -3481,6 +3481,7 @@ dependencies = [
  "rust_decimal",
  "scc",
  "serde",
+ "serde_json",
  "sha2",
  "sha3",
  "shamir-collections",

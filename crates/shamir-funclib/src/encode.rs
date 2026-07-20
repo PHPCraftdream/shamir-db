@@ -2,7 +2,8 @@
 //!
 //! Functions registered (plain names, no folder prefix):
 //! `base64_enc base64_dec base64url_enc base64url_dec hex_enc hex_dec
-//!  base32_enc base32_dec url_encode url_decode html_escape str_escape_chars`.
+//!  base32_enc base32_dec url_encode url_decode html_escape str_escape_chars
+//!  to_json parse_json`.
 //!
 //! Conventions (mirroring `math.rs`):
 //! - Encoders accept bytes (`Bin`) **or** text (`Str`, taken as UTF-8 bytes)
@@ -11,6 +12,19 @@
 //! - `url_encode` / `url_decode` operate on UTF-8 text and return a `Str`;
 //!   `url_decode` rejects non-UTF-8 percent sequences with `"decode_failed"`.
 //! - `html_escape` / `str_escape_chars` (registered as `json_escape`) are text→text escapers (return `Str`).
+//! - `to_json(v)` / `parse_json(s)` bridge between `QueryValue` and JSON text
+//!   via the existing `Value<Key>` serde impl (`serde_json::to_string` /
+//!   `from_str`). These are self-describing-format conversions, NOT lossless
+//!   for every variant. `to_json` maps a serialization failure to
+//!   `"encode_failed"`; `parse_json` maps a parse failure to
+//!   `"decode_failed"` (matching the existing decode-error convention).
+//!
+//!   Type-decay caveats (same limitations as this codebase's msgpack
+//!   round-trip — documented behavior, not bugs):
+//!   - `Dec`/`Big` → JSON string → `Str` (not `Dec`/`Big`).
+//!   - `Set` → JSON array → `List` (not `Set`).
+//!   - `Bin` → JSON array of byte numbers → `List` of `Int` (not `Bin`).
+//!   - `Null`/`Bool`/`Int`/`F64`/`Str`/`List`/`Map` round-trip losslessly.
 //! - Every function here is pure + deterministic.
 
 use crate::registry::{arg_str, v_bytes, v_str, FnEntry, ScalarError, ScalarRegistry};
@@ -124,6 +138,30 @@ pub fn register(reg: &mut ScalarRegistry) {
     reg.register(
         "json_escape",
         FnEntry::pure(|a| Ok(v_str(str_escape_chars(arg_str(a, 0)?))), 1, Some(1)),
+    );
+    reg.register(
+        "to_json",
+        FnEntry::pure(
+            |a| {
+                let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
+                serde_json::to_string(v)
+                    .map(v_str)
+                    .map_err(|_| ScalarError::new("encode_failed"))
+            },
+            1,
+            Some(1),
+        ),
+    );
+    reg.register(
+        "parse_json",
+        FnEntry::pure(
+            |a| {
+                let s = arg_str(a, 0)?;
+                serde_json::from_str::<QueryValue>(s).map_err(|_| ScalarError::new("decode_failed"))
+            },
+            1,
+            Some(1),
+        ),
     );
 }
 
