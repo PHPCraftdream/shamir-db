@@ -462,11 +462,12 @@ impl<'a> QueryRunner<'a> {
             //   $query @sub[0].records[0].id  — NOT supported (records empty)
             //   $query @sub.alias_name[0].id  — walks value.alias_name[0].id
             //
-            // Round-trip via msgpack: QueryResult's Serialize is well-defined
-            // and produces the same wire shape as QueryValue's Deserialize expects.
-            let value = rmp_serde::to_vec_named(&inner_results)
-                .ok()
-                .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok());
+            // Direct conversion (F5): drive the existing `Serialize` impls of
+            // `TMap<String, QueryResult>` / `QueryRecord` / `InsertedRecord`
+            // into a `QueryValue` tree via `QueryValueSerializer` — same wire
+            // shape the old msgpack round-trip produced, without the encode +
+            // re-parse + re-allocate cost. See `query_value_serializer`.
+            let value = super::query_value_serializer::to_query_value(&inner_results).ok();
             return Ok(QueryResult {
                 records: Vec::new(),
                 stats: None,
@@ -671,11 +672,11 @@ impl<'a> QueryRunner<'a> {
                 };
 
                 // Same per-iteration value shape a single sub-batch already
-                // produces (round-trip via msgpack) — collected into a
-                // List, one entry per iteration (ADR Decision 2).
-                let value = rmp_serde::to_vec_named(&inner_results)
+                // produces (direct conversion via `QueryValueSerializer`,
+                // replacing the old msgpack round-trip — F5) — collected into
+                // a List, one entry per iteration (ADR Decision 2).
+                let value = super::query_value_serializer::to_query_value(&inner_results)
                     .ok()
-                    .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok())
                     .unwrap_or(QueryValue::Null);
                 iterations.push(value);
             }

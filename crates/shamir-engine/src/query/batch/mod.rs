@@ -147,6 +147,7 @@ mod fk_restrict;
 mod interactive_tx;
 mod param_subst;
 mod query_runner;
+mod query_value_serializer;
 
 // Only the executor (which actually drives a TableManager) lives here.
 // DTOs, the topological planner, and the `$query` reference parser are
