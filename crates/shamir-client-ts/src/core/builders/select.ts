@@ -107,17 +107,20 @@ export function max(
 /**
  * A library aggregate resolved by name through the funclib aggregate
  * registry (`median`, `mode`, `stddev`, `percentile`, `count_distinct`, …).
- * `distinct` is always emitted on the wire.
+ * `distinct` is always emitted on the wire. `args` carries static literal
+ * parameters for parameterised aggregates (e.g. `0.9` for `percentile`,
+ * `";"` for `string_agg`) and is always emitted (defaults to `[]`).
  */
 export function aggregateFn(
   name: string,
   field: string | string[] | null,
-  opts: { alias?: string; distinct?: boolean } = {},
+  opts: { alias?: string; distinct?: boolean; args?: FilterValue[] } = {},
 ): SelectItem {
   const item: SelectItem = {
     type: 'aggregate_fn',
     name,
     field: aggField(field),
+    args: opts.args ?? [],
     distinct: opts.distinct ?? false,
   };
   if (opts.alias !== undefined) item.alias = opts.alias;

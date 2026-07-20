@@ -86,6 +86,12 @@ pub enum SelectItem {
         /// Aggregate name (plain, e.g. `"median"`).
         name: String,
         field: AggregateField,
+        /// Static parameters for parameterised aggregates (e.g. `percentile`'s
+        /// `p`, `string_agg`'s `sep`). Must be literal `FilterValue`s —
+        /// dynamic `$ref`/`$fn`/etc. are rejected at execution time. Mirrors
+        /// [`SelectItem::Function`]'s `args` field shape.
+        #[serde(default)]
+        args: Vec<FilterValue>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
         #[serde(default)]

@@ -828,9 +828,11 @@ impl TableManager {
         }
 
         let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
+            exec::validate_aggregate_select(&query.select)?;
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
         } else if has_agg {
+            exec::validate_aggregate_select(&query.select)?;
             exec::apply_aggregate_all(&raw_acc, &query.select, interner, ctx.scalars.clone())
         } else {
             rec_acc

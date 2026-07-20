@@ -199,6 +199,7 @@ describe('aggregateFn', () => {
       type: 'aggregate_fn',
       name: 'median',
       field: ['score'],
+      args: [],
       distinct: false,
     });
     expect(item).not.toHaveProperty('alias');
@@ -209,6 +210,7 @@ describe('aggregateFn', () => {
       type: 'aggregate_fn',
       name: 'stddev',
       field: ['a', 'b'],
+      args: [],
       distinct: false,
     });
   });
@@ -218,6 +220,7 @@ describe('aggregateFn', () => {
       type: 'aggregate_fn',
       name: 'count_distinct',
       field: null,
+      args: [],
       distinct: false,
     });
   });
@@ -227,6 +230,7 @@ describe('aggregateFn', () => {
       type: 'aggregate_fn',
       name: 'mode',
       field: ['x'],
+      args: [],
       distinct: true,
     });
   });
@@ -236,8 +240,22 @@ describe('aggregateFn', () => {
       type: 'aggregate_fn',
       name: 'median',
       field: ['val'],
+      args: [],
       distinct: false,
       alias: 'm',
+    });
+  });
+
+  it('args are passed through for parameterised aggregates', () => {
+    expect(
+      aggregateFn('percentile', 'score', { alias: 'p90', args: [0.9] }),
+    ).toEqual({
+      type: 'aggregate_fn',
+      name: 'percentile',
+      field: ['score'],
+      args: [0.9],
+      distinct: false,
+      alias: 'p90',
     });
   });
 });

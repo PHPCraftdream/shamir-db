@@ -1,7 +1,7 @@
 //! Tests for every built-in aggregator — happy-path, empty-input, and
 //! cross-type min/max.
 
-use crate::agg::{self, AggRegistry};
+use crate::agg::{self, AggRegistry, Aggregator};
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 use shamir_types::types::common::{new_map, new_set};
@@ -516,4 +516,57 @@ fn all_aggregators_registered() {
         assert!(names.contains(name), "missing aggregator: {}", name);
     }
     assert_eq!(names.len(), expected.len());
+}
+
+// ---------------------------------------------------------------------------
+// DistinctWrapper — generic distinct-dedup wrapper over any Aggregator
+// ---------------------------------------------------------------------------
+
+#[test]
+fn distinct_wrapper_deduplicates_string_agg() {
+    // string_agg over ["a","a","b"] with distinct → "a,b" (not "a,a,b").
+    let factory = agg::string_agg(",".to_owned());
+    let mut a = Box::new(agg::DistinctWrapper::new(factory()));
+    a.accumulate(&str_v("a")).unwrap();
+    a.accumulate(&str_v("a")).unwrap();
+    a.accumulate(&str_v("b")).unwrap();
+    assert_eq!(a.finalize().unwrap(), str_v("a,b"));
+}
+
+#[test]
+fn distinct_wrapper_preserves_non_distinct_behaviour_without_dupes() {
+    // When there are no duplicates, DistinctWrapper is transparent.
+    let factory = agg::string_agg(";".to_owned());
+    let mut a = Box::new(agg::DistinctWrapper::new(factory()));
+    a.accumulate(&str_v("x")).unwrap();
+    a.accumulate(&str_v("y")).unwrap();
+    a.accumulate(&str_v("z")).unwrap();
+    assert_eq!(a.finalize().unwrap(), str_v("x;y;z"));
+}
+
+#[test]
+fn distinct_wrapper_cross_type_dedup() {
+    // Int(5) and Dec(5) are equal by compare → second is deduped.
+    let factory = agg::percentile(1.0); // max via percentile p=1.0
+    let mut a = Box::new(agg::DistinctWrapper::new(factory()));
+    a.accumulate(&int(5)).unwrap();
+    a.accumulate(&dec("5")).unwrap(); // deduped
+    a.accumulate(&int(3)).unwrap();
+    // After dedup: [5, 3] → sorted [3, 5] → p=1.0 → index n-1 = 5.
+    assert_eq!(a.finalize().unwrap(), int(5));
+}
+
+#[test]
+fn distinct_wrapper_passes_null_through_to_inner() {
+    // Nulls pass through to the inner aggregator unchanged (each aggregator
+    // decides its own Null handling). For sum, Nulls are skipped anyway.
+    let factory = agg::percentile(0.5);
+    let mut a = Box::new(agg::DistinctWrapper::new(factory()));
+    a.accumulate(&QueryValue::Null).unwrap();
+    a.accumulate(&int(1)).unwrap();
+    a.accumulate(&QueryValue::Null).unwrap();
+    a.accumulate(&int(3)).unwrap();
+    // [Null(passes through, skipped by PercentileAgg), 1, Null, 3]
+    // → [1, 3] → median (p=0.5) → nearest-rank ceil(0.5*2)=1 → idx 0 → 1.
+    assert_eq!(a.finalize().unwrap(), int(1));
 }

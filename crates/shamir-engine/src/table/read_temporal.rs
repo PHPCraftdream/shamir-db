@@ -147,9 +147,11 @@ impl TableManager {
         }
 
         let mut result_qv = if has_group_by {
+            exec::validate_aggregate_select(&query.select)?;
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
+            exec::validate_aggregate_select(&query.select)?;
             exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
         } else {
             apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())

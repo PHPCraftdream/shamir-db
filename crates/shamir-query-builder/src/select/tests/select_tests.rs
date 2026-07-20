@@ -5,7 +5,7 @@ use shamir_query_types::read::SelectItem;
 use shamir_types::mpack;
 
 use crate::select::*;
-use crate::val::{col, func as vfunc};
+use crate::val::{col, func as vfunc, lit};
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -241,6 +241,7 @@ fn test_agg_fn() {
             "type": "aggregate_fn",
             "name": "median",
             "field": ["age"],
+            "args": [],
             "alias": "med",
             "distinct": false
         }),
@@ -255,6 +256,7 @@ fn test_agg_fn_distinct() {
             "type": "aggregate_fn",
             "name": "count_distinct",
             "field": ["category"],
+            "args": [],
             "alias": "uniq_cats",
             "distinct": true
         }),
@@ -285,7 +287,23 @@ fn test_agg_fn_nested_path() {
             "type": "aggregate_fn",
             "name": "stddev",
             "field": ["stats", "latency"],
+            "args": [],
             "alias": "lat_sd",
+            "distinct": false
+        }),
+    );
+}
+
+#[test]
+fn test_agg_fn_with_args() {
+    assert_wire(
+        agg_fn_with_args("percentile", "score", "p90", [lit(0.9)]),
+        mpack!({
+            "type": "aggregate_fn",
+            "name": "percentile",
+            "field": ["score"],
+            "args": [0.9],
+            "alias": "p90",
             "distinct": false
         }),
     );

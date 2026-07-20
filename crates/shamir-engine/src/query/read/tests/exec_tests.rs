@@ -10,6 +10,7 @@ use crate::query::read::*;
 use bytes::Bytes;
 use shamir_query_builder::select;
 use shamir_query_builder::val::{col, func as vfunc, lit};
+use shamir_storage::error::DbError;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -808,4 +809,372 @@ fn aggregate_all_user_scalar_resolves() {
     assert_eq!(result.len(), 1);
     // The first record's age is 30 (from make_records), so my_double(30) = 60.
     assert_eq!(result[0]["doubled_age"], 60_i64);
+}
+
+// ============================================================================
+// Fix 1 — wire params for percentile/string_agg (AggregateFn args)
+// ============================================================================
+
+/// Build a record with a single `"score"` field (Int).
+fn make_score_record(interner: &Interner, score: i64) -> InnerValue {
+    let mut map = new_map();
+    map.insert(
+        InternerKey::new(intern(interner, "score")),
+        InnerValue::Int(score),
+    );
+    InnerValue::Map(map)
+}
+
+/// Build records with `"score"` field: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100].
+fn make_score_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
+    (10..=100)
+        .step_by(10)
+        .map(|s| (RecordId::new(), make_score_record(interner, s)))
+        .collect()
+}
+
+/// Build a record with a single `"name"` field (Str).
+fn make_name_record(interner: &Interner, name: &str) -> InnerValue {
+    let mut map = new_map();
+    map.insert(
+        InternerKey::new(intern(interner, "name")),
+        InnerValue::Str(name.into()),
+    );
+    InnerValue::Map(map)
+}
+
+#[test]
+fn percentile_with_args_p90() {
+    // SELECT percentile(score, args: [0.9]) → 90th percentile, not median.
+    let interner = Interner::default();
+    let records = make_score_records(&interner);
+    let select = Select {
+        items: vec![select::agg_fn_with_args(
+            "percentile",
+            "score",
+            "p90",
+            [lit(0.9)],
+        )],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    // p=0.9, n=10 → idx = ceil(9.0)-1 = 8 → sorted[8] = 90.
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["p90"], 90_i64);
+}
+
+#[test]
+fn percentile_default_is_median() {
+    // Regression: percentile with NO args still defaults to p=0.5.
+    let interner = Interner::default();
+    let records = make_score_records(&interner);
+    let select = Select {
+        items: vec![select::agg_fn("percentile", "score", "p50")],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    // p=0.5, n=10 → idx = ceil(5.0)-1 = 4 → sorted[4] = 50.
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["p50"], 50_i64);
+}
+
+#[test]
+fn string_agg_with_custom_sep() {
+    // SELECT string_agg(name, args: ["; "]) → joins with "; ", not ",".
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    let select = Select {
+        items: vec![select::agg_fn_with_args(
+            "string_agg",
+            "name",
+            "joined",
+            [lit("; ")],
+        )],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["joined"], "Alice; Bob; Carol; Dave");
+}
+
+#[test]
+fn string_agg_default_sep() {
+    // Regression: string_agg with NO args still defaults to sep=",".
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    let select = Select {
+        items: vec![select::agg_fn("string_agg", "name", "joined")],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["joined"], "Alice,Bob,Carol,Dave");
+}
+
+#[test]
+fn validate_rejects_percentile_p_out_of_range() {
+    let select = Select {
+        items: vec![select::agg_fn_with_args(
+            "percentile",
+            "score",
+            "p",
+            [lit(1.5)],
+        )],
+        distinct: false,
+    };
+    let err = validate_aggregate_select(&select).unwrap_err();
+    match err {
+        DbError::Validation(msg) => assert!(msg.contains("out_of_range"), "got: {msg}"),
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_dynamic_arg_to_percentile() {
+    // A $ref (field reference) is NOT a literal → rejected.
+    let select = Select {
+        items: vec![SelectItem::AggregateFn {
+            name: "percentile".into(),
+            field: AggregateField::Field(vec!["score".into()]),
+            args: vec![FilterValue::field_ref("some_field")],
+            alias: Some("p".into()),
+            distinct: false,
+        }],
+        distinct: false,
+    };
+    let err = validate_aggregate_select(&select).unwrap_err();
+    match err {
+        DbError::Validation(msg) => {
+            assert!(msg.contains("agg_param_must_be_literal"), "got: {msg}")
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_args_on_unsupported_aggregate() {
+    // "median" does not accept params → rejected.
+    let select = Select {
+        items: vec![select::agg_fn_with_args("median", "age", "m", [lit(0.5)])],
+        distinct: false,
+    };
+    let err = validate_aggregate_select(&select).unwrap_err();
+    match err {
+        DbError::Validation(msg) => assert!(msg.contains("agg_params_not_supported"), "got: {msg}"),
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// Fix 2a — distinct on AggregateFn via DistinctWrapper
+// ============================================================================
+
+#[test]
+fn aggregate_fn_distinct_string_agg_deduplicates() {
+    // string_agg over ["a","a","b"] with distinct:true → "a,b" (not "a,a,b").
+    let interner = Interner::default();
+    let records: Vec<(RecordId, InnerValue)> = ["a", "a", "b"]
+        .into_iter()
+        .map(|n| (RecordId::new(), make_name_record(&interner, n)))
+        .collect();
+    let select = Select {
+        items: vec![SelectItem::AggregateFn {
+            name: "string_agg".into(),
+            field: AggregateField::Field(vec!["name".into()]),
+            args: vec![],
+            alias: Some("joined".into()),
+            distinct: true,
+        }],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["joined"], "a,b");
+}
+
+#[test]
+fn aggregate_fn_non_distinct_keeps_duplicates() {
+    // Regression: same data with distinct:false keeps duplicates.
+    let interner = Interner::default();
+    let records: Vec<(RecordId, InnerValue)> = ["a", "a", "b"]
+        .into_iter()
+        .map(|n| (RecordId::new(), make_name_record(&interner, n)))
+        .collect();
+    let select = Select {
+        items: vec![SelectItem::AggregateFn {
+            name: "string_agg".into(),
+            field: AggregateField::Field(vec!["name".into()]),
+            args: vec![],
+            alias: Some("joined".into()),
+            distinct: false,
+        }],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["joined"], "a,a,b");
+}
+
+// ============================================================================
+// Fix 2b — distinct on fast-path Aggregate (Sum/Avg/Count rejected, Min/Max OK)
+// ============================================================================
+
+#[test]
+fn validate_rejects_distinct_sum() {
+    let select = Select {
+        items: vec![SelectItem::Aggregate {
+            func: AggFunc::Sum,
+            field: AggregateField::Field(vec!["age".into()]),
+            alias: Some("total".into()),
+            distinct: true,
+        }],
+        distinct: false,
+    };
+    let err = validate_aggregate_select(&select).unwrap_err();
+    match err {
+        DbError::Validation(msg) => {
+            assert!(
+                msg.contains("distinct_not_supported_for_fast_path_agg"),
+                "got: {msg}"
+            )
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_distinct_avg() {
+    let select = Select {
+        items: vec![SelectItem::Aggregate {
+            func: AggFunc::Avg,
+            field: AggregateField::Field(vec!["age".into()]),
+            alias: Some("mean".into()),
+            distinct: true,
+        }],
+        distinct: false,
+    };
+    assert!(validate_aggregate_select(&select).is_err());
+}
+
+#[test]
+fn validate_rejects_distinct_count() {
+    let select = Select {
+        items: vec![SelectItem::Aggregate {
+            func: AggFunc::Count,
+            field: AggregateField::Field(vec!["age".into()]),
+            alias: Some("cnt".into()),
+            distinct: true,
+        }],
+        distinct: false,
+    };
+    assert!(validate_aggregate_select(&select).is_err());
+}
+
+#[test]
+fn validate_allows_distinct_min_and_max() {
+    // Min/Max with distinct:true is allowed (correct no-op).
+    for func in [AggFunc::Min, AggFunc::Max] {
+        let select = Select {
+            items: vec![SelectItem::Aggregate {
+                func,
+                field: AggregateField::Field(vec!["age".into()]),
+                alias: Some("extreme".into()),
+                distinct: true,
+            }],
+            distinct: false,
+        };
+        validate_aggregate_select(&select)
+            .unwrap_or_else(|e| panic!("distinct on {func:?} should be allowed: {e}"));
+    }
+}
+
+#[test]
+fn distinct_min_succeeds_and_produces_correct_result() {
+    // Min with distinct:true over duplicate values → same result as distinct:false.
+    let interner = Interner::default();
+    let records = make_records(&interner); // ages: 30, 25, 35, 25
+    let group_by = GroupBy::new(["city"]);
+    let select = Select {
+        items: vec![
+            select::field("city"),
+            SelectItem::Aggregate {
+                func: AggFunc::Min,
+                field: AggregateField::Field(vec!["age".into()]),
+                alias: Some("min_age".into()),
+                distinct: true,
+            },
+        ],
+        distinct: false,
+    };
+    let refs = new_map();
+    let ctx = FilterContext::new(&interner, &refs);
+    let result = apply_group_by(
+        &to_bytes_records(&records),
+        &group_by,
+        &select,
+        &interner,
+        &ctx,
+    );
+    // LA: ages [25, 25] → min 25 (distinct is a no-op for min).
+    assert_eq!(result[0]["min_age"], 25_i64);
+    // NYC: ages [30, 35] → min 30.
+    assert_eq!(result[1]["min_age"], 30_i64);
+}
+
+#[test]
+fn fast_path_distinct_false_behaves_as_before() {
+    // Regression: distinct:false on all five fast-path functions works normally.
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    let select = Select {
+        items: vec![
+            select::sum("age", "s"),
+            select::avg("age", "a"),
+            select::count("age", "c"),
+            select::min("age", "mn"),
+            select::max("age", "mx"),
+        ],
+        distinct: false,
+    };
+    let result = apply_aggregate_all(
+        &to_bytes_records(&records),
+        &select,
+        &interner,
+        ScalarResolver::builtins_only(),
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["s"], 115_i64); // 30+25+35+25
+    assert_eq!(result[0]["c"], 4_i64);
+    assert_eq!(result[0]["mn"], 25_i64);
+    assert_eq!(result[0]["mx"], 35_i64);
 }

@@ -214,6 +214,52 @@ impl Aggregator for CountDistinctAgg {
     }
 }
 
+/// Wraps any [`Aggregator`], skipping duplicate values (via
+/// [`compare::compare`], the workspace cross-type total order — same dedup
+/// strategy as [`CountDistinctAgg`]) before delegating to the inner
+/// aggregator. `Null` values pass through to the inner aggregator unchanged
+/// (each aggregator already decides its own Null handling).
+///
+/// O(n²) worst-case: every incoming value is linearly searched against the
+/// `seen` set. Acceptable for the same reasons [`CountDistinctAgg`] accepts
+/// it: aggregate dedup is a bounded-cardinality cold path, not a per-row
+/// hot path.
+pub struct DistinctWrapper {
+    inner: Box<dyn Aggregator>,
+    seen: Vec<QueryValue>,
+}
+
+impl DistinctWrapper {
+    /// Wrap `inner`, deduplicating every non-null value before it reaches
+    /// the inner aggregator.
+    pub fn new(inner: Box<dyn Aggregator>) -> Self {
+        Self {
+            inner,
+            seen: Vec::new(),
+        }
+    }
+}
+
+impl Aggregator for DistinctWrapper {
+    fn accumulate(&mut self, v: &QueryValue) -> Result<(), ScalarError> {
+        if !is_null(v) {
+            let already = self
+                .seen
+                .iter()
+                .any(|s| compare::compare(s, v) == std::cmp::Ordering::Equal);
+            if already {
+                return Ok(());
+            }
+            self.seen.push(v.clone());
+        }
+        self.inner.accumulate(v)
+    }
+
+    fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
+        self.inner.finalize()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sum
 // ---------------------------------------------------------------------------

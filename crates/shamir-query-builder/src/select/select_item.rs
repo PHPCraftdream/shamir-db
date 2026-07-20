@@ -119,18 +119,13 @@ pub fn count(field: impl IntoFieldPath, alias: impl Into<String>) -> SelectItem 
 
 /// Funclib aggregate dispatched by name (e.g. `"median"`, `"stddev"`).
 ///
-/// Non-distinct variant.
+/// Non-distinct variant with no static parameters.
 pub fn agg_fn(
     name: impl Into<String>,
     field: impl IntoFieldPath,
     alias: impl Into<String>,
 ) -> SelectItem {
-    SelectItem::AggregateFn {
-        name: name.into(),
-        field: AggregateField::Field(field.into_field_path()),
-        alias: Some(alias.into()),
-        distinct: false,
-    }
+    agg_fn_with_args(name, field, alias, [])
 }
 
 /// Funclib aggregate dispatched by name, with `DISTINCT`.
@@ -139,10 +134,29 @@ pub fn agg_fn_distinct(
     field: impl IntoFieldPath,
     alias: impl Into<String>,
 ) -> SelectItem {
+    let mut item = agg_fn_with_args(name, field, alias, []);
+    if let SelectItem::AggregateFn { distinct, .. } = &mut item {
+        *distinct = true;
+    }
+    item
+}
+
+/// Funclib aggregate dispatched by name, with static parameters.
+///
+/// `args` carries literal parameters for parameterised aggregates
+/// (e.g. `0.9` for `percentile`, `";"` for `string_agg`). Dynamic
+/// `$ref`/`$fn`/etc. values are rejected at execution time.
+pub fn agg_fn_with_args(
+    name: impl Into<String>,
+    field: impl IntoFieldPath,
+    alias: impl Into<String>,
+    args: impl IntoIterator<Item = FilterValue>,
+) -> SelectItem {
     SelectItem::AggregateFn {
         name: name.into(),
         field: AggregateField::Field(field.into_field_path()),
+        args: args.into_iter().collect(),
         alias: Some(alias.into()),
-        distinct: true,
+        distinct: false,
     }
 }

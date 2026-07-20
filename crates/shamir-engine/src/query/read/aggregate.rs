@@ -28,7 +28,7 @@ use crate::query::filter::eval::{compare_values, resolve_filter_query};
 use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
-use shamir_funclib::agg::Aggregator;
+use shamir_funclib::agg::{Aggregator, DistinctWrapper};
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -635,6 +635,131 @@ fn intern_field_path_keys(field: &[String], interner: &Interner) -> Option<Vec<I
 }
 
 // ============================================================================
+// Aggregate-select validation (Fix 1b + Fix 2b)
+// ============================================================================
+
+/// Whether a [`FilterValue`] is a literal (not a dynamic `$ref`/`$fn`/etc.).
+/// Aggregate parameters must be literals — they are static SELECT-clause
+/// constants, not per-row values.
+fn is_literal(fv: &FilterValue) -> bool {
+    matches!(
+        fv,
+        FilterValue::Null
+            | FilterValue::Bool(_)
+            | FilterValue::Int(_)
+            | FilterValue::Float(_)
+            | FilterValue::String(_)
+            | FilterValue::Binary(_)
+            | FilterValue::Array(_)
+    )
+}
+
+/// Extract a literal `f64` from a [`FilterValue`] (`Float` or `Int`).
+fn literal_f64(fv: &FilterValue) -> Option<f64> {
+    match fv {
+        FilterValue::Float(f) => Some(*f),
+        FilterValue::Int(n) => Some(*n as f64),
+        _ => None,
+    }
+}
+
+/// Extract a literal `&str` from a [`FilterValue`] (`String`).
+fn literal_string(fv: &FilterValue) -> Option<&str> {
+    match fv {
+        FilterValue::String(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Validate all aggregate select items **before** execution, converting the
+/// silent-wrong-behaviour bugs from the release-readiness report into honest,
+/// coded rejections.
+///
+/// - `AggregateFn` with non-empty `args`: only `percentile` and `string_agg`
+///   accept parameters. The arg must be a literal (`agg_param_must_be_literal`
+///   for dynamic `$ref`/`$fn`/etc.), the right type (`type_mismatch`), and for
+///   `percentile` the `p` must be in `[0.0, 1.0]` (`out_of_range`). Any other
+///   aggregate name receiving args is `agg_params_not_supported`.
+/// - `Aggregate { distinct: true, .. }` with `func` = `Sum`/`Avg`/`Count`:
+///   rejected (`distinct_not_supported_for_fast_path_agg`) because the
+///   hand-rolled `AggAccum` state machine has no distinct-dedup tracking.
+///   `Min`/`Max` with `distinct: true` are ALLOWED (distinct is a correct
+///   no-op for min/max).
+pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbResult<()> {
+    for item in &select.items {
+        match item {
+            SelectItem::AggregateFn { name, args, .. } if !args.is_empty() => match name.as_str() {
+                "percentile" => {
+                    if !is_literal(&args[0]) {
+                        return Err(shamir_storage::error::DbError::Validation(
+                            "agg_param_must_be_literal".into(),
+                        ));
+                    }
+                    let p = literal_f64(&args[0]).ok_or_else(|| {
+                        shamir_storage::error::DbError::Validation("type_mismatch".into())
+                    })?;
+                    if !(0.0..=1.0).contains(&p) {
+                        return Err(shamir_storage::error::DbError::Validation(
+                            "out_of_range".into(),
+                        ));
+                    }
+                }
+                "string_agg" => {
+                    if !is_literal(&args[0]) {
+                        return Err(shamir_storage::error::DbError::Validation(
+                            "agg_param_must_be_literal".into(),
+                        ));
+                    }
+                    let _ = literal_string(&args[0]).ok_or_else(|| {
+                        shamir_storage::error::DbError::Validation("type_mismatch".into())
+                    })?;
+                }
+                other => {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                        "agg_params_not_supported: {other}"
+                    )));
+                }
+            },
+            SelectItem::Aggregate { func, distinct, .. } if *distinct => {
+                if matches!(func, AggFunc::Sum | AggFunc::Avg | AggFunc::Count) {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                        "distinct_not_supported_for_fast_path_agg: {func:?}"
+                    )));
+                }
+                // Min/Max: distinct is a correct no-op (min/max of a set ==
+                // min/max of its distinct subset). Allow silently.
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Construct the aggregator for an `AggregateFn` select item, honouring
+/// static `args` for `percentile`/`string_agg` (validated by
+/// [`validate_aggregate_select`]) and falling back to the default-parameter
+/// registry lookup when `args` is empty.
+fn make_aggregate_fn(name: &str, args: &[FilterValue]) -> Option<Box<dyn Aggregator>> {
+    if args.is_empty() {
+        return builtin_aggs().make(name);
+    }
+    match name {
+        "percentile" => {
+            let p = literal_f64(&args[0])?;
+            if !(0.0..=1.0).contains(&p) {
+                return None;
+            }
+            Some(shamir_funclib::agg::percentile(p)())
+        }
+        "string_agg" => {
+            let sep = literal_string(&args[0])?;
+            Some(shamir_funclib::agg::string_agg(sep.to_owned())())
+        }
+        _ => None,
+    }
+}
+
+// ============================================================================
 // build_aggregate_object
 // ============================================================================
 
@@ -702,7 +827,12 @@ pub(super) fn build_aggregate_object(
                 }
             }
             SelectItem::AggregateFn {
-                name, field, alias, ..
+                name,
+                field,
+                args,
+                alias,
+                distinct,
+                ..
             } => {
                 let key = match alias {
                     Some(a) => a.clone(),
@@ -715,7 +845,13 @@ pub(super) fn build_aggregate_object(
                     AggregateField::Field(p) => (intern_field_path_keys(p, interner), false),
                     AggregateField::All => (None, true),
                 };
-                fn_slots.push((key, field_path, all_field, builtin_aggs().make(name)));
+                let agg = make_aggregate_fn(name, args);
+                let agg = if *distinct {
+                    agg.map(|a| Box::new(DistinctWrapper::new(a)) as Box<dyn Aggregator>)
+                } else {
+                    agg
+                };
+                fn_slots.push((key, field_path, all_field, agg));
             }
             SelectItem::Function { name, args, alias } => {
                 let key = alias.clone().unwrap_or_else(|| name.clone());

@@ -266,9 +266,11 @@ impl TableManager {
             // None here) — skip the call entirely on this branch.
 
             let mut result_qv = if has_group_by {
+                exec::validate_aggregate_select(&query.select)?;
                 let group_by = query.group_by.as_ref().unwrap();
                 exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
             } else {
+                exec::validate_aggregate_select(&query.select)?;
                 exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
             };
 
@@ -664,9 +666,11 @@ impl TableManager {
             // None here) — skip the call entirely on this branch.
 
             let mut result_qv = if has_group_by {
+                exec::validate_aggregate_select(&query.select)?;
                 let group_by = query.group_by.as_ref().unwrap();
                 exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
             } else {
+                exec::validate_aggregate_select(&query.select)?;
                 exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
             };
 

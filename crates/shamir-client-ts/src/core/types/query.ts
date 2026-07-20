@@ -58,6 +58,7 @@ export type SelectItem =
       type: 'aggregate_fn';
       name: string;
       field: AggregateField;
+      args: FilterValue[];
       alias?: string;
       distinct: boolean;
     }
