@@ -56,10 +56,14 @@ pub enum DbRequest {
         /// the server write path).
         name: String,
         /// Plaintext password. Hashed server-side; the server wraps the
-        /// received `String` in `Zeroizing<Vec<u8>>` before deriving keys
-        /// so it is zeroized on drop. The `String` here is the on-the-wire
-        /// carrier — callers should avoid retaining it longer than needed.
-        password: String,
+        /// revealed cleartext in `Zeroizing<Vec<u8>>` before deriving keys
+        /// so it is zeroized on drop. Wire-level the value is still a
+        /// plain string (`SecretString`'s `Serialize`/`Deserialize` are a
+        /// transparent pass-through — the on-the-wire shape is unchanged),
+        /// but the deserialized field itself is now `SecretString` so it
+        /// can no longer leak through `Debug`/logging before the
+        /// server-side `Zeroizing` wrap happens.
+        password: crate::auth::SecretString,
         /// Roles to grant. Other strings are opaque to the protocol
         /// (RBAC is app-defined). NOTE (task #557): the literal
         /// `"superuser"` string is RESERVED at the directory write boundary

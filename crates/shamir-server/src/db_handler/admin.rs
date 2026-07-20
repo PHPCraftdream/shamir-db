@@ -13,6 +13,7 @@ use shamir_connect::server::changepw::{
 use shamir_connect::server::session::{Session, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 use shamir_db::query::batch::{BatchOp, BatchRequest};
+use shamir_query_types::auth::SecretString;
 use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
@@ -99,7 +100,7 @@ pub(super) async fn create_scram_user(
     admin: Option<&AdminGlue>,
     session: &Session,
     name: String,
-    password: String,
+    password: SecretString,
     roles: Vec<String>,
     hmac: Option<String>,
 ) -> DbResponse {
@@ -174,10 +175,12 @@ pub(super) async fn create_scram_user(
         };
     }
 
-    // Move password into a zeroizing buffer right away. `Zeroizing`
-    // wipes on Drop, so we don't need an explicit `.zeroize()` call —
-    // both the success and error paths drop `pw_buf` before returning.
-    let record = match derive_scram_record(password, admin.kdf).await {
+    // Reveal the cleartext only at this last-possible moment — immediately
+    // consumed by `derive_scram_record`, which itself moves it into a
+    // zeroizing buffer right away. `Zeroizing` wipes on Drop, so we don't
+    // need an explicit `.zeroize()` call — both the success and error
+    // paths drop `pw_buf` before returning.
+    let record = match derive_scram_record(password.reveal().to_owned(), admin.kdf).await {
         Ok(r) => r,
         Err(msg) => {
             return DbResponse::Error {

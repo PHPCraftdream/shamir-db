@@ -161,3 +161,59 @@ fn tx_rolled_back_response_tag() {
     );
     assert_eq!(v.get("tx_handle").and_then(QueryValue::as_i64), Some(3));
 }
+
+#[test]
+fn create_scram_user_debug_redacts_password() {
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "hunter2".into(),
+        roles: vec![],
+        hmac: None,
+    };
+    let dbg = format!("{:?}", req);
+    assert!(
+        !dbg.contains("hunter2"),
+        "Debug output must not leak the cleartext password: {dbg}"
+    );
+    assert!(
+        dbg.contains("SecretString(***)"),
+        "Debug output must show the redacted SecretString marker: {dbg}"
+    );
+}
+
+#[test]
+fn create_scram_user_wire_roundtrip_preserves_password_and_shape() {
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "hunter2".into(),
+        roles: vec!["reader".to_string()],
+        hmac: Some("deadbeef".to_string()),
+    };
+
+    // The wire shape is unchanged: `password` still serializes as a plain
+    // string, not a wrapped object — `SecretString`'s Serialize impl is a
+    // transparent pass-through.
+    let v = to_qv(&req);
+    assert_eq!(
+        v.get("password").and_then(QueryValue::as_str),
+        Some("hunter2"),
+        "password must serialize as a plain string on the wire"
+    );
+
+    let bytes = rmp_serde::to_vec_named(&req).unwrap();
+    let back: DbRequest = rmp_serde::from_slice(&bytes).unwrap();
+    match back {
+        DbRequest::CreateScramUser {
+            name,
+            password,
+            roles,
+            hmac,
+        } => {
+            assert_eq!(name, "bob");
+            assert_eq!(password.reveal(), "hunter2");
+            assert_eq!(roles, vec!["reader".to_string()]);
+            assert_eq!(hmac, Some("deadbeef".to_string()));
+        }
+        _ => panic!("expected CreateScramUser"),
+    }
+}

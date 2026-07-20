@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
@@ -825,20 +825,21 @@ impl Client {
             let canonical = shamir_query_types::hmac::canonical_create_scram_user(name, &roles);
             shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
         };
-        let mut req = DbRequest::CreateScramUser {
+        let req = DbRequest::CreateScramUser {
             name: name.to_string(),
-            password: password.as_str().to_owned(),
+            password: password.as_str().to_owned().into(),
             roles,
             hmac: Some(tag),
         };
         let result = self.roundtrip(&req).await;
-        // Wipe the cleartext password copy placed into the request before it
-        // drops. (The caller's `password` is `Zeroizing` and wipes on its own
-        // drop; the transient msgpack frame built inside `roundtrip` shares
-        // every request's lifecycle and is not separately wiped.)
-        if let DbRequest::CreateScramUser { password, .. } = &mut req {
-            password.zeroize();
-        }
+        // Wipe the cleartext password copy placed into the request
+        // immediately after the roundtrip, rather than waiting for `req`'s
+        // natural end-of-function drop. (The caller's `password` is
+        // `Zeroizing` and wipes on its own drop.) `SecretString` already
+        // zeroizes its buffer on `Drop` under the `crypto` feature, so
+        // dropping `req` here achieves the same "wipe ASAP" intent that the
+        // old manual `password.zeroize()` field-reach used to.
+        drop(req);
         match result? {
             DbResponse::UserCreated { user_id, .. } => Ok(user_id),
             other => Err(ClientError::Protocol(format!(

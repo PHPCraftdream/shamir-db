@@ -25,13 +25,13 @@ indexmap   = { version = "2.7", features = ["serde"] }
 hmac       = { version = "0.12", optional = true }
 sha2       = { version = "0.10", optional = true }
 
-# Secret-bearing newtypes for password / key fields. Optional —
-# without `crypto`, SecretString still works but skips zeroize-on-drop.
-zeroize    = { version = "1", features = ["derive"], optional = true }
-
 [features]
 default = ["crypto", "server"]
-crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
+# `SecretString` (re-exported from shamir-types::secret) lives one layer
+# down now; its own zeroize-on-drop is gated by shamir-types' own
+# `crypto` feature — forward it here so guest-core (WASM) builds that
+# disable this crate's `crypto` also skip zeroize in shamir-types.
+crypto  = ["dep:hmac", "dep:sha2", "shamir-types/crypto"]
 server  = []
 
 [dev-dependencies]

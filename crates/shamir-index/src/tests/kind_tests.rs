@@ -184,3 +184,23 @@ fn from_dsl_unknown_returns_none() {
     assert_eq!(StemLanguage::from_dsl(""), None);
     assert_eq!(StemLanguage::from_dsl("EN"), None); // case-sensitive
 }
+
+// ----- VectorBackendRef::External.api_key_secret redaction -----
+
+#[test]
+fn vector_backend_ref_external_debug_redacts_api_key_secret() {
+    let backend = VectorBackendRef::External {
+        driver: "pinecone".to_string(),
+        url: "https://example.invalid".to_string(),
+        api_key_secret: "sk-super-secret-key".into(),
+    };
+    let dbg = format!("{:?}", backend);
+    assert!(
+        !dbg.contains("sk-super-secret-key"),
+        "Debug output must not leak the cleartext api key: {dbg}"
+    );
+    assert!(
+        dbg.contains("SecretString(***)"),
+        "Debug output must show the redacted SecretString marker: {dbg}"
+    );
+}

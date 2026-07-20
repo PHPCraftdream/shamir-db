@@ -42,6 +42,16 @@ unicode-normalization = "0.1.24"
 thiserror = "2.0.18"
 log = "0.4"
 
+# Secret-bearing newtypes for password / key fields (`secret::SecretString`).
+# Optional — without `crypto`, SecretString still works but skips
+# zeroize-on-drop. Guest-core (WASM) builds consume this crate via
+# shamir-query-builder's `default-features = false` and skip it.
+zeroize = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = ["crypto"]
+crypto  = ["dep:zeroize"]
+
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"

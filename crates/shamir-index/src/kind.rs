@@ -5,6 +5,7 @@
 //! compact on the hot path.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::secret::SecretString;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IndexKind {
@@ -194,6 +195,6 @@ pub enum VectorBackendRef {
     External {
         driver: String,
         url: String,
-        api_key_secret: String,
+        api_key_secret: SecretString,
     },
 }

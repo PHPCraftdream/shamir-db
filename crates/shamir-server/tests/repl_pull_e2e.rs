@@ -367,7 +367,7 @@ async fn repl_deny_by_default_no_replicator_role() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "plain".into(),
-            password: String::from_utf8(plain_pw.clone()).expect("utf8"),
+            password: String::from_utf8(plain_pw.clone()).expect("utf8").into(),
             roles: plain_roles,
             hmac: Some(plain_tag),
         },
@@ -526,7 +526,7 @@ async fn repl_hello_and_pull_with_events() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
-            password: String::from_utf8(repl_pw.clone()).expect("utf8"),
+            password: String::from_utf8(repl_pw.clone()).expect("utf8").into(),
             roles: Vec::new(),
             hmac: Some(create_tag),
         },
@@ -755,7 +755,7 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "repl".into(),
-            password: String::from_utf8(repl_pw.clone()).expect("utf8"),
+            password: String::from_utf8(repl_pw.clone()).expect("utf8").into(),
             roles: Vec::new(),
             hmac: Some(create_tag),
         },

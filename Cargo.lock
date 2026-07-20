@@ -3572,7 +3572,6 @@ dependencies = [
  "sha2",
  "shamir-collections",
  "shamir-types",
- "zeroize",
 ]
 
 [[package]]
@@ -3781,6 +3780,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]

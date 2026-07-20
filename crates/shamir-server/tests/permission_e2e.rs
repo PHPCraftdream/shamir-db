@@ -807,7 +807,7 @@ async fn permission_deny_allow_by_mode() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "alice".into(),
-            password: String::from_utf8(user_pw.clone()).expect("utf8"),
+            password: String::from_utf8(user_pw.clone()).expect("utf8").into(),
             roles: create_alice_roles,
             hmac: Some(create_alice_tag),
         },
@@ -979,7 +979,7 @@ async fn permission_group_grant() {
         let resp = roundtrip(
             &DbRequest::CreateScramUser {
                 name: name.into(),
-                password: String::from_utf8(pw.clone()).expect("utf8"),
+                password: String::from_utf8(pw.clone()).expect("utf8").into(),
                 roles: loop_roles,
                 hmac: Some(loop_tag),
             },
@@ -1196,7 +1196,7 @@ async fn permission_open_default_allows_any_user() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "dave".into(),
-            password: String::from_utf8(dave_pw.clone()).expect("utf8"),
+            password: String::from_utf8(dave_pw.clone()).expect("utf8").into(),
             roles: dave_roles,
             hmac: Some(dave_tag),
         },
@@ -1419,7 +1419,7 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "alice".into(),
-            password: String::from_utf8(alice_pw.clone()).expect("utf8"),
+            password: String::from_utf8(alice_pw.clone()).expect("utf8").into(),
             roles: alice_roles2,
             hmac: Some(alice_tag2),
         },
@@ -1590,7 +1590,7 @@ async fn coarse_gate_access_tree_and_list_semantics() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "bob553c".into(),
-            password: String::from_utf8(bob_pw.clone()).expect("utf8"),
+            password: String::from_utf8(bob_pw.clone()).expect("utf8").into(),
             roles: bob553c_roles,
             hmac: Some(bob553c_tag),
         },
@@ -1744,7 +1744,7 @@ async fn coarse_gate_nested_batch_stays_denied() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "carol553e".into(),
-            password: String::from_utf8(carol_pw.clone()).expect("utf8"),
+            password: String::from_utf8(carol_pw.clone()).expect("utf8").into(),
             roles: carol553e_roles,
             hmac: Some(carol553e_tag),
         },
@@ -1876,7 +1876,7 @@ async fn coarse_gate_non_exempted_ops_stay_superuser_only() {
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
             name: "eve553f".into(),
-            password: String::from_utf8(eve_pw.clone()).expect("utf8"),
+            password: String::from_utf8(eve_pw.clone()).expect("utf8").into(),
             roles: eve553f_roles,
             hmac: Some(eve553f_tag),
         },

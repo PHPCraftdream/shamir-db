@@ -1,4 +1,4 @@
-use crate::auth::secret::SecretString;
+use crate::secret::SecretString;
 
 #[test]
 fn debug_redacts_value() {
