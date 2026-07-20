@@ -34,7 +34,7 @@ import { connect, filter, write, ddl } from '@shamir/client';
 
 const client = await connect({
   host: '127.0.0.1',
-  port: 13760,
+  port: 7331,
   username: 'admin',
   password: 'change-me-admin',
   tls: { rejectUnauthorized: false }, // self-signed cert

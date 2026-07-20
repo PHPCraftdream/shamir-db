@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { encode, decode } from '@msgpack/msgpack';
 import { Batch } from '../batch.js';
 import { Query } from '../query.js';
 import { write } from '../write.js';
@@ -718,6 +719,25 @@ describe('Finding 1.3 — wire-type drift fixes', () => {
     // A result without explain is still valid (skip-if-none).
     const bare: QueryResult = { records: [] };
     expect(bare.explain).toBeUndefined();
+  });
+
+  it('QueryResult carries an optional skipped flag (Epic03/B, #645)', () => {
+    // Type-check: `skipped` is assignable without a compile error, and a
+    // `QueryResult` omitting it (the common case — most ops run) is still
+    // valid, mirroring the Rust side's `skip_serializing_if` default-omit.
+    const ran: QueryResult = { records: [] };
+    expect(ran.skipped).toBeUndefined();
+
+    // Wire round-trip: a server response never sends `skipped: false` (it's
+    // skip_serializing_if-omitted), but DOES send `skipped: true` for a
+    // cascade-skipped alias. Encode a raw msgpack payload shaped like the
+    // real wire (no builder involved — this is the server's serialization,
+    // not the client's) and confirm it decodes into a `QueryResult` that
+    // exposes `.skipped === true`.
+    const wire = encode({ records: [], skipped: true });
+    const decoded = decode(wire) as QueryResult;
+    expect(decoded.skipped).toBe(true);
+    expect(decoded.records).toEqual([]);
   });
 });
 

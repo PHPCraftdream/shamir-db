@@ -48,7 +48,7 @@ import { connect } from '@shamir/client';
 
 const alice = await connect({
   host: '127.0.0.1',
-  port: 13760,
+  port: 7331,
   username: 'alice',
   password: 'alice-password',
   tls: { rejectUnauthorized: false },

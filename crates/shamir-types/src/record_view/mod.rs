@@ -2,9 +2,11 @@
 //! bytes — the Stage-1 primitive of the RecordView migration
 //! (see `docs/dev-artifacts/perf/record-view-migration.md` §2, §3, §8, §9).
 //!
-//! **ADDITIVE — not wired into the engine.** Stage 2 puts this behind a
-//! `RecordRef` trait; Stages 3-4 migrate consumers. Nothing in this crate
-//! changes behaviour as a result of this module existing.
+//! **Wired into the engine.** [`RecordRef`] (Stage 2's abstraction over this
+//! lens) and [`RecordView`] itself are consumed across `shamir-engine` —
+//! read execution, filter evaluation, projections, CRUD, and streaming (34+
+//! call sites under `crates/shamir-engine/src/`) — completing the Stages
+//! 2-4 migration this comment used to describe as future work.
 //!
 //! # What this is
 //! [`RecordView`] is a thin cursor (`&[u8]`) that reads fields *on demand*

@@ -613,7 +613,7 @@ import { connect } from '@shamir/client';
 
 const client = await connect({
   host: '127.0.0.1',
-  port: 13760,
+  port: 7331,
   username: 'admin',
   password: 'correct horse battery staple',
   tls: { rejectUnauthorized: false },
@@ -929,7 +929,7 @@ import { connect } from '@shamir/client';
 // Node.js (TCP or WS)
 const client = await connect({
   host: '127.0.0.1',
-  port: 13760,
+  port: 7331,
   username: 'admin',
   password: 'correct horse battery staple',
   tls: { rejectUnauthorized: false },

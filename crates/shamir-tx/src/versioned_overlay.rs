@@ -11,8 +11,13 @@
 //! by version within each key. This gives O(log N + k) range scans for
 //! `newest_visible` and contiguous iteration for GC.
 //!
-//! **Scaffold (P1a).** This module is additive — it is not wired into any
-//! read or write path yet. P1b–P1e will integrate it.
+//! **Wired in (P1a built it; P1b–P1e integrated it).** [`MvccStore`]
+//! (`mvcc_store/mod.rs`) holds this overlay and consults it on both the
+//! read path (`newest_visible` / exact-version `get`) and the write path
+//! (`insert` on commit, `remove`/`gc_upto` on reclaim), with
+//! `drain_to_history` flushing its entries to the durable history log via
+//! `iter_all_le`/`snapshot_le`. See also
+//! `crates/shamir-tx/src/tests/versioned_overlay_tests.rs`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

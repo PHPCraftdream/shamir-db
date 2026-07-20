@@ -1,4 +1,4 @@
-//! Two-tier group-commit coordinator over a [`WalSink`] (W2, additive).
+//! Two-tier group-commit coordinator over a [`WalSink`] (W2).
 //!
 //! [`WalGroupCommit`] coalesces many concurrent appends through one
 //! rotating leader: a single `AtomicBool` CAS elects the leader, which
@@ -62,8 +62,10 @@
 //! belongs to the integration layer (W3). This coordinator only fsyncs
 //! when a window carries a `Synced` waiter.
 //!
-//! PURELY ADDITIVE: not wired into `RepoWalManager` or the commit path
-//! (that is W3/W4). Marked `#[allow(dead_code)]` while unwired.
+//! **Wired in.** `shamir-tx`'s `RepoWalManager` (`repo_wal_manager.rs`) wraps
+//! this coordinator in an `Arc<WalGroupCommit>` and funnels every WAL
+//! append, replay, truncate, and sync call through it — it is the
+//! production commit path (W3/W4 landed), not an unwired scaffold.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -115,7 +117,6 @@ type Pending = (
 /// Lock-free-leader group commit over a [`WalSink`]. See the module-level
 /// correctness argument (L1/L2/L3 — the structure originally proved in the
 /// now-removed `group_fsync.rs`, preserved at `f62fe18`).
-#[allow(dead_code)]
 pub struct WalGroupCommit {
     sink: Arc<WalSink>,
     // Sanctioned tokio::sync::Mutex (CLAUDE.md "Banned in hot paths"):
@@ -150,7 +151,6 @@ pub struct WalGroupCommit {
     dirty_since_sync: AtomicBool,
 }
 
-#[allow(dead_code)]
 impl WalGroupCommit {
     pub fn new(sink: Arc<WalSink>) -> Self {
         Self {

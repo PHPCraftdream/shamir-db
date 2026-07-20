@@ -207,6 +207,16 @@ export interface QueryResult {
    * (`skip_serializing_if = "Option::is_none"`).
    */
   explain?: ExplainPlan;
+  /**
+   * Conditional-execution status (Epic03/B, #645): `true` when this alias's
+   * op did NOT run — either its own `when` evaluated `false`, or it was
+   * cascade-skipped because a `DataFlow`/`Both`-provenance dependency was
+   * itself skipped. Mirrors `query_result.rs::QueryResult.skipped`
+   * (`#[serde(default, skip_serializing_if = "std::ops::Not::not")]`) —
+   * omitted from the wire (and thus `undefined` here) when `false`, which
+   * means the op executed normally.
+   */
+  skipped?: boolean;
 }
 
 /** Transaction metadata (present on transactional batches). */
