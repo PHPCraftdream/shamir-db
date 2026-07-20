@@ -32,6 +32,7 @@ pub mod cast;
 pub mod crypto;
 pub mod datetime;
 pub mod encode;
+pub mod gen;
 pub mod math;
 pub mod null;
 pub mod object;
@@ -56,6 +57,7 @@ pub fn register_builtins() -> registry::ScalarRegistry {
     reg.in_folder("value_nav", value_nav::register);
     reg.in_folder("validate", validate::register);
     reg.in_folder("encode", encode::register);
+    reg.in_folder("gen", gen::register);
     reg.in_folder("object", object::register);
     reg.in_folder("text", text::register);
     reg.in_folder("crypto", crypto::register);

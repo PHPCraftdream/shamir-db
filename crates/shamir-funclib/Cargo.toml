@@ -47,6 +47,9 @@ subtle = "2.6.1"
 # callers dispatching it on an async runtime must offload to spawn_blocking.
 argon2 = "0.5"
 
+# Generation (/gen) — impure/non-deterministic. Same version as shamir-types.
+rand = "0.9.2"
+
 [dev-dependencies]
 bench-scale-tool = { workspace = true }
 

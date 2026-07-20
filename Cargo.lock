@@ -3475,6 +3475,7 @@ dependencies = [
  "hmac",
  "num-bigint",
  "percent-encoding",
+ "rand 0.9.4",
  "regex",
  "rmp-serde",
  "rust_decimal",
