@@ -47,7 +47,7 @@ refactor) all three checks below must pass. If any fails — do not commit.
 ```
 cargo fmt --all -- --check                            # formatting drift
 cargo clippy --workspace --all-targets -- -D warnings # lint regressions
-cargo test  --workspace --lib                         # behavioural tests
+./scripts/test.sh                                     # behavioural tests (cargo tl)
 ```
 
 If `fmt --check` fails, do **not** run `cargo fmt --all` — that

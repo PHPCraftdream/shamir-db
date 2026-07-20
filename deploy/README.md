@@ -61,15 +61,19 @@ docker exec shamir-db cat /var/lib/shamir-db/bootstrap_token.txt
 ## Backup
 
 ```bash
-# Stop the service for a fully consistent snapshot, OR copy live for
-# best-effort (redb's per-page CRC + atomic-commit makes live copies
-# safe to recover, but stop-and-copy is the strongest guarantee).
+# Stop-and-copy is the supported path. Fjall is journal-based, so a copy
+# that races an in-flight append loses only the torn tail batch on next
+# open (RecoveryMode::TolerateCorruptTail truncates back to the last
+# fully-checksummed batch) — earlier committed batches stay intact — but
+# stop-and-copy is the strongest guarantee.
 sudo systemctl stop shamir-db
-shamir-server backup --config /etc/shamir/server.ktav --to /backups/
+shamir-server --config /etc/shamir/server.ktav backup --to /backups/
 sudo systemctl start shamir-db
 
-# Cron daily:
-0 3 * * * /usr/local/bin/shamir-server backup --config /etc/shamir/server.ktav --to /backups/
+# Cron daily — BEST-EFFORT LIVE SNAPSHOT (no service stop): recovers, on
+# next open, to the last complete journal batch; for a guaranteed-
+# consistent snapshot, stop the service first (see the block above).
+0 3 * * * /usr/local/bin/shamir-server --config /etc/shamir/server.ktav backup --to /backups/
 ```
 
 Restore = stop service → `cp -r /backups/<timestamp>/* /var/lib/shamir-db/` → start.

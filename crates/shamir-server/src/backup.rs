@@ -1,7 +1,7 @@
 //! On-demand backup of the server's `data_dir` to a snapshot directory.
 //!
 //! v1: stop-and-copy. Operator stops the server, runs
-//! `shamir-server backup --from <data_dir> --to <dest>` which recursively
+//! `shamir-server --config <ktav> backup --to <dest>` which recursively
 //! copies every file under `data_dir` (fjall database directories — each a
 //! directory tree of journal and LSM segment files — plus wire-table
 //! registries, audit log, rotated audit files, and TLS PEMs). The

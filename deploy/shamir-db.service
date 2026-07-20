@@ -14,7 +14,8 @@ RestartSec=5
 
 # Process limits — match the server's expected workload.
 # 65536 open files: enough for ~10K concurrent connections (one fd per
-# socket + several per redb mmap region) plus headroom.
+# socket + journal + LSM segment files per keyspace — segments are opened
+# as needed and compaction creates new ones) plus headroom.
 LimitNOFILE=65536
 
 # Logging — go to journald, the operator runs `journalctl -u shamir-db`.

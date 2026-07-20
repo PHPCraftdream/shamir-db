@@ -75,9 +75,10 @@ enum Subcmd {
 
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
     /// **Server should be stopped first** for a fully consistent snapshot.
-    /// redb's per-page CRC + atomic-commit design means a copy taken
-    /// during a quiescent window is recoverable as the pre-commit state,
-    /// but for confidence stop the server.
+    /// Fjall is journal-based: a copy racing an in-flight append loses
+    /// only the torn tail batch on next open (`TolerateCorruptTail`
+    /// truncates to the last checksummed batch) — earlier committed
+    /// batches are safe — but stop-and-copy is the strongest guarantee.
     Backup {
         /// Destination directory. Created if missing. The actual snapshot
         /// goes into `<to>/YYYYMMDD_HHMMSS/`.
