@@ -308,20 +308,53 @@ impl Sq8Quantizer {
             self.dim
         );
 
-        let mut acc = 0.0f32;
-        // Audit 4(c): use precomputed `scales_sq` (= s_i²) instead of
-        // recomputing `s*s` per dimension per call.
-        // Indexes three parallel slices (scales_sq, qx, qy) by the same i.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..self.dim {
-            // Integer difference in i32: u8 − u8 can be negative.
-            let diff = (qx[i] as i32) - (qy[i] as i32);
-            // s² · diff² accumulated in f32. diff² ≤ 65025 fits in i32
-            // exactly; the multiply by s² (f32) promotes to f32.
-            let diff_sq = (diff * diff) as f32;
-            acc += self.scales_sq[i] * diff_sq;
-        }
-        acc
+        // F4: route through the dedicated `weighted_sq_diff_u8` SIMD kernel
+        // (AVX2/NEON/scalar dispatch, see `vector::simd::weighted_sq_diff_u8`)
+        // instead of the scalar loop this replaces. The squared-difference
+        // accumulate math is identical term-by-term; the only approximation
+        // vs the scalar reference is FMA-vs-mul-then-add rounding.
+        crate::vector::simd::weighted_sq_diff_u8(&self.scales_sq, qx, qy)
+    }
+
+    /// Squared L2 norm of the dequantized vector for a code vector:
+    /// `‖dequant(q)‖² = Σ_i (min_i + q_i·s_i)²`.
+    ///
+    /// Expanding each term: `(min_i + q_i·s_i)² = min_i² + 2·(min_i·s_i)·q_i +
+    /// s_i²·q_i²`. Summing over `i` and grouping against the precomputed
+    /// `min_sq_sum` (= `Σ min_i²`), `min_scale` (= `min_i·s_i`), and
+    /// `scales_sq` (= `s_i²`) fields gives:
+    ///
+    /// ```text
+    ///   ‖dequant(q)‖² = min_sq_sum
+    ///                 + Σ_i 2·min_scale[i]·q[i] + scales_sq[i]·q[i]²
+    /// ```
+    ///
+    /// The summation term is exactly `weighted_bilinear_f32(min_scale,
+    /// scales_sq, q, q)` — the SAME code slice passed as BOTH operands makes
+    /// the bilinear kernel's `min_scale[i]·(qx[i]+qy[i])` reduce to
+    /// `2·min_scale[i]·q[i]` and `scales_sq[i]·qx[i]·qy[i]` reduce to
+    /// `scales_sq[i]·q[i]²`. So this method needs ZERO new SIMD kernel code:
+    /// it reuses the existing, already-tested
+    /// [`weighted_bilinear_f32`](crate::vector::simd::weighted_bilinear_f32)
+    /// (AVX2/NEON/scalar dispatch, task #614) with `q` passed twice.
+    ///
+    /// Used by the Cosine metric (both the graph-traversal `eval` path and
+    /// the rescoring `RescoreCtx` path) as the dequantized-vector norm in
+    /// the `1 − dot/(‖x‖·‖y‖)` denominator.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `q.len() != self.dim`.
+    pub fn dequant_norm_sq(&self, q: &[u8]) -> f32 {
+        assert_eq!(
+            q.len(),
+            self.dim,
+            "Sq8Quantizer::dequant_norm_sq: q len {} != dim {}",
+            q.len(),
+            self.dim
+        );
+        self.min_sq_sum
+            + crate::vector::simd::weighted_bilinear_f32(&self.min_scale, &self.scales_sq, q, q)
     }
 
     /// Per-dimension lower bounds (training minima). Read-only access for

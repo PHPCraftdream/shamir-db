@@ -414,3 +414,84 @@ fn quantize_clamps_out_of_range() {
     assert_eq!(q.quantize(&[-5.0])[0], 0);
     assert_eq!(q.quantize(&[15.0])[0], 255);
 }
+
+// =========================================================================
+// dequant_norm_sq (F4): the canonical SIMD-backed method must match the OLD
+// scalar formula `Σ (mins[i] + q[i]*scales[i])²`, computed independently
+// here from the public accessors (not by calling the code that was deleted).
+// This proves the key identity: `min_sq_sum + weighted_bilinear_f32(
+// min_scale, scales_sq, q, q) == Σ (min_i + q_i·s_i)²`.
+// =========================================================================
+
+#[test]
+fn dequant_norm_sq_matches_scalar_reference() {
+    // Sweep dims spanning multiple SIMD chunk widths (8-lane AVX2, 4-lane
+    // NEON) plus tails, and several seeds, to catch any off-by-one in the
+    // tail loop or a widening error.
+    for &dim in &[1usize, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100, 128] {
+        for seed in [1u64, 17, 257] {
+            let train = clustered(48, dim, 4, 0.4, seed);
+            let q = Sq8Quantizer::fit(&train, dim);
+            let codes = q.quantize(&train[0]);
+
+            // Fresh scalar reference: Σ (mins[i] + codes[i]*scales[i])².
+            let mut ref_val = 0.0f32;
+            // Indexes three parallel slices (mins, scales, codes) by i.
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..dim {
+                let x = q.mins()[i] + (codes[i] as f32) * q.scales()[i];
+                ref_val += x * x;
+            }
+
+            let got = q.dequant_norm_sq(&codes);
+            // Combined relative+absolute tolerance: the canonical method
+            // goes through `weighted_bilinear_f32` (SIMD FMA) which differs
+            // from the scalar accumulation order by at most a few ulp. A
+            // pure relative bound breaks down when `ref_val` is near zero
+            // (a constant-dimension quantizer), so include an absolute floor.
+            let diff = (got - ref_val).abs();
+            let tol = 1e-3 * ref_val.abs() + 1e-5;
+            assert!(
+                diff <= tol,
+                "dequant_norm_sq dim={dim} seed={seed}: got {got} != scalar reference \
+                 {ref_val} (diff {diff}, tol {tol})"
+            );
+        }
+    }
+}
+
+#[test]
+fn dequant_norm_sq_all_255() {
+    // Saturation-adjacent: every code at the u8 max. Exercises the SIMD
+    // widening at the largest per-lane code value.
+    for &dim in &[8usize, 16, 32, 100, 128] {
+        let train = clustered(32, dim, 8, 0.5, 999);
+        let q = Sq8Quantizer::fit(&train, dim);
+        let codes = vec![255u8; dim];
+
+        let mut ref_val = 0.0f32;
+        // Indexes three parallel slices (mins, scales, codes) by i.
+        #[allow(clippy::needless_range_loop)]
+        for i in 0..dim {
+            let x = q.mins()[i] + (codes[i] as f32) * q.scales()[i];
+            ref_val += x * x;
+        }
+
+        let got = q.dequant_norm_sq(&codes);
+        let diff = (got - ref_val).abs();
+        let tol = 1e-3 * ref_val.abs() + 1e-5;
+        assert!(
+            diff <= tol,
+            "dequant_norm_sq all-255 dim={dim}: got {got} != ref {ref_val} (diff {diff}, tol {tol})"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "len")]
+fn dequant_norm_sq_dim_mismatch_panics() {
+    let dim = 4;
+    let train = clustered(8, dim, 2, 0.1, 1);
+    let q = Sq8Quantizer::fit(&train, dim);
+    let _ = q.dequant_norm_sq(&[1u8, 2, 3]);
+}

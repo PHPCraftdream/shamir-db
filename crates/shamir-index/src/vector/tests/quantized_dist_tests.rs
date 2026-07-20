@@ -393,3 +393,154 @@ fn rescore_f32_uses_simd_kernels() {
     // l2_squared(a, a) = 0
     assert_eq!(l2_squared(&a, &a), 0.0);
 }
+
+// =========================================================================
+// VR-7 option 2 (#429, F4 item 4): query-norm hoist for the Cosine
+// graph-traversal path. The thread-local stack (`QUERY_NORM_STACK`) is
+// pushed before `hnsw_u8.search(...)` and popped after (via a RAII guard).
+// `eval`'s Cosine arm checks the stack top for a pointer match on `a`/`b`;
+// on a hit it reuses the cached norm, on a miss it recomputes.
+//
+// These tests PROVE: (a) the cache is used when the pointer matches, (b)
+// the stack doesn't leak entries between push/pop cycles, (c) concurrent
+// threads don't cross-contaminate.
+// =========================================================================
+
+#[test]
+fn query_norm_cache_hit_and_miss() {
+    // (a) Push a known WRONG norm keyed on `a`'s pointer; verify eval uses
+    // it (Cosine result changes). Pop; verify eval recomputes the correct
+    // norm (result matches baseline). This proves the cache is live AND
+    // transparent (soft-miss falls back to recompute).
+    let dim = 32;
+    let train = clustered(64, dim, 8, 0.3, 4242);
+    let q = Arc::new(Sq8Quantizer::fit(&train, dim));
+    let dist = ShamirDistU8::new(Arc::clone(&q), VectorMetric::Cosine);
+    let a = q.quantize(&train[0]);
+    let b = q.quantize(&train[1]);
+
+    // Baseline: no cache entry → both norms recomputed.
+    let baseline = dist.eval(&a, &b);
+
+    // Push a WRONG norm for `a` (hnsw_rs always passes the query as the
+    // first `eval` argument, so `try_query_norm(a)` should hit).
+    let wrong_norm = q.dequant_norm_sq(&a) * 4.0;
+    let guard = ShamirDistU8::push_query_norm(&a, wrong_norm);
+    let cached = dist.eval(&a, &b);
+    assert!(
+        (cached - baseline).abs() > 1e-3,
+        "eval with wrong cached norm {wrong_norm} should differ from baseline \
+         {baseline}, got {cached}"
+    );
+    drop(guard); // pop
+
+    // After pop, stack is empty → eval recomputes → matches baseline.
+    let after_pop = dist.eval(&a, &b);
+    assert_eq!(
+        baseline.to_bits(),
+        after_pop.to_bits(),
+        "after pop, eval should match baseline (no stale entry)"
+    );
+}
+
+#[test]
+fn query_norm_stack_no_leak_between_pushes() {
+    // (b) Two sequential push/pop cycles on the same thread with DIFFERENT
+    // query pointers. The stack must not leak entries between cycles: after
+    // the first pop, the second push must be the ONLY entry.
+    let dim = 16;
+    let train = clustered(32, dim, 4, 0.3, 7777);
+    let q = Arc::new(Sq8Quantizer::fit(&train, dim));
+    let dist = ShamirDistU8::new(Arc::clone(&q), VectorMetric::Cosine);
+    let a = q.quantize(&train[0]);
+    let b = q.quantize(&train[1]);
+    let c = q.quantize(&train[2]);
+
+    let baseline_ab = dist.eval(&a, &b);
+
+    // First cycle: push wrong norm for `a`.
+    {
+        let wrong = q.dequant_norm_sq(&a) * 9.0;
+        let _g = ShamirDistU8::push_query_norm(&a, wrong);
+        let cached = dist.eval(&a, &b);
+        assert!(
+            (cached - baseline_ab).abs() > 1e-3,
+            "first push should be active"
+        );
+    } // pop
+
+    // After first pop: eval without push matches baseline (no stale `a` norm).
+    assert_eq!(
+        dist.eval(&a, &b).to_bits(),
+        baseline_ab.to_bits(),
+        "stack leaked after first pop"
+    );
+
+    // Second cycle: push wrong norm for `c` (different pointer).
+    let baseline_cb = dist.eval(&c, &b);
+    {
+        let wrong = q.dequant_norm_sq(&c) * 9.0;
+        let _g = ShamirDistU8::push_query_norm(&c, wrong);
+        let cached = dist.eval(&c, &b);
+        assert!(
+            (cached - baseline_cb).abs() > 1e-3,
+            "second push should be active"
+        );
+    } // pop
+
+    // No stale entries remain.
+    assert_eq!(
+        dist.eval(&c, &b).to_bits(),
+        baseline_cb.to_bits(),
+        "stack leaked after second pop"
+    );
+    assert_eq!(
+        dist.eval(&a, &b).to_bits(),
+        baseline_ab.to_bits(),
+        "stack leaked after second pop (a side)"
+    );
+}
+
+#[test]
+fn query_norm_stack_no_cross_thread_contamination() {
+    // (c) Thread A pushes a wrong norm; thread B (which never pushed) must
+    // NOT see it. Thread-locals are per-OS-thread, so this is structurally
+    // guaranteed — but this test PROVES it rather than relying on the
+    // invariant alone.
+    use std::thread;
+
+    let dim = 16;
+    let train = clustered(32, dim, 4, 0.3, 9999);
+    let q = Arc::new(Sq8Quantizer::fit(&train, dim));
+    let dist = ShamirDistU8::new(Arc::clone(&q), VectorMetric::Cosine);
+    let a = q.quantize(&train[0]);
+    let b = q.quantize(&train[1]);
+
+    let baseline = dist.eval(&a, &b);
+
+    // Thread B: never pushes → must see baseline result.
+    let dist_b = dist.clone();
+    let a_b = a.clone();
+    let b_b = b.clone();
+    let baseline_b = baseline;
+    let handle = thread::spawn(move || {
+        let result = dist_b.eval(&a_b, &b_b);
+        assert_eq!(
+            result.to_bits(),
+            baseline_b.to_bits(),
+            "thread B should not see thread A's thread-local cache entry"
+        );
+    });
+
+    // Main thread: push wrong norm WHILE thread B may be running.
+    let wrong = q.dequant_norm_sq(&a) * 4.0;
+    let _g = ShamirDistU8::push_query_norm(&a, wrong);
+    let main_cached = dist.eval(&a, &b);
+    assert!(
+        (main_cached - baseline).abs() > 1e-3,
+        "main thread cache should be active"
+    );
+    drop(_g); // pop before join
+
+    handle.join().unwrap();
+}

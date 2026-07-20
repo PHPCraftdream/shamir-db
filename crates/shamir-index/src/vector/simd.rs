@@ -960,3 +960,311 @@ unsafe fn weighted_bilinear_neon(
     }
     s
 }
+
+// =====================================================================
+// Weighted SQ8 squared-difference kernel (F4):
+//
+//   Σ_i scales_sq[i] * (qx[i] − qy[i])²
+//
+// The L2 analogue of `weighted_bilinear_f32` above: same u8→f32 widening
+// (8 lanes per AVX2 iter, 4 lanes per NEON iter) and the same per-lane f32
+// weight, but the accumulate step is a squared difference (subtract, square,
+// FMA) instead of the linear+bilinear product. Used by
+// `Sq8Quantizer::approx_l2_sq`. There is no existing kernel to reuse — the
+// bilinear kernel multiplies qx*qy; this one computes (qx−qy)².
+//
+// Invariant: every dispatched path returns the same value as
+// `weighted_sq_diff_scalar` to within f32/FMA rounding (see
+// `tests/simd_tests.rs`).
+// =====================================================================
+
+/// Scalar reference: widens u8 codes to f32 and accumulates
+/// `scales_sq[i] * (qx[i] − qy[i])²` in one pass. Mirrors the original loop
+/// this kernel replaces in [`crate::vector::sq8::Sq8Quantizer::approx_l2_sq`].
+#[inline]
+pub(crate) fn weighted_sq_diff_scalar(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 {
+    debug_assert_eq!(scales_sq.len(), qx.len());
+    debug_assert_eq!(scales_sq.len(), qy.len());
+    let n = scales_sq.len().min(qx.len()).min(qy.len());
+
+    let mut acc = 0.0f32;
+    for i in 0..n {
+        let diff = (qx[i] as f32) - (qy[i] as f32);
+        acc += scales_sq[i] * (diff * diff);
+    }
+    acc
+}
+
+/// Dispatcher: AVX2 → NEON → scalar, mirroring `weighted_bilinear_f32`.
+#[inline]
+pub(crate) fn weighted_sq_diff_u8(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if has_avx2() {
+            // SAFETY: `has_avx2()` guarantees the AVX2 + FMA target
+            // features required by the intrinsics in `weighted_sq_diff_avx2`.
+            return unsafe { weighted_sq_diff_avx2(scales_sq, qx, qy) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            // SAFETY: `has_neon()` guarantees the NEON target feature
+            // required by the intrinsics in `weighted_sq_diff_neon`.
+            return unsafe { weighted_sq_diff_neon(scales_sq, qx, qy) };
+        }
+    }
+    weighted_sq_diff_scalar(scales_sq, qx, qy)
+}
+
+/// AVX2 path: identical u8→f32 widening as `weighted_bilinear_avx2`
+/// (`_mm_loadl_epi64` → `_mm256_cvtepu8_epi32` → `_mm256_cvtepi32_ps`),
+/// then `acc = fmadd(scales_sq, diff*diff, acc)` where `diff = xv − yv`.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn weighted_sq_diff_avx2(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    debug_assert_eq!(scales_sq.len(), qx.len());
+    debug_assert_eq!(scales_sq.len(), qy.len());
+    let n = scales_sq.len().min(qx.len()).min(qy.len());
+    let chunks = n / 8;
+
+    let mut acc = _mm256_setzero_ps();
+
+    let ssp = scales_sq.as_ptr();
+    let xp = qx.as_ptr();
+    let yp = qy.as_ptr();
+
+    let mut i = 0usize;
+    while i < chunks * 8 {
+        // Load 8 u8 codes and zero-extend to 8 lanes of i32, then f32.
+        let xv_u8 = _mm_loadl_epi64(xp.add(i) as *const __m128i);
+        let yv_u8 = _mm_loadl_epi64(yp.add(i) as *const __m128i);
+        let xv_i32 = _mm256_cvtepu8_epi32(xv_u8);
+        let yv_i32 = _mm256_cvtepu8_epi32(yv_u8);
+        let xv = _mm256_cvtepi32_ps(xv_i32);
+        let yv = _mm256_cvtepi32_ps(yv_i32);
+
+        let ssv = _mm256_loadu_ps(ssp.add(i));
+
+        // Squared-difference term: scales_sq * (xv − yv)².
+        let diff = _mm256_sub_ps(xv, yv);
+        acc = _mm256_fmadd_ps(ssv, _mm256_mul_ps(diff, diff), acc);
+
+        i += 8;
+    }
+
+    // Horizontal reduction of the single 8-lane accumulator (identical to
+    // `weighted_bilinear_avx2`).
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let lo = _mm256_castps256_ps128(acc);
+    let v128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(v128);
+    let sums = _mm_add_ps(v128, shuf);
+    let shuf2 = _mm_movehl_ps(sums, sums);
+    let sums2 = _mm_add_ss(sums, shuf2);
+    let mut s = _mm_cvtss_f32(sums2);
+
+    for k in (chunks * 8)..n {
+        let diff = (qx[k] as f32) - (qy[k] as f32);
+        s += scales_sq[k] * (diff * diff);
+    }
+    s
+}
+
+/// NEON path: identical u8→f32 widening as `weighted_bilinear_neon`
+/// (`vld1_lane_u32`/`vmovl_u8`/`vmovl_u16`/`vcvtq_f32_u32`), then
+/// `acc = vfmaq(acc, scales_sq, diff*diff)` where `diff = xv − yv`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn weighted_sq_diff_neon(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(scales_sq.len(), qx.len());
+    debug_assert_eq!(scales_sq.len(), qy.len());
+    let n = scales_sq.len().min(qx.len()).min(qy.len());
+    let chunks = n / 4;
+
+    let mut acc = vdupq_n_f32(0.0);
+
+    let ssp = scales_sq.as_ptr();
+    let xp = qx.as_ptr();
+    let yp = qy.as_ptr();
+
+    let mut i = 0usize;
+    while i < chunks * 4 {
+        // Load 4 u8 lanes, widen u8 -> u16 -> u32 -> f32.
+        let xv_u8 = vld1_lane_u32(xp.add(i) as *const u32, vdup_n_u32(0), 0);
+        let yv_u8 = vld1_lane_u32(yp.add(i) as *const u32, vdup_n_u32(0), 0);
+        let xv_u8x8 = vreinterpret_u8_u32(xv_u8);
+        let yv_u8x8 = vreinterpret_u8_u32(yv_u8);
+        let xv_u16 = vmovl_u8(xv_u8x8);
+        let yv_u16 = vmovl_u8(yv_u8x8);
+        let xv_u32 = vmovl_u16(vget_low_u16(xv_u16));
+        let yv_u32 = vmovl_u16(vget_low_u16(yv_u16));
+        let xv = vcvtq_f32_u32(xv_u32);
+        let yv = vcvtq_f32_u32(yv_u32);
+
+        let ssv = vld1q_f32(ssp.add(i));
+
+        // Squared-difference term: scales_sq * (xv − yv)².
+        let diff = vsubq_f32(xv, yv);
+        acc = vfmaq_f32(acc, ssv, vmulq_f32(diff, diff));
+
+        i += 4;
+    }
+
+    let mut s = vaddvq_f32(acc);
+
+    for k in (chunks * 4)..n {
+        let diff = (qx[k] as f32) - (qy[k] as f32);
+        s += scales_sq[k] * (diff * diff);
+    }
+    s
+}
+
+// =====================================================================
+// Weighted SQ8 linear kernel (F4):
+//
+//   Σ_i weights[i] * codes[i]
+//
+// A single f32-weight × u8-code multiply-accumulate, with no bilinear or
+// subtract term (simpler than `weighted_bilinear_f32` above). Used by
+// `RescoreCtx::fused_dot` for the Dot/Cosine rescore path.
+//
+// Invariant: every dispatched path returns the same value as
+// `weighted_linear_scalar` to within f32/FMA rounding (see
+// `tests/simd_tests.rs`).
+// =====================================================================
+
+/// Scalar reference: widens u8 codes to f32 and accumulates
+/// `weights[i] * codes[i]` in one pass. Mirrors the original loop this
+/// kernel replaces in `RescoreCtx::fused_dot`.
+#[inline]
+pub(crate) fn weighted_linear_scalar(weights: &[f32], codes: &[u8]) -> f32 {
+    debug_assert_eq!(weights.len(), codes.len());
+    let n = weights.len().min(codes.len());
+
+    let mut acc = 0.0f32;
+    for i in 0..n {
+        acc += weights[i] * (codes[i] as f32);
+    }
+    acc
+}
+
+/// Dispatcher: AVX2 → NEON → scalar, mirroring `weighted_bilinear_f32`.
+#[inline]
+pub(crate) fn weighted_linear_u8(weights: &[f32], codes: &[u8]) -> f32 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if has_avx2() {
+            // SAFETY: `has_avx2()` guarantees the AVX2 + FMA target
+            // features required by the intrinsics in `weighted_linear_avx2`.
+            return unsafe { weighted_linear_avx2(weights, codes) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            // SAFETY: `has_neon()` guarantees the NEON target feature
+            // required by the intrinsics in `weighted_linear_neon`.
+            return unsafe { weighted_linear_neon(weights, codes) };
+        }
+    }
+    weighted_linear_scalar(weights, codes)
+}
+
+/// AVX2 path: identical u8→f32 widening as `weighted_bilinear_avx2`, then a
+/// single `acc = fmadd(weights, codes_f32, acc)` per 8 lanes.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn weighted_linear_avx2(weights: &[f32], codes: &[u8]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    debug_assert_eq!(weights.len(), codes.len());
+    let n = weights.len().min(codes.len());
+    let chunks = n / 8;
+
+    let mut acc = _mm256_setzero_ps();
+
+    let wp = weights.as_ptr();
+    let cp = codes.as_ptr();
+
+    let mut i = 0usize;
+    while i < chunks * 8 {
+        // Load 8 u8 codes and zero-extend to 8 lanes of i32, then f32.
+        let cv_u8 = _mm_loadl_epi64(cp.add(i) as *const __m128i);
+        let cv_i32 = _mm256_cvtepu8_epi32(cv_u8);
+        let cv = _mm256_cvtepi32_ps(cv_i32);
+
+        let wv = _mm256_loadu_ps(wp.add(i));
+
+        // Linear term: weights * codes.
+        acc = _mm256_fmadd_ps(wv, cv, acc);
+
+        i += 8;
+    }
+
+    // Horizontal reduction (identical to `weighted_bilinear_avx2`).
+    let hi = _mm256_extractf128_ps(acc, 1);
+    let lo = _mm256_castps256_ps128(acc);
+    let v128 = _mm_add_ps(lo, hi);
+    let shuf = _mm_movehdup_ps(v128);
+    let sums = _mm_add_ps(v128, shuf);
+    let shuf2 = _mm_movehl_ps(sums, sums);
+    let sums2 = _mm_add_ss(sums, shuf2);
+    let mut s = _mm_cvtss_f32(sums2);
+
+    for k in (chunks * 8)..n {
+        s += weights[k] * (codes[k] as f32);
+    }
+    s
+}
+
+/// NEON path: identical u8→f32 widening as `weighted_bilinear_neon`, then a
+/// single `acc = vfmaq(acc, weights, codes_f32)` per 4 lanes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn weighted_linear_neon(weights: &[f32], codes: &[u8]) -> f32 {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(weights.len(), codes.len());
+    let n = weights.len().min(codes.len());
+    let chunks = n / 4;
+
+    let mut acc = vdupq_n_f32(0.0);
+
+    let wp = weights.as_ptr();
+    let cp = codes.as_ptr();
+
+    let mut i = 0usize;
+    while i < chunks * 4 {
+        // Load 4 u8 lanes, widen u8 -> u16 -> u32 -> f32.
+        let cv_u8 = vld1_lane_u32(cp.add(i) as *const u32, vdup_n_u32(0), 0);
+        let cv_u8x8 = vreinterpret_u8_u32(cv_u8);
+        let cv_u16 = vmovl_u8(cv_u8x8);
+        let cv_u32 = vmovl_u16(vget_low_u16(cv_u16));
+        let cv = vcvtq_f32_u32(cv_u32);
+
+        let wv = vld1q_f32(wp.add(i));
+
+        // Linear term: weights * codes.
+        acc = vfmaq_f32(acc, wv, cv);
+
+        i += 4;
+    }
+
+    let mut s = vaddvq_f32(acc);
+
+    for k in (chunks * 4)..n {
+        s += weights[k] * (codes[k] as f32);
+    }
+    s
+}

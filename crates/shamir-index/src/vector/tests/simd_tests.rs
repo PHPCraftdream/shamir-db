@@ -11,7 +11,10 @@
 //! are type-checked via `cargo check --target aarch64-*` and mirror the
 //! proven AVX2/scalar structure (see the block comment in `simd.rs`).
 
-use crate::vector::simd::{dot_u8, dot_u8_scalar, weighted_bilinear_f32, weighted_bilinear_scalar};
+use crate::vector::simd::{
+    dot_u8, dot_u8_scalar, weighted_bilinear_f32, weighted_bilinear_scalar, weighted_linear_scalar,
+    weighted_linear_u8, weighted_sq_diff_scalar, weighted_sq_diff_u8,
+};
 
 /// Numerical-Recipes LCG (same lineage as `shamir_bench_utils::Lcg` and
 /// `hnsw_rs_contract_tests::lcg_vec`) — deterministic, no global RNG.
@@ -261,6 +264,186 @@ fn weighted_bilinear_avx2_path_is_exercised_on_this_host() {
     assert!(
         has_avx2(),
         "expected AVX2 on the x86_64 test host; weighted_bilinear_f32's \
+         AVX2 kernel would not be exercised by the tests above otherwise"
+    );
+}
+
+// =====================================================================
+// `weighted_sq_diff_u8` (F4) vs `weighted_sq_diff_scalar` reference — f32
+// equivalence tests (dispatcher-equals-scalar, not bit-exact).
+// =====================================================================
+
+#[test]
+fn weighted_sq_diff_dispatcher_equals_scalar_random() {
+    for &dim in WEIGHTED_DIMS {
+        let scales_sq = rand_f32_vec(dim, dim as u64 * 5 + 2, 0.0, 3.0);
+        let qx = rand_vec(dim, dim as u64 * 7 + 3);
+        let qy = rand_vec(dim, dim as u64 * 11 + 5);
+
+        let want = weighted_sq_diff_scalar(&scales_sq, &qx, &qy);
+        let got = weighted_sq_diff_u8(&scales_sq, &qx, &qy);
+        assert_close(got, want, &format!("weighted_sq_diff dim={dim}"));
+    }
+}
+
+#[test]
+fn weighted_sq_diff_dispatcher_equals_scalar_many_seeds() {
+    // Statistical sweep over dim=128 (multiple SIMD chunks + no tail) and
+    // dim=100 (multiple chunks + a scalar tail on every dispatched path).
+    for &dim in &[100usize, 128] {
+        for s in 0..64u64 {
+            let scales_sq = rand_f32_vec(dim, s.wrapping_mul(40503).wrapping_add(7), 0.0, 3.0);
+            let qx = rand_vec(dim, s.wrapping_mul(97).wrapping_add(11));
+            let qy = rand_vec(dim, s.wrapping_mul(131).wrapping_add(13));
+
+            let want = weighted_sq_diff_scalar(&scales_sq, &qx, &qy);
+            let got = weighted_sq_diff_u8(&scales_sq, &qx, &qy);
+            assert_close(
+                got,
+                want,
+                &format!("weighted_sq_diff seed sweep dim={dim} s={s}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn weighted_sq_diff_dispatcher_equals_scalar_zero_dim() {
+    let empty: Vec<f32> = Vec::new();
+    let empty_u8: Vec<u8> = Vec::new();
+    assert_eq!(weighted_sq_diff_u8(&empty, &empty_u8, &empty_u8), 0.0);
+    assert_eq!(weighted_sq_diff_scalar(&empty, &empty_u8, &empty_u8), 0.0);
+}
+
+#[test]
+fn weighted_sq_diff_dispatcher_equals_scalar_max_diff() {
+    // Max-difference configuration: qx = all-255, qy = all-0, so every diff
+    // is 255 and diff² = 65025 — the largest per-lane value a u8-widened
+    // sq-diff kernel can see. With large scales_sq this stresses the f32
+    // accumulation across multiple SIMD chunk widths plus a tail.
+    for &dim in &[8usize, 16, 32, 100, 128] {
+        let qx = vec![255u8; dim];
+        let qy = vec![0u8; dim];
+        let scales_sq = vec![1.5f32; dim];
+
+        let want = weighted_sq_diff_scalar(&scales_sq, &qx, &qy);
+        let got = weighted_sq_diff_u8(&scales_sq, &qx, &qy);
+        assert_close(got, want, &format!("weighted_sq_diff max-diff dim={dim}"));
+    }
+}
+
+#[test]
+fn weighted_sq_diff_dispatcher_equals_scalar_self_diff_zero() {
+    // Degenerate: qx == qy → every diff is 0 → result is exactly 0. Catches
+    // a sign-error or a stale-accumulator bug that would produce a non-zero
+    // sum.
+    for &dim in &[8usize, 16, 32, 100, 128] {
+        let qx = vec![255u8; dim];
+        let scales_sq = vec![1.5f32; dim];
+
+        assert_eq!(
+            weighted_sq_diff_u8(&scales_sq, &qx, &qx),
+            0.0,
+            "self-diff should be 0 for dim={dim}"
+        );
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[test]
+fn weighted_sq_diff_avx2_path_is_exercised_on_this_host() {
+    use crate::vector::simd::has_avx2;
+    assert!(
+        has_avx2(),
+        "expected AVX2 on the x86_64 test host; weighted_sq_diff_u8's \
+         AVX2 kernel would not be exercised by the tests above otherwise"
+    );
+}
+
+// =====================================================================
+// `weighted_linear_u8` (F4) vs `weighted_linear_scalar` reference — f32
+// equivalence tests (dispatcher-equals-scalar, not bit-exact).
+// =====================================================================
+
+#[test]
+fn weighted_linear_dispatcher_equals_scalar_random() {
+    for &dim in WEIGHTED_DIMS {
+        // Weights can be negative (qs[i] = query[i]*scale_i for Dot/Cosine).
+        let weights = rand_f32_vec(dim, dim as u64 * 5 + 2, -2.0, 2.0);
+        let codes = rand_vec(dim, dim as u64 * 7 + 3);
+
+        let want = weighted_linear_scalar(&weights, &codes);
+        let got = weighted_linear_u8(&weights, &codes);
+        assert_close(got, want, &format!("weighted_linear dim={dim}"));
+    }
+}
+
+#[test]
+fn weighted_linear_dispatcher_equals_scalar_many_seeds() {
+    for &dim in &[100usize, 128] {
+        for s in 0..64u64 {
+            let weights = rand_f32_vec(dim, s.wrapping_mul(40503).wrapping_add(7), -2.0, 2.0);
+            let codes = rand_vec(dim, s.wrapping_mul(97).wrapping_add(11));
+
+            let want = weighted_linear_scalar(&weights, &codes);
+            let got = weighted_linear_u8(&weights, &codes);
+            assert_close(
+                got,
+                want,
+                &format!("weighted_linear seed sweep dim={dim} s={s}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn weighted_linear_dispatcher_equals_scalar_zero_dim() {
+    let empty: Vec<f32> = Vec::new();
+    let empty_u8: Vec<u8> = Vec::new();
+    assert_eq!(weighted_linear_u8(&empty, &empty_u8), 0.0);
+    assert_eq!(weighted_linear_scalar(&empty, &empty_u8), 0.0);
+}
+
+#[test]
+fn weighted_linear_dispatcher_equals_scalar_all_255() {
+    // Saturation-adjacent: every code at the u8 max, with large-magnitude
+    // weights (positive and negative), across dims spanning multiple SIMD
+    // chunk widths plus a tail.
+    for &dim in &[8usize, 16, 32, 100, 128] {
+        let codes = vec![255u8; dim];
+        let weights = vec![1.5f32; dim];
+
+        let want = weighted_linear_scalar(&weights, &codes);
+        let got = weighted_linear_u8(&weights, &codes);
+        assert_close(got, want, &format!("weighted_linear all-255 dim={dim}"));
+    }
+}
+
+#[test]
+fn weighted_linear_dispatcher_equals_scalar_mixed_sign_weights() {
+    // Weights spanning both signs — catches a widening/sign-extension error
+    // in the u8→f32 path (u8 codes are always non-negative, but the f32
+    // weight can flip the sign of each lane's contribution).
+    for &dim in &[32usize, 64, 128] {
+        let mut weights = vec![0.0f32; dim];
+        let mut codes = vec![0u8; dim];
+        for i in 0..dim {
+            weights[i] = if i % 2 == 0 { 1.75 } else { -1.75 };
+            codes[i] = if i % 3 == 0 { 255 } else { 128 };
+        }
+        let want = weighted_linear_scalar(&weights, &codes);
+        let got = weighted_linear_u8(&weights, &codes);
+        assert_close(got, want, &format!("weighted_linear mixed-sign dim={dim}"));
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[test]
+fn weighted_linear_avx2_path_is_exercised_on_this_host() {
+    use crate::vector::simd::has_avx2;
+    assert!(
+        has_avx2(),
+        "expected AVX2 on the x86_64 test host; weighted_linear_u8's \
          AVX2 kernel would not be exercised by the tests above otherwise"
     );
 }

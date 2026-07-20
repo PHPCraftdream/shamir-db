@@ -127,7 +127,53 @@ use crate::kind::VectorMetric;
 use crate::vector::simd::dot_product;
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
+use std::cell::RefCell;
 use std::sync::Arc;
+
+// VR-7 option 2 (#429, F4 item 4): thread-local stack of
+// `(query_ptr → dequant_norm_sq)` entries for the Cosine graph-traversal
+// path.
+//
+// `hnsw_rs::Distance::eval(&self, a, b)` is symmetric — it doesn't know
+// which of `a`/`b` is "the query". But `hnsw_rs::search` always passes the
+// query as the FIRST argument to `eval` (verified from
+// `hnsw_rs-0.3.4/src/hnsw.rs` `search_filter`/`search_layer`), and a single
+// `.search()` call is single-threaded (sequential layer traversal with no
+// internal rayon — only `parallel_search` dispatches across rayon workers,
+// each running one query's `search` on one thread; see
+// `hnsw.rs:1475-1589`). So a thread-local stack pushed before `.search()`
+// and popped after is safe: during the search, `eval` sees the query's norm
+// on top of the stack; after the search, the stack is empty.
+//
+// On a soft-miss (empty stack or pointer mismatch), `eval` recomputes the
+// norm — NO panic, NO stale value. This matches the module doc's "option 2"
+// recommendation and degrades gracefully, like the other opt-in caches in
+// this campaign (`CondCache`/`FieldPathCache`/`QueryRefCache`).
+//
+// The stack (not a single cell) supports reentrancy: if `eval` somehow
+// triggered a nested search (it does not today, but defense-in-depth), the
+// inner search pushes a new entry on top and pops it on return, leaving the
+// outer entry intact.
+thread_local! {
+    static QUERY_NORM_STACK: RefCell<Vec<(usize, f32)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard that pops the top entry from [`QUERY_NORM_STACK`] on drop,
+/// ensuring the stack is always cleaned up even if the bracketed `search`
+/// panics.
+///
+/// Created by [`ShamirDistU8::push_query_norm`]; do not construct directly.
+pub(crate) struct QueryNormGuard {
+    _private: (),
+}
+
+impl Drop for QueryNormGuard {
+    fn drop(&mut self) {
+        QUERY_NORM_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
 
 /// Quantized distance function holding frozen SQ8 quantizer params.
 ///
@@ -162,26 +208,55 @@ impl ShamirDistU8 {
         self.metric
     }
 
+    /// VR-7 option 2 (#429, F4 item 4): push the query's precomputed
+    /// dequant norm onto the thread-local stack, keyed by the query code
+    /// slice's pointer address. Returns a [`QueryNormGuard`] that pops the
+    /// entry on drop (panic-safe).
+    ///
+    /// Call this immediately before `hnsw_u8.search(&query_codes, ...)`
+    /// (inside the `spawn_blocking` closure, on the same thread that runs
+    /// `eval`), and let the guard drop immediately after.
+    ///
+    /// The pointer is taken from `query_codes.as_ptr()`, which is stable
+    /// across the move into the closure (moving a `Vec` transfers the heap
+    /// allocation without copying) and stable for the duration of the
+    /// single-threaded `search` call.
+    #[inline]
+    pub(crate) fn push_query_norm(query_codes: &[u8], norm: f32) -> QueryNormGuard {
+        let ptr = query_codes.as_ptr() as usize;
+        QUERY_NORM_STACK.with(|s| s.borrow_mut().push((ptr, norm)));
+        QueryNormGuard { _private: () }
+    }
+
+    /// VR-7 option 2 (#429, F4 item 4): look up the cached norm for a code
+    /// slice whose pointer matches the top of the thread-local stack.
+    /// Returns `None` on a soft-miss (empty stack or pointer mismatch) —
+    /// callers MUST fall back to recomputing
+    /// [`Sq8Quantizer::dequant_norm_sq`].
+    #[inline]
+    fn try_query_norm(codes: &[u8]) -> Option<f32> {
+        let ptr = codes.as_ptr() as usize;
+        QUERY_NORM_STACK.with(|s| {
+            let stack = s.borrow();
+            stack
+                .last()
+                .and_then(|&(p, n)| if p == ptr { Some(n) } else { None })
+        })
+    }
+
     /// Squared L2 norm of the dequantized vector for a code vector:
     /// `||x||² = Σ (min_i + q_i·s_i)²`. Used by the Cosine metric.
     ///
-    /// This is `O(dim)` per call. VR-7 (#429) analyzed caching it per
-    /// internal-id at insert time — see the module-level "Cosine norm
-    /// cache" architecture section for why that cache cannot reach `eval`
-    /// without rewriting the `hnsw_rs` integration, and the recommended
-    /// follow-up options (query-norm hoist / pointer-keyed cache).
+    /// Delegates to the canonical SIMD-backed
+    /// [`Sq8Quantizer::dequant_norm_sq`](crate::vector::sq8::Sq8Quantizer::dequant_norm_sq)
+    /// (F4): the norm expands to `min_sq_sum + weighted_bilinear_f32(
+    /// min_scale, scales_sq, q, q)` — the existing bilinear SIMD kernel with
+    /// `q` passed as both operands. See the module-level "Cosine norm cache"
+    /// architecture section for why a per-internal-id norm cache cannot reach
+    /// `eval` without rewriting the `hnsw_rs` integration.
+    #[inline]
     fn dequant_norm_sq(&self, q: &[u8]) -> f32 {
-        debug_assert_eq!(q.len(), self.params.dim());
-        let mins = self.params.mins();
-        let scales = self.params.scales();
-        let mut acc = 0.0f32;
-        // Indexes three parallel slices (mins, scales, q) by the same i.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..self.params.dim() {
-            let x = mins[i] + (q[i] as f32) * scales[i];
-            acc += x * x;
-        }
-        acc
+        self.params.dequant_norm_sq(q)
     }
 }
 
@@ -216,8 +291,18 @@ impl Distance<u8> for ShamirDistU8 {
             // ordering (the true cosine distance is in [0, 2]).
             VectorMetric::Cosine => {
                 let dot = self.params.approx_dot(a, b);
-                let na_sq = self.dequant_norm_sq(a);
-                let nb_sq = self.dequant_norm_sq(b);
+                // VR-7 option 2 (#429, F4 item 4): the query's norm is hoisted
+                // onto a thread-local stack by `search_quantized_graph`/
+                // `search_cofilter_quantized` before the `hnsw_u8.search`
+                // call. `hnsw_rs` always passes the query as the FIRST
+                // argument to `eval`, so `try_query_norm(a)` hits on the
+                // graph-traversal path. `try_query_norm(b)` misses (candidate
+                // pointers don't match the query's) and falls back to
+                // recompute — the candidate norm cannot be hoisted. On a
+                // soft-miss (empty stack, e.g. standalone `eval` calls outside
+                // a search) both sides recompute.
+                let na_sq = Self::try_query_norm(a).unwrap_or_else(|| self.dequant_norm_sq(a));
+                let nb_sq = Self::try_query_norm(b).unwrap_or_else(|| self.dequant_norm_sq(b));
                 if na_sq < 1e-18 || nb_sq < 1e-18 {
                     return 1.0;
                 }
@@ -368,32 +453,20 @@ impl<'a> RescoreCtx<'a> {
     }
 
     /// `dot(query, dequant(codes)) = qm + Σ qs[i] · codes[i]` — single
-    /// alloc-free pass over the u8 codes.
+    /// alloc-free pass over the u8 codes. F4: the `Σ qs[i]·codes[i]` term
+    /// is now routed through the dedicated `weighted_linear_u8` SIMD kernel
+    /// (AVX2/NEON/scalar dispatch, see `vector::simd::weighted_linear_u8`).
     #[inline]
     fn fused_dot(&self, codes: &[u8]) -> f32 {
-        let mut acc = self.qm;
-        // Indexes parallel slices (qs, codes) by the same i.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..codes.len() {
-            acc += self.qs[i] * (codes[i] as f32);
-        }
-        acc
+        self.qm + crate::vector::simd::weighted_linear_u8(&self.qs, codes)
     }
 
     /// `‖dequant(codes)‖² = Σ (min_i + codes_i·s_i)²` — single alloc-free pass
-    /// (Cosine denominator, candidate side).
+    /// (Cosine denominator, candidate side). Delegates to the canonical
+    /// SIMD-backed [`Sq8Quantizer::dequant_norm_sq`] (F4).
     #[inline]
     fn dequant_norm_sq(&self, codes: &[u8]) -> f32 {
-        let mins = self.params.mins();
-        let scales = self.params.scales();
-        let mut acc = 0.0f32;
-        // Indexes parallel slices (mins, scales, codes) by the same i.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..codes.len() {
-            let x = mins[i] + (codes[i] as f32) * scales[i];
-            acc += x * x;
-        }
-        acc
+        self.params.dequant_norm_sq(codes)
     }
 }
 

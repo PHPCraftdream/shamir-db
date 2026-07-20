@@ -1852,10 +1852,22 @@ impl HnswAdapter {
         let query_codes = quantizer.quantize(query);
         let overscan = ((k as usize) * 16 + 64).min(MAX_TOPK as usize);
         let ef_q = ef.max(overscan);
-        let neighbors =
-            tokio::task::spawn_blocking(move || hnsw_u8.search(&query_codes, overscan, ef_q))
-                .await
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+        // VR-7 option 2 (#429, F4 item 4): hoist the query's dequant norm so
+        // the Cosine graph traversal's `eval` can reuse it instead of
+        // recomputing it on every hop. Pushed onto a thread-local stack
+        // (keyed by the query code slice's pointer) inside the
+        // `spawn_blocking` closure — the same thread that runs `eval`. A
+        // RAII guard pops on drop (panic-safe). Soft-miss on pointer mismatch
+        // → recompute (never stale, never panic). Computed here (outside the
+        // closure) because `quantizer` borrows `self` (not `'static`); the
+        // `query_codes` heap pointer is unchanged by the move.
+        let query_norm = quantizer.dequant_norm_sq(&query_codes);
+        let neighbors = tokio::task::spawn_blocking(move || {
+            let _norm_guard = ShamirDistU8::push_query_norm(&query_codes, query_norm);
+            hnsw_u8.search(&query_codes, overscan, ef_q)
+        })
+        .await
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
 
         // Audit finding 4.1 (task #530): fused rescore context built ONCE per
         // query, scored per candidate with no per-candidate dequant allocation.
@@ -1911,11 +1923,15 @@ impl HnswAdapter {
             .expect("quantized_active but u8 graph unset");
         let query_codes = quantizer.quantize(query);
         let knbn = k as usize;
+        // VR-7 option 2 (#429, F4 item 4): hoist the query's dequant norm —
+        // see `search_quantized_graph` for the full rationale.
+        let query_norm = quantizer.dequant_norm_sq(&query_codes);
         // F7 bonus: the allow-set arrives as an owned `Arc` from the caller
         // (`search_cofilter`), so it moves directly into the `spawn_blocking`
         // closure (satisfying the `'static` bound) with zero data cloning —
         // previously this site did `Arc::new(allow_set.clone())` per query.
         let neighbors = tokio::task::spawn_blocking(move || {
+            let _norm_guard = ShamirDistU8::push_query_norm(&query_codes, query_norm);
             let pred = |id: &usize| allow_set.contains(id);
             hnsw_u8.search_filter(&query_codes, knbn, ef, Some(&pred))
         })
