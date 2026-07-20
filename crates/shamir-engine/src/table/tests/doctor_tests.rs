@@ -213,6 +213,13 @@ async fn bump_write_counter_spawns_background_verify_periodically() {
     // returned verify state.
     tokio::task::yield_now().await;
     // Drain — the spawned task may have completed by now.
+    // Note: this loop is ITERATION-bounded (tries < 100), not wall-clock
+    // bounded. Each iteration is a single yield_now + an atomic-flag check,
+    // so 100 iterations complete in sub-millisecond regardless of runner
+    // speed. Unlike an unbounded `while !flag { yield }` spin (which can hang
+    // forever if the flag never fires), this cannot become an anonymous
+    // nextest TIMEOUT — the iteration cap terminates it deterministically.
+    // Left as-is: the existing bound is adequate for this risk class.
     let mut tries = 0;
     while table.is_background_verify_running() && tries < 100 {
         tokio::task::yield_now().await;
@@ -246,6 +253,9 @@ async fn bump_write_counter_is_single_flight() {
     // finished between the two bumps. We make the assertion
     // resilient by ensuring eventually exactly zero verifies are
     // still running and verify is healthy.
+    // Same iteration-bounded pattern as above (tries < 200) — see the comment
+    // there for why this is adequately bounded (deterministic termination via
+    // iteration cap, not the unbounded spin-wait class).
     let mut tries = 0;
     while table.is_background_verify_running() && tries < 200 {
         tokio::task::yield_now().await;

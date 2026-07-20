@@ -99,6 +99,24 @@ async fn read_once(mvcc: &MvccStore) -> Result<(), String> {
     }
 }
 
+/// The reader spin-loop, extracted so it can be wrapped in a
+/// [`tokio::time::timeout`] at each call site. Spins until `stop` is set or a
+/// violation is recorded, exactly as the original inline loop did.
+async fn poll_until_stopped(
+    stop: &Arc<AtomicBool>,
+    mvcc: &MvccStore,
+    id: usize,
+    violation: &Arc<scc::HashMap<usize, String, shamir_collections::THasher>>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        if let Err(msg) = read_once(mvcc).await {
+            let _ = violation.insert_sync(id, msg);
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 // ============================================================================
 // Overlay arm — value lives ONLY in the overlay (no drain between commits).
 // ============================================================================
@@ -137,13 +155,24 @@ async fn overlay_ordering_reader_sees_version_implies_value_overlay_arm() {
         let stop = Arc::clone(&stop);
         let violation = Arc::clone(&violation);
         readers.push(tokio::spawn(async move {
-            while !stop.load(Ordering::Relaxed) {
-                if let Err(msg) = read_once(&mvcc).await {
-                    let _ = violation.insert_sync(id, msg);
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
+            // Local wall-clock bound (30 s): the writer does 720 synchronous
+            // in-memory commits (ROUNDS × WRITES_PER_ROUND), which completes
+            // in milliseconds under normal conditions. 30 s is ~60× headroom
+            // over that, yet 6× shorter than nextest's 180 s anonymous kill.
+            // If the writer deadlocks (the exact bug class this test exists
+            // to catch), this fires FAST with a diagnostic message naming the
+            // condition, instead of an anonymous nextest TIMEOUT.
+            let reached = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                poll_until_stopped(&stop, &mvcc, id, &violation),
+            )
+            .await;
+            assert!(
+                reached.is_ok(),
+                "overlay-arm reader {id}: `stop` flag was never set within 30 s — \
+                 the writer likely deadlocked in the ack-path (apply_committed_visible), \
+                 the exact hazard this test exists to catch"
+            );
         }));
     }
 
@@ -234,13 +263,22 @@ async fn overlay_ordering_reader_sees_version_implies_value_history_arm() {
         let stop = Arc::clone(&stop);
         let violation = Arc::clone(&violation);
         readers.push(tokio::spawn(async move {
-            while !stop.load(Ordering::Relaxed) {
-                if let Err(msg) = read_once(&mvcc).await {
-                    let _ = violation.insert_sync(id, msg);
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
+            // Local wall-clock bound (30 s): the writer does 480 async
+            // in-memory log writes (ROUNDS × WRITES_PER_ROUND) plus overlay
+            // GC — still sub-second under normal conditions. 30 s gives ~60×
+            // headroom while being 6× shorter than nextest's 180 s kill.
+            let reached = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                poll_until_stopped(&stop, &mvcc, id, &violation),
+            )
+            .await;
+            assert!(
+                reached.is_ok(),
+                "history-arm reader {id}: `stop` flag was never set within 30 s — \
+                 the writer likely deadlocked in the ack-path or history-drain \
+                 (apply_committed_visible / write_committed_to_history), the exact \
+                 hazard this test exists to catch"
+            );
         }));
     }
 

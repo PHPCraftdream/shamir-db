@@ -602,7 +602,10 @@ async fn mvcc2_stress_race_not_triggered_with_in_memory_store() {
         let read_handle = tokio::spawn(async move {
             let snap = gate_r.open_snapshot().await;
             let snap_v = snap.version();
-            // Small yield to increase interleaving odds.
+            // Small yield to increase interleaving odds. This is a SINGLE
+            // yield, not a spin-wait loop — it is bounded by definition.
+            // The subsequent `get_at` resolves against an in-memory store
+            // with no external synchronization, so it cannot deadlock.
             tokio::task::yield_now().await;
             let result = mvcc_r.get_at(&key_r, snap_v).await.unwrap();
             // Every write publishes its version, so version_of is never 0

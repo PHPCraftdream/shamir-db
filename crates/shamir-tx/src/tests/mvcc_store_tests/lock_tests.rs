@@ -156,6 +156,12 @@ async fn lock_key_deadlock_freedom_opposite_order() {
     let key_b2 = key_b.clone();
 
     // T1: lock A (Exclusive), then B (Exclusive). Same wound/notify.
+    // Note: the single `yield_now().await` calls below (lines ~165, ~178) are
+    // NOT spin-wait loops — they are one-shot yields to increase interleaving
+    // odds. The entire (t1, t2) join is wrapped in a 3 s `tokio::time::timeout`
+    // at line ~185, so even if `lock_key` deadlocks (the wound-wait hazard
+    // this test exercises), the failure is a FAST named assertion, not an
+    // anonymous nextest TIMEOUT.
     let t1_handle = tokio::spawn(async move {
         let (f1, n1, f2, n2) = t1;
         mvcc1

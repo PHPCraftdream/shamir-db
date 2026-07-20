@@ -279,6 +279,15 @@ async fn backpressure_engages_then_releases_on_drain() {
         // → `notify_waiters`, releasing the parked committer once gap <= low.
         // A yield between passes guarantees the committer observes an
         // intermediate (still-braked) gap at least once.
+        //
+        // This loop is NOT an unbounded spin-wait: it terminates by its OWN
+        // logic (`if n == 0 { break }`), bounded by the finite seeded WAL
+        // data (100 versions). Each `drain_step` processes one version and
+        // decrements the remaining count — the loop runs at most ~100 times.
+        // The test's synchronization point (`apply_backpressure` below) IS
+        // wrapped in a 30 s `tokio::time::timeout` with a named assertion;
+        // `drain_task.await` (after the timeout-bounded join) completes
+        // immediately since the drain has already converged by then.
         loop {
             let n = drainer_bg.drain_step(&repo_bg).await.unwrap();
             tokio::task::yield_now().await;
