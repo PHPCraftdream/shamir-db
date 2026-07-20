@@ -7,6 +7,7 @@ use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
 use super::cond_cache::CondCache;
+use super::field_path_cache::FieldPathCache;
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -39,6 +40,15 @@ pub struct FilterContext<'a> {
     /// `SelectProjection::new`) and inject it via
     /// [`with_cond_cache`](Self::with_cond_cache) skip the per-row recompile.
     pub cond_cache: Option<&'a CondCache>,
+    /// Optional pre-interned `FieldRef` path cache (F1). Defaults to `None`
+    /// — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,
+    /// write-value resolution) is completely unaffected: `resolve_filter_query`
+    /// re-interns each `FieldRef`'s path via `intern_field_path` on every
+    /// evaluation exactly as before. Only callers that build a
+    /// [`FieldPathCache`] once (e.g. `SelectProjection::new`) and inject it
+    /// via [`with_field_path_cache`](Self::with_field_path_cache) skip the
+    /// per-row `Vec` alloc + per-segment `DashMap` lookup.
+    pub field_path_cache: Option<&'a FieldPathCache>,
 }
 
 /// A permanently empty params map, shared across all top-level contexts
@@ -64,6 +74,7 @@ impl<'a> FilterContext<'a> {
             scalars: builtins_only_resolver(),
             params: empty_params(),
             cond_cache: None,
+            field_path_cache: None,
         }
     }
 
@@ -92,6 +103,16 @@ impl<'a> FilterContext<'a> {
     /// resolution) should leave this unset.
     pub fn with_cond_cache(mut self, cache: &'a CondCache) -> Self {
         self.cond_cache = Some(cache);
+        self
+    }
+
+    /// Builder: inject a pre-interned `FieldRef` path cache (F1).
+    /// Only meaningful for callers that pre-scan a static `FilterValue` tree
+    /// once (e.g. `SelectProjection::new`) and reuse it across many records —
+    /// one-off evaluation contexts (WHERE, `when`, `for_each`, write-value
+    /// resolution) should leave this unset.
+    pub fn with_field_path_cache(mut self, cache: &'a FieldPathCache) -> Self {
+        self.field_path_cache = Some(cache);
         self
     }
 }

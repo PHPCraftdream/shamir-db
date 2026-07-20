@@ -207,9 +207,28 @@ pub fn resolve_filter_query(
         FilterValue::String(s) => Some(QueryValue::Str(s.clone())),
         FilterValue::Binary(b) => Some(QueryValue::Bin(b.clone())),
         FilterValue::FieldRef { path } => {
-            let keys = intern_field_path(path, ctx.interner)?;
-            let ipath: SmallVec<[InternerKey; 4]> =
-                keys.iter().map(|&id| InternerKey::new(id)).collect();
+            // F1: check the pre-interned path cache first (populated once by
+            // `prescan_field_path_cache`, e.g. `SelectProjection::new`) —
+            // avoids re-allocating a `Vec<u64>` and re-issuing one
+            // `Interner::get_ind` (DashMap shard lookup) PER SEGMENT, PER
+            // record. The cache key is pointer identity of THIS `FieldRef`
+            // node (`fv as *const FilterValue as usize`), which stays stable
+            // for the lifetime of a `SelectProjection`-owned tree — see
+            // `field_path_cache.rs`'s safety comment. When
+            // `ctx.field_path_cache` is `None` (every caller that hasn't
+            // opted in: WHERE, `when`, `for_each`'s `over`, write-value
+            // resolution), behavior is IDENTICAL to before this cache
+            // existed.
+            let ipath: SmallVec<[InternerKey; 4]> = match ctx
+                .field_path_cache
+                .and_then(|c| c.get(&(fv as *const FilterValue as usize)))
+            {
+                Some(cached) => cached.clone(),
+                None => {
+                    let keys = intern_field_path(path, ctx.interner)?;
+                    keys.iter().map(|&id| InternerKey::new(id)).collect()
+                }
+            };
             // Single lens→QueryValue boundary (replaces the old lens→InnerValue
             // materialization). NOT a net-new round-trip — see fn doc.
             record

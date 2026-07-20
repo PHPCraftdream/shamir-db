@@ -3,7 +3,10 @@
 use smallvec::SmallVec;
 
 use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
-use crate::query::filter::{prescan_cond_cache, CondCache, FilterContext, FilterValue, FnCall};
+use crate::query::filter::{
+    prescan_cond_cache, prescan_field_path_cache, CondCache, FieldPathCache, FilterContext,
+    FilterValue, FnCall,
+};
 use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::codecs::interned::inner_value_to_query_value;
@@ -38,6 +41,16 @@ pub struct SelectProjection {
     /// `funcs`/this cache are never cloned — the pointer-identity cache key
     /// stays valid for the projection's whole lifetime.
     pub(super) funcs_cond_cache: CondCache,
+    /// Pre-interned `FieldRef` path cache (F1) — populated once in `new()`
+    /// by pre-scanning the same `funcs` tree for nested `FieldRef` nodes
+    /// (e.g. `SELECT upper(name)`'s `$ref name`). `project_value` threads
+    /// this into the per-record `FilterContext` so `resolve_filter_query`'s
+    /// `FieldRef` arm reuses the interned `SmallVec<InternerKey>` instead
+    /// of re-allocating a `Vec<u64>` + re-issuing a per-segment `Interner::
+    /// get_ind` lookup on every record. Same lifetime invariant as
+    /// `funcs_cond_cache`: `funcs` is never cloned/moved after `new()`, so
+    /// the pointer-identity cache key stays valid.
+    pub(super) funcs_field_path_cache: FieldPathCache,
     /// Scalar resolver (user + builtin layers) for `$fn` projections.
     /// Stored once in `new()`, cloned per-record into the `FilterContext`
     /// (cheap — `ScalarResolver` wraps an `Arc`).
@@ -77,13 +90,17 @@ impl SelectProjection {
             (fields, funcs)
         };
 
-        // #643: pre-scan every projected FilterValue once (at query-compile
-        // time, NOT per record) for nested `$cond` conditions, and compile
-        // each one now. `project_value` reuses this cache for every record
-        // instead of re-running `compile_filter` per row per `$cond`.
+        // #643 / F1: pre-scan every projected FilterValue once (at
+        // query-compile time, NOT per record) for nested `$cond` conditions
+        // (compiled into `funcs_cond_cache`) AND nested `FieldRef` paths
+        // (interned into `funcs_field_path_cache`). `project_value` reuses
+        // both caches for every record instead of re-running `compile_filter`
+        // / `intern_field_path` per row per node.
         let mut funcs_cond_cache: CondCache = shamir_types::types::common::new_map();
+        let mut funcs_field_path_cache: FieldPathCache = shamir_types::types::common::new_map();
         for (_, fv) in &funcs {
             prescan_cond_cache(fv, interner, &mut funcs_cond_cache);
+            prescan_field_path_cache(fv, interner, &mut funcs_field_path_cache);
         }
 
         Self {
@@ -92,6 +109,7 @@ impl SelectProjection {
             funcs,
             empty_refs: new_map_wc(0),
             funcs_cond_cache,
+            funcs_field_path_cache,
             scalars,
         }
     }
@@ -127,7 +145,8 @@ impl SelectProjection {
         if !self.funcs.is_empty() {
             let ctx = FilterContext::new(interner, &self.empty_refs)
                 .with_scalars(self.scalars.clone())
-                .with_cond_cache(&self.funcs_cond_cache);
+                .with_cond_cache(&self.funcs_cond_cache)
+                .with_field_path_cache(&self.funcs_field_path_cache);
             for (key, fv) in &self.funcs {
                 let val = resolve_filter_query(fv, record, &ctx).unwrap_or(QueryValue::Null);
                 obj.insert(key.clone(), val);

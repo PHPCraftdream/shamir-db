@@ -12,6 +12,7 @@ pub mod cond_cache;
 pub mod eval;
 pub mod eval_bytes;
 pub mod eval_context;
+pub mod field_path_cache;
 pub mod filter_node;
 pub mod fts;
 pub mod index_range;
@@ -21,6 +22,7 @@ pub mod resolve;
 pub use compile::compile_filter;
 pub use cond_cache::{cond_cache_get, prescan_cond_cache, CondCache};
 pub use eval_context::FilterContext;
+pub use field_path_cache::{prescan_field_path_cache, FieldPathCache};
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
 pub use resolve::{
