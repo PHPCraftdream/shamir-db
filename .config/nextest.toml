@@ -17,8 +17,14 @@
 # those launched through ./scripts/test.sh and `cargo t`.
 #
 # Pinned baseline: cargo-nextest 0.9.137 (commit 75ddba7e9, 2026-05-26).
+# This pin is ENFORCED in:
+#   - .github/workflows/ci.yml (both the `test` and `integration` jobs, via
+#     `taiki-e/install-action@v2` with `tool: nextest@0.9.137`)
+#   - CLAUDE.md's local install instruction
+#     (`cargo install cargo-nextest --version 0.9.137 --locked`)
 # Verify with: cargo nextest --version
-# When upgrading nextest, confirm $NEXTEST is still set before merging.
+# When upgrading nextest, confirm $NEXTEST is still set before merging, then
+# bump the version in BOTH ci.yml call sites and CLAUDE.md to match.
 
 [test-groups]
 # functions_lifecycle.rs compiles WASM modules via cranelift

@@ -56,7 +56,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: taiki-e/install-action@nextest
+      # Pinned to the cargo-nextest version documented as the perimeter-guard
+      # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
+      # cargo-runner guard in .cargo/config.toml gates on the $NEXTEST env var
+      # that cargo-nextest sets; pinning prevents a silent future upgrade from
+      # renaming/removing it and fail-closing ALL test runs. The shorthand
+      # `taiki-e/install-action@nextest` form cannot pin a version — the
+      # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/test.sh --locked
 
@@ -106,7 +115,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: taiki-e/install-action@nextest
+      # Pinned to the cargo-nextest version documented as the perimeter-guard
+      # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
+      # cargo-runner guard in .cargo/config.toml gates on the $NEXTEST env var
+      # that cargo-nextest sets; pinning prevents a silent future upgrade from
+      # renaming/removing it and fail-closing ALL test runs. The shorthand
+      # `taiki-e/install-action@nextest` form cannot pin a version — the
+      # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@v2
       # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
       # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest

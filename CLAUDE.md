@@ -229,7 +229,7 @@ NEVER raw `cargo test`. The wrapper is the contract.
 
 If `cargo-nextest` is missing on a fresh checkout:
 ```
-cargo install cargo-nextest --locked
+cargo install cargo-nextest --version 0.9.137 --locked
 ```
 The wrapper checks for it and exits with an installation hint.
 Pinned baseline: **0.9.137** — see `.config/nextest.toml` header for the guard-coupling note.

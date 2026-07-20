@@ -62,7 +62,7 @@ if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev
         export PATH="$_found:$PATH"
     else
         echo "ERROR: cargo-nextest is not installed." >&2
-        echo "Install: cargo install cargo-nextest --locked" >&2
+        echo "Install: cargo install cargo-nextest --version 0.9.137 --locked" >&2
         exit 2
     fi
 fi
