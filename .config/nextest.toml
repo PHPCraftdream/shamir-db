@@ -68,8 +68,11 @@ fail-fast = false
 # many test BINARIES run concurrently to the runner's reported core count
 # — but it has no visibility into what happens INSIDE each spawned test
 # process. A large fraction of this workspace's tests use
-# `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` (33 files
-# as of this writing), so N concurrently-running binaries can each spin up
+# `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]` (63 files
+# as of this writing — this count has grown since the "33" figure was
+# first written; the oversubscription arithmetic below is roughly 2×
+# worse than it assumed at that time), so N concurrently-running binaries
+# can each spin up
 # their OWN 4-worker tokio runtime — N×4 real OS threads competing for
 # whatever (likely far fewer than this repo's 16-core dev boxes) vCPUs a
 # hosted CI runner actually has. This is the leading, still-unconfirmed
