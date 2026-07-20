@@ -42,10 +42,12 @@ jobs:
 
   # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
   # the project's stated pre-commit gate in CLAUDE.md ("Code quality
-  # (MANDATORY)"): `cargo test --workspace --lib`. Kept as its own job so
-  # the dominant signal stays fast and is not held hostage by the slower,
-  # heavier integration build below. Matrixed across OSes so Windows /
-  # macOS regressions (path handling, file locking, fsync) are caught.
+  # (MANDATORY)"): `./scripts/test.sh` (the nextest wrapper — raw
+  # `cargo test` is blocked outright by the perimeter guard). Kept as its
+  # own job so the dominant signal stays fast and is not held hostage by
+  # the slower, heavier integration build below. Matrixed across OSes so
+  # Windows / macOS regressions (path handling, file locking, fsync) are
+  # caught.
   test:
     name: cargo test lib (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -67,7 +69,12 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@v2
+      # bash on every runner (Git Bash on Windows) — `./scripts/test.sh` is
+      # a bash script; without this, GitHub Actions defaults `run:` steps
+      # to PowerShell on windows-latest, which cannot execute it directly.
+      # Parity with the `integration` job's own `shell: bash` below.
       - run: ./scripts/test.sh --locked
+        shell: bash
 
   # Integration gate: the test files under `crates/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
