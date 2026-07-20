@@ -240,8 +240,13 @@ Criterion on 2026-07-07 (see
 `docs/dev-artifacts/checkpoints/2026-07-07-bench-scale-tool-migration.md`).
 `bench-scale-tool` is a published crates.io package
 (https://crates.io/crates/bench-scale-tool) providing a fixed-iteration
-harness — no `criterion_group!`/`criterion_main!`, no `tune()`,
-no `shamir_bench_utils` (that helper predates the migration and is gone).
+harness — no `criterion_group!`/`criterion_main!`, no `tune()`/`tune_tiered()`/
+`sample_size()` (the old Criterion tier-tuning API `shamir-bench-utils` used
+to carry — removed once the last consumer migrated off Criterion; do NOT
+reach for it). The `shamir-bench-utils` crate itself is NOT gone: it still
+exists, narrowed to what `bench_scale_tool::Harness` doesn't provide —
+shared vector fixture generation (`vector_data`) and optional peak-RSS
+sampling (`peak_mem`), used by several `crates/*/benches/*.rs` files today.
 Every bench file in `crates/*/benches/` today uses `bench_scale_tool::Harness`
 + `bench_batched_async` (or the sync `bench` variant) — copy an existing
 file (e.g. `crates/shamir-engine/benches/tx_pipeline.rs`) as the template
