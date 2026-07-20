@@ -519,14 +519,58 @@ impl TableManager {
         };
 
         for (id, old_bytes) in &matched {
-            // Byte-level merge: patch old_bytes with the interned set overlay.
-            // Produces bytes identical to merge_inner_maps(old_tree, set_map).to_bytes().
-            let new_bytes = merge_storage_bytes(old_bytes, set_map)?;
+            // Read-this-tx-staging-FIRST: a prior op in the SAME batch/tx
+            // (e.g. an FK `ON UPDATE CASCADE`/`SET NULL` fan-out applied by
+            // `apply_fk_update_plan` BEFORE this op) may have already staged
+            // a DIFFERENT value for this exact row. The `matched` scan above
+            // is COMMITTED-store-only and is blind to this tx's own
+            // `write_set` (see `table_manager_streaming.rs`'s "KNOWN
+            // LIMITATION" doc on `list_stream_tx`). Merging on top of the
+            // stale committed snapshot and then staging via `update_tx_bytes`
+            // (which calls `StagingStore::set` — an unconditional replace by
+            // design) would silently OVERWRITE the earlier staged mutation.
+            //
+            // So we resolve the effective "old" bytes from this tx's own
+            // staging first and merge on top of THAT — mirroring the
+            // read-your-own-write probe `read_one_tx_bytes` does for point
+            // reads. This keeps BOTH the byte-level merge AND the downstream
+            // index-delta planning in `update_tx_bytes` correctly incremental
+            // (cascade-result → final, composing with the earlier call's
+            // committed → cascade-result delta, instead of double-counting).
+            let effective_old_bytes: Bytes = match tx
+                .write_set
+                .get(&self.table_token())
+                .and_then(|staging| staging.staged_op(id.to_bytes().as_ref()))
+            {
+                Some(shamir_tx::staging_store::StagedKind::Set(staged_bytes)) => {
+                    // This tx already staged a value here (read-your-own-
+                    // writes): merge on top of the staged value, not the
+                    // committed snapshot, so the earlier mutation survives.
+                    staged_bytes
+                }
+                Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                    // This tx already staged a DELETE for this row (e.g. a
+                    // same-batch DELETE op in this transactional batch). From
+                    // this tx's point of view the row no longer exists, so
+                    // this UPDATE must NOT match it — skip the row entirely
+                    // (no merge, no stage, no affected-count contribution).
+                    // Without this skip, `update_tx_bytes` would stage a Set
+                    // over the staged Remove, silently resurrecting the
+                    // deleted row and losing the DELETE intent.
+                    continue;
+                }
+                None => old_bytes.clone(),
+            };
+
+            // Byte-level merge: patch effective_old_bytes with the interned
+            // set overlay. Produces bytes identical to
+            // merge_inner_maps(old_tree, set_map).to_bytes().
+            let new_bytes = merge_storage_bytes(&effective_old_bytes, set_map)?;
 
             // Change detection: a no-op set yields identical bytes (the
             // merge copies old value spans verbatim when no key is patched),
             // so byte equality is safe for this "patched from old" shape.
-            let changed = new_bytes.as_ref() != old_bytes.as_ref();
+            let changed = new_bytes.as_ref() != effective_old_bytes.as_ref();
 
             // Track the validator-built `old_qv` so the RETURNING block below
             // can REUSE it instead of de-interning `old_bytes` a second time.
@@ -549,7 +593,7 @@ impl TableManager {
                     //   de-interned new_bytes through the base-only reverse
                     //   snapshot (new_bytes may contain overlay-minted key ids
                     //   not yet in base).
-                    let old_view = RecordView::new(old_bytes).map_err(|e| {
+                    let old_view = RecordView::new(&effective_old_bytes).map_err(|e| {
                         shamir_storage::error::DbError::Codec(format!(
                             "execute_update_tx: RecordView for validator old: {e}"
                         ))
@@ -583,7 +627,7 @@ impl TableManager {
                     reuse_old_qv = Some(old_qv);
                 }
 
-                self.update_tx_bytes(*id, old_bytes, new_bytes.clone(), &mut *tx)
+                self.update_tx_bytes(*id, &effective_old_bytes, new_bytes.clone(), &mut *tx)
                     .await?;
                 affected += 1;
             }
@@ -609,7 +653,7 @@ impl TableManager {
                     let base_qv = match reuse_old_qv.take() {
                         Some(qv) => qv,
                         None => {
-                            let old_view = RecordView::new(old_bytes).map_err(|e| {
+                            let old_view = RecordView::new(&effective_old_bytes).map_err(|e| {
                                 shamir_storage::error::DbError::Codec(format!(
                                     "execute_update_tx: RecordView for result: {e}"
                                 ))

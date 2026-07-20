@@ -1705,3 +1705,179 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
         "no stale ref to old id 10, got: {mgr_ids:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOST-UPDATE REGRESSION: cascade fan-out + direct UPDATE on the SAME child row
+// in one transactional batch — both mutations must survive.
+//
+// Bug class: `execute_update_tx` scanned the COMMITTED store for matched rows
+// (blind to this tx's own `write_set`) and merged its SET on top of that stale
+// snapshot, then staged unconditionally via `update_tx_bytes` →
+// `StagingStore::set` (a blind replace). A prior op in the SAME tx (the FK
+// cascade fan-out) that already staged a DIFFERENT value for that exact row was
+// silently overwritten — one of the two mutations vanished with no error.
+//
+// This test reproduces the EXACT overlap scenario: op (a) re-keys the parent,
+// cascading child.parent_id 5→7; op (b) directly UPDATEs the SAME child row's
+// `label`. Without the fix, op (b) merges on the committed snapshot
+// (parent_id=5) and overwrites the cascade — child.parent_id reverts to 5.
+// With the fix, op (b) merges on the tx-staged cascade result (parent_id=7) and
+// BOTH changes survive.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cascade_and_direct_update_on_same_child_row_both_survive() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        9325,
+        "child_fk_cascade_overlap",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // parent(id=5); child(cid=50, parent_id=5, label="original").
+    insert_row(
+        &resolver,
+        "ip",
+        "parent",
+        doc().set("id", 5).set("name", "P5"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic",
+        "child",
+        doc()
+            .set("cid", 50)
+            .set("parent_id", 5)
+            .set("label", "original"),
+    )
+    .await;
+
+    // Single TRANSACTIONAL batch — both ops share one TxContext so the cascade
+    // fan-out (op a) stages into the SAME write_set that op (b)'s
+    // `execute_update_tx` must merge over.
+    let mut b = Batch::new();
+    b.id(1);
+    b.transactional();
+    // (a) Re-key parent 5→7 → cascade child.parent_id 5→7 (staged in tx).
+    b.update(
+        "upd_parent",
+        write::update("parent")
+            .where_(filter::eq("id", 5))
+            .set(doc().set("id", 7)),
+    );
+    // (b) Direct UPDATE on the SAME child row, setting a DIFFERENT field.
+    //    WHERE matches on `cid` (unchanged by the cascade) so the match is
+    //    unambiguous regardless of read-your-own-writes.
+    b.update(
+        "upd_child",
+        write::update("child")
+            .where_(filter::eq("cid", 50))
+            .set(doc().set("label", "direct")),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(resp.results.contains_key("upd_parent"));
+    assert!(resp.results.contains_key("upd_child"));
+
+    // BOTH mutations must survive on the child row:
+    //  - parent_id == 7  (the cascade fan-out was NOT overwritten)
+    //  - label    == "direct"  (the direct UPDATE was applied on top)
+    assert_eq!(
+        read_first_field(&resolver, "child", "parent_id").await,
+        Some(QueryValue::Int(7)),
+        "cascade fan-out (parent_id 5→7) must survive the direct UPDATE"
+    );
+    assert_eq!(
+        read_first_field(&resolver, "child", "label").await,
+        Some(QueryValue::Str("direct".to_string())),
+        "direct UPDATE (label→\"direct\") must be applied on top of the cascade"
+    );
+    assert_eq!(count_rows(&resolver, "child").await, 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REMOVED-ROW SEMANTICS: DELETE then UPDATE the same row in one transactional
+// batch — the row must stay deleted (UPDATE is a no-op on a tx-staged-removed
+// row, never resurrecting it).
+//
+// Same bug class as above: `execute_update_tx` scanned the committed store
+// (where the row still exists) and, without the staging probe, would merge +
+// stage a Set over the staged Remove — silently resurrecting the deleted row.
+// The fix probes staging, sees the staged Remove, and treats the row as
+// NOT MATCHED (skip entirely).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn delete_then_update_same_row_in_one_tx_row_stays_deleted() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("items")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // items(id=5, name="original").
+    insert_row(
+        &resolver,
+        "ii",
+        "items",
+        doc().set("id", 5).set("name", "original"),
+    )
+    .await;
+    assert_eq!(count_rows(&resolver, "items").await, 1);
+
+    // Single TRANSACTIONAL batch: DELETE then UPDATE the same row.
+    let mut b = Batch::new();
+    b.id(1);
+    b.transactional();
+    b.delete("del", write::delete("items").where_(filter::eq("id", 5)));
+    b.update(
+        "upd",
+        write::update("items")
+            .where_(filter::eq("id", 5))
+            .set(doc().set("name", "resurrected")),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(resp.results.contains_key("del"));
+    assert!(resp.results.contains_key("upd"));
+
+    // The row must stay deleted — the UPDATE must NOT resurrect it.
+    assert_eq!(
+        count_rows(&resolver, "items").await,
+        0,
+        "DELETE then UPDATE same row in one tx: row must stay deleted"
+    );
+}
