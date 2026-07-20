@@ -8,7 +8,7 @@ on a production host.
 | File | What it is |
 |------|------------|
 | `shamir-db.service` | systemd unit. Drop into `/etc/systemd/system/` and `systemctl enable --now shamir-db` |
-| `Dockerfile` | Multi-stage Docker image (Rust 1.83 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
+| `Dockerfile` | Multi-stage Docker image (Rust 1.93 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
 | `server.example.ktav` | Annotated config template — copy to `/etc/shamir/server.ktav` and adjust |
 
 ## Quick start (systemd)

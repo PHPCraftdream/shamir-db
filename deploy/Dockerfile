@@ -12,14 +12,15 @@
 #             -p 7331:7331 -p 9090:9090 \
 #             shamir-db:dev
 
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 WORKDIR /build
 # Copy the workspace metadata first so layer caching kicks in even when
 # only crate sources change (not Cargo.lock / Cargo.toml).
+# This is a virtual workspace ([workspace] with no [package] in the root
+# Cargo.toml, members = ["crates/*"]) -- there is no root `src/` to copy.
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
 COPY crates ./crates
-COPY src ./src
 RUN cargo build --release -p shamir-server
 
 FROM debian:bookworm-slim AS runtime
