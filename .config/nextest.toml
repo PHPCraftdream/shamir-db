@@ -126,3 +126,34 @@ test-group = "wasm-heavy"
 [[profile.ci.overrides]]
 filter = "package(shamir-db) and binary(functions_lifecycle)"
 test-group = "wasm-heavy"
+
+# ============================================================================
+# Stress profile — the INVERSE of [profile.ci]. Used by the nightly
+# contention/stress lane (.github/workflows/stress-nightly.yml), NOT by any
+# per-PR gate. See report 08 §3 "The structural problem": the real MvccStore
+# deadlock (bug 3) was caught only under HIGH contention (16 idle dev-box
+# cores, default parallelism), but [profile.ci]'s test-threads = 4 cap (above)
+# correctly eliminated that oversubscription for the per-PR gate — leaving NO
+# environment that routinely recreates the contention conditions. This profile
+# deliberately re-introduces oversubscription so contention-only deadlocks
+# have a scheduled home where they are EXPECTED to reproduce.
+#
+# Core-count assumption: GitHub-hosted ubuntu-latest runners have 4 vCPUs.
+# test-threads = 8 is 2× that (report 08's "2-3× cores" framing), so up to
+# 8 concurrently-running test binaries × 4 tokio worker_threads each = 32 real
+# OS threads competing for 4 cores (8× oversubscription), vs ci's 4×4=16 (4×).
+# Don't size this off the dev box's 16 cores — the stress lane runs on the
+# SAME hosted runner class as ci.yml, not on a dev machine.
+#
+# `inherits = "ci"` (nextest ≥0.9.115) gives us ci's slow-timeout (60s × 10 =
+# 600s kill — already generous, and NEEDED here: more concurrent threads on the
+# same core count means legitimate slowdowns, not just deadlocks), fail-fast =
+# false, and status-level = "all". Only test-threads and failure-output are
+# overridden below.
+[profile.stress]
+inherits = "ci"
+# 2× a 4-core runner — the deliberate oversubscription this profile exists for.
+test-threads = 8
+# "immediate" (not ci's "final"): a hang/deadlock under stress benefits from
+# partial output streamed AS IT HAPPENS, not buffered until the 600s kill.
+failure-output = "immediate"

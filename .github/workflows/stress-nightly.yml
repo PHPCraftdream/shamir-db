@@ -1,0 +1,81 @@
+name: stress-nightly
+
+# Nightly contention/stress lane for the Version Oracle area (report 08 §3).
+#
+# WHY THIS EXISTS: the real MvccStore deadlock (bug 3) was caught only under
+# HIGH contention — 16 idle dev-box cores at default parallelism. After
+# `[profile.ci]`'s `test-threads = 4` cap (which correctly eliminated that
+# oversubscription for the per-PR gate), NO environment routinely recreates
+# the contention conditions that would catch a similar deadlock again. Dev
+# boxes have 16 idle cores (no oversubscription); CI is now throttled to 4
+# threads. This scheduled lane deliberately re-introduces oversubscription
+# (`[profile.stress]`, `test-threads = 8` on a 4-vCPU runner — 2× cores, per
+# report 08's "2-3× cores" framing) so contention-only deadlocks have a home
+# where they are EXPECTED to reproduce.
+#
+# WHY NIGHTLY, NOT PER-PR: contention-hunting is slow and probabilistic, not a
+# fast correctness gate. A deadlock that surfaces once in 50 high-contention
+# runs would be a flaky per-PR gate but a real signal on a nightly cadence.
+# Running it off-hours also avoids contending with the per-PR CI pool.
+#
+# WHY THE OPPOSITE PARALLELISM POLICY FROM `ci`: `[profile.ci]`'s own comment
+# explains its LOW-parallelism rationale (worker_threads = 4 oversubscription
+# on a 4-core runner → cap test binaries at 4). This lane INVERTS that: 8
+# test binaries × 4 tokio worker_threads = 32 OS threads on 4 cores (8×
+# oversubscription vs ci's 4×). That is the point — the deadlock was a
+# contention-window bug, and the window only opens under heavy contention.
+
+on:
+  schedule:
+    # 04:23 UTC nightly — off the top/bottom of the hour to ease load on the
+    # shared GitHub Actions runner pool (same convention as supply-chain.yml's
+    # "17 3 * * 0" Sunday slot). Nightly (not weekly) because contention-only
+    # bugs are probabilistic: more runs = higher detection odds.
+    - cron: "23 4 * * *"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  stress:
+    name: contention stress (@oracle + mvcc_store_tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      # Pinned to the cargo-nextest baseline documented in
+      # .config/nextest.toml (0.9.137 — the version whose `--stress-count`
+      # support this job relies on). Same pin as ci.yml's two test jobs.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@v2
+
+      # Step 1: the Version Oracle area (shamir-tx + shamir-engine, lib +
+      # integration) at deliberately ELEVATED parallelism. `[profile.stress]`
+      # (test-threads = 8, 2× a 4-vCPU runner) overrides [profile.ci]'s
+      # test-threads = 4 cap. `--profile stress` is forwarded by the wrapper
+      # even when CI=true is set (scripts/test.sh detects the explicit
+      # --profile and skips its CI auto-detection). bash shell on every runner
+      # (Git Bash on Windows, though this job is ubuntu-only).
+      - name: "oracle scope --full (stress profile, test-threads = 8)"
+        run: "./scripts/test.sh @oracle --full --profile stress"
+        shell: bash
+
+      # Step 2: the mvcc_store_tests suite specifically, looped via nextest's
+      # native `--stress-count 10` (each test runs 10× within one nextest
+      # invocation — no shell loop needed). This is the narrowest, highest-
+      # risk contention-window suite (overlay_ordering, a10_toctou, lock
+      # races — see report 08 §3's "Highest-risk narrow-window tests" list).
+      # `mvcc_store_tests` is a substring filter matching every test under
+      # crates/shamir-tx/src/tests/mvcc_store_tests/. Same stress profile
+      # (test-threads = 8) for the same oversubscription rationale.
+      #
+      # failure-output = "immediate" is set in [profile.stress]: a hang/
+      # deadlock under stress benefits from partial output streamed AS IT
+      # HAPPENS, not buffered until the 600s slow-timeout kill.
+      - name: mvcc_store_tests ×10 (stress profile, repetition)
+        run: "./scripts/test.sh -p shamir-tx --profile stress --stress-count 10 mvcc_store_tests"
+        shell: bash
