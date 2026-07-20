@@ -340,7 +340,7 @@ audit: {
 
 Audit-лог в audit-line-формате с HMAC-chain (каждая запись включает HMAC от предыдущей).
 Ротация по размеру; устаревшие файлы удаляются автоматически.
-События: аутентификация, DDL, ACL-изменения, admin-операции.
+Покрытие (состояние реализации): в durable HMAC-chained audit-лог сегодня попадают **только события аутентификации** (успех/сбой/прерывание рукопожатия — это единственный append call site, `crates/shamir-server/src/connection/handshake.rs`). DDL, ACL-изменения (chmod/chown) и admin-операции (`CreateScramUser`, `SetSuperuser`, retention/purge, drop и т.п.) durable-следа **не оставляют** — для них существует только эфемерный вывод `log`/`tracing`, который не персистируется и не является enforcement-gate (см. `shamir-types::access::trace_access`). Расширение покрытия (мост `AuditSink` → `AuditChainWriter` + append call sites на DDL/ACL/admin-операциях) — запланированное улучшение, пока не реализовано (P1).
 
 ## 8. Backup
 

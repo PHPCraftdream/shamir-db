@@ -96,7 +96,7 @@ ShamirDB Auth Protocol v1 НЕ гарантирует:
 
 4.3. **Session non-transferability.** session_id — bearer. RAM read на клиенте → имперсонация до idle TTL.
 
-4.4. **Защита от malicious admin.** Superuser имеет полный доступ. Audit log с HMAC chain (IMPL §3.3) даёт forensics, но не prevention.
+4.4. **Защита от malicious admin.** Superuser имеет полный доступ. Audit log с HMAC chain (IMPL §3.3) даёт forensics, но не prevention. **Важно (состояние реализации):** на сегодня в durable audit-лог попадают только события аутентификации; admin/DDL/ACL-операции (`CreateScramUser`, `SetSuperuser`, purge, drop и т.п.) durable-следа сейчас не оставляют — только эфемерный `log`/`tracing`. Таким образом forensic-ценность audit-лога против malicious admin сегодня ограничена auth-событиями; расширение durable-покрытия на admin/DDL/ACL — planned improvement (P1).
 
 4.5. **Username confidentiality.** Username виден серверу. Длина наблюдаема через TLS frame size.
 

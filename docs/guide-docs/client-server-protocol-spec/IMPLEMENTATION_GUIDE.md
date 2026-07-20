@@ -272,6 +272,8 @@ Audit-line (одна запись на строку, no inner whitespace в prod
 
 ### 3.2. Минимум v1 events
 
+> **Состояние реализации:** набор ниже — целевой v1-минимум. На сегодня в durable HMAC-chained audit-лог (`AuditChainWriter`) wired **только категория Auth lifecycle** (единственный append call site — `crates/shamir-server/src/connection/handshake.rs`). Остальные категории (Bootstrap, Lockout, User management, Sessions, Resumption, Rotation, Revocation) durable-аудит пока не попадают — для них существует только эфемерный `log`/`tracing` и in-memory `AuditSink` (`InMemoryAuditSink`, используется в тестах). Мост `AuditSink` → `AuditChainWriter` и append call sites для этих категорий — planned improvement (P1); см. release-audit report 03 (capability-matrix row 1b).
+
 **Auth lifecycle:** `auth_success` (sampled), `auth_failed` (rate-limited 1/мин per (subnet, user)), `auth_aborted` (sampled).
 
 **Bootstrap:** `bootstrap_used`, `bootstrap_regen`, `bootstrap_token_file_orphan_cleaned`.

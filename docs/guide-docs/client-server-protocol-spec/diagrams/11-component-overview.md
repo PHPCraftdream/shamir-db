@@ -147,7 +147,7 @@ flowchart LR
 | A2 Active MITM | TLS + Ed25519 pin + channel binding | — |
 | A3 Offline DB snapshot | Argon2id memory-hard | — |
 | A4 Live RAM read | mlock / disable_core_dumps best-effort | Partial |
-| A5 Malicious admin | Audit log HMAC chain (forensics, not prevention) | Out of scope |
+| A5 Malicious admin | Audit log HMAC chain (forensics, not prevention) — **today durable-coverage is auth-only; admin/DDL/ACL durable audit is planned (P1)** | Out of scope |
 | A6 Compromised client | known_hosts MAC | Partial |
 | A7 Supply chain | — | Out of scope |
 | A8 Spectre/cache | — | Out of scope (acknowledged) |
