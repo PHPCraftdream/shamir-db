@@ -344,14 +344,50 @@ Audit-лог в audit-line-формате с HMAC-chain (каждая запис
 
 ## 8. Backup
 
-Однократный snapshot — без остановки сервера:
+Одноразовый snapshot всего `data_dir` — модель **stop-and-copy** (v1):
+**сервер должен быть остановлен перед запуском `backup`**, онлайн/живого
+режима резервного копирования сейчас нет.
 
 ```bash
-shamir-server --config db.ktav backup --to /backup/shamir-$(date +%Y%m%d)
+# 1) Остановить сервер (systemctl stop shamir-server / SIGTERM — дождаться graceful shutdown)
+# 2) Запустить backup — data_dir берётся из --config, снимок пишется в <to>/<UTC-timestamp>/
+shamir-server --config db.ktav backup --to /backup/shamir
+# 3) Перезапустить сервер
 ```
 
-Блокирует данные на время snapshot, записывает в целевой каталог.
-Для scheduled backup — cron / systemd timer.
+Команда рекурсивно копирует **весь** `data_dir` (хранилище, WAL, реестры таблиц,
+audit-лог и его ротации, TLS PEM) в каталог `<to>/YYYYMMDD_HHMMSS/`; существующий
+целевой каталог перезаписываться отказывается. Источник (`data_dir`) задаётся
+файлом `--config`, отдельного флага источника нет; реальная точка входа —
+`crates/shamir-server/src/main.rs` (`Subcmd::Backup { to }` → `backup::backup`).
+
+> ⚠ **Нельзя запускать `backup` против живого (запущенного) сервера.**
+> Никакой блокировки или quiesce-механизма нет: фразы вроде «блокирует данные
+> на время snapshot» в старых версиях этого руководства были **неверны**. Защита
+> от torn-write здесь — **только** отсутствие конкурирующего writer'а благодаря
+> остановленному серверу. Копия, снятая на фоне работающего сервера (mid-WAL-write
+> / mid-SST-flush), может быть повреждена и **молчаливо непригодна к
+> восстановлению** — дефект всплывёт только при restore.
+
+In-process online-snapshot без downtime (через существующий redb-handle
+`system_store`) — запланированное улучшение **P2**, пока не реализовано
+(см. комментарий-модуля `crates/shamir-server/src/backup.rs`, «Future enhancement
+(P2)»).
+
+**Scheduled backup** — cron / systemd timer, но задание **обязано** сначала
+остановить сервер, затем снять копию, затем поднять его обратно. Пример обёртки
+для systemd: один `.service` с `ExecStartPre=systemctl stop shamir-server`,
+`ExecStart=shamir-server ... backup --to ...`, `ExecStopPost=systemctl start
+shamir-server`; либо wrapper-скрипт `stop → backup → restart`. Наивный cron,
+запускающий `backup` против всё ещё живого сервера, — в точности тот риск,
+которого избегает это правило.
+
+**Restore (runbook-обязанность).** После восстановления `SystemStore` из любого
+снимка оператор **обязан** выполнить `revokeAllTickets` (и `revokeAllLockouts`),
+чтобы откатнутые resumption-tickets / lockout-счётчики не допустили replay.
+Автоматического принуждения этой команды сейчас нет — это ручной шаг; см.
+`docs/guide-docs/client-server-protocol-spec/IMPLEMENTATION_GUIDE.md` §5.7 и
+`SECURITY_MODEL.md` §4.4.
 
 ## 9. Capacity planning
 
