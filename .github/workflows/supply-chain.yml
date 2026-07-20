@@ -75,7 +75,11 @@ jobs:
       # for metadata, so we install the toolchain pinned by rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
+        # Pinned: `--locked` only pins cargo-deny's OWN Cargo.lock during
+        # its build, not which version gets installed. `--version` pins the
+        # exact crates.io release (same convention as the cargo-cooldown pin
+        # in ci.yml). When upgrading, bump the version here.
+        run: cargo install --locked --version 0.20.2 cargo-deny
       - name: cargo deny check
         # No `--locked` on deny itself; the lockfile is consulted read-only.
         # All four check categories run so a single job is the gate.
@@ -95,7 +99,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-audit
-        run: cargo install --locked cargo-audit
+        # Pinned: same rationale as cargo-deny above.
+        run: cargo install --locked --version 0.22.2 cargo-audit
       # `--file Cargo.lock` pins the scan to the committed lockfile (no network
       # resolution). `--ignore` is intentionally absent here — every advisory
       # audit finds should surface. If a finding is a genuine false positive or
@@ -117,7 +122,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-cyclonedx
-        run: cargo install --locked cargo-cyclonedx
+        # Pinned: same rationale as cargo-deny above.
+        run: cargo install --locked --version 0.5.9 cargo-cyclonedx
       # `-f json` emits CycloneDX JSON (widely consumed by SBOM tooling).
       # `--spec-version 1.5` is the latest CycloneDX spec. The tool produces
       # one `<crate-name>.cdx.json` per workspace member (per-crate

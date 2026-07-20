@@ -154,5 +154,14 @@ jobs:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install --locked cargo-cooldown
+      # Pinned: an unpinned supply-chain-freshness tool silently changing
+      # behavior between CI runs is exactly the kind of drift a "cooldown"
+      # gate exists to prevent for the WORKSPACE's dependencies — it would
+      # be inconsistent to leave the gate tool itself unpinned. `--locked`
+      # only pins cargo-cooldown's OWN internal Cargo.lock during its build,
+      # NOT which published version gets installed (same misconception
+      # corrected for cargo-nextest in the nextest pin above). `--version`
+      # pins the exact crates.io release. When upgrading, bump the version
+      # here to match.
+      - run: cargo install --locked --version 0.3.4 cargo-cooldown
       - run: cargo cooldown check
