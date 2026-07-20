@@ -86,6 +86,25 @@ fail-fast = false
 test-threads = 4
 
 # Per-test overrides (extend as we discover legitimately-slow tests).
+#
+# PROFILE OVERRIDE PRECEDENCE — read before adding entries here or in
+# [profile.ci.overrides]. nextest resolves per-test overrides per-SETTING with
+# a fall-through chain (verified empirically with `cargo nextest show-config
+# test-groups --profile ci`, and per nextest's own "Override precedence" doc at
+# https://nexte.st/docs/configuration/per-test-overrides/):
+#   1. For test T and setting S, scan profile.<selected>.overrides for the first
+#      matching entry that configures S → if found, it wins.
+#   2. ONLY if step 1 found nothing for S, scan profile.default.overrides for
+#      the first matching entry that configures S → if found, it wins.
+#   3. Otherwise fall back to the selected profile's global value.
+# This means [[profile.default.overrides]] entries below DO apply in CI runs
+# (the `ci` profile falls through to `default` for any setting its own
+# overrides don't configure). You do NOT need to mirror them into
+# [[profile.ci.overrides]] for them to take effect there — and if you DO add a
+# ci-profile entry for the same filter, it REPLACES (not augments) the
+# default-profile entry for the settings it sets. (The functions_lifecycle /
+# wasm-heavy entry is duplicated in both profiles below for historical reasons;
+# the ci copy is redundant — the default one would fall through — but harmless.)
 [[profile.default.overrides]]
 filter = "test(wasm_function_inserts_and_queries)"
 slow-timeout = { period = "120s", terminate-after = 2 }  # ~99 s legit, kill at 240 s.
