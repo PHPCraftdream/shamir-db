@@ -1676,3 +1676,93 @@ async fn search_cofilter_transient_none_retries_into_u8_path() {
     // `_gate_guard` drops here (and on any earlier panic/assert failure
     // above), clearing the global gate unconditionally.
 }
+
+// =========================================================================
+// F3/F7 (task 8c) — regression: `search_quantized_bruteforce` returns the
+// EXACT (RecordId, f32) pairs (byte-identical scored output) after the
+// clone-vs-score-in-closure refactor. Pins the top-k RIDs AND the literal
+// f32 distances so a mistake like scoring the wrong candidate, attaching a
+// score to the wrong RID, or swapping the closure's score argument is
+// caught immediately.
+//
+// The stored u8 codes are exactly `quantizer.quantize(v)` (the upsert/fit
+// sites all funnel through `Sq8Quantizer::quantize`), and the bruteforce
+// path scores them via the SAME `RescoreCtx::score`. So the expected
+// distances, re-derived here from the original f32 vectors, are
+// bitwise-identical to production — the assertion uses exact bit equality
+// (no epsilon).
+// =========================================================================
+#[tokio::test]
+async fn f3_f7_quantized_bruteforce_exact_scored_output() {
+    use crate::vector::quantized_dist::RescoreCtx;
+
+    let dim = 8u32;
+    // 300 > FIT_THRESHOLD (256) → fit fires; 300 ≤ 512 → bruteforce path
+    // (`search_quantized_bruteforce`), the site touched by F3/F7.
+    let n = 300u64;
+    let adapter = HnswAdapter::new_with_quantization(
+        dim,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 5000,
+            ..Default::default()
+        },
+        Some(VectorQuantization::Sq8),
+    );
+    for i in 0..n {
+        adapter
+            .upsert(rid(i), &random_vec(dim as usize, i))
+            .await
+            .expect("pre-populate upsert");
+    }
+    assert!(
+        adapter.is_quantized(),
+        "test setup: adapter must have fitted (n > FIT_THRESHOLD)"
+    );
+    // Confirm the bruteforce path is taken: len() <= QUANT_BRUTE_FORCE_MAX (512).
+    assert!(
+        adapter.len() <= 512,
+        "test must take the bruteforce path: len()={} must be <= 512",
+        adapter.len()
+    );
+
+    let query = random_vec(dim as usize, 424242);
+    let k = 5u32;
+    let results = adapter
+        .search(&query, k, SearchOpts::default(), None)
+        .await
+        .expect("search");
+
+    // Independently re-derive the expected (RecordId, score) top-k over the
+    // SAME dataset, scoring each vector's re-quantized codes with the SAME
+    // `RescoreCtx::score` the production path uses.
+    let quantizer = adapter.quantizer().expect("fitted");
+    let ctx = RescoreCtx::new(VectorMetric::L2, quantizer, &query);
+    let mut expected: Vec<(RecordId, f32)> = (0..n)
+        .map(|i| {
+            let v = random_vec(dim as usize, i);
+            let codes = quantizer.quantize(&v);
+            (rid(i), ctx.score(&codes))
+        })
+        .collect();
+    expected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    expected.truncate(k as usize);
+
+    assert_eq!(
+        results.len(),
+        k as usize,
+        "bruteforce must return k results"
+    );
+    // Compare as (RecordId, f32-bits) so the comparison is byte-exact: same
+    // RID, in the same order, with bitwise-identical distances.
+    let result_bits: Vec<(RecordId, u32)> =
+        results.iter().map(|(r, d)| (*r, d.to_bits())).collect();
+    let expected_bits: Vec<(RecordId, u32)> =
+        expected.iter().map(|(r, d)| (*r, d.to_bits())).collect();
+    assert_eq!(
+        result_bits, expected_bits,
+        "F3/F7: exact (RecordId, f32-distance-bits) output mismatch — \
+         the clone-vs-score-in-closure refactor must be byte-identical to the \
+         independent brute-force ground truth"
+    );
+}

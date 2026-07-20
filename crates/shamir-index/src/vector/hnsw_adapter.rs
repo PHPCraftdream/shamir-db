@@ -1789,17 +1789,26 @@ impl HnswAdapter {
             .quantizer
             .get()
             .expect("quantized_active but quantizer unset");
-        let mut pairs: Vec<(usize, Vec<u8>)> = Vec::with_capacity(256);
-        self.vectors_u8.iter_sync(|i, c| {
-            pairs.push((*i, c.clone()));
-            true
-        });
         // Audit finding 4.1 (task #530): build the fused rescore context ONCE
         // per query (precomputes `qm`/`qs`/`q_norm`), then score each candidate
         // with zero per-candidate dequant allocation.
+        //
+        // F3/F7: score INSIDE the `iter_sync` closure instead of cloning each
+        // `Vec<u8>` code (dim bytes + a heap alloc per candidate) out just to
+        // score and immediately drop it. Pass 1 now collects the pre-computed
+        // f32 score (4 bytes/entry, no allocation); pass 2 filters
+        // `deleted`/`rid_map` over the much smaller `(usize, f32)` pairs using
+        // that score directly. The two-pass shape is deliberately kept — the
+        // `deleted`/`rid_map` probes stay OUTSIDE `iter_sync` to avoid a new
+        // cross-map nesting inside the bucket-lock-held callback.
         let ctx = RescoreCtx::new(self.metric, quantizer, query);
+        let mut pairs: Vec<(usize, f32)> = Vec::with_capacity(256);
+        self.vectors_u8.iter_sync(|i, c| {
+            pairs.push((*i, ctx.score(c)));
+            true
+        });
         let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
-        for (internal, codes) in pairs {
+        for (internal, score) in pairs {
             // DEADLOCK FIX (#589 class, commit `7a4abf62`):
             // `contains_sync`, NOT `contains_async`. The `deleted` map is
             // written via `insert_sync` (upsert/upsert_batch/delete) and
@@ -1813,8 +1822,7 @@ impl HnswAdapter {
             // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
             // (snapshot serialisation) on the SAME worker threads.
             if let Some(rid) = self.rid_map.read_sync(&internal, |_, r| *r) {
-                let d = ctx.score(&codes);
-                out.push((rid, d));
+                out.push((rid, score));
             }
         }
         out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1864,14 +1872,13 @@ impl HnswAdapter {
             // `vectors_u8` is scanned via `iter_sync` (this fn's bruteforce
             // twin, fit catch-up drain) and read via `read_sync`
             // (`collect_live_vectors`) on the SAME worker threads.
-            let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
-            if let Some(codes) = codes_opt {
+            let score_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| ctx.score(c));
+            if let Some(exact) = score_opt {
                 // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                 // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                 // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                 // (snapshot serialisation) on the SAME worker threads.
                 if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
-                    let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
             }
@@ -1886,13 +1893,14 @@ impl HnswAdapter {
     /// branch of [`Self::search_cofilter`].
     ///
     /// `ef` is the (already overscan-clamped) ef_search; `allow_set` is the
-    /// internal-ID allow-set built from the candidate RIDs.
+    /// internal-ID allow-set (as an owned `Arc`) built from the candidate
+    /// RIDs by the caller.
     async fn search_cofilter_quantized(
         &self,
         query: &[f32],
         k: u32,
         ef: usize,
-        allow_set: &shamir_collections::TFxSet<usize>,
+        allow_set: Arc<shamir_collections::TFxSet<usize>>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         let quantizer = self
             .quantizer
@@ -1903,12 +1911,12 @@ impl HnswAdapter {
             .expect("quantized_active but u8 graph unset");
         let query_codes = quantizer.quantize(query);
         let knbn = k as usize;
-        // Clone the allow-set into an Arc so the spawn_blocking closure is
-        // 'static. The set is typically small (the candidate RID count) so
-        // the clone is cheap relative to the graph traversal.
-        let allow = Arc::new(allow_set.clone());
+        // F7 bonus: the allow-set arrives as an owned `Arc` from the caller
+        // (`search_cofilter`), so it moves directly into the `spawn_blocking`
+        // closure (satisfying the `'static` bound) with zero data cloning —
+        // previously this site did `Arc::new(allow_set.clone())` per query.
         let neighbors = tokio::task::spawn_blocking(move || {
-            let pred = |id: &usize| allow.contains(id);
+            let pred = |id: &usize| allow_set.contains(id);
             hnsw_u8.search_filter(&query_codes, knbn, ef, Some(&pred))
         })
         .await
@@ -1924,14 +1932,13 @@ impl HnswAdapter {
             // (`search_quantized_bruteforce`, fit catch-up drain) and
             // mutated via `insert_sync`/`remove_sync` on the SAME worker
             // threads.
-            let codes_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| c.clone());
-            if let Some(codes) = codes_opt {
+            let score_opt = self.vectors_u8.read_sync(&n.d_id, |_, c| ctx.score(c));
+            if let Some(exact) = score_opt {
                 // DEADLOCK FIX (same class as #589, commit `7a4abf62`; H3
                 // commit `dcfaf825`): `read_sync`, NOT `read_async` —
                 // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                 // (snapshot serialisation) on the SAME worker threads.
                 if let Some(rid) = self.rid_map.read_sync(&n.d_id, |_, v| *v) {
-                    let exact = ctx.score(&codes);
                     out.push((rid, exact));
                 }
             }
@@ -2041,9 +2048,8 @@ impl HnswAdapter {
                 // DEADLOCK FIX (#589 class): `read_sync`, NOT `read_async`
                 // — `vectors_u8` is scanned via `iter_sync` and mutated via
                 // `insert_sync`/`remove_sync` on the SAME worker threads.
-                let codes_opt = self.vectors_u8.read_sync(&internal, |_, c| c.clone());
-                if let Some(codes) = codes_opt {
-                    let d = ctx.score(&codes);
+                let d_opt = self.vectors_u8.read_sync(&internal, |_, c| ctx.score(c));
+                if let Some(d) = d_opt {
                     scored.push((rid, d));
                 }
             } else {
@@ -2051,9 +2057,10 @@ impl HnswAdapter {
                 // — `vectors` is scanned via `iter_sync` (fit snapshot/
                 // delta/catch-up) and mutated via `insert_sync`/`remove_sync`
                 // on the SAME worker threads.
-                let vec_opt = self.vectors.read_sync(&internal, |_, v| v.clone());
-                if let Some(v) = vec_opt {
-                    let d = dist.eval(query, &v);
+                let d_opt = self
+                    .vectors
+                    .read_sync(&internal, |_, v| dist.eval(query, v));
+                if let Some(d) = d_opt {
                     scored.push((rid, d));
                 }
             }
@@ -2164,6 +2171,11 @@ impl HnswAdapter {
         if allow_set.is_empty() {
             return Ok(vec![]);
         }
+        // F7 bonus: wrap the built allow-set in an `Arc` ONCE here so both the
+        // quantized co-filter path (`search_cofilter_quantized`) and the f32
+        // co-filter path below move a cheap refcount handle into
+        // `spawn_blocking` instead of each callee re-cloning the whole set.
+        let allow_set = Arc::new(allow_set);
 
         // ef-overscan: generous to compensate search_filter under-return.
         let ef_base = match ef_search_override {
@@ -2179,7 +2191,7 @@ impl HnswAdapter {
             // so the transient-None retry path in the f32-graph branch below
             // can re-run the EXACT same logic instead of returning empty.
             return self
-                .search_cofilter_quantized(query, k, ef, &allow_set)
+                .search_cofilter_quantized(query, k, ef, allow_set)
                 .await;
         }
 
@@ -2217,7 +2229,7 @@ impl HnswAdapter {
                 // #424 (Б-4) — transient flip during this request.
                 if self.quantized_active() {
                     return self
-                        .search_cofilter_quantized(query, k, ef, &allow_set)
+                        .search_cofilter_quantized(query, k, ef, allow_set)
                         .await;
                 }
                 // Genuinely unreachable: non-quantized / pre-flip adapter
