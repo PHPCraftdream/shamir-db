@@ -58,7 +58,6 @@ Repos plug into one of seven embedded engines via `BoxRepoFactory`:
 pub enum BoxRepoFactory {
     InMemory(_),
     #[cfg(feature = "sled")]   Sled(_),
-    #[cfg(feature = "redb")]   Redb(_),
     #[cfg(feature = "fjall")]  Fjall(_),
     #[cfg(feature = "nebari")] Nebari(_),
     #[cfg(feature = "persy")]  Persy(_),

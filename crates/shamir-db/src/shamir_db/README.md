@@ -35,8 +35,8 @@ pub struct ShamirDb {
 ### Инициализация
 
 ```rust
-// Production — с persistent metadata на redb
-let db = ShamirDb::init(SystemStoreConfig::Redb("./data/system.redb".into())).await?;
+// Production — с persistent metadata на fjall
+let db = ShamirDb::init(SystemStoreConfig::Fjall("./data/system".into())).await?;
 
 // Тесты — in-memory
 let db = ShamirDb::init_memory().await?;
@@ -88,7 +88,7 @@ pub struct SystemStore {
 | Вариант | Описание |
 |---------|----------|
 | `InMemory` | Для тестов. Данные теряются при перезапуске |
-| `Redb(PathBuf)` | Production. Персистентное хранение на redb |
+| `Fjall(PathBuf)` | Production. Персистентное хранение на fjall |
 
 ### Системные таблицы
 

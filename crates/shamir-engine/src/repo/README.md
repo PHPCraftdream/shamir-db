@@ -74,7 +74,6 @@ pub enum BoxRepoFactory {
 ```rust
 BoxRepoFactory::in_memory()
 BoxRepoFactory::sled("./data/sled")
-BoxRepoFactory::redb("./data/main.redb")
 BoxRepoFactory::fjall("./data/fjall")
 ```
 

@@ -6,7 +6,7 @@
 //! consumers see no change. Embedded / minimal builds can opt out:
 //!
 //! ```toml
-//! shamir-storage = { version = "0.1", default-features = false, features = ["redb"] }
+//! shamir-storage = { version = "0.1", default-features = false, features = ["fjall"] }
 //! ```
 //!
 //! `error`, `types` (Store/Repo trait surface) and `storage_in_memory`

@@ -328,9 +328,8 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 {"drop_repo": "hot_cache"}
 ```
 
-Engines: `in_memory` (всегда), `sled` / `redb` / `fjall` / `nebari` / `persy` /
-`canopy` (если соответствующая cargo-feature включена при сборке).
-Disk-движкам требуется поле `path`.
+Engines: `in_memory` (всегда), `fjall` (если соответствующая cargo-feature
+включена при сборке). Disk-движкам требуется поле `path`.
 
 ### Create/Drop Table
 

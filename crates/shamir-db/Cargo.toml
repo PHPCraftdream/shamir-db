@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 # Cascade backend feature flags from shamir-storage / shamir-engine all
 # the way through the facade. Default = all backends, so consumers
 # that didn't pick features explicitly see no change. Embedded
-# minimal builds: `default-features = false, features = ["redb"]`.
+# minimal builds: `default-features = false, features = ["fjall"]`.
 #
 # `all-backends` lists per-backend features explicitly, mirroring
 # shamir-engine — needed because the facade's own re-exports go through

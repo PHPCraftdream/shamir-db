@@ -58,7 +58,7 @@ rust_decimal = { version = "1.40.0", features = ["serde"] }
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
 # pick them at the engine level too:
-#   shamir-engine = { default-features = false, features = ["redb"] }
+#   shamir-engine = { default-features = false, features = ["fjall"] }
 #
 # `all-backends` lists every per-backend feature explicitly (NOT just
 # `shamir-storage/all-backends`) because the engine's own `BoxRepo` /

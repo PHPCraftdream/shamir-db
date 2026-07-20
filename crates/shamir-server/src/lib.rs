@@ -7,7 +7,7 @@
 //! - [`config`] — Ktav-based configuration schema.
 //! - [`server_meta`] — durable storage for server secrets, Ed25519
 //!   identity, ticket key, audit chain key, bootstrap state.
-//! - [`user_directory`] — durable `UserDirectory` impl backed by redb.
+//! - [`user_directory`] — durable `UserDirectory` impl backed by fjall.
 //! - [`audit_appender`] — durable `AuditAppender` impl with HMAC-chained
 //!   tab-separated log + checkpoint.
 //! - [`connection`] — accept loop + per-connection orchestration.

@@ -67,7 +67,7 @@ await db.run(ddl.createRepo('cold'));
 Ответ: `results.r.records[0].created_repo === "cold"`.
 
 **Durable по умолчанию.** Если сервер запущен с `data_dir` (продакшен),
-wire-созданные репозитории — durable (redb). Если сервер in-memory
+wire-созданные репозитории — durable (fjall). Если сервер in-memory
 (тесты) — репозиторий тоже in-memory. Явный opt-out:
 
 ```ts
@@ -77,8 +77,6 @@ await db.run(ddl.createRepo('scratch', { engine: 'in_memory' }));
 
 `in_memory`-репозиторий — эфемерный scratch-пространство: данные не
 переживают рестарт. Полезно для кешей, сессий, временных расчётов.
-
-<!-- TODO: verify that wire-created durable repo engine=redb path is auto-derived from data_root per DURABLE_BY_DEFAULT.md D2 — currently CreateRepoOp.engine is Option<String> with None default -->
 
 ### Интроспекция
 

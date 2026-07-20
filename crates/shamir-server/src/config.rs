@@ -71,7 +71,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Root directory for durable state (server_meta, user_directory,
-    /// audit log, redb databases).
+    /// audit log, fjall databases).
     pub data_dir: PathBuf,
     /// Tracing / logging configuration.
     #[serde(default)]
