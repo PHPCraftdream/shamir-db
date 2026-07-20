@@ -152,6 +152,7 @@ impl ServerLauncher {
             &config.data_dir,
             std::time::Duration::from_secs(5),
             audit_max_bytes,
+            config.audit.retention_days,
         )
         .map_err(|e| BootError::AuditAppender(e.to_string()))?;
 

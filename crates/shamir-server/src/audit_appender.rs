@@ -199,6 +199,11 @@ enum Durab {
 pub struct RotationPolicy {
     pub max_size_bytes: u64,
     pub current_size: std::sync::atomic::AtomicU64,
+    /// Delete rotated files older than this many days. `0` disables the
+    /// retention sweep (operator manages retention out-of-band). The
+    /// sweep runs piggyback on each rotation — see
+    /// [`FjallAuditAppender::sweep_retention`].
+    pub retention_days: u32,
 }
 
 /// Durable [`AuditAppender`] backed by fixed-format tab-separated log + fjall checkpoint.
@@ -248,13 +253,16 @@ impl FjallAuditAppender {
 
     /// Open in **strict** mode — every entry is fsync'd synchronously.
     pub fn open_strict(data_dir: impl AsRef<Path>) -> Result<Arc<Self>, AppenderError> {
-        Self::open_strict_with_rotation(data_dir, None)
+        Self::open_strict_with_rotation(data_dir, None, 0)
     }
 
     /// Same as [`Self::open_strict`] with optional rotation cap (in bytes).
+    /// `retention_days` controls the age-based retention sweep that runs
+    /// piggyback on each rotation (`0` disables it).
     pub fn open_strict_with_rotation(
         data_dir: impl AsRef<Path>,
         max_size_bytes: Option<u64>,
+        retention_days: u32,
     ) -> Result<Arc<Self>, AppenderError> {
         let dir = data_dir.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -271,6 +279,7 @@ impl FjallAuditAppender {
             rotation: max_size_bytes.map(|m| RotationPolicy {
                 max_size_bytes: m,
                 current_size: std::sync::atomic::AtomicU64::new(initial_size),
+                retention_days,
             }),
         }))
     }
@@ -281,14 +290,17 @@ impl FjallAuditAppender {
         data_dir: impl AsRef<Path>,
         flush_every: Duration,
     ) -> Result<Arc<Self>, AppenderError> {
-        Self::open_batched_with_rotation(data_dir, flush_every, None)
+        Self::open_batched_with_rotation(data_dir, flush_every, None, 0)
     }
 
     /// Same as [`Self::open_batched`] with optional rotation cap (in bytes).
+    /// `retention_days` controls the age-based retention sweep that runs
+    /// piggyback on each rotation (`0` disables it).
     pub fn open_batched_with_rotation(
         data_dir: impl AsRef<Path>,
         flush_every: Duration,
         max_size_bytes: Option<u64>,
+        retention_days: u32,
     ) -> Result<Arc<Self>, AppenderError> {
         let dir = data_dir.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -313,6 +325,7 @@ impl FjallAuditAppender {
             rotation: max_size_bytes.map(|m| RotationPolicy {
                 max_size_bytes: m,
                 current_size: std::sync::atomic::AtomicU64::new(initial_size),
+                retention_days,
             }),
         });
 
@@ -529,7 +542,105 @@ impl FjallAuditAppender {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
         tracing::info!(rotated = %rotated.display(), "audit log rotated");
+
+        // Best-effort retention sweep — runs piggyback on each rotation.
+        // Only rotated files are candidates; the active log is never swept.
+        // All errors are swallowed (logged at `warn`): retention is
+        // housekeeping, not a correctness requirement — the write that
+        // triggered this rotation has already succeeded.
+        if let Some(rot) = &self.rotation {
+            if rot.retention_days != 0 {
+                self.sweep_retention(rot.retention_days);
+            }
+        }
         Ok(())
+    }
+
+    /// Delete rotated audit files whose embedded timestamp (or, as
+    /// fallback, file mtime) is older than `retention_days * 86400 s`.
+    ///
+    /// Called from [`Self::rotate_locked`] after a successful rename +
+    /// reopen. **Never fails** — every error (directory read failure,
+    /// individual file deletion failure) is logged at `warn` and
+    /// swallowed so the write path is unaffected.
+    ///
+    /// Age is determined from the `unix_nanos` suffix embedded in the
+    /// filename (the same format [`Self::rotate_locked`] produces:
+    /// `{stem}.<020d-nanos>`), avoiding reliance on filesystem mtime
+    /// which can be wrong after a backup/restore/copy. Files whose
+    /// suffix does not parse as nanos fall back to mtime; files from
+    /// the future (clock skew) are never deleted.
+    fn sweep_retention(&self, retention_days: u32) {
+        const NANOS_PER_SEC: u64 = 1_000_000_000;
+        const SECS_PER_DAY: u64 = 86400;
+        let max_age_ns = (retention_days as u64)
+            .saturating_mul(SECS_PER_DAY)
+            .saturating_mul(NANOS_PER_SEC);
+        let now_ns = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_nanos() as u64,
+            Err(_) => return, // clock before epoch — give up silently
+        };
+        let Some(stem) = self.log_path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let prefix = format!("{stem}.");
+        let Some(dir) = self.log_path.parent() else {
+            return;
+        };
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "audit retention sweep: failed to read directory");
+                return;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Only consider files matching the rotated-file naming pattern.
+            let Some(suffix) = fname.strip_prefix(&prefix) else {
+                continue;
+            };
+            // Determine the file's age: prefer the embedded nanos suffix,
+            // fall back to file mtime if the suffix doesn't parse.
+            let file_ns = suffix.parse::<u64>().ok().or_else(|| {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos() as u64)
+            });
+            let Some(file_ns) = file_ns else {
+                continue;
+            };
+            // Skip files from the future (clock skew) — never delete.
+            let Some(age_ns) = now_ns.checked_sub(file_ns) else {
+                continue;
+            };
+            if age_ns < max_age_ns {
+                continue;
+            }
+            let age_days = age_ns / (SECS_PER_DAY * NANOS_PER_SEC);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    tracing::info!(
+                        file = %path.display(),
+                        age_days,
+                        "audit retention sweep: deleted old rotated file"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        file = %path.display(),
+                        "audit retention sweep: failed to delete old rotated file"
+                    );
+                }
+            }
+        }
     }
 
     /// Persist `(next_seq, prev_hmac)` to the checkpoint keyspace.
