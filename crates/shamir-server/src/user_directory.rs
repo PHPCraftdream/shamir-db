@@ -943,6 +943,67 @@ impl FjallUserDirectory {
             changed
         })
     }
+
+    /// Bump `tickets_invalid_before_ns` to `now_ns` for EVERY user in the
+    /// directory (if `now_ns` is newer than their current value) — used
+    /// after a restore so no resumption ticket issued before the restore
+    /// point can still resume against the restored state. Mirrors
+    /// [`Self::set_superuser`]'s single-user bump pattern (read-modify-write,
+    /// `SyncAll`, cache update), just looped over every user via the same
+    /// full-scan [`Self::list_all`] uses.
+    ///
+    /// Unlike the per-request read-modify-write helpers, this batches the
+    /// fsync into ONE `db.persist(PersistMode::SyncAll)` after the whole
+    /// loop rather than per-user — this runs offline over potentially many
+    /// users, not on a live request path, so per-user fsync would be pure
+    /// waste.
+    ///
+    /// Returns the number of users actually bumped (`0` = fresh/empty
+    /// directory or every user was already past `now_ns` — both fine, not
+    /// an error).
+    pub fn invalidate_all_tickets(&self, now_ns: u64) -> Result<usize> {
+        let _guard = self.write_lock.lock();
+
+        let all = self.list_all()?;
+        let mut batch = self.db.batch();
+        let mut bumped = 0usize;
+        let mut cache_updates: Vec<([u8; 16], u64)> = Vec::new();
+
+        for (_projected, state) in &all {
+            if now_ns <= state.tickets_invalid_before_ns {
+                continue; // already past now_ns — no-op for this user
+            }
+            let blob = match self.read_blob(&state.username)? {
+                Some(b) => b,
+                None => continue, // raced away between list_all and here
+            };
+            let mut user: PersistedUser = rmp_serde::from_slice(&blob)
+                .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
+            user.tickets_invalid_before_ns = now_ns;
+
+            let new_bytes = rmp_serde::to_vec_named(&user)
+                .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
+            batch.insert(&self.users, state.username.as_bytes(), new_bytes.as_slice());
+            cache_updates.push((state.user_id, now_ns));
+            bumped += 1;
+        }
+
+        if bumped > 0 {
+            batch
+                .commit()
+                .map_err(|e| Error::Encoding(format!("fjall: batch commit: {e}")))?;
+            // Spec §3.5 / §6.2: fsync once for the whole batch, not per-user.
+            self.db
+                .persist(PersistMode::SyncAll)
+                .map_err(|e| Error::Encoding(format!("fjall: persist: {e}")))?;
+
+            for (user_id, tib) in cache_updates {
+                self.update_cache(&user_id, tib);
+            }
+        }
+
+        Ok(bumped)
+    }
 }
 
 // ----------------------------------------------------------------------------

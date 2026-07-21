@@ -90,11 +90,38 @@ enum Subcmd {
     /// only the torn tail batch on next open (`TolerateCorruptTail`
     /// truncates to the last checksummed batch) — earlier committed
     /// batches are safe — but stop-and-copy is the strongest guarantee.
+    /// A `manifest.json` (file list + sha256 + size per file) is written
+    /// into the snapshot so `restore` can verify it before trusting it.
     Backup {
         /// Destination directory. Created if missing. The actual snapshot
         /// goes into `<to>/YYYYMMDD_HHMMSS/`.
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
+    },
+
+    /// Restore a `backup --to` snapshot back into `data_dir` (from
+    /// --config). **Offline only** — the server for this `data_dir` must
+    /// be stopped first; a liveness probe (fjall's own exclusive advisory
+    /// file lock on `data_dir/server_meta`) refuses the restore otherwise
+    /// unless `--force` is passed. Verifies the snapshot's `manifest.json`
+    /// BEFORE touching `data_dir`, then atomically swaps: the current
+    /// `data_dir` (if any) is renamed to a `.pre_restore_backup_<timestamp>`
+    /// sibling (preserved, not deleted — the explicit rollback path)
+    /// before the restored snapshot takes its place. Finally invalidates
+    /// every outstanding resumption ticket in the restored user directory
+    /// so no session issued before the restore point can resume.
+    Restore {
+        /// Snapshot directory to restore from (e.g. `<to>/YYYYMMDD_HHMMSS`
+        /// from a prior `backup --to`).
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Skip the "is the server currently running" liveness probe. Use
+        /// only when you are certain no server process holds `data_dir`
+        /// (e.g. recovering from an unclean shutdown where the lock file
+        /// itself is stale) — bypassing this check while a real server is
+        /// running WILL corrupt the live database.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Render the Shomer access-control tree (resources + functions +
@@ -192,6 +219,23 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                 report.bytes_copied,
                 report.dest_dir.display()
             );
+            return Ok(());
+        }
+        Some(Subcmd::Restore { from, force }) => {
+            let report = shamir_server::restore::restore(&from, &config.data_dir, force)?;
+            println!(
+                "restore ok: {} files, {} bytes restored → {}, {} user(s) had tickets invalidated",
+                report.files_restored,
+                report.bytes_restored,
+                config.data_dir.display(),
+                report.users_invalidated
+            );
+            if let Some(pre) = &report.pre_restore_backup {
+                println!(
+                    "pre-restore data preserved at {} — remove manually once satisfied",
+                    pre.display()
+                );
+            }
             return Ok(());
         }
         Some(Subcmd::AccessTree {

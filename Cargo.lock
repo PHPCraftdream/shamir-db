@@ -3629,6 +3629,7 @@ dependencies = [
  "sefer-alloc",
  "serde",
  "serde_bytes",
+ "serde_json",
  "serial_test",
  "shamir-client",
  "shamir-collections",

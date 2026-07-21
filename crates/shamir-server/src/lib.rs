@@ -27,6 +27,7 @@ pub mod logging;
 pub mod observability;
 pub mod ports;
 pub mod replication;
+pub mod restore;
 pub mod runtime;
 pub mod scheduler;
 pub mod server;

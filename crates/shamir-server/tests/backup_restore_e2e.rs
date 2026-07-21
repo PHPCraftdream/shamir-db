@@ -53,6 +53,7 @@ use shamir_server::config::{
     ProfileKind, TlsConfig,
 };
 use shamir_server::db_handler::{DbRequest, DbResponse};
+use shamir_server::restore;
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 
 #[derive(Serialize, Deserialize)]
@@ -428,6 +429,318 @@ async fn backup_then_restore_recovers_data() {
         }
         other => panic!("expected Batch, got {:?}", other),
     }
+
+    let _ = w.shutdown().await;
+    let mut tmp = [0u8; 1];
+    let _ = r.read(&mut tmp).await;
+    handle.shutdown().await;
+}
+
+// ----------------------------------------------------------------------------
+// RI-11: full restore-CLI flow — manifest verify, atomic swap,
+// `.pre_restore_backup_*` rollback path, ticket invalidation.
+// ----------------------------------------------------------------------------
+
+/// Client → server first frame for session resume (mirrors
+/// `tests/resume_fast_path.rs`'s wire shape).
+#[derive(Serialize, Deserialize)]
+struct WireResumeInit {
+    #[serde(with = "serde_bytes")]
+    ticket: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    client_nonce: Vec<u8>,
+    binding_mode: u8,
+}
+
+/// Server → client response for successful resume.
+#[derive(Serialize, Deserialize)]
+struct WireResumeOk {
+    #[serde(with = "serde_bytes")]
+    session_id: Vec<u8>,
+    expires_at_ns: u64,
+    #[serde(default, with = "serde_bytes")]
+    resumption_ticket: Vec<u8>,
+    #[serde(default)]
+    resumption_expires_at_ns: u64,
+    #[serde(default)]
+    server_query_version: u8,
+}
+
+/// Same handshake as `login`, but also returns the raw resumption ticket
+/// bytes from `AuthOk` so the caller can attempt to resume with it later.
+async fn login_capture_ticket(
+    addr: std::net::SocketAddr,
+    password: &[u8],
+) -> (
+    tokio::io::ReadHalf<tokio_rustls::client::TlsStream<TcpStream>>,
+    tokio::io::WriteHalf<tokio_rustls::client::TlsStream<TcpStream>>,
+    [u8; 32],
+    Vec<u8>,
+) {
+    let username = NormalizedUsername::from_raw("admin").unwrap();
+    let connector = TlsConnector::from(make_client_config_no_ca());
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let tls = connector.connect(server_name, tcp).await.unwrap();
+    let exporter = extract_tls_exporter(&tls).unwrap();
+    let (mut r, mut w) = split(tls);
+
+    let hs = HandshakeBuilder::new(username, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .accept_new_host(true)
+        .build()
+        .unwrap();
+    let init = hs.auth_init();
+    let init_wire = WireAuthInit {
+        user: init.user,
+        client_nonce: init.client_nonce.to_vec(),
+        binding_mode: init.binding_mode,
+        version: init.version,
+    };
+    write_frame(&mut w, &rmp_serde::to_vec(&init_wire).unwrap())
+        .await
+        .unwrap();
+
+    let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes).unwrap();
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&ch_wire.salt);
+    let mut server_nonce = [0u8; 32];
+    server_nonce.copy_from_slice(&ch_wire.server_nonce);
+    let challenge = ServerChallenge {
+        salt,
+        kdf_params: KdfParams {
+            memory_kb: ch_wire.memory_kb,
+            time: ch_wire.time,
+            parallelism: ch_wire.parallelism,
+            argon2_version: ch_wire.argon2_version,
+        },
+        server_nonce,
+    };
+
+    let mut password_buf = password.to_vec();
+    let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
+    write_frame(
+        &mut w,
+        &rmp_serde::to_vec(&WireClientProof {
+            client_proof: proof.to_vec(),
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes).unwrap();
+    let mut sig = [0u8; 32];
+    sig.copy_from_slice(&ok_wire.server_signature);
+    let mut pub32 = [0u8; 32];
+    pub32.copy_from_slice(&ok_wire.server_pub_key);
+    let mut id_sig = [0u8; 64];
+    id_sig.copy_from_slice(&ok_wire.identity_sig);
+    let mut session_id = [0u8; 32];
+    session_id.copy_from_slice(&ok_wire.session_id);
+    let auth_ok = ServerAuthOk {
+        server_signature: sig,
+        server_pub_key: pub32,
+        identity_sig: id_sig,
+        session_id,
+        expires_at_ns: ok_wire.expires_at_ns,
+        resumption_ticket: Some(ok_wire.resumption_ticket.clone()),
+        resumption_expires_at_ns: Some(ok_wire.resumption_expires_at_ns),
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
+    };
+    let pinned: Arc<std::sync::Mutex<Option<[u8; 32]>>> = Arc::new(std::sync::Mutex::new(None));
+    let pinned2 = pinned.clone();
+    hs.process_auth_ok(&auth_ok, &derived, &am, |p| {
+        *pinned2.lock().unwrap() = Some(*p);
+    })
+    .unwrap();
+
+    assert!(
+        !ok_wire.resumption_ticket.is_empty(),
+        "server must issue a resumption ticket on full auth"
+    );
+    (r, w, session_id, ok_wire.resumption_ticket)
+}
+
+/// Attempt to resume a session with `ticket` on a fresh connection. Returns
+/// `true` iff the server responded with a well-formed `ResumeOkWire`;
+/// `false` if the connection was closed or the response did not decode as
+/// one (both are "resume rejected" from the caller's point of view).
+async fn attempt_resume(addr: std::net::SocketAddr, ticket: Vec<u8>) -> bool {
+    let (mut r, mut w, _exporter) = {
+        let connector = TlsConnector::from(make_client_config_no_ca());
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let tls = connector.connect(server_name, tcp).await.unwrap();
+        let exporter = extract_tls_exporter(&tls).unwrap();
+        let (r, w) = split(tls);
+        (r, w, exporter)
+    };
+
+    let mut client_nonce = [0u8; 32];
+    shamir_connect::common::crypto::random_bytes(&mut client_nonce);
+    let resume_init = WireResumeInit {
+        ticket,
+        client_nonce: client_nonce.to_vec(),
+        binding_mode: BindingMode::TlsExporter.as_u8(),
+    };
+    write_frame(&mut w, &rmp_serde::to_vec(&resume_init).unwrap())
+        .await
+        .expect("send resume_init");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT),
+    )
+    .await
+    .expect("should not hang");
+
+    match result {
+        Err(_) => false, // connection closed / read error — rejected
+        Ok(bytes) => rmp_serde::from_slice::<WireResumeOk>(&bytes).is_ok(),
+    }
+}
+
+/// Full brief-described flow (RI-11 Part 4):
+///   boot #1 → write data → obtain a resumption ticket → shutdown →
+///   `backup::backup` → boot #2 → write MORE data → shutdown →
+///   `restore::restore` (pointing at the boot #1 snapshot) → boot #3 →
+///   assert the boot #2 writes are GONE (rolled back to the snapshot) →
+///   assert the OLD ticket (from boot #1) is now REJECTED → assert a
+///   `.pre_restore_backup_*` sibling directory exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restore_cli_rolls_back_data_and_invalidates_tickets() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let password: &[u8] = b"correct horse battery staple RI-11";
+
+    let data_temp = TempDir::new().unwrap();
+    let data_dir = data_temp.path().to_path_buf();
+
+    // ---- Boot #1: create table, write ONE row, capture a resumption ticket ----
+    let (port, old_ticket) = {
+        let handle = launch(data_dir.clone(), 0, password).await;
+        let addr = handle.first_tls_exporter_addr().unwrap();
+        let port = addr.port();
+
+        let (mut r, mut w, sid, ticket) = login_capture_ticket(addr, password).await;
+
+        let res = roundtrip(&create_table_req("ri11_items"), sid, 1, &mut w, &mut r).await;
+        assert!(matches!(res, DbResponse::Batch { .. }), "create_table");
+        let res = roundtrip(&write_req("ri11_items", "PRE", 1), sid, 2, &mut w, &mut r).await;
+        assert!(matches!(res, DbResponse::Batch { .. }), "pre-backup write");
+
+        let _ = w.shutdown().await;
+        let mut tmp = [0u8; 1];
+        let _ = r.read(&mut tmp).await;
+        handle.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (port, ticket)
+    };
+
+    // ---- Backup: snapshot the state as of boot #1 ----
+    let backup_dest = TempDir::new().unwrap();
+    let report = backup::backup(&data_dir, backup_dest.path()).expect("backup ok");
+    assert!(
+        report.files_copied > 0,
+        "backup must copy at least one file"
+    );
+    assert!(
+        report.manifest_path.exists(),
+        "backup must write manifest.json"
+    );
+
+    // ---- Boot #2: write MORE data so post-backup state differs from the snapshot ----
+    {
+        let handle = launch(data_dir.clone(), port, password).await;
+        let addr = handle.first_tls_exporter_addr().unwrap();
+        let (mut r, mut w, sid) = login(addr, password).await;
+
+        let res = roundtrip(&write_req("ri11_items", "POST", 2), sid, 1, &mut w, &mut r).await;
+        assert!(matches!(res, DbResponse::Batch { .. }), "post-backup write");
+
+        let _ = w.shutdown().await;
+        let mut tmp = [0u8; 1];
+        let _ = r.read(&mut tmp).await;
+        handle.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // ---- Restore: point at the boot #1 snapshot, via the real restore()
+    // entry point (not a hand-rolled copy) ----
+    let parent = data_dir.parent().unwrap().to_path_buf();
+
+    let restore_report =
+        restore::restore(&report.dest_dir, &data_dir, false).expect("restore succeeds");
+    assert!(restore_report.files_restored > 0);
+    assert_eq!(
+        restore_report.users_invalidated, 1,
+        "the single admin account's tickets must be invalidated"
+    );
+    let pre_restore_backup = restore_report
+        .pre_restore_backup
+        .clone()
+        .expect("a pre-existing data_dir must be preserved as a sibling");
+    assert!(
+        pre_restore_backup.exists(),
+        ".pre_restore_backup_* sibling must exist on disk"
+    );
+
+    // Independently confirm the sibling matches the expected naming
+    // convention (`.pre_restore_backup_<timestamp>`) by scanning the
+    // parent directory — not just trusting the report's own field.
+    let found_pre_restore_sibling = std::fs::read_dir(&parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .contains(".pre_restore_backup_")
+        });
+    assert!(
+        found_pre_restore_sibling,
+        "a .pre_restore_backup_* sibling directory must be discoverable under {}",
+        parent.display()
+    );
+
+    // ---- Boot #3: against the now-restored data_dir ----
+    let handle = launch(data_dir.clone(), port, password).await;
+    let addr = handle.first_tls_exporter_addr().unwrap();
+    assert_eq!(addr.port(), port, "third boot reuses same port");
+
+    let (mut r, mut w, sid) = login(addr, password).await;
+    let res = roundtrip(&read_req("ri11_items"), sid, 1, &mut w, &mut r).await;
+    match res {
+        DbResponse::Batch { response } => {
+            let rd = response
+                .results
+                .get("rd")
+                .expect("rd alias must exist after restore");
+            assert_eq!(
+                rd.records.len(),
+                1,
+                "only the PRE-backup row must survive restore — the POST-backup \
+                 write must be rolled back"
+            );
+            assert_eq!(rd.records[0].get_value_str("sku"), Some("PRE"));
+            assert_eq!(rd.records[0].get_value_i64("qty"), Some(1));
+        }
+        DbResponse::Error { code, message } => {
+            panic!("expected restored data, got error {{ code: {code:?}, message: {message:?} }}");
+        }
+        other => panic!("expected Batch, got {:?}", other),
+    }
+
+    // ---- The OLD ticket (captured before backup / before restore) must
+    // now be REJECTED — invalidate_all_tickets ran during restore. ----
+    let resumed = attempt_resume(addr, old_ticket).await;
+    assert!(
+        !resumed,
+        "a resumption ticket issued before the restore point must be rejected \
+         after restore invalidates all tickets"
+    );
 
     let _ = w.shutdown().await;
     let mut tmp = [0u8; 1];

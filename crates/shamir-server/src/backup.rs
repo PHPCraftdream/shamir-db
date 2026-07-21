@@ -6,7 +6,9 @@
 //! directory tree of journal and LSM segment files — plus wire-table
 //! registries, audit log, rotated audit files, and TLS PEMs). The
 //! destination is `<dest>/<timestamp>/` so a single `--to` can collect
-//! daily snapshots.
+//! daily snapshots. A `manifest.json` (file list + sha256 + size per file)
+//! is written into the snapshot last, so `restore` (`restore.rs`) has
+//! something durable to verify a snapshot against before trusting it.
 //!
 //! Why stop-and-copy instead of an online backup: fjall exposes no live /
 //! online backup API on `Database` (its public surface is `insert`/`get`/
@@ -33,7 +35,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use shamir_collections::new_fx_set_wc;
+use shamir_connect::common::crypto::sha256;
+
+/// Name of the manifest file written into every snapshot directory.
+pub const MANIFEST_FILE_NAME: &str = "manifest.json";
 
 #[derive(Debug, Error)]
 pub enum BackupError {
@@ -43,6 +52,30 @@ pub enum BackupError {
     SourceMissing(PathBuf),
     #[error("source is not a directory: {0}")]
     SourceNotDir(PathBuf),
+    /// `verify_manifest`: `manifest.json` is absent from the snapshot dir.
+    #[error("manifest missing: {0}")]
+    ManifestMissing(PathBuf),
+    /// `verify_manifest`: `manifest.json` exists but failed to parse.
+    #[error("manifest invalid: {0}")]
+    ManifestInvalid(String),
+    /// `verify_manifest`: a file's actual sha256/size does not match what
+    /// the manifest recorded — the snapshot must never be trusted/restored.
+    #[error(
+        "checksum mismatch for {path}: manifest says sha256={expected_sha256} \
+         size={expected_size_bytes}, actual sha256={actual_sha256} size={actual_size_bytes}"
+    )]
+    ChecksumMismatch {
+        path: PathBuf,
+        expected_sha256: String,
+        expected_size_bytes: u64,
+        actual_sha256: String,
+        actual_size_bytes: u64,
+    },
+    /// `verify_manifest`: a file is physically present under the snapshot
+    /// directory but is not listed in the manifest — could indicate a
+    /// tampered or hand-modified snapshot.
+    #[error("file present on disk but not listed in manifest: {0}")]
+    UnmanifestedFile(PathBuf),
 }
 
 /// Outcome of a successful backup.
@@ -54,6 +87,41 @@ pub struct BackupReport {
     pub bytes_copied: u64,
     /// Number of files copied.
     pub files_copied: u64,
+    /// Path to the `manifest.json` written into `dest_dir`.
+    pub manifest_path: PathBuf,
+}
+
+/// One entry in `manifest.json`'s `files` array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestFileEntry {
+    /// Path relative to the snapshot directory, forward-slash separated
+    /// (normalized even on Windows so a manifest written on one platform
+    /// verifies correctly on another).
+    pub path: String,
+    /// Lowercase hex-encoded SHA-256 of the file's full contents.
+    pub sha256: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+}
+
+/// On-disk shape of `manifest.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub format_version: u32,
+    pub created_at_unix_ns: u128,
+    pub files: Vec<ManifestFileEntry>,
+}
+
+/// Current manifest format version.
+pub const MANIFEST_FORMAT_VERSION: u32 = 1;
+
+/// Outcome of a successful [`verify_manifest`] call.
+#[derive(Debug)]
+pub struct ManifestVerifyReport {
+    /// Number of files checked (equals `manifest.files.len()`).
+    pub files_checked: u64,
+    /// Sum of `size_bytes` across every checked file.
+    pub total_bytes: u64,
 }
 
 /// Recursively copy `from` → `to/<timestamp>/`. The timestamp is
@@ -62,6 +130,13 @@ pub struct BackupReport {
 /// `to` is created if missing. The timestamped subdirectory MUST NOT
 /// already exist (we refuse to overwrite — operator should pick a new
 /// `--to`).
+///
+/// After the recursive copy completes, a `manifest.json` (see [`Manifest`])
+/// is written into `dest_dir`, hashing every JUST-COPIED file with SHA-256.
+/// This is an extra full read of every backed-up file — an acceptable,
+/// honest cost for a correctness-critical manifest. `manifest.json` itself
+/// is not included in its own `files` list (it is written after the list is
+/// computed).
 pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     if !from.exists() {
         return Err(BackupError::SourceMissing(from.to_path_buf()));
@@ -84,11 +159,165 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     let mut files = 0u64;
     copy_dir_recursive(from, &dest_dir, &mut bytes, &mut files)?;
 
+    let manifest_path = write_manifest(&dest_dir)?;
+
     Ok(BackupReport {
         dest_dir,
         bytes_copied: bytes,
         files_copied: files,
+        manifest_path,
     })
+}
+
+/// Walk `dest_dir` (a just-written snapshot), hash every file, and write
+/// `dest_dir/manifest.json`. Returns the manifest's path.
+fn write_manifest(dest_dir: &Path) -> Result<PathBuf, BackupError> {
+    let mut entries = Vec::new();
+    collect_manifest_entries(dest_dir, dest_dir, &mut entries)?;
+
+    let manifest = Manifest {
+        format_version: MANIFEST_FORMAT_VERSION,
+        created_at_unix_ns: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        files: entries,
+    };
+
+    let manifest_path = dest_dir.join(MANIFEST_FILE_NAME);
+    let json = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| BackupError::ManifestInvalid(format!("encode: {e}")))?;
+    fs::write(&manifest_path, json)?;
+    Ok(manifest_path)
+}
+
+/// Recursively walk `dir` (rooted at `root`), hashing every regular file and
+/// pushing a [`ManifestFileEntry`] with a `root`-relative, forward-slash
+/// path. Skips `manifest.json` itself at the root (it does not exist yet at
+/// call time, but the check is defensive against a future caller re-running
+/// this over an already-manifested directory).
+fn collect_manifest_entries(
+    root: &Path,
+    dir: &Path,
+    entries: &mut Vec<ManifestFileEntry>,
+) -> Result<(), BackupError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            collect_manifest_entries(root, &path, entries)?;
+        } else if ft.is_file() {
+            let rel = relative_slash_path(root, &path);
+            if rel == MANIFEST_FILE_NAME {
+                continue;
+            }
+            let contents = fs::read(&path)?;
+            let size_bytes = contents.len() as u64;
+            let digest = sha256(&contents);
+            entries.push(ManifestFileEntry {
+                path: rel,
+                sha256: hex::encode(digest),
+                size_bytes,
+            });
+        }
+        // Symlinks / sockets / fifos: `copy_dir_recursive` already skipped
+        // these with a warning; nothing to hash here either.
+    }
+    Ok(())
+}
+
+/// `path` relative to `root`, forward-slash separated regardless of
+/// platform (so a manifest written on Windows verifies correctly on Linux
+/// and vice versa).
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Read `snapshot_dir/manifest.json`, re-hash every listed file, and
+/// confirm no extra unmanifested file is physically present. A checksum /
+/// size mismatch, a missing manifest, an unparseable manifest, or an extra
+/// unmanifested file are all hard errors — a corrupted or tampered snapshot
+/// must never be silently accepted.
+pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, BackupError> {
+    let manifest_path = snapshot_dir.join(MANIFEST_FILE_NAME);
+    if !manifest_path.exists() {
+        return Err(BackupError::ManifestMissing(manifest_path));
+    }
+    let raw = fs::read(&manifest_path)?;
+    let manifest: Manifest = serde_json::from_slice(&raw).map_err(|e| {
+        BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
+    })?;
+
+    let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(manifest.files.len());
+
+    let mut total_bytes = 0u64;
+    for entry in &manifest.files {
+        let file_path = snapshot_dir.join(&entry.path);
+        let contents = fs::read(&file_path).map_err(|e| {
+            BackupError::Io(std::io::Error::new(
+                e.kind(),
+                format!("manifest entry {}: {e}", entry.path),
+            ))
+        })?;
+        let actual_size = contents.len() as u64;
+        let actual_sha256 = hex::encode(sha256(&contents));
+
+        if actual_size != entry.size_bytes || actual_sha256 != entry.sha256 {
+            return Err(BackupError::ChecksumMismatch {
+                path: file_path,
+                expected_sha256: entry.sha256.clone(),
+                expected_size_bytes: entry.size_bytes,
+                actual_sha256,
+                actual_size_bytes: actual_size,
+            });
+        }
+        total_bytes += actual_size;
+        accounted.insert(entry.path.clone());
+    }
+
+    // Every file physically present under snapshot_dir (except the
+    // manifest itself) must be accounted for in the manifest.
+    let mut on_disk = Vec::new();
+    collect_relative_file_paths(snapshot_dir, snapshot_dir, &mut on_disk)?;
+    for rel in on_disk {
+        if rel == MANIFEST_FILE_NAME {
+            continue;
+        }
+        if !accounted.contains(&rel) {
+            return Err(BackupError::UnmanifestedFile(snapshot_dir.join(&rel)));
+        }
+    }
+
+    Ok(ManifestVerifyReport {
+        files_checked: manifest.files.len() as u64,
+        total_bytes,
+    })
+}
+
+/// Recursively collect every regular file under `dir` (rooted at `root`) as
+/// a `root`-relative, forward-slash path. Used by [`verify_manifest`] to
+/// detect extra unmanifested files.
+fn collect_relative_file_paths(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<String>,
+) -> Result<(), BackupError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            collect_relative_file_paths(root, &path, out)?;
+        } else if ft.is_file() {
+            out.push(relative_slash_path(root, &path));
+        }
+    }
+    Ok(())
 }
 
 /// `YYYYMMDD_HHMMSS` UTC. Pure-Rust without `chrono` to keep deps light.
@@ -125,7 +354,9 @@ fn unix_to_ymd_hms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     (y, mo, d, h, mi, se)
 }
 
-fn copy_dir_recursive(
+/// `pub(crate)` — reused by `restore.rs` to copy a snapshot into a
+/// temporary sibling directory before the atomic swap into `data_dir`.
+pub(crate) fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
     bytes: &mut u64,
