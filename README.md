@@ -17,6 +17,31 @@ A modern, modular embedded database and server written in Rust, with pluggable s
 
 The repository is currently source-first: it provides a Cargo workspace, a server binary, Rust client crates, a TypeScript client, protocol specifications, and development documentation. Published binaries and stable release guarantees are not available yet.
 
+## 🧭 What S.H.A.M.I.R. is (and isn't)
+
+S.H.A.M.I.R. is a self-contained Rust database for greenfield embedded and self-hosted applications. It combines transactional document storage, secure networking, WASM logic, full-text and vector search in one deployable system.
+
+It is **not** a drop-in replacement for PostgreSQL, MySQL, MongoDB, Redis, or Memcached. In a small greenfield project it can reasonably replace the combination of "SQLite (or a small document DB) + a simple cache + a search service" — it is not a general-purpose OLTP/cache/search stack replacement for an existing production system built on any of those.
+
+| System | Overlap with S.H.A.M.I.R. | Verdict |
+|---|---|---|
+| SQLite | Embeddable, single-process-friendly, transactional | Partial overlap — S.H.A.M.I.R. adds networked multi-client access, WASM logic, and built-in vector/full-text search that SQLite doesn't have out of the box |
+| MongoDB | Document data model, flexible schema | Partial overlap — no sharding/clustering, no aggregation-pipeline parity, alpha-stage query surface |
+| PostgreSQL / MySQL | Mature relational engines, decades of ecosystem/tooling, mature query optimizers | **Not a replacement** — no SQL, no comparable optimizer maturity, alpha-only guarantees |
+| Redis / Memcached | In-memory cache semantics, sub-millisecond hot-path latency | **Not a replacement** — S.H.A.M.I.R. is disk-durable transactional storage, not a cache |
+
+**Alpha status.** See the [Project Status](#-project-status) section below and the [versioning/compatibility statement in CHANGELOG.md](CHANGELOG.md#versioning-scheme) — there is no supported in-place upgrade path between alpha releases yet.
+
+---
+
+*Русский эквивалент:*
+
+S.H.A.M.I.R. — самодостаточная база данных на Rust для greenfield embedded и self-hosted приложений. Она объединяет транзакционное документное хранилище, защищённую сеть, WASM-логику, полнотекстовый и векторный поиск в одной разворачиваемой системе.
+
+Это **не** drop-in замена PostgreSQL, MySQL, MongoDB, Redis или Memcached. В небольшом greenfield-проекте она может обоснованно заменить связку «SQLite (или небольшая document DB) + простой cache + search-сервис» — но не универсальный OLTP/cache/search-стек для уже существующей продакшн-системы на любой из перечисленных СУБД.
+
+**Alpha-статус.** См. секцию [Project Status](#-project-status) ниже и [заявление о совместимости версий в CHANGELOG.md](CHANGELOG.md#versioning-scheme) — гарантированного пути обновления между alpha-версиями пока нет.
+
 ## 🎯 Project Status
 
 **Version:** 0.1.0-alpha.1
