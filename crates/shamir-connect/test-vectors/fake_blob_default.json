@@ -1,0 +1,16 @@
+{
+  "name": "fake_blob — anti-enumeration HKDF triple for a fixed unknown username",
+  "spec_section": "AUTH_PROTOCOL.md §5.2.1 / §16",
+  "note": "FakeBlob::derive(server_secret, username='alice') via HKDF-SHA256(ikm=server_secret, salt='SHAMIR-FAKE-SALT-v1', info=username_nfc, L=80). The 80-byte blob splits into fake_salt(16) || fake_stored_key(32) || fake_server_key(32). The username is the SAME 'alice' used across the vector suite (post-PRECIS UsernameCaseMapped).",
+  "inputs": {
+    "server_secret_hex": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+    "username": "alice"
+  },
+  "expected": {
+    "fake_blob_hex": "dcebc172ded6bdb0203c988ac264bff386df4404ecf60bdb5c12fd4cb1944de4a1ed5201e3e4ef48fe4eba1ccd319fdab82bf05e8f6fc64d88f90b57d7f89179de535e78a4bdfe4381ad8c97f6f8ce00",
+    "fake_blob_total_bytes": 80,
+    "fake_salt_hex": "dcebc172ded6bdb0203c988ac264bff3",
+    "fake_stored_key_hex": "86df4404ecf60bdb5c12fd4cb1944de4a1ed5201e3e4ef48fe4eba1ccd319fda",
+    "fake_server_key_hex": "b82bf05e8f6fc64d88f90b57d7f89179de535e78a4bdfe4381ad8c97f6f8ce00"
+  }
+}

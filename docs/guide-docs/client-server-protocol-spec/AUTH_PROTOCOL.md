@@ -901,9 +901,36 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ## 16. Test Vectors
 
-**Release blocker для v1.** Файл `docs/guide-docs/client-server-protocol-spec/test-vectors/auth_v1.msgpack` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
+**Release blocker для v1.** Все векторы — фиксированные, byte-exact, вычисленные
+запуском РЕАЛЬНЫХ crypto-функций Rust-имплементации с фиксированными входами
+(не hand-computed). Каждая имплементация (Rust native, browser SDK) обязана
+воспроизвести pinned hex побайтово.
 
-### Example: auth_message hex dump
+### 16.1. Расположение и формат
+
+Векторы живут в `crates/shamir-connect/test-vectors/` в виде **per-vector
+JSON+TOML пар** (git-diffable, human-readable, по одному файлу на категорию):
+
+- `.json` — canonical cross-language source of truth (browser/TS SDK грузит эти
+  файлы напрямую).
+- `.toml` — тот же вектор; потребляется Rust-тестами через `include_str!` +
+  `toml::from_str` (см. `common/tests/test_vectors_tests.rs`).
+
+> Исторически §16 требовала единый `test-vectors/auth_v1.msgpack`. Такой файл
+> в репозитории **никогда не существовал**; per-vector JSON+TOML пары — реально
+> установленная, работающая конвенция (см. `README.md` в той же папке).
+> Msgpack использовался бы только как *derived* экспорт из JSON, если потребуется
+> — но не как отдельный source of truth. Схема каждого файла:
+> `{ "name", "spec_section", "inputs": {...}, "expected": {...} }`.
+
+Все векторы разделяют **один когерентный фиксированный сценарий**:
+`username="alice"`, фиксированные nonces/salt, `KdfParams::DEFAULT`
+(memory_kb=131072, time=4, parallelism=1, argon2_version=0x13),
+transport_kind=tcp, binding_mode=tls_exporter, фиксированный tls_exporter — те же
+входы, что в inline-примере ниже. Векторы цепочку образуют end-to-end:
+auth_message → Argon2id → SCRAM proofs → identity_sig.
+
+### 16.2. Inline example: auth_message hex dump
 
 ```
 Inputs:
@@ -937,15 +964,25 @@ auth_message bytes:
 Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 149 bytes
 ```
 
-Полный test-vectors файл содержит:
-- `kdf_canonical_string` (legacy compat reference)
-- `Argon2id(password="hello world!1", salt=fixed, params=defaults)` → 32-byte output
-- `client_proof`, `server_signature`, `identity_sig` для полного flow
-- `fake_blob` через HKDF для fixed username → 80 байт hex
-- Resumption ticket: encrypt/decrypt round-trip с fixed key/nonce
-- Identity rotation `signed_by_old` для fixed inputs
+Закреплён в `auth_message_default.{json,toml}`.
 
-Каждая имплементация (Rust native, browser SDK) обязана pass всех vectors.
+### 16.3. Полный набор векторов (файлы в `crates/shamir-connect/test-vectors/`)
+
+| Файл | Категория | Что pinned |
+|---|---|---|
+| `auth_message_default.{json,toml}` | auth_message construction | 149-byte canonical auth_message (inline example выше) |
+| `kdf_canonical_string_default.{json,toml}` | kdf_canonical_string | 13-byte BE-serialization of KdfParams |
+| `argon2id_default.{json,toml}` | Argon2id | `Argon2id("hello world!1", fixed salt, DEFAULT)` → 32-byte salted_password |
+| `scram_flow_default.{json,toml}` | SCRAM chain | DerivedKeys → client_proof + server_signature над pinned auth_message |
+| `identity_sig_default.{json,toml}` | identity_sig | Ed25519 (fixed seed) → identity_input + 64-byte signature |
+| `fake_blob_default.{json,toml}` | fake_blob | HKDF(server_secret, "alice") → 80-byte blob (salt‖stored_key‖server_key) |
+| `resumption_ticket_roundtrip.{json,toml}` | resumption ticket | AES-256-GCM encrypt/decrypt над realistic TicketPlain (msgpack) |
+| `identity_rotation_signed_by_old.{json,toml}` | identity rotation | Ed25519 old→new rotation event signature (signed_by_old) |
+
+Каждый вектор проверяется Rust-тестом в `common/tests/test_vectors_tests.rs`,
+который перезапускает РЕАЛЬНУЮ функцию с фиксированными входами и assert'ит
+byte-for-byte equality против pinned `expected`. Любой drift (reorder
+domain-tag, изменение HKDF info-string, иное кодирование KdfParams) ломает тест.
 
 ---
 

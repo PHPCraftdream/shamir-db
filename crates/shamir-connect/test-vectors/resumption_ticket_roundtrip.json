@@ -1,0 +1,28 @@
+{
+  "name": "resumption_ticket — AES-256-GCM encrypt/decrypt round-trip with fixed key+nonce",
+  "spec_section": "AUTH_PROTOCOL.md §16 / SESSION_RESUMPTION.md §2.2",
+  "note": "aes256gcm_encrypt(key, nonce, plaintext=TicketPlain-as-msgpack, aad='SHAMIR-TICKET-v1'||0x02). The plaintext is a realistic TicketPlain (version=2) serialized via rmp_serde::to_vec_named, matching the real ticket wire format. AES-GCM is deterministic given fixed key+nonce+plaintext+aad, so a cross-language impl reproduces ciphertext_and_tag bit-exactly. The Rust test also asserts aes256gcm_decrypt round-trips back to plaintext.",
+  "inputs": {
+    "ticket_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "ticket_nonce_hex": "000102030405060708090a0b",
+    "plaintext_msgpack_hex": "8ba776657273696f6e02a7757365725f6964c4100102030405060708090a0b0c0d0e0f10ac757365726e616d655f6e6663a5616c696365b67472616e73706f72745f6b696e645f61745f6175746801b462696e64696e675f6d6f64655f61745f6175746801b76368616e6e656c5f62696e64696e675f61745f61757468c420aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9b07469636b65745f66616d696c795f6964c410202122232425262728292a2b2c2d2e2fb36f726967696e616c5f617574685f61745f6e73cf17979cfe362a0000ad657870697265735f61745f6e73cf17979cff0cbda400ae66616d696c795f636f756e74657201b46964656e746974795f6b65795f76657273696f6e00",
+    "aad_hex": "5348414d49522d5449434b45542d763102",
+    "ticket_plain_fields": {
+      "version": 2,
+      "user_id_hex": "0102030405060708090a0b0c0d0e0f10",
+      "username_nfc": "alice",
+      "transport_kind_at_auth": 1,
+      "binding_mode_at_auth": 1,
+      "channel_binding_at_auth_hex": "aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9",
+      "ticket_family_id_hex": "202122232425262728292a2b2c2d2e2f",
+      "original_auth_at_ns": 1700000000000000000,
+      "expires_at_ns": 1700000003600000000,
+      "family_counter": 1,
+      "identity_key_version": 0
+    }
+  },
+  "expected": {
+    "ciphertext_and_tag_hex": "cca5a07eb796ab74e34330fec28c0a32eab24324f1795c783d61e28d14630bbe0c1ea1ec03b461fd06ca1e80edd8465e8dfc01e133b5c66c4be54b776b939a9c8463ad13bdb57900680bcb1b9be70f5c5ae3a7061f0d34379092faa92791cdd2aa8d2d8ea5f6ab72ff7250d7242a4316d4030bc5849a44ee129e22b9ea224ea410fead681b677ae1bb55fd178a62f5788d485e8b8ad152884f9b2db13d1a205ee7fefd7e8c8b9318c60eb496a6dfefdf59deea03a988579943f8e8ee5bee9bde3d6339957fb4b1a05937bfb9db34adecbe1f8c29537375e6e60d64f16b488f57265ba4c69445707a3333e766c6de6bc6346cb5c8393027c376060e1ff2c321ee61bf86f5efdbfc5713ba1c73de594355b1d1b392f6eef3dc1840035104c246f2c663dacb0e5337846b3617be",
+    "ciphertext_and_tag_total_bytes": 300
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "kdf_canonical_string — big-endian serialization of KdfParams::DEFAULT",
+  "spec_section": "AUTH_PROTOCOL.md §4.1 / §16",
+  "note": "The 13-byte canonical embedding of KdfParams inside auth_message: u32_be(memory_kb) || u32_be(time) || u32_be(parallelism) || u8(argon2_version). Pinned so a cross-language impl cannot silently reorder or mis-encode these fields.",
+  "inputs": {
+    "memory_kb": 131072,
+    "time": 4,
+    "parallelism": 1,
+    "argon2_version": 19
+  },
+  "expected": {
+    "total_bytes": 13,
+    "canonical_string_hex": "00020000000000040000000113"
+  }
+}

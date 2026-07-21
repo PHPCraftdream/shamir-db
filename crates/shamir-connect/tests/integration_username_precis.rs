@@ -155,3 +155,91 @@ fn ascii_case_fold_matches_javascript_default() {
     let norm = NormalizedUsername::from_raw(raw).unwrap();
     assert_eq!(norm.as_str(), "alice");
 }
+
+// ---------------------------------------------------------------------------
+// Canonical NFC composition/decomposition edge cases (Unicode
+// NormalizationTest.txt categories). These pin the REAL output of the
+// `unicode-normalization` + PRECIS pipeline for representative composition,
+// canonical-ordering, and rejection cases — so a JS SDK using
+// `String.normalize("NFC")` can be checked against the same expected bytes.
+// ---------------------------------------------------------------------------
+
+/// Hangul precomposed syllable U+AC00 (가) is already in NFC and stays stable
+/// (NormalizationTest.txt: Hangul LVT syllables are NFC-stable).
+#[test]
+fn nfc_precomposed_hangul_is_stable() {
+    let raw = "\u{AC00}"; // 가
+    let norm = NormalizedUsername::from_raw(raw).unwrap();
+    assert_eq!(norm.as_str(), "\u{AC00}");
+}
+
+/// Conjoining Hangul jamo (L, V, T filler code points like U+1100) are NOT in
+/// the PRECIS IdentifierClass and are rejected — a JS `normalize("NFC")` would
+/// compose them to a syllable, but PRECIS forbids the raw jamo, so this is a
+/// genuine cross-pipeline divergence point that must be pinned.
+#[test]
+fn nfc_hangul_conjoining_jamo_rejected() {
+    // U+1100 (CHOSEONG KIYEOK) + U+1161 (JUNGSEONG A) + U+11A8 (JONGSEONG)
+    let raw = "\u{1100}\u{1161}\u{11A8}";
+    assert!(
+        NormalizedUsername::from_raw(raw).is_err(),
+        "conjoining Hangul jamo are rejected by PRECIS IdentifierClass"
+    );
+}
+
+/// Canonical singleton: U+212B ANGSTROM SIGN canonically decomposes to
+/// U+00C5 (Å). PRECIS rejects it (not in IdentifierClass) — pinning this
+/// rejection prevents a regression where it might silently become accepted.
+#[test]
+fn nfc_angstrom_sign_singleton_rejected() {
+    assert!(
+        NormalizedUsername::from_raw("x\u{212B}").is_err(),
+        "U+212B ANGSTROM SIGN is rejected by PRECIS (not IdentifierClass)"
+    );
+}
+
+/// Partial composition with a surviving non-starter: `n` + U+0303 (tilde) +
+/// U+0301 (acute). NFC composes n+̃ → ñ (U+00F1); the acute (U+0301) has no
+/// composition with ñ and survives. Pin the exact byte output.
+#[test]
+fn nfc_partial_composition_with_surviving_mark() {
+    let raw = "n\u{0303}\u{0301}";
+    let norm = NormalizedUsername::from_raw(raw).unwrap();
+    assert_eq!(norm.as_str(), "\u{00F1}\u{0301}"); // ñ + combining acute
+}
+
+/// Canonical ordering + composition: `a` + U+0300 (grave, CCC 230) + U+0316
+/// (grave-below, CCC 220). Canonical reordering places CCC 220 before 230;
+/// composition yields à (U+00E0) followed by the surviving U+0316. This pins
+/// the interaction of reordering and composition.
+#[test]
+fn nfc_canonical_ordering_then_composition() {
+    let raw = "a\u{0300}\u{0316}";
+    let norm = NormalizedUsername::from_raw(raw).unwrap();
+    assert_eq!(norm.as_str(), "\u{00E0}\u{0316}"); // à + combining grave below
+}
+
+/// Case-fold THEN NFC compose: Cyrillic capital I (U+0418) + combining breve
+/// (U+0306). Case-fold lowers to U+0438, then NFC composes with the breve to
+/// U+0439 (й). Pins the casefold-before-NFC ordering.
+#[test]
+fn nfc_casefold_then_compose_cyrillic() {
+    let raw = "\u{0418}\u{0306}"; // Capital И + combining breve
+    let norm = NormalizedUsername::from_raw(raw).unwrap();
+    assert_eq!(norm.as_str(), "\u{0439}"); // lowercase й
+}
+
+/// Compatibility characters are rejected by PRECIS (it uses canonical NFC,
+/// not NFKC, for the normalization step; compatibility chars like U+FB01 ﬁ and
+/// U+00B2 ² are not in IdentifierClass). Pin both rejections.
+#[test]
+fn nfc_compatibility_chars_rejected() {
+    assert!(
+        NormalizedUsername::from_raw("x\u{FB01}").is_err(),
+        "U+FB01 LATIN SMALL LIGATURE FI is rejected"
+    );
+    assert!(
+        NormalizedUsername::from_raw("x\u{00B2}").is_err(),
+        "U+00B2 SUPERSCRIPT TWO is rejected"
+    );
+}

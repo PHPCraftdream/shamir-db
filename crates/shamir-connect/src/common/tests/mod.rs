@@ -7,5 +7,6 @@ mod latency_tests;
 mod password_tests;
 mod push_envelope_tests;
 mod scram_tests;
+mod test_vectors_tests;
 mod types_tests;
 mod username_tests;

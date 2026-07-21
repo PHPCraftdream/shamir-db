@@ -1,0 +1,12 @@
+name = "kdf_canonical_string — big-endian serialization of KdfParams::DEFAULT"
+spec_section = "AUTH_PROTOCOL.md §4.1 / §16"
+
+[inputs]
+memory_kb = 131072
+time = 4
+parallelism = 1
+argon2_version = 19
+
+[expected]
+total_bytes = 13
+canonical_string_hex = "00020000000000040000000113"
