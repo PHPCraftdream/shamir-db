@@ -103,12 +103,16 @@ jobs:
   # `serial_test::#[serial]` (already a dev-dependency) rather than
   # forcing `--test-threads=1` on the whole suite.
   #
-  # NOTE: the Node.js e2e suite under `tests/e2e/` is intentionally NOT
-  # wired in here. It requires `npm install`, a release `shamir-server`
-  # build, and the MSVC-only `shamir-client-node` napi binding (excluded
-  # from the workspace) — too heavy for a per-PR gate. Run it manually per
-  # `tests/e2e/README.md`; promoting it to a scheduled/nightly workflow is
-  # a follow-up.
+  # NOTE: the Node.js napi e2e suite under `tests/e2e/` AND the TS client
+  # e2e suite (`crates/shamir-client-ts/src/__tests__/e2e-*.test.ts`) are
+  # intentionally NOT wired into this per-PR gate — both require a release
+  # `shamir-server` build (and the napi one needs the MSVC-built
+  # `shamir-client-node` binding, excluded from the workspace), too heavy
+  # for every PR. They now run on the scheduled nightly workflow
+  # `.github/workflows/ts-e2e-nightly.yml` (cron + `workflow_dispatch`).
+  # The pure-TS unit tests for `shamir-client-ts` ARE gated per-PR — see the
+  # `ts-unit` job below (the e2e-* suites self-skip there because no server
+  # binary is built in that job).
   # Matrixed across OSes — this is the suite that actually exercises sockets,
   # TLS+SCRAM, fsync-durability-across-restart, and the storage backends'
   # on-disk file locking, where OS differences bite hardest.
@@ -140,6 +144,39 @@ jobs:
       # and `kind(bench)` (never a correctness gate).
       - run: ./scripts/test.sh --full --locked -E 'kind(test)'
         shell: bash
+
+  # Pure-TypeScript unit tests for `crates/shamir-client-ts` (query
+  # builders, framing, hmac, msgpack round-trips — the
+  # `src/core/**/__tests__/*.test.ts` surface). Cheap (seconds), no Rust
+  # toolchain and no server binary needed.
+  #
+  # The TS package's `npm test` (vitest run) ALSO collects the
+  # `src/__tests__/e2e-*.test.ts` suites, but those self-skip via
+  # `describe.skipIf(!SERVER_AVAILABLE)` when no `shamir-server` release
+  # binary is resolvable (see `src/__tests__/e2e-harness.ts`'s
+  # `SERVER_AVAILABLE` / `serverBinPath()`: `SHAMIR_SERVER_BIN` →
+  # `$CARGO_TARGET_DIR/release/<exe>` → `<repo>/target/release/<exe>`).
+  # This job sets NONE of those and runs no `cargo build`, so
+  # `SERVER_AVAILABLE` is false and ONLY the pure unit tests execute — the
+  # e2e-* suites run for real in `ts-e2e-nightly.yml` instead.
+  #
+  # ubuntu-only: pure TS, no OS-specific behaviour (these tests assert wire
+  # shapes and builder output, not filesystem or socket semantics).
+  ts-unit:
+    name: ts unit (shamir-client-ts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22 = active LTS. `shamir-client-ts/package.json` declares
+          # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
+          # satisfies both. Pinned for reproducibility.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+      - run: npm ci && npm run typecheck && npm test
+        working-directory: crates/shamir-client-ts
 
   # Supply-chain cooldown gate (RFC 3923, fail-closed) — fails the PR if
   # resolving the workspace would pull a crate version younger than 30 days

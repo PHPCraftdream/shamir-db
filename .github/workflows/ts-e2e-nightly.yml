@@ -1,0 +1,139 @@
+name: ts-e2e-nightly
+
+# Nightly e2e lane for BOTH TypeScript client surfaces that drive a REAL
+# `shamir-server` subprocess — too heavy for the per-PR `ci.yml` gate, too
+# important to leave unrun. (This workflow IS the follow-up `ci.yml`'s old
+# NOTE comment used to call unaddressed.)
+#
+# Two distinct e2e surfaces, kept in ONE file because they share the
+# "build a release server, then drive it" shape and the same off-hours
+# cadence — see each job's header for why it lives here rather than in its
+# own workflow:
+#
+#  - `ts-e2e`   : the pure-TypeScript client (`crates/shamir-client-ts`,
+#                 `src/__tests__/e2e-*.test.ts`, ~25 suites). Drives a real
+#                 `shamir-server` over TCP/WS using the pure-TS client — NO
+#                 native binding involved. In per-PR `ci.yml`'s `ts-unit`
+#                 job these suites self-skip (no server binary present);
+#                 here the binary is built first so they run for real.
+#                 ubuntu-latest — pure TS + a Rust server build, no
+#                 platform-specific binding.
+#
+#  - `node-e2e` : the Node.js NATIVE binding (`shamir-client-node`, the napi
+#                 crate excluded from the Cargo workspace) driven through
+#                 `tests/e2e/`. windows-latest — see the job header for the
+#                 MSVC reasoning (short version: the checked-in
+#                 `crates/shamir-client-node/rust-toolchain.toml` pins
+#                 `x86_64-pc-windows-msvc`, matching CLAUDE.md's "MSVC-only
+#                 on Windows — built separately"; that is the established,
+#                 toolchain-pinned build path).
+#
+# WHY NIGHTLY, NOT PER-PR: each job builds a release `shamir-server` (the
+# `node-e2e` job ALSO builds the napi `.node`), which is far too slow for a
+# per-PR gate. e2e correctness is also lower-frequency than unit tests — a
+# nightly cadence catches regressions without blocking every PR. Off-hours
+# scheduling avoids contending with the per-PR CI runner pool (same
+# convention as `stress-nightly.yml`).
+
+on:
+  schedule:
+    # 05:47 UTC nightly — off the top/bottom of the hour to ease load on the
+    # shared GitHub Actions runner pool. Distinct from `stress-nightly.yml`'s
+    # `23 4 * * *` (04:23 UTC) and `supply-chain.yml`'s Sunday `17 3 * * 0`
+    # (03:17 UTC), so the three scheduled lanes don't land on top of each
+    # other. Nightly (not weekly) because these are correctness suites — a
+    # regression introduced any day should surface within ~24h.
+    - cron: "47 5 * * *"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── TS client e2e (pure TypeScript, no native binding) ────────────────────
+  ts-e2e:
+    name: ts client e2e (shamir-client-ts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
+      # back to at `<repo>/target/release/shamir-server`. No workflow in this
+      # repo sets `CARGO_TARGET_DIR` (grep-confirmed), so the default
+      # `target/` dir is used and the harness's fallback path resolves the
+      # binary with no `SHAMIR_SERVER_BIN` override needed. `--locked` matches
+      # ci.yml's test/integration pinning discipline (no silent lockfile
+      # drift); a no-op when Cargo.lock is current.
+      - name: Build shamir-server (release)
+        run: cargo build --release --locked -p shamir-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+      # `SERVER_AVAILABLE` is now true (the binary exists at
+      # target/release/shamir-server), so the full `e2e-*.test.ts` suite
+      # executes instead of self-skipping. `npm test` = `vitest run`; a
+      # non-zero exit (any failed test) fails the job.
+      - name: TS client e2e (vitest)
+        run: npm ci && npm test
+        working-directory: crates/shamir-client-ts
+
+  # ── Node napi e2e (native binding, tests/e2e/) ────────────────────────────
+  #
+  # WHY WINDOWS, NOT UBUNTU: napi-rs IS cross-platform in principle
+  # (`shamir-client-node/package.json`'s `napi.targets` lists linux + macos +
+  # windows triples, so the binding is DESIGNED to build everywhere). But the
+  # established, TOOLCHAIN-PINNED build path in THIS repo is Windows/MSVC:
+  #
+  #  - `crates/shamir-client-node/rust-toolchain.toml` pins
+  #    `targets = ["x86_64-pc-windows-msvc"]` with a comment that napi-rs on
+  #    Windows requires MSVC linkage (delay-load against `node.exe`). On an
+  #    ubuntu runner this file would make rustup cross-download the unused
+  #    windows-msvc rust-std and the linux napi build would be untested here.
+  #  - `CLAUDE.md` Workspace section: "napi-rs binding, MSVC-only on Windows
+  #    — built separately".
+  #  - The shipped prebuilt artifact in the crate is
+  #    `shamir-client.win32-x64-msvc.node`.
+  #  - `tests/e2e/README.md`'s steps assume the Windows/MSVC dev environment.
+  #
+  # The "MSVC-only on Windows" note is a Windows-BUILD-path constraint (when
+  # on Windows, use msvc not gnu), not a "Windows-only ever" statement — but
+  # until a linux napi build is explicitly validated, windows-latest is the
+  # conservative choice that matches the repo's checked-in toolchain pin and
+  # runs the suite exactly as the repo's dev docs describe. windows-latest
+  # runners ship MSVC + the .NET framework napi-rs shells out to, so `napi
+  # build --platform --release` works with no extra setup. (If a future
+  # decision validates the linux napi path, this job can move to ubuntu —
+  # the cross-platform target list in package.json is the evidence it would
+  # work; that's a separate follow-up.)
+  #
+  # Follows `tests/e2e/README.md`'s documented steps exactly: `npm install`
+  # → `npm run build` → `npm test`. `shell: bash` (Git Bash on the windows
+  # runner) for parity with ci.yml's test steps and to avoid PowerShell
+  # `&&`/path quirks.
+  node-e2e:
+    name: node napi e2e (tests/e2e)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      # `npm run build` = build:server (`cargo build --release -p
+      # shamir-server`, producing target/release/shamir-server.exe) +
+      # build:binding (`cd shamir-client-node && npm install && napi build
+      # --platform --release`, producing the .node binding), per
+      # tests/e2e/package.json. `npm test` then runs `node e2e.test.js`,
+      # which spawns the server and drives the native binding through the
+      # full TLS+SCRAM+Batch flow. A non-zero exit fails the job.
+      - name: Build server + napi binding, run node e2e
+        run: npm install && npm run build && npm test
+        working-directory: tests/e2e
+        shell: bash
