@@ -5,12 +5,16 @@ use futures::StreamExt;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
+use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::record_cow::RecordCow;
 use super::table::Table;
 use super::table_manager::TableManager;
+use super::tx_scan_overlay::{
+    merge_filtered_stream_with_tx_overlay, merge_stream_with_tx_overlay, overlay_rows_for_tx,
+};
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
@@ -156,23 +160,30 @@ impl TableManager {
     /// contract is preserved (a consumer that stops early only records the
     /// keys it actually pulled).
     ///
-    /// Streaming-scan SSI scope: this records the keys the scan *yields*. It
-    /// does NOT install predicate / range locks, so phantom inserts into the
+    /// Streaming-scan SSI scope: this records the keys the scan *yields* (of
+    /// the RAW committed stream, before the overlay merge below). It does
+    /// NOT install predicate / range locks, so phantom inserts into the
     /// scanned range by a concurrent tx are not detected — full SSI predicate
     /// locking over a stream is a known harder problem and out of scope here.
     /// Point reads ([`read_one_tx`]) and materialised scan reads are covered.
     ///
-    /// KNOWN LIMITATION — no read-your-own-writes for scans. Streaming scans
-    /// do NOT overlay the tx's own `write_set`: a record this tx staged
-    /// (inserted/updated/deleted but not yet committed) is **invisible** to an
-    /// in-tx stream — a staged insert is absent, a staged delete still appears,
-    /// a staged update yields the committed value. Only point reads
-    /// ([`read_one_tx`]) overlay staging (read-your-own-writes). A staged
-    /// change becomes visible to a scan only after commit. Full streaming RYOW
-    /// (inject staged inserts, drop staged deletes, override staged updates,
-    /// all while preserving the lazy-yield + SSI recording contract) is a
-    /// follow-up. The `list_stream_tx_does_not_see_staged_insert` test pins
-    /// this current behaviour so the limitation cannot regress silently.
+    /// FG-3: read-your-own-writes for scans. Streaming scans overlay the
+    /// tx's own `write_set` on top of the committed-store stream: a record
+    /// this tx staged (inserted/updated/deleted but not yet committed) IS
+    /// visible to an in-tx stream — a staged insert is injected in sorted
+    /// position, a staged delete is hidden, a staged update yields the
+    /// STAGED (new) bytes instead of the committed (old) ones. This mirrors
+    /// point reads ([`read_one_tx`]), which already did RYOW. The overlay
+    /// merge (`merge_stream_with_tx_overlay`, `tx_scan_overlay.rs`) runs
+    /// AFTER `record_scan_reads` below — SSI read-set recording is a
+    /// separate, unchanged concern over the raw committed stream; the
+    /// overlay merge is a downstream transform of what
+    /// `record_scan_reads` already yielded. A tx that never wrote this
+    /// table pays nothing (`overlay_rows_for_tx` returns empty, and the
+    /// merge is then a zero-cost pass-through). ONLY the tx that staged a
+    /// write sees it — a different, concurrent tx's stream is untouched
+    /// (isolation is preserved: `tx.write_set` is per-`TxContext`, never
+    /// shared).
     pub fn list_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -191,7 +202,11 @@ impl TableManager {
         let inner = self.list_stream(batch_size);
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
-        Self::record_scan_reads(inner, tx, token, mvcc)
+        let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
+        // FG-3: overlay this tx's own staged writes on top of the recorded
+        // committed stream (unfiltered — no Filter/FilterContext here).
+        let overlay = overlay_rows_for_tx(tx, token);
+        merge_stream_with_tx_overlay(recorded, overlay, batch_size)
     }
 
     /// tx-aware streaming variant of [`filter_stream`].
@@ -199,8 +214,12 @@ impl TableManager {
     /// Same materialised-read SSI recording as [`list_stream_tx`]: each
     /// record that survives the filter and is yielded gets recorded into the
     /// read-set (Serializable only). Same streaming-scan SSI scope note, and
-    /// the same KNOWN LIMITATION: scans do NOT overlay the tx `write_set`
-    /// (no read-your-own-writes for scans — see [`list_stream_tx`]).
+    /// the same FG-3 read-your-own-writes behaviour as [`list_stream_tx`] —
+    /// but here overlay-sourced rows (staged inserts / staged-overridden
+    /// updates) are re-evaluated against `filter` before being yielded (the
+    /// FILTERED overlay variant), so an injected/overridden staged row that
+    /// does not actually match `filter` is excluded rather than blindly
+    /// included.
     pub async fn filter_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -234,7 +253,34 @@ impl TableManager {
         let inner = self.filter_stream(batch_size, filter, ctx).await?;
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
-        Ok(Self::record_scan_reads(inner, tx, token, mvcc))
+        let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
+        // FG-3: overlay this tx's own staged writes, filtered variant —
+        // overlay-sourced rows are re-evaluated against `filter` (a staged
+        // UPDATE's new bytes may match/not-match differently than the old
+        // committed value did; a staged INSERT was never filtered before).
+        let overlay = overlay_rows_for_tx(tx, token);
+        if overlay.is_empty() {
+            // Zero-cost pass-through — no compile_filter call needed.
+            return Ok(Box::pin(recorded)
+                as std::pin::Pin<
+                    Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,
+                >);
+        }
+        let interner = self.interner().get().await?;
+        let callback = compile_filter(filter, interner);
+        let keep = move |_id: &RecordId, bytes: &Bytes| match RecordView::new(bytes) {
+            Ok(view) => callback.matches(&view, ctx),
+            Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                Ok(tree) => callback.matches(&tree, ctx),
+                Err(_) => false, // malformed → exclude
+            },
+        };
+        Ok(Box::pin(merge_filtered_stream_with_tx_overlay(
+            recorded, overlay, batch_size, keep,
+        ))
+            as std::pin::Pin<
+                Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,
+            >)
     }
 
     /// Wrap a record stream so that, for a Serializable tx, each yielded

@@ -286,3 +286,84 @@ async fn validator_db_no_deadlock_cross_and_self_read() {
     // Clean up.
     resolver.repo.commit_tx(child_tx).await.unwrap();
 }
+
+/// FG-3: cross-table FK read-your-own-writes. Insert BOTH the parent row
+/// AND the referencing child row in the SAME transaction (parent not yet
+/// committed when the child's FK validator fires). Before the FG-3 fix,
+/// `ValidatorDb::exists_in`/`exists_in_table` read only the committed store
+/// (`target.list_stream` + the committed index) — a same-tx staged parent
+/// insert was invisible to it, and the child insert would wrongly reject
+/// with an `fk_violation`. After the fix, `exists_in_table` also probes
+/// `tx.write_set` for the resolved TARGET table (here, `parent`), so the
+/// staged-but-uncommitted parent row is found and the FK check passes.
+#[tokio::test]
+async fn validator_db_fk_sees_staged_parent_in_same_tx() {
+    let (resolver, child) = setup().await;
+
+    let (mut tx, _guard) = resolver
+        .repo
+        .begin_tx(IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    tx.set_implicit(true);
+
+    // Stage the parent row — NOT committed yet.
+    let mut parent_row = new_map();
+    parent_row.insert("ref_id".to_string(), QueryValue::Int(7));
+    parent_row.insert("name".to_string(), QueryValue::Str("beta".into()));
+    let parent_op = crate::query::write::InsertOp {
+        insert_into: TableRef::new("parent"),
+        values: vec![QueryValue::Map(parent_row)],
+        records_idmsgpack: Vec::new(),
+        select: None,
+    };
+    let parent = resolver.resolve(&TableRef::new("parent")).await.unwrap();
+    parent
+        .execute_insert_tx(
+            &parent_op,
+            &mut tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        )
+        .await
+        .unwrap();
+
+    // Stage the child row referencing the just-staged (uncommitted) parent,
+    // in the SAME tx. The `DbReadingValidator` bound to `child` calls
+    // `db.exists_in(parent, "ref_id", 7)` — this must see the staged parent
+    // row and accept the write, since `unwrap_or(false)` in the validator
+    // would otherwise mask a real FK read failure as silent success. To
+    // prove the fix precisely (not just "insert succeeded"), assert
+    // `exists_in` directly via a fresh `ValidatorDb` built on the SAME tx.
+    let vdb = crate::validator::ValidatorDb::new(&tx, &child, Some(&resolver));
+    let found = vdb
+        .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(7))
+        .await
+        .unwrap();
+    assert!(
+        found,
+        "FK cross-table check must see this tx's OWN staged (uncommitted) parent row"
+    );
+
+    // A DIFFERENT, concurrent tx must NOT see the staged parent — isolation
+    // must hold for the cross-table staged-probe exactly as it does for the
+    // self-table one.
+    let other_tx = shamir_tx::TxContext::new(
+        shamir_tx::TxId::new(999),
+        0,
+        tx.snapshot_version,
+        IsolationLevel::Snapshot,
+    );
+    let vdb_other = crate::validator::ValidatorDb::new(&other_tx, &child, Some(&resolver));
+    let found_other = vdb_other
+        .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(7))
+        .await
+        .unwrap();
+    assert!(
+        !found_other,
+        "a DIFFERENT, concurrent tx must NOT see tx A's staged-but-uncommitted parent row"
+    );
+
+    resolver.repo.commit_tx(tx).await.unwrap();
+}

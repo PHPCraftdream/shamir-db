@@ -187,6 +187,12 @@ impl<'a> ValidatorDb<'a> {
     /// 2. If an index covers `field`, use `lookup_by_index` (O(log n)) and
     ///    confirm the posting set is non-empty.
     /// 3. Otherwise, scan via `list_stream` and match by field name.
+    /// 4. FG-3: additionally probe THIS tx's own `write_set` entry for the
+    ///    resolved target table (a staged insert into the parent table,
+    ///    earlier in the SAME tx, not yet committed — e.g. insert-parent then
+    ///    insert-child-referencing-it in one batch). Mirrors
+    ///    `exists_in_self`'s staged-probe step, generalised to a table other
+    ///    than `self_table`.
     ///
     /// All reads are on `tx.snapshot_version` — **no write locks acquired**,
     /// **no commit pipeline re-entry**, **no `DbGateway` (autocommit)**.
@@ -229,13 +235,20 @@ impl<'a> ValidatorDb<'a> {
                     if !ids.is_empty() {
                         return Ok(true);
                     }
-                    // Index says no match → done (index is authoritative).
-                    return Ok(false);
+                    // Index says no match — authoritative for the COMMITTED
+                    // store, so skip the full-scan fallback below entirely
+                    // (it would re-scan the same store the index already
+                    // covers and can only agree). The index alone cannot
+                    // rule out a same-tx FK match though: a staged insert
+                    // into the target table (this tx, not yet committed) is
+                    // never in the index (indexing happens at commit), so go
+                    // straight to the staged-overlay probe.
+                    return Ok(self.staged_field_matches(target.table_token(), &field_id, value));
                 }
             }
         }
 
-        // Fallback: full scan with field match.
+        // Fallback: full scan with field match (committed store only).
         let batch_size = 1000;
         let stream = target.list_stream(batch_size);
         futures::pin_mut!(stream);
@@ -258,7 +271,40 @@ impl<'a> ValidatorDb<'a> {
                 }
             }
         }
+
+        // FG-3: read-your-own-writes for cross-table FK checks — probe this
+        // tx's own staged writes to the TARGET table (a parent row inserted
+        // earlier in the SAME tx, not yet committed, never reachable via the
+        // index or the committed-store scan above). Resolved through the
+        // TARGET table's token, not `self_table`'s — this is the key
+        // difference from `exists_in_self`'s self-table staged probe.
+        if let Some(field_id) = interner.get_ind(field) {
+            if self.staged_field_matches(target.table_token(), &field_id, value) {
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    /// FG-3 helper: does this tx's own staged (uncommitted) write_set for
+    /// `target_token` contain a row where `field_id == value`? Shared by
+    /// both `exists_in_table` exit paths (index-conclusive and full-scan
+    /// fallback) so the staged-overlay probe isn't duplicated.
+    fn staged_field_matches(
+        &self,
+        target_token: u64,
+        field_id: &shamir_types::core::interner::InternerKey,
+        value: &QueryValue,
+    ) -> bool {
+        let Some(staging) = self.tx.write_set.get(&target_token) else {
+            return false;
+        };
+        staging.snapshot_ops().into_iter().any(|op| match op {
+            shamir_storage::types::KvOp::Set(_, ref bytes) => {
+                record_field_matches_by_id(bytes.as_ref(), field_id, value)
+            }
+            shamir_storage::types::KvOp::Remove(_) => false,
+        })
     }
 
     // ── Unique probe (self-table) ───────────────────────────────────────

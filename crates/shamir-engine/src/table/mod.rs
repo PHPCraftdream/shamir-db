@@ -25,6 +25,7 @@ mod table_manager_sorted_index;
 mod table_manager_streaming;
 mod table_manager_tx_ops;
 mod table_manager_validators;
+mod tx_scan_overlay;
 mod write_exec;
 pub(crate) mod write_helpers;
 

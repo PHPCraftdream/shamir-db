@@ -67,20 +67,17 @@ async fn list_stream_tx_some_matches_list_stream_forward() {
     assert_eq!(baseline.len(), 3);
 }
 
-/// KNOWN LIMITATION guard (C8): streaming scans do NOT overlay the tx's own
-/// `write_set`, so a record staged inside a tx is INVISIBLE to an in-tx
-/// stream until commit (only point reads — `read_one_tx` — do
-/// read-your-own-writes). This test stages an insert and asserts the staged
-/// record is ABSENT from `list_stream_tx(Some(&tx))`, pinning the *current*
-/// documented behaviour.
+/// FG-3: read-your-own-writes for scans. Streaming scans now overlay the
+/// tx's own `write_set` on top of the committed-store stream (mirrors
+/// `read_one_tx`'s existing RYOW). This test stages an insert and asserts
+/// the staged record IS visible in `list_stream_tx(Some(&tx))` — the
+/// stream yields `n + 1` records, and the staged id is among them.
 ///
-/// When streaming read-your-own-writes is implemented, this test must FLIP:
-/// the staged record becomes expected-present (and `list_stream_tx` should
-/// then yield `n + 1` records). The assertions below will fail at that point,
-/// forcing a deliberate update rather than letting the new behaviour ship as
-/// a silent regression.
+/// FLIPPED from `list_stream_tx_does_not_see_staged_insert` (the pre-FG-3
+/// "KNOWN LIMITATION" pin) — this is the deliberate update that test's own
+/// doc comment called for once streaming RYOW was implemented.
 #[tokio::test]
-async fn list_stream_tx_does_not_see_staged_insert() {
+async fn list_stream_tx_sees_staged_insert() {
     let (tbl, ids) = make_table_with_n_records(3).await;
     let mut tx = make_tx(123);
 
@@ -90,27 +87,134 @@ async fn list_stream_tx_does_not_see_staged_insert() {
         .await
         .unwrap();
 
-    // The streamed scan forwards to the committed data store and does NOT
-    // overlay staging, so it yields exactly the pre-staged committed set.
+    // The streamed scan now overlays this tx's own staged write, so the
+    // staged-but-uncommitted insert is visible alongside the pre-staged
+    // committed set.
     let streamed = collect_stream(tbl.list_stream_tx(Some(&tx), 2)).await;
 
     assert_eq!(
         streamed.len(),
-        ids.len(),
-        "streaming scan must yield only committed records (no read-your-own-writes)"
+        ids.len() + 1,
+        "streaming scan must overlay the tx's own staged insert (read-your-own-writes)"
     );
     assert!(
-        streamed.iter().all(|(rid, _)| *rid != staged),
-        "the staged-but-uncommitted insert must be ABSENT from the in-tx stream \
-         (current limitation: scans do not overlay tx.write_set)"
+        streamed.iter().any(|(rid, _)| *rid == staged),
+        "the staged-but-uncommitted insert must be VISIBLE in the in-tx stream"
     );
-    // Cross-check via the point-read path, which DOES overlay staging: the
-    // same record is visible there (read-your-own-writes), proving the
-    // divergence is the streaming path's limitation, not a lost write.
+    // Cross-check via the point-read path, which also does RYOW: the same
+    // record is visible there too — both paths now agree.
     assert!(
         tbl.read_one_tx(staged, Some(&tx)).await.is_ok(),
         "read_one_tx must see the tx's own staged insert (point-read RYOW holds)"
     );
+}
+
+/// Staged UPDATE visible with the STAGED (new) bytes, not the committed
+/// (old) bytes — mandatory test 2 of the FG-3 brief.
+#[tokio::test]
+async fn list_stream_tx_sees_staged_update_with_new_bytes() {
+    let (tbl, ids) = make_table_with_n_records(3).await;
+    let mut tx = make_tx(123);
+    let target = ids[0];
+
+    tbl.update_tx(
+        target,
+        &InnerValue::Str("updated-value".into()),
+        Some(&mut tx),
+    )
+    .await
+    .unwrap();
+
+    let streamed = collect_stream(tbl.list_stream_tx(Some(&tx), 2)).await;
+    assert_eq!(
+        streamed.len(),
+        ids.len(),
+        "an UPDATE does not change the row count"
+    );
+    let (_, value) = streamed
+        .iter()
+        .find(|(rid, _)| *rid == target)
+        .expect("updated row must still be present in the stream");
+    assert_eq!(
+        value,
+        &InnerValue::Str("updated-value".into()),
+        "in-tx stream must yield the STAGED (new) bytes for an updated row, not the committed (old) bytes"
+    );
+}
+
+/// Staged DELETE hidden from an in-tx stream, even though the row is still
+/// present in the committed store — mandatory test 3 of the FG-3 brief.
+#[tokio::test]
+async fn list_stream_tx_hides_staged_delete() {
+    let (tbl, ids) = make_table_with_n_records(3).await;
+    let mut tx = make_tx(123);
+    let target = ids[0];
+
+    let removed = tbl.delete_tx(target, Some(&mut tx)).await.unwrap();
+    assert!(removed, "delete_tx must report the row as removed (staged)");
+
+    let streamed = collect_stream(tbl.list_stream_tx(Some(&tx), 2)).await;
+    assert_eq!(
+        streamed.len(),
+        ids.len() - 1,
+        "a staged delete must be absent from the in-tx stream"
+    );
+    assert!(
+        streamed.iter().all(|(rid, _)| *rid != target),
+        "the staged-deleted row must be ABSENT from the in-tx stream"
+    );
+
+    // The committed store itself is untouched (no commit happened yet) —
+    // a fresh, tx-less scan still sees all 3 rows.
+    let committed = collect_stream(tbl.list_stream_tx(None, 2)).await;
+    assert_eq!(
+        committed.len(),
+        ids.len(),
+        "the committed store must be unaffected by an uncommitted staged delete"
+    );
+}
+
+/// MANDATORY isolation regression (FG-3 brief, item 9): a DIFFERENT,
+/// concurrent tx must NOT see tx A's staged-but-uncommitted overlay. Only
+/// the tx that staged a write sees it via its own stream. A bug here would
+/// leak uncommitted data across transactions.
+#[tokio::test]
+async fn list_stream_tx_isolation_other_tx_does_not_see_staged_insert() {
+    let (tbl, ids) = make_table_with_n_records(3).await;
+    let mut tx_a = make_tx(123);
+    let tx_b = TxContext::new(TxId::new(2), 0, 123, IsolationLevel::Snapshot);
+
+    // Tx A stages an insert — NOT committed.
+    let staged = tbl
+        .insert_tx(&InnerValue::Str("tx-a-only".into()), Some(&mut tx_a))
+        .await
+        .unwrap();
+
+    // Tx A's OWN stream sees its own staged write.
+    let stream_a = collect_stream(tbl.list_stream_tx(Some(&tx_a), 2)).await;
+    assert!(
+        stream_a.iter().any(|(rid, _)| *rid == staged),
+        "tx A must see its own staged insert"
+    );
+    assert_eq!(stream_a.len(), ids.len() + 1);
+
+    // Tx B — a DIFFERENT, concurrent tx that never wrote this table — must
+    // NOT see tx A's staged-but-uncommitted row.
+    let stream_b = collect_stream(tbl.list_stream_tx(Some(&tx_b), 2)).await;
+    assert_eq!(
+        stream_b.len(),
+        ids.len(),
+        "tx B must NOT see tx A's staged-but-uncommitted insert"
+    );
+    assert!(
+        stream_b.iter().all(|(rid, _)| *rid != staged),
+        "tx A's staged insert must be invisible to a different, concurrent tx B"
+    );
+
+    // A tx-less scan (representing the committed-only view) also must not
+    // see it — the write was never committed.
+    let stream_none = collect_stream(tbl.list_stream_tx(None, 2)).await;
+    assert_eq!(stream_none.len(), ids.len());
 }
 
 // ===========================================================================

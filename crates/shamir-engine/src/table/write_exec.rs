@@ -466,7 +466,19 @@ impl TableManager {
         // decode on the hot scan path. The index-via-index arm returns
         // pre-decoded InnerValue trees; serialize them once to bytes so the
         // downstream merge/change-detect/index-plan pipeline is uniform.
-        let matched: Vec<(RecordId, Bytes)> = if let Some(ref filter) = op.where_clause {
+        //
+        // FG-3 (#729 residual): the committed-store scan below (both the
+        // index-path and list_stream-fallback arms) is blind to this tx's
+        // own `write_set` — a row this SAME tx already staged (inserted, or
+        // updated to new bytes) that satisfies `filter`/`op.where_clause`
+        // would otherwise never enter `matched`. After each arm runs, we
+        // append `staged_only_matches` — the tx's staged `Set` rows not
+        // already found by the arm above, re-evaluated against the SAME
+        // filter (or unconditionally kept when there is no WHERE). Rows
+        // ALREADY in `matched` are left untouched here — the per-row loop
+        // below already resolves the correct "effective old bytes" from
+        // `tx.write_set` for those (see `effective_old_bytes`).
+        let mut matched: Vec<(RecordId, Bytes)> = if let Some(ref filter) = op.where_clause {
             if let Some(via_index) = self.lookup_records_via_index(filter, ctx).await? {
                 via_index
                     .into_iter()
@@ -542,6 +554,39 @@ impl TableManager {
             }
             result
         };
+
+        // FG-3: fold in purely-staged-inserted rows this tx's own write_set
+        // holds that the committed-store scan above could never see. Gated
+        // on the tx having ANY staged rows for this table BEFORE compiling
+        // the filter — a tx that never wrote this table pays nothing beyond
+        // the `write_set.get(token)` probe.
+        if tx.write_set.contains_key(&self.table_token()) {
+            let already: shamir_collections::TSet<RecordId> =
+                matched.iter().map(|(id, _)| *id).collect();
+            let residual_callback = op
+                .where_clause
+                .as_ref()
+                .map(|f| compile_filter(f, interner));
+            let keep = |_id: &RecordId, bytes: &Bytes| -> bool {
+                match &residual_callback {
+                    None => true,
+                    Some(callback) => match RecordView::new(bytes) {
+                        Ok(view) => callback.matches(&view, ctx),
+                        Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                            Ok(tree) => callback.matches(&tree, ctx),
+                            Err(_) => false,
+                        },
+                    },
+                }
+            };
+            let staged_extra = super::tx_scan_overlay::staged_only_matches(
+                Some(tx),
+                self.table_token(),
+                &already,
+                keep,
+            );
+            matched.extend(staged_extra);
+        }
 
         let mut affected: u64 = 0;
         let mut result_records: Vec<InsertedRecord> = Vec::with_capacity(matched.len());
@@ -792,7 +837,20 @@ impl TableManager {
         //   serialised from the already-decoded `InnerValue` only when
         //   validators or RETURNING are active, otherwise the record is
         //   skipped.
-        let to_delete: Vec<(RecordId, Option<Bytes>)> =
+        //
+        // FG-3 (#729 residual, symmetric with execute_update_tx): both arms
+        // below are committed-store-only, so a row this SAME tx already
+        // staged (insert, or update to new bytes) that satisfies
+        // `op.where_clause` never enters `to_delete`. After the scan we fold
+        // in `staged_only_matches` — the tx's own staged `Set` rows not
+        // already found above, re-evaluated against the SAME filter. The
+        // actual delete-time semantics for a row already present (including
+        // one this tx staged-removed already, which must NOT re-match) are
+        // handled downstream by `delete_tx`'s existing RYOW-aware
+        // `read_one_tx_bytes` read (a staged-removed id here would simply
+        // no-op — `read_one_tx_bytes` returns `None` and `delete_tx` returns
+        // `false`, contributing nothing to `affected`).
+        let mut to_delete: Vec<(RecordId, Option<Bytes>)> =
             if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
                 via_index
                     .into_iter()
@@ -850,6 +908,38 @@ impl TableManager {
                 }
                 result
             };
+
+        // FG-3: fold in purely-staged-inserted rows this tx's own write_set
+        // holds that the committed-store scan above could never see. Gated
+        // on the tx having ANY staged rows for this table BEFORE compiling
+        // the filter — a tx that never wrote this table pays nothing beyond
+        // the `write_set.get(token)` probe.
+        if tx.write_set.contains_key(&self.table_token()) {
+            let already: shamir_collections::TSet<RecordId> =
+                to_delete.iter().map(|(id, _)| *id).collect();
+            // DeleteOp::where_clause is a mandatory Filter (never Option).
+            let callback = compile_filter(&op.where_clause, interner);
+            let keep = |_id: &RecordId, bytes: &Bytes| -> bool {
+                match RecordView::new(bytes) {
+                    Ok(view) => callback.matches(&view, ctx),
+                    Err(_) => match InnerValue::from_bytes(bytes.clone()) {
+                        Ok(tree) => callback.matches(&tree, ctx),
+                        Err(_) => false,
+                    },
+                }
+            };
+            let staged_extra = super::tx_scan_overlay::staged_only_matches(
+                Some(tx),
+                self.table_token(),
+                &already,
+                keep,
+            );
+            to_delete.extend(
+                staged_extra
+                    .into_iter()
+                    .map(|(id, bytes)| (id, if keep_bytes { Some(bytes) } else { None })),
+            );
+        }
 
         // FG-2: optimistic-concurrency (CAS) gate — see execute_update_tx for
         // the full rationale. Same hybrid: immediate version_of check +

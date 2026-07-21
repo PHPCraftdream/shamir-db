@@ -171,10 +171,11 @@ async fn interactive_tx_happy_path_wire() {
         "open tx → no TransactionInfo per call"
     );
 
-    // EXECUTE(read inside open tx) — streaming scans do NOT overlay the
-    // tx's write_set (KNOWN LIMITATION C8, see stream_tx_tests.rs:95-100).
-    // Only point reads (`read_one_tx`) do RYOW.  Assert current behaviour:
-    // scan returns 0 rows while the tx is still open.
+    // EXECUTE(read inside open tx) — FG-3: streaming scans now overlay the
+    // tx's own write_set (read-your-own-writes), so the two rows staged by
+    // the write batch above (not yet committed) ARE visible to a read in the
+    // SAME open tx. This flips the old C8 "KNOWN LIMITATION" pin — see
+    // `stream_tx_tests.rs`'s `list_stream_tx_sees_staged_insert`.
     let mut rb = Batch::new();
     rb.id("r");
     rb.query("top", Query::from("items").order_by_desc("qty"));
@@ -195,8 +196,9 @@ async fn interactive_tx_happy_path_wire() {
     let rows = &rresp.results.get("top").expect("top result").records;
     assert_eq!(
         rows.len(),
-        0,
-        "C8: streaming scan does not overlay write_set — staged rows invisible until commit"
+        2,
+        "FG-3: streaming scan overlays write_set — staged-but-uncommitted rows are visible \
+         to a read in the SAME open tx (read-your-own-writes)"
     );
 
     // COMMIT

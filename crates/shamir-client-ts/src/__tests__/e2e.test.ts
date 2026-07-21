@@ -651,6 +651,25 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(names).toContain('widget');
     });
 
+    it('tx: FG-3 read-your-own-writes — read in the SAME transactional batch sees the just-inserted row', async () => {
+      // Mirrors the Rust e2e `interactive_tx_happy_path_wire` RYOW
+      // assertion: within ONE transactional batch, an insert followed by a
+      // read (both ops sharing the SAME TxContext, not yet committed) must
+      // see the staged-but-uncommitted row. Before FG-3, streaming scans did
+      // not overlay the tx's own write_set, so this read would have missed
+      // the row inserted earlier in the same batch.
+      const resp = br(await Batch.create('tx-ryow')
+        .add('ins', write.insert('items', [{ name: 'ryow-widget', qty: 42 }]))
+        .add('read', Query.from('items').where(filter.eq('name', 'ryow-widget')))
+        .transactional()
+        .execute(client!, txDb));
+      expect(resp.transaction!.status).toBe('committed');
+      const recs = resp.results.read.records;
+      expect(recs.length).toBe(1);
+      expect(recs[0].name).toBe('ryow-widget');
+      expect(recs[0].qty).toBe(42);
+    });
+
     it('tx: cross-table insert is atomic', async () => {
       const resp = br(await Batch.create('tx-cross-table')
         .add('ins_items', write.insert('items', [{ name: 'cross-item' }]))
