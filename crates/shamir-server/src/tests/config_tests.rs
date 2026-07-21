@@ -86,6 +86,21 @@ fn small_profile_parses_and_validates() {
     );
 }
 
+/// The all-fields reference example was previously never loaded by any
+/// test — this is what let its `argon2_version: 19   # 0x13` /
+/// `max_result_size_bytes: ... # 1 GiB` inline comments go unnoticed as a
+/// latent parse bug (ktav only supports whole-line comments). Both were
+/// moved onto their own comment line during RI-8 cleanup; this test pins
+/// the file to actually being loadable so the regression can't return
+/// silently.
+#[test]
+fn reference_example_parses_and_validates() {
+    let cfg = Config::from_file(&deploy_path("server.example.ktav"))
+        .expect("server.example.ktav must parse");
+    cfg.validate()
+        .expect("server.example.ktav must pass Config::validate");
+}
+
 #[test]
 fn medium_profile_parses_and_validates() {
     let cfg = Config::from_file(&deploy_path("server.medium.example.ktav"))

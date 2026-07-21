@@ -18,7 +18,8 @@ kdf_defaults: {
     memory_kb: 131072
     time: 4
     parallelism: 1
-    argon2_version: 19   # 0x13
+    # 0x13.
+    argon2_version: 19
 }
 
 # Server-wide cap on concurrent Argon2id verifies. Each verify holds
@@ -73,7 +74,8 @@ security: {
     query_limits: {
         # Hard caps on `BatchRequest.limits` — operator's max wins
         # over client payload.
-        max_result_size_bytes:    1073741824    # 1 GiB
+        # 1 GiB.
+        max_result_size_bytes:    1073741824
         max_execution_time_secs:  60
         max_queries_per_batch:    100
     }
