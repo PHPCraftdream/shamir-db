@@ -1,0 +1,110 @@
+# Small-footprint ShamirDB server config — sized for a 1–2 GiB container
+# (≈1.5 GiB effective budget). Copy to /etc/shamir/server.ktav and adjust
+# paths/ports for your deployment.
+#
+# Sizing formula for this profile's Argon2 auth-RAM ceiling:
+#   argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
+#   container/host RAM (KiB).
+# Example: a 4 GiB container → ~1 GiB budget → memory_kb=131072 (128 MiB)
+# allows argon2_concurrent_max up to ~8.
+#
+# Schema is documented in `crates/shamir-server/src/config.rs`.
+
+data_dir: /var/lib/shamir-db
+
+logging: {
+    level: info
+    # Log a WARN line for any batch >1s. 0 disables.
+    slow_query_threshold_ms: 1000
+}
+
+# Argon2id KDF for new users. Spec §3.7.2 floor is 19_456 / 2 / 1; the
+# values below raise memory 3× over the floor while staying inside a
+# 1.5 GiB container's RAM budget. Tune to match your auth-rate budget.
+kdf_defaults: {
+    # 64 MiB.
+    memory_kb: 65536
+    time: 4
+    parallelism: 1
+    # 0x13.
+    argon2_version: 19
+}
+
+# Server-wide cap on concurrent Argon2id verifies. Each verify holds
+# `memory_kb` of RAM for a few hundred ms, so this directly bounds peak
+# auth-RAM. 6 × 64 MiB = 384 MiB worst case (~25% of a 1.5 GiB budget).
+argon2_concurrent_max: 6
+
+# Network endpoints. Multiple listeners can run concurrently — each
+# spawns its own accept loop. Defaults below cover the three common
+# combinations:
+#   * 7331  tcp+tls_exporter   → native binding_mode 0x01
+#   * 7332  ws+tls_exporter    → wss:///shamir/v1 native (binding_mode 0x01)
+#   * 7333  ws+tls_no_export   → wss:///shamir/v1/browser (binding_mode 0x02)
+listeners: [
+    {
+        kind: tcp
+        addr: 0.0.0.0:7331
+        profile: tls_exporter
+    }
+    {
+        kind: ws
+        addr: 0.0.0.0:7332
+        profile: tls_exporter
+        path: /shamir/v1
+    }
+    {
+        kind: ws
+        addr: 0.0.0.0:7333
+        profile: tls_no_export
+        path: /shamir/v1/browser
+        # Browser endpoints MUST list the allowed Origin headers.
+        # Wildcard not supported (spec §9 — exact-match only).
+        browser_origin_allowlist: [
+            https://app.example.com
+        ]
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path:  /var/lib/shamir-db/key.pem
+}
+
+security: {
+    connection: {
+        # Slow-loris timeout for `auth_init`. Real clients send within
+        # ~50 ms; 5000 ms is comfortably above network jitter.
+        auth_init_timeout_ms: 5000
+        # Hard cap on simultaneously-active connections. 0 disables.
+        max_active_connections: 500
+        # Per-source-IP cap on simultaneously-active connections.
+        max_active_connections_per_ip: 25
+    }
+    query_limits: {
+        # Hard caps on `BatchRequest.limits` — operator's max wins
+        # over client payload.
+        # 32 MiB.
+        max_result_size_bytes: 33554432
+        max_execution_time_secs: 60
+        max_queries_per_batch: 100
+    }
+}
+
+audit: {
+    # Rotate the JSON-line audit log when it crosses this size.
+    # 0 disables rotation.
+    max_file_size_mb: 100
+    # Delete rotated files older than this. 0 disables (operator manages
+    # retention out-of-band).
+    retention_days: 30
+}
+
+observability: {
+    # Loopback by convention — expose to Prometheus / K8s probes via a
+    # sidecar / proxy, not directly from the public network.
+    # Empty string disables the server entirely (typically you don't
+    # want this in production — without /healthz the load balancer is
+    # blind).
+    addr: 127.0.0.1:9090
+}

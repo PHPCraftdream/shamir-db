@@ -284,7 +284,7 @@ fn default_max_tx_bytes() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryLimitsConfig {
     /// Maximum total result size (bytes) — clamps `BatchLimits::max_result_size`.
-    /// Default 1 GiB.
+    /// Default 64 MiB.
     #[serde(default = "default_max_result_size_bytes")]
     pub max_result_size_bytes: usize,
     /// Maximum total execution time (seconds) — clamps
@@ -308,7 +308,7 @@ impl Default for QueryLimitsConfig {
 }
 
 fn default_max_result_size_bytes() -> usize {
-    1024 * 1024 * 1024 // 1 GiB
+    64 * 1024 * 1024 // 64 MiB
 }
 fn default_max_execution_time_secs() -> u64 {
     60
@@ -330,7 +330,7 @@ pub struct ConnectionSecurity {
     /// Global hard cap on simultaneously-active connections across all
     /// listeners. Reached → server closes the new TCP socket immediately
     /// (TCP RST, no TLS handshake) so an attacker can't waste server CPU
-    /// on TLS for connections that won't be served. Default 10000.
+    /// on TLS for connections that won't be served. Default 1000.
     #[serde(default = "default_max_active_connections")]
     pub max_active_connections: usize,
     /// Per-source-IP cap on simultaneously-active connections. Default
@@ -358,7 +358,7 @@ fn default_auth_init_timeout_ms() -> u64 {
 }
 
 fn default_max_active_connections() -> usize {
-    10_000
+    1_000
 }
 
 fn default_max_active_connections_per_ip() -> usize {

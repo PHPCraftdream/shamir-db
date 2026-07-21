@@ -9,7 +9,33 @@ on a production host.
 |------|------------|
 | `shamir-db.service` | systemd unit. Drop into `/etc/systemd/system/` and `systemctl enable --now shamir-db` |
 | `Dockerfile` | Multi-stage Docker image (Rust 1.93 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
-| `server.example.ktav` | Annotated config template — copy to `/etc/shamir/server.ktav` and adjust |
+| `server.example.ktav` | Annotated reference config (all fields shown) — copy to `/etc/shamir/server.ktav` and adjust |
+| `server.small.example.ktav` | Resource profile for a 1–2 GiB container (≈1.5 GiB budget): Argon2 64 MiB × 6, 500 conns, 32 MiB result cap |
+| `server.medium.example.ktav` | Resource profile for a 4–8 GiB container (≈6 GiB budget): Argon2 128 MiB × 12, 2000 conns, 64 MiB result cap |
+
+## Resource profiles
+
+Pick a profile by your container/host RAM budget and start from it instead of
+the all-fields reference (`server.example.ktav`):
+
+| Profile | Target RAM | When to pick |
+|---------|-----------|--------------|
+| `server.small.example.ktav` | 1–2 GiB (sized for ~1.5 GiB) | Single-tenant / dev / small VPS. Argon2 auth-RAM ceiling ≈ 384 MiB. |
+| `server.medium.example.ktav` | 4–8 GiB (sized for ~6 GiB) | Small-to-medium production. Argon2 auth-RAM ceiling ≈ 1.5 GiB. |
+| `server.example.ktav` | n/a (reference) | Every-field-shown template — copy & trim when neither small nor medium fits. |
+
+**Argon2 sizing formula** (also embedded as a comment at the top of each
+profile):
+
+```
+argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
+container/host RAM (KiB).
+```
+
+Example: a 4 GiB container → ~1 GiB budget → `memory_kb = 131072` (128 MiB)
+allows `argon2_concurrent_max` up to ~8. The two profiles above pin
+`argon2_concurrent_max` to ~25% of their respective budgets; if your budget
+differs, derive your own pair from the formula and update both fields together.
 
 ## Quick start (systemd)
 
