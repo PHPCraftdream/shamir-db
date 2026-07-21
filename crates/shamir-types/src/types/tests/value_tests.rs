@@ -612,4 +612,98 @@ mod tests {
         let decoded2 = UserValue::from_bytes(b).unwrap();
         assert_eq!(val, decoded2);
     }
+
+    // ── FG-1: unified u64 contract ───────────────────────────────────────────
+    //
+    // `visit_u64` (fix site 1) and `From<u64>` (fix site 3) must promote
+    // u64 > i64::MAX losslessly to `Big(BigInt)` instead of wrapping via
+    // `value as i64` (which sign-flips u64::MAX to -1).
+
+    /// Encode a raw msgpack `uint64` payload (`0xcf` + 8 big-endian bytes),
+    /// bypassing the i64-typed builder surface so `visit_u64` is exercised
+    /// directly on the wire decode path.
+    fn raw_uint64_payload(v: u64) -> Vec<u8> {
+        let mut bytes = vec![0xcf];
+        bytes.extend_from_slice(&v.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn fg1_visit_u64_i64_max_stays_int() {
+        // i64::MAX as a u64 must decode to Int (no promotion).
+        let payload = raw_uint64_payload(i64::MAX as u64);
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        assert_eq!(decoded, UserValue::Int(i64::MAX));
+        // InnerValue (Key=InternerKey) shares the SAME generic visitor.
+        let inner = InnerValue::from_bytes(&payload).unwrap();
+        assert_eq!(inner, InnerValue::Int(i64::MAX));
+    }
+
+    #[test]
+    fn fg1_visit_u64_i64_max_plus_one_becomes_big() {
+        // i64::MAX + 1 (the smallest u64 that overflows i64) must promote to Big.
+        let overflow: u64 = i64::MAX as u64 + 1;
+        let payload = raw_uint64_payload(overflow);
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        assert_eq!(decoded, UserValue::Big(BigInt::from(overflow)));
+        let inner = InnerValue::from_bytes(&payload).unwrap();
+        assert_eq!(inner, InnerValue::Big(BigInt::from(overflow)));
+    }
+
+    #[test]
+    fn fg1_visit_u64_u64_max_becomes_big_exact() {
+        // u64::MAX must decode losslessly to Big(18446744073709551615) — NOT
+        // the old wrapping result Int(-1) and NOT a clamped i64::MAX.
+        let payload = raw_uint64_payload(u64::MAX);
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        assert_eq!(decoded, UserValue::Big(BigInt::from(u64::MAX)));
+        // Sanity: the exact decimal value, not -1, not i64::MAX.
+        match decoded {
+            UserValue::Big(b) => {
+                assert_eq!(b.to_string(), "18446744073709551615");
+                assert_ne!(b.to_string(), "-1");
+                assert_ne!(b.to_string(), i64::MAX.to_string());
+            }
+            other => panic!("expected Big, got {other:?}"),
+        }
+        let inner = InnerValue::from_bytes(&payload).unwrap();
+        assert_eq!(inner, InnerValue::Big(BigInt::from(u64::MAX)));
+    }
+
+    #[test]
+    fn fg1_from_u64_boundary() {
+        // Fix site 3: From<u64> for Value<String>.
+        assert_eq!(UserValue::from(i64::MAX as u64), UserValue::Int(i64::MAX));
+        let overflow: u64 = i64::MAX as u64 + 1;
+        assert_eq!(
+            UserValue::from(overflow),
+            UserValue::Big(BigInt::from(overflow))
+        );
+        assert_eq!(
+            UserValue::from(u64::MAX),
+            UserValue::Big(BigInt::from(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn fg1_visit_map_u_prefix_promotes_overflow() {
+        // Fix site 2: the `Some("u")` prefixed-key branch in `visit_map`
+        // (Key=String test-fixture path) must apply the same contract.
+        // Encode a map {"u:n": <u64>} via rmp_serde over a plain Rust struct
+        // the prefixed-key parser recognises. We build the raw msgpack map
+        // { "u:n": uint64(u64::MAX) }.
+        let mut payload = vec![0x81]; // fixmap, 1 entry
+        payload.push(0xa3); // fixstr len 3 ("u:n")
+        payload.extend_from_slice(b"u:n");
+        payload.push(0xcf); // uint64
+        payload.extend_from_slice(&u64::MAX.to_be_bytes());
+        let decoded = UserValue::from_bytes(&payload).unwrap();
+        match decoded {
+            UserValue::Map(m) => {
+                let v = m.get("n").expect("field n present");
+                assert_eq!(v, &UserValue::Big(BigInt::from(u64::MAX)));
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+    }
 }

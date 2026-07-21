@@ -237,26 +237,21 @@ fn deintern_parity_empty_list() {
 
 // ─── u64 > i64::MAX edge ─────────────────────────────────────────────────────
 
-/// DIVERGENCE DOCUMENTED — u64 > i64::MAX shape:
+/// Two lossless representations of the same value (FG-1 unified u64 contract):
 ///
-/// The tree decoder (`InnerValue::from_bytes` via `rmp_serde`) calls
-/// `visit_u64` which does `value as i64` (truncating/wrapping), so
-/// `9223372036854775808u64` becomes `Int(-9223372036854775808)` = `i64::MIN`.
+/// The tree decoder (`InnerValue::from_bytes` via `rmp_serde`) dispatches
+/// through `ValueVisitor::visit_u64`, which now promotes `u64 > i64::MAX`
+/// losslessly to `Big(BigInt)` (instead of the old `value as i64` wrap that
+/// sign-flipped `9223372036854775808u64` to `i64::MIN`).
 ///
-/// The lens decoder (`RecordView`, `uint_to_record_value`) maps any u64 that
-/// does not fit in i64 to `Str(decimal_string)`, so the same bytes yield
-/// `Str("9223372036854775808")`.
+/// The lens decoder (`RecordView`, `uint_to_record_value`) maps the same
+/// bytes to `Str(decimal_string)` — deliberately zero-copy (the lens has no
+/// `Big` variant by design).
 ///
-/// This divergence is PRE-EXISTING (predates R5): it exists between
-/// `from_bytes` and `RecordView::get` on ANY path that touches this byte
-/// pattern, and is documented in `parity_tests.rs::parity_u64_above_i64_max`.
-/// It is NOT a bug in the new `record_view_to_query_value` walker; the walker
-/// faithfully reproduces what `RecordView::fields()` yields.
-///
-/// Per brief hard rule: "if any shape diverges — STOP and report it, do NOT
-/// change semantics to force a pass." This test characterises the divergence
-/// exactly, asserts each side independently, and does NOT assert equality (to
-/// keep the gate green while the divergence is surfaced).
+/// Both walkers therefore yield a lossless, value-equal result: tree →
+/// `Big("9223372036854775808")`, lens → `Str("9223372036854775808")`. They
+/// are two representations of the SAME value (the previous divergence —
+/// tree truncating to `Int(i64::MIN)` — is gone after FG-1).
 #[test]
 fn deintern_parity_u64_above_i64_max() {
     let interner = Interner::new();
@@ -279,34 +274,35 @@ fn deintern_parity_u64_above_i64_max() {
     let tree_qv = inner_value_to_query_value(&tree_iv, &interner).expect("tree qv u64>max");
     let lens_qv = record_view_to_query_value(&lens_view, &interner).expect("lens qv u64>max");
 
-    // Tree: rmp_serde truncates u64>i64::MAX via `as i64` → Int(-9223372036854775808).
-    // Verify the tree side gives the expected (lossy) Int.
-    assert!(
-        matches!(
-            tree_qv,
-            crate::types::value::QueryValue::Map(ref m)
-            if matches!(m.get("big"), Some(crate::types::value::QueryValue::Int(_)))
-        ),
-        "tree side unexpected: {tree_qv:?}"
-    );
-    // Lens: uint_to_record_value maps u64>i64::MAX → Str(decimal).
-    // Verify the lens side gives the expected (lossless) Str.
-    assert!(
-        matches!(
-            lens_qv,
-            crate::types::value::QueryValue::Map(ref m)
-            if matches!(m.get("big"), Some(crate::types::value::QueryValue::Str(_)))
-        ),
-        "lens side unexpected: {lens_qv:?}"
+    // Tree: visit_u64 now promotes u64>i64::MAX losslessly to Big.
+    let tree_field = tree_qv.get("big").expect("tree field present");
+    let tree_decimal = match tree_field {
+        crate::types::value::QueryValue::Big(b) => b.to_string(),
+        other => panic!("tree side unexpected (expected Big): {other:?}"),
+    };
+    assert_eq!(
+        tree_decimal,
+        large_u64.to_string(),
+        "tree Big decimal must equal the exact u64"
     );
 
-    // The two sides DIFFER (tree=Int(truncated), lens=Str(decimal)).
-    // This is the documented pre-existing decoder divergence; the new walker
-    // correctly reproduces the lens decoder's mapping. Not a bug in R5.
-    assert_ne!(
-        tree_qv, lens_qv,
-        "unexpected equality: the known u64>i64::MAX divergence appears to have been resolved \
-         — revisit this test"
+    // Lens: uint_to_record_value maps u64>i64::MAX → Str(decimal).
+    let lens_field = lens_qv.get("big").expect("lens field present");
+    let lens_decimal = match lens_field {
+        crate::types::value::QueryValue::Str(s) => s.clone(),
+        other => panic!("lens side unexpected (expected Str): {other:?}"),
+    };
+    assert_eq!(
+        lens_decimal,
+        large_u64.to_string(),
+        "lens Str decimal must equal the exact u64"
+    );
+
+    // Both walkers now yield the SAME lossless value (tree=Big(decimal),
+    // lens=Str(decimal)). The previous tree-truncation divergence is gone.
+    assert_eq!(
+        tree_decimal, lens_decimal,
+        "tree and lens must agree on the exact value for u64>i64::MAX"
     );
 }
 

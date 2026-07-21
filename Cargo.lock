@@ -3566,6 +3566,7 @@ dependencies = [
  "bench-scale-tool",
  "hmac",
  "indexmap",
+ "num-bigint",
  "rmp-serde",
  "serde",
  "serde_bytes",

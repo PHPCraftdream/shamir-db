@@ -585,27 +585,47 @@ describe('bin — binary literal (FilterValue::Binary)', () => {
   });
 });
 
-describe('litU64 — lossy u64 escape-hatch (FilterValue::Int)', () => {
-  it('litU64(42) returns number 42', () => {
+describe('litU64 — lossless u64 filter literal (mirrors Rust lit_u64)', () => {
+  it('litU64(42) returns number 42 (within i64 range)', () => {
     expect(filter.litU64(42)).toBe(42);
   });
 
-  it('litU64(42n) returns number 42 (within safe integer range)', () => {
+  it('litU64(42n) returns number 42 (within i64 range)', () => {
     const result = filter.litU64(42n);
-    expect(Number(result)).toBe(42);
+    expect(result).toBe(42);
   });
 
-  it('litU64 with bigint above 2^53 returns number (lossy — msgpack-safe)', () => {
-    const large = 2n ** 60n + 1n;
-    const result = filter.litU64(large);
-    expect(typeof result).toBe('number');
+  it('litU64(i64::MAX) stays a number at the boundary', () => {
+    const max = 9223372036854775807n;
+    const result = filter.litU64(max);
+    expect(result).toBe(9223372036854775807);
   });
 
-  it('litU64 inside eq gives correct wire form', () => {
+  it('litU64(i64::MAX + 1) becomes the exact decimal string', () => {
+    const overflow = 9223372036854775808n; // i64::MAX + 1
+    const result = filter.litU64(overflow);
+    expect(result).toBe('9223372036854775808');
+  });
+
+  it('litU64(u64::MAX) becomes the exact decimal string (no sign-flip)', () => {
+    const maxU64 = 18446744073709551615n;
+    const result = filter.litU64(maxU64);
+    expect(result).toBe('18446744073709551615');
+  });
+
+  it('litU64 inside eq gives correct wire form (small number)', () => {
     expect(filter.eq(['n'], filter.litU64(7))).toEqual({
       op: 'eq',
       field: ['n'],
       value: 7,
+    });
+  });
+
+  it('litU64 inside eq gives correct wire form (overflow string)', () => {
+    expect(filter.eq(['n'], filter.litU64(9223372036854775808n))).toEqual({
+      op: 'eq',
+      field: ['n'],
+      value: '9223372036854775808',
     });
   });
 });

@@ -140,7 +140,18 @@ where
         Ok(Value::Int(value))
     }
     fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(Value::Int(value as i64))
+        // Unified u64 contract: values that fit in `i64` decode as a plain
+        // `Int`; values above `i64::MAX` promote losslessly to `Big` (an
+        // arbitrary-precision `BigInt`) instead of silently wrapping via
+        // `value as i64` (which sign-flips `u64::MAX` to `-1`). This visitor is
+        // generic over `Key`, so it governs BOTH `UserValue`/`QueryValue`
+        // (`Key=String`) and `InnerValue` (`Key=InternerKey`), including the
+        // `InnerValue::from_bytes` storage-decode path.
+        if value <= i64::MAX as u64 {
+            Ok(Value::Int(value as i64))
+        } else {
+            Ok(Value::Big(BigInt::from(value)))
+        }
     }
     fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
         Ok(Value::F64(value))
@@ -204,7 +215,21 @@ where
 
             let value = match prefix {
                 Some("i") => map.next_value::<i64>().map(Value::Int)?,
-                Some("u") => map.next_value::<u64>().map(|v| Value::Int(v as i64))?,
+                Some("u") => {
+                    // Same `<= i64::MAX` → `Int` / else → `Big` contract as
+                    // `visit_u64` (fix FG-1), reusing this file's established
+                    // `BigInt::from(_)` construction idiom (see the `Some("big")`
+                    // branch below). This `visit_map` branch is the `Key=String`
+                    // prefixed-key test-fixture path (`UserValue` is
+                    // `#[deprecated]`, tests-only).
+                    map.next_value::<u64>().map(|v| {
+                        if v <= i64::MAX as u64 {
+                            Value::Int(v as i64)
+                        } else {
+                            Value::Big(BigInt::from(v))
+                        }
+                    })?
+                }
                 Some("float") => map.next_value::<f64>().map(Value::F64)?,
                 Some("dec") => {
                     let s: String = map.next_value()?;
@@ -619,7 +644,16 @@ impl From<u32> for Value<String> {
 
 impl From<u64> for Value<String> {
     fn from(v: u64) -> Self {
-        Value::Int(v as i64)
+        // Unified u64 contract (FG-1): promote to `Big` instead of wrapping
+        // via `v as i64` for values above `i64::MAX`. This is the conversion a
+        // Rust query-builder caller hits when constructing a literal from a
+        // plain `u64` (e.g. `.value(some_u64)` sugar relying on
+        // `Into<Value<String>>`).
+        if v <= i64::MAX as u64 {
+            Value::Int(v as i64)
+        } else {
+            Value::Big(BigInt::from(v))
+        }
     }
 }
 

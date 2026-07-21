@@ -16,4 +16,5 @@ mod null_exists_tests;
 mod query_ref_tests;
 mod resolve_compare_tests;
 mod string_regex_tests;
+mod u64_big_filter_match_tests;
 mod value_compare_null_tests;

@@ -8,6 +8,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_bytes::ByteBuf;
 use shamir_types::types::value::QueryValue;
 
+use num_bigint::BigInt;
+
 use crate::write::InsertedRecord;
 
 /// Read response row.
@@ -101,11 +103,15 @@ impl<'de> Visitor<'de> for QueryRecordVisitor {
     }
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<QueryRecord, E> {
-        // u64 > i64::MAX cannot be represented losslessly in QueryValue::Int;
-        // clamp to i64::MAX as a safe approximation (u64 > i64::MAX saturates).
-        Ok(QueryRecord::Direct(QueryValue::Int(
-            v.min(i64::MAX as u64) as i64
-        )))
+        // Unified u64 contract (FG-1): values that fit in `i64` decode as
+        // `QueryValue::Int`; values above `i64::MAX` promote losslessly to
+        // `QueryValue::Big` (an arbitrary-precision `BigInt`) instead of being
+        // silently clamped to `i64::MAX`.
+        if v <= i64::MAX as u64 {
+            Ok(QueryRecord::Direct(QueryValue::Int(v as i64)))
+        } else {
+            Ok(QueryRecord::Direct(QueryValue::Big(BigInt::from(v))))
+        }
     }
 
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<QueryRecord, E> {

@@ -475,19 +475,39 @@ export function bin(bytes: Uint8Array | number[]): Uint8Array {
 }
 
 /**
- * Explicit lossy escape-hatch for full u64 values. Mirrors Rust
- * `lit_u64` (`filter_value.rs:68`) — values above `i64::MAX` wrap
- * silently (Rust casts `v as i64` without bounds checks).
+ * u64 filter literal. Mirrors Rust `lit_u64` (`filter_value.rs`).
  *
- * Accepts `bigint` for ergonomics (callers may already hold a bigint),
- * but ALWAYS returns `number` via `Number(v)`. Values above `2^53` lose
- * precision — this is the JS analogue of Rust's lossy cast. The result
- * is a msgpack-safe integer (no bigint on the wire).
+ * Unified u64 contract (FG-1): values representable in `i64`
+ * (`<= 9223372036854775807`) stay a `number` (unchanged, msgpack-safe
+ * integer). Values above `i64::MAX` become their EXACT decimal `string` —
+ * matching how Rust `Value::Big` / `QueryValue::Big` serialises on the wire
+ * (`serializer.serialize_str(&b.to_string())`) and how Rust
+ * `FilterValue::String(v.to_string())` represents the same overflow case.
+ *
+ * JS strings are exact for arbitrary-precision decimal text, so no `bigint`
+ * is needed on this side for correctness (the value only needs a wire
+ * representation here, never arithmetic). The old behaviour wrapped via
+ * `Number(v)`, silently losing precision above `2^53` AND sign-flipping
+ * above `i64::MAX`; that silent data corruption is gone.
  *
  * NO runtime range checks are added — no throw.
  */
-export function litU64(v: bigint | number): number {
-  return typeof v === 'bigint' ? Number(v) : v;
+export function litU64(v: bigint | number): number | string {
+  if (typeof v === 'bigint') {
+    if (v <= 9223372036854775807n) {
+      return Number(v);
+    }
+    return v.toString();
+  }
+  // number input: in the safe i64 range it passes through unchanged; a
+  // `number` already above i64::MAX (only reachable via lossy callers) is
+  // emitted as its exact decimal text to stay lossless.
+  if (v <= 9223372036854775807) {
+    return v;
+  }
+  // Above i64::MAX the number is emitted as its exact decimal string (no
+  // further-precision `Number()` round-trip).
+  return v.toString();
 }
 
 // ── Logical combinators ──────────────────────────────────────────────

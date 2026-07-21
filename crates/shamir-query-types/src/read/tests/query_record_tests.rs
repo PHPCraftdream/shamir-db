@@ -6,6 +6,8 @@ use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
+use num_bigint::BigInt;
+
 use crate::read::QueryRecord;
 use crate::write::InsertedRecord;
 
@@ -237,4 +239,58 @@ fn query_value_is_map_is_list() {
     assert!(!mpack!([]).is_map());
     assert!(mpack!([]).is_list());
     assert!(!mpack!({}).is_list());
+}
+
+// ── FG-1: unified u64 contract (QueryRecord::visit_u64, fix site 4) ─────────
+//
+// A bare msgpack `uint64` payload deserialised as a `QueryRecord` must route
+// through `QueryRecordVisitor::visit_u64`: values that fit in `i64` stay
+// `QueryValue::Int`; values above `i64::MAX` promote losslessly to
+// `QueryValue::Big` (NOT the old silent clamp to `i64::MAX`).
+
+/// Encode a raw msgpack `uint64` payload (`0xcf` + 8 big-endian bytes).
+fn raw_uint64(v: u64) -> Vec<u8> {
+    let mut bytes = vec![0xcf];
+    bytes.extend_from_slice(&v.to_be_bytes());
+    bytes
+}
+
+#[test]
+fn fg1_query_record_visit_u64_i64_max_stays_int() {
+    let bytes = raw_uint64(i64::MAX as u64);
+    let qr: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
+    match qr {
+        QueryRecord::Direct(QueryValue::Int(i)) => assert_eq!(i, i64::MAX),
+        other => panic!("expected Direct(Int(i64::MAX)), got {other:?}"),
+    }
+}
+
+#[test]
+fn fg1_query_record_visit_u64_i64_max_plus_one_becomes_big() {
+    let overflow: u64 = i64::MAX as u64 + 1;
+    let bytes = raw_uint64(overflow);
+    let qr: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
+    match qr {
+        QueryRecord::Direct(QueryValue::Big(b)) => assert_eq!(b, BigInt::from(overflow)),
+        other => panic!("expected Direct(Big), got {other:?}"),
+    }
+}
+
+#[test]
+fn fg1_query_record_visit_u64_u64_max_becomes_big_exact() {
+    // u64::MAX must decode losslessly — NOT the old clamped i64::MAX.
+    let bytes = raw_uint64(u64::MAX);
+    let qr: QueryRecord = rmp_serde::from_slice(&bytes).unwrap();
+    match qr {
+        QueryRecord::Direct(QueryValue::Big(b)) => {
+            assert_eq!(b, BigInt::from(u64::MAX));
+            assert_eq!(b.to_string(), "18446744073709551615");
+            assert_ne!(
+                b.to_string(),
+                i64::MAX.to_string(),
+                "must not be clamped to i64::MAX"
+            );
+        }
+        other => panic!("expected Direct(Big(u64::MAX)), got {other:?}"),
+    }
 }

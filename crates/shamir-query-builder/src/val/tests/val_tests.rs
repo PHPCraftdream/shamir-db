@@ -61,6 +61,47 @@ fn test_lit_u64() {
     assert_wire(lit_u64(999), mpack!(999));
 }
 
+// ── FG-1: lit_u64 unified u64 contract (fix site 5) ─────────────────
+//
+// Values <= i64::MAX stay FilterValue::Int (unchanged). Values > i64::MAX
+// become their exact decimal String — the same representation QueryValue::Big
+// serialises to on the wire. No more silent wrapping (`v as i64`).
+
+#[test]
+fn fg1_lit_u64_i64_max_stays_int() {
+    assert!(matches!(lit_u64(i64::MAX as u64), FilterValue::Int(i) if i == i64::MAX));
+}
+
+#[test]
+fn fg1_lit_u64_i64_max_plus_one_becomes_string() {
+    let overflow: u64 = i64::MAX as u64 + 1;
+    match lit_u64(overflow) {
+        FilterValue::String(s) => assert_eq!(s, "9223372036854775808"),
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn fg1_lit_u64_u64_max_becomes_exact_decimal_string() {
+    // u64::MAX must be the exact decimal string — not the old wrapping result
+    // Int(-1) and not a lossy number.
+    match lit_u64(u64::MAX) {
+        FilterValue::String(s) => {
+            assert_eq!(s, "18446744073709551615");
+            assert_ne!(s, "-1");
+        }
+        other => panic!("expected String, got {other:?}"),
+    }
+}
+
+#[test]
+fn fg1_lit_u64_small_value_unchanged() {
+    // Regression: small u64 values still produce FilterValue::Int.
+    assert!(matches!(lit_u64(0), FilterValue::Int(0)));
+    assert!(matches!(lit_u64(1), FilterValue::Int(1)));
+    assert!(matches!(lit_u64(u32::MAX as u64), FilterValue::Int(i) if i == u32::MAX as i64));
+}
+
 #[test]
 fn lit_f64() {
     assert_wire(lit(2.72_f64), mpack!(2.72));

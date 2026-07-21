@@ -59,14 +59,26 @@ pub fn lit(v: impl Into<FilterValue>) -> FilterValue {
     v.into()
 }
 
-/// Create a [`FilterValue::Int`] from a `u64`.
+/// Create a filter literal from a `u64`.
 ///
-/// This is an explicit lossy escape-hatch for values that may exceed
-/// `i64::MAX`. Values above `i64::MAX` will wrap silently.
+/// Unified u64 contract (FG-1): values that fit in `i64` (`<= i64::MAX`)
+/// become `FilterValue::Int` (unchanged, msgpack-safe). Values above
+/// `i64::MAX` are represented as their exact decimal `String` — the SAME
+/// representation `Value::Big` / `QueryValue::Big` serialises to on the wire
+/// (`serializer.serialize_str(&b.to_string())`). The engine's cross-type
+/// comparison layer (`Big`↔`Str` equality) and the lens's `Str(decimal)`
+/// mapping for the same bytes mean an `Eq` filter built this way matches a
+/// stored `u64 > i64::MAX` field. There is no longer any silent wrapping
+/// (the old `v as i64` sign-flipped `u64::MAX` to `-1`).
+///
 /// For all other integer widths, use `lit(v)` (which goes through
 /// `From<i8/i16/i32/i64/u8/u16/u32>`).
 pub fn lit_u64(v: u64) -> FilterValue {
-    FilterValue::Int(v as i64)
+    if v <= i64::MAX as u64 {
+        FilterValue::Int(v as i64)
+    } else {
+        FilterValue::String(v.to_string())
+    }
 }
 
 // ── binary / null ────────────────────────────────────────────────────

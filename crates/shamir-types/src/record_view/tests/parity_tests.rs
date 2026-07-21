@@ -13,8 +13,10 @@
 //!   u32/i8/i16/i32/i64 depending on magnitude; positive fixint, -1, u8 boundary,
 //!   u16 boundary, u32 boundary, i64::MAX, i64::MIN);
 //! * the U64 > `i64::MAX` edge — synthesised via raw rmpv bytes (the encoder
-//!   never emits it from `InnerValue`, but the decoder accepts it and maps it to
-//!   `Str(decimal)`; the lens must agree);
+//!   never emits it from `InnerValue`, but the decoder accepts it). The tree
+//!   decoder promotes it to `Big(BigInt)` (FG-1); the lens maps it to
+//!   `Str(decimal)`. Both are lossless — see
+//!   `parity_u64_above_i64_max_tree_big_lens_str`);
 //! * `F32`-precision-via-`F64` and `F64`;
 //! * empty string, short string, long string (>32 -> Str8, >255 -> Str16);
 //! * empty map, flat map, nested map (2-level), nested nested map (3-level);
@@ -37,8 +39,10 @@ fn ik(interner: &Interner, s: &str) -> InternerKey {
 
 /// Compare a lens [`RecordValue`] against the tree's [`InnerValue`] for the
 /// SAME field. This is the per-field assertion the parity tests drive: the two
-/// must agree on type and value. The U64 > `i64::MAX` edge is normalised (tree
-/// = `Str(decimal)`, lens = `Str(Owned(decimal))`).
+/// must agree on type and value. The U64 > `i64::MAX` edge is NOT exercised
+/// here (the tree now maps it to `Big`, the lens to `Str(decimal)` — both
+/// lossless but different representations; that edge has its own dedicated
+/// test, `parity_u64_above_i64_max_tree_big_lens_str`).
 fn assert_lens_matches_tree(lens: Option<RecordValue<'_>>, tree: Option<&InnerValue>) {
     match (lens, tree) {
         (Some(RecordValue::Null), Some(InnerValue::Null)) => {}
@@ -354,17 +358,20 @@ fn parity_empty_map_and_empty_array() {
 }
 
 // ---------------------------------------------------------------------------
-// THE U64 > i64::MAX EDGE — the canonical decoder maps it to Str(decimal).
-// The encoder never emits this from InnerValue (Int is i64), so synthesise the
-// bytes via rmpv and confirm lens==tree.
+// THE U64 > i64::MAX EDGE — the tree decoder (FG-1) now maps it to `Big`
+// (lossless `BigInt`); the lens maps it to `Str(decimal)`. Both are
+// lossless representations of the same value in two different type systems
+// (the lens is deliberately zero-copy and has no `Big` variant). The
+// encoder never emits this from `InnerValue::Int` (Int is i64), so
+// synthesise the bytes via raw msgpack and confirm the tree==lens value.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn parity_u64_above_i64_max_maps_to_str() {
+fn parity_u64_above_i64_max_tree_big_lens_str() {
     let interner = Interner::new();
     let large_u64: u64 = i64::MAX as u64 + 1;
     // Synthesise { <bin key for "big"> : <u64> } directly in msgpack.
-    // The storage form has bin keys, so we encode the interned key for "big"
+    // The storage form has bin-keys, so we encode the interned key for "big"
     // as a bin marker + LE bytes, and the value as a u64.
     let big_key = ik(&interner, "big");
     let (key_buf, key_len) = big_key.as_bytes_buf();
@@ -381,45 +388,40 @@ fn parity_u64_above_i64_max_maps_to_str() {
     blob.push(0xcf);
     blob.extend_from_slice(&large_u64.to_be_bytes());
 
-    // Tree decoder's view (via from_bytes, the storage decoder).
+    // Tree decoder's view (via from_bytes, the storage decoder). The tree
+    // decoder dispatches through `ValueVisitor::visit_u64`, which (FG-1)
+    // promotes u64 > i64::MAX losslessly to `Big(BigInt)` instead of
+    // truncating via `value as i64`.
     let tree = InnerValue::from_bytes(&blob).unwrap();
     let tree_map = match &tree {
         InnerValue::Map(m) => m,
         _ => panic!("expected map"),
     };
-    // The tree decoder maps U64 > i64::MAX to Int (truncated via `visit_u64`
-    // which does `value as i64`). The lens does the same via uint_to_record_value
-    // which maps to Str(decimal) for overflow. Check what the tree actually does.
     let tree_big = tree_map.get(&big_key);
-    // from_bytes uses rmp_serde which calls visit_u64 -> Int(value as i64).
-    // This is a different mapping than msgpack_to_inner which maps to Str(decimal).
-    // The lens should agree with from_bytes (the storage decoder).
+    // The tree decoder maps U64 > i64::MAX to Big (lossless BigInt).
     match tree_big {
-        Some(InnerValue::Int(i)) => {
-            // rmp_serde truncates u64 > i64::MAX to i64 via `as i64`.
-            assert_eq!(*i, large_u64 as i64);
+        Some(InnerValue::Big(b)) => {
+            assert_eq!(
+                b,
+                &num_bigint::BigInt::from(large_u64),
+                "tree Big must hold the exact u64 value"
+            );
         }
-        Some(InnerValue::Str(s)) => {
-            assert_eq!(s, &large_u64.to_string());
-        }
-        other => panic!("tree view for U64>MAX: {other:?}"),
+        other => panic!("tree view for U64>MAX: expected Big, got {other:?}"),
     }
 
-    // Lens's view — the lens uses uint_to_record_value which maps U64 > i64::MAX
-    // to Str(Owned(decimal)). But if the tree maps to Int, we need to match.
+    // Lens's view — the lens uses `uint_to_record_value` which maps U64 >
+    // i64::MAX to `Str(Owned(decimal))` (deliberately zero-copy; the lens has
+    // no `Big` variant by design).
     let lens = RecordView::new(&blob).unwrap();
     let lens_val = lens.get(big_key.clone());
     match (&lens_val, tree_big) {
-        (Some(RecordValue::Int(a)), Some(InnerValue::Int(b))) => assert_eq!(*a, *b),
-        (Some(RecordValue::Str(a)), Some(InnerValue::Str(b))) => {
-            assert_eq!(a.as_ref(), b.as_str());
-        }
-        (Some(RecordValue::Str(a)), Some(InnerValue::Int(_))) => {
-            // Lens maps to Str but tree maps to Int: this is a known divergence
-            // between uint_to_record_value (Str for overflow) and visit_u64
-            // (truncating as i64). The lens's mapping is the intended one for
-            // lossless decode; the tree's is lossy. Not a bug in the lens.
+        (Some(RecordValue::Str(a)), Some(InnerValue::Big(b))) => {
+            // Both representations are lossless and agree on the exact value:
+            // lens → Str(decimal), tree → Big(decimal). The decimal text must
+            // match.
             assert_eq!(a.as_ref(), large_u64.to_string());
+            assert_eq!(b.to_string(), large_u64.to_string());
         }
         other => panic!(
             "lens/tree disagree on U64>MAX: lens={:?}, tree={:?}",

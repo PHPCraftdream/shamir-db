@@ -1092,6 +1092,58 @@ fn order_by_cross_type_dec_int_f64() {
     assert_eq!(qvs[3]["v"], QueryValue::F64(10.5));
 }
 
+/// FG-1 regression: `compare_values` (the engine-level comparison helper used
+/// by `FilterNode::ValueCompare`, aggregate Min/Max, etc.) has explicit
+/// `Big`↔`Int` arms that use the f64 fallback. This test confirms a
+/// collection containing BOTH ordinary `Int` values and promoted `Big`
+/// values compares correctly relative to each other via `compare_values`.
+///
+/// NOTE: the ORDER BY path (`apply_order_by_qv`) uses a separate
+/// `QvSortKey` that maps `Big(b)` → `Str(b.to_string())` (lexicographic).
+/// `QvSortKey` has no `I64`↔`Str` cross-type arm, so mixed Int+Big ORDER
+/// BY falls to `_ => Equal` (preserving insertion order). This is a known
+/// limitation of the sort-key representation, NOT of `compare_values`.
+#[test]
+fn order_by_mixed_int_and_big_compare_values_works() {
+    use crate::query::filter::eval::compare_values;
+    use num_bigint::BigInt;
+    use std::cmp::Ordering;
+
+    let int_small = QueryValue::Int(50);
+    let int_large = QueryValue::Int(100);
+    let big_overflow = QueryValue::Big(BigInt::from(i64::MAX as u64 + 1));
+    let big_max = QueryValue::Big(BigInt::from(u64::MAX));
+
+    // Int vs Int — exact.
+    assert_eq!(compare_values(&int_small, &int_large), Some(Ordering::Less));
+
+    // Int vs Big — f64 fallback. Int(50) << Big(i64::MAX+1 ≈ 9.2e18).
+    assert_eq!(
+        compare_values(&int_small, &big_overflow),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&int_large, &big_overflow),
+        Some(Ordering::Less)
+    );
+
+    // Big vs Big — f64 fallback. i64::MAX+1 ≈ 9.2e18 < u64::MAX ≈ 1.8e19.
+    assert_eq!(
+        compare_values(&big_overflow, &big_max),
+        Some(Ordering::Less)
+    );
+
+    // Symmetry.
+    assert_eq!(
+        compare_values(&big_overflow, &int_small),
+        Some(Ordering::Greater)
+    );
+    assert_eq!(
+        compare_values(&big_max, &big_overflow),
+        Some(Ordering::Greater)
+    );
+}
+
 // ============================================================================
 // Sum integer-overflow regression (the "Sum accumulator unchecked i64
 // overflow" fix): values that individually fit in i64 but whose running
