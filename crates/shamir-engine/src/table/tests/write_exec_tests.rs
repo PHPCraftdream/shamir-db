@@ -42,7 +42,13 @@ pub(crate) async fn insert_via_tx(
     repo.run_implicit_batch_tx(Actor::System, "test_insert", move |tx| {
         Box::pin(async move {
             owned_table
-                .execute_insert_tx(&owned_op, tx, return_result, None)
+                .execute_insert_tx(
+                    &owned_op,
+                    tx,
+                    return_result,
+                    None,
+                    &shamir_types::access::Actor::System,
+                )
                 .await
         })
     })
@@ -66,7 +72,13 @@ pub(crate) async fn update_via_tx(
             let interner = owned_table.interner().get().await?;
             let ctx = FilterContext::new(interner, &owned_refs);
             owned_table
-                .execute_update_tx(&owned_op, &ctx, tx, None)
+                .execute_update_tx(
+                    &owned_op,
+                    &ctx,
+                    tx,
+                    None,
+                    &shamir_types::access::Actor::System,
+                )
                 .await
         })
     })
@@ -88,7 +100,13 @@ pub(crate) async fn delete_via_tx(
             let interner = owned_table.interner().get().await?;
             let ctx = FilterContext::new(interner, &owned_refs);
             owned_table
-                .execute_delete_tx(&owned_op, &ctx, tx, None)
+                .execute_delete_tx(
+                    &owned_op,
+                    &ctx,
+                    tx,
+                    None,
+                    &shamir_types::access::Actor::System,
+                )
                 .await
         })
     })
@@ -104,7 +122,11 @@ pub(crate) async fn set_via_tx(
     let owned_op = op.clone();
     let owned_table = table.clone();
     repo.run_implicit_batch_tx(Actor::System, "test_set", move |tx| {
-        Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx, None).await })
+        Box::pin(async move {
+            owned_table
+                .execute_set_tx(&owned_op, tx, None, &shamir_types::access::Actor::System)
+                .await
+        })
     })
     .await
 }

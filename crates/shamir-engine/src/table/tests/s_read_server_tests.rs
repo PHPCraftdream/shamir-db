@@ -52,7 +52,13 @@ async fn insert_alice_and_get_bytes(
         move |tx| {
             Box::pin(async move {
                 owned_table
-                    .execute_insert_tx(&owned_op, tx, false, None)
+                    .execute_insert_tx(
+                        &owned_op,
+                        tx,
+                        false,
+                        None,
+                        &shamir_types::access::Actor::System,
+                    )
                     .await
             })
         },
@@ -274,7 +280,13 @@ async fn s_read_aggregate_falls_back_to_name() {
         move |tx| {
             Box::pin(async move {
                 owned_table
-                    .execute_insert_tx(&owned_op, tx, false, None)
+                    .execute_insert_tx(
+                        &owned_op,
+                        tx,
+                        false,
+                        None,
+                        &shamir_types::access::Actor::System,
+                    )
                     .await
             })
         },

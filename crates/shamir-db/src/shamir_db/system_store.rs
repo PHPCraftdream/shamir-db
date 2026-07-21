@@ -148,7 +148,7 @@ impl SystemStore {
                 let refs = crate::types::common::new_map();
                 let ctx = crate::query::filter::FilterContext::new(interner, &refs);
                 owned_table
-                    .execute_delete_tx(&owned_op, &ctx, tx, None)
+                    .execute_delete_tx(&owned_op, &ctx, tx, None, &Actor::System)
                     .await
             })
         })
@@ -168,7 +168,11 @@ impl SystemStore {
         let owned_op = op.clone();
         let owned_table = table.clone();
         repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
-            Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx, None).await })
+            Box::pin(async move {
+                owned_table
+                    .execute_set_tx(&owned_op, tx, None, &Actor::System)
+                    .await
+            })
         })
         .await
         .map_err(|e| DbError::Internal(e.to_string()))

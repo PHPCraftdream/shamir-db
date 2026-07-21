@@ -140,7 +140,11 @@ async fn set_via_implicit_tx(
     let owned_op = op.clone();
     let owned_table = table.clone();
     repo.run_implicit_batch_tx(Actor::System, "test_set", move |tx| {
-        Box::pin(async move { owned_table.execute_set_tx(&owned_op, tx, None).await })
+        Box::pin(async move {
+            owned_table
+                .execute_set_tx(&owned_op, tx, None, &shamir_types::access::Actor::System)
+                .await
+        })
     })
     .await
 }
@@ -149,7 +153,9 @@ async fn set_via_implicit_tx(
 /// can inspect staging (`counter_deltas`, `index_write_set`) directly.
 async fn set_into_tx(tbl: &TableManager, op: &crate::query::write::SetOp) -> TxContext {
     let mut tx = TxContext::new(TxId::new(99), 0, u64::MAX, IsolationLevel::Snapshot);
-    tbl.execute_set_tx(op, &mut tx, None).await.unwrap();
+    tbl.execute_set_tx(op, &mut tx, None, &shamir_types::access::Actor::System)
+        .await
+        .unwrap();
     tx
 }
 

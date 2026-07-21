@@ -83,6 +83,7 @@ use super::wasm_engine::{WasmEngine, WasmLimits};
 use super::wasm_sanitizer::verify_wasm_module;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
+use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use wasmtime::{InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -103,6 +104,11 @@ pub(crate) struct HostState {
     pub(super) registry: Option<Arc<FunctionRegistry>>,
     pub(super) depth: u32,
     pub(super) depth_limit: u32,
+    /// RI-7: the invocation's actor — threaded from the parent `FnCtx` so a
+    /// nested `ctx.call(...)` inherits the SAME actor instead of silently
+    /// defaulting to `Actor::System` (a confused-deputy privilege-escalation
+    /// primitive). Read by `host_call.rs` to rebuild the child `FnCtx`.
+    pub(super) actor: Actor,
     pub(super) db: Option<Arc<dyn DbGateway>>,
     pub(super) repo: String,
     pub(super) net: Option<Arc<dyn NetGateway>>,
@@ -134,6 +140,7 @@ pub(crate) fn test_linker_and_store(
         registry: None,
         depth: 0,
         depth_limit: 0,
+        actor: Actor::System,
         db: None,
         repo: String::new(),
         net: None,
@@ -409,6 +416,10 @@ impl ShamirFunction for WasmFunction {
         let registry = ctx.registry().cloned();
         let depth = ctx.depth();
         let depth_limit = ctx.depth_limit();
+        // RI-7: the invocation's actor travels from FnCtx → HostState so
+        // host_call.rs can rebuild the child FnCtx with the SAME actor for a
+        // nested `ctx.call(...)` (closing the confused-deputy gap).
+        let actor = ctx.actor().clone();
         let db = ctx.db_gateway().cloned();
         let repo = ctx.repo().to_string();
         let net = ctx.net_gateway().cloned();
@@ -453,6 +464,7 @@ impl ShamirFunction for WasmFunction {
             registry,
             depth,
             depth_limit,
+            actor,
             db,
             repo,
             net,

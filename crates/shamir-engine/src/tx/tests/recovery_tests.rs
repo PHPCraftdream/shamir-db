@@ -728,7 +728,13 @@ async fn f4b_nontx_insert_crash_recovery() {
         let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
         tx.set_implicit(true);
         let wr = tbl
-            .execute_insert_tx(&op, &mut tx, true, None)
+            .execute_insert_tx(
+                &op,
+                &mut tx,
+                true,
+                None,
+                &shamir_types::access::Actor::System,
+            )
             .await
             .unwrap();
         repo.commit_tx(tx).await.unwrap();
@@ -815,7 +821,13 @@ async fn c5_implicit_insert_new_field_recovers_with_preserved_id() {
         // Overlay MUST stay empty on the implicit path — the field is interned
         // straight into base, so the commit-time overlay-merge is a no-op.
         let wr = tbl
-            .execute_insert_tx(&op, &mut tx, true, None)
+            .execute_insert_tx(
+                &op,
+                &mut tx,
+                true,
+                None,
+                &shamir_types::access::Actor::System,
+            )
             .await
             .unwrap();
         assert!(
@@ -992,7 +1004,13 @@ async fn stage_i_cross_table_shared_interner_id() {
         .build();
     let (mut tx_a, _g_a) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     alpha
-        .execute_insert_tx(&op_a, &mut tx_a, true, None)
+        .execute_insert_tx(
+            &op_a,
+            &mut tx_a,
+            true,
+            None,
+            &shamir_types::access::Actor::System,
+        )
         .await
         .unwrap();
     repo.commit_tx(tx_a).await.unwrap();
@@ -1002,9 +1020,15 @@ async fn stage_i_cross_table_shared_interner_id() {
         .row(doc().set("shared_field", "b_val"))
         .build();
     let (mut tx_b, _g_b) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-    beta.execute_insert_tx(&op_b, &mut tx_b, true, None)
-        .await
-        .unwrap();
+    beta.execute_insert_tx(
+        &op_b,
+        &mut tx_b,
+        true,
+        None,
+        &shamir_types::access::Actor::System,
+    )
+    .await
+    .unwrap();
     repo.commit_tx(tx_b).await.unwrap();
 
     // Both tables resolve "shared_field" through the SHARED repo interner.

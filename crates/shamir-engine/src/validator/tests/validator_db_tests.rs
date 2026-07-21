@@ -226,7 +226,13 @@ async fn validator_db_no_deadlock_cross_and_self_read() {
     parent_tx.set_implicit(true);
     let parent = resolver.resolve(&TableRef::new("parent")).await.unwrap();
     parent
-        .execute_insert_tx(&parent_op, &mut parent_tx, false, None)
+        .execute_insert_tx(
+            &parent_op,
+            &mut parent_tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        )
         .await
         .unwrap();
     resolver.repo.commit_tx(parent_tx).await.unwrap();
@@ -255,7 +261,13 @@ async fn validator_db_no_deadlock_cross_and_self_read() {
     // completes and nextest kills it after the timeout.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        child.execute_insert_tx(&child_op, &mut child_tx, false, None),
+        child.execute_insert_tx(
+            &child_op,
+            &mut child_tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        ),
     )
     .await;
 

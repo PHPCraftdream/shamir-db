@@ -54,6 +54,7 @@ impl TableManager {
         tx: &mut shamir_tx::TxContext,
         return_result: bool,
         resolver: Option<&dyn crate::query::TableResolver>,
+        actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let interner = self.interner().get().await?;
@@ -203,8 +204,9 @@ impl TableManager {
         // S3: run validators on each record before staging.
         // tx path: resolve keys through the tx overlay so brand-new field
         // names (staged above into the layered interner, not yet in base)
-        // resolve at validation time.
-        // TODO actor threading — use Actor::System for now.
+        // resolve at validation time. The caller's `actor` is threaded so a
+        // validator's cross-table reads run with the SAME privileges the
+        // caller already used to reach this write (RI-7).
         //
         // W1: feed the resolved `QueryValue` directly (the resolved record
         // already carries the tx-overlay keys as plain strings, so no
@@ -212,16 +214,9 @@ impl TableManager {
         // `run_validators_tx` path is proven by
         // `validator::tests::query_value_conv_tests`.
         for qv in &resolved_values {
-            self.run_validators_qv(
-                WriteOp::Insert,
-                Some(qv),
-                None,
-                &Actor::System,
-                Some(tx),
-                resolver,
-            )
-            .await
-            .map_err(validator_failure_to_db_error)?;
+            self.run_validators_qv(WriteOp::Insert, Some(qv), None, actor, Some(tx), resolver)
+                .await
+                .map_err(validator_failure_to_db_error)?;
         }
 
         // W2d-cutover: lens-driven batched tx insert — the staged bytes
@@ -293,7 +288,7 @@ impl TableManager {
                         WriteOp::Insert,
                         Some(&qv),
                         None,
-                        &Actor::System,
+                        actor,
                         Some(tx),
                         resolver,
                     )
@@ -374,6 +369,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
         tx: &mut shamir_tx::TxContext,
         resolver: Option<&dyn crate::query::TableResolver>,
+        actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -615,7 +611,7 @@ impl TableManager {
                         WriteOp::Update,
                         Some(&new_qv),
                         Some(&old_qv),
-                        &Actor::System,
+                        actor,
                         Some(tx),
                         resolver,
                     )
@@ -698,6 +694,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
         tx: &mut shamir_tx::TxContext,
         resolver: Option<&dyn crate::query::TableResolver>,
+        actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -800,12 +797,14 @@ impl TableManager {
                             e
                         ))
                     })?;
-                    // TODO actor threading — use Actor::System for now.
+                    // S3: run validators before staging (the W3c keystone pattern).
+                    // The caller's `actor` is threaded so cross-table validator reads
+                    // run with the caller's privileges (RI-7).
                     self.run_validators_view(
                         WriteOp::Delete,
                         None,
                         Some(&view),
-                        &Actor::System,
+                        actor,
                         tx,
                         resolver,
                     )
@@ -891,6 +890,7 @@ impl TableManager {
         op: &SetOp,
         tx: &mut shamir_tx::TxContext,
         resolver: Option<&dyn crate::query::TableResolver>,
+        actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
@@ -1060,7 +1060,7 @@ impl TableManager {
                         WriteOp::Upsert,
                         Some(&new_qv),
                         Some(&old_qv),
-                        &Actor::System,
+                        actor,
                         Some(tx),
                         resolver,
                     )
@@ -1121,7 +1121,7 @@ impl TableManager {
                 WriteOp::Upsert,
                 Some(resolved_value.as_ref()),
                 None,
-                &Actor::System,
+                actor,
                 Some(tx),
                 resolver,
             )

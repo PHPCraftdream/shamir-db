@@ -128,7 +128,14 @@ async fn stage_insert(
 ) -> Result<crate::query::write::WriteResult, shamir_storage::error::DbError> {
     let mut tx = TxContext::new(TxId::new(99), 0, u64::MAX, IsolationLevel::Snapshot);
     tx.implicit = true;
-    tbl.execute_insert_tx(op, &mut tx, true, None).await
+    tbl.execute_insert_tx(
+        op,
+        &mut tx,
+        true,
+        None,
+        &shamir_types::access::Actor::System,
+    )
+    .await
 }
 
 /// Collect all (RecordId, raw_bytes) pairs from the committed table store.
@@ -204,7 +211,11 @@ async fn idmsgpack_byte_identity_convergence() {
     let table_b = table.clone();
     let res_b = repo
         .run_implicit_batch_tx(Actor::System, "idmsgpack_convergence_B", move |tx| {
-            Box::pin(async move { table_b.execute_insert_tx(&op_b, tx, true, None).await })
+            Box::pin(async move {
+                table_b
+                    .execute_insert_tx(&op_b, tx, true, None, &shamir_types::access::Actor::System)
+                    .await
+            })
         })
         .await
         .unwrap();
@@ -285,7 +296,13 @@ async fn idmsgpack_indexed_insert() {
             let owned_op = op.clone();
             Box::pin(async move {
                 owned_table
-                    .execute_insert_tx(&owned_op, tx, true, None)
+                    .execute_insert_tx(
+                        &owned_op,
+                        tx,
+                        true,
+                        None,
+                        &shamir_types::access::Actor::System,
+                    )
                     .await
             })
         })
@@ -467,7 +484,11 @@ async fn idmsgpack_return_result_records_match_affected() {
     let table_c = table.clone();
     let result = repo
         .run_implicit_batch_tx(Actor::System, "idmsgpack_returning", move |tx| {
-            Box::pin(async move { table_c.execute_insert_tx(&op, tx, true, None).await })
+            Box::pin(async move {
+                table_c
+                    .execute_insert_tx(&op, tx, true, None, &shamir_types::access::Actor::System)
+                    .await
+            })
         })
         .await
         .unwrap();
@@ -557,7 +578,11 @@ async fn mixed_values_and_idmsgpack_return_result() {
     let table_c = table.clone();
     let result = repo
         .run_implicit_batch_tx(Actor::System, "mixed_returning", move |tx| {
-            Box::pin(async move { table_c.execute_insert_tx(&op, tx, true, None).await })
+            Box::pin(async move {
+                table_c
+                    .execute_insert_tx(&op, tx, true, None, &shamir_types::access::Actor::System)
+                    .await
+            })
         })
         .await
         .unwrap();

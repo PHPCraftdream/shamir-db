@@ -3,6 +3,7 @@ pub mod compile_tests;
 pub mod context_tests;
 pub mod env_globals_tests;
 pub mod env_policy_tests;
+pub mod nested_actor_tests;
 pub mod net_gateway_tests;
 pub mod registry_tests;
 pub mod wasm_sanitizer_tests;

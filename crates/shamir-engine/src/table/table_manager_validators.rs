@@ -129,6 +129,15 @@ impl TableManager {
     /// (`foreign_key` C2, `unique` C3) to read database state on the tx's
     /// snapshot.  Both are optional (`None` on paths without a tx context —
     /// legacy callers, some tests).
+    ///
+    /// RI-7 (actor semantics): `actor` is the CALLER's identity, threaded from
+    /// `execute_*_tx` (which in turn receives it from `QueryRunner.actor`).
+    /// validator cross-table reads execute with the CALLER's privileges; a
+    /// validator referencing a table the caller cannot read will reject the
+    /// write. This is fail-closed (worst case: a legitimate write is rejected
+    /// because the caller can't see a referenced table — a UX bug, not a
+    /// security bug) and matches the codebase's "ambiguous actor → return
+    /// caller, not System" convention.
     pub async fn run_validators_qv(
         &self,
         op: crate::validator::WriteOp,

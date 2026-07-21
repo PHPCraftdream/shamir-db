@@ -52,6 +52,11 @@ pub(super) fn host_call(
         let next_depth;
         let depth_limit;
         let fuel_budget;
+        let actor;
+        let db_gateway;
+        let repo;
+        let net_gateway;
+        let secret_grants;
         {
             let memory = caller
                 .get_export("memory")
@@ -68,6 +73,15 @@ pub(super) fn host_call(
             next_depth = state.depth.saturating_add(1);
             depth_limit = state.depth_limit;
             fuel_budget = state.fuel_budget.clone();
+            // RI-7: clone the per-invocation identity + capabilities so the
+            // child FnCtx (Phase 2) inherits the SAME actor instead of
+            // Actor::System, and keeps db/repo/net/secret-grant access
+            // instead of silently losing them (same unfinished-plumbing site).
+            actor = state.actor.clone();
+            db_gateway = state.db.clone();
+            repo = state.repo.clone();
+            net_gateway = state.net.clone();
+            secret_grants = state.secret_grants.clone();
         }
         // Borrows on caller (memory, data) are dropped. Caller itself is still alive.
 
@@ -90,12 +104,26 @@ pub(super) fn host_call(
             .ok_or_else(|| wasmtime::Error::msg(format!("call: function not found: {name}")))?;
 
         // ── Phase 2: await the callee ──
-        // TODO(Shomer R2): thread actor from parent FnCtx into child
-        let child_ctx = FnCtx::with_globals(globals)
+        // RI-7: thread the parent invocation's actor into the child FnCtx so
+        // a nested ctx.call(...) inherits the SAME actor instead of silently
+        // defaulting to Actor::System (a confused-deputy privilege-escalation
+        // primitive). db/repo/net/secret_grants are threaded the same way so
+        // the nested call inherits the parent's capabilities instead of
+        // silently losing them (the same unfinished-plumbing site — fail-
+        // closed, lower urgency than the actor fail-open, fixed together).
+        let mut child_ctx = FnCtx::with_globals(globals)
             .with_registry(reg)
             .with_depth(next_depth)
             .with_depth_limit(depth_limit)
+            .with_actor(actor)
+            .with_secret_grants(secret_grants.iter().cloned())
             .with_fuel_budget(fuel_budget);
+        if let Some(db) = db_gateway {
+            child_ctx = child_ctx.with_db(db, repo);
+        }
+        if let Some(net) = net_gateway {
+            child_ctx = child_ctx.with_net(net);
+        }
         let child_batch = FnBatch::with_context(batch_ctx);
 
         let result = child_ctx

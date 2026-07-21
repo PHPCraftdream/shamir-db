@@ -511,7 +511,7 @@ impl ShamirAdminExecutor {
                     let refs = crate::types::common::new_map();
                     let ctx = crate::query::filter::FilterContext::new(interner, &refs);
                     owned_table
-                        .execute_delete_tx(&owned_op, &ctx, tx, None)
+                        .execute_delete_tx(&owned_op, &ctx, tx, None, &Actor::System)
                         .await
                 })
             })

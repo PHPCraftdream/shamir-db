@@ -931,7 +931,13 @@ impl<'a> QueryRunner<'a> {
                 };
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
-                        .execute_insert_tx(op_ref, tx, entry.return_result, Some(self.resolver))
+                        .execute_insert_tx(
+                            op_ref,
+                            tx,
+                            entry.return_result,
+                            Some(self.resolver),
+                            &self.actor,
+                        )
                         .await
                         .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
@@ -961,10 +967,17 @@ impl<'a> QueryRunner<'a> {
                         // HRTB requires no other caller-scope borrows).
                         let owned_op: shamir_query_types::write::InsertOp = op_ref.clone();
                         let owned_table = table.clone();
+                        let owned_actor = self.actor.clone();
                         repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
                                 owned_table
-                                    .execute_insert_tx(&owned_op, tx, return_result, None)
+                                    .execute_insert_tx(
+                                        &owned_op,
+                                        tx,
+                                        return_result,
+                                        None,
+                                        &owned_actor,
+                                    )
                                     .await
                             })
                         })
@@ -1037,7 +1050,7 @@ impl<'a> QueryRunner<'a> {
                         super::fk_on_update::apply_fk_update_plan(fk_update_plan, tx, alias)
                             .await?;
                         table
-                            .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver))
+                            .execute_update_tx(op_ref, &ctx, tx, Some(self.resolver), &self.actor)
                             .await
                             .map_err(|e| BatchError::QueryError {
                                 alias: alias.to_string(),
@@ -1082,10 +1095,10 @@ impl<'a> QueryRunner<'a> {
 
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
-                                    .with_actor(owned_actor)
+                                    .with_actor(owned_actor.clone())
                                     .with_params(&owned_params);
                                 owned_table
-                                    .execute_update_tx(&owned_op, &ctx, tx, None)
+                                    .execute_update_tx(&owned_op, &ctx, tx, None, &owned_actor)
                                     .await
                             })
                         })
@@ -1156,7 +1169,7 @@ impl<'a> QueryRunner<'a> {
                         // is cleaner this way).
                         super::fk_actions::apply_cascade_plan(cascade_plan, tx, alias).await?;
                         table
-                            .execute_delete_tx(op, &ctx, tx, Some(self.resolver))
+                            .execute_delete_tx(op, &ctx, tx, Some(self.resolver), &self.actor)
                             .await
                             .map_err(|e| BatchError::QueryError {
                                 alias: alias.to_string(),
@@ -1201,10 +1214,10 @@ impl<'a> QueryRunner<'a> {
 
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
-                                    .with_actor(owned_actor)
+                                    .with_actor(owned_actor.clone())
                                     .with_params(&owned_params);
                                 owned_table
-                                    .execute_delete_tx(&owned_op, &ctx, tx, None)
+                                    .execute_delete_tx(&owned_op, &ctx, tx, None, &owned_actor)
                                     .await
                             })
                         })
@@ -1251,7 +1264,7 @@ impl<'a> QueryRunner<'a> {
                     };
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
-                        .execute_set_tx(op_ref, tx, Some(self.resolver))
+                        .execute_set_tx(op_ref, tx, Some(self.resolver), &self.actor)
                         .await
                         .map_err(|e| BatchError::QueryError {
                             alias: alias.to_string(),
@@ -1274,9 +1287,11 @@ impl<'a> QueryRunner<'a> {
                         let owned_op: shamir_query_types::write::SetOp = op_ref.clone();
                         let owned_table = table.clone();
                         let owned_actor = self.actor.clone();
-                        repo.run_implicit_batch_tx(owned_actor, alias, move |tx| {
+                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
-                                owned_table.execute_set_tx(&owned_op, tx, None).await
+                                owned_table
+                                    .execute_set_tx(&owned_op, tx, None, &owned_actor)
+                                    .await
                             })
                         })
                         .await?

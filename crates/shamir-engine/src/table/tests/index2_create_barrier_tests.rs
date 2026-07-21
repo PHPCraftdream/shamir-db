@@ -446,7 +446,13 @@ async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
         .rows([mpack!({ "name": "Bob" })])
         .build();
     let result = tbl
-        .execute_insert_tx(&op, &mut tx, true, None)
+        .execute_insert_tx(
+            &op,
+            &mut tx,
+            true,
+            None,
+            &shamir_types::access::Actor::System,
+        )
         .await
         .unwrap();
     assert_eq!(result.affected, 1);
@@ -528,7 +534,13 @@ async fn stage_and_commit_inside_window_still_misses_new_index_part_b_open() {
         .rows([mpack!({ "name": "Carol" })])
         .build();
     let result = tbl
-        .execute_insert_tx(&op, &mut tx, true, None)
+        .execute_insert_tx(
+            &op,
+            &mut tx,
+            true,
+            None,
+            &shamir_types::access::Actor::System,
+        )
         .await
         .unwrap();
     let carol = result.records[0].id.expect("insert must assign an id");
