@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 
 use shamir_connect::server::session::Session;
 use shamir_db::access::{Action, ResourcePath};
-use shamir_query_types::wire::repl::{ReplRepoInfo, ReplRequest, ReplResponse};
+use shamir_query_types::wire::repl::{
+    ReplRepoInfo, ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER,
+};
 
 use super::handler::{session_actor, ShamirDbHandler};
 
@@ -57,10 +59,24 @@ impl ShamirDbHandler {
 
         match req {
             ReplRequest::Hello {
-                proto_ver: _,
+                proto_ver,
                 node_id: _,
             } => {
-                // TODO(R1): negotiate proto_ver — for R0 we accept any.
+                // Upper-bound reject only: a follower speaking a NEWER,
+                // unrecognized protocol version is rejected; an OLDER (or
+                // equal) follower is accepted. Full bidirectional
+                // negotiation is unnecessary until a second protocol
+                // version is actually introduced.
+                if proto_ver > CURRENT_REPL_PROTO_VER {
+                    return ReplResponse::Error {
+                        leader_epoch: self.leader_epoch,
+                        code: "proto_ver_unsupported".into(),
+                        message: format!(
+                            "follower proto_ver {proto_ver} exceeds this leader's supported \
+                             version {CURRENT_REPL_PROTO_VER}"
+                        ),
+                    };
+                }
                 self.handle_hello(session).await
             }
             ReplRequest::Pull {

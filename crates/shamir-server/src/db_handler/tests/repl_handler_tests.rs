@@ -26,7 +26,7 @@ use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
-use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
+use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER};
 
 use crate::db_handler::handler::ShamirDbHandler;
 
@@ -429,5 +429,70 @@ async fn leader_epoch_carried_on_all_responses() {
     match err {
         ReplResponse::Error { leader_epoch, .. } => assert_eq!(leader_epoch, 7),
         other => panic!("expected Error, got: {other:?}"),
+    }
+}
+
+/// 7. `proto_ver` upper-bound rejection: a `Hello` advertising
+/// `CURRENT_REPL_PROTO_VER + 1` (an unrecognized, newer protocol) is
+/// rejected with `proto_ver_unsupported`; a `Hello` at (or below) the
+/// current version still succeeds normally.
+#[tokio::test]
+async fn proto_ver_upper_bound_reject_and_accept() {
+    let handler = build_handler().await;
+    let session = alice_replicator_session();
+
+    // A newer, unrecognized proto_ver is rejected.
+    let resp = handler
+        .handle_repl(
+            &session,
+            ReplRequest::Hello {
+                proto_ver: CURRENT_REPL_PROTO_VER + 1,
+                node_id: "follower-1".into(),
+            },
+        )
+        .await;
+    match resp {
+        ReplResponse::Error {
+            leader_epoch,
+            code,
+            message,
+        } => {
+            assert_eq!(leader_epoch, 1, "default epoch is 1");
+            assert_eq!(
+                code, "proto_ver_unsupported",
+                "wrong code; message: {message}"
+            );
+        }
+        other => panic!("expected Error(proto_ver_unsupported), got: {other:?}"),
+    }
+
+    // The current proto_ver still succeeds normally.
+    let resp = handler
+        .handle_repl(
+            &session,
+            ReplRequest::Hello {
+                proto_ver: CURRENT_REPL_PROTO_VER,
+                node_id: "follower-1".into(),
+            },
+        )
+        .await;
+    match resp {
+        ReplResponse::Hello { leader_epoch, .. } => assert_eq!(leader_epoch, 1),
+        other => panic!("expected Hello, got: {other:?}"),
+    }
+
+    // An OLDER proto_ver (e.g. 0) is also accepted (forward-compat).
+    let resp = handler
+        .handle_repl(
+            &session,
+            ReplRequest::Hello {
+                proto_ver: 0,
+                node_id: "follower-1".into(),
+            },
+        )
+        .await;
+    match resp {
+        ReplResponse::Hello { leader_epoch, .. } => assert_eq!(leader_epoch, 1),
+        other => panic!("expected Hello, got: {other:?}"),
     }
 }

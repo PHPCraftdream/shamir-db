@@ -11,9 +11,12 @@
 //!      - **epoch-fence (§5.2):** if the reply's epoch is strictly lower
 //!        than the max seen, terminate with [`ReplError::StaleLeaderEpoch`];
 //!        otherwise record the new max;
-//!      - **gap-reseed (§5.3 / R1 simplification):** if the reply carries
-//!        `gap_at: Some(g)`, log + shift the cursor to `g` and continue
-//!        (full snapshot reseed is R2);
+//!      - **gap-stop (§5.3 / R1 simplification):** if the reply carries
+//!        `gap_at: Some(g)` with `g > from_version`, the follower is
+//!        permanently missing `[from_version, g)` — log at `warn!`/`error!`
+//!        and terminate with [`ReplError::JournalGap`] WITHOUT applying any
+//!        events in that same reply (the supervisor marks the subscription
+//!        `resync_required`; full automated snapshot reseed is R2);
 //!      - decode the events payload (`Vec<ChangelogEvent>`);
 //!      - for each event in order: `apply_replicated(event, bookmark)` →
 //!        on `Applied`, `advance_replication_bookmark(event.commit_version)`
@@ -114,6 +117,9 @@ impl FollowerLoopConfig {
 ///   * `cancel` is cancelled (graceful shutdown) → returns `Ok(())`;
 ///   * a [`ReplError::StaleLeaderEpoch`] is observed → returns the error
 ///     (the loop MUST stop; a stale leader is a fencing violation);
+///   * a [`ReplError::JournalGap`] is observed → returns the error (the loop
+///     MUST stop; the follower is permanently missing the gapped range and
+///     must not silently resume past it — see the module docs);
 ///   * `cfg.max_iterations` is reached, if `Some` (used by tests to bound
 ///     the loop without relying on cancellation).
 ///
@@ -166,10 +172,6 @@ pub async fn run_follower_loop(
 
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
-    // Tracks whether the next `pull` should override `from_version` to skip
-    // a leader-reported gap. `Some(g)` → pull from `g` instead of
-    // `bookmark+1`. Cleared after the gap-skipping pull.
-    let mut gap_skip_from: Option<u64> = None;
 
     loop {
         // Cancellation check — cheap and race-free (CancellationToken).
@@ -214,9 +216,10 @@ pub async fn run_follower_loop(
             }
         };
 
-        // 3. pull — `from = bookmark + 1` unless a gap-shift overrides it.
-        let from_version = gap_skip_from.unwrap_or(bookmark + 1);
-        gap_skip_from = None; // consumed
+        // 3. pull — always from the durable bookmark; a journal gap is now
+        // terminal (see step 6), so there is no cursor-shift state to track
+        // across iterations.
+        let from_version = bookmark + 1;
         let resp = match source
             .pull(
                 &db_name,
@@ -282,18 +285,26 @@ pub async fn run_follower_loop(
             }
         };
 
-        // 6. gap-reseed (§5.3 / R1 simplification).
+        // 6. gap-stop (§5.3 / R1 simplification). A gap means the follower
+        // is permanently missing `[from_version, g)` — this is now a
+        // terminal condition, NOT a silent skip. Check and return BEFORE
+        // decoding/applying any events that may have accompanied this same
+        // reply (the events, if any, must not be applied).
         if let Some(g) = gap_at {
             if g > from_version {
                 warn!(
                     node_id = %node_id,
                     gap_at = g,
                     from = from_version,
-                    "follower_loop: leader reports journal gap; shifting cursor past it \
-                     (full snapshot reseed is R2)"
+                    "follower_loop: leader reports journal gap; STOPPING the loop \
+                     (not skipping) — data in [from_version, gap_at) is permanently \
+                     missing; the supervisor will mark this subscription \
+                     resync_required (full automated snapshot reseed is R2)"
                 );
-                gap_skip_from = Some(g);
-                continue;
+                return Err(ReplError::JournalGap {
+                    gap_at: g,
+                    from_version,
+                });
             }
             // `g <= from_version` — the gap is behind us, ignore and proceed.
         }

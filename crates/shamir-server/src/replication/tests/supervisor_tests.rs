@@ -16,11 +16,17 @@
 //!   3. **resume:** `alter_subscription().resume()` → `reconcile()` restarts
 //!      the loop → catches up again.
 //!   4. **drop:** `drop_subscription()` → `reconcile()` stops + deregisters.
+//!   5. **journal gap → resync_required:** a source that always replies with
+//!      a `gap_at` past the requested `from_version` → the follower loop
+//!      terminates with `JournalGap` → the supervisor persists
+//!      `state = "resync_required"` on the subscription's row → a subsequent
+//!      `reconcile()` does NOT restart it (mirrors how `"paused"` behaves).
 //!
 //! Loops are bounded via `with_max_iterations` (no infinite sleep).
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use shamir_db::access::{principal64_from_username, Actor};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
@@ -32,7 +38,9 @@ use shamir_query_builder::ddl::{
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
+use shamir_query_types::wire::repl::ReplResponse;
 
+use crate::replication::error::ReplError;
 use crate::replication::in_process::InProcessReplSource;
 use crate::replication::source::ReplSource;
 use crate::replication::supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
@@ -299,4 +307,116 @@ async fn drop_stops_and_deregisters() {
     assert_eq!(sup.active_count(), 0);
 
     sup.stop_all().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 5 — journal gap → resync_required (RI-10, Part 2)
+// ---------------------------------------------------------------------------
+
+/// A [`ReplSource`] whose `pull` always replies with a fixed `gap_at` well
+/// past any requested `from_version` — every pull call terminates the
+/// follower loop with [`ReplError::JournalGap`].
+struct AlwaysGapReplSource {
+    gap_at: u64,
+}
+
+#[async_trait]
+impl ReplSource for AlwaysGapReplSource {
+    async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
+        Ok(ReplResponse::Hello {
+            leader_epoch: 1,
+            repos: Vec::new(),
+        })
+    }
+
+    async fn pull(
+        &self,
+        _db: &str,
+        _repo: &str,
+        _from_version: u64,
+        _limit: u32,
+        _wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        Ok(ReplResponse::Pull {
+            leader_epoch: 1,
+            events: Vec::new(),
+            gap_at: Some(self.gap_at),
+            current_version: self.gap_at,
+        })
+    }
+}
+
+/// After a follower loop terminates with `JournalGap`, the supervisor
+/// persists `state = "resync_required"` on the subscription's row, AND a
+/// subsequent `reconcile()` does NOT restart it — mirroring how a `"paused"`
+/// subscription already stays stopped across reconcile ticks (Test 2).
+#[tokio::test]
+async fn journal_gap_marks_resync_required_and_stays_stopped() {
+    let follower = build_db().await;
+    create_profile_and_subscription(&follower).await;
+
+    // Factory always returns a source whose `pull` reports a gap at 100
+    // (well past `bookmark(0) + 1 = 1`) — every loop iteration hits the
+    // terminal `JournalGap` path immediately.
+    let factory: ReplSourceFactory = Arc::new(move |_sub: &Subscription| {
+        Arc::new(AlwaysGapReplSource { gap_at: 100 }) as Arc<dyn ReplSource>
+    });
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_poll_wait_ms(20)
+        .with_max_iterations(50);
+
+    sup.reconcile().await;
+
+    // Wait for the spawned loop task to observe the gap and for the
+    // supervisor to persist `resync_required` on the subscription row.
+    let mut state = None;
+    for _ in 0..200 {
+        state = sub_state(&follower, "sub_a").await;
+        if state.as_deref() == Some("resync_required") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        state.as_deref(),
+        Some("resync_required"),
+        "subscription row must be marked resync_required after a journal gap"
+    );
+
+    // The dead loop task leaves a stale registry entry (pre-existing
+    // loop-liveness gap, out of scope for this task) — but a fresh
+    // `reconcile()` must NOT start a new loop for a subscription whose row
+    // is `resync_required` (only `active` rows are (re)started).
+    sup.reconcile().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    state = sub_state(&follower, "sub_a").await;
+    assert_eq!(
+        state.as_deref(),
+        Some("resync_required"),
+        "reconcile() must not flip resync_required back to active on its own"
+    );
+
+    sup.stop_all().await;
+}
+
+/// Read the `state` field of subscription `name`'s row directly from the
+/// system store (mirrors `shamir_db`'s own `replication_ddl_tests.rs::sub_field`).
+async fn sub_state(follower: &ShamirDb, name: &str) -> Option<String> {
+    let table = follower.system_store().subscriptions_table().await.ok()?;
+    let interner = table.interner().get().await.ok()?;
+    let refs = shamir_db::types::common::new_map();
+    let ctx = shamir_db::query::filter::FilterContext::new(interner, &refs);
+    let query = shamir_db::query::read::ReadQuery::new("subscriptions").filter(
+        shamir_db::query::filter::Filter::Eq {
+            field: vec!["name".to_string()],
+            value: shamir_db::query::filter::FilterValue::String(name.to_string()),
+        },
+    );
+    let result = table.read(&query, &ctx).await.ok()?;
+    result.records.first().and_then(|r| {
+        r.as_value()
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    })
 }

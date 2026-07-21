@@ -50,6 +50,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use super::error::ReplError;
 use super::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use super::source::ReplSource;
 
@@ -283,8 +284,40 @@ impl SubscriptionSupervisor {
             let sub_name = sub.name.clone();
             // §5.6 — each loop is its own task; never blocks the server.
             let join = tokio::spawn(async move {
-                if let Err(e) = run_follower_loop(local, src, cfg, tok).await {
-                    warn!(subscription = %sub_name, error = %e, "follower loop terminated");
+                match run_follower_loop(local.clone(), src, cfg, tok).await {
+                    Ok(()) => {}
+                    Err(
+                        e @ ReplError::JournalGap {
+                            gap_at,
+                            from_version,
+                        },
+                    ) => {
+                        // Terminal, honest-stop condition (Part 2 of this
+                        // task): persist `resync_required` on the
+                        // subscription's own row so the gap is visible via
+                        // the existing admin surface (`ReplicationStatus` /
+                        // `ListSubscriptions`). Any OTHER `ReplError`
+                        // variant falls through to the generic warn-log
+                        // branch below, unchanged.
+                        if let Err(mark_err) = local
+                            .mark_subscription_resync_required(&sub_name, gap_at, from_version)
+                            .await
+                        {
+                            warn!(
+                                subscription = %sub_name,
+                                error = %mark_err,
+                                "supervisor: failed to persist resync_required after journal gap"
+                            );
+                        }
+                        warn!(
+                            subscription = %sub_name,
+                            error = %e,
+                            "follower loop terminated on journal gap; subscription marked resync_required"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(subscription = %sub_name, error = %e, "follower loop terminated");
+                    }
                 }
             });
             joins.push(join);

@@ -5,7 +5,7 @@
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
     alter_subscription, drop_publication, drop_subscription, list_publications, list_subscriptions,
-    publication, repl_scope, replication_profile, subscription,
+    publication, repl_scope, replication_profile, replication_status, subscription,
 };
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 
@@ -235,6 +235,108 @@ async fn create_replication_profile_persists_streams() {
     assert_eq!(rec.get("name").and_then(|v| v.as_str()), Some("cluster"));
     let streams = rec.get("streams").and_then(|v| v.as_array()).unwrap();
     assert_eq!(streams.len(), 1);
+}
+
+/// RI-10 Part 2: `mark_subscription_resync_required` (called by the
+/// follower-loop supervisor on a terminal `JournalGap`) persists
+/// `state = "resync_required"` on the subscription's row, and that value
+/// round-trips verbatim through BOTH `ListSubscriptions` and
+/// `ReplicationStatus` — the pre-existing admin surface that already echoes
+/// `state` (no new endpoint was added). The existing `Resume` admin action
+/// still recovers it back to `"active"`.
+#[tokio::test]
+async fn resync_required_round_trips_through_status_and_list_then_resume_recovers() {
+    let shamir = setup().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.op(
+        "cs",
+        subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Simulate what the supervisor does when `run_follower_loop` returns a
+    // terminal `ReplError::JournalGap`.
+    shamir
+        .mark_subscription_resync_required("sub_a", 100, 42)
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_field(&shamir, "sub_a", "state").await,
+        Some("resync_required".into())
+    );
+
+    // `ListSubscriptions` echoes it verbatim.
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("ls", list_subscriptions());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let subs = result_value(&resp, "ls");
+    let subs = subs
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(subs.len(), 1);
+    assert_eq!(
+        subs[0].get("state").and_then(|v| v.as_str()),
+        Some("resync_required")
+    );
+
+    // `ReplicationStatus` echoes it verbatim too.
+    let mut b = Batch::new();
+    b.id(3);
+    b.op("rs", replication_status());
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let status = result_value(&resp, "rs");
+    let entries = status
+        .get("subscriptions")
+        .and_then(|v| v.as_array())
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].get("name").and_then(|v| v.as_str()),
+        Some("sub_a")
+    );
+    assert_eq!(
+        entries[0].get("state").and_then(|v| v.as_str()),
+        Some("resync_required")
+    );
+
+    // The existing `Resume` admin action still recovers it back to `active`
+    // — no new admin action is needed for this new state value.
+    let mut b = Batch::new();
+    b.id(4);
+    b.op("alt", alter_subscription("sub_a").resume());
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        sub_field(&shamir, "sub_a", "state").await,
+        Some("active".into())
+    );
+}
+
+/// `mark_subscription_resync_required` on a subscription name that does not
+/// exist is a no-op (does not error) — the subscription may have been
+/// dropped concurrently by an admin command racing with gap detection.
+#[tokio::test]
+async fn mark_resync_required_on_missing_subscription_is_a_noop() {
+    let shamir = setup().await;
+    shamir
+        .mark_subscription_resync_required("does_not_exist", 100, 42)
+        .await
+        .expect("missing subscription must not error the caller");
 }
 
 /// Read one field of the stored subscription record from the system store.

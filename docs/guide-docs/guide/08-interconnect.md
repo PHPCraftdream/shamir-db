@@ -154,7 +154,7 @@ RESPONSE ← ReplResponse::Pull { leader_epoch, events: <msgpack Vec<ChangelogEv
   (`CreateSubscription`/`DropSubscription`/`AlterSubscription`/
   `ListSubscriptions`).
 
-### Шаг 3: Leader-follower replication — реализовано
+### Шаг 3: Leader-follower replication — реализовано (Experimental)
 
 Follower подключается к leader'у и тянет changefeed:
 
@@ -170,6 +170,22 @@ Follower  ──apply changes───────►  Local store
 через `crates/shamir-server/src/replication/follower_loop.rs` +
 `supervisor.rs` и применяет локально. VR-style epoch fencing защищает
 от применения событий от устаревшего leader'а.
+
+**Это честно экспериментальная async single-leader read-replica
+фича, а не clustering/HA-решение.** Известные ограничения R1:
+один общий `replicator`-аккаунт (username+password) аутентифицирует
+ВСЕ subscription'ы на follower'е — отдельного per-subscription
+credential store пока нет; supervisor **reconcile-driven, а не
+event-driven** — изменение каталога (`system/subscriptions`)
+подхватывается только на очередном вызове `reconcile()`/
+`notify_changed()`, а не непрерывным наблюдением; нет leader election,
+quorum, автоматического failover, multi-primary или sharding. Кроме
+того, journal gap (follower запросил диапазон, которого leader уже не
+хранит) теперь **останавливает** follower-loop и помечает subscription
+`resync_required` вместо тихого пропуска пропавших данных — recovery
+это ручной шаг оператора (проверить/починить данные follower'а, затем
+вызвать существующий admin action `Resume`); полностью автоматический
+snapshot-based reseed остаётся в роадмапе (R2).
 
 ### Шаг 4: P2P / gossip → chat
 
@@ -210,13 +226,16 @@ logic (CRDT, last-write-wins, merge-функции).
 
 ## Что важно знать уже сейчас (дозированно)
 
-* **Changefeed, network pull, leader-follower репликация и live
-  subscriptions — реальны, реализованы и покрыты тестами.** Монотонный
-  `commit_version`, resumable journal (`from_version`/`wait_ms`), gap
-  detection (`gap_at`), VR-style epoch fencing — всё это уже работающий
-  код, а не набросок API. Если нужна репликация или server-push
-  сегодня — это доступно через `ReplRequest`/`ReplResponse` и
-  `BatchOp::Subscribe`/`Unsubscribe`.
+* **Changefeed, network pull, leader-follower репликация (Experimental)
+  и live subscriptions — реальны, реализованы и покрыты тестами.**
+  Монотонный `commit_version`, resumable journal (`from_version`/
+  `wait_ms`), gap detection (`gap_at`) с honest stop +
+  `resync_required`, VR-style epoch fencing — всё это уже работающий
+  код, а не набросок API. Leader-follower репликация при этом остаётся
+  экспериментальной single-leader read-replica фичей — без election/
+  quorum/failover/multi-primary/sharding, см. §Шаг 3. Если нужна
+  репликация или server-push сегодня — это доступно через
+  `ReplRequest`/`ReplResponse` и `BatchOp::Subscribe`/`Unsubscribe`.
 * **P2P, gossip, peer discovery и chat — по-прежнему роадмап.** Не жди
   децентрализованного mesh в ближайших релизах.
 * **Смотри роадмап.** `docs/dev-artifacts/roadmap/STAGES.md` и `docs/dev-artifacts/roadmap/PLAN.md`

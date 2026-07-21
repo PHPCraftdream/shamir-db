@@ -12,12 +12,17 @@
 //!   3. **Epoch regression (§5.2):** a source whose epoch regresses below
 //!      the previously-seen maximum terminates the loop with
 //!      [`ReplError::StaleLeaderEpoch`].
+//!   4. **Journal gap → terminal stop:** a source whose `pull` reply carries
+//!      `gap_at: Some(g)` with `g > from_version` (alongside events, to prove
+//!      they are NOT applied) terminates the loop with
+//!      [`ReplError::JournalGap`] and leaves the bookmark unchanged.
 //!
 //! The loop is bounded via `max_iterations` (no infinite sleep) and a
 //! `CancellationToken` as a belt-and-suspenders backstop.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use shamir_db::access::principal64_from_username;
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -26,11 +31,13 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::wire::repl::ReplResponse;
 use tokio_util::sync::CancellationToken;
 
 use crate::replication::error::ReplError;
 use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use crate::replication::in_process::InProcessReplSource;
+use crate::replication::source::ReplSource;
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -330,4 +337,108 @@ async fn epoch_regression_terminate_loop() {
         }
         Err(other) => panic!("expected StaleLeaderEpoch or clean exit, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test 4 — journal gap terminates the loop, WITHOUT applying accompanying events
+// ---------------------------------------------------------------------------
+
+/// A [`ReplSource`] whose `pull` always replies with a fixed `gap_at` AND a
+/// non-empty events payload in the SAME reply — this proves the loop checks
+/// the gap BEFORE decoding/applying events, per the brief's requirement that
+/// events accompanying a gap response must never be applied.
+struct GapReplSource {
+    gap_at: u64,
+    /// Events to include alongside the gap (msgpack-encoded
+    /// `Vec<ChangelogEvent>`). Non-empty, so an incorrect implementation
+    /// that applies-before-checking would visibly advance the bookmark.
+    events_bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl ReplSource for GapReplSource {
+    async fn hello(&self, _node_id: &str) -> Result<ReplResponse, ReplError> {
+        Ok(ReplResponse::Hello {
+            leader_epoch: 1,
+            repos: Vec::new(),
+        })
+    }
+
+    async fn pull(
+        &self,
+        _db: &str,
+        _repo: &str,
+        _from_version: u64,
+        _limit: u32,
+        _wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        Ok(ReplResponse::Pull {
+            leader_epoch: 1,
+            events: self.events_bytes.clone(),
+            gap_at: Some(self.gap_at),
+            current_version: self.gap_at,
+        })
+    }
+}
+
+/// A gap reply (`gap_at > from_version`) terminates the loop with
+/// [`ReplError::JournalGap`] and does NOT apply any event in that same
+/// reply — the follower's bookmark stays at its pre-call value (0, since
+/// nothing was ever applied).
+#[tokio::test]
+async fn journal_gap_terminates_loop_without_applying_events() {
+    let leader = build_db("alice").await;
+    // One real event, so decoding would succeed if the loop incorrectly
+    // reached the decode/apply step before the gap check.
+    write_rows(&leader, 1).await;
+    let jr = leader
+        .read_changelog_from_journal("app", "main", 0, 10)
+        .await
+        .expect("leader journal");
+    let events_bytes = rmp_serde::to_vec_named(&jr.events).expect("encode events");
+    assert!(!events_bytes.is_empty(), "fixture must carry an event");
+
+    let follower = build_db("follower").await;
+    // gap_at (100) > from_version (bookmark(0) + 1 = 1) — the follower has
+    // never applied anything, so a `from_version` of 1 is guaranteed to be
+    // less than the gap.
+    let source = Arc::new(GapReplSource {
+        gap_at: 100,
+        events_bytes,
+    });
+
+    let cancel = CancellationToken::new();
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(50)
+        .with_max_iterations(10);
+    let result = run_follower_loop(Arc::new(follower.clone()), source, cfg, cancel).await;
+
+    match result {
+        Err(ReplError::JournalGap {
+            gap_at,
+            from_version,
+        }) => {
+            assert_eq!(gap_at, 100);
+            assert_eq!(from_version, 1);
+        }
+        other => panic!("expected JournalGap, got {other:?}"),
+    }
+
+    // No event was applied: the bookmark is unchanged (still at its initial
+    // value) and the follower's own changefeed is empty.
+    let repo = follower
+        .get_db("app")
+        .and_then(|d| d.get_repo("main"))
+        .expect("follower repo");
+    let bookmark = repo.replication_bookmark().await.expect("bookmark read");
+    assert_eq!(bookmark, 0, "bookmark must not advance past a gap");
+
+    let follower_jr = follower
+        .read_changelog_from_journal("app", "main", 0, 1000)
+        .await
+        .expect("follower journal");
+    assert!(
+        follower_jr.events.is_empty(),
+        "no event should have been applied when a gap is reported"
+    );
 }

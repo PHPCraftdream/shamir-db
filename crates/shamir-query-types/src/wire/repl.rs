@@ -7,6 +7,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Highest replication-protocol version this build speaks/accepts.
+///
+/// Followers advertise their `proto_ver` in [`ReplRequest::Hello`]; a leader
+/// rejects any `proto_ver` strictly greater than this constant (an
+/// unrecognized, newer protocol) but accepts anything lower or equal
+/// (forward-compat with an older follower). See
+/// `repl_handler.rs::handle_repl`'s `Hello` arm for the enforcement point.
+pub const CURRENT_REPL_PROTO_VER: u32 = 1;
+
 /// Privileged replication request (leader-facing). Carried as the single
 /// `DbRequest::Repl` variant so the replication protocol versions
 /// independently of the client query protocol (REPLICATION §5, PR5).

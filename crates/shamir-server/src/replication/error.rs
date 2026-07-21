@@ -1,12 +1,16 @@
 //! R1-c — error type for the follower replication pull-loop.
 //!
 //! Splits into two classes:
-//!   * **Terminal** ([`ReplError::StaleLeaderEpoch`]) — the loop MUST stop. A
-//!     leader whose epoch regressed is a fencing violation (REPLICATION §5.2);
-//!     continuing would risk applying events from a deposed leader.
+//!   * **Terminal** ([`ReplError::StaleLeaderEpoch`], [`ReplError::JournalGap`])
+//!     — the loop MUST stop. A leader whose epoch regressed is a fencing
+//!     violation (REPLICATION §5.2); continuing would risk applying events
+//!     from a deposed leader. A journal gap means the follower is missing
+//!     data it can never recover by continuing to pull — silently skipping
+//!     past it would leave the follower permanently and invisibly
+//!     inconsistent, so this is now a hard stop too (see [`ReplError::JournalGap`]).
 //!   * **Transient** (everything else) — transport hiccups, decode failures,
-//!     apply errors, a gap the leader reported. The loop logs and backs off,
-//!     then retries; §5.6 makes replication a non-fatal background task.
+//!     apply errors. The loop logs and backs off, then retries; §5.6 makes
+//!     replication a non-fatal background task.
 
 use thiserror::Error;
 
@@ -32,14 +36,20 @@ pub enum ReplError {
     },
 
     /// The leader reported a journal gap (`gap_at`) — events in
-    /// `[from_version, gap_at)` are no longer retained. The loop logs and
-    /// re-seeds `from` to `gap_at` so the next pull skips the lost range;
-    /// full snapshot reseed is R2.
+    /// `[from_version, gap_at)` are no longer retained. **Terminal**: the
+    /// follower is permanently missing this range and continuing to pull
+    /// would silently resume past the loss. The loop MUST stop rather than
+    /// skip-and-continue; the caller (the supervisor) marks the
+    /// subscription `resync_required` so the gap is visible via the
+    /// existing admin surface. Recovery is a manual operator step (verify/
+    /// fix the follower's data, then `Resume`); full automated snapshot
+    /// reseed remains R2.
     #[error(
         "journal gap at leader version {gap_at} (requested from {from_version}); \
-         shifting the pull cursor past the gap (full snapshot reseed is R2)"
+         stopping the follower loop rather than silently skipping the missing \
+         range (full snapshot reseed is R2)"
     )]
-    LeaderGap {
+    JournalGap {
         /// Lowest retained version reported by the leader.
         gap_at: u64,
         /// The `from_version` the follower had requested.

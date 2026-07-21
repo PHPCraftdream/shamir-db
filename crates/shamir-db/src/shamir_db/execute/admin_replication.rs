@@ -21,6 +21,7 @@ use crate::query::admin::{
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 use crate::types::value::QueryValue;
+use crate::{DbResult, ShamirDb};
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -517,5 +518,87 @@ impl ShamirAdminExecutor {
             })
             .await?;
         Ok(result.affected > 0)
+    }
+}
+
+// ----------------------------------------------------------------------
+// Follower-side gap visibility (Part 2, RI-10)
+// ----------------------------------------------------------------------
+//
+// `SubscriptionSupervisor` (`shamir-server`) only holds an `Arc<ShamirDb>` —
+// NOT a `ShamirAdminExecutor` (which additionally requires a resolved
+// `Actor` + `db_name` for a specific caller session, neither of which the
+// supervisor's background follower-loop task has). `ShamirAdminExecutor`
+// itself is `pub(super)` to this crate's `shamir_db` module tree and
+// unreachable from `shamir-server` regardless. So this helper is exposed
+// directly on `ShamirDb`, reusing the exact same lookup + `set_via_implicit_tx`
+// write pattern `handle_alter_subscription`'s `SubAction::Pause`/`Resume`
+// arms use above — just without the actor-authorization gate, since this is
+// an internal system action taken by the replication engine itself (mirrors
+// `Actor::System` already used by `delete_repl`/`SystemStore::set_via_implicit_tx`
+// throughout this file), not a user-initiated admin command.
+impl ShamirDb {
+    /// Persist `state = "resync_required"` on subscription `name`'s row in
+    /// `system/subscriptions`.
+    ///
+    /// Called by the follower-loop supervisor (`shamir-server`) when
+    /// [`run_follower_loop`](../../../shamir-server/src/replication/follower_loop.rs)
+    /// (out of this crate) returns a terminal journal-gap error: the
+    /// follower is permanently missing `[from_version, gap_at)` and must
+    /// stop, and this makes that stop visible via the existing
+    /// `ReplicationStatus`/`ListSubscriptions` admin surface (both already
+    /// echo `state` verbatim). Because `reconcile()` only (re)starts
+    /// subscriptions whose row has `state == "active"`, a row left at
+    /// `"resync_required"` naturally stays stopped across reconcile ticks,
+    /// exactly like `"paused"` does today. Recovery is the EXISTING
+    /// `Resume` admin action (flips `state` back to `"active"`); no new
+    /// admin action is introduced.
+    ///
+    /// `name` not found → treated as a no-op (logged, not errored): the
+    /// subscription may have been dropped concurrently by an admin command
+    /// racing with the gap detection.
+    pub async fn mark_subscription_resync_required(
+        &self,
+        name: &str,
+        gap_at: u64,
+        from_version: u64,
+    ) -> DbResult<()> {
+        let table = self.system_store().subscriptions_table().await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let lookup = crate::query::read::ReadQuery::new("subscriptions").filter(
+            crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        );
+        let existing = table.read(&lookup, &ctx).await?;
+        let Some(row) = existing.records.into_iter().next() else {
+            log::warn!(
+                "mark_subscription_resync_required: subscription '{name}' not found \
+                 (gap_at={gap_at}, from_version={from_version}); treating as a no-op \
+                 — it may have been dropped concurrently"
+            );
+            return Ok(());
+        };
+
+        let mut record = row.as_value().into_owned();
+        if let QueryValue::Map(ref mut m) = record {
+            m.insert(
+                "state".to_string(),
+                QueryValue::Str("resync_required".to_string()),
+            );
+        }
+        let set_op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new("subscriptions"),
+            key: mpack!({"name": @(QueryValue::Str(name.to_string()))}),
+            value: record,
+        };
+        self.system_store()
+            .set_via_implicit_tx(&table, &set_op)
+            .await?;
+        table.interner().persist().await?;
+        Ok(())
     }
 }

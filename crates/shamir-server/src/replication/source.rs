@@ -18,7 +18,7 @@
 //! `pull` (fetch a batch of events).
 
 use async_trait::async_trait;
-use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
+use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, CURRENT_REPL_PROTO_VER};
 
 use super::error::ReplError;
 
@@ -71,7 +71,7 @@ pub(crate) fn leader_epoch_of(resp: &ReplResponse) -> u64 {
 /// protocol version they advertise.
 pub(crate) fn hello_request(node_id: &str) -> ReplRequest {
     ReplRequest::Hello {
-        proto_ver: 1,
+        proto_ver: CURRENT_REPL_PROTO_VER,
         node_id: node_id.to_string(),
     }
 }
