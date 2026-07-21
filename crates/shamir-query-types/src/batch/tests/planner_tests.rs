@@ -1070,6 +1070,7 @@ fn update_set_value_cond_with_field_based_condition_is_rejected_at_plan_time() {
         where_clause: None,
         set: QueryValue::Map(row),
         select: None,
+        expected_version: None,
     };
 
     let mut queries: TMap<String, QueryEntry> = new_map();

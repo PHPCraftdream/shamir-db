@@ -349,6 +349,7 @@ fn main() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
     let refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(refs));

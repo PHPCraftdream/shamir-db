@@ -70,6 +70,7 @@ fn qr(records: Vec<QueryRecord>) -> QueryResult {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 
@@ -244,6 +245,7 @@ fn optional_fields_present() {
             estimated_rows: Some(100),
         }),
         skipped: false,
+        versions: None,
     };
     let m = results_map([("full", res)]);
     assert_parity("all optionals present", &m);
@@ -260,6 +262,7 @@ fn optional_fields_absent() {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     };
     let m = results_map([("bare", res)]);
     assert_parity("all optionals absent", &m);
@@ -292,6 +295,7 @@ fn skipped_true_emitted() {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     };
     let res_true = QueryResult {
         records: Vec::new(),
@@ -300,6 +304,7 @@ fn skipped_true_emitted() {
         value: None,
         explain: None,
         skipped: true,
+        versions: None,
     };
     let m = results_map([("a", res_false), ("b", res_true)]);
     assert_parity("skipped true/false", &m);
@@ -361,6 +366,7 @@ fn kitchen_sink() {
             estimated_rows: None,
         }),
         skipped: false,
+        versions: None,
     };
     let simple = qr(vec![QueryRecord::Direct(mpack!("ok"))]);
     let m = results_map([("rich", rich), ("simple", simple)]);

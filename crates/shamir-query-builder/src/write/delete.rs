@@ -14,6 +14,7 @@ pub struct Delete {
     table_ref: TableRef,
     where_clause: Option<Filter>,
     select: Option<DeleteSelect>,
+    expected_version: Option<u64>,
 }
 
 /// Create a [`Delete`] builder targeting the given table (default repo).
@@ -28,6 +29,7 @@ impl Delete {
             table_ref: TableRef::new(table),
             where_clause: None,
             select: None,
+            expected_version: None,
         }
     }
 
@@ -37,6 +39,7 @@ impl Delete {
             table_ref: TableRef::with_repo(repo, table),
             where_clause: None,
             select: None,
+            expected_version: None,
         }
     }
 
@@ -64,6 +67,17 @@ impl Delete {
         self
     }
 
+    /// Set the optimistic-concurrency (CAS) version guard.
+    ///
+    /// When set, the server rejects the delete with `version_conflict`
+    /// unless every matched row is currently at exactly this version
+    /// (the value surfaced by `Query::with_version()` on the read side).
+    /// `None` (the default) disables the check.
+    pub fn expected_version(mut self, version: u64) -> Self {
+        self.expected_version = Some(version);
+        self
+    }
+
     /// Consume the builder and produce the wire DTO.
     ///
     /// # Panics
@@ -77,6 +91,7 @@ impl Delete {
                 "Delete::build() requires a where clause — call .where_(filter) before .build()",
             ),
             select: self.select,
+            expected_version: self.expected_version,
         }
     }
 }

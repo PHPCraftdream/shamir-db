@@ -98,6 +98,7 @@ fn test_in_query_ref_column() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -137,6 +138,7 @@ fn test_in_query_ref_column_no_match() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -175,6 +177,7 @@ fn test_not_in_query_ref_column() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 

@@ -98,6 +98,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             value: Some(QueryValue::Map(initial_value)),
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -208,6 +209,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
                 value: Some(QueryValue::Map(v)),
                 explain: None,
                 skipped: false,
+                versions: None,
             },
         );
     }
@@ -324,6 +326,7 @@ async fn bridge_self_exit_releases_registry_slot() {
             value: Some(QueryValue::Map(v)),
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 

@@ -40,6 +40,90 @@ type DynBatchStream<'a> = std::pin::Pin<
 >;
 
 // ============================================================================
+// FG-2 read-side version reporting (`with_version`).
+//
+// `ReadQuery::with_version == true` asks the engine to populate
+// `QueryResult::versions` — a `Vec<u64>` index-aligned with `records`, where
+// `versions[i]` is the canonical committed version of `records[i]`'s row.
+//
+// Source: `MvccStore::version_of(key)` — the SAME accessor SSI read-set
+// validation already uses. Non-MVCC tables have no version authority, so
+// `versions` stays `None` for them even when the client asks (the wire field
+// is documented as opt-in assistance, never a correctness contract).
+//
+// Helper below is called only on read paths where records preserve scan order
+// (no ORDER BY / DISTINCT / GROUP BY / aggregates — those reorder rows AFTER
+// the per-row version is read, and the parallel `versions` array would
+// silently drift out of alignment). For those reorder paths we deliberately
+// leave `versions = None` even when `with_version == true`; the brief calls
+// this out as an acceptable, documented exception.
+// ============================================================================
+
+/// Build the `QueryResult::versions` array for `ids` when the client asked
+/// for per-record versions. Returns `None` when:
+///   - the client did not ask (`with_version == false`), or
+///   - this table has no MVCC backing store (no version authority).
+///
+/// Otherwise returns `Some(Vec<u64>)` with `version_of(id)` per input id,
+/// in the same order as `ids`.
+pub(super) fn collect_versions(
+    with_version: bool,
+    mvcc: Option<&std::sync::Arc<shamir_tx::MvccStore>>,
+    ids: &[RecordId],
+) -> Option<Vec<u64>> {
+    if !with_version {
+        return None;
+    }
+    let mvcc = mvcc?;
+    Some(
+        ids.iter()
+            .map(|id| mvcc.version_of(id.as_bytes()))
+            .collect(),
+    )
+}
+
+/// Compute the `versions` array from a matched `[(RecordId, Bytes)]` list,
+/// honouring the query's pagination slice and ORDER-BY gate.
+///
+/// Returns `None` when:
+///   - `with_version == false`, or
+///   - no MvccStore, or
+///   - ORDER BY is present (reorder breaks id↔version alignment — documented
+///     exception per the brief).
+///
+/// When pagination is set, replicates `apply_pagination`'s `[skip..skip+take]`
+/// slice on the matched ids so the version array stays aligned with the paged
+/// records.
+pub(super) fn versions_from_matched(
+    query: &ReadQuery,
+    mvcc: Option<&std::sync::Arc<shamir_tx::MvccStore>>,
+    matched: &[(RecordId, bytes::Bytes)],
+) -> Option<Vec<u64>> {
+    if !query.with_version {
+        return None;
+    }
+    let mvcc = mvcc?;
+    // ORDER BY reorders rows after projection, breaking id↔version alignment.
+    if query.order_by.is_some() {
+        return None;
+    }
+    let (skip, take) = query.pagination.resolve();
+    let skip = skip as usize;
+    let take = take.map(|t| t as usize).unwrap_or(usize::MAX);
+    let ids: Vec<RecordId> = matched
+        .iter()
+        .skip(skip)
+        .take(take)
+        .map(|(id, _)| *id)
+        .collect();
+    Some(
+        ids.iter()
+            .map(|id| mvcc.version_of(id.as_bytes()))
+            .collect(),
+    )
+}
+
+// ============================================================================
 // S-read: simple-select gate
 //
 // A query is "simple" (eligible for the Id-keyed pass-through path) when:
@@ -222,6 +306,7 @@ impl TableManager {
                 value: None,
                 explain: Some(plan),
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -292,6 +377,11 @@ impl TableManager {
                                 value: None,
                                 explain: None,
                                 skipped: false,
+                                versions: collect_versions(
+                                    query.with_version,
+                                    self.mvcc_store_ref(),
+                                    std::slice::from_ref(&id),
+                                ),
                             });
                         }
                     }
@@ -317,6 +407,7 @@ impl TableManager {
                     value: None,
                     explain: None,
                     skipped: false,
+                    versions: None,
                 });
             }
         }
@@ -383,7 +474,21 @@ impl TableManager {
                 // S3: zero-copy bytes path — index2 is plain SELECT only.
                 let raw_records = self.get_many_bytes(rids_slice).await?;
                 let mut records = Vec::with_capacity(raw_records.len());
-                for bytes in raw_records.into_iter().flatten() {
+                // FG-2: when `with_version`, track which RecordId survived the
+                // (post-filter-on-bytes) materialisation loop, so we can build
+                // a parallel `versions` array via `version_of`. Iterate zip
+                // with `rids_slice` to keep rid↔record alignment.
+                let tracking_versions = query.with_version && self.mvcc_store_ref().is_some();
+                let mut survivor_ids: Vec<RecordId> = if tracking_versions {
+                    Vec::with_capacity(raw_records.len())
+                } else {
+                    Vec::new()
+                };
+                for (maybe_bytes, rid) in raw_records.into_iter().zip(rids_slice.iter()) {
+                    let bytes = match maybe_bytes {
+                        Some(b) => b,
+                        None => continue,
+                    };
                     let qv = match shamir_types::record_view::RecordView::new(&bytes) {
                         Ok(view) => view.to_query_value(interner),
                         Err(_) => match InnerValue::from_bytes(bytes) {
@@ -398,6 +503,9 @@ impl TableManager {
                             Err(_) => continue,
                         },
                     };
+                    if tracking_versions {
+                        survivor_ids.push(*rid);
+                    }
                     records.push(crate::query::read::QueryRecord::Direct(qv));
                 }
                 let returned = records.len() as u64;
@@ -421,6 +529,11 @@ impl TableManager {
                     value: None,
                     explain: None,
                     skipped: false,
+                    versions: collect_versions(
+                        query.with_version,
+                        self.mvcc_store_ref(),
+                        &survivor_ids,
+                    ),
                 });
             }
         }
@@ -470,6 +583,7 @@ impl TableManager {
                             value: None,
                             explain: None,
                             skipped: false,
+                            versions: None,
                         });
                     }
                 }
@@ -546,6 +660,11 @@ impl TableManager {
                                 value: None,
                                 explain: None,
                                 skipped: false,
+                                versions: collect_versions(
+                                    query.with_version,
+                                    self.mvcc_store_ref(),
+                                    std::slice::from_ref(&id),
+                                ),
                             });
                         }
                     }
@@ -903,6 +1022,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 
@@ -943,12 +1063,21 @@ impl TableManager {
         let mut records_scanned: u64 = 0;
         let mut matched_total: u64 = 0;
         let mut result: Vec<crate::query::read::QueryRecord> = Vec::new();
+        // FG-2: track which RecordId survived filter+pagination so we can
+        // emit a parallel `versions` array when `with_version == true`.
+        // Only populated when an MvccStore backs this table.
+        let tracking_versions = query.with_version && self.mvcc_store_ref().is_some();
+        let mut version_ids: Vec<RecordId> = if tracking_versions {
+            Vec::with_capacity(16)
+        } else {
+            Vec::new()
+        };
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
 
-            for (_, cow) in &batch {
+            for (id, cow) in &batch {
                 // Inline helper: filter + project via the correct RecordRef impl.
                 // The RecordView is built once and reused for both matches+project.
                 macro_rules! count_row {
@@ -965,11 +1094,17 @@ impl TableManager {
                         if idx >= skip {
                             if let Some(lim) = limit {
                                 if idx < skip + lim {
+                                    if tracking_versions {
+                                        version_ids.push(*id);
+                                    }
                                     result.push(crate::query::read::QueryRecord::Direct(
                                         proj.project_value($rec, interner),
                                     ));
                                 }
                             } else {
+                                if tracking_versions {
+                                    version_ids.push(*id);
+                                }
                                 result.push(crate::query::read::QueryRecord::Direct(
                                     proj.project_value($rec, interner),
                                 ));
@@ -1013,6 +1148,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
         })
     }
 
@@ -1082,6 +1218,13 @@ impl TableManager {
         let mut result: Vec<QueryRecord> = Vec::new();
         let mut has_next = false;
         let mut done = false;
+        // FG-2: track per-result RecordId for `with_version` reporting.
+        let tracking_versions = query.with_version && self.mvcc_store_ref().is_some();
+        let mut version_ids: Vec<RecordId> = if tracking_versions {
+            Vec::with_capacity(16)
+        } else {
+            Vec::new()
+        };
 
         while let Some(batch_result) = stream.next().await {
             if done {
@@ -1090,7 +1233,7 @@ impl TableManager {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
 
-            for (_, cow) in &batch {
+            for (id, cow) in &batch {
                 // ── Id-keyed pass-through path (S-read) ─────────────────────
                 if use_id_encoding {
                     match cow {
@@ -1133,6 +1276,9 @@ impl TableManager {
                                     }
                                 }
                             };
+                            if tracking_versions {
+                                version_ids.push(*id);
+                            }
                             result.push(record);
                         }
                         RecordCow::Owned(iv) => {
@@ -1174,6 +1320,9 @@ impl TableManager {
                                     Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
                                 }
                             };
+                            if tracking_versions {
+                                version_ids.push(*id);
+                            }
                             result.push(record);
                         }
                     }
@@ -1200,6 +1349,9 @@ impl TableManager {
                                 done = true;
                                 break;
                             }
+                        }
+                        if tracking_versions {
+                            version_ids.push(*id);
                         }
                         result.push(QueryRecord::Direct(proj.project_value($rec, interner)));
                     }};
@@ -1241,6 +1393,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
         })
     }
 
@@ -1601,6 +1754,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 
@@ -1853,6 +2007,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 

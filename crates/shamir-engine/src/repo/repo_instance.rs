@@ -950,7 +950,7 @@ impl RepoInstance {
         let wr = stage(&mut tx).await.map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
             message: e.to_string(),
-            code: None,
+            code: e.code().map(str::to_owned),
         })?;
 
         // Commit — folds everything into one WalEntryV2 / one commit_version.

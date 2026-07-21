@@ -60,6 +60,7 @@ impl FunctionInvoker for ShamirFunctionInvoker {
             value: Some(qv),
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 }

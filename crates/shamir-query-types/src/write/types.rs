@@ -117,6 +117,21 @@ pub struct UpdateOp {
     /// Optional select configuration for returning updated records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<UpdateSelect>,
+
+    /// Optimistic concurrency control: when `Some(v)`, every row this
+    /// operation would match must currently be at version `v` — if ANY
+    /// matched row's committed version differs, the ENTIRE operation is
+    /// rejected with a `version_conflict` error and NO row is modified (no
+    /// partial application). `None` (default) disables the check — existing
+    /// callers are unaffected.
+    ///
+    /// The version is the same `MvccStore::version_of` value surfaced by
+    /// `QueryResult::versions` when `ReadQuery::with_version == true`.
+    /// Combined with the existing SSI read-set contour (the executor
+    /// registers each matched key as a tx read at `expected_version`), this
+    /// closes the race window between the check and commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<u64>,
 }
 
 /// Set operation - upsert by key (update if exists, insert if not).
@@ -147,4 +162,11 @@ pub struct DeleteOp {
     /// returned, optionally restricted to a field projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub select: Option<DeleteSelect>,
+
+    /// Optimistic concurrency control — see [`UpdateOp::expected_version`].
+    /// Same semantics: when `Some(v)`, every matched row must currently be
+    /// at version `v` or the whole delete aborts with `version_conflict`
+    /// and no row is removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<u64>,
 }

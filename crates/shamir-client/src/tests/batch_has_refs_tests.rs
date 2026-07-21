@@ -182,6 +182,7 @@ fn delete_where_clause_is_scanned() {
             },
         },
         select: None,
+        expected_version: None,
     });
     assert!(batch_has_refs(&batch_with(op)));
 }

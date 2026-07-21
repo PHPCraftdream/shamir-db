@@ -232,6 +232,7 @@ fn test_cond_then_branch_is_query_ref() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
     let ctx = FilterContext::new(&interner, &refs);

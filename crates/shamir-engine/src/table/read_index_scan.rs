@@ -21,6 +21,7 @@ use shamir_types::types::value::InnerValue;
 
 use super::read_exec::{
     apply_select_value_bytes, try_project_page_only, try_project_page_only_bytes,
+    versions_from_matched,
 };
 use super::table_manager::TableManager;
 
@@ -178,6 +179,7 @@ impl TableManager {
                                     value: None,
                                     explain: None,
                                     skipped: false,
+                                    versions: None,
                                 });
                             }
 
@@ -207,6 +209,7 @@ impl TableManager {
                                 value: None,
                                 explain: None,
                                 skipped: false,
+                                versions: None,
                             });
                         }
                     }
@@ -295,6 +298,7 @@ impl TableManager {
                 value: None,
                 explain: None,
                 skipped: false,
+                versions: None,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -342,6 +346,7 @@ impl TableManager {
                     value: None,
                     explain: None,
                     skipped: false,
+                    versions: None,
                 });
             }
 
@@ -369,6 +374,7 @@ impl TableManager {
                 value: None,
                 explain: None,
                 skipped: false,
+                versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
             })
         }
     }
@@ -443,6 +449,12 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            // FG-2: order_limit_fast preserves sorted-index order (no
+            // in-memory ORDER BY reorder) — thread versions directly.
+            versions: {
+                let ids: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
+                super::read_exec::collect_versions(query.with_version, self.mvcc_store_ref(), &ids)
+            },
         })
     }
 
@@ -585,6 +597,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
     ///
@@ -701,6 +714,7 @@ impl TableManager {
                 value: None,
                 explain: None,
                 skipped: false,
+                versions: None,
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -749,6 +763,7 @@ impl TableManager {
                     value: None,
                     explain: None,
                     skipped: false,
+                    versions: None,
                 });
             }
 
@@ -782,6 +797,7 @@ impl TableManager {
                 value: None,
                 explain: None,
                 skipped: false,
+                versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
             })
         }
     }

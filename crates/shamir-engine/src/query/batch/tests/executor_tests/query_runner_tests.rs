@@ -285,6 +285,7 @@ fn build_resolved_refs_excludes_explicit_only_edge() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -311,6 +312,7 @@ fn build_resolved_refs_includes_dataflow_edge() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -339,6 +341,7 @@ fn build_resolved_refs_includes_both_edge() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 

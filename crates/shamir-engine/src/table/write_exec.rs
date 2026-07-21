@@ -41,6 +41,55 @@ use super::write_helpers::{
 };
 
 impl TableManager {
+    /// FG-2: optimistic-concurrency (CAS) version check for
+    /// `UpdateOp`/`DeleteOp::expected_version`.
+    ///
+    /// Hybrid two-step (brief §"Validation timing"):
+    /// 1. **Immediate check**: for each matched row, call
+    ///    `MvccStore::version_of(key)` and compare against `expected`. A
+    ///    mismatch on ANY row aborts the WHOLE operation with
+    ///    [`DbError::VersionConflict`] — no partial application.
+    /// 2. **SSI registration**: call `record_read_shared(table_token, key,
+    ///    expected)` for every matched row, feeding the EXISTING SSI
+    ///    `validate_read_set` commit-time re-check to close the race window
+    ///    between step 1 and this tx's actual commit.
+    ///
+    /// When the table has no MvccStore, the immediate check is skipped
+    /// (there is no version authority) but step 2 still runs — a concurrent
+    /// committer on a different path could still trigger SSI abort.
+    /// Non-MVCC tables simply don't support meaningful CAS; the read side
+    /// returns `versions: None` for them, so a client never gets a version
+    /// to pass in.
+    fn check_expected_version(
+        &self,
+        matched_ids: &[RecordId],
+        expected: u64,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        let table_token = self.table_token();
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            for id in matched_ids {
+                let actual = mvcc.version_of(id.as_bytes());
+                if actual != expected {
+                    return Err(shamir_storage::error::DbError::VersionConflict(format!(
+                        "table '{}': key {:?} expected version {} but found {}",
+                        self.name(),
+                        id.as_bytes(),
+                        expected,
+                        actual
+                    )));
+                }
+            }
+        }
+        // Register each matched key as a tx read at `expected` so the
+        // existing SSI validate_read_set re-check at commit catches a
+        // concurrent write between this check and commit.
+        for id in matched_ids {
+            tx.record_read_shared(table_token, id.to_bytes(), expected);
+        }
+        Ok(())
+    }
+
     /// tx-aware variant of INSERT.
     ///
     /// Stages each insert through [`insert_tx`](Self::insert_tx) — no
@@ -503,6 +552,23 @@ impl TableManager {
             .unwrap_or(UpdateReturnMode::Changed);
         let wants_records = op.select.is_some();
 
+        // FG-2: optimistic-concurrency (CAS) gate — `expected_version`.
+        //
+        // Hybrid check (brief §"Validation timing"): for every matched row,
+        // (1) immediately compare `MvccStore::version_of(key)` against
+        // `expected_version` — a mismatch aborts the WHOLE op with
+        // `VersionConflict` BEFORE any row is staged; AND (2) register each
+        // matched key as a tx read at `expected_version` via
+        // `record_read_shared`, so the EXISTING SSI `validate_read_set` at
+        // commit time closes the race window between this check and commit.
+        //
+        // Zero matched rows is a no-op (affected: 0) — matching the existing
+        // convention for a WHERE that matches nothing.
+        if let Some(expected) = op.expected_version {
+            let id_refs: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
+            self.check_expected_version(&id_refs, expected, tx)?;
+        }
+
         // Check whether any Update validators are registered BEFORE the
         // per-row loop, mirroring `execute_delete_tx`'s `has_delete_validators`.
         // When false, the per-row `old_qv` / `new_qv` de-intern (String alloc
@@ -784,6 +850,14 @@ impl TableManager {
                 }
                 result
             };
+
+        // FG-2: optimistic-concurrency (CAS) gate — see execute_update_tx for
+        // the full rationale. Same hybrid: immediate version_of check +
+        // record_read_shared for SSI revalidation. Zero matches = no-op.
+        if let Some(expected) = op.expected_version {
+            let id_refs: Vec<RecordId> = to_delete.iter().map(|(id, _)| *id).collect();
+            self.check_expected_version(&id_refs, expected, tx)?;
+        }
 
         // S3: run validators on each record before deleting (tx).
         // Feeds a `RecordView` lens over the bytes collected above — no

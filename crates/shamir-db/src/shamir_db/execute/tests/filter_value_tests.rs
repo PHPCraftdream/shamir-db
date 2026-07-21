@@ -67,6 +67,7 @@ fn query_ref_resolves_value_from_resolved_refs() {
             value: Some(QueryValue::Int(42)),
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 

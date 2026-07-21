@@ -48,6 +48,7 @@ fn call_result(value: QueryValue) -> QueryResult {
         value: Some(value),
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 
@@ -63,6 +64,7 @@ fn read_result(field: &str, val: QueryValue) -> QueryResult {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 

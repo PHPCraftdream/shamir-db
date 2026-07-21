@@ -88,4 +88,22 @@ pub struct QueryResult {
     /// know this field never observe it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skipped: bool,
+    /// Per-record version, index-aligned with `records` (i.e.
+    /// `versions[i]` is the version of `records[i]`). `Some` only when the
+    /// originating `ReadQuery::with_version == true`; `None`/omitted
+    /// otherwise (backward-compatible — existing peers that don't ask for
+    /// versions never see this field).
+    ///
+    /// The version is the canonical per-key committed version reported by
+    /// `MvccStore::version_of` (the same source SSI read-set validation
+    /// uses). A client captures this value, mutates conditionally, and
+    /// supplies it back as `UpdateOp`/`DeleteOp::expected_version` for
+    /// optimistic concurrency control (CAS). Paths that cannot
+    /// structurally attribute a single record version to a result row
+    /// (aggregates, ORDER BY / DISTINCT which reorder rows after the
+    /// version is read, or tables without an MVCC backing store) leave
+    /// this field `None` even when `with_version == true` — opt-in
+    /// assistance, never a correctness contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versions: Option<Vec<u64>>,
 }

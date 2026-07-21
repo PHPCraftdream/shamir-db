@@ -162,6 +162,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 

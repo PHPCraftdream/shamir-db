@@ -217,6 +217,15 @@ export interface QueryResult {
    * means the op executed normally.
    */
   skipped?: boolean;
+  /**
+   * Per-record version (FG-2), index-aligned with `records`. Present only
+   * when the source `ReadQuery` set `with_version: true`. Each entry is the
+   * canonical committed version of the corresponding record — use it as
+   * `expected_version` on a subsequent UPDATE/DELETE for optimistic CAS.
+   * Omitted when not requested or when the read path cannot structurally
+   * attribute a version (aggregates, ORDER BY reordering, non-MVCC table).
+   */
+  versions?: number[];
 }
 
 /** Transaction metadata (present on transactional batches). */

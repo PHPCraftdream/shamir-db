@@ -216,6 +216,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         Ok(())
@@ -304,6 +305,7 @@ impl SystemStore {
                 ],
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -434,6 +436,7 @@ impl SystemStore {
                 ],
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -567,6 +570,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -789,6 +793,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::Int(group_id as i64),
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         table.data_store().flush().await?;
@@ -1004,6 +1009,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
@@ -1098,6 +1104,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(path_key.to_string()),
             },
             select: None,
+            expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.

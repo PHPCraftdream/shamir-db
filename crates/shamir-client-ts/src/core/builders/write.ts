@@ -69,6 +69,7 @@ export class UpdateBuilder {
   private whereFilter: Filter | null = null;
   private setValue: WireValue | null = null;
   private selectValue: UpdateSelect | null = null;
+  private expectedVersionValue: number | null = null;
 
   /** @internal Use `update()` to create an instance. */
   static create(tableRef: TableRefWire): UpdateBuilder {
@@ -109,6 +110,17 @@ export class UpdateBuilder {
     return this;
   }
 
+  /**
+   * Set the optimistic-concurrency (CAS) version guard (FG-2). When set, the
+   * server rejects the update with `version_conflict` unless every matched row
+   * is currently at exactly this version. The version comes from
+   * `QueryResult.versions` (read-side `.withVersion()`).
+   */
+  expectedVersion(version: number): this {
+    this.expectedVersionValue = version;
+    return this;
+  }
+
   /** Assemble the wire `UpdateOp`. Throws if `.set()` was never called. */
   build(): UpdateOp {
     if (this.setValue === null) {
@@ -120,6 +132,8 @@ export class UpdateBuilder {
     };
     if (this.whereFilter !== null) op.where = this.whereFilter;
     if (this.selectValue !== null) op.select = this.selectValue;
+    if (this.expectedVersionValue !== null)
+      op.expected_version = this.expectedVersionValue;
     return op;
   }
 }
@@ -166,7 +180,12 @@ export function upsert(
 export function del(
   table: string,
   where: Filter,
-  opts?: { repo?: string; returning?: boolean; returningFields?: string[] },
+  opts?: {
+    repo?: string;
+    returning?: boolean;
+    returningFields?: string[];
+    expectedVersion?: number;
+  },
 ): DeleteOp {
   const op: DeleteOp = { delete_from: tableRef(opts?.repo, table), where };
   if (opts?.returningFields !== undefined) {
@@ -174,6 +193,8 @@ export function del(
   } else if (opts?.returning) {
     op.select = {};
   }
+  if (opts?.expectedVersion !== undefined)
+    op.expected_version = opts.expectedVersion;
   return op;
 }
 

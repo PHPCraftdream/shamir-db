@@ -22,6 +22,7 @@ export {
   ShamirDbError,
   ShamirTimeoutError,
   isRetryableCode,
+  isVersionConflict,
   RETRYABLE_ERROR_CODES,
 } from './core/errors.js';
 export type { TxOpened, ScramUserCreated } from './core/client.js';

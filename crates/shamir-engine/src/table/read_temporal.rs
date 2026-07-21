@@ -143,6 +143,7 @@ impl TableManager {
                 value: None,
                 explain: None,
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -181,6 +182,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 
@@ -382,6 +384,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         })
     }
 }

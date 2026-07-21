@@ -173,6 +173,10 @@ export interface UpdateOp {
   where?: Filter;
   set: WireValue;
   select?: UpdateSelect;
+  /** Optimistic-concurrency (CAS) version guard (FG-2). When set, the server
+   * rejects the update with `version_conflict` unless every matched row is at
+   * exactly this version (from `QueryResult.versions`). Omitted = disabled. */
+  expected_version?: number;
 }
 
 /**
@@ -197,6 +201,9 @@ export interface DeleteOp {
   delete_from: TableRefWire;
   where: Filter;
   select?: DeleteSelect;
+  /** Optimistic-concurrency (CAS) version guard (FG-2). Same semantics as
+   * `UpdateOp.expected_version`. */
+  expected_version?: number;
 }
 
 /** Union of all write operation wire shapes. */

@@ -27,6 +27,7 @@ fn qresult(records: Vec<QueryRecord>) -> QueryResult {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 

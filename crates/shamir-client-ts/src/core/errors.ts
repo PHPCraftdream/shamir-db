@@ -37,6 +37,19 @@ export function isRetryableCode(code: string): boolean {
 }
 
 /**
+ * `true` if `code` is an optimistic-concurrency (CAS) version conflict
+ * (FG-2). The caller should re-read the current version, then retry the
+ * write with the fresh `expected_version`. NOT in
+ * {@link RETRYABLE_ERROR_CODES} because a blind retry without re-reading
+ * would fail identically — the caller MUST re-read first.
+ */
+export function isVersionConflict(err: unknown): boolean {
+  return (
+    err instanceof ShamirDbError && err.code === 'version_conflict'
+  );
+}
+
+/**
  * A typed DB-layer error carrying the server's `code` and a `retryable`
  * classification. Thrown/rejected in place of a plain `Error` for every
  * `DbResponse::Error` the server returns.

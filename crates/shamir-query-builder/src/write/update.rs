@@ -13,6 +13,7 @@ pub struct Update {
     where_clause: Option<Filter>,
     set_value: QueryValue,
     select: Option<UpdateSelect>,
+    expected_version: Option<u64>,
 }
 
 /// Create an [`Update`] builder targeting the given table (default repo).
@@ -28,6 +29,7 @@ impl Update {
             where_clause: None,
             set_value: QueryValue::Null,
             select: None,
+            expected_version: None,
         }
     }
 
@@ -38,6 +40,7 @@ impl Update {
             where_clause: None,
             set_value: QueryValue::Null,
             select: None,
+            expected_version: None,
         }
     }
 
@@ -79,6 +82,17 @@ impl Update {
         self
     }
 
+    /// Set the optimistic-concurrency (CAS) version guard.
+    ///
+    /// When set, the server rejects the update with `version_conflict`
+    /// unless every matched row is currently at exactly this version
+    /// (the value surfaced by `Query::with_version()` on the read side).
+    /// `None` (the default) disables the check.
+    pub fn expected_version(mut self, version: u64) -> Self {
+        self.expected_version = Some(version);
+        self
+    }
+
     /// Consume the builder and produce the wire DTO.
     pub fn build(self) -> UpdateOp {
         UpdateOp {
@@ -86,6 +100,7 @@ impl Update {
             where_clause: self.where_clause,
             set: self.set_value,
             select: self.select,
+            expected_version: self.expected_version,
         }
     }
 }

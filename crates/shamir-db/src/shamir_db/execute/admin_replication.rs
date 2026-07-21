@@ -129,6 +129,7 @@ impl ShamirAdminExecutor {
                 value: crate::query::filter::FilterValue::String(name.clone()),
             },
             select: None,
+            expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
         Ok(admin_result(mpack!({
@@ -209,6 +210,7 @@ impl ShamirAdminExecutor {
                 value: crate::query::filter::FilterValue::String(name.clone()),
             },
             select: None,
+            expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
         Ok(admin_result(mpack!({
@@ -318,6 +320,7 @@ impl ShamirAdminExecutor {
                 value: crate::query::filter::FilterValue::String(name.clone()),
             },
             select: None,
+            expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
         Ok(admin_result(mpack!({

@@ -84,6 +84,7 @@ pub(super) fn skipped_query_result() -> QueryResult {
         value: None,
         explain: None,
         skipped: true,
+        versions: None,
     }
 }
 
@@ -475,6 +476,7 @@ impl<'a> QueryRunner<'a> {
                 value,
                 explain: None,
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -688,6 +690,7 @@ impl<'a> QueryRunner<'a> {
                 value: Some(QueryValue::List(iterations)),
                 explain: None,
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -781,6 +784,7 @@ impl<'a> QueryRunner<'a> {
                 value: Some(QueryValue::Map(grant_map)),
                 explain: None,
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -796,6 +800,7 @@ impl<'a> QueryRunner<'a> {
                 value: Some(QueryValue::Map(grant_map)),
                 explain: None,
                 skipped: false,
+                versions: None,
             });
         }
 
@@ -1016,6 +1021,7 @@ impl<'a> QueryRunner<'a> {
                         where_clause: op.where_clause.clone(),
                         set: subst_set,
                         select: op.select.clone(),
+                        expected_version: op.expected_version,
                     };
                     &subst_op
                 };
@@ -1055,7 +1061,7 @@ impl<'a> QueryRunner<'a> {
                             .map_err(|e| BatchError::QueryError {
                                 alias: alias.to_string(),
                                 message: e.to_string(),
-                                code: None,
+                                code: e.code().map(str::to_owned),
                             })?
                     }
                     // F4b-2: "everything is a transaction" — a non-tx update
@@ -1174,7 +1180,7 @@ impl<'a> QueryRunner<'a> {
                             .map_err(|e| BatchError::QueryError {
                                 alias: alias.to_string(),
                                 message: e.to_string(),
-                                code: None,
+                                code: e.code().map(str::to_owned),
                             })?
                     }
                     // F4b-3: "everything is a transaction" — a non-tx delete
@@ -1400,6 +1406,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 

@@ -30,6 +30,7 @@ fn test_query_ref_eq() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 
@@ -65,6 +66,7 @@ fn test_query_ref_no_match() {
             value: None,
             explain: None,
             skipped: false,
+            versions: None,
         },
     );
 

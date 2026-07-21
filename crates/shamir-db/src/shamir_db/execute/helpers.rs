@@ -20,6 +20,7 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
         value: None,
         explain: None,
         skipped: false,
+        versions: None,
     }
 }
 

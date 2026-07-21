@@ -70,11 +70,34 @@ pub enum DbError {
     /// to a `"tx_conflict"`-style wire reason where appropriate.
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    /// Optimistic-concurrency (CAS) mismatch on `UpdateOp`/`DeleteOp::
+    /// expected_version`. The detail string names the offending table/key
+    /// plus the expected and actual versions. Engine wire-mapping surfaces
+    /// this as `BatchError::QueryError { code: Some("version_conflict") }`
+    /// (and `DbResponse::Error { code: "version_conflict" }`); TS callers
+    /// branch on `ShamirDbError.code === "version_conflict"`.
+    #[error("Version conflict: {0}")]
+    VersionConflict(String),
 }
 
 impl From<CodecError> for DbError {
     fn from(err: CodecError) -> Self {
         DbError::Codec(err.to_string())
+    }
+}
+
+impl DbError {
+    /// Return the machine-readable wire code for this error variant, if any.
+    /// Used by the engine to populate `BatchError::QueryError.code` (and
+    /// `DbResponse::Error.code` on the wire) so clients can branch on typed
+    /// codes instead of regex-matching messages.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            DbError::VersionConflict(_) => Some("version_conflict"),
+            DbError::Conflict(_) => Some("tx_conflict"),
+            _ => None,
+        }
     }
 }
 
