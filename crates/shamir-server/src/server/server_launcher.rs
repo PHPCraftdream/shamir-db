@@ -156,6 +156,33 @@ impl ServerLauncher {
         )
         .map_err(|e| BootError::AuditAppender(e.to_string()))?;
 
+        // 1b. Boot-time bootstrap-token TTL sweep (RI-9). Runs unconditionally,
+        // in ALL bootstrap modes, BEFORE the bootstrap step below: a
+        // previously-issued token from an earlier `RandomToken` boot can
+        // still be outstanding and expired even if this boot is
+        // `Skip`/`Password`. Best-effort — an I/O failure deleting the file
+        // is logged and does not fail boot; `consume_bootstrap_token` is
+        // called regardless so the meta row is cleared either way.
+        {
+            let now_ns = UnixNanos::now().as_u64();
+            if meta.bootstrap_token_expired(now_ns) {
+                if let Some(path) = meta.bootstrap_token_path() {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                ?path,
+                                ?e,
+                                "bootstrap: failed to delete expired token file"
+                            );
+                        }
+                    }
+                }
+                if let Err(e) = meta.consume_bootstrap_token() {
+                    tracing::warn!(?e, "bootstrap: failed to consume expired token record");
+                }
+            }
+        }
+
         // 2. Bootstrap (idempotent).
         let kdf_for_bootstrap = kdf_from_config(&config.kdf_defaults);
         match &bootstrap {
@@ -169,15 +196,33 @@ impl ServerLauncher {
                 )?;
                 log_bootstrap_outcome(username, &outcome);
             }
-            BootstrapMode::RandomToken { username } => {
+            BootstrapMode::RandomToken {
+                username,
+                token_path,
+            } => {
                 let name = username.as_deref().unwrap_or(DEFAULT_BOOTSTRAP_NAME);
                 let outcome = ensure_superuser(
                     &user_dir,
                     &config.data_dir,
                     name,
-                    BootstrapPolicy::RandomToken,
+                    BootstrapPolicy::RandomToken(token_path.clone()),
                     &kdf_for_bootstrap,
                 )?;
+                if let BootstrapOutcome::Created {
+                    token: Some(tok),
+                    token_path: Some(path),
+                } = &outcome
+                {
+                    let now_ns = UnixNanos::now().as_u64();
+                    if let Err(e) = meta.set_bootstrap_token(
+                        name,
+                        shamir_connect::common::crypto::sha256(tok.as_bytes()),
+                        now_ns.saturating_add(crate::bootstrap::BOOTSTRAP_TOKEN_TTL_NS),
+                        path.clone(),
+                    ) {
+                        tracing::warn!(?e, "bootstrap: failed to persist token TTL/consume record");
+                    }
+                }
                 log_bootstrap_outcome(name, &outcome);
             }
             BootstrapMode::Skip => {
@@ -555,6 +600,7 @@ impl ServerLauncher {
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
+                        &meta,
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -591,6 +637,7 @@ impl ServerLauncher {
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
+                        &meta,
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -627,6 +674,7 @@ impl ServerLauncher {
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
+                        &meta,
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -794,6 +842,7 @@ fn build_ctx(
     transport_kind: TransportKind,
     kdf_override: Option<KdfParams>,
     auth_init_timeout: Duration,
+    meta: &Arc<ServerMetaStore>,
 ) -> Arc<ConnectionContext> {
     let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
     let max_in_flight = shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT;
@@ -818,6 +867,7 @@ fn build_ctx(
         auth_init_timeout,
         idle_timeout,
         max_in_flight,
+        meta.clone(),
     )
 }
 

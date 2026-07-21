@@ -61,10 +61,23 @@ curl -fsS http://127.0.0.1:9090/healthz   # → "ok"
 curl -fsS http://127.0.0.1:9090/readyz    # → "ready"
 ```
 
-First boot: a random `bootstrap_token.txt` appears in `data_dir/` AND
-in the service log at WARN level. Use it for the first SCRAM login,
-then have an admin pre-create operator users via `CreateScramUser`
-and delete the bootstrap token file.
+First boot: a random bootstrap token is generated and its **path** (never
+the token itself) is logged at WARN level. By default it is written to
+`data_dir/bootstrap_token.txt` — for backward compatibility only.
+**Operators SHOULD instead pass `--bootstrap-token-path
+/run/shamir/bootstrap_token.txt`** (tmpfs, per the `RuntimeDirectory=shamir`
+directive in `shamir-db.service`) so the token is never captured by a
+`backup --to` snapshot of `data_dir`. If left at the default `data_dir`
+path, the token **will** be captured verbatim by any `backup --to` run
+that happens before it is consumed or expired.
+
+The token auto-deletes itself: the server removes the file and consumes
+the record on the **first successful SCRAM login** for the bootstrap
+username, or via a **24h TTL** boot-time sweep for any token nobody ever
+used — whichever comes first. Manual deletion right after reading the
+token and logging in remains a safe, optional immediate step; it is no
+longer the primary cleanup mechanism. After logging in, have an admin
+pre-create operator users via `CreateScramUser`.
 
 ## Quick start (Docker)
 

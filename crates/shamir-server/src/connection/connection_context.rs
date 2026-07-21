@@ -23,6 +23,7 @@ use shamir_connect::server::resume::{ConsumedCounterStore, ResumeConfig};
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
 
+use crate::server_meta::ServerMetaStore;
 use crate::user_directory::FjallUserDirectory;
 
 /// Live shared state passed into [`handle_connection`].
@@ -68,6 +69,10 @@ pub struct ConnectionContext {
     /// capacity in [`request_loop`]. `1` gives lock-step semantics;
     /// default is [`shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT`].
     pub max_in_flight: usize,
+    /// Durable server-meta store — used post-handshake to consume an
+    /// outstanding bootstrap token on the first successful login for the
+    /// username it was issued to (RI-9 bootstrap-token lifecycle).
+    pub meta: Arc<ServerMetaStore>,
 }
 
 impl ConnectionContext {
@@ -108,6 +113,7 @@ impl ConnectionContext {
         auth_init_timeout: Duration,
         idle_timeout: Duration,
         max_in_flight: usize,
+        meta: Arc<ServerMetaStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             identity,
@@ -129,6 +135,7 @@ impl ConnectionContext {
             auth_init_timeout,
             idle_timeout,
             max_in_flight,
+            meta,
         })
     }
 }

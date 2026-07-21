@@ -111,6 +111,10 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
     let temp_path = temp.path().join("u.redb");
     let user_dir = shamir_server::user_directory::FjallUserDirectory::open(&temp_path)
         .expect("open user dir for bench");
+    let meta = Arc::new(
+        shamir_server::server_meta::ServerMetaStore::open_or_init(temp.path().join("meta"))
+            .expect("open server meta store for bench"),
+    );
     // Leak the temp dir so the redb file outlives this function.
     Box::leak(Box::new(temp));
 
@@ -145,6 +149,7 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
         Duration::from_secs(5),
         shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT,
         max_in_flight,
+        meta,
     )
 }
 

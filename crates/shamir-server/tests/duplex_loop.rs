@@ -130,6 +130,10 @@ fn make_ctx_with_session_and_idle_timeout(
     let temp_path = temp.path().join("u.redb");
     let user_dir = shamir_server::user_directory::FjallUserDirectory::open(&temp_path)
         .expect("open user dir for test");
+    let meta = Arc::new(
+        shamir_server::server_meta::ServerMetaStore::open_or_init(temp.path().join("meta"))
+            .expect("open server meta store for test"),
+    );
     // Leak the temp dir so the redb file lives until process exit (test only).
     Box::leak(Box::new(temp));
 
@@ -167,6 +171,7 @@ fn make_ctx_with_session_and_idle_timeout(
         Duration::from_secs(5),
         idle_timeout,
         max_in_flight,
+        meta,
     );
 
     (ctx, session_id)

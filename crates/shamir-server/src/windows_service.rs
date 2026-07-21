@@ -75,6 +75,11 @@ fn service_main_inner() -> anyhow::Result<()> {
         .iter()
         .position(|a| a == "--bootstrap-password")
         .and_then(|i| args.get(i + 1).cloned());
+    let bootstrap_token_path = args
+        .iter()
+        .position(|a| a == "--bootstrap-token-path")
+        .and_then(|i| args.get(i + 1).cloned())
+        .map(std::path::PathBuf::from);
 
     // Install rustls crypto provider.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -135,6 +140,7 @@ fn service_main_inner() -> anyhow::Result<()> {
     } else {
         crate::server::BootstrapMode::RandomToken {
             username: bootstrap_user,
+            token_path: bootstrap_token_path,
         }
     };
 

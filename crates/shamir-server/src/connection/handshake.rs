@@ -398,6 +398,26 @@ async fn run_handshake<F: Framer>(
     // Reset lockout on success per spec §5.2.5 NORMATIVE.
     ctx.lockout.reset_on_success(pair);
 
+    // RI-9: consume the bootstrap token on the first successful login for
+    // the username it was issued to. Best-effort and non-fatal — a failure
+    // here must NEVER abort an otherwise-successful login; the boot-time
+    // TTL sweep (`server_launcher.rs`) is the backstop for anything missed
+    // here.
+    if ctx.meta.bootstrap_token_active()
+        && ctx.meta.bootstrap_username().as_deref() == Some(username.as_str())
+    {
+        if let Some(path) = ctx.meta.bootstrap_token_path() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(?path, ?e, "bootstrap: failed to delete token file on login");
+                }
+            }
+        }
+        if let Err(e) = ctx.meta.consume_bootstrap_token() {
+            tracing::warn!(?e, "bootstrap: failed to consume token record on login");
+        }
+    }
+
     // 8. Build session, insert with per-user cap, send auth_ok.
     let user_id = match ctx.user_dir.user_id(username.as_str()) {
         Some(id) => id,

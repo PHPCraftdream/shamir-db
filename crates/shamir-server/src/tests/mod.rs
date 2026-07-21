@@ -5,6 +5,7 @@ pub mod config_tests;
 pub mod conn_limiter_tests;
 pub mod connection_tests;
 pub mod per_ip_limiter_tests;
+pub mod server_meta_tests;
 pub mod server_tests;
 pub mod tables_registry_tests;
 pub mod tls_tests;

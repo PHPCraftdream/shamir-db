@@ -65,7 +65,7 @@ fn random_token_writes_file() {
         &user_dir,
         dir_path,
         DEFAULT_BOOTSTRAP_NAME,
-        BootstrapPolicy::RandomToken,
+        BootstrapPolicy::RandomToken(None),
         &fast_kdf(),
     )
     .unwrap();
@@ -79,6 +79,50 @@ fn random_token_writes_file() {
         }
         other => panic!("expected Created with token, got {:?}", other),
     }
+}
+
+#[test]
+fn random_token_writes_file_at_override_path() {
+    // RI-9: `BootstrapPolicy::RandomToken(Some(override_path))` must write
+    // the token file at `override_path`, NOT `data_dir/bootstrap_token.txt`
+    // — the whole point of the override is to let operators point the
+    // token at a tmpfs path outside `data_dir` (so `backup --to` never
+    // captures it).
+    let dir = TempDir::new().unwrap();
+    let dir_path = dir.path();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
+
+    let override_dir = TempDir::new().unwrap();
+    let override_path = override_dir.path().join("nested").join("token.txt");
+
+    let r = ensure_superuser(
+        &user_dir,
+        dir_path,
+        DEFAULT_BOOTSTRAP_NAME,
+        BootstrapPolicy::RandomToken(Some(override_path.clone())),
+        &fast_kdf(),
+    )
+    .unwrap();
+
+    match r {
+        BootstrapOutcome::Created {
+            token: Some(tok),
+            token_path: Some(p),
+        } => {
+            assert_eq!(
+                p, override_path,
+                "token must be written at the override path"
+            );
+            assert_eq!(fs::read_to_string(&p).unwrap(), tok);
+        }
+        other => panic!("expected Created with token, got {:?}", other),
+    }
+
+    let default_path = dir_path.join(crate::bootstrap::BOOTSTRAP_TOKEN_FILE);
+    assert!(
+        !default_path.exists(),
+        "default data_dir token path must NOT be written when an override is given"
+    );
 }
 
 #[test]

@@ -29,7 +29,7 @@
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -149,6 +149,8 @@ struct PersistedBootstrap {
     bootstrap_token_hash: Option<Zeroizing<Vec<u8>>>,
     bootstrap_token_expires_at_ns: Option<u64>,
     superuser_ever_existed: bool,
+    bootstrap_username: Option<String>,
+    bootstrap_token_path: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -280,6 +282,8 @@ impl ServerMetaStore {
             bootstrap_token_hash: None,
             bootstrap_token_expires_at_ns: None,
             superuser_ever_existed: false,
+            bootstrap_username: None,
+            bootstrap_token_path: None,
         };
         let times = PersistedTimes {
             created_at_ns: now,
@@ -414,6 +418,8 @@ impl ServerMetaStore {
                     bootstrap_token_hash: None,
                     bootstrap_token_expires_at_ns: None,
                     superuser_ever_existed: false,
+                    bootstrap_username: None,
+                    bootstrap_token_path: None,
                 });
         let token_hash = p.bootstrap_token_hash.as_ref().map(|v| bytes32(v));
         BootstrapState::from_meta(
@@ -454,6 +460,42 @@ impl ServerMetaStore {
             .flatten()
             .and_then(|p| p.bootstrap_token_hash)
             .is_some()
+    }
+
+    /// Username the currently-outstanding bootstrap token was issued for,
+    /// if any (matched against the login username to decide whether a
+    /// successful auth should consume the token).
+    pub fn bootstrap_username(&self) -> Option<String> {
+        self.read_blob::<PersistedBootstrap>(KEY_BOOTSTRAP)
+            .ok()
+            .flatten()
+            .and_then(|p| p.bootstrap_username)
+    }
+
+    /// On-disk path the currently-outstanding bootstrap token was written
+    /// to, if any — used by both the boot-time TTL sweep and the
+    /// consume-on-first-login path to know exactly which file to delete.
+    pub fn bootstrap_token_path(&self) -> Option<PathBuf> {
+        self.read_blob::<PersistedBootstrap>(KEY_BOOTSTRAP)
+            .ok()
+            .flatten()
+            .and_then(|p| p.bootstrap_token_path)
+    }
+
+    /// True iff a bootstrap-token hash is present AND its expiry has
+    /// passed (`bootstrap_token_expires_at_ns <= now_ns`). Deliberately
+    /// narrower than [`Self::bootstrap_token_active`], which only checks
+    /// hash presence — callers that want "is a token outstanding at all"
+    /// vs. "has it expired" need both meanings kept distinct.
+    pub fn bootstrap_token_expired(&self, now_ns: u64) -> bool {
+        self.read_blob::<PersistedBootstrap>(KEY_BOOTSTRAP)
+            .ok()
+            .flatten()
+            .is_some_and(|p| {
+                p.bootstrap_token_hash.is_some()
+                    && p.bootstrap_token_expires_at_ns
+                        .is_some_and(|exp| exp <= now_ns)
+            })
     }
 
     /// True iff a superuser has EVER been provisioned (sticky flag).
@@ -547,34 +589,51 @@ impl ServerMetaStore {
         self.persist()
     }
 
-    /// Install a fresh bootstrap-token hash + expiry.
-    pub fn set_bootstrap_token(&self, hash: [u8; 32], expires_at_ns: u64) -> Result<(), MetaError> {
+    /// Install a fresh bootstrap-token hash + expiry, plus the username the
+    /// token was issued for and the on-disk path it was written to (so the
+    /// TTL sweep / consume-on-login paths know exactly what to delete).
+    pub fn set_bootstrap_token(
+        &self,
+        username: &str,
+        hash: [u8; 32],
+        expires_at_ns: u64,
+        token_path: PathBuf,
+    ) -> Result<(), MetaError> {
         let _guard = self.write_lock.lock();
         let prior: PersistedBootstrap = self.get(KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
             bootstrap_token_hash: None,
             bootstrap_token_expires_at_ns: None,
             superuser_ever_existed: false,
+            bootstrap_username: None,
+            bootstrap_token_path: None,
         });
         let next = PersistedBootstrap {
             bootstrap_token_hash: Some(Zeroizing::new(hash.to_vec())),
             bootstrap_token_expires_at_ns: Some(expires_at_ns),
             superuser_ever_existed: prior.superuser_ever_existed,
+            bootstrap_username: Some(username.to_string()),
+            bootstrap_token_path: Some(token_path),
         };
         self.put(KEY_BOOTSTRAP, &next)?;
         self.persist()
     }
 
-    /// Atomically clear `bootstrap_token_hash` and set
-    /// `superuser_ever_existed = true`. Idempotent.
+    /// Atomically clear `bootstrap_token_hash` (plus `bootstrap_username` /
+    /// `bootstrap_token_path`) and set `superuser_ever_existed = true`.
+    /// Idempotent.
     pub fn consume_bootstrap_token(&self) -> Result<(), MetaError> {
         let _guard = self.write_lock.lock();
         let prior: PersistedBootstrap = self.get(KEY_BOOTSTRAP)?.unwrap_or(PersistedBootstrap {
             bootstrap_token_hash: None,
             bootstrap_token_expires_at_ns: None,
             superuser_ever_existed: false,
+            bootstrap_username: None,
+            bootstrap_token_path: None,
         });
         if prior.bootstrap_token_hash.is_none()
             && prior.bootstrap_token_expires_at_ns.is_none()
+            && prior.bootstrap_username.is_none()
+            && prior.bootstrap_token_path.is_none()
             && prior.superuser_ever_existed
         {
             return Ok(());
@@ -583,6 +642,8 @@ impl ServerMetaStore {
             bootstrap_token_hash: None,
             bootstrap_token_expires_at_ns: None,
             superuser_ever_existed: true,
+            bootstrap_username: None,
+            bootstrap_token_path: None,
         };
         self.put(KEY_BOOTSTRAP, &next)?;
         self.persist()

@@ -8,9 +8,15 @@ Wants=network-online.target
 Type=simple
 User=shamir
 Group=shamir
-ExecStart=/usr/local/bin/shamir-server --config /etc/shamir/server.ktav
+ExecStart=/usr/local/bin/shamir-server --config /etc/shamir/server.ktav --bootstrap-token-path /run/shamir/bootstrap_token.txt
 Restart=on-failure
 RestartSec=5
+
+# tmpfs directory for the bootstrap token (see --bootstrap-token-path
+# above). Created as /run/shamir, owned by this service's User/Group,
+# and removed automatically on stop — never persisted to disk, so it is
+# never captured by a `backup --to` snapshot of the data dir.
+RuntimeDirectory=shamir
 
 # Process limits — match the server's expected workload.
 # 65536 open files: enough for ~10K concurrent connections (one fd per

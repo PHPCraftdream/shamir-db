@@ -45,10 +45,21 @@ struct Cli {
     bootstrap_user: Option<String>,
 
     /// Optional password for the bootstrap superuser. If omitted, a random
-    /// 32-byte token is generated, written to `data_dir/bootstrap_token.txt`,
-    /// AND printed once at WARN level.
+    /// 32-byte token is generated and printed once at WARN level. The token
+    /// is also written to `data_dir/bootstrap_token.txt` by default —
+    /// override the output path with `--bootstrap-token-path`. The token
+    /// auto-deletes on the first successful login, or after a 24h TTL
+    /// (whichever comes first) — manual deletion is no longer the primary
+    /// cleanup mechanism, though it remains a safe immediate step.
     #[arg(long, value_name = "PASSWORD")]
     bootstrap_password: Option<String>,
+
+    /// Override the output path for the random bootstrap token (only used
+    /// when `--bootstrap-password` is omitted). Recommend a tmpfs path
+    /// (e.g. `/run/shamir/bootstrap_token.txt`) so the token is never
+    /// captured by a `backup --to` snapshot of `data_dir`.
+    #[arg(long, value_name = "PATH")]
+    bootstrap_token_path: Option<PathBuf>,
 
     /// Skip the bootstrap step entirely. Use only when the operator manages
     /// the user directory out-of-band.
@@ -236,6 +247,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
     } else {
         BootstrapMode::RandomToken {
             username: cli.bootstrap_user,
+            token_path: cli.bootstrap_token_path,
         }
     };
 

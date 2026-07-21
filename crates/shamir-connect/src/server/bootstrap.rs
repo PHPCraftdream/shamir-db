@@ -1,5 +1,17 @@
 //! Server-side bootstrap state machine (spec §11).
 //!
+//! **Status: library code, NOT wired into any live dispatch path.** This
+//! module fully implements the challenge-response wire flow described
+//! below, but no server (`crates/shamir-server`) ever constructs a
+//! [`BootstrapState`] or calls [`make_bootstrap_challenge`] from a live
+//! connection handler — there is no dispatch branch for
+//! `bootstrap_hello`/`bootstrap_challenge`/`bootstrap` wire messages
+//! anywhere in the tree. The operationally-reachable bootstrap flow today
+//! is CLI-flag + local-file-based (`--bootstrap-password` /
+//! `--bootstrap-token-path`, see `shamir-server::bootstrap`), not this
+//! wire protocol. See `docs/guide-docs/client-server-protocol-spec/IMPLEMENTATION_GUIDE.md`
+//! §2.1 for the same fact recorded against the spec.
+//!
 //! Bootstrap creates the **first** superuser. It is gated by the
 //! `superuser_ever_existed` invariant in `__system__/server_meta`. Once a
 //! bootstrap has succeeded the flag stays `true` forever (defending against

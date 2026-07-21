@@ -216,11 +216,59 @@ allowed_origins = ["https://admin.example.com"]
 
 #### Bootstrap token output options
 
-- `tty` (default): печать в stdout **только** если `isatty(stdout)` AND процесс не systemd-managed (проверка `INVOCATION_ID` env var). Иначе server fails с инструкцией.
-- `file:<path>`: атомарно создать `chmod 600` файл. **Strongly recommend tmpfs/ramdisk path** (`/run/shamir/bootstrap.token` или `/dev/shm/...`) — обычные filesystem пути попадают в backup/AV/EDR/cloud sync ecosystem. Server **MUST** удалить после use или TTL.
-- `command:<cmd>`: pipe token в external command (e.g., `pass insert shamir/bootstrap`, `age -r recipient -e -o /vault/token.age`, `gpg -e -r ops@example.com`). Token не касается обычного диска.
+> **Status legend** (same as §11 below): **✅ DONE** — implemented and
+> wired into the live boot path. **🔵 ROADMAP** — not implemented; only
+> the mode(s) marked DONE exist in the tree today.
 
-**WARNING:** systemd / journald / docker logs / k8s log shippers **захватывают stdout** даже при `isatty` check (через TTY emulation). Пред-deployment проверять `journalctl -u shamirdb` после bootstrap — токен не должен присутствовать.
+- `file:<path>` — **✅ DONE.** The only output mode implemented today.
+  `shamir-server` (`crates/shamir-server/src/bootstrap.rs`,
+  `server_launcher.rs`) writes the token to `data_dir/bootstrap_token.txt`
+  by default, `chmod 600` on Unix. The path is configurable via the CLI
+  flag `--bootstrap-token-path <PATH>` (recommend a tmpfs path, e.g.
+  `/run/shamir/bootstrap_token.txt`, so a `backup --to` snapshot of
+  `data_dir` never captures it — see `deploy/README.md`). The token now
+  **auto-deletes**: the server removes the file and consumes the
+  durable `ServerMetaStore` token record on the FIRST successful SCRAM
+  login for the bootstrap username (primary path,
+  `connection/handshake.rs`), or via a 24h TTL boot-time sweep for any
+  token nobody ever used (backstop, `server_launcher.rs`,
+  `BOOTSTRAP_TOKEN_TTL_NS`). Both paths are best-effort/non-fatal — an
+  I/O failure deleting the file is logged and never aborts a login or
+  boot. Manual deletion right after reading the token remains a safe,
+  optional belt-and-braces step; it is no longer the only cleanup
+  mechanism.
+- `tty` (stdout-only-if-`isatty(stdout)` AND not systemd-managed, checked
+  via `INVOCATION_ID`) — **🔵 ROADMAP.** Not implemented. The server
+  always uses `file:<path>` mode; there is no stdout-only output path
+  today.
+- `command:<cmd>` (pipe token to an external command, e.g. `pass insert`,
+  `age -e`, `gpg -e`) — **🔵 ROADMAP.** Not implemented.
+
+**WARNING:** systemd / journald / docker logs / k8s log shippers **захватывают stdout** даже при `isatty` check (через TTY emulation). Пред-deployment проверять `journalctl -u shamirdb` после bootstrap — токен не должен присутствовать. (This applies to the `tty` mode once/if it is implemented — today's `file:<path>` mode already logs only the token *path* at WARN, never the token itself, precisely to avoid this leak — see `server_launcher.rs::log_bootstrap_outcome`.)
+
+#### Bootstrap wire protocol (`bootstrap_hello` / `bootstrap_challenge` / `bootstrap`) — 🔵 ROADMAP
+
+The full challenge-response bootstrap wire protocol described elsewhere in
+this spec (`bootstrap_hello` → `bootstrap_challenge` → `bootstrap`; see
+AUTH_PROTOCOL.md §11.3 and `diagrams/03-bootstrap.md`) exists as
+**library code only** — `shamir_connect::server::bootstrap::BootstrapState`
+/ `make_bootstrap_challenge` / `BootstrapRequest` (server side) and
+`shamir_connect::client::bootstrap::{build_hello, verify_challenge,
+build_request, run_local_bootstrap_with}` (client side) are fully
+implemented and unit-tested in `shamir-connect`, but **neither side is
+wired into any live dispatch path**: zero references to
+`BootstrapState`/`BootstrapHello`/`BootstrapChallenge`/
+`make_bootstrap_challenge` exist in `crates/shamir-server` or
+`shamir-query-types`'s wire-message enum, and no client connection path
+ever calls the client-side helpers. The operationally-reachable bootstrap
+flow today is entirely CLI-flag + local-file-based
+(`--bootstrap-password` / `--bootstrap-token-path`, described above) —
+**not** the wire protocol this subsection and the AUTH spec describe.
+Wiring the wire protocol up (new pre-auth wire message types, a new
+server dispatch branch, client-side integration in both the Rust and
+TypeScript clients) is a materially larger follow-up feature, tracked
+separately — not part of the bootstrap-token-lifecycle work that landed
+the `file:<path>` improvements above.
 
 **MUST:** profile→binding_mode mapping enforced server-side. Server rejects auth_init с `binding_mode` не в listener policy **до** Argon2id (DoS-amp защита; см. AUTH §4.3).
 
@@ -631,7 +679,14 @@ individual entries exist as dedicated integration tests where applicable:
 - Browser path (binding_mode=0x02) auth + resume в same tier
 - Cross-transport same-tier resumption (TCP↔WS)
 - Anti-downgrade resumption rejection
-- Bootstrap (token TTL, CAS race в parallel attempt, file orphan cleanup, command pipe mode)
+- Bootstrap: **✅ DONE** for `file:<path>` mode — token TTL (24h boot-time
+  sweep) and file/record cleanup on first successful login are covered by
+  `crates/shamir-server/tests/bootstrap_token_lifecycle_e2e.rs` (e2e) plus
+  `crates/shamir-server/src/tests/server_meta_tests.rs` and
+  `bootstrap_tests.rs` (unit). CAS race under parallel bootstrap attempts,
+  and `command:<cmd>` output mode: **🔵 ROADMAP** — no `command:<cmd>` mode
+  exists to race against (see §2.1), and no test exercises concurrent
+  `ensure_superuser` calls racing the same username.
 - Identity rotation (broadcast, signed_by_old, transition_until, per-recipient signing)
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection

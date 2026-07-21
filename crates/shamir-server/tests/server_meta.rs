@@ -214,11 +214,14 @@ fn consume_bootstrap_token_is_idempotent_atomic() {
 
     let hash = [0x77u8; 32];
     let expires = 2_000_000_000_000_000_000u64;
+    let token_path = PathBuf::from("/tmp/bootstrap_token.txt");
     store
-        .set_bootstrap_token(hash, expires)
+        .set_bootstrap_token("admin", hash, expires, token_path.clone())
         .expect("set_bootstrap_token");
     assert!(store.bootstrap_token_active());
     assert!(!store.superuser_ever_existed());
+    assert_eq!(store.bootstrap_username(), Some("admin".to_string()));
+    assert_eq!(store.bootstrap_token_path(), Some(token_path));
 
     // Consume.
     store.consume_bootstrap_token().expect("consume");
@@ -228,6 +231,8 @@ fn consume_bootstrap_token_is_idempotent_atomic() {
     let store = ServerMetaStore::open_or_init(&path).expect("reopen");
     assert!(!store.bootstrap_token_active());
     assert!(store.superuser_ever_existed());
+    assert_eq!(store.bootstrap_username(), None);
+    assert_eq!(store.bootstrap_token_path(), None);
 
     // Idempotent — second consume is a no-op (no error, state unchanged).
     store

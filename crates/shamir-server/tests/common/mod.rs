@@ -110,3 +110,28 @@ pub async fn spawn_with_password(
 pub async fn spawn_ephemeral(temp: &TempDir, admin_password: &[u8]) -> ServerHandle {
     spawn_with_password(temp, admin_password, "127.0.0.1:0").await
 }
+
+/// Spawn a fresh server with an `admin` superuser bootstrapped via
+/// [`BootstrapMode::RandomToken`] (default username, default
+/// `data_dir/bootstrap_token.txt` path — no override). Returns the
+/// [`ServerHandle`] plus the generated token (read back off disk), so the
+/// caller can use it as the login password.
+///
+/// The caller owns `temp` and must keep it alive for the duration of the
+/// test — dropping it deletes the data dir out from under the running
+/// server.
+pub async fn spawn_with_random_token(temp: &TempDir, addr: &str) -> (ServerHandle, String) {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = make_test_config(temp, addr);
+    let bootstrap = BootstrapMode::RandomToken {
+        username: None,
+        token_path: None,
+    };
+    let handle = ServerLauncher { config, bootstrap }
+        .launch()
+        .await
+        .expect("launcher boot");
+    let token = std::fs::read_to_string(temp.path().join("bootstrap_token.txt"))
+        .expect("bootstrap token file must exist right after boot");
+    (handle, token)
+}
