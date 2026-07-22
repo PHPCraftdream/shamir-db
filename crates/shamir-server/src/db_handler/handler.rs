@@ -379,6 +379,43 @@ impl RequestHandler for ShamirDbHandler {
                     )
                     .await
                 }
+
+                // --- FG-5a: cursor wire protocol — compile-safety stubs
+                // only. Real cursor state (session-scoped MVCC as_of
+                // snapshot, per-session open-cursor cap, idle-timeout
+                // eviction) is NOT wired here — that is FG-5b. These arms
+                // exist solely so the exhaustive `DbRequest` match compiles
+                // once the wire variants land; every one of them returns a
+                // placeholder error today.
+                DbRequest::CreateCursor { .. } => {
+                    // FG-5b: implement — mint a cursor, open the MVCC
+                    // as_of snapshot, return the first `CursorPage`.
+                    DbResponse::Error {
+                        code: "cursor_not_yet_implemented".into(),
+                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
+                    }
+                }
+                DbRequest::FetchNext { .. } => {
+                    // FG-5b: implement — look up the cursor by id, advance
+                    // the scan, return the next `CursorPage`.
+                    DbResponse::Error {
+                        code: "cursor_not_yet_implemented".into(),
+                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
+                    }
+                }
+                DbRequest::CancelCursor { .. } => {
+                    // FG-5b: implement — idempotently drop the cursor's
+                    // server-side state and reply `DbResponse::CursorClosed`
+                    // (canceling an unknown/already-closed cursor is NOT an
+                    // error — see CURSORS.md). This stub intentionally
+                    // returns the same placeholder error as the other two
+                    // arms so the compile-safety stub is uniform and
+                    // trivially greppable until FG-5b lands.
+                    DbResponse::Error {
+                        code: "cursor_not_yet_implemented".into(),
+                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
+                    }
+                }
             };
 
             rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
@@ -605,5 +642,11 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         }
         BatchError::CrossRepoNotSupported { .. } => "tx_cross_repo_not_supported",
         BatchError::NestingTooDeep { .. } => "nesting_too_deep",
+        // FG-5a: wire error codes reserved for the cursor protocol; actual
+        // cap/eviction enforcement (the only place these variants are
+        // currently constructed) lands in FG-5b.
+        BatchError::CursorNotFound { .. } => "cursor_not_found",
+        BatchError::CursorExpired { .. } => "cursor_expired",
+        BatchError::CursorLimitExceeded { .. } => "cursor_limit_exceeded",
     }
 }

@@ -2,6 +2,8 @@ use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::batch::TransactionInfo;
+use crate::read::ReadQuery;
+use crate::wire::cursor_id::CursorId;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
@@ -216,4 +218,156 @@ fn create_scram_user_wire_roundtrip_preserves_password_and_shape() {
         }
         _ => panic!("expected CreateScramUser"),
     }
+}
+
+// ============================================================================
+// FG-5a: cursor wire protocol round-trips
+// ============================================================================
+
+#[test]
+fn create_cursor_request_roundtrip_and_tag() {
+    let req = DbRequest::CreateCursor {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "app".into(),
+        query: ReadQuery::new("users"),
+        page_size: 50,
+    };
+    let v = to_qv(&req);
+    assert_eq!(
+        v.get("op").and_then(QueryValue::as_str),
+        Some("create_cursor")
+    );
+    assert_eq!(v.get("db").and_then(QueryValue::as_str), Some("app"));
+    assert_eq!(v.get("page_size").and_then(QueryValue::as_i64), Some(50));
+
+    let back: DbRequest = from_qv(v);
+    match back {
+        DbRequest::CreateCursor {
+            db,
+            page_size,
+            query,
+            ..
+        } => {
+            assert_eq!(db, "app");
+            assert_eq!(page_size, 50);
+            assert_eq!(query.from, ReadQuery::new("users").from);
+        }
+        _ => panic!("expected CreateCursor"),
+    }
+}
+
+#[test]
+fn create_cursor_query_version_defaults_when_absent() {
+    let v = mpack!({
+        "op": "create_cursor",
+        "db": "app",
+        "query": { "from": "users" },
+        "page_size": 20_i64
+    });
+    let req: DbRequest = from_qv(v);
+    match req {
+        DbRequest::CreateCursor { query_version, .. } => {
+            assert_eq!(
+                query_version, CURRENT_QUERY_LANG_VERSION,
+                "absent query_version must default"
+            );
+        }
+        _ => panic!("expected CreateCursor"),
+    }
+}
+
+#[test]
+fn fetch_next_request_roundtrip_and_tag() {
+    let req = DbRequest::FetchNext {
+        cursor_id: CursorId(42),
+        page_size: 10,
+    };
+    let v = to_qv(&req);
+    assert_eq!(v.get("op").and_then(QueryValue::as_str), Some("fetch_next"));
+    assert_eq!(v.get("cursor_id").and_then(QueryValue::as_i64), Some(42));
+    assert_eq!(v.get("page_size").and_then(QueryValue::as_i64), Some(10));
+
+    let back: DbRequest = from_qv(v);
+    assert!(matches!(
+        back,
+        DbRequest::FetchNext { cursor_id, page_size }
+            if cursor_id == CursorId(42) && page_size == 10
+    ));
+}
+
+#[test]
+fn cancel_cursor_request_roundtrip_and_tag() {
+    let req = DbRequest::CancelCursor {
+        cursor_id: CursorId(7),
+    };
+    let v = to_qv(&req);
+    assert_eq!(
+        v.get("op").and_then(QueryValue::as_str),
+        Some("cancel_cursor")
+    );
+    assert_eq!(v.get("cursor_id").and_then(QueryValue::as_i64), Some(7));
+
+    let back: DbRequest = from_qv(v);
+    assert!(matches!(
+        back,
+        DbRequest::CancelCursor { cursor_id } if cursor_id == CursorId(7)
+    ));
+}
+
+#[test]
+fn cursor_id_serializes_as_bare_integer_not_wrapped_object() {
+    // `#[serde(transparent)]` — must round-trip as a plain integer on the
+    // wire, not `{ "0": 42 }`.
+    let v = to_qv(&CursorId(42));
+    assert_eq!(v.as_i64(), Some(42));
+}
+
+#[test]
+fn cursor_page_response_roundtrip_and_tag() {
+    let resp = DbResponse::CursorPage {
+        cursor_id: CursorId(5),
+        page: crate::read::QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+            skipped: false,
+            versions: None,
+        },
+        has_more: true,
+    };
+    let v = to_qv(&resp);
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("cursor_page")
+    );
+    assert_eq!(v.get("cursor_id").and_then(QueryValue::as_i64), Some(5));
+    assert_eq!(v.get("has_more").and_then(QueryValue::as_bool), Some(true));
+
+    let back: DbResponse = from_qv(v);
+    assert!(matches!(
+        back,
+        DbResponse::CursorPage { cursor_id, has_more, .. }
+            if cursor_id == CursorId(5) && has_more
+    ));
+}
+
+#[test]
+fn cursor_closed_response_roundtrip_and_tag() {
+    let resp = DbResponse::CursorClosed {
+        cursor_id: CursorId(11),
+    };
+    let v = to_qv(&resp);
+    assert_eq!(
+        v.get("kind").and_then(QueryValue::as_str),
+        Some("cursor_closed")
+    );
+    assert_eq!(v.get("cursor_id").and_then(QueryValue::as_i64), Some(11));
+
+    let back: DbResponse = from_qv(v);
+    assert!(matches!(
+        back,
+        DbResponse::CursorClosed { cursor_id } if cursor_id == CursorId(11)
+    ));
 }

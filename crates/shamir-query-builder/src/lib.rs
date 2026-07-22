@@ -11,7 +11,7 @@
 //! # Scope boundary — query construction, not transport envelope
 //!
 //! This crate builds the **`BatchRequest`** body and the `BatchOp` ops inside
-//! it — the OQL/DDL surface. It deliberately does **not** construct the
+//! it — the OQL/DDL surface. It deliberately does **not** construct most
 //! top-level `DbRequest` envelope variants (`Ping`, `CreateScramUser`,
 //! `TxBegin`/`TxExecute`/`TxCommit`/`TxRollback`): those are a *transport /
 //! session-lifecycle* concern owned by the client SDKs, which already expose
@@ -22,6 +22,12 @@
 //! the builder produces what goes *inside* an `Execute`, the SDK wraps the
 //! envelope around it. This is by design, not a coverage gap.
 //!
+//! `cursor` (FG-5a) is a narrow, deliberate exception: `CreateCursor` embeds
+//! a `ReadQuery` (the same query shape `Batch::query` already builds) and
+//! `FetchNext`/`CancelCursor` reference an existing cursor by opaque id with
+//! no query to construct at all — see that module's doc comment for the
+//! full rationale.
+//!
 //! See `docs/dev-artifacts/roadmap/QUERY_BUILDER.md` for the full design.
 //!
 //! Modules are wired in here phase by phase as they land:
@@ -31,6 +37,7 @@
 //! - `select`   — `SelectItem` constructors (field / func / agg / …).
 //! - `write`    — Insert / Update / Upsert / Delete + the `Doc` value builder.
 //! - `batch`    — `Batch` + typed `Handle` dependency references.
+//! - `cursor`   — `DbRequest::{CreateCursor,FetchNext,CancelCursor}` constructors (FG-5a).
 //! - `response` — `BatchResponse` extraction helpers.
 //! - `macros`   — `doc!` / `vals!` declarative macros; `filter!` / `q!` proc-macro re-exports.
 
@@ -40,6 +47,7 @@
 extern crate self as shamir_query_builder;
 
 pub mod batch;
+pub mod cursor;
 pub mod ddl;
 pub mod filter;
 #[macro_use]

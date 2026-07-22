@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::batch::{BatchRequest, BatchResponse, TransactionInfo};
+use crate::read::{QueryResult, ReadQuery};
+use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
 
 /// Current query-language version. Bumped when the on-the-wire
@@ -26,6 +28,7 @@ fn default_query_version() -> u32 {
 /// `RequestEnvelope.req`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // dispatch enum: rarely on the stack; mirrors BatchOp::Read(ReadQuery)
 pub enum DbRequest {
     /// Health check — no DB lookup, no version negotiation.
     Ping,
@@ -206,6 +209,50 @@ pub enum DbRequest {
         /// required (unconditional, mirrors `SetSuperuser`'s gate).
         hmac: Option<String>,
     },
+
+    // --- FG-5a: server-side result cursors (wire protocol only; the
+    // engine/session state that actually backs these lands in FG-5b — see
+    // `docs/guide-docs/client-server-protocol-spec/CURSORS.md`) ---
+    /// Open a server-side cursor over a read query and return its first
+    /// page. The server mints an opaque [`CursorId`] and parks cursor state
+    /// (an MVCC as_of snapshot + scan position) bound to the session —
+    /// FG-5b. `page_size` bounds how many records come back per page
+    /// (this call's page AND every subsequent `FetchNext`'s default,
+    /// though `FetchNext` may request a different size per call).
+    CreateCursor {
+        /// Query-language version. Default: [`CURRENT_QUERY_LANG_VERSION`].
+        #[serde(default = "default_query_version")]
+        query_version: u32,
+        /// Target database name.
+        db: String,
+        /// The read query the cursor scans — same [`ReadQuery`] shape a
+        /// batch `Read` op uses.
+        query: ReadQuery,
+        /// Maximum records returned per page (this call's page, and the
+        /// default for subsequent `FetchNext` calls that omit an override).
+        page_size: u32,
+    },
+    /// Fetch the next page from an already-open cursor.
+    ///
+    /// `page_size` may differ from the value used at `CreateCursor` time or
+    /// any prior `FetchNext` — client-controlled per-call backpressure.
+    FetchNext {
+        /// The cursor minted by [`DbRequest::CreateCursor`].
+        cursor_id: CursorId,
+        /// Maximum records returned by this page.
+        page_size: u32,
+    },
+    /// Explicitly close (cancel) an open cursor, releasing its server-side
+    /// state early (idle-timeout eviction is the implicit counterpart,
+    /// FG-5b).
+    ///
+    /// Idempotent: canceling an already-closed or unknown cursor id is NOT
+    /// an error — the server replies with
+    /// [`DbResponse::CursorClosed`] either way.
+    CancelCursor {
+        /// The cursor to close.
+        cursor_id: CursorId,
+    },
 }
 
 /// Application-layer DB response.
@@ -325,4 +372,27 @@ pub enum DbResponse {
     /// Successful reply to [`DbRequest::ChangePasswordVerify`]. No payload
     /// beyond ok — the client already knows its own new credentials.
     ChangePasswordOk,
+
+    // --- FG-5a: server-side result cursors (wire protocol only — see
+    // `docs/guide-docs/client-server-protocol-spec/CURSORS.md`) ---
+    /// Reply to both [`DbRequest::CreateCursor`] (first page) and
+    /// [`DbRequest::FetchNext`] (subsequent pages).
+    CursorPage {
+        /// The cursor this page belongs to (echoed on `CreateCursor`, the
+        /// same id the caller supplied on `FetchNext`).
+        cursor_id: CursorId,
+        /// This page's records/stats — reuses the existing [`QueryResult`]
+        /// shape, so a cursor page looks exactly like a regular read result.
+        page: QueryResult,
+        /// `true` if more pages remain (a further `FetchNext` will return
+        /// at least one more record); `false` when this page was the last
+        /// and the server has already released the cursor.
+        has_more: bool,
+    },
+    /// Reply to [`DbRequest::CancelCursor`] — also the (idempotent) reply
+    /// when the target cursor was already closed or never existed.
+    CursorClosed {
+        /// The cursor id that is now (or already was) closed.
+        cursor_id: CursorId,
+    },
 }

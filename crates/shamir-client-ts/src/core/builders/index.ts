@@ -43,3 +43,4 @@ export * from './call.js';
 export * from './batch.js';
 export * from './handle.js';
 export * from './subscribe.js';
+export * from './cursor.js';

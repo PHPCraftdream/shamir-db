@@ -172,3 +172,12 @@ export type {
   EdgeKind,
 } from './batch.js';
 
+export type {
+  CursorId,
+  CreateCursorRequest,
+  FetchNextRequest,
+  CancelCursorRequest,
+  CursorPageResponse,
+  CursorClosedResponse,
+} from './cursor.js';
+

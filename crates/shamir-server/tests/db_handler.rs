@@ -140,6 +140,90 @@ async fn ping_returns_pong() {
     assert!(matches!(decode(&res), DbResponse::Pong));
 }
 
+// --------------------------------------------------------------------------
+// FG-5a: cursor wire protocol — compile-safety stub dispatch
+//
+// Real cursor state (MVCC as_of snapshot, per-session cap, idle-timeout
+// eviction) is FG-5b, not implemented yet. These tests only prove the three
+// new `DbRequest` variants are wired through `ShamirDbHandler::handle` (not
+// dead code) and produce the documented placeholder stub.
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_cursor_returns_not_yet_implemented_stub() {
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::new(Arc::new(db));
+    let session = user_session();
+
+    let req = shamir_query_builder::cursor::create_cursor("app", Query::from("users"), 50);
+    let res = handler
+        .handle(
+            &session,
+            &encode(&req),
+            &ConnectionServices::without_push(0),
+        )
+        .await
+        .unwrap();
+
+    match decode(&res) {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "cursor_not_yet_implemented", "got message: {message}");
+            assert!(message.contains("FG-5b"), "got message: {message}");
+        }
+        other => panic!("expected DbResponse::Error stub, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fetch_next_returns_not_yet_implemented_stub() {
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::new(Arc::new(db));
+    let session = user_session();
+
+    let req = shamir_query_builder::cursor::fetch_next(7u64, 25);
+    let res = handler
+        .handle(
+            &session,
+            &encode(&req),
+            &ConnectionServices::without_push(0),
+        )
+        .await
+        .unwrap();
+
+    match decode(&res) {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "cursor_not_yet_implemented", "got message: {message}");
+            assert!(message.contains("FG-5b"), "got message: {message}");
+        }
+        other => panic!("expected DbResponse::Error stub, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_cursor_returns_not_yet_implemented_stub() {
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::new(Arc::new(db));
+    let session = user_session();
+
+    let req = shamir_query_builder::cursor::cancel_cursor(9u64);
+    let res = handler
+        .handle(
+            &session,
+            &encode(&req),
+            &ConnectionServices::without_push(0),
+        )
+        .await
+        .unwrap();
+
+    match decode(&res) {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "cursor_not_yet_implemented", "got message: {message}");
+            assert!(message.contains("FG-5b"), "got message: {message}");
+        }
+        other => panic!("expected DbResponse::Error stub, got {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_msgpack_returns_protocol_err() {
     let db = ShamirDb::init_memory().await.expect("init shamir");

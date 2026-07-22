@@ -121,6 +121,40 @@ pub enum BatchError {
     /// decision: a batch that reports `ExecutionTimedOut` has durably
     /// committed nothing.
     ExecutionTimedOut { budget_secs: u64 },
+
+    /// FG-5a: `FetchNext`/`CancelCursor` against a cursor id the server has
+    /// never issued (or has already fully consumed/dropped for a reason
+    /// other than idle-timeout eviction — see `CursorExpired` for that
+    /// case).
+    ///
+    /// Wire error code (see `crate::wire::db_message::DbResponse::Error`):
+    /// `cursor_not_found`.
+    CursorNotFound {
+        /// The unrecognised cursor id.
+        cursor_id: crate::wire::CursorId,
+    },
+
+    /// FG-5a: `FetchNext` against a cursor the server evicted after it sat
+    /// idle past its idle-timeout. Distinguishable from `CursorNotFound` so
+    /// a client can tell "you waited too long" apart from "that id was
+    /// never valid" — eviction itself is implemented in FG-5b; this variant
+    /// only reserves the wire-distinguishable error code.
+    ///
+    /// Wire error code: `cursor_expired`.
+    CursorExpired {
+        /// The evicted cursor id.
+        cursor_id: crate::wire::CursorId,
+    },
+
+    /// FG-5a: `CreateCursor` rejected because the caller's session already
+    /// has `limit` cursors open. Cap enforcement itself lands in FG-5b;
+    /// this variant only reserves the wire-distinguishable error code.
+    ///
+    /// Wire error code: `cursor_limit_exceeded`.
+    CursorLimitExceeded {
+        /// The per-session cap that was hit.
+        limit: u32,
+    },
 }
 
 impl std::fmt::Display for BatchError {
@@ -202,6 +236,15 @@ impl std::fmt::Display for BatchError {
                     "batch execution exceeded its {}s time budget",
                     budget_secs
                 )
+            }
+            BatchError::CursorNotFound { cursor_id } => {
+                write!(f, "cursor {} not found", cursor_id)
+            }
+            BatchError::CursorExpired { cursor_id } => {
+                write!(f, "cursor {} expired (idle-timeout eviction)", cursor_id)
+            }
+            BatchError::CursorLimitExceeded { limit } => {
+                write!(f, "cursor limit exceeded (max: {})", limit)
             }
         }
     }

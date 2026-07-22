@@ -20,10 +20,27 @@ import type {
   BatchResponse,
 } from '../types/batch.js';
 import type { FilterValue, Filter } from '../types/filter.js';
+import type { ReadQuery } from '../types/query.js';
+import type {
+  CreateCursorRequest,
+  FetchNextRequest,
+  CancelCursorRequest,
+  CursorId,
+} from '../types/cursor.js';
 import type { ExecCtx } from '../exec-ctx.js';
 import type { SubscribeSource, SubscribeOpts } from './subscribe.js';
 import { subscribe, unsubscribeOp } from './subscribe.js';
 import { Handle } from './handle.js';
+import {
+  createCursor as buildCreateCursor,
+  fetchNext as buildFetchNext,
+  cancelCursor as buildCancelCursor,
+} from './cursor.js';
+
+/** Something that has a `.build()` method returning a `ReadQuery`. */
+interface QueryBuildable {
+  build(): ReadQuery;
+}
 
 /** Something that has a `.build()` method returning a wire op. */
 interface Buildable {
@@ -377,6 +394,48 @@ export class Batch {
    */
   unsubscribe(alias: string, subId: number): this {
     return this.add(alias, unsubscribeOp(subId));
+  }
+
+  // ── cursors (FG-5a) ───────────────────────────────────────────────
+  //
+  // `CreateCursor`/`FetchNext`/`CancelCursor` are top-level `DbRequest`s,
+  // NOT batch entries (there is no `BatchOp` for a cursor op — mirrors
+  // `TxBegin`/`TxCommit`/`TxRollback`, which are also request-level, not
+  // batch-level). These are exposed as STATIC helpers (they build a
+  // standalone wire request, not an entry in `this.queriesMap`) so callers
+  // never need to hand-assemble the `{ op: 'create_cursor', ... }` shape
+  // themselves. Sending the built request is a transport concern (FG-5c/
+  // FG-5d streaming wrappers), out of scope here.
+
+  /**
+   * Build a `DbRequest::CreateCursor` — opens a server-side cursor over
+   * `query` on database `db`, with `pageSize` bounding the first (and, by
+   * default, every subsequent) page. `query` may be a `Query` builder
+   * instance or a raw `ReadQuery` wire object.
+   */
+  static createCursor(
+    db: string,
+    query: ReadQuery | QueryBuildable,
+    pageSize: number,
+  ): CreateCursorRequest {
+    return buildCreateCursor(db, query, pageSize);
+  }
+
+  /**
+   * Build a `DbRequest::FetchNext` — fetch the next page from an
+   * already-open cursor. `pageSize` may differ per call.
+   */
+  static fetchNext(cursorId: CursorId, pageSize: number): FetchNextRequest {
+    return buildFetchNext(cursorId, pageSize);
+  }
+
+  /**
+   * Build a `DbRequest::CancelCursor` — explicitly close an open cursor.
+   * Idempotent: canceling an unknown or already-closed cursor is not an
+   * error on the wire.
+   */
+  static cancelCursor(cursorId: CursorId): CancelCursorRequest {
+    return buildCancelCursor(cursorId);
   }
 
   /**
