@@ -39,6 +39,7 @@ export type { TxOpened, ScramUserCreated, SuperuserSet } from './core/client.js'
 export { SubscriptionRouter } from './core/subscription-router.js';
 export type { SubscriptionEvent } from './core/subscription-router.js';
 export { SubscriptionHandle } from './core/subscription-handle.js';
+export { CursorIterator } from './core/cursor-iterator.js';
 export type { ResumeOptions };
 export type { Db, Tx } from './core/db.js';
 

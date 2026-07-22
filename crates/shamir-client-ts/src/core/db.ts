@@ -12,10 +12,12 @@
 import type { ShamirClient } from './client.js';
 import type { BatchResponse, QueryResult, TransactionInfo } from './types/batch.js';
 import type { WireValue } from './types/write.js';
+import type { ReadQuery } from './types/query.js';
 import type { ExecCtx } from './exec-ctx.js';
 import { Batch } from './builders/batch.js';
 import { Query } from './builders/query.js';
 import { SubscriptionHandle } from './subscription-handle.js';
+import { CursorIterator } from './cursor-iterator.js';
 import * as ddl from './builders/ddl.js';
 
 /**
@@ -88,6 +90,18 @@ export class Db {
   /** Create a bound `Batch`. */
   batch(id?: WireValue): Batch {
     return Batch.create(id).bindCtx(this.ctx);
+  }
+
+  /**
+   * Open a server-side cursor over `query` and return an idiomatic
+   * {@link CursorIterator} — usable via `for await (const record of
+   * db.cursor(query, pageSize)) { ... }`. `pageSize` bounds the first (and,
+   * by default, every subsequent) page. Delegates to
+   * `ShamirClient.streamCursor`, mirroring `query()`/`batch()`'s existing
+   * delegation shape.
+   */
+  cursor(query: Query | ReadQuery, pageSize: number): CursorIterator {
+    return this.client.streamCursor(this.name, query, pageSize);
   }
 
   /**

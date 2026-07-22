@@ -15,7 +15,15 @@ import {
 } from './types/connection.js';
 import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import type { WireValue } from './types/write.js';
+import type { ReadQuery } from './types/query.js';
+import type {
+  CreateCursorRequest,
+  FetchNextRequest,
+  CancelCursorRequest,
+} from './types/cursor.js';
 import { ShamirDbError, ShamirTimeoutError } from './errors.js';
+import { CursorIterator } from './cursor-iterator.js';
+import type { QueryBuildable } from './cursor-iterator.js';
 import { WsFramer, encode, decode } from './framing.js';
 import {
   runHandshake,
@@ -1002,6 +1010,42 @@ export class ShamirClient {
       throw new Error(`no such user: ${username}`);
     }
     return BigInt(entry.principal64);
+  }
+
+  /**
+   * Open a server-side cursor over `query` on database `db` and return an
+   * idiomatic {@link CursorIterator} — usable via
+   * `for await (const record of client.streamCursor(...)) { ... }`.
+   * `pageSize` bounds the first (and, by default, every subsequent) page.
+   *
+   * `sendDbRequest` is `private`, so `CursorIterator` (a separate module)
+   * cannot call it directly — this method injects a bound closure instead
+   * (dependency injection over visibility widening), the same pattern
+   * `execute` follows for `sendDbRequest` itself.
+   */
+  streamCursor(
+    db: string,
+    query: ReadQuery | QueryBuildable,
+    pageSize: number,
+  ): CursorIterator {
+    return new CursorIterator((req) => this.sendDbRequest(req), db, query, pageSize);
+  }
+
+  /**
+   * Send a raw cursor-lifecycle request (`create_cursor` / `fetch_next` /
+   * `cancel_cursor`, as built by `builders/cursor.ts`) and return the
+   * decoded `DbResponse`. Deliberately narrow: unlike a general
+   * `sendDbRequest` widening, this only accepts the cursor op shapes —
+   * exists so tests can drive a follow-up request against a cursor id
+   * obtained from a live {@link CursorIterator} (via its `cursorId`
+   * property) to prove server-side state (e.g. that `cancel_cursor` / a
+   * drained cursor actually removed the registry entry), mirroring FG-5c's
+   * Rust test's use of the crate-internal `Client::roundtrip`.
+   */
+  async probeCursorOp(
+    req: CreateCursorRequest | FetchNextRequest | CancelCursorRequest,
+  ): Promise<Record<string, unknown>> {
+    return this.sendDbRequest(req);
   }
 
   /**
