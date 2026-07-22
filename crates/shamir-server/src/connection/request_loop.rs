@@ -45,6 +45,7 @@ use super::push_sink::MpscPushSink;
 
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
+use crate::byte_budget::{self, ByteBudgetGuard};
 use crate::framer::{FrameReader, FrameWriter};
 use crate::subscriptions::SubscriptionRegistry;
 
@@ -83,11 +84,22 @@ pub(crate) fn prereserve_frame(payload: &[u8]) -> Vec<u8> {
 /// ALL variants carry a **prereserved** buffer: `[4-byte BE u32 length][payload]`.
 /// The writer calls `write_frame_prereserved` directly — no internal memcpy
 /// to prepend the length prefix (finding §3.4).
+///
+/// `Reply`/`ReplyAndClose` additionally carry an `Option<ByteBudgetGuard>`
+/// (RI-15): the global in-flight response-byte budget reservation for this
+/// response's serialized bytes, acquired inside `ShamirDbHandler::execute`.
+/// The guard is dropped by the WRITER task — after the socket write
+/// completes, on EITHER the success or the write-error path — never by the
+/// dispatch task that produced the reply. That is what actually bounds
+/// in-flight memory: the reservation stays live for exactly as long as the
+/// bytes occupy memory on the write path, and releases unconditionally on
+/// every exit from the writer's match arm. `None` when the budget is
+/// unbounded or this reply never went through `execute` (e.g. `Ping`).
 pub(crate) enum WriterMsg {
     /// Write these bytes and keep running.
-    Reply(Vec<u8>),
+    Reply(Vec<u8>, Option<ByteBudgetGuard>),
     /// Write these bytes, then shut down the connection.
-    ReplyAndClose(Vec<u8>),
+    ReplyAndClose(Vec<u8>, Option<ByteBudgetGuard>),
     /// Server-initiated push frame (subscription event).
     Push(Vec<u8>),
 }
@@ -171,11 +183,21 @@ pub async fn request_loop<R, W>(
                     // Channel closed (all senders dropped) — clean exit.
                     break;
                 }
-                Some(WriterMsg::Reply(bytes)) => {
+                Some(WriterMsg::Reply(bytes, budget_guard)) => {
                     // DEFECT C fix: on write error (broken pipe / dead client)
                     // break immediately so the JoinHandle resolves and the
                     // reader's select! branch wakes up (Defect B fix).
-                    if writer.write_frame_prereserved(&bytes).await.is_err() {
+                    //
+                    // RI-15: `budget_guard` (if any) is held across the
+                    // write and only drops when this match arm ends —
+                    // whether the write succeeds or errors. That release
+                    // (in `ByteBudgetGuard::drop`) is what frees the
+                    // reserved bytes back to the server-wide budget; it
+                    // happens HERE, in the writer task, never in the
+                    // dispatch task that produced `bytes`.
+                    let write_failed = writer.write_frame_prereserved(&bytes).await.is_err();
+                    drop(budget_guard);
+                    if write_failed {
                         break;
                     }
                 }
@@ -184,9 +206,12 @@ pub async fn request_loop<R, W>(
                         break;
                     }
                 }
-                Some(WriterMsg::ReplyAndClose(bytes)) => {
+                Some(WriterMsg::ReplyAndClose(bytes, budget_guard)) => {
                     // Write error here is ignored — we're closing anyway.
+                    // RI-15: release the budget guard after the write
+                    // attempt regardless of outcome, same as the Reply arm.
                     let _ = writer.write_frame_prereserved(&bytes).await;
+                    drop(budget_guard);
                     break;
                 }
             }
@@ -304,25 +329,36 @@ pub async fn request_loop<R, W>(
                     let lookup_tib = |uid: &[u8; 16]| -> u64 {
                         ctx_clone.user_dir.tickets_invalid_before_ns_by_user_id(uid)
                     };
-                    match dispatch_request_view(
+                    // RI-15: `run_with_guard_slot` scopes a fresh task-local
+                    // slot around the dispatch call. Deep inside it,
+                    // `ShamirDbHandler::execute` (via `stash_guard`) may
+                    // stash a `ByteBudgetGuard` for the response about to be
+                    // returned — retrieved immediately below via
+                    // `take_stashed_guard` and attached to the `WriterMsg`
+                    // so the writer task (not this dispatch task) releases
+                    // it after the socket write completes.
+                    let dispatch_result = byte_budget::run_with_guard_slot(dispatch_request_view(
                         &v,
                         &ctx_clone.session_store,
                         lookup_tib,
                         ctx_clone.handler.as_ref(),
                         &conn_clone,
-                    )
-                    .await
-                    {
+                    ))
+                    .await;
+                    let budget_guard = byte_budget::take_stashed_guard();
+                    match dispatch_result {
                         Ok(DispatchOutcome::Response(resp)) => {
                             let rid = v.request_id;
                             // §3.4: serialize directly into a length-prefixed
                             // buffer to avoid the memcpy in write_frame_into.
                             match encode_prereserved(&resp) {
-                                Ok(b) => Some(WriterMsg::Reply(b)),
+                                Ok(b) => Some(WriterMsg::Reply(b, budget_guard)),
                                 Err(_) => {
                                     // Serialisation failure — best-effort error.
                                     let err = ErrorEnvelope::new(rid, "internal_error");
-                                    encode_prereserved(&err).ok().map(WriterMsg::Reply)
+                                    encode_prereserved(&err)
+                                        .ok()
+                                        .map(|b| WriterMsg::Reply(b, budget_guard))
                                 }
                             }
                         }
@@ -334,9 +370,9 @@ pub async fn request_loop<R, W>(
                                     if close {
                                         // Signal the reader loop to stop.
                                         close_flag.store(true, Ordering::Relaxed);
-                                        Some(WriterMsg::ReplyAndClose(b))
+                                        Some(WriterMsg::ReplyAndClose(b, budget_guard))
                                     } else {
-                                        Some(WriterMsg::Reply(b))
+                                        Some(WriterMsg::Reply(b, budget_guard))
                                     }
                                 }
                                 Err(_) => None,
@@ -345,14 +381,18 @@ pub async fn request_loop<R, W>(
                         Err(_) => {
                             // Internal dispatch error.
                             let err = ErrorEnvelope::new(v.request_id, "internal_error");
-                            encode_prereserved(&err).ok().map(WriterMsg::Reply)
+                            encode_prereserved(&err)
+                                .ok()
+                                .map(|b| WriterMsg::Reply(b, budget_guard))
                         }
                     }
                 }
                 Err(_) => {
                     // Malformed envelope.
                     let err = ErrorEnvelope::new(None, "invalid_envelope");
-                    encode_prereserved(&err).ok().map(WriterMsg::Reply)
+                    encode_prereserved(&err)
+                        .ok()
+                        .map(|b| WriterMsg::Reply(b, None))
                 }
             };
 

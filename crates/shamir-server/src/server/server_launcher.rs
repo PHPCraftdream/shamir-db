@@ -45,6 +45,7 @@ use crate::audit_appender::FjallAuditAppender;
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
+use crate::byte_budget::ByteBudget;
 use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
 use crate::connection::{handle_connection, ConnectionContext};
@@ -393,6 +394,14 @@ impl ServerLauncher {
             .with_tx_limits(TxLimitsCap {
                 max_tx_bytes: config.security.tx.max_tx_bytes,
             })
+            // RI-15 — global in-flight response-byte budget. `None` (the
+            // default) preserves pre-RI-15 behavior: unbounded, only the
+            // per-batch `max_result_size_bytes` cap above applies.
+            // `Config::validate` already rejected a configured value below
+            // `max_result_size_bytes` before boot reached this point.
+            .with_byte_budget(ByteBudget::new(
+                config.security.query_limits.max_inflight_response_bytes,
+            ))
             .with_session_store(session_store.clone()),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();

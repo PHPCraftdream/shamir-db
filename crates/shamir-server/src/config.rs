@@ -295,6 +295,15 @@ pub struct QueryLimitsConfig {
     /// Default 100.
     #[serde(default = "default_max_queries_per_batch")]
     pub max_queries_per_batch: usize,
+    /// RI-15 — global cap (bytes) on the SUM of in-flight response memory
+    /// across every concurrently-executing batch/connection. `None`
+    /// (default) = unbounded, preserving pre-RI-15 behavior: only the
+    /// per-batch `max_result_size_bytes` cap applies. When set, MUST be
+    /// `>= max_result_size_bytes` — otherwise no single max-size batch
+    /// could ever be admitted; `Config::validate` rejects that
+    /// configuration at startup.
+    #[serde(default)]
+    pub max_inflight_response_bytes: Option<usize>,
 }
 
 impl Default for QueryLimitsConfig {
@@ -303,6 +312,7 @@ impl Default for QueryLimitsConfig {
             max_result_size_bytes: default_max_result_size_bytes(),
             max_execution_time_secs: default_max_execution_time_secs(),
             max_queries_per_batch: default_max_queries_per_batch(),
+            max_inflight_response_bytes: None,
         }
     }
 }
@@ -560,6 +570,21 @@ impl Config {
             return Err(ConfigError::Validation(
                 "logging.flush_interval_ms must be >= 1".into(),
             ));
+        }
+
+        // RI-15: the global in-flight response-byte budget, if set, must be
+        // able to admit at least one max-size batch response — otherwise
+        // every batch that legitimately fills `max_result_size_bytes` would
+        // be permanently rejected by the budget gate.
+        if let Some(max_inflight) = self.security.query_limits.max_inflight_response_bytes {
+            let max_result = self.security.query_limits.max_result_size_bytes;
+            if max_inflight < max_result {
+                return Err(ConfigError::Validation(format!(
+                    "security.query_limits.max_inflight_response_bytes ({max_inflight}) must be \
+                     >= max_result_size_bytes ({max_result}) — otherwise no single max-size \
+                     batch could ever be admitted"
+                )));
+            }
         }
 
         if self.listeners.is_empty() {

@@ -157,9 +157,10 @@ security: {
         max_active_connections: 10000
     }
     query_limits: {
-        max_result_size_bytes:   1073741824    # 1 GiB
-        max_execution_time_secs: 60
-        max_queries_per_batch:   100
+        max_result_size_bytes:        1073741824    # 1 GiB
+        max_execution_time_secs:      60
+        max_queries_per_batch:        100
+        max_inflight_response_bytes:  4294967296    # 4 GiB (RI-15, optional)
     }
 }
 
@@ -192,6 +193,13 @@ observability: {
 `Config::validate()` проверяет: `data_dir` существует, `listeners` не
 пустой, `tls` пути — файлы, `kdf_defaults` в диапазонах, порты ≥ 0.
 Ошибка → процесс не стартует, понятное сообщение.
+
+`security.query_limits.max_inflight_response_bytes` (RI-15) — если задан,
+должен быть `>= max_result_size_bytes`: иначе ни один максимально большой
+батч-ответ не смог бы пройти глобальный бюджет памяти. По умолчанию
+`None` (не задан) — глобальный бюджет не ограничивает суммарный размер
+одновременно висящих в памяти ответов; действует только per-batch cap
+`max_result_size_bytes`.
 
 ## 3. Observability: `/healthz`, `/readyz`, `/metrics`, `/info`
 

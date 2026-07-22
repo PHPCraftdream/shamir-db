@@ -18,6 +18,7 @@ pub mod access_tree;
 pub mod audit_appender;
 pub mod backup;
 pub mod bootstrap;
+pub mod byte_budget;
 pub mod config;
 pub mod conn_limiter;
 pub mod connection;

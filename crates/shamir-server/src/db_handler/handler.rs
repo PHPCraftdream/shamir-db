@@ -75,6 +75,8 @@ use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
 
+use crate::byte_budget::{stash_guard, ByteBudget};
+
 // Wire DTOs are defined once in `shamir-query-types::wire` so that the
 // SDK (`shamir-client`) and the server share the same definition. Re-
 // exported here so existing `shamir_server::db_handler::DbRequest` import
@@ -152,6 +154,11 @@ pub struct ShamirDbHandler {
     pub(super) query_limits: QueryLimitsCap,
     /// Server-side hard cap on per-interactive-tx staged bytes.
     pub(super) tx_limits: TxLimitsCap,
+    /// RI-15 — global cap on the SUM of in-flight response bytes across
+    /// every concurrently-executing batch/connection. Default
+    /// [`ByteBudget::unbounded`] (matches pre-RI-15 behavior: only the
+    /// per-batch `query_limits.max_result_size_bytes` cap applies).
+    pub(super) byte_budget: ByteBudget,
     /// Read/write mode of this node. `ReadOnly` rejects client writes
     /// (they must go to the leader). Default `ReadWrite`; until R1 this
     /// is always `ReadWrite` so behaviour is unchanged.
@@ -192,6 +199,7 @@ impl ShamirDbHandler {
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
+            byte_budget: ByteBudget::unbounded(),
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
@@ -207,6 +215,7 @@ impl ShamirDbHandler {
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
             tx_limits: TxLimitsCap::UNLIMITED,
+            byte_budget: ByteBudget::unbounded(),
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
@@ -230,6 +239,12 @@ impl ShamirDbHandler {
     /// Set the per-interactive-tx staging byte cap.
     pub fn with_tx_limits(mut self, tx_limits: TxLimitsCap) -> Self {
         self.tx_limits = tx_limits;
+        self
+    }
+
+    /// Set the server-wide in-flight response-byte budget (RI-15).
+    pub fn with_byte_budget(mut self, byte_budget: ByteBudget) -> Self {
+        self.byte_budget = byte_budget;
         self
     }
 
@@ -486,6 +501,35 @@ impl ShamirDbHandler {
                     &mut response,
                     actor.clone(),
                 );
+
+                // RI-15 — global in-flight response-byte budget. Measures
+                // the ACTUAL serialized size of this response (not the
+                // `max_result_size_bytes` upper bound — reserving the cap
+                // upfront would under-utilize the budget by the
+                // cap-to-actual ratio) and acquires that many bytes from
+                // the server-wide budget. When the budget is unbounded
+                // (`ByteBudget::unbounded`, the default) `acquire` returns
+                // instantly without serializing anything.
+                //
+                // The guard is stashed in a task-local
+                // (`byte_budget::stash_guard`) rather than returned from
+                // this function: `execute`'s return type is `DbResponse`
+                // (asserted on directly by tests) and the caller,
+                // `RequestHandler::handle`, has a fixed
+                // `Result<Vec<u8>, String>` signature owned by
+                // `shamir-connect`. `connection::request_loop` retrieves the
+                // guard with `byte_budget::take_stashed_guard` right after
+                // the dispatch future resolves and rides it inside
+                // `WriterMsg::{Reply,ReplyAndClose}` so the release happens
+                // in the writer task, after the socket write completes —
+                // never in this dispatch task.
+                if self.byte_budget.cap().is_some() {
+                    if let Ok(bytes) = rmp_serde::to_vec_named(&response) {
+                        let guard = self.byte_budget.acquire(bytes.len()).await;
+                        stash_guard(guard);
+                    }
+                }
+
                 DbResponse::Batch { response }
             }
             Err(e) => DbResponse::Error {

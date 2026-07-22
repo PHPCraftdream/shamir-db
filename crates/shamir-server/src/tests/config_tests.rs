@@ -126,3 +126,53 @@ fn medium_profile_parses_and_validates() {
         "medium profile max_result_size_bytes"
     );
 }
+
+// =============== RI-15: max_inflight_response_bytes validation ===============
+
+/// Default `max_inflight_response_bytes` is `None` (unbounded) — RI-15
+/// must not change behavior for operators who don't opt in.
+#[test]
+fn default_max_inflight_response_bytes_is_none() {
+    assert_eq!(
+        QueryLimitsConfig::default().max_inflight_response_bytes,
+        None,
+        "default must be unbounded so RI-15 preserves pre-existing behavior"
+    );
+}
+
+/// `max_inflight_response_bytes` set below `max_result_size_bytes` must be
+/// rejected at startup — otherwise no single max-size batch response could
+/// ever be admitted by the global budget gate.
+#[test]
+fn inflight_budget_below_result_cap_is_rejected() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+    let result_cap = cfg.security.query_limits.max_result_size_bytes;
+    cfg.security.query_limits.max_inflight_response_bytes = Some(result_cap - 1);
+
+    let err = cfg
+        .validate()
+        .expect_err("max_inflight_response_bytes < max_result_size_bytes must fail validation");
+    let message = err.to_string();
+    assert!(
+        message.contains("max_inflight_response_bytes"),
+        "error message must name the offending field: {message}"
+    );
+}
+
+/// `max_inflight_response_bytes` set equal to or above
+/// `max_result_size_bytes` must pass validation.
+#[test]
+fn inflight_budget_at_or_above_result_cap_is_accepted() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+    let result_cap = cfg.security.query_limits.max_result_size_bytes;
+
+    cfg.security.query_limits.max_inflight_response_bytes = Some(result_cap);
+    cfg.validate()
+        .expect("max_inflight_response_bytes == max_result_size_bytes must pass validation");
+
+    cfg.security.query_limits.max_inflight_response_bytes = Some(result_cap * 4);
+    cfg.validate()
+        .expect("max_inflight_response_bytes > max_result_size_bytes must pass validation");
+}
