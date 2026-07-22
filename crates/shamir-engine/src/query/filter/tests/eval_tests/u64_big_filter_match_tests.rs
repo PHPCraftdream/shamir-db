@@ -1,54 +1,36 @@
-//! FG-1 mandatory empirical verification: does an `Eq` filter built via
-//! `lit_u64(large_value)` actually MATCH a stored field whose value is a
-//! raw `u64 > i64::MAX`?
+//! FG-6: an `Eq` filter built via `lit_u64(large_value)` now MATCHES a stored
+//! field whose value is a raw `u64 > i64::MAX` (promoted to `Big`/decimal
+//! `Str`), on both the lens (hot) and tree (cold/MVCC-Owned) read paths.
 //!
-//! ## Finding (PRECISE — per brief's "STOP and report" rule)
+//! ## Background (FG-1 finding, now fixed by FG-6)
 //!
-//! **No — the filter does NOT match on either read path.** The brief
-//! hypothesised that the existing `Big`↔`Str` cross-type EQUALITY bridge in
-//! `hashable_query_value.rs` (`canonical_eq`) would feed
-//! `FilterValue::String` (from `lit_u64`) into a comparison against a stored
-//! `Big`/`Str` value. That hypothesis is structurally wrong:
+//! After FG-1, a `u64 > i64::MAX` decodes losslessly to `Value::Big`/
+//! `QueryValue::Big` instead of wrapping/clamping. `FilterNode::Compare`
+//! extracts the record field via `RecordRef::scalar_at`, which returns `None`
+//! for a promoted `Big` value on BOTH read paths:
+//! - **Lens / hot path** (`RecordView`): `uint_to_record_value` maps the raw
+//!   bytes to `RecordValue::Str(Cow::Owned(decimal_string))` — `scalar_at`
+//!   cannot borrow an owned `String` into `ScalarRef::Str(&'a str)`.
+//! - **Tree / cold (MVCC-Owned) path** (`InnerValue`): the field decodes to
+//!   `InnerValue::Big(BigInt)`, and `ScalarRef` has no `Big` variant by
+//!   design (see `scalar_ref.rs`).
 //!
-//! `FilterNode::Compare` (the `Eq`/`Gt`/... arm) extracts the record field via
-//! `RecordRef::scalar_at` and compares it against the resolved filter operand
-//! via `scalar_ref_cmp_qv`. **Neither path can surface a `u64 > i64::MAX`
-//! field as a `ScalarRef`:**
+//! `FilterNode::Compare` (`filter_node.rs`) now distinguishes "field absent"
+//! from "field present but `scalar_at`-non-comparable": when `scalar_at`
+//! returns `None` AND `present_kind_at` reports the field IS present, it
+//! falls back to `record.materialize_at(path)` (one owned `InnerValue` leaf)
+//! plus `inner_value_to_query_value` (a single, cheap, interner-free
+//! conversion for scalar/Dec/Big leaves) and compares via `compare_values`
+//! — the SAME helper `Filter::ValueCompare` and the `Min`/`Max` aggregates
+//! already use, which already has correct `Int`↔`Big` cross-type arms (f64
+//! fallback). This mirrors the identical `FieldRef` resolution boundary
+//! already used by `resolve_filter_query`, and the Dec/Big fallback already
+//! used by `AggAccum`'s Sum/Avg/Min/Max in `aggregate.rs` — not a new
+//! pattern.
 //!
-//! * **Lens / hot read path** (`RecordView`): `uint_to_record_value` maps the
-//!   raw bytes to `RecordValue::Str(Cow::Owned(decimal_string))` (the decimal
-//!   text is allocated because it isn't in the buffer). `scalar_at` then
-//!   returns `None` — `ScalarRef::Str(&'a str)` requires a borrow tied to the
-//!   `RecordView`'s lifetime, but an owned `String` can't be borrowed that way
-//!   (see `record_ref.rs` lines 267-278, the explicit `Cow::Owned(_) => None`
-//!   arm).
-//! * **Tree / cold (MVCC-Owned) path** (`InnerValue`): fix site 1 now decodes
-//!   the raw `uint64` losslessly to `InnerValue::Big(BigInt)`. But
-//!   `inner_to_scalar` maps `Big` to `None` (`ScalarRef` has no `Big` variant
-//!   by design — see `scalar_ref.rs` lines 28-30).
-//!
-//! In both cases `scalar_at` returns `None`, so `FilterNode::Compare` falls
-//! to `(None, _) | (_, None) => matches!(op, CompareOp::Ne)` → `Eq` is
-//! `false`. The `canonical_eq` bridge is only consulted by the
-//! DEDUP/group-by/distinct layer (`HashableQueryValue`), NOT by the
-//! filter-eval comparison.
-//!
-//! ## What IS correct (this task's fixes)
-//!
-//! The fix sites 1-6 are about **lossless REPRESENTATION** (no more silent
-//! wrapping/clamping). They are correct: the stored value is now the exact
-//! `Big`/`Str(decimal)`, not `-1` or `i64::MAX`. The `lit_u64` →
-//! `FilterValue::String` representation is the correct lossless choice.
-//!
-//! The filter-MATCH gap is a **pre-existing structural limitation** of the
-//! `scalar_at` extraction layer: before this task the value was SILENTLY
-//! CORRUPTED (wrapped to -1 / clamped to i64::MAX), so a filter "matched"
-//! against the corrupted value. Now the value is CORRECT in storage, but
-//! `scalar_at` cannot surface it for comparison. This is a strictly better
-//! state (correct value + a known, documented limitation), but the gap must
-//! NOT be papered over — it is reported here precisely so it can be
-//! re-scoped as its own follow-up (e.g. a `ScalarRef::Big` variant, or a
-//! `FilterNode::Compare` fallback to `materialize_at` for non-scalar fields).
+//! Every ordinary Bool/Int/F64/Str/Bin field still resolves via the
+//! zero-copy `scalar_at` fast path above, unchanged; the `materialize_at`
+//! fallback only triggers for the rare Dec/Big/promoted-u64 leaf.
 
 use crate::query::filter::eval::{compile_filter, resolve_filter_query};
 use crate::query::filter::eval_context::FilterContext;
@@ -140,16 +122,15 @@ fn fg1_lit_u64_produces_lossless_decimal_string() {
     }
 }
 
-// ── Empirical verification: filter-MATCH outcome (the gap) ──────────────────
+// ── FG-6: filter-MATCH now works on both read paths ──────────────────────────
 
-/// **MANDATORY empirical finding (lens path).** An `Eq` filter via
-/// `lit_u64(u64::MAX)` does NOT match a stored `uint64` record through the
-/// real filter-eval path. The reason: `RecordView::scalar_at` returns `None`
-/// for the `Str(Cow::Owned(_))` field (the decimal text can't be borrowed
-/// into `ScalarRef::Str(&'a str)`). So `FilterNode::Compare` sees an absent
-/// field → `Eq` is `false`.
+/// **FG-6 fix (lens path).** An `Eq` filter via `lit_u64(u64::MAX)` now
+/// MATCHES a stored `uint64` record through the real filter-eval path, even
+/// though `RecordView::scalar_at` still returns `None` for the
+/// `Str(Cow::Owned(_))` field — `FilterNode::Compare` detects the field IS
+/// present (`present_kind_at`) and falls back to `materialize_at`.
 #[test]
-fn fg1_lit_u64_eq_lens_path_scalar_at_is_none() {
+fn fg6_lit_u64_eq_lens_path_matches_via_materialize_fallback() {
     let interner = Interner::new();
     let refs = empty_refs();
     let ctx = FilterContext::new(&interner, &refs);
@@ -159,7 +140,8 @@ fn fg1_lit_u64_eq_lens_path_scalar_at_is_none() {
     let view = RecordView::new(&blob).expect("RecordView decodes uint64 record");
 
     // The field IS present and lossless in the lens — but scalar_at cannot
-    // surface it (Cow::Owned decimal → None).
+    // surface it (Cow::Owned decimal → None); this is the structural gap
+    // that `FilterNode::Compare`'s materialize_at fallback now covers.
     let key = interner.touch_ind("n").unwrap().into_key();
     assert!(
         view.get(key.clone()).is_some(),
@@ -168,7 +150,8 @@ fn fg1_lit_u64_eq_lens_path_scalar_at_is_none() {
     assert_eq!(
         view.scalar_at(&[key]),
         None,
-        "scalar_at returns None for Cow::Owned Str (the u64>max edge)"
+        "scalar_at still returns None for Cow::Owned Str (the u64>max edge) \
+         — the fallback in FilterNode::Compare handles this, not scalar_at itself"
     );
 
     // The filter operand resolves correctly to a QueryValue::Str.
@@ -182,25 +165,28 @@ fn fg1_lit_u64_eq_lens_path_scalar_at_is_none() {
         "filter operand resolves to Str: {resolved:?}"
     );
 
-    // But the Eq filter does NOT match (scalar_at is None on the record side).
+    // The Eq filter now DOES match — FilterNode::Compare falls back to
+    // materialize_at + compare_values when scalar_at is None but the field
+    // is present.
     let filter = Filter::Eq {
         field: vec!["n".to_string()],
         value: lit_u64(large),
     };
     let node = compile_filter(&filter, &interner);
     assert!(
-        !node.matches(&view, &ctx),
-        "Eq does NOT match: scalar_at is None for Cow::Owned Str \
-         (documented gap — see module docs)"
+        node.matches(&view, &ctx),
+        "Eq DOES match: FilterNode::Compare falls back to materialize_at \
+         for the Cow::Owned Str (promoted u64>max) edge"
     );
 }
 
-/// **MANDATORY empirical finding (tree path).** An `Eq` filter via
-/// `lit_u64(u64::MAX)` does NOT match a stored `Big` field through the
-/// real filter-eval path. The reason: `InnerValue::scalar_at` returns `None`
-/// for a `Big` leaf (`ScalarRef` has no `Big` variant by design).
+/// **FG-6 fix (tree path).** An `Eq` filter via `lit_u64(u64::MAX)` now
+/// MATCHES a stored `Big` field through the real filter-eval path, even
+/// though `InnerValue::scalar_at` still returns `None` for a `Big` leaf
+/// (`ScalarRef` has no `Big` variant) — `FilterNode::Compare` falls back to
+/// `materialize_at` + `compare_values`.
 #[test]
-fn fg1_lit_u64_eq_tree_path_scalar_at_is_none() {
+fn fg6_lit_u64_eq_tree_path_matches_via_materialize_fallback() {
     let interner = Interner::new();
     let refs = empty_refs();
     let ctx = FilterContext::new(&interner, &refs);
@@ -212,7 +198,8 @@ fn fg1_lit_u64_eq_tree_path_scalar_at_is_none() {
     assert_eq!(
         record.scalar_at(&[key]),
         None,
-        "scalar_at returns None for InnerValue::Big (no Big variant in ScalarRef)"
+        "scalar_at still returns None for InnerValue::Big (no Big variant in \
+         ScalarRef) — the fallback in FilterNode::Compare handles this"
     );
 
     let filter = Filter::Eq {
@@ -221,9 +208,32 @@ fn fg1_lit_u64_eq_tree_path_scalar_at_is_none() {
     };
     let node = compile_filter(&filter, &interner);
     assert!(
+        node.matches(&record, &ctx),
+        "Eq DOES match: FilterNode::Compare falls back to materialize_at \
+         for InnerValue::Big"
+    );
+}
+
+/// FG-6 regression: a non-matching `Big` value must still correctly NOT
+/// match (proves the fallback compares VALUES, not just presence).
+#[test]
+fn fg6_lit_u64_eq_tree_path_big_mismatch_does_not_match() {
+    let interner = Interner::new();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // Stored value is u64::MAX, filter looks for a different large value.
+    let record = tree_big_record(&interner, "n", u64::MAX);
+    let other_large: u64 = i64::MAX as u64 + 1; // also promotes to Big, but != u64::MAX
+
+    let filter = Filter::Eq {
+        field: vec!["n".to_string()],
+        value: lit_u64(other_large),
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
         !node.matches(&record, &ctx),
-        "Eq does NOT match: scalar_at is None for Big \
-         (documented gap — see module docs)"
+        "Eq must NOT match a different Big value"
     );
 }
 

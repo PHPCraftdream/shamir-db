@@ -42,10 +42,12 @@ TS type), values above `i64::MAX` are represented as their exact decimal
 
 This matches how `Value::Big` itself serialises on the wire. The engine's
 cross-type comparison layer bridges `Big`↔`Str` for equality in the
-dedup/group-by path (`canonical_eq`). Values stored via the normal write
-path (as decimal strings) round-trip and match filters correctly.
+dedup/group-by path (`canonical_eq`), in `FilterNode::Compare` /
+`Filter::ValueCompare` (`compare_values`, see below), and in ORDER BY
+(`QvSortKey`). Values stored via the normal write path (as decimal strings)
+round-trip and match filters correctly.
 
-## Known limitation: raw `uint64` storage + `Eq` filters
+## `Eq` filter and ORDER BY over raw `uint64` storage (FG-6)
 
 When raw `uint64` bytes (`0xcf` marker) are stored directly (e.g. by an
 external non-Rust/non-TS encoder), the read-path `scalar_at` extraction
@@ -57,12 +59,23 @@ returns `None` for the field:
 - **Tree path** (`InnerValue::Big`): `ScalarRef` has no `Big` variant by
   design. `scalar_at` returns `None`.
 
-Consequently, an `Eq` filter via `lit_u64` does not currently match a field
-stored as raw `uint64` bytes. This is a pre-existing structural limitation
-of the `scalar_at` extraction layer, not a regression — before FG-1 the
-value was silently corrupted (wrapped/clamped), so a filter "matched"
-against the corrupted value. This gap is tracked as a follow-up.
+`FilterNode::Compare` handles this by falling back to
+`RecordRef::materialize_at` (one owned leaf, off the hot path — every
+ordinary Bool/Int/F64/Str/Bin field still resolves via the zero-copy
+`scalar_at` fast path) whenever `scalar_at` returns `None` but the field is
+present (`present_kind_at` reports it exists). The materialised leaf is
+compared via `compare_values`, which has a `Big`↔`Str` arm: if the string
+operand parses as an exact integer, the comparison is numeric and exact
+(`BigInt: Ord`), matching a `lit_u64`-built `Eq`/`Gt`/`Gte`/`Lt`/`Lte` filter
+against a raw-`uint64`-stored field correctly on both the lens and tree
+paths.
+
+ORDER BY (`apply_order_by_qv`) similarly gained a dedicated `Big` sort-key
+variant with `Int`/`F64`/`Dec` cross-type arms (f64-fallback, mirroring
+`compare_values`), so a column mixing ordinary `Int` values and promoted
+`Big` values now sorts numerically instead of falling back to
+insertion-order preservation.
 
 Values stored via the normal write path (as `msgpack str`, which is how
-`Value::Big` serialises) are unaffected — they round-trip as borrowed
-strings and match correctly.
+`Value::Big` serialises) round-trip as borrowed strings and match/sort
+correctly regardless of this fallback.

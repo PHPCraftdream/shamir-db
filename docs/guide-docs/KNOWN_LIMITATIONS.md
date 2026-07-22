@@ -189,17 +189,14 @@ artifact).
 
 - **`u64` → `Big` promotion contract.** A `u64` value greater than
   `i64::MAX` promotes losslessly to `Value::Big`/`QueryValue::Big`
-  instead of silently wrapping or clamping. See
+  instead of silently wrapping or clamping. `Eq`/`Gt`/`Gte`/`Lt`/`Lte`
+  filters and `ORDER BY` correctly match/cross-compare a promoted `Big`
+  value, including one stored as raw `uint64` wire bytes (fixed by FG-6 —
+  `FilterNode::Compare` falls back to `materialize_at` + `compare_values`'s
+  `Big`↔`Str` arm when `scalar_at` can't surface the value directly, and
+  `ORDER BY`'s `QvSortKey` gained a numeric `Big` variant). See
   [`client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md`](client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md)
   for the full contract.
-  - **Known residual gap: `Eq` filters and `ORDER BY` do not currently
-    match/cross-compare correctly against a promoted `Big` value stored
-    as raw `uint64` wire bytes.** This is a structural gap in the
-    filter-eval extraction layer (`scalar_at`/`ScalarRef` have no path to
-    return a comparable value for that representation) and is tracked as
-    a follow-up, not yet fixed as of this document. See the "Known
-    limitation: raw `uint64` storage + `Eq` filters" section of
-    `NUMERIC_WIRE_SEMANTICS.md` (already documents this gap in detail).
 
 ## 8. `ttl_ms`
 

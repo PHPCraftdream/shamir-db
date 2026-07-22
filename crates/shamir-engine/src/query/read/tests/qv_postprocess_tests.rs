@@ -1092,17 +1092,11 @@ fn order_by_cross_type_dec_int_f64() {
     assert_eq!(qvs[3]["v"], QueryValue::F64(10.5));
 }
 
-/// FG-1 regression: `compare_values` (the engine-level comparison helper used
-/// by `FilterNode::ValueCompare`, aggregate Min/Max, etc.) has explicit
+/// FG-1/FG-6: `compare_values` (the engine-level comparison helper used by
+/// `FilterNode::ValueCompare`, aggregate Min/Max, etc.) has explicit
 /// `Big`↔`Int` arms that use the f64 fallback. This test confirms a
 /// collection containing BOTH ordinary `Int` values and promoted `Big`
 /// values compares correctly relative to each other via `compare_values`.
-///
-/// NOTE: the ORDER BY path (`apply_order_by_qv`) uses a separate
-/// `QvSortKey` that maps `Big(b)` → `Str(b.to_string())` (lexicographic).
-/// `QvSortKey` has no `I64`↔`Str` cross-type arm, so mixed Int+Big ORDER
-/// BY falls to `_ => Equal` (preserving insertion order). This is a known
-/// limitation of the sort-key representation, NOT of `compare_values`.
 #[test]
 fn order_by_mixed_int_and_big_compare_values_works() {
     use crate::query::filter::eval::compare_values;
@@ -1142,6 +1136,62 @@ fn order_by_mixed_int_and_big_compare_values_works() {
         compare_values(&big_max, &big_overflow),
         Some(Ordering::Greater)
     );
+}
+
+/// FG-6 fix: the ORDER BY path (`apply_order_by_qv`) now has an
+/// `I64`/`F64`/`Dec`↔`Big` cross-type arm in `QvSortKey` (mirroring
+/// `compare_values`'s existing arms), so mixed Int+Big rows sort NUMERICALLY
+/// instead of falling to the `_ => Equal` arbitrary-order arm that preserved
+/// insertion order. Exercises the real `apply_order_by_qv` entry point (not
+/// just the comparator function directly).
+#[test]
+fn order_by_mixed_int_and_big_sorts_numerically() {
+    use num_bigint::BigInt;
+
+    // Insertion order is deliberately NOT sorted, so a no-op "_ => Equal"
+    // comparator would leave it unchanged.
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Big(BigInt::from(u64::MAX)))]), // ~1.8e19
+        qv_map(&[("v", QueryValue::Int(100))]),
+        qv_map(&[(
+            "v",
+            QueryValue::Big(BigInt::from(i64::MAX as u64 + 1)), // ~9.2e18
+        )]),
+        qv_map(&[("v", QueryValue::Int(50))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    // Numeric ascending: Int(50) < Int(100) < Big(i64::MAX+1) < Big(u64::MAX).
+    assert_eq!(qvs[0]["v"], QueryValue::Int(50));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(100));
+    assert_eq!(
+        qvs[2]["v"],
+        QueryValue::Big(BigInt::from(i64::MAX as u64 + 1))
+    );
+    assert_eq!(qvs[3]["v"], QueryValue::Big(BigInt::from(u64::MAX)));
+}
+
+/// FG-6: DESC direction + Big/Big exact comparison (not just cross-type
+/// against Int) — two Big values that are close in magnitude but not equal
+/// must still sort correctly (BigInt: Ord is exact, unlike the f64 fallback
+/// used for cross-type comparisons).
+#[test]
+fn order_by_big_vs_big_desc_exact() {
+    use num_bigint::BigInt;
+
+    let huge = BigInt::from(u64::MAX) * BigInt::from(1_000_000);
+    let bigger = &huge + BigInt::from(1);
+
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Big(bigger.clone()))]),
+        qv_map(&[("v", QueryValue::Big(huge.clone()))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::desc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Big(bigger));
+    assert_eq!(qvs[1]["v"], QueryValue::Big(huge));
 }
 
 // ============================================================================

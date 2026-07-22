@@ -132,6 +132,16 @@ where
         (Value::Big(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
         (Value::Dec(a), Value::Big(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
         (Value::Big(a), Value::Dec(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
+        // Big<->Str: FG-6. `lit_u64`/wire encoding represent a promoted
+        // `u64 > i64::MAX` as its exact decimal `String` (the same canonical
+        // form `Value::Big` serialises to — see `hashable_query_value.rs`'s
+        // `canonical_eq`, which already treats `Big(a) == Str(b) iff
+        // a.to_string() == b` as the established cross-type equality). This
+        // arm extends that convention to `Ordering`: if `b` parses as an
+        // exact integer, compare numerically via `BigInt: Ord` (exact, no
+        // precision loss); a non-numeric string is not comparable (`None`).
+        (Value::Big(a), Value::Str(b)) => b.parse::<num_bigint::BigInt>().ok().map(|n| a.cmp(&n)),
+        (Value::Str(a), Value::Big(b)) => a.parse::<num_bigint::BigInt>().ok().map(|n| n.cmp(b)),
         _ => None,
     }
 }

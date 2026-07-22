@@ -379,6 +379,48 @@ impl FilterNode {
                     owned_rhs.as_ref()
                 };
 
+                // FG-6: `scalar_at` returns `None` in two structurally
+                // different situations that must NOT be conflated:
+                //  1. the field is genuinely ABSENT (or descends through a
+                //     non-map) — `present_kind_at` also returns `None`.
+                //  2. the field IS present but is a non-comparable-as-scalar
+                //     leaf — `Dec`/`Big` in the tree, or a promoted
+                //     `u64 > i64::MAX` in the lens (`RecordValue::Str(Cow::Owned)`,
+                //     which `present_kind_at` reports as `Scalar` since the
+                //     lens cannot distinguish it from an ordinary string, but
+                //     `scalar_at` still can't borrow it). Case 2 falls back to
+                //     `materialize_at` (one owned leaf, off the common hot
+                //     path — every ordinary Bool/Int/F64/Str/Bin field still
+                //     resolves via the zero-copy `scalar_at` above) + a single
+                //     `inner_value_to_query_value` conversion, mirroring the
+                //     identical `FieldRef` resolution boundary in
+                //     `resolve_filter_query` and the `AggAccum` Min/Max/Sum/Avg
+                //     Dec/Big fallback in `aggregate.rs`.
+                if field_val.is_none() && record.present_kind_at(field_path).is_some() {
+                    let owned_field = record
+                        .materialize_at(field_path)
+                        .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok());
+                    return match (owned_field.as_ref(), filter_val) {
+                        (Some(a), Some(b)) => match op {
+                            CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
+                            CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                            CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
+                            CompareOp::Gte => matches!(
+                                compare_values(a, b),
+                                Some(Ordering::Greater | Ordering::Equal)
+                            ),
+                            CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
+                            CompareOp::Lte => {
+                                matches!(
+                                    compare_values(a, b),
+                                    Some(Ordering::Less | Ordering::Equal)
+                                )
+                            }
+                        },
+                        (None, _) | (_, None) => matches!(op, CompareOp::Ne),
+                    };
+                }
+
                 match (field_val, filter_val) {
                     (Some(a), Some(b)) => match op {
                         CompareOp::Eq => scalar_ref_cmp_qv(a, b) == Some(Ordering::Equal),
