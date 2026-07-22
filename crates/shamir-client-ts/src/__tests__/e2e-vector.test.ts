@@ -13,7 +13,8 @@
  *      index without quantization.
  *   3. Per-query `efSearch` / `oversample` via builder — recall-superset
  *      assertion (larger ef does not drop ids from a smaller-ef result),
- *      clamp of an enormous ef value.
+ *      client-side rejection of an enormous ef value (never reaches the
+ *      server).
  *   4. Filtered ANN via builder (`and(vectorSimilarity, eq)`): only
  *      filter-passing rows returned, `stats.index_used ==
  *      'filtered_vector_scan'`; an empty residual predicate terminates
@@ -396,32 +397,16 @@ describe.skipIf(!SERVER_AVAILABLE)(
       }
     });
 
-    it('efSearch: huge value is clamped, not rejected', async () => {
-      const dim = 4;
-      const db = await setupDb(client!, 'vec_ef_clamp', ['docs']);
-
-      br(await Batch.create('mk-clamp')
-        .add('i', ddl.createIndex('v', 'docs', [['embedding']], {
-          index_type: 'vector',
-          vector_dim: dim,
-          vector_metric: 'cosine',
-        }))
-        .execute(client!, db));
-
-      br(await Batch.create('ins-clamp')
-        .add('a', write.insert('docs', [{ id: 'a', embedding: [1, 0, 0, 0], cluster: 0 }]))
-        .add('b', write.insert('docs', [{ id: 'b', embedding: [0, 1, 0, 0], cluster: 1 }]))
-        .execute(client!, db));
-
-      // ef_search far above MAX_EF_SEARCH (10_000) must clamp, not error.
-      const resp = br(await Batch.create('q-clamp')
-        .add('r', Query.from('docs')
-          .where(filter.vectorSimilarity('embedding', [1, 0, 0, 0], 1, { efSearch: 999_999_999 }))
-          .build())
-        .execute(client!, db));
-
-      expect(resp.results.r.records.length).toBe(1);
-      expect(resp.results.r.records[0].id).toBe('a');
+    it('efSearch: huge value is rejected client-side, never reaches the server', () => {
+      // `filter.vectorSimilarity` guards `efSearch` against `MAX_EF_SEARCH`
+      // (10_000) and throws BEFORE building a wire request — a deliberate
+      // improvement over a server-side clamp, which would silently degrade
+      // recall without telling the caller. See
+      // `crates/shamir-client-ts/src/core/builders/filter.ts` (the
+      // `efSearch > MAX_EF_SEARCH` guard) for the rationale.
+      expect(() =>
+        filter.vectorSimilarity('embedding', [1, 0, 0, 0], 1, { efSearch: 999_999_999 }),
+      ).toThrow(/MAX_EF_SEARCH/);
     });
 
     it('oversample: explicit oversample on bare vector_similarity is accepted', async () => {

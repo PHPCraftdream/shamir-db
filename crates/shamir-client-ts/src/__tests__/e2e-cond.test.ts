@@ -171,36 +171,24 @@ describe.skipIf(!SERVER_AVAILABLE)(
     // Scenario 3: a $cond branch referencing a prior query's result
     // (cross-query conditional value) — a real wire round-trip.
     //
-    // KNOWN ENGINE BUG (found while writing the Rust twin of this test,
-    // `crates/shamir-client/tests/batch_cond_e2e.rs`, NOT fixed here per
-    // this task's brief — production code from Phases A/B/C is out of
-    // scope, report only):
-    //
+    // Regression test for bug #642 (now fixed):
     // `BatchPlanner::extract_deps_from_filter_value`
-    // (crates/shamir-query-types/src/batch/planner.rs:342-358) only
-    // recurses into `FilterValue::Array` and matches `FilterValue::QueryRef`
-    // directly — every other variant (`Cond`, `Expr`, `FnCall`, `FieldRef`,
-    // `Param`) falls into a catch-all `_ => {}` and is silently skipped. So
-    // a `$query` ref nested inside a `$cond` branch used as a WHERE-filter
-    // comparison value produces ZERO extracted dependencies, and the batch
-    // planner never adds a `DataFlow`/`Both` edge for the dependent op.
-    // Even an explicit `after` ordering hint does not help:
-    // `query_runner::build_resolved_refs`
-    // (crates/shamir-engine/src/query/batch/query_runner.rs:31-48) only
-    // copies a dependency's result into the dependent op's FilterContext for
-    // `EdgeKind::DataFlow`/`Both` edges — a pure `EdgeKind::Explicit` `after`
-    // edge is ordering-only by design (the Epic01/A guarantee) and must NOT
-    // leak data. Since the planner mis-classifies this edge as `Explicit`,
-    // the `$query`-ref branch of `$cond` silently resolves to `None` (see
-    // `resolve_filter_query`'s documented silent-miss semantics).
+    // (crates/shamir-query-types/src/batch/planner.rs:618-648) recurses into
+    // `FilterValue::Cond`/`Expr`/`FnCall` (in addition to `Array` and
+    // `QueryRef`), so a `$query` ref nested inside a `$cond` branch used as a
+    // WHERE-filter comparison value is correctly extracted as a dependency
+    // and the batch planner adds a `DataFlow`/`Both` edge for the dependent
+    // op. `query_runner::build_resolved_refs`
+    // (crates/shamir-engine/src/query/batch/query_runner.rs) then copies the
+    // dependency's result into the dependent op's FilterContext, so the
+    // `$query`-ref branch of `$cond` resolves correctly instead of silently
+    // missing.
     //
-    // This test therefore asserts the CURRENT (buggy) behavior — `heidi` is
-    // silently excluded even though she should match — so it fails loudly
-    // the moment the planner bug is fixed (a welcome regression to catch).
-    // Track the real fix under a dedicated follow-up task, not Epic02/D.
+    // Mirrors the Rust twin
+    // `crates/shamir-client/tests/batch_cond_e2e.rs::cond_branch_referencing_prior_query_result_over_real_wire`.
     // ═══════════════════════════════════════════════════════════════════
 
-    it('documents a known bug: $cond branch referencing a prior query result silently misses', async () => {
+    it('$cond branch referencing a prior query result resolves correctly', async () => {
       await client!.execute(db, {
         id: `seed-${db}-3`,
         queries: {
@@ -217,21 +205,20 @@ describe.skipIf(!SERVER_AVAILABLE)(
       );
       const threshold = batch.handle('threshold_lookup');
 
-      // Intended semantics (currently unreachable — see bug note above):
       // WHERE tier == cond(score >= 100, <tier of heidi row>, "newbie")
-      // For heidi (score=100, tier="vip"): SHOULD evaluate to
-      // threshold_lookup's tier ("vip"), matching her own tier.
+      // For heidi (score=100, tier="vip"): evaluates to threshold_lookup's
+      // tier ("vip"), matching her own tier.
       // For ivan (score=30, tier="newbie"): evaluates to the literal
-      // "newbie", unaffected by the bug (no $query ref on his branch), so
-      // he matches regardless.
+      // "newbie", which equals his own tier, so he matches too.
       const crossCond = filter.cond(
         filter.gte('score', 100),
         threshold.first().field('tier'),
         'newbie',
       );
 
-      // Explicit `after` added defensively (harmless even though the
-      // planner bug means it doesn't grant data access on its own).
+      // Explicit `after` is redundant now (the $query ref inside $cond is
+      // correctly auto-detected as a DataFlow dependency, #642) but kept for
+      // clarity/defense-in-depth ordering.
       batch.add(
         'rd',
         Query.from('users')
@@ -246,13 +233,11 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .map((r) => r.name)
         .sort();
 
-      // BUG-DOCUMENTING ASSERTION: `heidi` is missing today because the
-      // $query-ref branch of her $cond silently resolves to undefined (the
-      // dependency was never detected, so threshold_lookup's result never
-      // reaches rd's FilterContext). Only `ivan` matches, whose branch is a
-      // plain literal unaffected by the bug. When the planner bug is fixed,
-      // this assertion should be updated to `['heidi', 'ivan']`.
-      expect(names).toEqual(['ivan']);
+      // Both match now that bug #642 is fixed: heidi's $cond branch
+      // correctly resolves threshold_lookup's tier ("vip") via the
+      // now-detected DataFlow dependency; ivan matches via the plain
+      // literal "newbie" branch.
+      expect(names).toEqual(['heidi', 'ivan']);
     });
   },
 );
