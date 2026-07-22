@@ -429,10 +429,16 @@ async fn expired_tx_rejected_at_commit() {
     let repo = make_repo();
     repo.add_table(crate::table::TableConfig::new("t"));
 
-    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let (tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
 
-    // Backdoor: set started_at to the past to simulate expiry.
-    tx.started_at = std::time::Instant::now() - std::time::Duration::from_secs(600);
+    // Backdating `started_at` via `Instant::now() - Duration::from_secs(N)`
+    // panics on overflow if the host has been up for less than `N` (observed
+    // on a freshly-booted CI VM). Shrink the effective max lifetime instead
+    // and sleep past it — deterministic regardless of host uptime.
+    crate::tx::commit::TEST_MAX_TX_LIFETIME_OVERRIDE
+        .set(std::time::Duration::from_millis(1))
+        .expect("override already set");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let result = repo.commit_tx(tx).await;
     assert!(result.is_err());

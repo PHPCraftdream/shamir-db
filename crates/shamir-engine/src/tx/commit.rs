@@ -16,6 +16,28 @@ use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutc
 
 const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
 
+/// Test-only override for [`DEFAULT_MAX_TX_LIFETIME`].
+///
+/// `Instant::now() - Duration::from_secs(N)` (the natural way to simulate an
+/// old tx) panics on overflow if the process/host has been up for less than
+/// `N` — observed on a freshly-booted CI VM. Rather than have expiry tests
+/// backdate `TxContext::started_at` by a large, machine-uptime-dependent
+/// amount, they shrink the effective max lifetime here (to a few
+/// milliseconds) and use a short real `tokio::time::sleep` instead — fully
+/// deterministic regardless of host uptime. `nextest` runs each test in its
+/// own process, so this global cannot leak across test files.
+#[cfg(test)]
+pub(crate) static TEST_MAX_TX_LIFETIME_OVERRIDE: std::sync::OnceLock<std::time::Duration> =
+    std::sync::OnceLock::new();
+
+fn effective_max_tx_lifetime() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(d) = TEST_MAX_TX_LIFETIME_OVERRIDE.get() {
+        return *d;
+    }
+    DEFAULT_MAX_TX_LIFETIME
+}
+
 /// Test-only crash-injection seam for the real crash-recovery harness
 /// (`crates/shamir-engine/tests/crash_recovery.rs`, Vector II.1).
 ///
@@ -456,12 +478,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         return Err(TxError::Wounded { tx_version });
     }
 
-    if tx.is_expired(DEFAULT_MAX_TX_LIFETIME) {
+    let max_tx_lifetime = effective_max_tx_lifetime();
+    if tx.is_expired(max_tx_lifetime) {
         release_pessimistic_locks(&tx, repo).await;
         repo.tx_metrics().on_tx_aborted_expired();
         return Err(TxError::Expired {
             elapsed: tx.elapsed(),
-            max: DEFAULT_MAX_TX_LIFETIME,
+            max: max_tx_lifetime,
         });
     }
 
