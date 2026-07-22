@@ -33,6 +33,25 @@ fn entry(txn_id: u64, commit_version: u64) -> WalEntryV2 {
     .with_commit_version(commit_version)
 }
 
+/// Poll `condition` every 10ms until it returns `true` or `deadline` elapses.
+/// Used in place of a single fixed `sleep` for background-timer-driven
+/// assertions: a fixed sleep margin comfortable on an idle dev box can be
+/// too tight under CI-runner scheduler/disk contention (observed on
+/// windows-latest CI), where a background fsync can legitimately take
+/// longer than a couple of its own timer ticks to actually complete.
+async fn poll_until(deadline: std::time::Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if condition() {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 async fn open_sink(dir: &TempDir) -> WalSink {
     let segset = SegmentSet::open(dir.path().to_path_buf(), BIG_SEG)
         .await
@@ -216,8 +235,10 @@ async fn background_fsync_fires_for_buffered() {
     // Inline fsync_count should be 0 (Buffered doesn't fsync inline).
     assert_eq!(gc.fsync_count(), 0);
 
-    // Wait long enough for the bg timer to fire.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    // Wait for the bg timer to fire — poll rather than a fixed sleep, since
+    // a background fsync can take longer than a couple of its own 30ms
+    // ticks to complete under CI-runner contention.
+    poll_until(Duration::from_secs(10), || gc.fsync_count() >= 1).await;
 
     // Background fsync should have fired at least once.
     assert!(
@@ -436,8 +457,10 @@ async fn background_fsync_clears_dirty_on_success() {
         .unwrap();
     assert!(gc.is_dirty());
 
-    // Wait for the bg fsync to fire and succeed (clearing dirty).
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    // Wait for the bg fsync to fire and succeed (clearing dirty) — poll
+    // rather than a fixed sleep, since this can take longer than a couple
+    // of the timer's own 30ms ticks under CI-runner contention.
+    poll_until(Duration::from_secs(10), || !gc.is_dirty()).await;
 
     assert!(
         !gc.is_dirty(),
