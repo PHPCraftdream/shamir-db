@@ -460,7 +460,19 @@ async fn background_fsync_clears_dirty_on_success() {
     // Wait for the bg fsync to fire and succeed (clearing dirty) — poll
     // rather than a fixed sleep, since this can take longer than a couple
     // of the timer's own 30ms ticks under CI-runner contention.
-    poll_until(Duration::from_secs(10), || !gc.is_dirty()).await;
+    //
+    // Poll on BOTH conditions, not just `!is_dirty()`: the background task
+    // (`spawn_background_fsync`) clears the dirty flag via `take_dirty()`
+    // BEFORE calling `sync_now()`, which only increments `fsync_count()`
+    // AFTER the fsync itself completes (see `wal_group_commit.rs`'s
+    // `spawn_background_fsync`/`sync_now`). Polling on `!is_dirty()` alone
+    // can observe the flag already cleared while `fsync_count()` hasn't
+    // incremented yet, exiting the loop one tick too early (this exact race
+    // fired on CI once with the single-condition version).
+    poll_until(Duration::from_secs(10), || {
+        !gc.is_dirty() && gc.fsync_count() >= 1
+    })
+    .await;
 
     assert!(
         !gc.is_dirty(),
