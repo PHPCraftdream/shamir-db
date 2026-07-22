@@ -150,6 +150,21 @@ pub(super) async fn run_leader(
     // so subsequent survivors' predicate checks cover earlier batch members.
     let mut batch_footprints: Vec<CommitWriteRecord> = Vec::new();
 
+    // RI-13-blocker fix: batch-local write-KEY accumulator for intra-batch
+    // keyed SSI read-set + Phase CAS conflict detection. Mirrors
+    // `batch_footprints` above but maps each earlier-validated-but-not-yet-
+    // published survivor's exact `(table_id, key)` write to the
+    // `commit_version` it was assigned. `pre_commit_locked_validate`'s Phase 2
+    // / Phase CAS checks only see ALREADY-PUBLISHED state via
+    // `provider.version_of` — a batch survivor validated earlier in this SAME
+    // loop has not been materialized yet, so its write is invisible there. A
+    // LATER survivor in the same batch reading/CAS-checking that same key
+    // would otherwise see stale state and wrongly pass. Checked right after
+    // `pre_commit_locked_validate` returns `Ok(Some(vpc))`, alongside the
+    // existing `phantom_conflict` check.
+    let mut batch_write_keys: shamir_collections::TFxMap<(u64, Bytes), u64> =
+        shamir_collections::new_fx_map();
+
     for mut entry in entries {
         let pg_idx = if entry.is_leader {
             usize::MAX // sentinel — not used for leader
@@ -218,11 +233,91 @@ pub(super) async fn run_leader(
                     continue;
                 }
 
+                // RI-13-blocker fix: intra-batch keyed SSI read-set + Phase
+                // CAS check — scan this survivor's OWN `read_set` and
+                // `cas_set` keys against `batch_write_keys` (writes of
+                // earlier-validated-but-not-yet-published survivors in THIS
+                // batch). `pre_commit_locked_validate`'s Phase 2 / Phase CAS
+                // only see already-PUBLISHED state via `provider`, so an
+                // earlier batch survivor's write is invisible there — this
+                // closes that gap the same way the `phantom_conflict` block
+                // above closes it for predicates.
+                let mut keyed_conflict: Option<TxError> = None;
+                if !batch_write_keys.is_empty() {
+                    entry
+                        .tx
+                        .read_set
+                        .iter_sync(|(table_id, key), _version_seen| {
+                            if keyed_conflict.is_some() {
+                                return false;
+                            }
+                            if batch_write_keys.contains_key(&(*table_id, key.clone())) {
+                                keyed_conflict = Some(TxError::SsiConflict { key: key.clone() });
+                            }
+                            true
+                        });
+                    if keyed_conflict.is_none() {
+                        entry.tx.cas_set.iter_sync(|(table_id, key), expected| {
+                            if keyed_conflict.is_some() {
+                                return false;
+                            }
+                            if let Some(&found) = batch_write_keys.get(&(*table_id, key.clone())) {
+                                keyed_conflict = Some(TxError::CasConflict {
+                                    key: key.clone(),
+                                    expected: *expected,
+                                    found,
+                                });
+                            }
+                            true
+                        });
+                    }
+                }
+
+                if let Some(err) = keyed_conflict {
+                    // Abort this survivor due to intra-batch keyed SSI /
+                    // Phase CAS collision. Dropping `vpc.version_guard` (with
+                    // the rest of `vpc`) marks this version Aborted.
+                    repo.tx_metrics().on_tx_aborted_ssi();
+                    release_pessimistic_locks(&entry.tx, repo).await;
+                    if entry.is_leader {
+                        // Leader failed — abort all validated followers too.
+                        // Draining `validated` drops each peer's
+                        // version_guard → mark(Aborted).
+                        for v in validated.drain(..) {
+                            if !v.is_leader {
+                                if let Some(s) = panic_guard.senders[v.pg_idx].take() {
+                                    let _ = s.send(Err(DbError::Internal(
+                                        "batch aborted: leader failed".into(),
+                                    )));
+                                }
+                            }
+                            // v.version_guard drops here → mark(Aborted).
+                        }
+                        drop(panic_guard);
+                        drop(commit_guard);
+                        return Err(err);
+                    }
+                    // Follower failed — notify, continue.
+                    if let Some(sender) = panic_guard.senders[pg_idx].take() {
+                        let _ = sender.send(Err(tx_error_to_db_error(&err)));
+                    }
+                    continue;
+                }
+
                 // P3a: accumulate this survivor's footprint for subsequent
                 // survivors' phantom checks.
                 let footprint = shamir_tx::build_footprint_from_tx(&entry.tx, vpc.commit_version);
                 if !footprint.is_empty() {
                     batch_footprints.push(footprint);
+                }
+
+                // RI-13-blocker fix: accumulate this survivor's write keys
+                // for subsequent survivors' keyed SSI / Phase CAS checks.
+                for (token, key) in entry.tx.write_set_keys() {
+                    batch_write_keys.insert(
+                        (token, Bytes::copy_from_slice(key.as_slice())),
+                        vpc.commit_version,
+                    );
                 }
 
                 // The survivor's version_guard moves into `validated`; on any
