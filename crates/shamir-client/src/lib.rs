@@ -28,6 +28,7 @@
 //! TLS+SCRAM+envelope handling.
 
 mod client;
+pub mod cursor_stream;
 mod error;
 pub mod interner_cache;
 mod interner_cache_ops;
@@ -38,6 +39,7 @@ mod wire_frames;
 mod tests;
 
 pub use client::{Client, ConnectOptions, ResumeOptions};
+pub use cursor_stream::CursorStream;
 pub use error::ClientError;
 pub use interner_cache::{FieldMap, InternerCacheRegistry};
 pub use subscription::SubscriptionHandle;

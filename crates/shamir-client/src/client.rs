@@ -867,13 +867,31 @@ impl Client {
         }
     }
 
+    /// Open a server-side cursor (FG-5a/FG-5b) over `query` and return an
+    /// idiomatic [`futures::Stream`] of records — see
+    /// [`crate::cursor_stream::CursorStream`] for the full contract
+    /// (pagination, error propagation, and the cleanup tradeoff around
+    /// dropping the stream without calling `close()`).
+    pub fn stream_cursor<'a>(
+        &'a self,
+        db: &str,
+        query: shamir_query_types::read::ReadQuery,
+        page_size: u32,
+    ) -> crate::cursor_stream::CursorStream<'a> {
+        crate::cursor_stream::CursorStream::new(self, db, query, page_size)
+    }
+
     /// Send a request and route the response via the rid-demux pending map.
     ///
     /// 1. Allocate rid and register the oneshot **before** writing (no race
     ///    with a fast server response).
     /// 2. Take the write mutex only for the duration of `write_frame`.
     /// 3. Await the oneshot; the reader task delivers the result.
-    async fn roundtrip(&self, req: &DbRequest) -> Result<DbResponse, ClientError> {
+    ///
+    /// `pub(crate)` (rather than private) so sibling modules — e.g.
+    /// `cursor_stream`'s `CursorStream` — can drive their own
+    /// request/response cycles without duplicating this primitive.
+    pub(crate) async fn roundtrip(&self, req: &DbRequest) -> Result<DbResponse, ClientError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(ClientError::ConnectionClosed);
         }

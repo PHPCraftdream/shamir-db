@@ -19,6 +19,9 @@ tokio   = { version = "1", features = ["net", "io-util", "macros", "sync", "rt",
 tokio-rustls = "0.26"
 rustls  = { version = "0.23", default-features = false, features = ["std"] }
 
+# Stream trait + `stream::unfold` combinator (Client::stream_cursor, FG-5c).
+futures = "0.3"
+
 # Lock-free concurrent maps (interner field-map cache registry + per-repo maps).
 scc = "3.8"
 
