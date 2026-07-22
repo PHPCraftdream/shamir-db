@@ -112,6 +112,19 @@ test-threads = 4
 filter = "test(wasm_function_inserts_and_queries)"
 slow-timeout = { period = "120s", terminate-after = 2 }  # ~99 s legit, kill at 240 s.
 
+# Legit ~84-93 s standalone (verified isolated: 83.9 s pass) — builds a real
+# HNSW graph over the minimum row count (red=4097, blue=16600) that still
+# satisfies BOTH the pre-filter (n_candidates > 4096) and co-filter
+# (selectivity <= 0.20) path-selection thresholds; already trimmed down from
+# 25000 rows once (see 30d976c0) and can't shrink further without changing
+# those thresholds. Under full-workspace nextest parallelism this occasionally
+# exceeds the default 180 s kill (observed: TIMEOUT at 180.278s, RI-13 gate
+# run) — not a deadlock, same CPU-starvation-under-load class as the
+# wasm_function override above.
+[[profile.default.overrides]]
+filter = "test(vr5_cofilter_sees_staged_and_filters_residual)"
+slow-timeout = { period = "60s", terminate-after = 4 }  # ~90 s legit, kill at 240 s.
+
 [[profile.default.overrides]]
 filter = "package(shamir-connect) and test(/.*scram.*/)"
 slow-timeout = { period = "10s", terminate-after = 6 }   # Argon2-bound; kill at 60 s.
