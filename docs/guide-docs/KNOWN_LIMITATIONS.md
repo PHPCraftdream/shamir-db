@@ -40,15 +40,6 @@ artifact).
   open transaction's commit pipeline, transactional or not. See
   `crates/shamir-engine/src/query/batch/query_runner.rs:697-698`
   ("Admin ops — delegate to AdminExecutor (no tx)").
-- **`expected_version` CAS isolation caveat.** The commit-time SSI
-  race-window backstop for `expected_version` (optimistic-concurrency CAS)
-  only fires under `Serializable` isolation. A plain, non-transactional
-  `expected_version` write runs through the hardcoded-`Snapshot`
-  implicit-tx path and gets only the immediate stale-read check — two
-  concurrent non-transactional writers with the same `expected_version`
-  can both succeed. See the "⚠️ Isolation caveat" section in
-  [`client-server-protocol-spec/OPTIMISTIC_CONCURRENCY.md`](client-server-protocol-spec/OPTIMISTIC_CONCURRENCY.md#%EF%B8%8F-isolation-caveat--step-2-requires-serializable)
-  and the test `crates/shamir-server/tests/version_cas_e2e.rs`.
 - **Read-your-own-writes (RYOW), current behavior.** Streaming scans
   (`list_stream_tx`/`filter_stream_tx`) and the match-scans behind
   `execute_update_tx`/`execute_delete_tx` overlay a transaction's own

@@ -792,12 +792,16 @@ impl RepoInstance {
         let mut tx =
             shamir_tx::TxContext::new(tx_id, repo_token(&self.name), snapshot_version, isolation);
 
-        if isolation == shamir_tx::IsolationLevel::Serializable {
-            let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
-                per_table_mvcc: Arc::clone(&self.per_table_mvcc),
-            });
-            tx.set_version_provider(provider);
-        }
+        // FG-7: attach the version provider UNCONDITIONALLY (every isolation
+        // level), not just Serializable. `pre_commit_locked_validate`'s new
+        // Phase CAS needs `version_of` for `expected_version` re-validation
+        // at commit regardless of isolation — a Snapshot tx with no CAS
+        // checks pays only a thin `Arc` construction + clone, no behavior
+        // change to Phase 2 (still gated on `isolation == Serializable`).
+        let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
+            per_table_mvcc: Arc::clone(&self.per_table_mvcc),
+        });
+        tx.set_version_provider(provider);
 
         Ok((tx, guard))
     }
@@ -960,6 +964,14 @@ impl RepoInstance {
                 let (message, code) = match commit_err {
                     crate::tx::CommitError::UniqueViolation { .. } => {
                         (commit_err.to_string(), Some("unique_violation".to_string()))
+                    }
+                    // FG-7: a commit-time CAS failure on the implicit
+                    // (plain non-transactional) Snapshot path must surface
+                    // the SAME "version_conflict" code as the immediate
+                    // staging-time check — mirrors the identical mapping in
+                    // `batch_execute.rs` / `db_tx.rs` / `group_commit.rs`.
+                    crate::tx::CommitError::CasConflict { .. } => {
+                        (commit_err.to_string(), Some("version_conflict".to_string()))
                     }
                     other => (other.to_string(), None),
                 };

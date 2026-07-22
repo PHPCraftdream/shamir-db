@@ -159,6 +159,13 @@ pub struct TxContext {
     /// was always empty in production and SSI silently degraded to Snapshot).
     pub read_set: scc::HashMap<(u64, Bytes), u64, THasher>,
 
+    /// FG-7: keys this tx staged an `expected_version` CAS check against,
+    /// independent of `read_set`/SSI. Validated at commit UNCONDITIONALLY
+    /// (any isolation level) — see `pre_commit_locked_validate`. Kept
+    /// separate from `read_set` so a CAS-specific commit-time failure maps
+    /// to `version_conflict`, distinct from a generic SSI `tx_conflict`.
+    pub cas_set: scc::HashMap<(u64, Bytes), u64, THasher>,
+
     /// Token → original table name. Populated alongside `write_set`
     /// entries. Used at commit time to look up table names for WAL
     /// emission and interner merge (Stage 5).
@@ -280,6 +287,7 @@ impl TxContext {
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: TFxMap::default(),
             read_set: scc::HashMap::with_hasher(THasher::default()),
+            cas_set: scc::HashMap::with_hasher(THasher::default()),
             table_tokens: TFxMap::default(),
             interner_deltas: Vec::new(),
             version_provider: None,
@@ -498,6 +506,17 @@ impl TxContext {
                 }
             }
         }
+    }
+
+    /// FG-7: record a CAS check unconditionally (any isolation). Overwrite
+    /// semantics (last write wins) — unlike `read_set`'s first-read-wins,
+    /// there is no monotonic-conservative-bound concern here: `expected`
+    /// IS the exact version this specific check demands, not an observed
+    /// read version. (If the SAME key is CAS-checked twice in one tx with
+    /// two different `expected` values, that is almost certainly a caller
+    /// bug — the later check's `expected` is what commit validates.)
+    pub fn record_cas(&self, table_id: u64, key: Bytes, expected: u64) {
+        self.cas_set.upsert_sync((table_id, key), expected);
     }
 
     /// Record a predicate dependency for SSI phantom detection.

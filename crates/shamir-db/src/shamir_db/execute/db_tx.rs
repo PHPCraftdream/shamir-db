@@ -258,6 +258,13 @@ impl ShamirDb {
                     crate::engine::tx::CommitError::UniqueViolation { .. } => {
                         "unique_violation".to_string()
                     }
+                    // FG-7: a commit-time CAS failure maps to the SAME
+                    // "version_conflict" code as the immediate staging-time
+                    // check, so client retry logic keyed on that code
+                    // handles both failure timings identically.
+                    crate::engine::tx::CommitError::CasConflict { .. } => {
+                        "version_conflict".to_string()
+                    }
                     crate::engine::tx::CommitError::Storage(e) => format!("storage: {}", e),
                     crate::engine::tx::CommitError::Expired { elapsed, max } => {
                         format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)

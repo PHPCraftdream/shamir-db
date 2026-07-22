@@ -171,16 +171,24 @@ async fn create_table_context_populates_per_table_mvcc() {
     assert_eq!(v, Some(0), "unknown key returns version 0");
 }
 
+/// FG-7: `begin_tx` now attaches a version provider UNCONDITIONALLY (every
+/// isolation level), not just `Serializable`. This flips the pre-FG-7
+/// contract this test used to assert (`version_provider.is_none()` under
+/// Snapshot) — a Snapshot tx now needs the provider so
+/// `pre_commit_locked_validate`'s isolation-independent Phase CAS can call
+/// `version_of` for `expected_version` re-validation at commit, regardless
+/// of isolation. See `TxContext::cas_set` / `record_cas`.
 #[tokio::test]
-async fn begin_tx_snapshot_does_not_attach_provider() {
+async fn begin_tx_snapshot_attaches_provider() {
     let repo = make_repo();
     let (tx, _g) = repo
         .begin_tx(shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
     assert!(
-        tx.version_provider.is_none(),
-        "SI tx must not have provider"
+        tx.version_provider.is_some(),
+        "Snapshot tx must have a provider too (FG-7: needed for Phase CAS \
+         regardless of isolation)"
     );
 }
 

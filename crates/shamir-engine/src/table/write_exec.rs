@@ -41,10 +41,10 @@ use super::write_helpers::{
 };
 
 impl TableManager {
-    /// FG-2: optimistic-concurrency (CAS) version check for
+    /// FG-2/FG-7: optimistic-concurrency (CAS) version check for
     /// `UpdateOp`/`DeleteOp::expected_version`.
     ///
-    /// Hybrid two-step (brief §"Validation timing"):
+    /// Three-part check (brief §"Validation timing"):
     /// 1. **Immediate check**: for each matched row, call
     ///    `MvccStore::version_of(key)` and compare against `expected`. A
     ///    mismatch on ANY row aborts the WHOLE operation with
@@ -52,14 +52,23 @@ impl TableManager {
     /// 2. **SSI registration**: call `record_read_shared(table_token, key,
     ///    expected)` for every matched row, feeding the EXISTING SSI
     ///    `validate_read_set` commit-time re-check to close the race window
-    ///    between step 1 and this tx's actual commit.
+    ///    between step 1 and this tx's actual commit. Serializable-only —
+    ///    a documented no-op under Snapshot.
+    /// 3. **FG-7 CAS registration**: call `record_cas(table_token, key,
+    ///    expected)` for every matched row, UNCONDITIONAL of isolation
+    ///    level. Validated at commit by the new Phase CAS
+    ///    (`pre_commit_locked_validate` / `pre_commit_locked`) regardless of
+    ///    Snapshot/Serializable — this is what makes "exactly one wins"
+    ///    hold on every entry path (implicit batch, explicit Snapshot,
+    ///    explicit Serializable), not just under an explicit
+    ///    `.isolation(Serializable)` opt-in.
     ///
     /// When the table has no MvccStore, the immediate check is skipped
-    /// (there is no version authority) but step 2 still runs — a concurrent
-    /// committer on a different path could still trigger SSI abort.
-    /// Non-MVCC tables simply don't support meaningful CAS; the read side
-    /// returns `versions: None` for them, so a client never gets a version
-    /// to pass in.
+    /// (there is no version authority) but steps 2/3 still run — a
+    /// concurrent committer on a different path could still trigger an
+    /// abort. Non-MVCC tables simply don't support meaningful CAS; the read
+    /// side returns `versions: None` for them, so a client never gets a
+    /// version to pass in.
     fn check_expected_version(
         &self,
         matched_ids: &[RecordId],
@@ -83,9 +92,17 @@ impl TableManager {
         }
         // Register each matched key as a tx read at `expected` so the
         // existing SSI validate_read_set re-check at commit catches a
-        // concurrent write between this check and commit.
+        // concurrent write between this check and commit (Serializable
+        // only — no-op otherwise).
+        //
+        // FG-7: ALSO record an independent CAS check, unconditional of
+        // isolation level — validated at commit by `pre_commit_locked*`'s
+        // new Phase CAS regardless of Snapshot/Serializable, closing the
+        // race window on every entry path (implicit batch, explicit
+        // Snapshot, explicit Serializable).
         for id in matched_ids {
             tx.record_read_shared(table_token, id.to_bytes(), expected);
+            tx.record_cas(table_token, id.to_bytes(), expected);
         }
         Ok(())
     }

@@ -155,34 +155,19 @@ async fn with_version_read_and_expected_version_write_e2e() {
 /// after boot) — a real, intentional anti-DoS behavior, not something
 /// this test should work around by disabling server security config.
 ///
-/// STRUCTURAL FINDING (surfaced while writing this test, not papered over):
-/// each racing batch is wrapped `.transactional().isolation(Serializable)`
-/// — this is NOT cosmetic. A PLAIN non-transactional `client.execute(...)`
-/// carrying `expected_version` runs through
-/// `RepoInstance::run_implicit_batch_tx`, which is HARDCODED to
-/// `IsolationLevel::Snapshot` (see its doc comment: "Snapshot isolation is
-/// deliberate: SSI validation is gated on Serializable, so the implicit tx
-/// NEVER aborts on a read/write conflict"). `TxContext::record_read_shared`
-/// (the CAS hybrid's step-2 SSI registration,
-/// `crates/shamir-tx/src/tx_context.rs:490`) is ITSELF gated on
-/// `IsolationLevel::Serializable` and is a documented no-op otherwise. So on
-/// the plain non-transactional path, TWO concurrent CAS writers that both
-/// observe the SAME pre-write version both pass the immediate
-/// `version_of` check (step 1) before either commits, and since the SSI
-/// backstop (step 2) never fires under Snapshot isolation, BOTH commit —
-/// silently violating the "exactly one wins" CAS guarantee. Confirmed
-/// reproducible: the identical test body with plain (non-transactional,
-/// non-Serializable) batches deterministically observed `a_ok=true
-/// b_ok=true` (both writers succeeded) across repeated runs. The CAS
-/// guarantee IS fully correct under `Serializable` isolation (proven here,
-/// and by `crates/shamir-engine/src/table/tests/version_cas_tests.rs`'s
-/// `concurrent_cas_exactly_one_wins`, which opens `Serializable` txs
-/// directly) — but a caller who sets `expected_version` on an ordinary
-/// non-transactional update/delete today gets ONLY the "stale read"
-/// half of the CAS contract (step 1), not the "commit-time race-window"
-/// half (step 2), despite the brief's/docs' wording implying both apply
-/// universally. This is a real, currently-open gap between the documented
-/// contract and the non-transactional code path — not a gap in this test.
+/// FG-7 FIX (this test used to document a real, open gap — now closed):
+/// previously, only the `.transactional().isolation(Serializable)` variant
+/// below closed the race; a PLAIN non-transactional `client.execute(...)`
+/// carrying `expected_version` ran through
+/// `RepoInstance::run_implicit_batch_tx`, hardcoded to
+/// `IsolationLevel::Snapshot`, and `TxContext::record_read_shared` (the old
+/// commit-time backstop) was a documented no-op outside `Serializable` — so
+/// two concurrent CAS writers on the plain path could BOTH commit,
+/// confirmed reproducible via repeated runs of this test body. FG-7
+/// replaced that isolation-gated backstop with an independent `cas_set`
+/// validated at commit UNCONDITIONALLY of isolation level, so "exactly one
+/// wins" now holds on the plain non-transactional path too — proven below
+/// alongside the pre-existing `Serializable` proof.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_cas_via_real_server_exactly_one_wins() {
     let temp = TempDir::new().expect("tempdir");
@@ -250,27 +235,42 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
     let res_a = res_a.expect("task_a join");
     let res_b = res_b.expect("task_b join");
 
-    // A TRANSACTIONAL batch reports an abort two different ways depending
-    // on WHICH half of the CAS hybrid caught it:
+    // A TRANSACTIONAL batch reports an abort in up to THREE shapes,
+    // depending on WHICH check caught it (all are "this writer lost the
+    // race" outcomes):
     //   - the immediate `version_of` check (step 1) rejects the op before
-    //     any commit is attempted, surfacing as a top-level
-    //     `Err(ClientError::Db { code: "version_conflict", .. })` — the
-    //     whole request never reaches a commit decision;
-    //   - the SSI `validate_read_set` backstop (step 2) catches a
-    //     concurrent writer AT COMMIT time, which — for a transactional
-    //     batch — surfaces as `Ok(BatchResponse)` with
-    //     `transaction.status == "aborted"` and
-    //     `transaction.reason == Some("tx_conflict")` (the existing SSI
-    //     conflict convention; NOT a `version_conflict`-coded error,
-    //     because by the time this fires the immediate version check has
-    //     already passed and the abort is a generic SSI read/write
-    //     conflict, indistinguishable from any other tx_conflict).
-    // Either shape is an acceptable "this writer lost the race" outcome.
+    //     any commit is attempted AND before the batch's own plan/stage
+    //     phase even finishes — surfaces as a top-level
+    //     `Err(ClientError::Db { code: "version_conflict", .. })`;
+    //   - that SAME immediate check can ALSO surface as a per-batch
+    //     STAGING-time abort still wrapped in `Ok(BatchResponse)` with
+    //     `transaction.status == "aborted"` and a `reason` string that
+    //     debug-formats the underlying `BatchError::QueryError { ...,
+    //     code: Some("version_conflict") }` (see
+    //     `crates/shamir-engine/src/query/batch/batch_execute.rs`'s
+    //     `Err(plan_err) => TransactionInfo::aborted(tx_id, format!("{:?}",
+    //     plan_err))` arm) — this fires when the OTHER writer's commit
+    //     already bumped the version before this writer's own staging ran;
+    //   - FG-7's new commit-time Phase CAS backstop (step 2) catches a
+    //     concurrent writer AT COMMIT time (both writers' immediate checks
+    //     passed, the race closed at commit instead), which ALSO surfaces
+    //     as `Ok(BatchResponse)` with `transaction.status == "aborted"`,
+    //     but with `reason` containing `"version_conflict"` (the NEW
+    //     `CommitError::CasConflict` mapping — distinct from the old
+    //     generic SSI `"tx_conflict"` a non-CAS Serializable conflict would
+    //     produce). Checking for the `"version_conflict"` substring in
+    //     `reason` covers both of the last two shapes without depending on
+    //     the exact enclosing error-struct debug format.
+    // Any of the three shapes is an acceptable "this writer lost the race"
+    // outcome.
     fn lost_the_race(res: &Result<shamir_client::BatchResponse, ClientError>) -> bool {
         match res {
             Err(ClientError::Db { code, .. }) => code == "version_conflict",
             Ok(resp) => resp.transaction.as_ref().is_some_and(|t| {
-                t.status == "aborted" && t.reason.as_deref() == Some("tx_conflict")
+                t.status == "aborted"
+                    && t.reason
+                        .as_deref()
+                        .is_some_and(|r| r.contains("version_conflict") || r == "tx_conflict")
             }),
             _ => false,
         }
@@ -311,6 +311,74 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
         .execute("default", retry_b.build())
         .await
         .expect("retry with fresh version must succeed");
+
+    // FG-7 (mandatory test #1): the SAME "exactly one wins" guarantee, now
+    // ALSO proven on the PLAIN non-transactional path (no `.transactional()`
+    // at all) — this is the path the doc comment above describes as
+    // formerly broken. `client.execute(...)` with no transactional wrapper
+    // routes through `RepoInstance::run_implicit_batch_tx`
+    // (`IsolationLevel::Snapshot`); a commit-time CAS loser here surfaces as
+    // a top-level `Err(ClientError::Db { code: "version_conflict", .. })`
+    // (there is no `TransactionInfo` wrapper on a non-transactional batch),
+    // identically to the immediate staging-time check.
+    let v2 = read_version(&setup_client, "counter").await;
+    let client_c = setup_client.clone();
+    let client_d = setup_client.clone();
+
+    let task_c = tokio::spawn(async move {
+        let mut b = Batch::new();
+        b.id("c");
+        b.update(
+            "uc",
+            update("kv")
+                .where_(filter::eq("id", "counter"))
+                .set(doc! { "val" => 300 })
+                .expected_version(v2),
+        );
+        // No `.transactional()` at all — plain non-tx batch.
+        client_c.execute("default", b.build()).await
+    });
+    let task_d = tokio::spawn(async move {
+        let mut b = Batch::new();
+        b.id("d");
+        b.update(
+            "ud",
+            update("kv")
+                .where_(filter::eq("id", "counter"))
+                .set(doc! { "val" => 400 })
+                .expected_version(v2),
+        );
+        client_d.execute("default", b.build()).await
+    });
+
+    let (res_c, res_d) = tokio::join!(task_c, task_d);
+    let res_c = res_c.expect("task_c join");
+    let res_d = res_d.expect("task_d join");
+
+    fn plain_path_lost_the_race(res: &Result<shamir_client::BatchResponse, ClientError>) -> bool {
+        matches!(res, Err(ClientError::Db { code, .. }) if code == "version_conflict")
+    }
+    fn plain_path_committed(res: &Result<shamir_client::BatchResponse, ClientError>) -> bool {
+        res.is_ok()
+    }
+
+    let c_ok = plain_path_committed(&res_c);
+    let d_ok = plain_path_committed(&res_d);
+    let c_conflict = plain_path_lost_the_race(&res_c);
+    let d_conflict = plain_path_lost_the_race(&res_d);
+
+    assert!(
+        (c_ok && d_conflict) || (d_ok && c_conflict),
+        "expected exactly one commit success and one version_conflict abort on the \
+         PLAIN non-transactional path, got: c_ok={c_ok} d_ok={d_ok} \
+         c_conflict={c_conflict} d_conflict={d_conflict} res_c={res_c:?} res_d={res_d:?}"
+    );
+
+    let v3 = read_version(&setup_client, "counter").await;
+    assert!(
+        v3 > v2,
+        "version must have advanced after the winning plain-path commit: {v2} -> {v3}"
+    );
 
     handle.shutdown().await;
 }

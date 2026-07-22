@@ -539,5 +539,17 @@ fn tx_error_to_db_error(e: &TxError) -> DbError {
         }
         TxError::PhantomConflict { dep } => DbError::Conflict(format!("phantom conflict: {}", dep)),
         TxError::Wounded { tx_version } => DbError::Conflict(format!("tx {} wounded", tx_version)),
+        // FG-7: maps to `DbError::VersionConflict` (NOT `Conflict`) so the
+        // wire code is "version_conflict", matching the immediate
+        // staging-time CAS check's error code — see the identical mapping
+        // rationale in `batch_execute.rs` / `db_tx.rs`.
+        TxError::CasConflict {
+            key,
+            expected,
+            found,
+        } => DbError::VersionConflict(format!(
+            "cas conflict on key {:?}: expected version {} but found {}",
+            key, expected, found
+        )),
     }
 }

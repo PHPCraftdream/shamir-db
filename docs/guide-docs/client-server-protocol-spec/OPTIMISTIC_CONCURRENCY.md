@@ -77,60 +77,35 @@ When `expected_version` is `Some(v)`:
   `version_conflict` and NO row is modified (no partial application).
 - **Zero matched rows is a no-op** (`affected: 0`) — matching the existing
   convention for a WHERE that matches nothing.
-- The check is a hybrid (two steps):
+- The check is independent of isolation level, on EVERY entry path (plain
+  non-transactional writes, explicit `.transactional()` batches under
+  Snapshot, and explicit `.transactional().isolation(Serializable)` batches
+  alike):
   1. **Immediate check at staging time**: for each matched row, call
      `MvccStore::version_of(key)` and compare against `v`. A mismatch aborts
-     immediately.
-  2. **SSI registration**: each matched key is registered as a tx read at
-     version `v` via the EXISTING `TxContext::record_read` /
-     `validate_read_set` SSI contour. This closes the race window between step
-     1 and this tx's actual commit — a concurrent committer writing the same
-     key after step 1 will cause commit-time `validate_read_set` to abort.
+     immediately with `version_conflict`.
+  2. **Commit-time CAS re-validation**: each matched key is registered in a
+     dedicated `TxContext::cas_set` (independent of the SSI `read_set`) and
+     re-checked at commit, UNCONDITIONALLY of isolation level. This closes
+     the race window between step 1 and this tx's actual commit — a
+     concurrent committer writing the same key after step 1 causes the
+     commit-time check to abort with `version_conflict` as well, so both
+     failure timings surface the SAME wire code and a client's retry logic
+     does not need to branch on which step caught the conflict.
 
-### ⚠️ Isolation caveat — step 2 requires `Serializable`
+"Exactly one wins" holds among writers that ALL use `expected_version` (the
+CAS protocol). A non-CAS writer racing a CAS writer for the same key is
+still last-writer-wins, by design — same as any other OCC system. This
+boundary is unrelated to isolation level and is not changed by the
+commit-time CAS re-validation above.
 
-`TxContext::record_read`/`record_read_shared` is a documented no-op under
-`IsolationLevel::Snapshot` (SSI read-set tracking is gated on
-`Serializable`). A **plain, non-transactional** `UpdateOp`/`DeleteOp` (an
-ordinary single-op `client.execute(...)` call with no explicit transaction)
-runs through `RepoInstance::run_implicit_batch_tx`, which is **hardcoded to
-`IsolationLevel::Snapshot`** — deliberately, so ordinary non-tx writes never
-abort on an SSI conflict (last-writer-wins semantics).
-
-Consequence: on that plain non-transactional path, `expected_version` gets
-ONLY step 1 (the immediate stale-read check) — step 2 (the commit-time race-
-window backstop) never fires. Two concurrent non-transactional writers that
-both read the same pre-write version and both pass step 1 before either
-commits will **both succeed**, silently violating the "exactly one wins"
-guarantee this document describes above.
-
-**To get the full two-step CAS guarantee (including the race-window
-backstop), wrap the `expected_version` write in an explicit transactional
-batch with `Serializable` isolation:**
-
-```rust
-let mut b = Batch::new();
-b.update("u", update("table").where_(filter::eq("id", key)).set(value).expected_version(v));
-b.transactional().isolation(Isolation::Serializable);
-client.execute(db, b.build()).await
-```
-
-Under a transactional batch, a step-2 abort surfaces differently than a
-step-1 abort: the request still returns `Ok(BatchResponse)`, but with
-`transaction.status == "aborted"` and `transaction.reason == Some("tx_conflict")`
-(the existing generic SSI-conflict convention) rather than a top-level
-`version_conflict`-coded error. Callers that want a uniform "did my CAS
-write lose the race" check must handle BOTH shapes — see
-`crates/shamir-server/tests/version_cas_e2e.rs`'s
-`concurrent_cas_via_real_server_exactly_one_wins` for a worked example.
-
-Proven correct under `Serializable` (both the concurrent-writer race closing
-correctly, and the wire-level abort shapes above):
+Proven correct on every entry path:
 `crates/shamir-engine/src/table/tests/version_cas_tests.rs`'s
 `concurrent_cas_exactly_one_wins` (direct engine `begin_tx(Serializable)`)
 and `crates/shamir-server/tests/version_cas_e2e.rs`'s
 `concurrent_cas_via_real_server_exactly_one_wins` (real server + real
-`shamir_client::Client`, transactional + `Serializable`).
+`shamir_client::Client`, plain non-transactional AND explicit-Snapshot AND
+explicit-Serializable).
 
 ### Builder methods
 

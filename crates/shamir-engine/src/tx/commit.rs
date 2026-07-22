@@ -129,6 +129,19 @@ pub enum TxError {
     /// existing client retry covers it.
     #[error("tx {} wounded (wound-wait abort)", tx_version)]
     Wounded { tx_version: u64 },
+    /// FG-7: a CAS (`expected_version`) check failed at commit time — a
+    /// concurrent committer changed the key's version between the
+    /// immediate `check_expected_version` staging-time check and this tx's
+    /// commit. Surfaced to the wire path as `"version_conflict"` (NOT
+    /// `"tx_conflict"`) so client retry logic keyed on `version_conflict`
+    /// (the immediate-check error code) handles BOTH failure timings
+    /// identically — see `OPTIMISTIC_CONCURRENCY.md`.
+    #[error("cas conflict on key {key:?}: expected version {expected} but found {found}")]
+    CasConflict {
+        key: bytes::Bytes,
+        expected: u64,
+        found: u64,
+    },
 }
 
 /// cancel-safe: yes — read-only over `&TxContext`. The only `.await`
@@ -673,6 +686,14 @@ async fn commit_tx_lockfree(
     // lock-free parallelism — the branch below is a pure `if` with no lock
     // taken on the Snapshot path (zero overhead).
     //
+    // FG-7: ALSO take the lock when `cas_set` is non-empty, regardless of
+    // isolation. A CAS tx (even under Snapshot) needs the SAME
+    // validate→publish atomicity Serializable already relies on — otherwise
+    // two Snapshot CAS writers could both pass the new Phase CAS check and
+    // then both publish, reproducing the exact race this task closes. A
+    // Snapshot tx with NO CAS keys is completely unaffected (empty-set
+    // check, no lock taken).
+    //
     // No deadlock / self-block risk: `commit_tx_lockfree` has a single call
     // site (`commit_tx_inner` line ~490), which itself never holds
     // `commit_lock`. The AsyncIndex path (`commit_tx_inner_legacy_async`)
@@ -680,11 +701,12 @@ async fn commit_tx_lockfree(
     // control flow reaches this function, so no caller arrives here already
     // holding the mutex. `tokio::sync::Mutex` is non-reentrant, so this
     // invariant is load-bearing.
-    let _serializable_guard = if tx.isolation == IsolationLevel::Serializable {
-        Some(gate.commit_lock().await)
-    } else {
-        None
-    };
+    let _serializable_guard =
+        if tx.isolation == IsolationLevel::Serializable || !tx.cas_set.is_empty() {
+            Some(gate.commit_lock().await)
+        } else {
+            None
+        };
 
     // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
     let validated = match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards).await {

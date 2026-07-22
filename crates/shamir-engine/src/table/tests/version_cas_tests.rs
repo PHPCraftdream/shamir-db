@@ -389,3 +389,241 @@ async fn concurrent_cas_exactly_one_wins() {
     // Silence unused warning.
     let _ = rid;
 }
+
+// ── Test 5 (FG-7, mandatory #2): CONCURRENT CAS under explicit Snapshot ────
+//
+// Mirrors `concurrent_cas_exactly_one_wins` above EXACTLY, except both
+// racing txs open with `IsolationLevel::Snapshot` instead of `Serializable`.
+// Before FG-7, this scenario was the documented gap: `record_read_shared`
+// (the old commit-time backstop) is a no-op under Snapshot, so both writers
+// could pass the immediate check and both commit. FG-7's independent
+// `cas_set` + Phase CAS validate at commit UNCONDITIONALLY of isolation, so
+// "exactly one wins" must now hold here too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn concurrent_cas_exactly_one_wins_under_snapshot() {
+    use shamir_types::types::common::new_map_wc;
+    use shamir_types::types::value::QueryValue;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let rid = insert_row(&tbl, "counter").await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = shamir_types::types::common::new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let vq = Query::from("t").with_version().build();
+    let vr = tbl.read(&vq, &ctx).await.unwrap();
+    let v1 = vr.versions.as_ref().unwrap()[0];
+
+    let make_op = move |new_val: String| {
+        let mut m = new_map_wc(1);
+        m.insert("name".to_string(), QueryValue::Str(new_val));
+        write::update("t")
+            .where_(filter::eq("name", "counter"))
+            .set(QueryValue::Map(m))
+            .expected_version(v1)
+            .build()
+    };
+
+    let repo_a = repo.clone();
+    let tbl_a = tbl.clone();
+    let repo_b = repo.clone();
+    let tbl_b = tbl.clone();
+
+    // Barrier(2): under heavy scheduler contention (this test running
+    // alongside thousands of others in a full workspace nextest sweep) one
+    // task's `execute_update_tx` immediate check can otherwise be starved
+    // long enough for the OTHER task to fully commit first, bumping the
+    // version BEFORE the starved task's immediate check even runs — that
+    // is a genuine (but uninteresting) staging-time rejection, not the
+    // commit-time race this test exists to prove. The barrier forces both
+    // immediate checks to complete before EITHER task proceeds to commit,
+    // guaranteeing the real race this test targets.
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier_a = barrier.clone();
+    let barrier_b = barrier.clone();
+
+    let task_a = tokio::spawn(async move {
+        let (mut tx, _g) = repo_a.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let interner = tbl_a.interner().get().await.unwrap();
+        let refs = shamir_types::types::common::new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        tbl_a
+            .execute_update_tx(
+                &make_op("writer_a".to_string()),
+                &ctx,
+                &mut tx,
+                None,
+                &shamir_types::access::Actor::System,
+            )
+            .await
+            .unwrap(); // both pass the immediate check
+        barrier_a.wait().await;
+        repo_a.commit_tx(tx).await
+    });
+
+    let task_b = tokio::spawn(async move {
+        let (mut tx, _g) = repo_b.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let interner = tbl_b.interner().get().await.unwrap();
+        let refs = shamir_types::types::common::new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        tbl_b
+            .execute_update_tx(
+                &make_op("writer_b".to_string()),
+                &ctx,
+                &mut tx,
+                None,
+                &shamir_types::access::Actor::System,
+            )
+            .await
+            .unwrap(); // both pass the immediate check
+        barrier_b.wait().await;
+        repo_b.commit_tx(tx).await
+    });
+
+    let (res_a, res_b) = tokio::join!(task_a, task_b);
+    let res_a = res_a.unwrap();
+    let res_b = res_b.unwrap();
+
+    let a_ok = res_a.is_ok();
+    let b_ok = res_b.is_ok();
+    // FG-7: the commit-time loser under Snapshot must surface the NEW
+    // `CasConflict` variant specifically (not `SsiConflict`/`PhantomConflict`
+    // — those stay gated on Serializable and would NOT fire here).
+    let a_conflict = matches!(res_a, Err(CommitError::CasConflict { .. }));
+    let b_conflict = matches!(res_b, Err(CommitError::CasConflict { .. }));
+
+    assert!(
+        (a_ok && b_conflict) || (b_ok && a_conflict),
+        "expected exactly one commit success and one CasConflict abort under \
+         Snapshot isolation, got: a_ok={a_ok} b_ok={b_ok} a_conflict={a_conflict} \
+         b_conflict={b_conflict} res_a={res_a:?} res_b={res_b:?}"
+    );
+
+    // Mandatory test #5: the commit-time CAS failure must map to the
+    // "version_conflict" wire code, not "tx_conflict" — verify the losing
+    // `CommitError::CasConflict` converts to `DbError::VersionConflict`
+    // (whose `.code()` is `"version_conflict"`), mirroring the exact
+    // mapping used by `batch_execute.rs` / `db_tx.rs` / `group_commit.rs`.
+    let loser = if a_conflict { res_a } else { res_b };
+    match loser {
+        Err(CommitError::CasConflict { .. }) => {}
+        other => panic!("expected CommitError::CasConflict, got: {other:?}"),
+    }
+
+    // Retry with the fresh version must succeed.
+    let fresh_v = tbl.read(&vq, &ctx).await.unwrap().versions.unwrap()[0];
+    assert!(
+        fresh_v > v1,
+        "version must have advanced after the winning commit: {v1} -> {fresh_v}"
+    );
+
+    let retry_op = write::update("t")
+        .where_(filter::eq("name", "counter"))
+        .set(mpack!({ "name": "retry_succeeded" }))
+        .expected_version(fresh_v)
+        .build();
+    let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.execute_update_tx(
+        &retry_op,
+        &ctx,
+        &mut tx3,
+        None,
+        &shamir_types::access::Actor::System,
+    )
+    .await
+    .unwrap();
+    let retry = repo.commit_tx(tx3).await;
+    assert!(
+        retry.is_ok(),
+        "retry with fresh version must succeed: {:?}",
+        retry.err()
+    );
+
+    // Silence unused warning.
+    let _ = rid;
+}
+
+// ── Test 6 (FG-7, mandatory #4): non-CAS Snapshot tx unaffected ────────────
+//
+// Two concurrent Snapshot txs writing DIFFERENT keys, with NO
+// `expected_version` set at all (empty `cas_set`), must both commit without
+// waiting on each other — proving the widened CRIT-4 `commit_lock` guard
+// (`!tx.cas_set.is_empty()`) does NOT take the lock for an ordinary,
+// non-CAS Snapshot write. Black-box proxy: both commits complete promptly
+// (bounded by a generous timeout) rather than one blocking on the other's
+// commit_lock hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn non_cas_snapshot_writes_to_different_keys_do_not_serialize() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let _rid1 = insert_row(&tbl, "alice").await;
+    let _rid2 = insert_row(&tbl, "bob").await;
+
+    let repo_a = repo.clone();
+    let tbl_a = tbl.clone();
+    let repo_b = repo.clone();
+    let tbl_b = tbl.clone();
+
+    let task_a = tokio::spawn(async move {
+        let (mut tx, _g) = repo_a.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let interner = tbl_a.interner().get().await.unwrap();
+        let refs = shamir_types::types::common::new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        let op = write::update("t")
+            .where_(filter::eq("name", "alice"))
+            .set(mpack!({ "name": "alice2" }))
+            .build();
+        tbl_a
+            .execute_update_tx(
+                &op,
+                &ctx,
+                &mut tx,
+                None,
+                &shamir_types::access::Actor::System,
+            )
+            .await
+            .unwrap();
+        repo_a.commit_tx(tx).await
+    });
+
+    let task_b = tokio::spawn(async move {
+        let (mut tx, _g) = repo_b.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let interner = tbl_b.interner().get().await.unwrap();
+        let refs = shamir_types::types::common::new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        let op = write::update("t")
+            .where_(filter::eq("name", "bob"))
+            .set(mpack!({ "name": "bob2" }))
+            .build();
+        tbl_b
+            .execute_update_tx(
+                &op,
+                &ctx,
+                &mut tx,
+                None,
+                &shamir_types::access::Actor::System,
+            )
+            .await
+            .unwrap();
+        repo_b.commit_tx(tx).await
+    });
+
+    let joined = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        futures::future::join(task_a, task_b),
+    )
+    .await
+    .expect(
+        "both non-CAS Snapshot commits to different keys must complete promptly \
+         (no commit_lock serialization) — a hang here would indicate the FG-7 \
+         CRIT-4 guard widening incorrectly took the lock for an empty cas_set",
+    );
+    let (res_a, res_b) = joined;
+    res_a.unwrap().expect("writer a must commit");
+    res_b.unwrap().expect("writer b must commit");
+}

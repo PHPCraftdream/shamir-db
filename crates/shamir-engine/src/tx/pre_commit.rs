@@ -466,6 +466,52 @@ pub(super) async fn pre_commit_locked_validate(
         }
     }
 
+    // Phase CAS (FG-7): expected_version validation, independent of
+    // isolation level. Runs for EVERY tx (Snapshot and Serializable alike)
+    // whenever cas_set is non-empty — zero cost otherwise (empty-map check).
+    // Placed after Phase 2/2-bis so a Serializable tx that also used CAS
+    // still surfaces the pre-existing SsiConflict/PhantomConflict class
+    // first (regression test `concurrent_cas_exactly_one_wins` depends on
+    // this ordering); Phase CAS is the backstop for Snapshot/no-SSI paths
+    // where Phase 2/2-bis are no-ops.
+    if !tx.cas_set.is_empty() {
+        // Defensive: every `begin_tx` call site now attaches a version
+        // provider unconditionally (FG-7 step 3), so `None` here should be
+        // unreachable in production. Fail safe (treat as a conflict, same
+        // as `validate_read_set`'s `None => conflict` convention) rather
+        // than silently skipping a CAS check a caller depends on.
+        debug_assert!(
+            tx.version_provider.is_some(),
+            "cas_set non-empty but no version_provider attached"
+        );
+        let provider = tx.version_provider.as_ref();
+        // Mirror `validate_read_set`'s iteration idiom: `iter_sync` is a
+        // synchronous visitor that cannot early-return, so capture the
+        // first conflict and report it after the scan.
+        let mut conflict: Option<(bytes::Bytes, u64, u64)> = None;
+        tx.cas_set.iter_sync(|(table_id, key), expected| {
+            if conflict.is_some() {
+                return false;
+            }
+            match provider.and_then(|p| p.version_of(*table_id, key)) {
+                None => conflict = Some((key.clone(), *expected, 0)),
+                Some(found) if found != *expected => {
+                    conflict = Some((key.clone(), *expected, found));
+                }
+                Some(_) => {}
+            }
+            true
+        });
+        if let Some((key, expected, found)) = conflict {
+            repo.tx_metrics().on_tx_aborted_ssi();
+            return Err(TxError::CasConflict {
+                key,
+                expected,
+                found,
+            });
+        }
+    }
+
     // C6: empty-tx fast-path. No version has been allocated yet (P0c),
     // so nothing to mark — just return.
     if tx.is_empty() {
@@ -571,6 +617,45 @@ pub(super) async fn pre_commit_locked(
             let dep = format!("{:?}", deps[idx]);
             repo.tx_metrics().on_tx_aborted_phantom();
             return Err(TxError::PhantomConflict { dep });
+        }
+    }
+
+    // Phase CAS (FG-7): expected_version validation, independent of
+    // isolation level. See the matching block in `pre_commit_locked_validate`
+    // for the full rationale — both call sites mirror each other exactly.
+    // This path (`pre_commit_locked`, the AsyncIndex commit visibility
+    // route) already always runs under `commit_lock` (taken unconditionally
+    // by its caller), so the validate→publish atomicity CRIT-4 provides for
+    // `commit_tx_lockfree` is a non-issue here — but the CAS check itself
+    // still must run so an AsyncIndex-visibility tx gets the same
+    // "exactly one wins" guarantee as every other commit path.
+    if !tx.cas_set.is_empty() {
+        debug_assert!(
+            tx.version_provider.is_some(),
+            "cas_set non-empty but no version_provider attached"
+        );
+        let provider = tx.version_provider.as_ref();
+        let mut conflict: Option<(bytes::Bytes, u64, u64)> = None;
+        tx.cas_set.iter_sync(|(table_id, key), expected| {
+            if conflict.is_some() {
+                return false;
+            }
+            match provider.and_then(|p| p.version_of(*table_id, key)) {
+                None => conflict = Some((key.clone(), *expected, 0)),
+                Some(found) if found != *expected => {
+                    conflict = Some((key.clone(), *expected, found));
+                }
+                Some(_) => {}
+            }
+            true
+        });
+        if let Some((key, expected, found)) = conflict {
+            repo.tx_metrics().on_tx_aborted_ssi();
+            return Err(TxError::CasConflict {
+                key,
+                expected,
+                found,
+            });
         }
     }
 
