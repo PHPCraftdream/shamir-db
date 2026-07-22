@@ -330,7 +330,12 @@ async fn retention_sweep_runs_in_batched_mode_too() {
     }
 
     // Wait for the batched flusher to land the writes + trigger rotation.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 1s is generous headroom over the 50ms flush interval — under CI-runner
+    // scheduler/filesystem contention (observed: a Windows-hosted runner
+    // needed more than the previous 200ms margin), the batched flusher's
+    // write + threshold check + rotation + retention sweep can take
+    // meaningfully longer than on an idle dev box.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
 
     assert!(
         !dir.join(format!("audit.log.{old_ns:020}")).exists(),
