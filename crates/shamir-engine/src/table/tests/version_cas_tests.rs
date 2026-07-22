@@ -260,14 +260,29 @@ async fn expected_version_zero_match_is_noop() {
 // ── Test 4: CONCURRENT CAS — mandatory ─────────────────────────────────────
 //
 // Two real concurrent Serializable txs: both read the same row at version v1,
-// both call `execute_update_tx` with `expected_version(v1)`. Both pass the
-// immediate check (version_of == v1 at staging time). Both try to COMMIT.
-// The commit pipeline's `validate_read_set` catches the loser: the first
-// committer bumps the version, the second's recorded read (v1) is now stale
-// → SsiConflict abort.
+// both call `execute_update_tx` with `expected_version(v1)`. Both try to
+// COMMIT. The commit pipeline's `validate_read_set` catches the loser: the
+// first committer bumps the version, the second's recorded read (v1) is now
+// stale → SsiConflict abort.
 //
-// Exactly one commit succeeds. The loser must fail with a tx-conflict class
-// error. A retry with the fresh version must then succeed.
+// Each writer's payload sets a NEW field (`last_writer`) rather than
+// overwriting `name` (the `WHERE` predicate's own match field). Overwriting
+// the predicate's own field is a trap: under wide-enough scheduling (the
+// winner's commit — including the field rename — fully lands before the
+// loser's own `execute_update_tx` even runs) the loser's `WHERE name ==
+// "counter"` would legitimately match ZERO rows once the winner renamed it,
+// producing a silent no-op rather than a conflict. `name` stays "counter"
+// for both writers' whole lifetime, so the match is always found regardless
+// of interleaving, and the race is always decided by the CAS check, never
+// by the predicate.
+//
+// The loser can be caught at TWO points, both legitimate "this side lost"
+// outcomes: (1) `execute_update_tx`'s own immediate check (`version_of !=
+// expected`) if the winner's commit already landed before the loser even
+// staged, or (2) the commit pipeline's SSI/CAS validation if both staged
+// before either committed. Exactly one side must reach a real commit
+// success; the other must hit one of these two conflict points. A retry
+// with the fresh version must then succeed.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
@@ -290,7 +305,7 @@ async fn concurrent_cas_exactly_one_wins() {
 
     let make_op = move |new_val: String| {
         let mut m = new_map_wc(1);
-        m.insert("name".to_string(), QueryValue::Str(new_val));
+        m.insert("last_writer".to_string(), QueryValue::Str(new_val));
         write::update("t")
             .where_(filter::eq("name", "counter"))
             .set(QueryValue::Map(m))
@@ -303,12 +318,15 @@ async fn concurrent_cas_exactly_one_wins() {
     let repo_b = repo.clone();
     let tbl_b = tbl.clone();
 
+    // Returns `(succeeded, conflicted)` — `conflicted` covers BOTH the
+    // immediate staging-time version check and the commit-time SSI/CAS
+    // check, since either is a legitimate "this side lost the race" outcome.
     let task_a = tokio::spawn(async move {
         let (mut tx, _g) = repo_a.begin_tx(IsolationLevel::Serializable).await.unwrap();
         let interner = tbl_a.interner().get().await.unwrap();
         let refs = shamir_types::types::common::new_map();
         let ctx = FilterContext::new(interner, &refs);
-        tbl_a
+        if tbl_a
             .execute_update_tx(
                 &make_op("writer_a".to_string()),
                 &ctx,
@@ -317,8 +335,17 @@ async fn concurrent_cas_exactly_one_wins() {
                 &shamir_types::access::Actor::System,
             )
             .await
-            .unwrap(); // both pass the immediate check
-        repo_a.commit_tx(tx).await
+            .is_err()
+        {
+            return (false, true);
+        }
+        match repo_a.commit_tx(tx).await {
+            Ok(_) => (true, false),
+            Err(CommitError::SsiConflict { .. })
+            | Err(CommitError::PhantomConflict { .. })
+            | Err(CommitError::CasConflict { .. }) => (false, true),
+            Err(e) => panic!("unexpected commit error for task_a: {e:?}"),
+        }
     });
 
     let task_b = tokio::spawn(async move {
@@ -326,7 +353,7 @@ async fn concurrent_cas_exactly_one_wins() {
         let interner = tbl_b.interner().get().await.unwrap();
         let refs = shamir_types::types::common::new_map();
         let ctx = FilterContext::new(interner, &refs);
-        tbl_b
+        if tbl_b
             .execute_update_tx(
                 &make_op("writer_b".to_string()),
                 &ctx,
@@ -335,20 +362,21 @@ async fn concurrent_cas_exactly_one_wins() {
                 &shamir_types::access::Actor::System,
             )
             .await
-            .unwrap(); // both pass the immediate check
-        repo_b.commit_tx(tx).await
+            .is_err()
+        {
+            return (false, true);
+        }
+        match repo_b.commit_tx(tx).await {
+            Ok(_) => (true, false),
+            Err(CommitError::SsiConflict { .. })
+            | Err(CommitError::PhantomConflict { .. })
+            | Err(CommitError::CasConflict { .. }) => (false, true),
+            Err(e) => panic!("unexpected commit error for task_b: {e:?}"),
+        }
     });
 
-    let (res_a, res_b) = tokio::join!(task_a, task_b);
-    let res_a = res_a.unwrap();
-    let res_b = res_b.unwrap();
-
-    let a_ok = res_a.is_ok();
-    let b_ok = res_b.is_ok();
-    let a_conflict = matches!(res_a, Err(CommitError::SsiConflict { .. }))
-        || matches!(res_a, Err(CommitError::PhantomConflict { .. }));
-    let b_conflict = matches!(res_b, Err(CommitError::SsiConflict { .. }))
-        || matches!(res_b, Err(CommitError::PhantomConflict { .. }));
+    let (a_ok, a_conflict) = task_a.await.unwrap();
+    let (b_ok, b_conflict) = task_b.await.unwrap();
 
     // Exactly one must succeed; the other must abort with a conflict.
     assert!(
