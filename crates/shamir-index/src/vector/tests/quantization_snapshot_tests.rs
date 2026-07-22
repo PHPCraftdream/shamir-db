@@ -161,7 +161,15 @@ async fn build_fitted_quant_adapter(
 #[tokio::test]
 async fn spike_file_dump_u8_works() {
     let dim = 16usize;
-    let n = 300usize;
+    // 1500 (not 300): `hnsw_rs` assigns graph node layers from an internal,
+    // unseedable RNG (see `crates/shamir-index/src/vector/hnsw_adapter.rs`
+    // lines ~46-58 for the same documented caveat), so a small/under-
+    // connected graph can occasionally miss even a self-query's own id
+    // within top-10 -- observed once on CI. A larger, well-connected graph
+    // keeps this pre-dump sanity check reliable without weakening the
+    // test's actual subject (the before==after dump/reload fidelity check
+    // below, which stays an exact comparison).
+    let n = 1500usize;
     let data = clustered(n, dim, 8, 0.2, 0xCAFE);
 
     // Fit SQ8 quantizer on the data.
