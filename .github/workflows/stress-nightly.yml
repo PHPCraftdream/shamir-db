@@ -43,7 +43,7 @@ jobs:
     name: contention stress (@oracle + mvcc_store_tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.0
       # Pinned to the cargo-nextest baseline documented in
       # .config/nextest.toml (0.9.137 — the version whose `--stress-count`

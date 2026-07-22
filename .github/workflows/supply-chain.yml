@@ -66,7 +66,7 @@ jobs:
     name: cargo deny check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # `cargo deny check` needs a Cargo.lock to resolve the graph; it does not
       # need a Rust toolchain to *check*, but `cargo-deny` shells out to cargo
       # for metadata, so we install the toolchain pinned by rust-toolchain.toml.
@@ -93,7 +93,7 @@ jobs:
     # this job's value is the time-decoupled re-scan.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-audit
         # Pinned: same rationale as cargo-deny above.
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-cyclonedx
         # Pinned: same rationale as cargo-deny above.

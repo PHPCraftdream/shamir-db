@@ -56,7 +56,7 @@ jobs:
     name: ts client e2e (shamir-client-ts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
@@ -118,7 +118,7 @@ jobs:
     name: node napi e2e (tests/e2e)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
