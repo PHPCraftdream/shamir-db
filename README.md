@@ -30,7 +30,7 @@ It is **not** a drop-in replacement for PostgreSQL, MySQL, MongoDB, Redis, or Me
 | PostgreSQL / MySQL | Mature relational engines, decades of ecosystem/tooling, mature query optimizers | **Not a replacement** — no SQL, no comparable optimizer maturity, alpha-only guarantees |
 | Redis / Memcached | In-memory cache semantics, sub-millisecond hot-path latency | **Not a replacement** — S.H.A.M.I.R. is disk-durable transactional storage, not a cache |
 
-**Alpha status.** See the [Project Status](#-project-status) section below and the [versioning/compatibility statement in CHANGELOG.md](CHANGELOG.md#versioning-scheme) — there is no supported in-place upgrade path between alpha releases yet.
+**Alpha status.** See the [Project Status](#-project-status) section below and the [versioning/compatibility statement in CHANGELOG.md](CHANGELOG.md#versioning-scheme) — there is no supported in-place upgrade path between alpha releases yet. For a citation-backed list of current architectural limitations (transactions, schemas, indexes, subscriptions, replication, results, numbers), see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md).
 
 ---
 
