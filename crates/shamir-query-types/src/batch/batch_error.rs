@@ -155,6 +155,25 @@ pub enum BatchError {
         /// The per-session cap that was hit.
         limit: u32,
     },
+
+    /// FG-5b: `CreateCursor` rejected because `ReadQuery.temporal` was
+    /// `AsOf { .. }` or `History { .. }` instead of the default `Latest`.
+    ///
+    /// This is a DELIBERATE, DOCUMENTED scope cut (see
+    /// `docs/dev-artifacts/prompts/post-alpha/03-fg5b-engine-session-cursor.md`
+    /// §2): a cursor pins its snapshot via `RepoTxGate::open_snapshot()`,
+    /// which only pins "whatever is currently committed" — there is no API
+    /// to pin an arbitrary already-past version on demand, and a historical
+    /// version may already be past the MVCC GC floor by the time a cursor
+    /// asks for it. `Temporal::AsOf`/`Temporal::History` on a plain read go
+    /// through separate one-shot, non-resumable code paths not designed for
+    /// incremental keyset pagination. Rather than silently downgrading the
+    /// caller's request to `Latest` (a wrong-results bug), `CreateCursor`
+    /// rejects it outright with this distinct, named error. A future task
+    /// can revisit full historical-cursor support if ever needed.
+    ///
+    /// Wire error code: `cursor_temporal_not_supported`.
+    CursorTemporalNotSupported,
 }
 
 impl std::fmt::Display for BatchError {
@@ -245,6 +264,14 @@ impl std::fmt::Display for BatchError {
             }
             BatchError::CursorLimitExceeded { limit } => {
                 write!(f, "cursor limit exceeded (max: {})", limit)
+            }
+            BatchError::CursorTemporalNotSupported => {
+                write!(
+                    f,
+                    "CreateCursor only supports Temporal::Latest queries (a cursor pins a \
+                     live MVCC snapshot; AsOf/History cursors are out of scope for now — see \
+                     FG-5b)"
+                )
             }
         }
     }

@@ -62,6 +62,11 @@ pub struct ServerHandle {
     /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
     /// task drops and any lingering open txs are dropped (RAII abort).
     pub(super) interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
+    /// FG-5b — periodic reaper for idle-timeout-expired result cursors.
+    /// Drained on shutdown so the `Arc<CursorRegistry>` reference held by
+    /// the task drops and any lingering open cursors release their pinned
+    /// `SnapshotGuard`s (RAII unpin of MVCC GC).
+    pub(super) cursor_reaper: Option<crate::cursor_registry::CursorReaperTask>,
     /// Follower-replication supervisor (386-c). Held here so its follower
     /// loops survive past boot (dropping it would kill every loop). On
     /// shutdown `stop_all()` cancels every running loop before the tasks are
@@ -139,6 +144,12 @@ impl ServerHandle {
         //    above) so its Arc<TxRegistry> drops and any lingering open txs
         //    are dropped (RAII abort).
         if let Some(reaper) = self.interactive_tx_reaper {
+            let _ = reaper.handle.await;
+        }
+        // 8. Join the cursor reaper (FG-5b, also cancelled by the root
+        //    token above) so its Arc<CursorRegistry> drops and any
+        //    lingering open cursors release their pinned SnapshotGuards.
+        if let Some(reaper) = self.cursor_reaper {
             let _ = reaper.handle.await;
         }
     }

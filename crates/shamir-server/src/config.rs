@@ -230,6 +230,10 @@ pub struct SecurityConfig {
     /// Hard cap on per-interactive-tx staged bytes.
     #[serde(default)]
     pub tx: TxLimitsConfig,
+    /// FG-5b — hard caps on server-side result cursors (per-session count,
+    /// idle-timeout eviction).
+    #[serde(default)]
+    pub cursors: CursorLimitsConfig,
     /// Per-subnet `auth_init` rate limit (token-bucket, spec §8).
     /// Each `/24` IPv4 or `/64` IPv6 subnet gets this many tokens per
     /// second. Default 10. Must be in `1..=100_000`.
@@ -243,6 +247,7 @@ impl Default for SecurityConfig {
             connection: Default::default(),
             query_limits: Default::default(),
             tx: Default::default(),
+            cursors: Default::default(),
             auth_init_rate_per_second: default_auth_init_rate_per_second(),
         }
     }
@@ -273,6 +278,44 @@ impl Default for TxLimitsConfig {
 
 fn default_max_tx_bytes() -> usize {
     64 * 1024 * 1024 // 64 MiB
+}
+
+/// FG-5b — server-side hard caps on result cursors.
+///
+/// Without this block, the defaults in
+/// `crate::db_handler::config::CursorLimitsCap::DEFAULT` apply: 16 cursors
+/// per session, 60 s idle-timeout eviction. Each open cursor pins an MVCC
+/// snapshot (via `shamir_tx::SnapshotGuard`), so an unbounded per-session
+/// count or an unbounded idle window would let one client block GC
+/// indefinitely.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CursorLimitsConfig {
+    /// Maximum concurrently-open cursors per session. Default 16.
+    #[serde(default = "default_max_cursors_per_session")]
+    pub max_cursors_per_session: usize,
+    /// Seconds a cursor may sit un-fetched before the background reaper
+    /// reclaims it. Longer than the interactive-tx idle TTL (30 s) — a
+    /// cursor's `FetchNext` cadence is paced by client consumption speed,
+    /// not a single round-trip. Default 60.
+    #[serde(default = "default_cursor_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for CursorLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_cursors_per_session: default_max_cursors_per_session(),
+            idle_timeout_secs: default_cursor_idle_timeout_secs(),
+        }
+    }
+}
+
+fn default_max_cursors_per_session() -> usize {
+    16
+}
+
+fn default_cursor_idle_timeout_secs() -> u64 {
+    60
 }
 
 /// Server-side hard caps on `BatchRequest.limits`.

@@ -22,6 +22,7 @@ pub mod byte_budget;
 pub mod config;
 pub mod conn_limiter;
 pub mod connection;
+pub mod cursor_registry;
 pub mod db_handler;
 pub mod framer;
 pub mod logging;

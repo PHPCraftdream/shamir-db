@@ -49,7 +49,9 @@ use crate::byte_budget::ByteBudget;
 use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
 use crate::connection::{handle_connection, ConnectionContext};
-use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap};
+use crate::db_handler::{
+    AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
+};
 use crate::framer::{TcpFramer, WsFramer};
 use crate::ports::DirectoryPorts;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
@@ -394,6 +396,10 @@ impl ServerLauncher {
             .with_tx_limits(TxLimitsCap {
                 max_tx_bytes: config.security.tx.max_tx_bytes,
             })
+            .with_cursor_limits(CursorLimitsCap {
+                max_cursors_per_session: config.security.cursors.max_cursors_per_session,
+                idle_timeout_secs: config.security.cursors.idle_timeout_secs,
+            })
             // RI-15 — global in-flight response-byte budget. `None` (the
             // default) preserves pre-RI-15 behavior: unbounded, only the
             // per-batch `max_result_size_bytes` cap above applies.
@@ -405,6 +411,7 @@ impl ServerLauncher {
             .with_session_store(session_store.clone()),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
+        let cursor_registry_for_reaper = handler_concrete.cursor_registry();
         let handler: Arc<dyn RequestHandler> = handler_concrete;
 
         // 5b. Follower-replication supervisor (386-c). Constructed here where
@@ -447,6 +454,16 @@ impl ServerLauncher {
             tx_registry_for_reaper,
             crate::tx_registry::DEFAULT_INTERACTIVE_TX_IDLE_TTL,
             crate::tx_registry::DEFAULT_REAPER_INTERVAL,
+            shutdown_token.clone(),
+        ));
+
+        // FG-5b — background reaper for result cursors that outlive their
+        // idle TTL. Shares the root shutdown token, same pattern as the
+        // interactive-tx reaper above.
+        let cursor_reaper = Some(crate::cursor_registry::spawn_reaper_task(
+            cursor_registry_for_reaper,
+            Duration::from_secs(config.security.cursors.idle_timeout_secs),
+            crate::cursor_registry::DEFAULT_CURSOR_REAPER_INTERVAL,
             shutdown_token.clone(),
         ));
 
@@ -792,6 +809,7 @@ impl ServerLauncher {
             observability,
             meta_snapshot_task,
             interactive_tx_reaper,
+            cursor_reaper,
             repl_supervisor: supervisor,
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,

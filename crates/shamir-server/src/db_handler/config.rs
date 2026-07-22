@@ -64,3 +64,34 @@ impl TxLimitsCap {
         max_tx_bytes: usize::MAX,
     };
 }
+
+/// FG-5b — server-side hard caps on result cursors.
+///
+/// `max_cursors_per_session` bounds how many cursors ONE session may have
+/// open concurrently (each pins an MVCC snapshot, so an unbounded count
+/// would let a single client block GC indefinitely). `idle_timeout_secs`
+/// bounds how long a cursor may sit un-fetched before the background
+/// reaper reclaims it. Default 16 cursors / 60 s idle; tests use
+/// [`Self::UNLIMITED`].
+#[derive(Debug, Clone, Copy)]
+pub struct CursorLimitsCap {
+    pub max_cursors_per_session: usize,
+    pub idle_timeout_secs: u64,
+}
+
+impl CursorLimitsCap {
+    /// Effectively-no-cap defaults — for unit tests.
+    pub const UNLIMITED: Self = Self {
+        max_cursors_per_session: usize::MAX,
+        idle_timeout_secs: u64::MAX,
+    };
+
+    /// Operator-facing defaults: 16 cursors/session, 60 s idle TTL. See
+    /// `crate::cursor_registry::DEFAULT_CURSOR_IDLE_TTL` for why 60 s
+    /// (longer than the interactive-tx idle TTL — cursor fetch cadence is
+    /// client-paced, not a single round-trip).
+    pub const DEFAULT: Self = Self {
+        max_cursors_per_session: 16,
+        idle_timeout_secs: 60,
+    };
+}

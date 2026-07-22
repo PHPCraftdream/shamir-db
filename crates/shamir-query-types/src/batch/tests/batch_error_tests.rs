@@ -60,6 +60,30 @@ fn cursor_not_found_and_cursor_expired_are_distinguishable() {
 }
 
 #[test]
+fn cursor_temporal_not_supported_display_mentions_temporal_scope_cut() {
+    // FG-5b: `CreateCursor` on a query whose `Temporal` is `AsOf`/`History`
+    // is rejected with a distinct, clearly-labelled error rather than a
+    // silent downgrade to `Latest` (a wrong-results bug) or a generic
+    // validation error indistinguishable from other rejections.
+    let err = BatchError::CursorTemporalNotSupported;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Latest"),
+        "Display should name the only supported temporal mode: {msg}"
+    );
+}
+
+#[test]
+fn cursor_temporal_not_supported_distinguishable_from_other_cursor_errors() {
+    let temporal_err = BatchError::CursorTemporalNotSupported;
+    let not_found = BatchError::CursorNotFound {
+        cursor_id: CursorId(1),
+    };
+    assert_ne!(temporal_err, not_found);
+    assert_ne!(temporal_err.to_string(), not_found.to_string());
+}
+
+#[test]
 fn cursor_errors_have_no_structured_code_via_batch_error_code() {
     // `BatchError::code()` only ever returns `Some` for `QueryError` — the
     // new cursor variants correctly fall through to `None` there. The
@@ -81,4 +105,5 @@ fn cursor_errors_have_no_structured_code_via_batch_error_code() {
         None
     );
     assert_eq!(BatchError::CursorLimitExceeded { limit: 5 }.code(), None);
+    assert_eq!(BatchError::CursorTemporalNotSupported.code(), None);
 }

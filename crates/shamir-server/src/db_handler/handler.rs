@@ -83,13 +83,14 @@ use crate::byte_budget::{stash_guard, ByteBudget};
 // paths keep resolving.
 pub use shamir_query_types::wire::{DbRequest, DbResponse};
 
+use crate::cursor_registry::CursorRegistry;
 use crate::tx_registry::TxRegistry;
 
 use super::admin::{
     change_password_challenge, change_password_verify, check_destructive_hmacs, create_scram_user,
     is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
 };
-use super::config::{NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
+use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
@@ -172,6 +173,18 @@ pub struct ShamirDbHandler {
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
     pub(super) tx_registry: Arc<TxRegistry>,
+    /// FG-5b — registry of open server-side result cursors, shared across
+    /// all clones of the handler (`Arc`), so a `FetchNext`/`CancelCursor`
+    /// on one dispatch finds the cursor a prior `CreateCursor` parked.
+    pub(super) cursor_registry: Arc<CursorRegistry>,
+    /// FG-5b — server-side hard caps on result cursors (per-session count,
+    /// idle-timeout eviction).
+    pub(super) cursor_limits: CursorLimitsCap,
+    /// FG-5b — monotonic source of fresh `CursorId` values. A plain
+    /// `AtomicU64` (not the tx registry's `RepoTxGate::fresh_tx_id`,
+    /// which is per-repo and async) since cursor ids are a
+    /// server-handler-scoped concept, not an engine one.
+    pub(super) next_cursor_id: Arc<std::sync::atomic::AtomicU64>,
     /// `SessionStore` access for ops that must kill OTHER live sessions of
     /// the calling user (currently only `ChangePasswordVerify`'s spec
     /// §12.5.3 session-kill step). `None` means the handler was built
@@ -203,6 +216,9 @@ impl ShamirDbHandler {
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
+            cursor_registry: Arc::new(CursorRegistry::new()),
+            cursor_limits: CursorLimitsCap::DEFAULT,
+            next_cursor_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             session_store: None,
         }
     }
@@ -219,6 +235,9 @@ impl ShamirDbHandler {
             node_mode: NodeMode::default(),
             leader_epoch: 1,
             tx_registry: Arc::new(TxRegistry::new()),
+            cursor_registry: Arc::new(CursorRegistry::new()),
+            cursor_limits: CursorLimitsCap::DEFAULT,
+            next_cursor_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             session_store: None,
         }
     }
@@ -239,6 +258,13 @@ impl ShamirDbHandler {
     /// Set the per-interactive-tx staging byte cap.
     pub fn with_tx_limits(mut self, tx_limits: TxLimitsCap) -> Self {
         self.tx_limits = tx_limits;
+        self
+    }
+
+    /// Set the server-side result-cursor caps (per-session count,
+    /// idle-timeout). Default [`CursorLimitsCap::DEFAULT`].
+    pub fn with_cursor_limits(mut self, cursor_limits: CursorLimitsCap) -> Self {
+        self.cursor_limits = cursor_limits;
         self
     }
 
@@ -290,6 +316,18 @@ impl ShamirDbHandler {
     /// `Arc` so the reaper task and the handler share state.
     pub fn tx_registry(&self) -> Arc<TxRegistry> {
         Arc::clone(&self.tx_registry)
+    }
+
+    /// FG-5b — borrow the cursor registry so the boot path can spawn the
+    /// periodic reaper against it. Mirrors [`Self::tx_registry`].
+    pub fn cursor_registry(&self) -> Arc<CursorRegistry> {
+        Arc::clone(&self.cursor_registry)
+    }
+
+    /// FG-5b — mint a fresh, process-unique cursor id.
+    pub(super) fn next_cursor_id(&self) -> u64 {
+        self.next_cursor_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -380,41 +418,25 @@ impl RequestHandler for ShamirDbHandler {
                     .await
                 }
 
-                // --- FG-5a: cursor wire protocol — compile-safety stubs
-                // only. Real cursor state (session-scoped MVCC as_of
-                // snapshot, per-session open-cursor cap, idle-timeout
-                // eviction) is NOT wired here — that is FG-5b. These arms
-                // exist solely so the exhaustive `DbRequest` match compiles
-                // once the wire variants land; every one of them returns a
-                // placeholder error today.
-                DbRequest::CreateCursor { .. } => {
-                    // FG-5b: implement — mint a cursor, open the MVCC
-                    // as_of snapshot, return the first `CursorPage`.
-                    DbResponse::Error {
-                        code: "cursor_not_yet_implemented".into(),
-                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
-                    }
+                // --- FG-5b: server-side result cursors ---
+                // See `crate::cursor_registry` and `db_handler::cursor_handlers`
+                // for the registry + snapshot-pinning + keyset-pagination
+                // implementation this dispatches into.
+                DbRequest::CreateCursor {
+                    query_version,
+                    db,
+                    query,
+                    page_size,
+                } => {
+                    self.create_cursor(session, query_version, &db, query, page_size)
+                        .await
                 }
-                DbRequest::FetchNext { .. } => {
-                    // FG-5b: implement — look up the cursor by id, advance
-                    // the scan, return the next `CursorPage`.
-                    DbResponse::Error {
-                        code: "cursor_not_yet_implemented".into(),
-                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
-                    }
-                }
-                DbRequest::CancelCursor { .. } => {
-                    // FG-5b: implement — idempotently drop the cursor's
-                    // server-side state and reply `DbResponse::CursorClosed`
-                    // (canceling an unknown/already-closed cursor is NOT an
-                    // error — see CURSORS.md). This stub intentionally
-                    // returns the same placeholder error as the other two
-                    // arms so the compile-safety stub is uniform and
-                    // trivially greppable until FG-5b lands.
-                    DbResponse::Error {
-                        code: "cursor_not_yet_implemented".into(),
-                        message: "server-side cursors are not implemented yet (FG-5b)".into(),
-                    }
+                DbRequest::FetchNext {
+                    cursor_id,
+                    page_size,
+                } => self.fetch_next(session, cursor_id, page_size).await,
+                DbRequest::CancelCursor { cursor_id } => {
+                    self.cancel_cursor(session, cursor_id).await
                 }
             };
 
@@ -648,5 +670,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         BatchError::CursorNotFound { .. } => "cursor_not_found",
         BatchError::CursorExpired { .. } => "cursor_expired",
         BatchError::CursorLimitExceeded { .. } => "cursor_limit_exceeded",
+        // FG-5b: `CreateCursor` rejects AsOf/History queries outright (see
+        // the variant's doc comment for the scope-cut rationale).
+        BatchError::CursorTemporalNotSupported => "cursor_temporal_not_supported",
     }
 }
