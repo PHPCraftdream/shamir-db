@@ -170,10 +170,22 @@ async function getFreePort(): Promise<number> {
 
 export function writeKtavConfig(
   dir: string,
-  opts: { host: string; port: number; origin: string },
+  opts: {
+    host: string;
+    port: number;
+    origin: string;
+    cursors?: { maxCursorsPerSession?: number; idleTimeoutSecs?: number };
+  },
 ): string {
   const certPath = path.join(dir, 'cert.pem').replace(/\\/g, '/');
   const keyPath = path.join(dir, 'key.pem').replace(/\\/g, '/');
+  const cursorsBlock = opts.cursors
+    ? `
+    cursors: {
+        max_cursors_per_session: ${opts.cursors.maxCursorsPerSession ?? 16}
+        idle_timeout_secs:       ${opts.cursors.idleTimeoutSecs ?? 60}
+    }`
+    : '';
   const cfg = `
 data_dir: ${dir.replace(/\\/g, '/')}
 
@@ -217,7 +229,7 @@ security: {
         max_result_size_bytes:    10485760
         max_execution_time_secs:  30
         max_queries_per_batch:    32
-    }
+    }${cursorsBlock}
 }
 
 audit: {
@@ -256,6 +268,7 @@ export function generateSelfSignedCert(dir: string): boolean {
 
 export async function startServer(opts?: {
   port?: number;
+  cursors?: { maxCursorsPerSession?: number; idleTimeoutSecs?: number };
 }): Promise<ServerHandle> {
   assertServerBinaryFresh();
   const port = opts?.port ?? await getFreePort();
@@ -266,7 +279,12 @@ export async function startServer(opts?: {
     throw new Error('openssl not available — cannot generate self-signed cert');
   }
 
-  const configPath = writeKtavConfig(dataDir, { host: HOST, port, origin: ORIGIN });
+  const configPath = writeKtavConfig(dataDir, {
+    host: HOST,
+    port,
+    origin: ORIGIN,
+    cursors: opts?.cursors,
+  });
   const child = spawn(
     SERVER_BIN,
     ['--config', configPath, '--bootstrap-password', ADMIN_PASSWORD],
