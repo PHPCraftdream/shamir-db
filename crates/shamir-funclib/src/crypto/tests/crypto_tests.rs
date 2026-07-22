@@ -237,18 +237,27 @@ fn argon2id_concurrency_cap_bounds_parallel_calls() {
             let args = [
                 bin(password),
                 bin(salt),
-                QueryValue::Int(16_384), // memory_kb — 16 MiB
-                QueryValue::Int(2),      // time
+                QueryValue::Int(32_768), // memory_kb — 32 MiB
+                QueryValue::Int(3),      // time
                 QueryValue::Int(1),      // parallelism
                 QueryValue::Int(32),     // length
             ];
             // Release all workers at once → simultaneous rush at the semaphore.
             gate.wait();
-            // Moderate profile (16 MiB, t=2): each call holds its permit long
+            // Moderate profile (32 MiB, t=3): each call holds its permit long
             // enough that all `cap` permit holders are provably in-flight
-            // together, while staying small enough (16 MiB) that memory-
-            // bandwidth contention does not fully serialise the calls
-            // independent of the semaphore.
+            // together, while staying well under `A2_MAX_MEMORY_KB` (64 MiB)
+            // so memory-bandwidth contention does not fully serialise the
+            // calls independent of the semaphore. Bumped from the original
+            // 16 MiB/t=2 profile: on constrained-core CI runners (observed:
+            // GitHub-hosted windows-latest), OS thread-scheduling latency for
+            // getting all `n_workers` threads past the barrier and into the
+            // semaphore acquire can exceed a too-short KDF call's own
+            // duration, so the fastest workers finish (and release their
+            // permit) before the slowest ones even arrive — peak_in_flight
+            // then stalls below `cap` despite the barrier. Doubling the cost
+            // widens the in-flight window well past realistic scheduling
+            // jitter without materially slowing the test.
             let res = reg.call("argon2id", &args);
             res.unwrap_or_else(|e| panic!("argon2id call failed: {e:?}"));
         }));
