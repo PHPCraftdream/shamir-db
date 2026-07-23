@@ -431,7 +431,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "shlex",
  "syn 2.0.114",
 ]
@@ -905,7 +905,7 @@ dependencies = [
  "log",
  "pulley-interpreter",
  "regalloc2",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "serde",
  "smallvec",
  "target-lexicon",
@@ -1892,7 +1892,7 @@ dependencies = [
  "compact_str",
  "indexmap",
  "itoa",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "ryu",
  "serde",
 ]
@@ -2002,7 +2002,7 @@ dependencies = [
  "log",
  "lz4_flex",
  "quick_cache",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "self_cell",
  "sfa",
  "tempfile",
@@ -2812,7 +2812,7 @@ dependencies = [
  "bumpalo",
  "hashbrown 0.17.1",
  "log",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "smallvec",
 ]
 
@@ -2981,9 +2981,9 @@ checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.1"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
 
 [[package]]
 name = "rustc_version"
@@ -3345,7 +3345,7 @@ name = "shamir-collections"
 version = "0.1.0-alpha.1"
 dependencies = [
  "indexmap",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]
@@ -3367,7 +3367,7 @@ dependencies = [
  "precis-profiles",
  "rand 0.9.4",
  "rmp-serde",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_bytes",
  "sha2",
@@ -3398,7 +3398,7 @@ dependencies = [
  "rand 0.9.4",
  "rcgen",
  "rmp-serde",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "rustls",
  "sefer-alloc",
  "serde",
@@ -3439,7 +3439,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rust_decimal",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "scc",
  "serde",
  "serde_bytes",
@@ -3510,7 +3510,7 @@ dependencies = [
  "rmp-serde",
  "rust-stemmers",
  "rust_decimal",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "scc",
  "serde",
  "serial_test",
@@ -3776,7 +3776,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rust_decimal",
- "rustc-hash 2.1.1",
+ "rustc-hash 2.1.2",
  "serde",
  "serial_test",
  "shamir-collections",
