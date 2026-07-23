@@ -79,6 +79,46 @@ fn resolve_repo(
         })
 }
 
+/// Authorize `actor` for `Action::Read` on the target table, mirroring the
+/// exact two-call shape `execute_as` uses for the normal batch path
+/// (`crates/shamir-db/src/shamir_db/execute/db_execute.rs::execute_as`,
+/// ~lines 35-65): a `Database` check up front, then a `Table` check for the
+/// specific target. `authorize_access`'s own ancestor-walk already covers the
+/// `Store` link internally, so these two calls are sufficient — no more, no
+/// less. `Actor::System`/`Actor::Admin` short-circuit to `Ok(())` inside
+/// `authorize_access` itself (admin bypass, same as everywhere else).
+async fn authorize_cursor_read(
+    db: &shamir_db::ShamirDb,
+    actor: &shamir_db::access::Actor,
+    db_name: &str,
+    repo_name: &str,
+    table_name: &str,
+) -> Result<(), BatchError> {
+    db.authorize_access(
+        actor,
+        &shamir_db::access::ResourcePath::Database {
+            db: db_name.to_string(),
+        },
+        shamir_db::access::Action::Read,
+    )
+    .await
+    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+
+    db.authorize_access(
+        actor,
+        &shamir_db::access::ResourcePath::Table {
+            db: db_name.to_string(),
+            store: repo_name.to_string(),
+            table: table_name.to_string(),
+        },
+        shamir_db::access::Action::Read,
+    )
+    .await
+    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+
+    Ok(())
+}
+
 /// Wrap an engine [`shamir_storage::error::DbError`] (or any `Display`
 /// error) in the same `BatchError::QueryError` shape every other cursor
 /// error path uses, so `error_code()` classifies it uniformly.
@@ -205,6 +245,13 @@ impl ShamirDbHandler {
         let repo_name = query.from.repo.clone();
         let table_name = query.from.table.clone();
 
+        let actor = session_actor(session);
+        if let Err(e) =
+            authorize_cursor_read(&self.db, &actor, db_name, &repo_name, &table_name).await
+        {
+            return error_response(&e);
+        }
+
         let repo = match resolve_repo(&self.db, db_name, &repo_name) {
             Ok(r) => r,
             Err(e) => return error_response(&e),
@@ -230,7 +277,6 @@ impl ShamirDbHandler {
             tracing::warn!(?e, db = db_name, repo = %repo_name, "create_cursor: drain_all failed");
         }
 
-        let actor = session_actor(session);
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();
         let ctx = match build_filter_context(&table, actor.clone(), &empty_refs).await {
             Ok(c) => c,
@@ -337,12 +383,29 @@ impl ShamirDbHandler {
         }
 
         let table_name = state.query.from.table.clone();
+
+        // Re-authorize on every FetchNext, not just at CreateCursor time: a
+        // pinned snapshot only bounds WHAT DATA a cursor can see, not
+        // whether the actor SHOULD still be allowed to see it — a
+        // permission revoked mid-scroll (between CreateCursor and a later
+        // FetchNext) must close the read here, same class of gap as the
+        // CreateCursor check above. Cheap: no I/O beyond the existing
+        // `resource_meta` catalog reads every other authorize call already
+        // does.
+        let actor = session_actor(session);
+        if let Err(e) =
+            authorize_cursor_read(&self.db, &actor, cursor.db(), cursor.repo(), &table_name).await
+        {
+            self.cursor_registry.remove(cursor_id.0);
+            drop(state);
+            return error_response(&e);
+        }
+
         let table = match repo.get_table(&table_name).await {
             Ok(t) => t,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
 
-        let actor = session_actor(session);
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();
         let ctx = match build_filter_context(&table, actor, &empty_refs).await {
             Ok(c) => c,

@@ -18,8 +18,10 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::chmod;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::read::{OrderBy, ReadQuery, Temporal};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
@@ -123,6 +125,48 @@ fn fetch_next_req(cursor_id: CursorId, page_size: u32) -> DbRequest {
         cursor_id,
         page_size,
     }
+}
+
+/// Open `app.main.items` to `mode` at all three ancestor levels (database,
+/// store, table) — `authorize_access`'s ancestor-walk requires `Execute` on
+/// EVERY ancestor, not just the target, so a non-owner needs all three
+/// chmod'd (mirrors `permission_e2e.rs`'s
+/// `permission_open_default_allows_any_user` "chmod db + repo + table to
+/// OPEN" sequence).
+async fn open_app_main_items(handler: &ShamirDbHandler, mode: u16) {
+    let mut batch = Batch::new();
+    batch.chmod(
+        "db",
+        chmod(
+            ResourceRef::Database {
+                database: "app".into(),
+            },
+            mode,
+        ),
+    );
+    batch.chmod(
+        "store",
+        chmod(
+            ResourceRef::Store {
+                store: ["app".into(), "main".into()],
+            },
+            mode,
+        ),
+    );
+    batch.chmod(
+        "table",
+        chmod(
+            ResourceRef::Table {
+                table: ["app".into(), "main".into(), "items".into()],
+            },
+            mode,
+        ),
+    );
+    handler
+        .db()
+        .execute_as(Actor::System, "app", &batch.build())
+        .await
+        .expect("admin chmod must succeed");
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +404,14 @@ async fn create_cursor_rejects_past_per_session_cap() {
         other => panic!("expected cursor_limit_exceeded, got {other:?}"),
     }
 
-    // A DIFFERENT session is unaffected by alice's cap.
+    // A DIFFERENT session is unaffected by alice's cap. Bob is not the
+    // table's owner (CR-A1 enforces the ACL on the cursor path too, so an
+    // unrelated user is denied by the enforced 0o700 default regardless of
+    // cap) — open db+store+table so this assertion isolates the CAP
+    // behavior from the ACL behavior (covered separately by
+    // `create_cursor_denies_non_owner_without_grant`).
+    open_app_main_items(&handler, 0o777).await;
+
     let bob = other_session();
     let query = ReadQuery::new("items");
     let resp = send(&handler, &bob, create_cursor_req(query, 1)).await;
@@ -532,4 +583,111 @@ fn cursor_temporal_not_supported_is_a_distinct_batch_error_variant() {
         crate::db_handler::handler::error_code(&e),
         "cursor_temporal_not_supported"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CR-A1 (#760) — ACL/DAC enforcement on the cursor create/fetch path.
+//
+// `build_handler_with_rows` creates `app.main.items` owned by alice
+// (`Actor::User(principal64([0xAB; 16]))`, matching `alice_session()`'s
+// `user_id`). New tables default to the enforced 0o700 (owner-rwx-only)
+// mode (see `permission_e2e.rs::permission_open_default_allows_any_user`,
+// "G.4c" note) — so bob (`other_session()`, a distinct non-owner user id)
+// is denied by default with NO chmod needed to set up the negative case.
+// ---------------------------------------------------------------------------
+
+/// Bob (non-owner, no grant) attempts `CreateCursor` against alice's table
+/// → must be denied with `access_denied`, and no cursor may be registered as
+/// a side effect of the attempt.
+#[tokio::test]
+async fn create_cursor_denies_non_owner_without_grant() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let bob = other_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &bob, create_cursor_req(query, 2)).await;
+
+    match resp {
+        DbResponse::Error { code, .. } => {
+            assert_eq!(
+                code, "access_denied",
+                "enforced default (0o700) must deny bob"
+            )
+        }
+        other => panic!("expected access_denied, got {other:?}"),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a denied CreateCursor attempt must not register a cursor"
+    );
+}
+
+/// Positive control: alice (the owner) creates a cursor on her own table →
+/// succeeds normally, proving the new authorize_access calls don't regress
+/// the legitimate owner path.
+#[tokio::test]
+async fn create_cursor_allows_owner() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let alice = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &alice, create_cursor_req(query, 2)).await;
+
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(page.records.len(), 2);
+            assert!(has_more);
+        }
+        other => panic!("expected CursorPage for the owner, got {other:?}"),
+    }
+    assert_eq!(handler.cursor_registry().len(), 1);
+}
+
+/// A permission revoked BETWEEN `CreateCursor` and a later `FetchNext` must
+/// close the read on the very next `FetchNext` — the pinned MVCC snapshot
+/// only bounds what data a cursor observes, not whether the actor should
+/// still be allowed to observe it at all.
+#[tokio::test]
+async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let alice_owner = Actor::User(principal64([0xAB; 16]));
+    let bob = other_session();
+
+    // Admin opens db+store+table so bob (a non-owner) can create a cursor —
+    // `authorize_access`'s ancestor-walk requires Execute on EVERY ancestor,
+    // not just the target table.
+    open_app_main_items(&handler, 0o777).await;
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &bob, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage { cursor_id, .. } => cursor_id,
+        other => panic!("expected CursorPage once opened, got {other:?}"),
+    };
+
+    // Revoke: chmod the table back to owner-only (0o700). Bob no longer
+    // qualifies for the Table-level Read check even though db/store are
+    // still open.
+    let resource = ResourceRef::Table {
+        table: ["app".into(), "main".into(), "items".into()],
+    };
+    let mut close_batch = Batch::new();
+    close_batch.chmod("close", chmod(resource, 0o700));
+    handler
+        .db()
+        .execute_as(alice_owner, "app", &close_batch.build())
+        .await
+        .expect("owner chmod back to 0o700 must succeed");
+
+    let resp = send(&handler, &bob, fetch_next_req(cursor_id, 2)).await;
+    match resp {
+        DbResponse::Error { code, .. } => {
+            assert_eq!(
+                code, "access_denied",
+                "FetchNext must re-check authorization and deny after revocation"
+            )
+        }
+        other => panic!("expected access_denied after mid-scroll revocation, got {other:?}"),
+    }
 }
