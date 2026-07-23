@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, ConnectionSecurity, QueryLimitsConfig};
+use crate::config::{Config, ConnectionSecurity, CursorLimitsConfig, QueryLimitsConfig};
 
 /// Resolve `<workspace>/deploy/<name>` from this crate's `CARGO_MANIFEST_DIR`.
 ///
@@ -175,4 +175,47 @@ fn inflight_budget_at_or_above_result_cap_is_accepted() {
     cfg.security.query_limits.max_inflight_response_bytes = Some(result_cap * 4);
     cfg.validate()
         .expect("max_inflight_response_bytes > max_result_size_bytes must pass validation");
+}
+
+// =============== CR-A3: max_cursor_page_size validation ===============
+
+/// Default `max_cursor_page_size` is 10,000 — the operator-facing cap on
+/// `CreateCursor`/`FetchNext`'s `page_size` field.
+#[test]
+fn default_max_cursor_page_size_is_10_000() {
+    assert_eq!(CursorLimitsConfig::default().max_cursor_page_size, 10_000);
+}
+
+/// `max_cursor_page_size == 0` must be rejected at startup — a zero cap
+/// would make every `CreateCursor`/`FetchNext` request unusable (there is no
+/// valid `page_size` left in the `1..=0` range).
+#[test]
+fn max_cursor_page_size_zero_is_rejected() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+    cfg.security.cursors.max_cursor_page_size = 0;
+
+    let err = cfg
+        .validate()
+        .expect_err("max_cursor_page_size == 0 must fail validation");
+    let message = err.to_string();
+    assert!(
+        message.contains("max_cursor_page_size"),
+        "error message must name the offending field: {message}"
+    );
+}
+
+/// `max_cursor_page_size >= 1` must pass validation.
+#[test]
+fn max_cursor_page_size_nonzero_is_accepted() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+
+    cfg.security.cursors.max_cursor_page_size = 1;
+    cfg.validate()
+        .expect("max_cursor_page_size == 1 must pass validation");
+
+    cfg.security.cursors.max_cursor_page_size = 50_000;
+    cfg.validate()
+        .expect("max_cursor_page_size == 50_000 must pass validation");
 }

@@ -174,6 +174,26 @@ pub enum BatchError {
     ///
     /// Wire error code: `cursor_temporal_not_supported`.
     CursorTemporalNotSupported,
+
+    /// CR-A3: `CreateCursor`/`FetchNext` rejected because `page_size` was
+    /// outside the valid `1..=max` range.
+    ///
+    /// `page_size == 0` previously caused an infinite loop: `has_more` is
+    /// computed as `page.records.len() as u64 >= page_size as u64`, and with
+    /// `page_size == 0` that is `0 >= 0 → true` forever — the bookmark never
+    /// advances, so the page is always empty and `has_more` never becomes
+    /// `false`. `page_size` above `max` is rejected (not silently clamped) —
+    /// a client that thinks it got `page_size` rows per page but silently
+    /// got fewer would misinterpret `has_more` semantics.
+    ///
+    /// Wire error code: `invalid_page_size`.
+    InvalidPageSize {
+        /// The rejected `page_size` value.
+        page_size: u32,
+        /// The configured `max_cursor_page_size` cap (the valid range is
+        /// `1..=max`).
+        max: u32,
+    },
 }
 
 impl std::fmt::Display for BatchError {
@@ -271,6 +291,13 @@ impl std::fmt::Display for BatchError {
                     "CreateCursor only supports Temporal::Latest queries (a cursor pins a \
                      live MVCC snapshot; AsOf/History cursors are out of scope for now — see \
                      FG-5b)"
+                )
+            }
+            BatchError::InvalidPageSize { page_size, max } => {
+                write!(
+                    f,
+                    "page_size must be between 1 and {} (got {})",
+                    max, page_size
                 )
             }
         }

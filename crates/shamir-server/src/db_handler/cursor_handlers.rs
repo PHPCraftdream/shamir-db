@@ -236,6 +236,19 @@ impl ShamirDbHandler {
             };
         }
 
+        // CR-A3: reject page_size == 0 (would make has_more's
+        // `page.records.len() as u64 >= page_size as u64` compute
+        // `0 >= 0 → true` forever, looping the client indefinitely) and
+        // page_size above the configured cap (unbounded materialize/
+        // serialize hazard) up front — before any registry/engine work.
+        let max_page_size = self.cursor_limits.max_cursor_page_size;
+        if page_size == 0 || page_size > max_page_size {
+            return error_response(&BatchError::InvalidPageSize {
+                page_size,
+                max: max_page_size,
+            });
+        }
+
         // Scope cut (FG-5b): only Temporal::Latest cursors are supported.
         // AsOf/History are rejected outright — never silently downgraded.
         if !matches!(query.temporal, Temporal::Latest) {
@@ -379,6 +392,20 @@ impl ShamirDbHandler {
         cursor_id: CursorId,
         page_size: u32,
     ) -> DbResponse {
+        // CR-A3: validate page_size BEFORE the registry lookup — it doesn't
+        // need the cursor, and this avoids a wasted registry hit (and,
+        // critically, avoids ever running the has_more == 0 >= 0 → true
+        // infinite-loop computation below) for a malformed request. A bad
+        // page_size on one FetchNext call must not corrupt or close the
+        // cursor — it isn't looked up at all here, so it stays untouched.
+        let max_page_size = self.cursor_limits.max_cursor_page_size;
+        if page_size == 0 || page_size > max_page_size {
+            return error_response(&BatchError::InvalidPageSize {
+                page_size,
+                max: max_page_size,
+            });
+        }
+
         let cursor = match self
             .cursor_registry
             .get_owned(cursor_id.0, &session.session_id)

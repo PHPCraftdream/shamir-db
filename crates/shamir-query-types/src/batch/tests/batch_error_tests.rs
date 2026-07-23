@@ -84,6 +84,33 @@ fn cursor_temporal_not_supported_distinguishable_from_other_cursor_errors() {
 }
 
 #[test]
+fn invalid_page_size_display_mentions_the_range() {
+    // CR-A3: `page_size == 0` (and `page_size > max`) is rejected with a
+    // distinct, specific error — the message must state the valid range so
+    // a client can self-correct instead of guessing.
+    let err = BatchError::InvalidPageSize {
+        page_size: 0,
+        max: 10_000,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains('0'), "Display must mention page_size: {msg}");
+    assert!(msg.contains("10000"), "Display must mention max: {msg}");
+}
+
+#[test]
+fn invalid_page_size_distinguishable_from_other_cursor_errors() {
+    let invalid = BatchError::InvalidPageSize {
+        page_size: 0,
+        max: 10_000,
+    };
+    let not_found = BatchError::CursorNotFound {
+        cursor_id: CursorId(1),
+    };
+    assert_ne!(invalid, not_found);
+    assert_ne!(invalid.to_string(), not_found.to_string());
+}
+
+#[test]
 fn cursor_errors_have_no_structured_code_via_batch_error_code() {
     // `BatchError::code()` only ever returns `Some` for `QueryError` — the
     // new cursor variants correctly fall through to `None` there. The
@@ -106,4 +133,12 @@ fn cursor_errors_have_no_structured_code_via_batch_error_code() {
     );
     assert_eq!(BatchError::CursorLimitExceeded { limit: 5 }.code(), None);
     assert_eq!(BatchError::CursorTemporalNotSupported.code(), None);
+    assert_eq!(
+        BatchError::InvalidPageSize {
+            page_size: 0,
+            max: 10_000
+        }
+        .code(),
+        None
+    );
 }

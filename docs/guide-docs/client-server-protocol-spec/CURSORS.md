@@ -166,6 +166,7 @@ same envelope every other DB-layer failure uses):
 | `cursor_not_found`      | `FetchNext` against a cursor id the server never issued (`CancelCursor` is idempotent instead — see §4). |
 | `cursor_expired`        | `FetchNext` against a cursor the server evicted after an idle-timeout (FG-5b). Wire-distinguishable from `cursor_not_found`. |
 | `cursor_limit_exceeded` | `CreateCursor` rejected because the session already has the per-session cap (FG-5b) of cursors open. |
+| `invalid_page_size`     | CR-A3: `CreateCursor`/`FetchNext` rejected because `page_size` was `0` (would loop the client forever — `has_more` never becomes `false`) or above the server's configured `max_cursor_page_size` cap. **Rejected, never silently clamped** — a client that thinks it got `page_size` rows per page but silently got fewer would misinterpret `has_more` semantics. The cursor itself (if any) is untouched by this rejection — a bad `page_size` on one `FetchNext` call does not close or corrupt an otherwise-valid cursor. |
 
 **Current status (FG-5a):** none of the above three are enforced yet — no engine
 state exists to detect them. Every `CreateCursor`/`FetchNext`/`CancelCursor` request

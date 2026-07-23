@@ -673,5 +673,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // FG-5b: `CreateCursor` rejects AsOf/History queries outright (see
         // the variant's doc comment for the scope-cut rationale).
         BatchError::CursorTemporalNotSupported => "cursor_temporal_not_supported",
+        // CR-A3: `page_size == 0` (infinite-loop hazard) or `page_size` above
+        // `max_cursor_page_size` (unbounded materialization hazard).
+        BatchError::InvalidPageSize { .. } => "invalid_page_size",
     }
 }

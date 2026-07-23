@@ -399,6 +399,7 @@ impl ServerLauncher {
             .with_cursor_limits(CursorLimitsCap {
                 max_cursors_per_session: config.security.cursors.max_cursors_per_session,
                 idle_timeout_secs: config.security.cursors.idle_timeout_secs,
+                max_cursor_page_size: config.security.cursors.max_cursor_page_size,
             })
             // RI-15 — global in-flight response-byte budget. `None` (the
             // default) preserves pre-RI-15 behavior: unbounded, only the

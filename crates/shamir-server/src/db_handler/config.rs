@@ -71,12 +71,17 @@ impl TxLimitsCap {
 /// open concurrently (each pins an MVCC snapshot, so an unbounded count
 /// would let a single client block GC indefinitely). `idle_timeout_secs`
 /// bounds how long a cursor may sit un-fetched before the background
-/// reaper reclaims it. Default 16 cursors / 60 s idle; tests use
+/// reaper reclaims it. `max_cursor_page_size` (CR-A3) bounds the
+/// `page_size` a `CreateCursor`/`FetchNext` request may ask for — rejecting
+/// `page_size == 0` (an infinite-loop hazard — see
+/// `crate::db_handler::cursor_handlers`) and anything above the cap.
+/// Default 16 cursors / 60 s idle / 10,000 page_size; tests use
 /// [`Self::UNLIMITED`].
 #[derive(Debug, Clone, Copy)]
 pub struct CursorLimitsCap {
     pub max_cursors_per_session: usize,
     pub idle_timeout_secs: u64,
+    pub max_cursor_page_size: u32,
 }
 
 impl CursorLimitsCap {
@@ -84,14 +89,16 @@ impl CursorLimitsCap {
     pub const UNLIMITED: Self = Self {
         max_cursors_per_session: usize::MAX,
         idle_timeout_secs: u64::MAX,
+        max_cursor_page_size: u32::MAX,
     };
 
-    /// Operator-facing defaults: 16 cursors/session, 60 s idle TTL. See
-    /// `crate::cursor_registry::DEFAULT_CURSOR_IDLE_TTL` for why 60 s
-    /// (longer than the interactive-tx idle TTL — cursor fetch cadence is
-    /// client-paced, not a single round-trip).
+    /// Operator-facing defaults: 16 cursors/session, 60 s idle TTL, 10,000
+    /// max page_size. See `crate::cursor_registry::DEFAULT_CURSOR_IDLE_TTL`
+    /// for why 60 s (longer than the interactive-tx idle TTL — cursor fetch
+    /// cadence is client-paced, not a single round-trip).
     pub const DEFAULT: Self = Self {
         max_cursors_per_session: 16,
         idle_timeout_secs: 60,
+        max_cursor_page_size: 10_000,
     };
 }

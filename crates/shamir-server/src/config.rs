@@ -299,6 +299,15 @@ pub struct CursorLimitsConfig {
     /// not a single round-trip. Default 60.
     #[serde(default = "default_cursor_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// CR-A3: maximum `page_size` a `CreateCursor`/`FetchNext` request may
+    /// request. `page_size == 0` is always rejected (it makes `has_more`
+    /// compute `0 >= 0 → true` forever, looping the client indefinitely);
+    /// `page_size` above this cap is rejected outright (not silently
+    /// clamped — a client that thinks it got `page_size` rows per page but
+    /// silently got fewer would misinterpret `has_more` semantics). Default
+    /// 10,000.
+    #[serde(default = "default_max_cursor_page_size")]
+    pub max_cursor_page_size: u32,
 }
 
 impl Default for CursorLimitsConfig {
@@ -306,6 +315,7 @@ impl Default for CursorLimitsConfig {
         Self {
             max_cursors_per_session: default_max_cursors_per_session(),
             idle_timeout_secs: default_cursor_idle_timeout_secs(),
+            max_cursor_page_size: default_max_cursor_page_size(),
         }
     }
 }
@@ -316,6 +326,10 @@ fn default_max_cursors_per_session() -> usize {
 
 fn default_cursor_idle_timeout_secs() -> u64 {
     60
+}
+
+fn default_max_cursor_page_size() -> u32 {
+    10_000
 }
 
 /// Server-side hard caps on `BatchRequest.limits`.
@@ -628,6 +642,15 @@ impl Config {
                      batch could ever be admitted"
                 )));
             }
+        }
+
+        // CR-A3: a zero cap would make every cursor unusable (every
+        // CreateCursor/FetchNext request would be rejected outright — see
+        // `CursorLimitsConfig::max_cursor_page_size`'s doc comment).
+        if self.security.cursors.max_cursor_page_size == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.max_cursor_page_size must be >= 1".into(),
+            ));
         }
 
         if self.listeners.is_empty() {

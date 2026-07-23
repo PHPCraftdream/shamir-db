@@ -385,6 +385,7 @@ async fn create_cursor_rejects_past_per_session_cap() {
         CursorLimitsCap {
             max_cursors_per_session: cap,
             idle_timeout_secs: u64::MAX,
+            max_cursor_page_size: u32::MAX,
         },
     )
     .await;
@@ -437,6 +438,7 @@ async fn idle_timeout_eviction_then_fetch_returns_expired() {
         CursorLimitsCap {
             max_cursors_per_session: 16,
             idle_timeout_secs: 60,
+            max_cursor_page_size: u32::MAX,
         },
     )
     .await;
@@ -641,6 +643,7 @@ async fn exhausted_first_page_cursors_never_exhaust_the_session_cap() {
         CursorLimitsCap {
             max_cursors_per_session: cap,
             idle_timeout_secs: u64::MAX,
+            max_cursor_page_size: u32::MAX,
         },
     )
     .await;
@@ -812,5 +815,167 @@ async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
             )
         }
         other => panic!("expected access_denied after mid-scroll revocation, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR-A3 (#762) — server-side page_size validation: page_size == 0 must
+// never reach the has_more == `0 >= 0 -> true` infinite-loop computation,
+// and page_size above the configured cap must be rejected outright (not
+// silently clamped).
+// ---------------------------------------------------------------------------
+
+/// `CreateCursor` with `page_size = 0` must be a clean error, not a
+/// `CursorPage` that could loop the client forever — and must not register
+/// a cursor as a side effect.
+#[tokio::test]
+async fn create_cursor_rejects_page_size_zero() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 0)).await;
+
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "invalid_page_size");
+            assert!(
+                message.contains('0'),
+                "message should mention the rejected page_size: {message}"
+            );
+        }
+        other => panic!(
+            "page_size = 0 must be rejected with a clean error, not a CursorPage \
+             (which would loop forever), got {other:?}"
+        ),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a page_size = 0 rejection must not register a cursor"
+    );
+}
+
+/// `FetchNext` with `page_size = 0` against an already-open, still-open
+/// cursor must be a clean error — and the cursor itself must remain usable
+/// afterward (a bad page_size on one call must not corrupt or close it).
+#[tokio::test]
+async fn fetch_next_rejects_page_size_zero_and_cursor_survives() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            has_more,
+            ..
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // A bad FetchNext(page_size=0) is a clean error...
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 0)).await;
+    match resp {
+        DbResponse::Error { code, .. } => assert_eq!(code, "invalid_page_size"),
+        other => panic!("expected invalid_page_size, got {other:?}"),
+    }
+
+    // ...and the cursor is untouched: a SUBSEQUENT FetchNext with a valid
+    // page_size still works normally, continuing from where page 1 left off.
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    match resp {
+        DbResponse::CursorPage {
+            cursor_id: cid,
+            page,
+            has_more,
+        } => {
+            assert_eq!(cid, cursor_id);
+            assert_eq!(page.records.len(), 2, "page 2 must still have 2 rows");
+            assert!(has_more, "4 of 5 consumed -> one more row remains");
+        }
+        other => panic!("cursor must remain usable after a bad page_size call, got {other:?}"),
+    }
+}
+
+/// `CreateCursor` with `page_size` above the configured `max_cursor_page_size`
+/// is rejected outright (not silently clamped).
+#[tokio::test]
+async fn create_cursor_rejects_page_size_above_configured_max() {
+    let handler = build_handler_with_rows(
+        5,
+        CursorLimitsCap {
+            max_cursors_per_session: usize::MAX,
+            idle_timeout_secs: u64::MAX,
+            max_cursor_page_size: 10,
+        },
+    )
+    .await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 11)).await;
+
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "invalid_page_size");
+            assert!(
+                message.contains("10"),
+                "message should mention the configured max: {message}"
+            );
+        }
+        other => panic!(
+            "page_size above the configured max must be rejected, not clamped, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a page_size-too-large rejection must not register a cursor"
+    );
+}
+
+/// `FetchNext` with `page_size` above the configured `max_cursor_page_size`
+/// is rejected outright, and the cursor remains usable afterward.
+#[tokio::test]
+async fn fetch_next_rejects_page_size_above_configured_max() {
+    let handler = build_handler_with_rows(
+        5,
+        CursorLimitsCap {
+            max_cursors_per_session: usize::MAX,
+            idle_timeout_secs: u64::MAX,
+            max_cursor_page_size: 10,
+        },
+    )
+    .await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage { cursor_id, .. } => cursor_id,
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 11)).await;
+    match resp {
+        DbResponse::Error { code, .. } => assert_eq!(code, "invalid_page_size"),
+        other => panic!("expected invalid_page_size, got {other:?}"),
+    }
+
+    // Cursor survives the rejected call.
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(page.records.len(), 2);
+            assert!(has_more);
+        }
+        other => panic!(
+            "cursor must remain usable after a rejected too-large page_size call, got {other:?}"
+        ),
     }
 }
