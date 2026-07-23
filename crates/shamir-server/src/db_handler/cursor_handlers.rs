@@ -751,9 +751,22 @@ impl ShamirDbHandler {
             Err(e) => return error_response(&e),
         };
 
+        // CR-B4: fetch one extra "peek" row beyond the client-visible
+        // `page_size` so the true end-of-data can be told apart from "the
+        // result set happens to be an exact multiple of page_size" — without
+        // the peek, `fetched == page_size` is ambiguous, and the OLD
+        // `fetched >= page_size` heuristic reported `has_more: true` on the
+        // genuine last page, causing one spurious empty round-trip (the
+        // `DbResponse::CursorPage::has_more` doc comment promises `true`
+        // means "a further FetchNext will return AT LEAST ONE more record" —
+        // widen to `u64` before the `+1` since `page_size` is validated only
+        // against `max_cursor_page_size` as a `u32`, not against the wider
+        // internal fetch limit; `Pagination::LimitOffset::limit` is already
+        // `Option<u64>`, so this cannot overflow.
+        let internal_limit = (page_size as u64).saturating_add(1);
         let mut first_query = query.clone();
         first_query.pagination = Pagination::LimitOffset {
-            limit: Some(page_size as u64),
+            limit: Some(internal_limit),
             offset: 0,
         };
         first_query.temporal = Temporal::AsOf {
@@ -769,13 +782,26 @@ impl ShamirDbHandler {
         // that case.
         let budget_guard = reserve_page_budget_upfront(self).await;
 
-        let page = match table
+        let mut page = match table
             .read_with_encoding(&first_query, &ctx, Default::default())
             .await
         {
             Ok(p) => p,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
+
+        // CR-B4: the peek row (if present) proves there's at least one more
+        // record beyond `page_size` — trim it off BEFORE the page goes out
+        // over the wire or is measured for the byte budget, so both the
+        // client-visible payload and the budget accounting reflect only the
+        // `page_size` rows actually returned.
+        let has_more = page.records.len() as u64 > page_size as u64;
+        if has_more {
+            page.records.truncate(page_size as usize);
+            if let Some(stats) = page.stats.as_mut() {
+                stats.records_returned = page.records.len() as u64;
+            }
+        }
 
         // CR-A5 (+ CR-B2): gate the page against the per-page byte-size cap
         // and the RI-15 global byte budget BEFORE deciding whether to
@@ -791,7 +817,6 @@ impl ShamirDbHandler {
             return error_response(&e);
         }
 
-        let has_more = page.records.len() as u64 >= page_size as u64;
         let mode = pagination_mode_for_query(&query);
         let (seek_key, tie_skip) = if has_more && mode == PaginationMode::Keyset {
             match page
@@ -1043,15 +1068,22 @@ impl ShamirDbHandler {
                 has_more = outcome.has_more;
             }
             _ => {
+                // CR-B4: same peek-ahead-by-one-row trick as `create_cursor`'s
+                // first page — fetch `effective_page_size + 1` internally so
+                // the true end-of-data can be told apart from an exact
+                // multiple of `effective_page_size`. Widen to `u64` before
+                // the `+1`; `Pagination::LimitOffset::limit` is `Option<u64>`,
+                // so this cannot overflow.
+                let internal_limit = (effective_page_size as u64).saturating_add(1);
                 let mut next_query = base_query.clone();
                 next_query.pagination = Pagination::LimitOffset {
-                    limit: Some(effective_page_size as u64),
+                    limit: Some(internal_limit),
                     offset: state.offset,
                 };
                 next_query.temporal = Temporal::AsOf {
                     at: At::Version(cursor.pinned_version()),
                 };
-                let fetched = match table
+                let mut fetched = match table
                     .read_with_encoding(&next_query, &ctx, Default::default())
                     .await
                 {
@@ -1061,7 +1093,19 @@ impl ShamirDbHandler {
                         return error_response(&wrap_engine_err(e));
                     }
                 };
-                has_more = fetched.records.len() as u64 >= effective_page_size as u64;
+                // The peek row (if present) proves at least one more record
+                // remains beyond `effective_page_size` — trim it off before
+                // it's handed to the client or counted toward the returned
+                // stats, and advance the offset bookmark by the RETURNED
+                // count only (advancing by the peek-inflated fetched count
+                // would skip a row on the next page).
+                has_more = fetched.records.len() as u64 > effective_page_size as u64;
+                if has_more {
+                    fetched.records.truncate(effective_page_size as usize);
+                    if let Some(stats) = fetched.stats.as_mut() {
+                        stats.records_returned = fetched.records.len() as u64;
+                    }
+                }
                 new_offset = state.offset + fetched.records.len() as u64;
                 page = fetched;
                 new_seek_key = None;
