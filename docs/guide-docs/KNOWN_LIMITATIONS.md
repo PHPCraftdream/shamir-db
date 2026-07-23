@@ -159,7 +159,15 @@ artifact).
 - **Query results materialize fully into a `Vec`; no true server-side
   streaming to the client yet.** `QueryResult.records` is a
   `Vec<QueryRecord>` built and returned in one shot. See
-  `crates/shamir-query-types/src/read/query_result.rs:64-66`.
+  `crates/shamir-query-types/src/read/query_result.rs:64-66`. This is now
+  mitigated on the wire/client side by server-side cursors (`CreateCursor`/
+  `FetchNext`/`CancelCursor`, see
+  [`client-server-protocol-spec/CURSORS.md`](client-server-protocol-spec/CURSORS.md)),
+  which page results so neither side holds the full set in memory over the
+  wire at once — but the SERVER still executes a full pinned-version scan
+  per page internally (no true server-side streaming cursor at the engine
+  level), so server-side peak memory during a single page's execution is
+  not reduced by cursors; only wire/client-side memory is.
 - **Result-size and connection caps (current defaults).** A batch
   response is clamped to `max_result_size_bytes` (default **64 MiB**),
   and the server enforces a global `max_active_connections` cap (default
@@ -167,14 +175,26 @@ artifact).
   `crates/shamir-server/src/config.rs:288-318` (`max_result_size_bytes`
   default) and `:330-366` (`max_active_connections`/
   `max_active_connections_per_ip` defaults).
-- **No server-side cursors yet.** Large result sets must currently fit
-  within the result-size cap above; incremental/cursor-based result
-  streaming to the client is planned, see roadmap.
-- **No global inflight response-memory budget across concurrent
-  connections yet.** Each connection is bounded individually by the caps
-  above, but there is no shared ceiling on total in-flight response
-  memory across all connections simultaneously; this is also planned,
-  see roadmap.
+- **Cursors only support `Temporal::Latest` reads.** `AsOf`/`History`
+  queries are rejected outright at `CreateCursor` with
+  `cursor_temporal_not_supported`, not silently downgraded to `Latest`. See
+  `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+  `create_cursor` and
+  `crates/shamir-query-types/src/batch/batch_error.rs`'s
+  `BatchError::CursorTemporalNotSupported`.
+- **`CreateCursor`/`FetchNext` do not yet reject `with_version: true`.**
+  Combining cursor pagination with per-record CAS version stamps
+  (`ReadQuery::with_version`) is unsupported/unverified today and may
+  produce confusing results; avoid combining the two until this is
+  explicitly rejected or supported (tracked separately).
+- **A cursor's "stable snapshot" can still be disturbed by a concurrent
+  DELETE.** A cursor pins an MVCC snapshot version at `CreateCursor` time,
+  but each `FetchNext` re-enumerates the table's CURRENT id set (not a
+  truly frozen id set) before reading each matched id at the pinned
+  version — a row deleted between two `FetchNext` calls stops being
+  enumerated at all, so it silently disappears from the cursor's remaining
+  pages (and, on the no-ORDER-BY offset-bookmark path, shifts subsequent
+  offsets). Tracked separately as a hardening item.
 
 ## 7. Numbers
 

@@ -61,7 +61,7 @@ S.H.A.M.I.R. — самодостаточная база данных на Rust 
 - ✅ Transports: TCP, WebSocket (native + browser)
 - ✅ Session resumption tickets (AES-256-GCM, anti-downgrade, multi-device families)
 - ✅ Audit log with HMAC chain
-- ✅ ACID Transactions: single-batch + **interactive multi-call** (`begin → execute* → commit/rollback`) Snapshot Isolation (SI) + Serializable (SSI) with **predicate/range locks → phantom protection (true serializability)**, crash recovery via WAL V2
+- ✅ ACID Transactions: single-batch + **interactive multi-call** (`begin → execute* → commit/rollback`) Snapshot Isolation (SI) + Serializable (SSI) with **read-set validation guarding point/match-scan reads against concurrent writes** (see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md#1-transactions) for the streaming-scan phantom-protection scope cut — full SSI predicate/range locking over a stream is not yet covered), crash recovery via WAL V2
 - ✅ MVCC versioned reads, history store GC, max-tx-lifetime enforcement, interactive-tx idle/lifetime reaper + per-tx staging budget
 - ✅ Broad workspace test coverage, including property tests for the version codec and SSI read-set validation
 
@@ -132,7 +132,7 @@ The repository's required pre-commit checks are documented in [CONTRIBUTING.md](
 ## 📊 Performance
 
 - **Interning**: ~70% memory reduction for string-heavy data
-- **Streaming**: Constant memory usage regardless of dataset size
+- **Streaming**: bounds wire/client-side memory for unsorted result streams; `ORDER BY`/`GROUP BY`/`DISTINCT` queries and cursor bookmarks still materialize/sort the full matching set server-side before the first page returns (see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md#6-results))
 - **Batch size**: Tunable for optimal throughput
 
 ## 🤝 Contributing

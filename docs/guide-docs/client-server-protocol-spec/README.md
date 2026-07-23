@@ -33,7 +33,7 @@
 - **[AUTH_PROTOCOL.md](AUTH_PROTOCOL.md)** — handshake, key derivation, errors. Transport-agnostic.
 - **[SESSION_RESUMPTION.md](SESSION_RESUMPTION.md)** — fast reconnect, anti-downgrade rules.
 - **[SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)** — live subscriptions v1.1: SubscribeOp/UnsubscribeOp, PushEnvelope, grant rejection codes, filter contract, early-buffer rule.
-- **[CURSORS.md](CURSORS.md)** — server-side result cursors v1 (FG-5a): CreateCursor/FetchNext/CancelCursor, CursorPage/CursorClosed, error codes. Wire contract only — engine/session state lands in FG-5b.
+- **[CURSORS.md](CURSORS.md)** — server-side result cursors v1: CreateCursor/FetchNext/CancelCursor, CursorPage/CursorClosed, error codes. Backed by real MVCC-snapshot-pinned engine/session state (not wire-only scaffolding).
 
 ### Reference (informative)
 - **[SECURITY_MODEL.md](SECURITY_MODEL.md)** — adversary model, threat coverage, non-guarantees.

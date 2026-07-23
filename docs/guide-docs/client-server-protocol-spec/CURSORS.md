@@ -1,12 +1,18 @@
 # Server-Side Cursors — Wire Format v1 (FG-5a)
 
-> Status: v1 — normative for the **wire shapes** described here. The engine/session
-> state that actually backs a cursor (MVCC as_of snapshot, per-session open-cursor
-> cap, idle-timeout eviction) is **NOT implemented yet** — that is FG-5b. This
-> document specifies the stable wire contract in advance so FG-5b/c/d/e can build
-> against it without another protocol revision. Every request described here is
-> currently answered by a placeholder `DbResponse::Error { code:
-> "cursor_not_yet_implemented" }` (see §6).
+> Status: v1, backed by REAL engine/session state (FG-5b shipped). A cursor is
+> pinned to an MVCC snapshot at `CreateCursor` time and pages through results via
+> keyset-style (or row-count-offset, when there's no simple single-column `ORDER
+> BY`) bookmarking; `FetchNext` re-runs the pinned-snapshot read with an advancing
+> bookmark rather than holding a live engine stream open across round-trips. Only
+> `Temporal::Latest` queries may open a cursor — `AsOf`/`History` are rejected
+> outright with `cursor_temporal_not_supported` (§6), not silently downgraded. A
+> per-session open-cursor cap and an idle-timeout reaper are both enforced (§1,
+> §2). Wave A hardening (ACL checks on open/fetch, no leaked registration of an
+> already-exhausted first page, `page_size` validation, byte-budget + per-page
+> size-cap coverage, and a tie-safe keyset bookmark for duplicate `ORDER BY`
+> values) has also landed — see §6 and the R-6 cost-model note below for what has
+> NOT yet landed.
 
 ---
 
@@ -24,7 +30,7 @@ A cursor's lifecycle is three request/response pairs:
 2. **Fetch-next** (repeatable) — `FetchNext` returns the next page, as many times
    as needed until `has_more == false`.
 3. **Close** — either explicit (`CancelCursor`, client-initiated) or implicit
-   (server-side idle-timeout eviction — see FG-5b; not yet enforced).
+   (server-side idle-timeout eviction — enforced today, see below).
 
 ```
 client                                              server
@@ -45,8 +51,25 @@ client                                              server
   │◄───────────────────────────────────────────────── │
 ```
 
-Idle-timeout eviction (implicit close with no client-initiated request) is detailed
-in FG-5b — referenced here as the counterpart to explicit cancel, not re-described.
+Idle-timeout eviction (implicit close with no client-initiated request) is enforced
+by a background reaper task (`crates/shamir-server/src/cursor_registry.rs`,
+`spawn_reaper_task`): a cursor idle longer than `security.cursors.idle_timeout_secs`
+(default 60s) is evicted on the next sweep (default interval 5s), releasing its
+pinned MVCC snapshot. A `FetchNext` racing the reaper against a just-evicted cursor
+gets the wire-distinguishable `cursor_expired` (§6), not `cursor_not_found`.
+
+**Cost model — cursors reduce wire/client memory, not server-side per-page execution
+cost.** Each `FetchNext` re-executes a full pinned-version table scan server-side to
+reach the next page: the underlying `AsOf` read path enumerates the table's current
+id set, individually looks up each matched id at the pinned version, and — when the
+query has an `ORDER BY` (the normal cursor case) — sorts the entire matched set
+before slicing off one page. The cost model is therefore **O(table) per page, not
+O(page_size)**, and server-side peak memory for a single page's execution is
+approximately the size of the FULL matching set, not just that page. This matters
+for a consumer deciding between a cursor and a single large `Read` with
+`max_result_size_bytes` headroom: a cursor bounds wire/client-side memory across
+many round-trips, but it does not make any individual `FetchNext` cheaper or
+lighter on the server than the equivalent one-shot read over the same data.
 
 ---
 
@@ -74,7 +97,8 @@ rename_all = "snake_case")]`).
 
 On success the server replies with the first page as `CursorPage` (§4). Rejections
 (query-language version mismatch, unknown db, permission, per-session cursor cap —
-FG-5b) surface through the normal `DbResponse::Error` path.
+enforced via `security.cursors.max_cursors_per_session`, default 16) surface through
+the normal `DbResponse::Error` path.
 
 ---
 
@@ -93,7 +117,7 @@ Wire discriminator: `"op": "fetch_next"`.
 
 On success the server replies with the next page as `CursorPage` (§4). Fetching an
 unknown cursor id → `cursor_not_found` (§5); fetching an idle-timeout-evicted cursor
-(FG-5b) → `cursor_expired` (§5) — the two are wire-distinguishable so a client can
+→ `cursor_expired` (§5) — the two are wire-distinguishable so a client can
 tell "that id was never valid" apart from "you waited too long".
 
 ---
@@ -158,41 +182,31 @@ Wire discriminator: `"kind": "cursor_closed"`. Returned by `CancelCursor`.
 
 ## 6. Errors
 
-Three new `BatchError` variants (surfaced as `DbResponse::Error { code, message }`,
-same envelope every other DB-layer failure uses):
+`BatchError` variants (surfaced as `DbResponse::Error { code, message }`,
+same envelope every other DB-layer failure uses). All error codes in this table are
+LIVE — every one is actually enforced by the engine/session cursor state today, not
+a placeholder:
 
-| Code                    | Condition                                                                                          |
-|-------------------------|------------------------------------------------------------------------------------------------------|
-| `cursor_not_found`      | `FetchNext` against a cursor id the server never issued (`CancelCursor` is idempotent instead — see §4). |
-| `cursor_expired`        | `FetchNext` against a cursor the server evicted after an idle-timeout (FG-5b). Wire-distinguishable from `cursor_not_found`. |
-| `cursor_limit_exceeded` | `CreateCursor` rejected because the session already has the per-session cap (FG-5b) of cursors open. |
-| `invalid_page_size`     | CR-A3: `CreateCursor`/`FetchNext` rejected because `page_size` was `0` (would loop the client forever — `has_more` never becomes `false`) or above the server's configured `max_cursor_page_size` cap. **Rejected, never silently clamped** — a client that thinks it got `page_size` rows per page but silently got fewer would misinterpret `has_more` semantics. The cursor itself (if any) is untouched by this rejection — a bad `page_size` on one `FetchNext` call does not close or corrupt an otherwise-valid cursor. |
-
-**Current status (FG-5a):** none of the above three are enforced yet — no engine
-state exists to detect them. Every `CreateCursor`/`FetchNext`/`CancelCursor` request
-today gets a single placeholder response:
-
-```msgpack
-{ "kind": "error", "code": "cursor_not_yet_implemented", "message": "server-side cursors are not implemented yet (FG-5b)" }
-```
-
-This placeholder exists purely so the wire shapes above can be exercised end-to-end
-(encode → dispatch → decode) before the real engine/session cursor state lands.
-Clients integrating against this document should NOT special-case
-`cursor_not_yet_implemented` beyond treating it as an ordinary `DbResponse::Error` —
-it will disappear once FG-5b ships.
+| Code                        | Condition                                                                                          |
+|------------------------------|------------------------------------------------------------------------------------------------------|
+| `cursor_not_found`          | `FetchNext` against a cursor id the server never issued (`CancelCursor` is idempotent instead — see §4). |
+| `cursor_expired`            | `FetchNext` against a cursor the server evicted after an idle-timeout. Wire-distinguishable from `cursor_not_found` via a short-lived server-side tombstone. |
+| `cursor_limit_exceeded`     | `CreateCursor` rejected because the session already has `security.cursors.max_cursors_per_session` cursors open. |
+| `invalid_page_size`         | CR-A3: `CreateCursor`/`FetchNext` rejected because `page_size` was `0` (would loop the client forever — `has_more` never becomes `false`) or above the server's configured `max_cursor_page_size` cap. **Rejected, never silently clamped** — a client that thinks it got `page_size` rows per page but silently got fewer would misinterpret `has_more` semantics. The cursor itself (if any) is untouched by this rejection — a bad `page_size` on one `FetchNext` call does not close or corrupt an otherwise-valid cursor. |
+| `cursor_temporal_not_supported` | `CreateCursor` rejected because `query.temporal` was not `Temporal::Latest`. `AsOf`/`History` cursors are out of scope (see the status blockquote above) — rejected outright, never silently downgraded to `Latest`. |
+| `cursor_page_too_large`     | CR-A5: a page's serialized size (measured once per `CreateCursor`/`FetchNext` call) exceeded `security.query_limits.max_result_size_bytes`. Rejected outright, same "never silently truncated" discipline as `invalid_page_size` — no budget is acquired and the cursor's bookmark state is left untouched by the rejection, so the client can retry with a smaller `page_size`. |
 
 ---
 
 ## 7. Out of scope for this document
 
-- **Cursor engine/session state** (MVCC as_of snapshot pinning, per-session open-cursor
-  cap enforcement, idle-timeout eviction) — FG-5b.
 - **Rust SDK ergonomic streaming** (an async `Stream` wrapper over
-  create/fetch-next/cancel) — FG-5c.
-- **TS SDK ergonomic streaming** (an async iterator wrapper) — FG-5d.
+  create/fetch-next/cancel) — `Client::stream_cursor`, shipped.
+- **TS SDK ergonomic streaming** (an async iterator wrapper) —
+  `ShamirClient.streamCursor` / `Db.cursor`, shipped.
 - **End-to-end tests** covering idle-timeout, cancel, and per-session cap behavior —
-  FG-5e.
+  shipped; see `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`
+  and `crates/shamir-server/src/tests/cursor_registry_tests.rs`.
 
 ---
 
@@ -206,15 +220,20 @@ Rust types (wire DTOs):
   newtype, `#[serde(transparent)]` — round-trips as a bare integer, not a wrapped
   object).
 - `crates/shamir-query-types/src/batch/batch_error.rs` — `BatchError::{CursorNotFound,
-  CursorExpired, CursorLimitExceeded}`.
+  CursorExpired, CursorLimitExceeded, CursorTemporalNotSupported, InvalidPageSize,
+  CursorPageTooLarge}`.
 - `crates/shamir-query-types/src/read/query_result.rs` — `QueryResult` (reused
   verbatim as `CursorPage.page`).
 
 Server implementation:
 
-- `crates/shamir-server/src/db_handler/handler.rs` — `RequestHandler::handle`'s
-  compile-safety stub arms (return `cursor_not_yet_implemented` for all three
-  requests today; FG-5b replaces them with real cursor state).
+- `crates/shamir-server/src/db_handler/cursor_handlers.rs` — `ShamirDbHandler::{
+  create_cursor, fetch_next, cancel_cursor}`, the real dispatch for all three
+  requests (ACL check, registry lookup/registration, pinned-snapshot `AsOf` read,
+  byte-budget/size-cap enforcement).
+- `crates/shamir-server/src/cursor_registry.rs` — `CursorRegistry`/`Cursor`/
+  `CursorState`, the per-session cursor table, idle-timeout reaper, and
+  `cursor_expired` tombstone mechanism.
 
 Reference client builders (produce the shapes above — see "Query construction —
 builder only" in `CLAUDE.md`):
