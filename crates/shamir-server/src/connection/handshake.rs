@@ -398,11 +398,15 @@ async fn run_handshake<F: Framer>(
     // Reset lockout on success per spec §5.2.5 NORMATIVE.
     ctx.lockout.reset_on_success(pair);
 
-    // RI-9: consume the bootstrap token on the first successful login for
-    // the username it was issued to. Best-effort and non-fatal — a failure
-    // here must NEVER abort an otherwise-successful login; the boot-time
-    // TTL sweep (`server_launcher.rs`) is the backstop for anything missed
-    // here.
+    // RI-9 / CR-A6: consume the bootstrap token on the first successful
+    // login for the username it was issued to, AND rotate the account's
+    // SCRAM credential to a fresh random value nobody knows — otherwise
+    // the token keeps working as the account's password forever (the bug
+    // CR-A6 fixes; see `bootstrap.rs::rotate_bootstrap_credential_to_random`
+    // for the residual-race note). Best-effort and non-fatal throughout —
+    // a failure here must NEVER abort an otherwise-successful login; the
+    // boot-time TTL sweep (`server_launcher.rs`) is the backstop for
+    // anything missed here.
     if ctx.meta.bootstrap_token_active()
         && ctx.meta.bootstrap_username().as_deref() == Some(username.as_str())
     {
@@ -415,6 +419,19 @@ async fn run_handshake<F: Framer>(
         }
         if let Err(e) = ctx.meta.consume_bootstrap_token() {
             tracing::warn!(?e, "bootstrap: failed to consume token record on login");
+        }
+        // Rotate AFTER the file/meta cleanup above, mirroring the sweep's
+        // ordering — same `kdf` this login itself just verified against,
+        // same `now_ns` already computed for the lockout pre-check.
+        if let Err(e) = crate::bootstrap::rotate_bootstrap_credential_to_random(
+            &ctx.user_dir,
+            username.as_str(),
+            kdf,
+            now_ns,
+        )
+        .await
+        {
+            tracing::warn!(?e, "bootstrap: failed to rotate SCRAM credential on login");
         }
     }
 

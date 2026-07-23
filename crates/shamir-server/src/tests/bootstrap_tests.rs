@@ -2,10 +2,12 @@ use std::fs;
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::time::UnixNanos;
 use tempfile::TempDir;
 
 use crate::bootstrap::{
-    ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
+    ensure_superuser, rotate_bootstrap_credential_to_random, BootstrapOutcome, BootstrapPolicy,
+    DEFAULT_BOOTSTRAP_NAME,
 };
 use crate::user_directory::FjallUserDirectory;
 use shamir_connect::server::admin::UserDirectory;
@@ -150,5 +152,58 @@ fn derived_keys_match_real_login_flow() {
     assert_eq!(
         redo.stored_key.0, stored.stored_key.0,
         "stored_key must round-trip through ensure_superuser"
+    );
+}
+
+/// CR-A6 unit coverage: [`rotate_bootstrap_credential_to_random`] must
+/// replace BOTH the salt and the `stored_key` with fresh values, so the
+/// original bootstrap token (used as the password here) no longer verifies
+/// against the post-rotation record.
+#[tokio::test]
+async fn rotate_bootstrap_credential_invalidates_old_password() {
+    let dir = TempDir::new().unwrap();
+    let dir_path = dir.path();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
+    let kdf = fast_kdf();
+
+    let token = "the-bootstrap-token-used-as-a-password";
+    ensure_superuser(
+        &user_dir,
+        dir_path,
+        DEFAULT_BOOTSTRAP_NAME,
+        BootstrapPolicy::Password(token.as_bytes()),
+        &kdf,
+    )
+    .unwrap();
+
+    let before = user_dir.lookup_by_name(DEFAULT_BOOTSTRAP_NAME).unwrap();
+    assert!(
+        DerivedKeys::derive(token.as_bytes(), &before.salt, &before.kdf_params)
+            .map(|d| d.stored_key.0 == before.stored_key.0)
+            .unwrap_or(false),
+        "sanity: the token must verify BEFORE rotation"
+    );
+
+    let now_ns = UnixNanos::now().as_u64();
+    rotate_bootstrap_credential_to_random(&user_dir, DEFAULT_BOOTSTRAP_NAME, kdf, now_ns)
+        .await
+        .expect("rotation must succeed");
+
+    let after = user_dir.lookup_by_name(DEFAULT_BOOTSTRAP_NAME).unwrap();
+    assert_ne!(
+        before.salt, after.salt,
+        "rotation must install a fresh random salt"
+    );
+    assert_ne!(
+        before.stored_key.0, after.stored_key.0,
+        "rotation must install a fresh random stored_key"
+    );
+
+    let would_still_verify = DerivedKeys::derive(token.as_bytes(), &after.salt, &after.kdf_params)
+        .map(|d| d.stored_key.0 == after.stored_key.0)
+        .unwrap_or(false);
+    assert!(
+        !would_still_verify,
+        "the OLD token must no longer verify against the ROTATED record"
     );
 }

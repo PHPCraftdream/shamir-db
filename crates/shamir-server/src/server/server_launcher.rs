@@ -159,16 +159,28 @@ impl ServerLauncher {
         )
         .map_err(|e| BootError::AuditAppender(e.to_string()))?;
 
-        // 1b. Boot-time bootstrap-token TTL sweep (RI-9). Runs unconditionally,
-        // in ALL bootstrap modes, BEFORE the bootstrap step below: a
-        // previously-issued token from an earlier `RandomToken` boot can
-        // still be outstanding and expired even if this boot is
-        // `Skip`/`Password`. Best-effort — an I/O failure deleting the file
-        // is logged and does not fail boot; `consume_bootstrap_token` is
-        // called regardless so the meta row is cleared either way.
+        // Hoisted from step 2 below (CR-A6): the TTL sweep now also needs
+        // `kdf_for_bootstrap` to rotate an expired-and-unused token's SCRAM
+        // credential, so this construction moved ahead of the sweep block.
+        let kdf_for_bootstrap = kdf_from_config(&config.kdf_defaults);
+
+        // 1b. Boot-time bootstrap-token TTL sweep (RI-9 + CR-A6). Runs
+        // unconditionally, in ALL bootstrap modes, BEFORE the bootstrap step
+        // below: a previously-issued token from an earlier `RandomToken`
+        // boot can still be outstanding and expired even if this boot is
+        // `Skip`/`Password`. Best-effort — an I/O failure deleting the file,
+        // or a rotation failure, is logged and does not fail boot;
+        // `consume_bootstrap_token` is called regardless so the meta row is
+        // cleared either way. CR-A6: also rotates the account's SCRAM
+        // credential to a fresh random value — without this an unused,
+        // TTL-expired token would still work as the account's password
+        // forever, contradicting the "one-time token" guarantee. The
+        // username MUST be read BEFORE `consume_bootstrap_token()` clears
+        // the bookkeeping row (order matters).
         {
             let now_ns = UnixNanos::now().as_u64();
             if meta.bootstrap_token_expired(now_ns) {
+                let expired_username = meta.bootstrap_username();
                 if let Some(path) = meta.bootstrap_token_path() {
                     if let Err(e) = std::fs::remove_file(&path) {
                         if e.kind() != std::io::ErrorKind::NotFound {
@@ -183,11 +195,25 @@ impl ServerLauncher {
                 if let Err(e) = meta.consume_bootstrap_token() {
                     tracing::warn!(?e, "bootstrap: failed to consume expired token record");
                 }
+                if let Some(name) = expired_username {
+                    if let Err(e) = crate::bootstrap::rotate_bootstrap_credential_to_random(
+                        &user_dir,
+                        &name,
+                        kdf_for_bootstrap,
+                        now_ns,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            ?e,
+                            "bootstrap: failed to rotate SCRAM credential for expired token"
+                        );
+                    }
+                }
             }
         }
 
         // 2. Bootstrap (idempotent).
-        let kdf_for_bootstrap = kdf_from_config(&config.kdf_defaults);
         match &bootstrap {
             BootstrapMode::Password { username, password } => {
                 let outcome = ensure_superuser(

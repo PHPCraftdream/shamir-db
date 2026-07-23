@@ -18,14 +18,19 @@
 //! URL-safe token, prints it ONCE to the configured logger at WARN level,
 //! AND writes it to `data_dir/bootstrap_token.txt` (or the operator's
 //! `--bootstrap-token-path` override — see `BootstrapPolicy::RandomToken`)
-//! with restrictive permissions. The token now auto-deletes itself: the
-//! server (`server_launcher.rs`, wired via `ServerMetaStore`) removes the
-//! file and consumes the token record on the FIRST successful login for
-//! this username (primary path), or via a 24h TTL boot-time sweep for any
-//! token nobody ever used (backstop). Operators who want an immediate
-//! belt-and-braces guarantee can still delete the file manually right
-//! after reading it and logging in — that remains safe and recommended,
-//! it's just no longer the only mechanism.
+//! with restrictive permissions. The token is truly one-time (CR-A6): on
+//! the FIRST successful login for this username (primary path), or via a
+//! 24h TTL boot-time sweep for any token nobody ever used (backstop), the
+//! server (`connection/handshake.rs` / `server/server_launcher.rs`, both
+//! wired via `ServerMetaStore`) removes the token file, consumes the
+//! bookkeeping record, AND rotates the account's SCRAM credential
+//! (`stored_key`/`server_key`) to a freshly-generated random value that is
+//! never logged or persisted anywhere — so the token itself stops
+//! authenticating after either event, instead of continuing to work as a
+//! permanent password. Operators who want an immediate belt-and-braces
+//! guarantee can still delete the file manually right after reading it and
+//! logging in — that remains safe and recommended, it's just no longer the
+//! only mechanism.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -40,6 +45,7 @@ use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
 
+use crate::db_handler::derive_scram_record;
 use crate::user_directory::FjallUserDirectory;
 
 /// Default name of the auto-created superuser.
@@ -189,5 +195,59 @@ fn insert_superuser(dir: &FjallUserDirectory, name: &str, record: UserRecord) ->
     // now_ns=0: grant without bumping the validity epoch (no existing
     // sessions can be invalidated on a fresh install anyway).
     dir.set_superuser(name, true, 0)?;
+    Ok(())
+}
+
+/// CR-A6: rotate `username`'s SCRAM credential to a fresh, random,
+/// permanently-unknown value.
+///
+/// Called at BOTH points where an outstanding bootstrap token is consumed —
+/// the first successful token login (`connection/handshake.rs`) and the
+/// boot-time TTL sweep for an unused token (`server/server_launcher.rs`) —
+/// so the token stops working as the account's password the moment either
+/// event fires, rather than continuing to function as a permanent
+/// credential (the bug this fixes).
+///
+/// The random "password" fed into [`derive_scram_record`] is generated,
+/// used once, and dropped immediately — it is never logged, returned, or
+/// persisted anywhere; only the derived `stored_key`/`server_key` reach the
+/// directory.
+///
+/// Best-effort and non-fatal by design, exactly like the token-file-delete
+/// and `consume_bootstrap_token()` calls it sits next to at both call
+/// sites: a rotation failure here must NOT abort an otherwise-successful
+/// login or fail boot. Returns `Err` (for the caller to log) rather than
+/// panicking; the caller decides how to surface it.
+///
+/// Residual (documented, not fixed): two near-simultaneous logins with the
+/// same token can both pass SCRAM verification before either rotation
+/// completes, since proof verification reads the CURRENT `stored_key` at
+/// check time, which is still valid until this function's write lands. The
+/// invariant this function provides is "the token stops working AFTER
+/// rotation completes," not "exactly one concurrent use ever succeeds" —
+/// that residual is acceptable and not worth distributed locking for.
+pub(crate) async fn rotate_bootstrap_credential_to_random(
+    user_dir: &FjallUserDirectory,
+    username: &str,
+    kdf: KdfParams,
+    now_ns: u64,
+) -> Result<(), String> {
+    // 32 random bytes -> ~43 char base64-url-no-pad, same shape as the
+    // original token — length doesn't matter here since Argon2id hashes it
+    // regardless, but reusing the same encoding keeps this obviously
+    // parallel to the token-generation code above.
+    let raw: [u8; 32] = random_array();
+    let random_password = URL_SAFE_NO_PAD.encode(raw);
+    let record = derive_scram_record(random_password, kdf).await?;
+    user_dir
+        .update_credentials(
+            username,
+            record.salt,
+            record.stored_key,
+            *record.server_key,
+            kdf,
+            now_ns,
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }

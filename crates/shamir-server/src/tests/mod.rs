@@ -1,5 +1,6 @@
 pub mod access_tree_tests;
 pub mod backup_tests;
+pub mod bootstrap_rotation_changepw_tests;
 pub mod bootstrap_tests;
 pub mod byte_budget_tests;
 pub mod config_tests;
