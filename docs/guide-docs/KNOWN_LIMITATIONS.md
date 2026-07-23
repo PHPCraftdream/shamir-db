@@ -194,6 +194,43 @@ artifact).
   `create_cursor` and
   `crates/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorWithVersionNotSupported`.
+- **Keyset-mode cursors: `Null`/missing `ORDER BY` values are handled;
+  mixed-type and `NaN` `ORDER BY` values are NOT (CR-D2, #783).** A
+  keyset cursor's page boundary is an inclusive `field >= seek_key` (ASC) /
+  `field <= seek_key` (DESC) filter — any row whose `ORDER BY` value cannot
+  be compared to `seek_key` makes that filter unresolvable (`false`),
+  silently excluding the row from every page after the first with a clean
+  `has_more: false` at the end (no error). Current state:
+  - **`Null` / missing value — CLOSED.** `CreateCursor` now runs one cheap
+    `WHERE <order_by_field> IS NULL LIMIT 1` existence probe against the
+    same pinned snapshot the first page reads, before running that first
+    page. If it finds any row, the WHOLE cursor is pinned to row-count-offset
+    pagination from creation, instead of keyset mode — closing this case
+    unconditionally. See
+    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+    `order_by_column_contains_null` and `create_cursor`.
+  - **Mixed `QueryValue` type in one `ORDER BY` column (e.g. some rows
+    `Int`, some `Str`) — STILL OPEN.** Not detected; such a cursor may
+    silently drop every row of the "other" type(s) once the scan passes
+    page 1. There is no existing cheap filter primitive for "is this field
+    a different type than X" to probe for this at `CreateCursor` time (unlike
+    the `Null` case, which `Filter::IsNull` already covers).
+  - **`NaN` in an `F64` `ORDER BY` column — STILL OPEN.** Not detected;
+    `NaN`'s `partial_cmp` always returns `None` (`compare_values`'s
+    `(F64, F64)` arm), so a `NaN`-valued row is silently dropped the same
+    way once the scan passes page 1. `NaN` additionally breaks the keyset
+    tie-run counter's equality check (`f64`'s `PartialEq` on `NaN` is always
+    `false`). There is no existing cheap "is this field NaN" filter
+    primitive to probe for this either.
+  - A full fix for the mixed-type/`NaN` cases would need either a new
+    cheap detection primitive or a two-phase scan design (a keyset phase
+    over comparable values, followed by an offset-bookmarked tail phase for
+    the incomparable rows) — both are explicitly out of scope for CR-D2;
+    avoid keyset-eligible cursors over an `ORDER BY` column that may hold
+    mixed types or `NaN` until a follow-up closes this. See
+    `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`'s
+    `nan_order_by_value_is_a_documented_still_open_limitation` for a test
+    pinning the current (accepted) gap.
 
 ## 7. Numbers
 

@@ -12,7 +12,11 @@
 > already-exhausted first page, `page_size` validation, byte-budget + per-page
 > size-cap coverage, and a tie-safe keyset bookmark for duplicate `ORDER BY`
 > values) has also landed — see §6 and the R-6 cost-model note below for what has
-> NOT yet landed.
+> NOT yet landed. CR-D2 (#783): a keyset-eligible `ORDER BY` column containing a
+> `Null`/missing value is now detected at `CreateCursor` time and the WHOLE
+> cursor falls back to row-count-offset pagination instead — see §1.1. A
+> mixed-type or `NaN`-containing `ORDER BY` column is NOT detected and remains a
+> known limitation (silent row loss) — see §1.1 and `KNOWN_LIMITATIONS.md` §6.
 
 ---
 
@@ -70,6 +74,44 @@ for a consumer deciding between a cursor and a single large `Read` with
 `max_result_size_bytes` headroom: a cursor bounds wire/client-side memory across
 many round-trips, but it does not make any individual `FetchNext` cheaper or
 lighter on the server than the equivalent one-shot read over the same data.
+
+### 1.1. Keyset pagination mode: data-dependent fallback and residual limitations
+
+A cursor over a query with a single, simple (top-level-field) `ORDER BY` column
+pages via a **keyset boundary-filter bookmark** (`field >= last_seen_value`, ASC —
+`<=`, DESC) for lower per-page memory pressure than the row-count-offset
+alternative. Whether that scheme is SAFE for a given column is a property of the
+column's **data**, not the query's shape — this section documents what the server
+checks (and does not check) before committing to keyset mode.
+
+- **`Null` / missing `ORDER BY` value (CLOSED, CR-D2 #783):** a `Null` or
+  entirely-absent value in the `ORDER BY` column cannot be proven `>=`/`<=`
+  anything, so a naive keyset boundary filter silently excludes that row from
+  every page after the first — the cursor would report a clean `has_more: false`
+  having silently dropped it. The server closes this unconditionally: at
+  `CreateCursor` time, once the query is otherwise keyset-eligible, it runs ONE
+  additional cheap `WHERE <order_by_field> IS NULL LIMIT 1` existence check
+  against the SAME pinned snapshot the first page reads. If that probe finds ANY
+  row, the WHOLE cursor is pinned to row-count-offset pagination from creation —
+  before the first page is even fetched — so a null-containing `ORDER BY` column
+  can never reach the keyset boundary-filter bug. This is purely a server-side,
+  data-dependent decision: **a client cannot request or predict which mode a
+  given cursor will use**, and the two modes have different cost profiles (the
+  offset fallback re-scans from a row-count position each `FetchNext` rather than
+  seeking via the boundary filter) — a consumer building strict cost expectations
+  around "my `ORDER BY` column is simple, so this must be keyset-mode" should not
+  assume that holds once the column's data can contain nulls.
+- **Mixed-`QueryValue`-type or `NaN`-containing `ORDER BY` column (STILL OPEN, not
+  fixed by CR-D2):** the SAME class of bug applies to a column holding more than
+  one `QueryValue` variant (e.g. some rows `Int`, some `Str`) or an `F64` column
+  containing `NaN` — the boundary comparison is unresolvable for those rows too,
+  and they are silently dropped once the scan passes page 1. Unlike the `Null`
+  case, there is no existing cheap filter primitive (e.g. an "is this field a
+  different type than X" or "is this field NaN" check) to probe for this at
+  `CreateCursor` time, so it is NOT detected and NOT fixed — see
+  `KNOWN_LIMITATIONS.md` §6 for the precise, current-state disclosure. Avoid
+  keyset-eligible cursors over an `ORDER BY` column that may hold mixed types or
+  `NaN` until this is closed.
 
 ---
 

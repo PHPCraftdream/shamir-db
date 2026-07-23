@@ -398,6 +398,105 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
     }
 }
 
+/// CR-D2 (#783, release blocker): does `query`'s sole ORDER BY column
+/// contain ANY `Null`/missing value, checked once against the SAME pinned
+/// snapshot `create_cursor` is about to scan?
+///
+/// # The bug this closes
+///
+/// The keyset bookmark's boundary filter is an inclusive `field >=
+/// seek_key` (ASC) / `field <= seek_key` (DESC), evaluated through
+/// `compare_values` (`shamir-engine`'s `query/filter/resolve.rs`). That
+/// function's `(Value::Null, _)` case falls through to its catch-all `_ =>
+/// None` arm — a `Null`/missing ORDER BY value can never be proven `>=` or
+/// `<=` anything, so the filter is `false` for that row. Meanwhile
+/// `QvSortKey`'s sort (`shamir-engine`'s `query/read/order.rs`,
+/// `compare_qv_sort_keys`) places `Null` LAST under the ASC default (FIRST
+/// under DESC) — so an ASC scan's page 1 (no boundary yet) returns only the
+/// leading real-valued rows, and EVERY subsequent page's boundary filter
+/// permanently excludes the null/missing rows. The scan looks like it "ran
+/// out" (`has_more: false` eventually), but those rows were never returned
+/// at all — silent data loss, no error. (DESC happens to work today, since
+/// nulls sort FIRST there and the boundary scan reaches them naturally —
+/// but this check does not special-case direction: a null-containing column
+/// is treated as unsafe for keyset regardless, the conservative choice.)
+///
+/// # Why a probe, not a static check
+///
+/// `pagination_mode_for_query` decides `Keyset` purely from the query's
+/// SHAPE (a single simple-field ORDER BY) — whether the column's DATA
+/// happens to contain a null/missing value cannot be known without asking
+/// the data. This runs ONE cheap existence-check read at `create_cursor`
+/// time, against the SAME pinned MVCC version the cursor's first page
+/// reads: `WHERE <order_by_field> IS NULL LIMIT 1`. `Filter::IsNull`
+/// compiles to `FilterNode::IsNull`, evaluated via `RecordView::is_null_at`
+/// (`shamir-types`), which treats an explicitly-`Null` field and a
+/// COMPLETELY MISSING field identically (`matches!(present_kind_at(path),
+/// None | Some(Kind::Null))`) — so this one probe closes BOTH sub-cases in
+/// the brief (explicit `Null` and absent field) with a single filter shape.
+///
+/// # Cost
+///
+/// `Temporal::AsOf`'s read path (`TableManager::read_as_of`) is a full
+/// tombstone-inclusive streaming scan of the table regardless of `limit` —
+/// the `LIMIT 1` here does NOT make the underlying scan early-terminate
+/// (verified against `read_as_of`'s source: the WHERE filter is applied
+/// per-record INSIDE the scan loop, and pagination/limit is only applied to
+/// the fully-materialized match set afterward). This probe is therefore the
+/// SAME cost class as `create_cursor`'s own first-page read (also a full
+/// `read_as_of` scan) and the `drain_all` step already run once per cursor
+/// creation — an acceptable ONE-TIME cost at cursor creation, not a
+/// per-page cost. `LIMIT 1` is still the cheapest correct query SHAPE
+/// (smallest possible result to materialize/serialize internally), even
+/// though it doesn't change the scan's asymptotic cost here.
+async fn order_by_column_contains_null(
+    table: &TableManager,
+    ctx: &FilterContext<'_>,
+    query: &ReadQuery,
+    pinned_version: u64,
+) -> Result<bool, BatchError> {
+    let Some(order_by) = query.order_by.as_ref() else {
+        return Ok(false);
+    };
+    if order_by.items.len() != 1 || order_by.items[0].field.len() != 1 {
+        return Ok(false);
+    }
+    let field = order_by.items[0].field.clone();
+    let is_null = Filter::IsNull { field };
+    // AND-combined with the caller's own WHERE (if any) — a null-containing
+    // ORDER BY value in a row the caller's own filter already excludes can
+    // never reach the keyset boundary scan in the first place, so it must
+    // not force an unnecessary Offset fallback (mirrors `boundary_filter`'s
+    // own AND-combination of the boundary with the caller's `where`).
+    let probe_where = match &query.r#where {
+        Some(existing) => Filter::And {
+            filters: vec![existing.clone(), is_null],
+        },
+        None => is_null,
+    };
+
+    // Base the probe on a clone of the caller's query (mirrors
+    // `create_cursor`'s own `first_query = query.clone()` idiom) so
+    // `from`/`select` and any other shape stay identical — only
+    // `where`/`pagination`/`temporal` are overridden for the probe's own
+    // purpose.
+    let mut probe = query.clone();
+    probe.r#where = Some(probe_where);
+    probe.pagination = Pagination::LimitOffset {
+        limit: Some(1),
+        offset: 0,
+    };
+    probe.temporal = Temporal::AsOf {
+        at: At::Version(pinned_version),
+    };
+
+    let result = table
+        .read_with_encoding(&probe, ctx, Default::default())
+        .await
+        .map_err(wrap_engine_err)?;
+    Ok(!result.records.is_empty())
+}
+
 /// Extract the sole ORDER BY column's value from a record. `None` when the
 /// field is absent from the projected row (e.g. not selected) — callers
 /// treat this as "can't build/refresh a keyset bookmark from this page"
@@ -888,6 +987,26 @@ impl ShamirDbHandler {
             Err(e) => return error_response(&e),
         };
 
+        // CR-D2 (#783, release blocker): a query's ORDER BY SHAPE alone
+        // (`pagination_mode_for_query`) cannot tell whether the column's
+        // DATA is actually safe for the keyset boundary-filter scheme — a
+        // `Null`/missing value in that column makes the `field >= seek_key`
+        // boundary permanently (and silently) exclude that row past page 1
+        // (see `order_by_column_contains_null`'s doc comment for the full
+        // mechanism). When the query is otherwise keyset-eligible, probe
+        // the SAME pinned snapshot ONCE for a null/missing value in that
+        // column before running the first page at all — if found, the
+        // WHOLE cursor falls back to `PaginationMode::Offset` from
+        // creation, closing the null/missing case unconditionally.
+        let mut mode = pagination_mode_for_query(&query);
+        if mode == PaginationMode::Keyset {
+            match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await {
+                Ok(true) => mode = PaginationMode::Offset,
+                Ok(false) => {}
+                Err(e) => return error_response(&e),
+            }
+        }
+
         // CR-B4: fetch one extra "peek" row beyond the client-visible
         // `page_size` so the true end-of-data can be told apart from "the
         // result set happens to be an exact multiple of page_size" — without
@@ -954,7 +1073,6 @@ impl ShamirDbHandler {
             return error_response(&e);
         }
 
-        let mode = pagination_mode_for_query(&query);
         let (seek_key, tie_skip) = if has_more && mode == PaginationMode::Keyset {
             match page
                 .records

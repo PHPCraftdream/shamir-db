@@ -26,6 +26,7 @@ use shamir_query_types::batch::BatchError;
 use shamir_query_types::read::{OrderBy, ReadQuery, Select, Temporal};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 
+use crate::cursor_registry::PaginationMode;
 use crate::db_handler::config::CursorLimitsCap;
 use crate::db_handler::handler::ShamirDbHandler;
 use crate::version::CURRENT_QUERY_LANG_VERSION;
@@ -2791,5 +2792,385 @@ fn resolve_repo_error_codes_are_distinct_structured_codes() {
     assert_eq!(
         crate::db_handler::handler::error_code(&repo_not_found),
         "unknown_repo"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR-D2 (#783, release blocker) — keyset cursor silently loses Null/missing
+// ORDER BY rows.
+//
+// Root cause: the keyset bookmark's boundary filter is `field >= seek_key`
+// (ASC), evaluated through `compare_values` (`shamir-engine`'s
+// `query/filter/resolve.rs`). Any row whose ORDER BY value cannot be
+// compared to `seek_key` (a `Null`/missing field vs. any real seek value)
+// makes the comparison return `None` -> the filter is `false` for that row.
+// Meanwhile `QvSortKey`'s sort (`shamir-engine`'s `query/read/order.rs`)
+// places `Null` LAST under the ASC default -- so page 1 (no boundary yet)
+// returns only the leading real-valued rows, and EVERY later page's
+// `field >= seek` boundary permanently excludes the null/missing rows. The
+// scan looks like it "ran out" (`has_more: false`), but those rows were
+// never returned at all.
+//
+// Fix (MUST-fix tier, per the brief): at `create_cursor` time, once
+// `pagination_mode_for_query` has already decided `Keyset`, run one cheap
+// `WHERE <order_by_field> IS NULL LIMIT 1` existence probe at the SAME
+// pinned snapshot. If it finds any row, the WHOLE cursor falls back to
+// `PaginationMode::Offset` from creation -- closing the null/missing case
+// unconditionally (a null-containing ORDER BY column can never reach the
+// keyset boundary-filter bug again).
+// ---------------------------------------------------------------------------
+
+use shamir_query_types::filter::FilterValue;
+
+/// Build `app.main.items` with a `score` (ORDER BY) column where SOME rows
+/// have an explicit `Null` score and/or omit the field entirely (both cases
+/// `Filter::IsNull`/`is_null_at` treat identically -- see
+/// `RecordRef::is_null_at`'s `matches!(.., None | Some(Kind::Null))`).
+/// `seq` is always present so drained rows can be identified uniquely.
+async fn build_handler_with_nullable_scores(
+    scores: &[Option<i64>],
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    if !scores.is_empty() {
+        let mut b = Batch::new();
+        for (i, score) in scores.iter().enumerate() {
+            let row = match score {
+                Some(s) => doc! { "seq" => i as i64, "score" => *s },
+                // Explicit Null (as opposed to a genuinely absent field) --
+                // both must trip the same IS NULL existence probe.
+                None => doc! { "seq" => i as i64, "score" => FilterValue::Null },
+            };
+            b.insert(format!("i{i}"), insert("items").row(row));
+        }
+        let batch = b.build();
+        shamir
+            .execute_as(owner, "app", &batch)
+            .await
+            .expect("seed rows");
+    }
+
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
+}
+
+/// Peek a live cursor's pinned `PaginationMode` directly off the registry --
+/// the test-visible signal the brief asks for (mirrors
+/// `keyset_pagination_mode_pinned_at_creation_stays_stable`'s doc comment,
+/// which notes no wire-visible field exposes this, so tests must reach
+/// in-process). `Cursor::state()` is a `pub` `tokio::sync::Mutex`, and
+/// nothing else is concurrently touching this cursor mid-assertion in these
+/// single-threaded-per-cursor tests, so a non-blocking `try_lock` is safe
+/// and avoids making this helper `async` for no reason.
+fn pinned_mode(handler: &ShamirDbHandler, cursor_id: CursorId, sid: &[u8; 32]) -> PaginationMode {
+    let cursor = handler
+        .cursor_registry
+        .get_owned(cursor_id.0, sid)
+        .expect("cursor must still be registered");
+    let mode = cursor.state().try_lock().expect("uncontended in test").mode;
+    mode
+}
+
+/// Null ORDER BY value, ASC: 3 rows with real scores (0, 1, 2) and 2 rows
+/// with a Null score. Before the fix: page 1 returns the 3 real-valued rows
+/// (Null sorts last under ASC, so they're never on page 1 when page_size <
+/// total), then every subsequent `field >= seek_key` boundary excludes the
+/// Null rows forever -- the cursor reports `has_more: false` having silently
+/// dropped both Null rows. After the fix: the existence probe detects the
+/// Null score at `create_cursor` time and pins the WHOLE cursor to
+/// `PaginationMode::Offset`, so every row (real-valued AND Null) surfaces
+/// exactly once, regardless of which mode ultimately serves them.
+#[tokio::test]
+async fn null_order_by_value_asc_is_not_silently_dropped() {
+    let scores = [Some(0), Some(1), Some(2), None, None];
+    let handler = build_handler_with_nullable_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // A null-containing ORDER BY column must be detected at CreateCursor
+    // time and pinned to Offset for its WHOLE lifetime -- never Keyset,
+    // which is exactly the mode that silently drops these rows.
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "a Null-containing ORDER BY column must fall back to PaginationMode::Offset \
+         at CreateCursor time (the cheap IS NULL existence probe must have detected it)"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row -- including BOTH Null-score rows (seq 3, 4) -- must appear exactly once; \
+         before the fix, the Null rows vanished silently with a clean has_more: false"
+    );
+}
+
+/// Missing field (never set at all, as opposed to an explicit `Null`) must
+/// trip the SAME existence probe and fall back the SAME way --
+/// `Filter::IsNull`/`RecordRef::is_null_at` treat "absent" and "explicit
+/// Null" identically by design, and this test pins that the create-time
+/// probe actually relies on that (a probe that only checked "is the field
+/// present and Null" but not "is it plain absent" would miss this case).
+#[tokio::test]
+async fn missing_order_by_field_is_not_silently_dropped() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // 3 rows with a real `score`, 2 rows that never set `score` at all.
+    let mut b = Batch::new();
+    for i in 0..3 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => i as i64 }),
+        );
+    }
+    for i in 3..5 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64 }), // no "score" key at all
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "a missing (never-set) ORDER BY field must ALSO fall back to \
+         PaginationMode::Offset -- same probe, same IS NULL semantics as explicit Null"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row -- including both rows that never set score at all (seq 3, 4) -- \
+         must appear exactly once"
+    );
+}
+
+/// Regression: a uniformly-typed, non-null ORDER BY column must stay on
+/// `PaginationMode::Keyset` (the existence probe must NOT false-positive and
+/// degrade every cursor to Offset by mistake), and existing keyset behavior
+/// (tie-run handling included) must remain intact.
+#[tokio::test]
+async fn null_probe_regression_non_null_column_stays_keyset() {
+    let handler = build_handler_with_scores(&[10, 10, 10, 10], CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "4 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a non-null, uniformly-typed ORDER BY column must NOT be routed through the new \
+         Offset-fallback probe -- this fix must not silently degrade every cursor to offset mode"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "regression: the existing tie-run scenario must still return every row exactly once \
+         under genuine Keyset mode"
+    );
+}
+
+/// Mixed-type / NaN: documented, still-open limitation (see CURSORS.md and
+/// KNOWN_LIMITATIONS.md §6) -- neither is cheaply detectable with the
+/// existing filter AST the way `Filter::IsNull` makes the Null case cheap
+/// (there is no "is this field a different QueryValue variant than X" or
+/// "is this F64 field NaN" filter primitive today), so this task's fix tier
+/// does NOT extend to these. This test PINS the current (accepted) gap: an
+/// ORDER BY column containing `NaN` values silently drops the NaN-valued
+/// row(s) once the keyset boundary scan passes page 1 -- proving the gap is
+/// tracked by a test, not silently unverified. If a future task closes this
+/// gap, this test's assertion (`< scores.len()`, i.e. loss occurs) should
+/// flip to an exact-equality "no loss" assertion instead.
+#[tokio::test]
+async fn nan_order_by_value_is_a_documented_still_open_limitation() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // 3 real-valued rows (0.0, 1.0, 2.0) + 2 NaN-valued rows. NaN's
+    // `partial_cmp` always returns `None` (`compare_values`'s
+    // `(F64, F64) => a.partial_cmp(b)` arm), so `field >= seek_key`
+    // evaluates to `false` for a NaN row on every page past the first.
+    let mut b = Batch::new();
+    for i in 0..3 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => i as f64 }),
+        );
+    }
+    for i in 3..5 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => f64::NAN }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs, mut has_more) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs, has_more)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Still Keyset -- NaN detection is explicitly NOT part of this task's
+    // fix tier (documented limitation, not a fix), so the existence probe
+    // must not (and structurally cannot, since it only checks IS NULL) catch
+    // this case.
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "NaN is not NULL -- the Null-only existence probe must not affect this case, \
+         by design (mixed-type/NaN detection is out of this task's fix tier)"
+    );
+
+    // Bounded drain (NaN can't livelock this path -- has_more legitimately
+    // reaches false once the keyset scan's real-valued rows are exhausted --
+    // but bound it anyway as cheap insurance).
+    for _ in 0..10 {
+        if !has_more {
+            break;
+        }
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage {
+                page, has_more: hm, ..
+            } => {
+                for r in &page.records {
+                    seqs.push(
+                        r.get_value_i64("seq")
+                            .expect("every row must carry a seq field"),
+                    );
+                }
+                has_more = hm;
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seqs.sort_unstable();
+    assert!(
+        seqs.len() < 5,
+        "documented, still-open limitation: a NaN-valued ORDER BY row is expected to be \
+         silently dropped by the current keyset boundary-filter scheme once the scan passes \
+         page 1 -- got {} of 5 rows back ({:?}); if this now equals 5, the limitation has been \
+         closed and this test's assertion should be flipped to an exact-equality \"no loss\" \
+         check instead",
+        seqs.len(),
+        seqs
     );
 }
