@@ -189,7 +189,9 @@ fn compare_values_f64_dec_fallback() {
 
 #[test]
 fn compare_values_big_fallback() {
-    // Big uses the f64 fallback — stops being a silent None.
+    // Big/Big is exact `BigInt::cmp`; Int/Big is exact `BigInt` conversion
+    // (CR-C5, #780) — both stopped being a silent `None` (FG-6) and are now
+    // ALSO exact, not an f64 approximation.
     use num_bigint::BigInt;
     assert_eq!(
         compare_values(
@@ -202,6 +204,128 @@ fn compare_values_big_fallback() {
         compare_values(&QueryValue::Int(200), &QueryValue::Big(BigInt::from(100))),
         Some(Ordering::Greater)
     );
+}
+
+// ============================================================================
+// CR-C5 (#780) — exact Big comparisons, eliminate f64 rounding.
+// ============================================================================
+
+/// THE core regression this task exists to fix: `i64::MAX` vs
+/// `i64::MAX + 1` (promoted to `Big`, matching this codebase's own
+/// promotion rule — `BigInt::from(i64::MAX) + 1`) must compare as `Less`,
+/// NOT `Equal`. Before the fix, both operands rounded to the SAME `f64`
+/// (`lossy_f64`), silently collapsing two distinct large integers.
+#[test]
+fn compare_values_int_max_vs_big_max_plus_one_is_exact() {
+    use num_bigint::BigInt;
+
+    let int_max = QueryValue::Int(i64::MAX);
+    let bigger = QueryValue::Big(BigInt::from(i64::MAX) + 1);
+
+    assert_eq!(compare_values(&int_max, &bigger), Some(Ordering::Less));
+    assert_eq!(compare_values(&bigger, &int_max), Some(Ordering::Greater));
+    assert_ne!(
+        compare_values(&int_max, &bigger),
+        Some(Ordering::Equal),
+        "i64::MAX and i64::MAX+1 must not collapse to equal"
+    );
+}
+
+/// `u64::MAX` (promoted to `Big`) vs `u64::MAX - 1` (also promoted to `Big`
+/// — both exceed `i64::MAX`, so both promote) must not collapse to equal.
+/// `u64::MAX` as `f64` rounds to the same value as several of its
+/// neighbours, so this is exactly the precision class the fix targets.
+#[test]
+fn compare_values_u64_max_vs_u64_max_minus_one_big_big_is_exact() {
+    use num_bigint::BigInt;
+
+    let max = QueryValue::Big(BigInt::from(u64::MAX));
+    let max_minus_one = QueryValue::Big(BigInt::from(u64::MAX) - 1);
+
+    assert_eq!(compare_values(&max_minus_one, &max), Some(Ordering::Less));
+    assert_eq!(
+        compare_values(&max, &max_minus_one),
+        Some(Ordering::Greater)
+    );
+}
+
+/// `Big` vs `Dec` boundary case: an exact-integer-valued `Big` vs a `Dec`
+/// with a fractional part numerically close enough that `f64` could not
+/// distinguish them, proving the cross-multiplication approach
+/// (`cmp_big_dec`) orders them correctly at `f64`-defeating precision.
+///
+/// `big = i64::MAX + 1` (~9.223372036854776e18) vs
+/// `dec = i64::MAX.5` (half a unit below `big`) — both operands round to
+/// the SAME `f64` at this magnitude (`f64` only has ~15-17 significant
+/// decimal digits, `i64::MAX` already has 19), so a naive `f64`-based
+/// comparison could not tell them apart; the exact cross-multiplication
+/// path must.
+#[test]
+fn compare_values_big_vs_dec_close_boundary_is_exact() {
+    use num_bigint::BigInt;
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+
+    let big_val: BigInt = BigInt::from(i64::MAX) + 1; // 9223372036854775808
+    let big = QueryValue::Big(big_val.clone());
+    // dec = 9223372036854775807.5 -- half a unit below `big`, a fractional
+    // Dec value that (cast through f64) would round to the SAME f64 as
+    // `big` (both are within 1 ULP at this magnitude).
+    let dec_str = format!("{}.5", i64::MAX);
+    let dec: Decimal = dec_str.parse().unwrap();
+    let dec_qv = QueryValue::Dec(dec);
+
+    // Sanity: confirm this boundary really would defeat a naive f64
+    // comparison — both operands' f64 approximations collapse to equal —
+    // so the correct ordering below can only come from the exact
+    // cross-multiplication path, not a lucky f64 rounding.
+    let big_f64: f64 = big_val.to_f64().unwrap();
+    let dec_f64 = dec.to_f64().unwrap();
+    assert_eq!(
+        big_f64, dec_f64,
+        "test setup invariant: these two operands must collapse to the \
+         same f64 for this to be a meaningful precision-loss regression test"
+    );
+
+    assert_eq!(compare_values(&big, &dec_qv), Some(Ordering::Greater));
+    assert_eq!(compare_values(&dec_qv, &big), Some(Ordering::Less));
+}
+
+/// Mixed `Int`+`Big` column, total order + stability: a multi-row ORDER BY
+/// over a column mixing plain `Int` and promoted `Big` values, including
+/// values numerically CLOSE (within f64's rounding distance of each other).
+/// Every row must land in its precisely correct position.
+#[test]
+fn order_by_mixed_int_and_big_close_values_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use num_bigint::BigInt;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    // i64::MAX and i64::MAX - 1 collapse to the same f64; likewise
+    // i64::MAX+1 (Big) and i64::MAX+2 (Big) collapse to the same f64. A
+    // correct exact total order still separates all four.
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Big(BigInt::from(i64::MAX) + 2))]),
+        qv_map(&[("v", QueryValue::Int(i64::MAX))]),
+        qv_map(&[("v", QueryValue::Big(BigInt::from(i64::MAX) + 1))]),
+        qv_map(&[("v", QueryValue::Int(i64::MAX - 1))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Int(i64::MAX - 1));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(i64::MAX));
+    assert_eq!(qvs[2]["v"], QueryValue::Big(BigInt::from(i64::MAX) + 1));
+    assert_eq!(qvs[3]["v"], QueryValue::Big(BigInt::from(i64::MAX) + 2));
 }
 
 // ============================================================================

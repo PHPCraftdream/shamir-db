@@ -21,6 +21,7 @@ use std::cmp::Ordering;
 
 use bytes::Bytes;
 use indexmap::map::Entry;
+use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::function::builtin_aggs;
@@ -304,13 +305,37 @@ pub(super) struct AggAccum {
 pub(super) enum AggState {
     /// Count(field) → non-null count.  Count(All) is folded into the caller.
     Count { count: u64 },
-    /// Sum: integer fast path, lifted to f64 when any float is seen.
+    /// Sum: `i64` fast path (`sum_i`), lifted EXACTLY to `sum_big` once a
+    /// `Big` value or an `i64` overflow is seen (still no precision loss —
+    /// see `sum_big`'s doc), and lifted to the (lossy) `f64` lane only once
+    /// a genuinely non-integer value (`F64`, or a `Dec` with a fractional
+    /// part) enters the same aggregate — CR-C5 (#780). That last transition
+    /// is a one-way door: once `has_float` is set, the aggregate stays
+    /// float-based for the rest of the group (mixing an exact running total
+    /// with a float is unavoidably lossy from that point on; this is a
+    /// documented, deliberate transition, not a bug).
     Sum {
         sum_i: i64,
+        /// Exact overflow/`Big` lane. `None` until the first `Big` value or
+        /// `sum_i` overflow is observed; once `Some`, it (not `sum_i`) is
+        /// the authoritative exact running total — `sum_i` stops being
+        /// added to once this is created (see `step`'s `Sum` arm).
+        sum_big: Option<BigInt>,
         sum_f: f64,
         has_float: bool,
     },
     /// Avg: f64 accumulator + non-null numeric count.
+    ///
+    /// CR-C5 (#780): unlike `Sum`, `Avg`'s intermediate running total stays
+    /// `f64`-based even for pure-integer/`Big` inputs — deliberate, per the
+    /// task's own guidance ("Avg inherently produces a non-integer result;
+    /// the final division stays f64 regardless"). An exact-`BigInt`
+    /// intermediate would still have to divide down to a `QueryValue::F64`
+    /// at `finish()`, so it buys no precision at the only point precision is
+    /// ever observed — restructuring it here would be scope creep beyond
+    /// this task's Sum-focused exactness fix. `Big` inputs to Avg go through
+    /// the existing `agg_leaf_to_f64` fallback unchanged (still lossy,
+    /// tracked, matches `agg_leaf_to_f64`'s doc comment).
     Avg { sum: f64, count: u64 },
     /// Min: owns the running extreme (§5b boundary #2). Scalar leaves use
     /// the cheap `OwnedScalar` repr; container leaves (rare) own a
@@ -330,6 +355,7 @@ impl AggAccum {
             AggFunc::Count => AggState::Count { count: 0 },
             AggFunc::Sum => AggState::Sum {
                 sum_i: 0,
+                sum_big: None,
                 sum_f: 0.0,
                 has_float: false,
             },
@@ -388,24 +414,47 @@ impl AggAccum {
             }
             AggState::Sum {
                 sum_i,
+                sum_big,
                 sum_f,
                 has_float,
             } => {
                 if let Some(s) = scalar {
                     match s {
-                        ScalarRef::Int(i) => match sum_i.checked_add(i) {
-                            Some(new_sum) => *sum_i = new_sum,
-                            None => {
-                                // Integer overflow — divert to the existing
-                                // float lane (same mechanism Dec/Big/F64 rows
-                                // use). Keeps `sum_i` always-exact so finish()'s
-                                // `sum_f + sum_i as f64` is correct.
-                                *has_float = true;
+                        ScalarRef::Int(i) => {
+                            if *has_float {
                                 *sum_f += i as f64;
+                            } else if let Some(big) = sum_big {
+                                // Exact lane already active (a prior Big
+                                // value or i64 overflow promoted it) — fold
+                                // this Int into it exactly, `sum_i` is no
+                                // longer touched once `sum_big` exists.
+                                *big += i;
+                            } else {
+                                match sum_i.checked_add(i) {
+                                    Some(new_sum) => *sum_i = new_sum,
+                                    None => {
+                                        // i64 overflow — promote to the exact
+                                        // BigInt lane (CR-C5, #780), NOT the
+                                        // lossy float lane: `sum_i + i` is
+                                        // still a genuine integer, it just no
+                                        // longer fits in i64.
+                                        *sum_big = Some(BigInt::from(*sum_i) + i);
+                                    }
+                                }
                             }
-                        },
+                        }
                         ScalarRef::F64(f) => {
-                            *has_float = true;
+                            // Genuine float enters the aggregate — one-way
+                            // transition to float semantics (documented on
+                            // `AggState::Sum`). Fold whatever exact total we
+                            // have so far into `sum_f` before switching.
+                            if !*has_float {
+                                *sum_f += sum_big
+                                    .take()
+                                    .map(|b| b.to_f64().unwrap_or(f64::NAN))
+                                    .unwrap_or(*sum_i as f64);
+                                *has_float = true;
+                            }
                             *sum_f += f;
                         }
                         _ => {}
@@ -414,8 +463,13 @@ impl AggAccum {
                     // Dec/Big/container fallback — materialize this one
                     // field (§5b: one `materialize_at` per row, only when
                     // `scalar_at` returned None, i.e. the field is Dec/Big/
-                    // container). Dec/Big flow into the f64 lane; containers
-                    // (Map/List/Set) contribute nothing (unchanged).
+                    // container). CR-C5 (#780): `Big` and integer-valued
+                    // `Dec` values fold into the EXACT `sum_big` lane;
+                    // `Dec` with a genuine fractional part is a real
+                    // non-integer value and transitions the whole aggregate
+                    // to the (documented, unavoidable) float lane, same as
+                    // an `F64` row above. Containers (Map/List/Set)
+                    // contribute nothing (unchanged).
                     let owned = if self.all_field {
                         None
                     } else {
@@ -424,9 +478,29 @@ impl AggAccum {
                             .and_then(|p| record.materialize_at(p))
                     };
                     if let Some(v) = owned {
-                        if let Some(f) = agg_leaf_to_f64(&v) {
-                            *has_float = true;
-                            *sum_f += f;
+                        match agg_leaf_exact(&v) {
+                            Some(AggLeafExact::Int(exact)) if !*has_float => match sum_big {
+                                Some(big) => *big += exact,
+                                None => *sum_big = Some(BigInt::from(*sum_i) + exact),
+                            },
+                            Some(AggLeafExact::Int(exact)) => {
+                                // Already float mode — fold exactly-known
+                                // integer value in as f64 (matches the
+                                // existing lossy-once-float semantics).
+                                *sum_f += exact.to_f64().unwrap_or(f64::NAN);
+                            }
+                            None => {
+                                if let Some(f) = agg_leaf_to_f64(&v) {
+                                    if !*has_float {
+                                        *sum_f += sum_big
+                                            .take()
+                                            .map(|b| b.to_f64().unwrap_or(f64::NAN))
+                                            .unwrap_or(*sum_i as f64);
+                                        *has_float = true;
+                                    }
+                                    *sum_f += f;
+                                }
+                            }
                         }
                     }
                 }
@@ -445,9 +519,14 @@ impl AggAccum {
                         _ => {}
                     }
                 } else {
-                    // Dec/Big/container fallback — mirrors Sum's fallback
-                    // above. Dec/Big values are converted to f64 and flow
-                    // into the same accumulator lane as F64.
+                    // Dec/Big/container fallback. CR-C5 (#780): UNLIKE Sum,
+                    // Avg's running total stays `f64`-based here on purpose
+                    // — see `AggState::Avg`'s doc comment for the reasoning
+                    // (the final division is always `f64` anyway, so an
+                    // exact intermediate buys nothing at the only point
+                    // precision is observed). Dec/Big values are converted
+                    // to f64 and flow into the same accumulator lane as F64
+                    // (documented, accepted precision-loss tradeoff).
                     let owned = if self.all_field {
                         None
                     } else {
@@ -561,17 +640,30 @@ impl AggAccum {
             AggState::Count { count } => QueryValue::Int(count as i64),
             AggState::Sum {
                 sum_i,
+                sum_big,
                 sum_f,
                 has_float,
             } => {
                 if has_float {
-                    let total = sum_f + sum_i as f64;
-                    // NaN/Inf → Null (non-finite float result).
-                    if total.is_finite() {
-                        QueryValue::F64(total)
+                    // `sum_big`/`sum_i` were already folded into `sum_f` at
+                    // the point of transition (see `step`'s `Sum` arm) —
+                    // `sum_f` alone is the running total once float mode is
+                    // active.
+                    if sum_f.is_finite() {
+                        QueryValue::F64(sum_f)
                     } else {
+                        // NaN/Inf → Null (non-finite float result).
                         QueryValue::Null
                     }
+                } else if let Some(big) = sum_big {
+                    // CR-C5 (#780): exact `BigInt` total — a `Big` value or
+                    // an `i64` overflow was seen, but no genuine float/
+                    // fractional value entered the aggregate, so the result
+                    // is exact. Encode as `QueryValue::Big` (the same
+                    // representation the storage layer already uses for a
+                    // single out-of-`i64`-range value — FG-1/FG-6) rather
+                    // than lossily downcasting through `f64`.
+                    QueryValue::Big(big)
                 } else {
                     QueryValue::Int(sum_i)
                 }
@@ -610,13 +702,53 @@ impl AggAccum {
 /// Sum/Avg container fallback. Only `Dec`/`Big` produce a value; all other
 /// leaves (containers, Null, Str, Bool, Bin) return `None` and contribute
 /// nothing — matching the pre-existing behaviour where non-numeric fields
-/// were silently skipped. `Big` uses the lossy f64 conversion (precision-loss
-/// tradeoff accepted, separately tracked).
+/// were silently skipped.
+///
+/// CR-C5 (#780): `Avg`'s intermediate running total is deliberately kept
+/// `f64`-based for `Big`/non-integer-`Dec` inputs (see `AggState::Avg`'s doc
+/// comment) — this helper remains its accepted, documented precision-loss
+/// tradeoff. `Sum`, however, no longer calls this for `Big`/integer-`Dec`
+/// inputs while it is still in exact mode — see [`agg_leaf_exact`] and
+/// `AggAccum::step`'s `Sum` arm, which use this only once the aggregate has
+/// already transitioned to float mode (at which point exactness is moot).
 #[inline]
 fn agg_leaf_to_f64(v: &InnerValue) -> Option<f64> {
     match v {
         InnerValue::Dec(d) => d.to_f64(),
         InnerValue::Big(b) => Some(b.to_f64().unwrap_or(f64::NAN)),
+        _ => None,
+    }
+}
+
+/// Result of [`agg_leaf_exact`]: an `InnerValue` leaf that carries an EXACT
+/// integer value (no precision loss), vs one that does not (genuinely
+/// fractional `Dec`, or a non-numeric leaf).
+enum AggLeafExact {
+    /// The leaf is an exact integer — `Big` directly, or a `Dec` whose
+    /// fractional part is zero (e.g. `100.00`).
+    Int(BigInt),
+}
+
+/// Extract an EXACT integer value from a materialised `InnerValue` leaf, for
+/// `Sum`'s exact-`BigInt` accumulation lane — CR-C5 (#780).
+///
+/// - `Big` is always exact (arbitrary-precision integer by construction).
+/// - `Dec` is exact ONLY when its fractional part is zero — a `Dec` with a
+///   genuine fractional part (e.g. `1.5`) is not representable as an
+///   integer without loss, so it returns `None` and the caller falls back
+///   to the (documented) float lane instead of silently truncating.
+/// - Everything else (containers, Null, Str, Bool, Bin) returns `None`,
+///   same as `agg_leaf_to_f64`.
+#[inline]
+fn agg_leaf_exact(v: &InnerValue) -> Option<AggLeafExact> {
+    match v {
+        InnerValue::Big(b) => Some(AggLeafExact::Int(b.clone())),
+        InnerValue::Dec(d) if d.fract().is_zero() => {
+            // `Decimal::trunc()`'s mantissa/scale-0 form round-trips through
+            // `BigInt` exactly for integer-valued Decimals within its 96-bit
+            // range — no `f64` involved.
+            Some(AggLeafExact::Int(BigInt::from(d.trunc().mantissa())))
+        }
         _ => None,
     }
 }

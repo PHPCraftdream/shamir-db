@@ -175,11 +175,38 @@ enum QvSortKey {
 }
 
 /// Lossy `BigInt` → `f64` (NaN on overflow). Mirrors `resolve.rs`'s
-/// `lossy_f64` / `scalar_ref.rs`'s `big_to_f64` — the accepted precision
-/// tradeoff for cross-type `Big` comparison against `I64`/`F64`/`Dec`.
+/// `lossy_f64` / `scalar_ref.rs`'s `big_to_f64`.
+///
+/// CR-C5 (#780): this is now the DELIBERATE, accepted-approximation path for
+/// `Big`↔`F64` only — see `compare_qv_sort_keys`'s `(Big, F64)`/`(F64, Big)`
+/// arms for why (F64 is inherently imprecise; there is no single "correct"
+/// exact answer). `Big`↔`I64` and `Big`↔`Dec` no longer use this helper —
+/// they compare two exact types via `cmp_i64_big`/`cmp_big_dec` instead.
 #[inline]
 fn big_to_f64(b: &BigInt) -> f64 {
     b.to_f64().unwrap_or(f64::NAN)
+}
+
+/// Exact `i64` vs `BigInt` comparison — CR-C5 (#780), mirrors
+/// `resolve.rs::compare_values`'s `(Int, Big)`/`(Big, Int)` arms. An `i64`
+/// always converts to `BigInt` losslessly (unlike the reverse `f64`
+/// conversion `big_to_f64` performs), so this is exact with no edge case.
+#[inline]
+fn cmp_i64_big(i: i64, b: &BigInt) -> std::cmp::Ordering {
+    BigInt::from(i).cmp(b)
+}
+
+/// Exact `Decimal` vs `BigInt` comparison via cross-multiplication — CR-C5
+/// (#780), mirrors `resolve.rs::cmp_big_dec` (see its doc comment for the
+/// full derivation). `Decimal == mantissa / 10^scale`; cross-multiplying by
+/// `10^scale` (arbitrary-precision, via `BigInt`) lifts both sides to
+/// exact integers with no `f64` intermediate.
+#[inline]
+fn cmp_big_dec(big: &BigInt, dec: &Decimal) -> std::cmp::Ordering {
+    let scale_factor = BigInt::from(10u32).pow(dec.scale());
+    let lhs = big * scale_factor;
+    let rhs = BigInt::from(dec.mantissa());
+    lhs.cmp(&rhs)
 }
 
 impl QvSortKey {
@@ -287,6 +314,12 @@ fn compare_qv_sort_keys(
         (QvSortKey::F64(x), QvSortKey::F64(y)) => {
             x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
         }
+        // CR-C5 (#780) re-verification finding, OUT OF SCOPE for this task's
+        // fix (see `resolve.rs::compare_values`'s matching `(Int, F64)` arm
+        // for the full writeup): this `as f64` cast is ALSO lossy for large
+        // `i64` magnitudes with NO `Big` involved (`i64::MAX` is far above
+        // `2^53`, and plain `I64` sort keys are not range-limited below
+        // that threshold). Tracked as a separate follow-up, not fixed here.
         (QvSortKey::I64(x), QvSortKey::F64(y)) => (*x as f64)
             .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
@@ -306,30 +339,26 @@ fn compare_qv_sort_keys(
             .unwrap_or(f64::NAN)
             .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
-        // Big: exact for Big/Big (`BigInt: Ord`); f64 fallback cross-type
-        // against I64/F64/Dec (precision loss accepted — mirrors
-        // `compare_values`'s Big arms in `resolve.rs`, FG-6).
+        // Big: exact for Big/Big (`BigInt: Ord`, unchanged). CR-C5 (#780):
+        // I64/Dec cross-type arms are now ALSO exact (`cmp_i64_big` /
+        // `cmp_big_dec`, both exact-integer arithmetic); only the F64
+        // cross-type arms keep the `f64` fallback, as a DELIBERATE, accepted
+        // approximation — `F64` is itself an inherently imprecise IEEE-754
+        // column type, so comparing an exact `BigInt` against it has no
+        // single "correct" exact answer beyond "which f64 is closest". This
+        // is distinct from the I64/Dec arms: those compare two EXACT types,
+        // where the `f64` intermediate was a genuine comparison-code bug.
         (QvSortKey::Big(x), QvSortKey::Big(y)) => x.cmp(y),
-        (QvSortKey::I64(x), QvSortKey::Big(y)) => (*x as f64)
-            .partial_cmp(&big_to_f64(y))
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (QvSortKey::Big(x), QvSortKey::I64(y)) => big_to_f64(x)
-            .partial_cmp(&(*y as f64))
-            .unwrap_or(std::cmp::Ordering::Equal),
+        (QvSortKey::I64(x), QvSortKey::Big(y)) => cmp_i64_big(*x, y),
+        (QvSortKey::Big(x), QvSortKey::I64(y)) => cmp_i64_big(*y, x).reverse(),
         (QvSortKey::F64(x), QvSortKey::Big(y)) => x
             .partial_cmp(&big_to_f64(y))
             .unwrap_or(std::cmp::Ordering::Equal),
         (QvSortKey::Big(x), QvSortKey::F64(y)) => big_to_f64(x)
             .partial_cmp(y)
             .unwrap_or(std::cmp::Ordering::Equal),
-        (QvSortKey::Dec(x), QvSortKey::Big(y)) => x
-            .to_f64()
-            .unwrap_or(f64::NAN)
-            .partial_cmp(&big_to_f64(y))
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (QvSortKey::Big(x), QvSortKey::Dec(y)) => big_to_f64(x)
-            .partial_cmp(&y.to_f64().unwrap_or(f64::NAN))
-            .unwrap_or(std::cmp::Ordering::Equal),
+        (QvSortKey::Dec(x), QvSortKey::Big(y)) => cmp_big_dec(y, x).reverse(),
+        (QvSortKey::Big(x), QvSortKey::Dec(y)) => cmp_big_dec(x, y),
         (QvSortKey::Str(x), QvSortKey::Str(y)) => x.cmp(y),
         (QvSortKey::Bool(x), QvSortKey::Bool(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,

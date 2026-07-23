@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
@@ -78,11 +79,43 @@ pub(super) fn intern_field_path_compact(
 
 /// Lossy numeric → `f64` for cross-type comparison (NaN on overflow). Works
 /// for both `Decimal` and `BigInt` via the shared `ToPrimitive` trait.
-/// Mirrors the accepted f64-precision tradeoff of the existing `Int`↔`F64`
-/// cross-type arms; Big precision loss is a separately-tracked item.
+///
+/// CR-C5 (#780): this remains the deliberate, ACCEPTED-approximation path
+/// for `Big`↔`F64` (and `Dec`↔`F64`) only — `F64` is itself an inherently
+/// imprecise IEEE-754 column type, so comparing an exact `BigInt`/`Decimal`
+/// against it can only ever mean "which `f64` is this value closest to",
+/// not a bug to fix. `Big`↔`Int` and `Big`↔`Dec` no longer route through
+/// this helper (see [`compare_values`]'s dedicated exact arms) — those two
+/// pairs compare two EXACT types, where a lossy `f64` intermediate was a
+/// genuine comparison-code bug, not an inherent-approximation tradeoff.
 #[inline]
 fn lossy_f64<T: ToPrimitive>(v: &T) -> f64 {
     v.to_f64().unwrap_or(f64::NAN)
+}
+
+/// Exact `Decimal` vs `BigInt` comparison via cross-multiplication —
+/// CR-C5 (#780).
+///
+/// `Decimal` is a 96-bit fixed-point type: `dec == mantissa / 10^scale`
+/// (`mantissa: i128` is already signed via [`Decimal::mantissa`];
+/// `scale: u32` is the number of fractional digits). To compare it against
+/// an arbitrary-precision `BigInt` without ever rounding through `f64`, both
+/// sides are lifted to the same denominator and compared as exact integers:
+///
+/// `big_value / 1 == mantissa / 10^scale`
+/// `<=>` (cross-multiply by the positive scale factor)
+/// `big_value * 10^scale == mantissa`
+///
+/// `BigInt` arithmetic has no magnitude limit, so this is exact regardless
+/// of how large `big` or how many significant digits `dec` carries. Sign is
+/// handled naturally: `mantissa` is already signed and `BigInt::cmp` handles
+/// negative values correctly, so no separate sign-case branching is needed.
+#[inline]
+fn cmp_big_dec(big: &BigInt, dec: &Decimal) -> Ordering {
+    let scale_factor = BigInt::from(10u32).pow(dec.scale());
+    let lhs = big * scale_factor;
+    let rhs = BigInt::from(dec.mantissa());
+    lhs.cmp(&rhs)
 }
 
 /// Compare two `Value<K>` scalars. Returns an `Ordering` if comparable.
@@ -112,6 +145,25 @@ where
         (Value::Null, Value::Null) => Some(Ordering::Equal),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        // CR-C5 (#780) re-verification finding, OUT OF SCOPE for this task's
+        // fix (flagged as a follow-up, not fixed here): this `as f64` cast
+        // is ALSO lossy for large `i64` magnitudes, with NO `Big` involved.
+        // `i64::MAX` (~9.2e18) is far above `2^53` (~9e15) where `f64` stops
+        // representing every integer exactly, and there is no promotion
+        // rule that keeps `Value::Int` below that threshold — a plain
+        // `i64` column is `Int` all the way to `i64::MAX`; only values that
+        // overflow `i64` entirely (`u64 > i64::MAX`) promote to `Big`. So
+        // e.g. `i64::MAX` and `i64::MAX - 1` collapse to the SAME `f64` here
+        // too (verified: `(i64::MAX) as f64 == (i64::MAX - 1) as f64`).
+        // Unlike `Big<->Int` above (trivial: `i64` -> `BigInt` is always
+        // lossless), an EXACT `Int<->F64` fix requires exact dyadic-rational
+        // comparison (decomposing the `f64` into its exact mantissa/exponent
+        // and cross-multiplying in arbitrary precision, e.g. via
+        // `num-rational`/`BigInt`) — a materially larger change than this
+        // task's surgical Big-focused scope, and one that would touch a far
+        // hotter, more general path (every plain `Int` vs `F64` comparison
+        // in the engine, not just the rare `Big` case). Tracked as a
+        // separate follow-up rather than attempted here.
         (Value::Int(a), Value::F64(b)) => (*a as f64).partial_cmp(b),
         (Value::F64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
         (Value::F64(a), Value::F64(b)) => a.partial_cmp(b),
@@ -123,15 +175,30 @@ where
         (Value::Dec(a), Value::Int(b)) => Some(a.cmp(&Decimal::from(*b))),
         (Value::F64(a), Value::Dec(b)) => a.partial_cmp(&lossy_f64(b)),
         (Value::Dec(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
-        // Big: f64 fallback throughout (precision loss accepted —
-        // separately-tracked finding).
-        (Value::Big(a), Value::Big(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
-        (Value::Int(a), Value::Big(b)) => (*a as f64).partial_cmp(&lossy_f64(b)),
-        (Value::Big(a), Value::Int(b)) => lossy_f64(a).partial_cmp(&(*b as f64)),
+        // Big: exact `BigInt::cmp` for Big/Big (unchanged — already exact).
+        (Value::Big(a), Value::Big(b)) => Some(a.cmp(b)),
+        // Big<->Int: CR-C5 (#780), MUST-fix. An `i64` always converts to
+        // `BigInt` losslessly (unlike the reverse `f64` conversion this
+        // replaces) — compare exactly via `BigInt::cmp`, no approximation.
+        (Value::Int(a), Value::Big(b)) => Some(BigInt::from(*a).cmp(b)),
+        (Value::Big(a), Value::Int(b)) => Some(a.cmp(&BigInt::from(*b))),
+        // Big<->F64: DELIBERATE, accepted approximation — `F64` is itself an
+        // inherently imprecise IEEE-754 column type, so comparing an EXACT
+        // `BigInt` against an APPROXIMATE `f64` has no single "correct"
+        // exact answer beyond "which f64 is this closest to". This is
+        // distinct from the Int/Dec arms above/below: those compare two
+        // EXACT types, where the `f64` intermediate was a genuine
+        // comparison-code bug (now fixed); here the approximation is
+        // inherent to the F64 column's own nature, not introduced by this
+        // comparison code. Left as-is on purpose — do not "fix" this arm.
         (Value::F64(a), Value::Big(b)) => a.partial_cmp(&lossy_f64(b)),
         (Value::Big(a), Value::F64(b)) => lossy_f64(a).partial_cmp(b),
-        (Value::Dec(a), Value::Big(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
-        (Value::Big(a), Value::Dec(b)) => lossy_f64(a).partial_cmp(&lossy_f64(b)),
+        // Big<->Dec: CR-C5 (#780), SHOULD-fix. Both sides are exact types
+        // (arbitrary-precision integer vs 96-bit fixed-point) — compare via
+        // cross-multiplication in `BigInt` space (see `cmp_big_dec`), never
+        // rounding through `f64`.
+        (Value::Dec(a), Value::Big(b)) => Some(cmp_big_dec(b, a).reverse()),
+        (Value::Big(a), Value::Dec(b)) => Some(cmp_big_dec(a, b)),
         // Big<->Str: FG-6. `lit_u64`/wire encoding represent a promoted
         // `u64 > i64::MAX` as its exact decimal `String` (the same canonical
         // form `Value::Big` serialises to — see `hashable_query_value.rs`'s
