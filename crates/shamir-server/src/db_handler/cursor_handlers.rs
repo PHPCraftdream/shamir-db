@@ -47,7 +47,10 @@
 //!
 //! `PaginationMode` is decided ONCE, at `create_cursor` time (see
 //! `CursorState::mode`) — never re-derived per `FetchNext` — so a later
-//! page can never flip coordinate systems mid-scroll.
+//! page can never flip coordinate systems OPPORTUNISTICALLY or repeatedly
+//! mid-scroll. CR-D1 (#782) below is the one narrow, DELIBERATE exception:
+//! a single, one-time, detected-failure-condition transition, not a
+//! per-page re-derivation.
 //!
 //! # CR-A4 (#764) — keyset tie-breaker for duplicate ORDER BY values
 //!
@@ -443,6 +446,29 @@ struct KeysetPage {
     has_more: bool,
 }
 
+/// CR-D1 (#782, release blocker): what [`fetch_keyset_page`] produced.
+///
+/// `StuckAtCeiling` is the fix for the tie-run-ceiling livelock: when the
+/// retry ceiling (`limit_ceiling = cursor_limits.max_cursor_page_size`) is
+/// hit AND the post-skip usable slice is EXACTLY `0` (`usable_len == 0` —
+/// not just "hit the ceiling but still made some progress", which stays a
+/// normal [`KeysetPage`]), there is NO way to make forward progress via the
+/// keyset boundary-filter scheme: every row in the current tie run up to
+/// `internal_limit` has already been handed to the client
+/// (`tie_skip >= internal_limit`), so re-running the SAME `>= seek_key`
+/// fetch at the SAME capped `internal_limit` can only ever reproduce the
+/// identical zero-progress result — the exact silent-livelock shape this
+/// task fixes (see the module-level `fetch_next` doc comment on the
+/// keyset->offset fallback for how the caller recovers from this signal).
+enum KeysetOutcome {
+    // Boxed: `KeysetPage` embeds a full `QueryResult`, making it far larger
+    // than the unit `StuckAtCeiling` variant (clippy::large_enum_variant) —
+    // indirection here keeps every `KeysetOutcome` on the stack cheap to
+    // move regardless of which variant is live.
+    Page(Box<KeysetPage>),
+    StuckAtCeiling,
+}
+
 /// Compute the next bookmark (`next_seek_key`, `next_tie_skip`) for the tail
 /// of a just-produced page.
 ///
@@ -521,7 +547,7 @@ async fn fetch_keyset_page(
     page_size: u32,
     pinned_version: u64,
     limit_ceiling: u32,
-) -> Result<KeysetPage, BatchError> {
+) -> Result<KeysetOutcome, BatchError> {
     let page_size_u64 = page_size as u64;
     let ceiling_u64 = limit_ceiling as u64;
     // The internal fetch must be AT LEAST big enough to contain every
@@ -629,21 +655,40 @@ async fn fetch_keyset_page(
             // was capped at `page_size`).
             let has_more = consumed_from_front < page.records.len();
 
-            return Ok(finish_keyset_page(
+            return Ok(KeysetOutcome::Page(Box::new(finish_keyset_page(
                 base_query, page, skip_count, take, has_more,
-            ));
+            ))));
         }
 
         if internal_limit >= ceiling_u64 {
             // Hit the retry ceiling with still not enough usable rows — the
-            // tie run genuinely exceeds the configured cap. Return what we
-            // have; `has_more` reflects whatever is left after this
-            // (already-maxed) fetch.
+            // tie run genuinely exceeds the configured cap.
+            //
+            // CR-D1 (#782, release blocker): `usable_len == 0` here means
+            // this call can make ZERO forward progress — every row this
+            // (already-maxed) fetch could see is either already-consumed
+            // tie (`skip_count`) or peek-only tail beyond `internal_limit`.
+            // Returning a normal zero-`take` page in that case is exactly
+            // the livelock this task fixes: `finish_keyset_page` would
+            // recompute the SAME `(seek_key, tie_skip)` bookmark this call
+            // started with (the tail of the consumed prefix is still
+            // wholly within the SAME tie run), so the very next `FetchNext`
+            // would re-run this identical fetch and get the identical
+            // empty-page-with-`has_more:true` result, forever. Signal the
+            // caller instead so it can fall back to the offset bookmark
+            // (see `fetch_next`'s Keyset dispatch arm).
+            //
+            // When `usable_len > 0` (the ceiling was hit but SOME progress
+            // was still made this call), the existing behavior is correct
+            // and unchanged — that page is real progress, not a livelock.
+            if usable_len == 0 {
+                return Ok(KeysetOutcome::StuckAtCeiling);
+            }
             let consumed_from_front = skip_count + usable_len;
             let has_more = consumed_from_front < page.records.len();
-            return Ok(finish_keyset_page(
+            return Ok(KeysetOutcome::Page(Box::new(finish_keyset_page(
                 base_query, page, skip_count, usable_len, has_more,
-            ));
+            ))));
         }
 
         internal_limit = internal_limit.saturating_mul(2).min(ceiling_u64);
@@ -683,6 +728,70 @@ fn finish_keyset_page(
         next_tie_skip,
         has_more,
     }
+}
+
+/// Outcome of [`fetch_offset_page`]: the up-to-`effective_page_size` rows
+/// for this call, whether more remain, and the advanced row-count bookmark.
+struct OffsetPage {
+    result: QueryResult,
+    has_more: bool,
+    new_offset: u64,
+}
+
+/// Row-count `Pagination::LimitOffset` fetch used by both a genuinely
+/// `PaginationMode::Offset` cursor's every `FetchNext` AND, since CR-D1
+/// (#782), a `Keyset`-mode cursor that just detected
+/// [`KeysetOutcome::StuckAtCeiling`] and is falling back to this bookmark
+/// for the REST of its lifetime (see `fetch_next`'s dispatch match for the
+/// exactly-once correctness argument — `offset` was already being
+/// maintained in parallel on the Keyset branch, tracking the TRUE
+/// cumulative row count regardless of which mode was active).
+///
+/// Same peek-ahead-by-one-row trick as `create_cursor`'s first page: fetch
+/// `effective_page_size + 1` internally so the true end-of-data can be told
+/// apart from an exact multiple of `effective_page_size`. Widen to `u64`
+/// before the `+1`; `Pagination::LimitOffset::limit` is `Option<u64>`, so
+/// this cannot overflow.
+async fn fetch_offset_page(
+    table: &TableManager,
+    ctx: &FilterContext<'_>,
+    base_query: &ReadQuery,
+    offset: u64,
+    effective_page_size: u32,
+    pinned_version: u64,
+) -> Result<OffsetPage, BatchError> {
+    let internal_limit = (effective_page_size as u64).saturating_add(1);
+    let mut next_query = base_query.clone();
+    next_query.pagination = Pagination::LimitOffset {
+        limit: Some(internal_limit),
+        offset,
+    };
+    next_query.temporal = Temporal::AsOf {
+        at: At::Version(pinned_version),
+    };
+    let mut fetched = table
+        .read_with_encoding(&next_query, ctx, Default::default())
+        .await
+        .map_err(wrap_engine_err)?;
+
+    // The peek row (if present) proves at least one more record remains
+    // beyond `effective_page_size` — trim it off before it's handed to the
+    // client or counted toward the returned stats, and advance the offset
+    // bookmark by the RETURNED count only (advancing by the peek-inflated
+    // fetched count would skip a row on the next page).
+    let has_more = fetched.records.len() as u64 > effective_page_size as u64;
+    if has_more {
+        fetched.records.truncate(effective_page_size as usize);
+        if let Some(stats) = fetched.stats.as_mut() {
+            stats.records_returned = fetched.records.len() as u64;
+        }
+    }
+    let new_offset = offset + fetched.records.len() as u64;
+    Ok(OffsetPage {
+        result: fetched,
+        has_more,
+        new_offset,
+    })
 }
 
 impl ShamirDbHandler {
@@ -1084,16 +1193,43 @@ impl ShamirDbHandler {
         // ORDER BY field was absent from a page's projection) falls back
         // to the row-count bookmark for THIS call only, matching the
         // pre-CR-A4 "can't build a seek from this page" safety net.
+        //
+        // CR-D1 (#782, release blocker): there is now a SECOND, narrower
+        // reason a Keyset-mode cursor ends up on the offset bookmark for a
+        // call: `fetch_keyset_page` returning
+        // `KeysetOutcome::StuckAtCeiling` (a tie run at the ORDER BY
+        // boundary genuinely exceeds `max_cursor_page_size` — see that
+        // type's doc comment for the exact livelock this avoids). Unlike
+        // CR-A4's per-page "no seek_key, fall back for THIS call only"
+        // case above, this fallback is PERMANENT for the cursor's REST OF
+        // LIFETIME: `state.mode` itself flips to `PaginationMode::Offset`
+        // below, so every FUTURE `FetchNext` goes straight through the
+        // offset branch without re-detecting the stuck condition. This is
+        // safe specifically because `state.offset` has been maintained in
+        // parallel on the Keyset branch all along (see `new_offset`
+        // below, both here and in the ordinary Keyset arm) — it already
+        // holds the exact count of rows returned to the client so far
+        // regardless of which mode produced them, so resuming a plain
+        // `LimitOffset { offset: state.offset, .. }` scan from here
+        // continues at exactly the right position: every row at or before
+        // `state.offset` in the pinned snapshot's stable full-scan order
+        // was already handed out (this call or an earlier one), and
+        // nothing after it has been. This does NOT contradict CR-A4's "a
+        // cursor's mode never flip-flops mid-scroll" invariant, which is
+        // about never flipping OPPORTUNISTICALLY/repeatedly per page — this
+        // is a ONE-TIME, detected-failure-condition transition, driven by a
+        // bookmark that was correct under either coordinate system the
+        // whole time.
+        //
         // CR-B2: reserve an upfront, pessimistic slice of the RI-15 budget
-        // BEFORE running the pinned-version read below (either branch of
-        // the match) — bounds execution-time memory for this page, not
-        // just write-path residency. `None` when there's no natural
-        // upfront estimate (unbounded budget or inactive per-page cap);
-        // `enforce_page_budget` falls back to its post-hoc-only acquire in
-        // that case.
+        // BEFORE running the pinned-version read below (any arm) — bounds
+        // execution-time memory for this page, not just write-path
+        // residency. `None` when there's no natural upfront estimate
+        // (unbounded budget or inactive per-page cap); `enforce_page_budget`
+        // falls back to its post-hoc-only acquire in that case.
         let budget_guard = reserve_page_budget_upfront(self).await;
 
-        let (page, new_seek_key, new_tie_skip, has_more, new_offset);
+        let (page, new_seek_key, new_tie_skip, has_more, new_offset, force_offset_mode);
         match (state.mode, state.seek_key.clone()) {
             (PaginationMode::Keyset, Some(seek_key)) => {
                 let outcome = match fetch_keyset_page(
@@ -1114,64 +1250,84 @@ impl ShamirDbHandler {
                         return error_response(&e);
                     }
                 };
-                new_offset = state.offset + outcome.result.records.len() as u64;
-                page = outcome.result;
-                new_seek_key = outcome.next_seek_key;
-                new_tie_skip = outcome.next_tie_skip;
-                has_more = outcome.has_more;
-            }
-            _ => {
-                // CR-B4: same peek-ahead-by-one-row trick as `create_cursor`'s
-                // first page — fetch `effective_page_size + 1` internally so
-                // the true end-of-data can be told apart from an exact
-                // multiple of `effective_page_size`. Widen to `u64` before
-                // the `+1`; `Pagination::LimitOffset::limit` is `Option<u64>`,
-                // so this cannot overflow.
-                let internal_limit = (effective_page_size as u64).saturating_add(1);
-                let mut next_query = base_query.clone();
-                next_query.pagination = Pagination::LimitOffset {
-                    limit: Some(internal_limit),
-                    offset: state.offset,
-                };
-                next_query.temporal = Temporal::AsOf {
-                    at: At::Version(cursor.pinned_version()),
-                };
-                let mut fetched = match table
-                    .read_with_encoding(&next_query, &ctx, Default::default())
-                    .await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        drop(state);
-                        return error_response(&wrap_engine_err(e));
+                match outcome {
+                    KeysetOutcome::Page(outcome) => {
+                        new_offset = state.offset + outcome.result.records.len() as u64;
+                        page = outcome.result;
+                        new_seek_key = outcome.next_seek_key;
+                        new_tie_skip = outcome.next_tie_skip;
+                        has_more = outcome.has_more;
+                        force_offset_mode = false;
                     }
-                };
-                // The peek row (if present) proves at least one more record
-                // remains beyond `effective_page_size` — trim it off before
-                // it's handed to the client or counted toward the returned
-                // stats, and advance the offset bookmark by the RETURNED
-                // count only (advancing by the peek-inflated fetched count
-                // would skip a row on the next page).
-                has_more = fetched.records.len() as u64 > effective_page_size as u64;
-                if has_more {
-                    fetched.records.truncate(effective_page_size as usize);
-                    if let Some(stats) = fetched.stats.as_mut() {
-                        stats.records_returned = fetched.records.len() as u64;
+                    KeysetOutcome::StuckAtCeiling => {
+                        // CR-D1: permanently switch coordinate systems and
+                        // re-run THIS SAME call via the offset bookmark —
+                        // the caller must still get a real page back, not
+                        // an error or an empty response, for the call that
+                        // TRIGGERED the fallback.
+                        let offset_outcome = match fetch_offset_page(
+                            &table,
+                            &ctx,
+                            &base_query,
+                            state.offset,
+                            effective_page_size,
+                            cursor.pinned_version(),
+                        )
+                        .await
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                drop(state);
+                                return error_response(&e);
+                            }
+                        };
+                        new_offset = offset_outcome.new_offset;
+                        page = offset_outcome.result;
+                        has_more = offset_outcome.has_more;
+                        new_seek_key = None;
+                        new_tie_skip = 0;
+                        force_offset_mode = true;
                     }
                 }
-                new_offset = state.offset + fetched.records.len() as u64;
-                page = fetched;
+            }
+            _ => {
+                let outcome = match fetch_offset_page(
+                    &table,
+                    &ctx,
+                    &base_query,
+                    state.offset,
+                    effective_page_size,
+                    cursor.pinned_version(),
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        drop(state);
+                        return error_response(&e);
+                    }
+                };
+                new_offset = outcome.new_offset;
+                page = outcome.result;
+                has_more = outcome.has_more;
                 new_seek_key = None;
                 new_tie_skip = 0;
+                force_offset_mode = false;
             }
         }
 
         // CR-A5 (+ CR-B2): gate BEFORE mutating the cursor's bookmark state
-        // (seek_key/offset/exhausted) or removing it from the registry on
-        // exhaustion — a rejected page must leave the cursor exactly as it
-        // was before this call, so the client can retry `FetchNext` (e.g.
-        // with a smaller `page_size`) against an untouched bookmark instead
-        // of one that silently advanced past records it never received.
+        // (seek_key/offset/exhausted/mode) or removing it from the registry
+        // on exhaustion — a rejected page must leave the cursor exactly as
+        // it was before this call, so the client can retry `FetchNext`
+        // (e.g. with a smaller `page_size`) against an untouched bookmark
+        // instead of one that silently advanced past records it never
+        // received. This also protects CR-D1's mode flip below: a page
+        // that gets rejected here must NOT have already committed the
+        // cursor to `Offset` mode — the client retrying with a smaller
+        // `page_size` should still see the same Keyset-mode stuck
+        // condition (and get another chance at a real fallback page), not
+        // an already-flipped cursor whose triggering page was thrown away.
         // `budget_guard` (reserved upfront, before the read above) is
         // shrunk to the actual size here rather than acquired fresh.
         if let Err(e) = enforce_page_budget(self, &page, budget_guard).await {
@@ -1183,6 +1339,12 @@ impl ShamirDbHandler {
         state.tie_skip = new_tie_skip;
         state.offset = new_offset;
         state.exhausted = !has_more;
+        // CR-D1 (#782): commit the permanent keyset->offset mode switch
+        // only now that the page has cleared the budget gate — see the
+        // dispatch match above for the exactly-once correctness argument.
+        if force_offset_mode {
+            state.mode = PaginationMode::Offset;
+        }
         drop(state);
         cursor.bump_activity();
 

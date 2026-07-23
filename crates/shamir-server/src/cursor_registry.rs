@@ -92,13 +92,27 @@ pub enum CursorRegistryError {
 /// CR-A4 (#764): which coordinate system a cursor's bookmark resumes from,
 /// decided ONCE at `create_cursor` time (see [`Cursor::new`]) from whether
 /// the caller's query has a simple single-column ORDER BY — never
-/// re-derived per `FetchNext` call. Pinning the mode up front closes a
-/// latent hazard where a later page could otherwise flip coordinate
-/// systems mid-scroll (e.g. if a projection quirk made one page's
-/// `seek_key` extraction fail, silently falling back to the row-count
-/// `offset` bookmark for that page only) — a flip like that could
-/// duplicate or skip rows, since the two bookmark kinds are not
+/// re-derived OPPORTUNISTICALLY per `FetchNext` call. Pinning the mode up
+/// front closes a latent hazard where a later page could otherwise flip
+/// coordinate systems mid-scroll (e.g. if a projection quirk made one
+/// page's `seek_key` extraction fail, silently falling back to the
+/// row-count `offset` bookmark for that page only) — a flip like that
+/// could duplicate or skip rows, since the two bookmark kinds are not
 /// interchangeable positions in the same scan.
+///
+/// CR-D1 (#782, release blocker): there IS one deliberate, PERMANENT
+/// exception — `db_handler::cursor_handlers::fetch_next` flips a
+/// `Keyset`-mode cursor to `Offset` for the rest of its lifetime when the
+/// keyset retry ceiling genuinely cannot make progress (an ORDER BY tie
+/// run larger than `max_cursor_page_size`; see
+/// `cursor_handlers::KeysetOutcome::StuckAtCeiling`). This is safe and
+/// exactly-once-correct because `CursorState::offset` is maintained in
+/// parallel on the Keyset branch the whole time (it already reflects the
+/// true count of rows returned so far, independent of which mode produced
+/// them) — see `fetch_next`'s dispatch match for the full argument. This
+/// differs qualitatively from the hazard the paragraph above rules out: a
+/// single, detected-failure-condition transition, never an
+/// opportunistic/repeated per-page re-derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaginationMode {
     /// Boundary-filter seek on the single ORDER BY column (`seek_key` +

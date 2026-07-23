@@ -1391,6 +1391,186 @@ async fn keyset_tie_run_larger_than_one_page_uses_bounded_retry() {
     );
 }
 
+/// CR-D1 (#782, release blocker): a tie run STRICTLY LARGER than
+/// `max_cursor_page_size` must not livelock. Before the fix,
+/// `fetch_keyset_page`'s ceiling branch could return `usable_len == 0`
+/// (empty page, `has_more: true`) while recomputing the EXACT SAME
+/// bookmark (`seek_key`/`tie_skip`) it started with — every subsequent
+/// `FetchNext` against the cursor was then byte-identical forever, and
+/// both SDKs' drain loops retry on exactly that shape (empty page +
+/// `has_more: true`), hanging the consumer.
+///
+/// Reproduces with a SMALL `max_cursor_page_size` (8, via
+/// `CursorLimitsCap`) and a tie run of 20 rows all sharing `score: 1` —
+/// comfortably past the ceiling. Drains via a BOUNDED loop (`for _ in
+/// 0..N`, N far larger than the number of pages a correct fix could ever
+/// need) rather than `drain_seqs`'s unbounded `while has_more` — an
+/// unbounded loop against the pre-fix code would hang this test (and the
+/// whole suite) instead of failing it.
+#[tokio::test]
+async fn keyset_tie_run_exceeding_ceiling_does_not_livelock() {
+    let scores = vec![1i64; 20];
+    let cursor_limits = CursorLimitsCap {
+        max_cursor_page_size: 8,
+        ..CursorLimitsCap::UNLIMITED
+    };
+    let handler = build_handler_with_scores(&scores, cursor_limits).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "20 rows / page_size 3 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Bounded drain: at most 20 more FetchNext calls could ever be needed
+    // to exhaust 20 rows at page_size 3 (a generous upper bound, not a
+    // tight one) -- this loop terminates on the CORRECT fix (offset
+    // fallback or typed error) and would otherwise run to completion
+    // WITHOUT ever observing `has_more == false`, which the assertions
+    // below catch.
+    const MAX_ROUNDS: usize = 20;
+    let mut saw_terminal_page = false;
+    let mut hit_tie_run_error = false;
+    for round in 0..MAX_ROUNDS {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 3)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seqs.push(
+                        r.get_value_i64("seq")
+                            .expect("every row must carry a seq field"),
+                    );
+                }
+                if !has_more {
+                    saw_terminal_page = true;
+                    break;
+                }
+                // Livelock signature: an empty page with `has_more: true`
+                // repeating forever. Fail fast with a clear message rather
+                // than silently burning through `MAX_ROUNDS` iterations if
+                // this regresses again.
+                assert!(
+                    !page.records.is_empty(),
+                    "round {round}: empty page with has_more=true -- this is the CR-D1 \
+                     livelock signature (stuck at the keyset ceiling with zero progress)"
+                );
+            }
+            DbResponse::Error { code, .. } if code == "cursor_tie_run_too_large" => {
+                // Acceptable minimum per the brief: a distinct, actionable
+                // error instead of a silent infinite loop.
+                hit_tie_run_error = true;
+                break;
+            }
+            other => panic!("round {round}: expected CursorPage or a clean error, got {other:?}"),
+        }
+    }
+
+    assert!(
+        saw_terminal_page || hit_tie_run_error,
+        "cursor must either fully drain (offset-fallback fix) or surface a clean, distinct \
+         error (typed-error fallback) within {MAX_ROUNDS} rounds -- neither happened, which \
+         means it livelocked exactly as CR-D1 describes"
+    );
+
+    if saw_terminal_page {
+        seqs.sort_unstable();
+        assert_eq!(
+            seqs,
+            (0..20).collect::<Vec<i64>>(),
+            "every one of the 20 tied rows must appear exactly once once the cursor is fully \
+             drained via the offset-mode fallback"
+        );
+    }
+}
+
+/// CR-D1 (#782): exactly-once correctness of the mode-transition itself.
+/// A tie run SLIGHTLY over the ceiling (12 tied rows, cap 8) followed by 3
+/// more DISTINCT-valued rows -- draining the whole cursor must return
+/// every one of the 15 rows EXACTLY once, in the correct overall order,
+/// proving the keyset -> offset mode switch neither duplicates nor skips
+/// anything at the transition boundary (only meaningful when the
+/// offset-fallback fix is landed; a typed-error fallback would fail this
+/// test outright, which is an intentional signal of which path was taken).
+#[tokio::test]
+async fn keyset_ceiling_transition_to_offset_mode_is_exactly_once() {
+    let mut scores = vec![9i64; 12];
+    scores.push(10);
+    scores.push(11);
+    scores.push(12);
+
+    let cursor_limits = CursorLimitsCap {
+        max_cursor_page_size: 8,
+        ..CursorLimitsCap::UNLIMITED
+    };
+    let handler = build_handler_with_scores(&scores, cursor_limits).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 4)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "15 rows / page_size 4 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    drain_seqs(&handler, &session, cursor_id, 4, &mut seqs).await;
+
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (0..15).collect::<Vec<i64>>(),
+        "all 15 rows (12-row tie run over the ceiling + 3 trailing distinct rows) must surface \
+         exactly once -- proves the keyset->offset transition at the ceiling neither duplicated \
+         nor skipped a row"
+    );
+    // The scores are non-decreasing by construction (score asc, `seq`
+    // assigned in score order), so ordering by `seq` must be
+    // non-decreasing too if overall ORDER BY order was preserved straight
+    // through the mode transition. Since every score in the tie run is `9`
+    // and identical to itself, and the trailing 3 rows are strictly
+    // increasing distinct scores inserted after the tie run's `seq`
+    // range, the returned order (before the final unstable sort above)
+    // must already have been non-decreasing in `seq` across the tie-run
+    // rows collectively followed by the trailing rows in increasing `seq`
+    // order.
+    let boundary = seqs
+        .iter()
+        .position(|&s| s == 12)
+        .expect("seq 12 (first trailing distinct row) must be present");
+    assert!(
+        seqs[boundary..] == [12, 13, 14],
+        "the 3 trailing distinct-valued rows must come out in correct ORDER BY order \
+         (12, 13, 14) after the transition, got {:?}",
+        &seqs[boundary..]
+    );
+}
+
 /// Pagination mode pinned at creation: a cursor's `PaginationMode` is
 /// decided once from the ORIGINAL query and never re-derived per
 /// `FetchNext`. This is a behavioral proxy (internal state isn't exposed
