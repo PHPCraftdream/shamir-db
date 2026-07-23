@@ -5,8 +5,10 @@ name: release
 # Fires on push of a `v*` tag (e.g. `v0.1.0-alpha.1`) and produces, for that
 # exact tag:
 #
-#   1. a GATE (fmt + clippy + test, mirroring ci.yml) that every downstream
-#      job depends on, so a red gate blocks the whole release;
+#   1. a GATE (fmt + clippy + test + integration + ts-unit + ts-e2e +
+#      version-consistency; CR-B9 widened this beyond the original
+#      fmt+clippy+test) that every downstream job depends on, so a red gate
+#      blocks the whole release;
 #   2. multi-OS release binaries (Linux x86_64, macOS aarch64, Windows
 #      x86_64) packaged as versioned archives + per-archive sha256 checksums;
 #   3. a Docker image build + real smoke test (boot the container, poll
@@ -26,7 +28,20 @@ name: release
 #
 # The release is marked PRERELEASE because every tag today is an alpha
 # (CHANGELOG.md: "has not published a stable release"). Do not let it default
-# to "latest". Node/TS e2e (RI-5) is intentionally NOT wired in here.
+# to "latest".
+#
+# CR-B9: the gate was widened from fmt+clippy+test to also require
+# `integration` (ci.yml's `crates/*/tests/*.rs` suite, copied in verbatim),
+# `ts-unit` (ci.yml's TS builder/type unit tests, copied in verbatim), a new
+# `ts-e2e` job (the real TS e2e suite against a freshly-built release
+# binary, mirroring ts-e2e-nightly.yml's `ts-e2e` job), and a new
+# `version-consistency` job (tag <-> every crate's Cargo.toml version +
+# CHANGELOG.md sanity). A tag could previously ship a commit whose
+# integration/TS suites were never actually green against that exact commit,
+# or whose reported version silently mismatched the tag — this closes both
+# gaps. `node-e2e` (the napi native-binding suite from ts-e2e-nightly.yml) is
+# still intentionally NOT wired in here — it needs the MSVC-only
+# `shamir-client-node` binding excluded from this workspace.
 
 on:
   push:
@@ -45,15 +60,15 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------------
-  # GATE. Mirrors ci.yml's `fmt` + `clippy` + `test` jobs verbatim. These are
-  # duplicated inline rather than invoked via the reusable-workflow
-  # (`workflow_call`) pattern because ci.yml's triggers are deliberately
-  # push/PR-to-master only (out of scope to change), and promoting ci.yml to a
-  # reusable workflow would require restructuring its triggers/guards. The
-  # integration job is intentionally NOT re-run here — the brief scopes the
-  # release gate to fmt+clippy+test, and the docker smoke test below provides
-  # real runtime validation of the built artifact. Every downstream job
-  # `needs:` these three so a red gate blocks the whole release.
+  # GATE. Mirrors ci.yml's `fmt` + `clippy` + `test` + `integration` +
+  # `ts-unit` jobs verbatim, plus a release-only `ts-e2e` job (mirroring
+  # ts-e2e-nightly.yml's `ts-e2e`) and a release-only `version-consistency`
+  # job (CR-B9). These are duplicated inline rather than invoked via the
+  # reusable-workflow (`workflow_call`) pattern because ci.yml's triggers are
+  # deliberately push/PR-to-master only (out of scope to change), and
+  # promoting ci.yml to a reusable workflow would require restructuring its
+  # triggers/guards. Every downstream job `needs:` all seven gate jobs so a
+  # red gate blocks the whole release.
   # --------------------------------------------------------------------------
 
   fmt:
@@ -106,6 +121,251 @@ jobs:
       - run: ./scripts/test.sh --locked
         shell: bash
 
+  # Integration gate: the test files under `crates/*/tests/`. Before this
+  # job these only had to COMPILE (clippy --all-targets) — they never RAN
+  # on a PR. This includes the only real fsync-durability-across-restart
+  # coverage (`shamir-server/tests/server_meta.rs`, `persistence_e2e.rs`,
+  # `backup_restore_e2e.rs`), the in-process server↔client TLS+SCRAM e2e
+  # (`mvp_e2e.rs`, `mvp_ws_e2e.rs`, `shamir-client/tests/smoke.rs`), the
+  # connection-cap / slow-loris defences (`max_connections.rs`,
+  # `slow_loris.rs`) and the `shamir-db/tests/query_*.rs` wire-path suite.
+  #
+  # `--test '*'` selects ONLY the integration test targets. We deliberately
+  # do NOT use `--all-targets` here: that also builds and *runs* the
+  # `criterion` benches (each `bench` target has a real `fn main` via
+  # `criterion_main!`), so `cargo test --all-targets` would execute the
+  # full benchmark suites — slow and pointless as a correctness gate.
+  #
+  # Thread policy: default (parallel). Every integration test was audited
+  # to be parallel-safe — each uses its own `tempfile::TempDir` and binds
+  # TCP listeners to an ephemeral port (`127.0.0.1:0`, OS-assigned), so
+  # there are no shared-disk-path or fixed-port collisions across tests.
+  # (The one fixed-relative-path test, `storage_sled::test_sled_transact_atomic`
+  # at `./test_data/sled_transact`, is a `--lib` test gated by the `test`
+  # job above, not an integration target, and uses a path unique to that
+  # test — it does not collide with siblings.) If a future integration
+  # test introduces a shared-path/fixed-port hazard, gate it with
+  # `serial_test::#[serial]` (already a dev-dependency) rather than
+  # forcing `--test-threads=1` on the whole suite.
+  #
+  # NOTE: the Node.js napi e2e suite under `tests/e2e/` AND the TS client
+  # e2e suite (`crates/shamir-client-ts/src/__tests__/e2e-*.test.ts`) are
+  # intentionally NOT wired into this per-PR gate — both require a release
+  # `shamir-server` build (and the napi one needs the MSVC-built
+  # `shamir-client-node` binding, excluded from the workspace), too heavy
+  # for every PR. They now run on the scheduled nightly workflow
+  # `.github/workflows/ts-e2e-nightly.yml` (cron + `workflow_dispatch`).
+  # The pure-TS unit tests for `shamir-client-ts` ARE gated per-PR — see the
+  # `ts-unit` job below (the e2e-* suites self-skip there because no server
+  # binary is built in that job).
+  # Matrixed across OSes — this is the suite that actually exercises sockets,
+  # TLS+SCRAM, fsync-durability-across-restart, and the storage backends'
+  # on-disk file locking, where OS differences bite hardest.
+  #
+  # Copied verbatim from ci.yml (CR-B9): a red integration suite must block
+  # a release exactly like a red fmt/clippy/test does today — a tag could
+  # otherwise ship a commit whose integration suite was never actually
+  # green against this exact commit. Runner-cost note (CR-B9 brief): this
+  # keeps the same ubuntu/windows/macos matrix as ci.yml's `integration` job
+  # — "reuse verbatim, don't invent variants" takes precedence over a
+  # runner-minutes optimization here.
+  integration:
+    name: cargo test integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      # Pinned to the cargo-nextest version documented as the perimeter-guard
+      # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
+      # cargo-runner guard in .cargo/config.toml gates on the $NEXTEST env var
+      # that cargo-nextest sets; pinning prevents a silent future upgrade from
+      # renaming/removing it and fail-closing ALL test runs. The shorthand
+      # `taiki-e/install-action@nextest` form cannot pin a version — the
+      # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@v2
+      # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
+      # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
+      # filterset equivalent of cargo's `--test '*'` target selector; it
+      # deliberately excludes `kind(lib)` (covered by the `test` job above)
+      # and `kind(bench)` (never a correctness gate).
+      - run: ./scripts/test.sh --full --locked -E 'kind(test)'
+        shell: bash
+
+  # Pure-TypeScript unit tests for `crates/shamir-client-ts` (query
+  # builders, framing, hmac, msgpack round-trips — the
+  # `src/core/**/__tests__/*.test.ts` surface). Cheap (seconds), no Rust
+  # toolchain and no server binary needed.
+  #
+  # The TS package's `npm test` (vitest run) ALSO collects the
+  # `src/__tests__/e2e-*.test.ts` suites, but those self-skip via
+  # `describe.skipIf(!SERVER_AVAILABLE)` when no `shamir-server` release
+  # binary is resolvable (see `src/__tests__/e2e-harness.ts`'s
+  # `SERVER_AVAILABLE` / `serverBinPath()`: `SHAMIR_SERVER_BIN` →
+  # `$CARGO_TARGET_DIR/release/<exe>` → `<repo>/target/release/<exe>`).
+  # This job sets NONE of those and runs no `cargo build`, so
+  # `SERVER_AVAILABLE` is false and ONLY the pure unit tests execute — the
+  # e2e-* suites run for real in `ts-e2e-nightly.yml` instead.
+  #
+  # ubuntu-only: pure TS, no OS-specific behaviour (these tests assert wire
+  # shapes and builder output, not filesystem or socket semantics).
+  #
+  # Copied verbatim from ci.yml (CR-B9) — same rationale as `integration`
+  # above: a red TS unit suite must block a release exactly like a red
+  # fmt/clippy/test does today.
+  ts-unit:
+    name: ts unit (shamir-client-ts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22 = active LTS. `shamir-client-ts/package.json` declares
+          # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
+          # satisfies both. Pinned for reproducibility.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+      - run: npm ci && npm run typecheck && npm test
+        working-directory: crates/shamir-client-ts
+
+  # TS client e2e against a freshly-built release binary (CR-B9). Mirrors
+  # `ts-e2e-nightly.yml`'s `ts-e2e` job recipe exactly: a self-contained
+  # release build (default target, NOT `--target <triple>`, so the binary
+  # lands at the DEFAULT `target/release/shamir-server` path that
+  # `e2e-harness.ts`'s `serverBinPath()` fallback resolves with no
+  # `SHAMIR_SERVER_BIN` override needed) followed by `npm test`, which now
+  # exercises the full `e2e-*.test.ts` suite (not just the unit subset
+  # `ts-unit` above covers) since `SERVER_AVAILABLE` becomes true. This is a
+  # SEPARATE, SELF-CONTAINED build from the matrixed `build` job below —
+  # that job builds to `target/<triple>/release/` paths, and
+  # downloading+renaming a cross-job artifact into the default path the
+  # harness expects is more complexity than a second straightforward build
+  # step costs. `needs: [fmt, clippy, test]` only (same as the other gates)
+  # — it doesn't need `integration`/`ts-unit` to have passed first, they're
+  # independent checks.
+  ts-e2e:
+    name: ts client e2e (shamir-client-ts)
+    needs: [fmt, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
+      # back to at `<repo>/target/release/shamir-server`. No workflow in this
+      # repo sets `CARGO_TARGET_DIR` (grep-confirmed), so the default
+      # `target/` dir is used and the harness's fallback path resolves the
+      # binary with no `SHAMIR_SERVER_BIN` override needed. `--locked` matches
+      # ci.yml's test/integration pinning discipline (no silent lockfile
+      # drift); a no-op when Cargo.lock is current.
+      - name: Build shamir-server (release)
+        run: cargo build --release --locked -p shamir-server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+      # `SERVER_AVAILABLE` is now true (the binary exists at
+      # target/release/shamir-server), so the full `e2e-*.test.ts` suite
+      # executes instead of self-skipping. `npm test` = `vitest run`; a
+      # non-zero exit (any failed test) fails the job.
+      - name: TS client e2e (vitest)
+        run: npm ci && npm test
+        working-directory: crates/shamir-client-ts
+
+  # --------------------------------------------------------------------------
+  # tag <-> version consistency check (CR-B9)
+  # --------------------------------------------------------------------------
+  #
+  # No `needs:` deliberately — this is a fast, cheap, pure-metadata check
+  # that should fail FAST rather than sit behind the slower fmt/clippy/test/
+  # integration/ts-* jobs; it is still wired into every downstream `needs:`
+  # list below so a mismatch blocks the release exactly like the other
+  # gates.
+  #
+  # Verified facts this check is built against (see brief for detail): every
+  # crate's Cargo.toml in this workspace currently declares the SAME
+  # `version = "0.1.0-alpha.1"` (24 crates, one unique value; there is no
+  # `[workspace.package] version` field to read instead — root Cargo.toml is
+  # a pure `[workspace]` manifest). `grep` is used for version extraction
+  # (consistent with the rest of this workflow — no other job here or in
+  # ci.yml reaches for `jq`/`cargo metadata` for JSON parsing).
+  #
+  # DELIBERATE CHOICE on the CHANGELOG requirement: the brief allows either a
+  # strict "a `## [<version>]` heading must already exist" check or a looser
+  # "at minimum `[Unreleased]` or some version heading exists" check. This
+  # job takes the LOOSER form: CHANGELOG.md today has ONLY `[Unreleased]`
+  # (no per-version heading yet, confirmed against the current tree), and
+  # `github-release`'s own "Extract release notes" step already has an
+  # intentional fallback for exactly this case (falls back to a generic
+  # "Pre-release build of ${GITHUB_REF_NAME}" note). Requiring a heading here
+  # would be STRICTER than that existing, intentional fallback allows, and
+  # would make this job permanently red until a human adds the heading in
+  # the same commit being tagged. So: this check only fails if CHANGELOG.md
+  # has NEITHER an `[Unreleased]` section NOR any `## [x.y.z...]` version
+  # heading at all — i.e. it catches a truly empty/gutted changelog, not the
+  # documented "first release has no per-version section yet" state.
+  # No `needs:` — GitHub Actions has no "explicit empty deps" syntax (an
+  # empty `needs: []` array is rejected by workflow syntax validation); a
+  # job with no `needs:` key already runs immediately as soon as the
+  # workflow starts, which is exactly "no dependencies, fail fast" for this
+  # job.
+  version-consistency:
+    name: tag <-> crate version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - name: Check every crate version matches the pushed tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "tag=${GITHUB_REF_NAME} -> expected crate version=${TAG_VERSION}"
+
+          VERSIONS="$(grep -rn '^version' crates/*/Cargo.toml | sed -E 's/.*version = "([^"]+)".*/\1/' | sort -u)"
+          COUNT="$(printf '%s\n' "${VERSIONS}" | grep -c . || true)"
+
+          echo "--- distinct crate versions found ---"
+          printf '%s\n' "${VERSIONS}"
+
+          if [ "${COUNT}" != "1" ]; then
+            echo "::error::crate versions are not all identical across the workspace (found ${COUNT} distinct values) — a crate was likely bumped independently by mistake"
+            exit 1
+          fi
+
+          CRATE_VERSION="$(printf '%s\n' "${VERSIONS}" | head -n1)"
+
+          if [ "${CRATE_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::pushed tag ${GITHUB_REF_NAME} (version ${TAG_VERSION}) does not match the workspace crate version ${CRATE_VERSION}"
+            exit 1
+          fi
+
+          echo "OK: all crates declare ${CRATE_VERSION}, matching tag ${GITHUB_REF_NAME}"
+      - name: Check CHANGELOG.md has appropriate content
+        # Looser form per the deliberate choice documented above: pass if
+        # CHANGELOG.md contains EITHER an `[Unreleased]` section OR a
+        # `## [x.y.z...]` version heading (matching this tag or any other) —
+        # only fail on a changelog with neither, which would indicate the
+        # file was gutted/corrupted rather than simply not-yet-cut.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -qE '^## \[Unreleased\]' CHANGELOG.md || grep -qE '^## \[[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md; then
+            echo "OK: CHANGELOG.md has an [Unreleased] section and/or a version heading"
+          else
+            echo "::error::CHANGELOG.md has neither an [Unreleased] section nor any '## [x.y.z...]' version heading"
+            exit 1
+          fi
+
   # --------------------------------------------------------------------------
   # 2. MULTI-OS RELEASE BINARY BUILD + PACKAGE + CHECKSUM
   # --------------------------------------------------------------------------
@@ -132,7 +392,7 @@ jobs:
 
   build:
     name: build (${{ matrix.target }})
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -223,7 +483,7 @@ jobs:
 
   docker:
     name: docker build + smoke test
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
@@ -327,7 +587,7 @@ jobs:
 
   sbom:
     name: cargo cyclonedx (SBOM)
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
@@ -372,7 +632,7 @@ jobs:
 
   sign:
     name: cosign sign (keyless)
-    needs: [fmt, clippy, test, build]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, build]
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for keyless cosign (GitHub OIDC)
@@ -425,11 +685,25 @@ jobs:
 
   github-release:
     name: create GitHub Release
-    # Needs the gate (fmt+clippy+test) explicitly AND build/docker/sbom/sign.
-    # The gate is also transitively required via the other four, but the brief
-    # specifies the final job `needs:` the gate directly — listing it makes a
-    # red gate's "block the whole release" semantics explicit, not implicit.
-    needs: [fmt, clippy, test, build, docker, sbom, sign]
+    # Needs the full gate (fmt+clippy+test+integration+ts-unit+ts-e2e+
+    # version-consistency) explicitly AND build/docker/sbom/sign. The gate is
+    # also transitively required via the other four, but the brief specifies
+    # the final job `needs:` the gate directly — listing it makes a red
+    # gate's "block the whole release" semantics explicit, not implicit.
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        integration,
+        ts-unit,
+        ts-e2e,
+        version-consistency,
+        build,
+        docker,
+        sbom,
+        sign,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create a release on the pushed tag
