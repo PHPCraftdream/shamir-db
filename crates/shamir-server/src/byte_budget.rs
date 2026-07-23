@@ -20,16 +20,23 @@
 //!
 //! # Usage
 //!
-//! `ShamirDbHandler::execute` acquires a [`ByteBudgetGuard`] for the actual
-//! serialized size of the response it is about to return (constraint: the
-//! gate reserves the REAL size, not the `max_result_size_bytes` upper
-//! bound — reserving the cap upfront would under-utilize the budget by the
-//! cap-to-actual ratio). The guard is threaded through
+//! CR-B2: `ShamirDbHandler::execute` acquires a [`ByteBudgetGuard`] UPFRONT,
+//! before the batch executes, using a pessimistic estimate — the batch's
+//! (server-clamped) `max_result_size` — so the budget actually gates
+//! EXECUTION-time memory, not just how long a serialized response sits on
+//! the write path. Once the final `DbResponse` is known, the reservation is
+//! narrowed down to the real serialized size via [`ByteBudgetGuard::shrink_to`]
+//! (a bounded few-byte overshoot past the estimate is absorbed via
+//! [`ByteBudgetGuard::grow_unchecked`] rather than a second blocking
+//! acquire). The guard is threaded through
 //! `connection::request_loop::WriterMsg::{Reply,ReplyAndClose}` and dropped
 //! only after the writer task finishes the socket write (success or
-//! error) — so the accounted bytes stay "reserved" for exactly as long as
-//! they occupy memory on the write path, and the release always happens on
-//! the writer task, never the dispatch task.
+//! error) — so the accounted (now-shrunk) bytes stay "reserved" for exactly
+//! as long as they occupy memory on the write path, and the release always
+//! happens on the writer task, never the dispatch task. The cursor path
+//! (`db_handler::cursor_handlers::enforce_page_budget`) mirrors this same
+//! upfront-reserve-then-shrink shape whenever a per-page size cap is
+//! actively configured.
 //!
 //! # Fairness
 //!
@@ -205,6 +212,70 @@ impl Drop for ByteBudgetGuard {
     }
 }
 
+impl ByteBudgetGuard {
+    /// Bytes currently reserved by this guard (what `Drop`/`shrink_to`'s
+    /// delta math is relative to). Used by callers that need to compare
+    /// the reservation against an actual size before deciding whether to
+    /// [`Self::shrink_to`] or [`Self::grow_unchecked`] (CR-B2's overshoot
+    /// case).
+    pub fn bytes_reserved(&self) -> usize {
+        self.bytes
+    }
+
+    /// Narrow this reservation down from a pessimistic upfront estimate to
+    /// the actual size, once known (CR-B2 — upfront-reserve-then-shrink).
+    ///
+    /// Shrink-only: a no-op when `self.inner` is `None` (unbounded budget)
+    /// or when `new_bytes >= self.bytes` — this reservation scheme only
+    /// ever estimates HIGH then narrows DOWN, so `new_bytes` should always
+    /// be `<= self.bytes` at every intended call site, but treating the
+    /// edge case as a no-op (rather than panicking or silently growing) is
+    /// the defensive choice. Use [`Self::grow_unchecked`] for the rare
+    /// legitimate overshoot case instead.
+    ///
+    /// Releases `delta = self.bytes - new_bytes` back to the budget and
+    /// wakes any parked waiters (same release pattern `Drop` uses), then
+    /// updates `self.bytes` so a later `Drop` releases only the remaining
+    /// (already-shrunk) amount — never double-releasing the shrunk delta.
+    pub fn shrink_to(&mut self, new_bytes: usize) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if new_bytes >= self.bytes {
+            return;
+        }
+        let delta = self.bytes - new_bytes;
+        inner.used.fetch_sub(delta, Ordering::AcqRel);
+        inner.notify.notify_waiters();
+        self.bytes = new_bytes;
+    }
+
+    /// Add `extra_bytes` to this reservation UNCONDITIONALLY — no waiting,
+    /// no cap check (CR-B2 — the bounded, few-bytes-of-envelope-framing
+    /// overshoot case: the final serialized `DbResponse` can be a handful
+    /// of bytes larger than the raw pessimistic estimate it was reserved
+    /// against, e.g. enum discriminator framing on top of the inner
+    /// payload).
+    ///
+    /// Deliberately does NOT re-acquire via a blocking `acquire().await` —
+    /// the response is already computed at this point, and blocking here
+    /// risks deadlocking against the very budget this guard already holds
+    /// a slice of. This is a documented, bounded overshoot (a few bytes of
+    /// framing, never unbounded), not a general-purpose growth mechanism.
+    ///
+    /// A no-op when `self.inner` is `None` (unbounded budget).
+    pub fn grow_unchecked(&mut self, extra_bytes: usize) {
+        let Some(inner) = &self.inner else {
+            return;
+        };
+        if extra_bytes == 0 {
+            return;
+        }
+        inner.used.fetch_add(extra_bytes, Ordering::AcqRel);
+        self.bytes += extra_bytes;
+    }
+}
+
 tokio::task_local! {
     /// Side-channel that carries a just-acquired [`ByteBudgetGuard`] out of
     /// `db_handler::handler::ShamirDbHandler::execute` to the dispatch task
@@ -224,12 +295,21 @@ tokio::task_local! {
     pub(crate) static PENDING_RESPONSE_BUDGET_GUARD: RefCell<Option<ByteBudgetGuard>>;
 }
 
-/// Run `fut` with a fresh, empty [`PENDING_RESPONSE_BUDGET_GUARD`] slot
-/// scoped to it. Call this once per dispatched request, wrapping the same
-/// future that (transitively) calls `ShamirDbHandler::execute`.
+/// Run `fut` with fresh, empty [`PENDING_RESPONSE_BUDGET_GUARD`] AND
+/// [`PENDING_SERIALIZED_RESPONSE`] slots scoped to it. Call this once per
+/// dispatched request, wrapping the same future that (transitively) calls
+/// `ShamirDbHandler::execute`.
+///
+/// Both task-locals are scoped together here (nested `.scope()` calls) so
+/// callers only need to remember one entry point — mirrors the existing
+/// single-guard-slot pattern rather than introducing a second, divergent
+/// "remember to scope this too" call site.
 pub async fn run_with_guard_slot<F: std::future::Future>(fut: F) -> F::Output {
     PENDING_RESPONSE_BUDGET_GUARD
-        .scope(RefCell::new(None), fut)
+        .scope(
+            RefCell::new(None),
+            PENDING_SERIALIZED_RESPONSE.scope(RefCell::new(None), fut),
+        )
         .await
 }
 
@@ -259,6 +339,46 @@ pub(crate) fn stash_guard(guard: ByteBudgetGuard) {
 /// batch (version/permission/read-only gates).
 pub(crate) fn take_stashed_guard() -> Option<ByteBudgetGuard> {
     PENDING_RESPONSE_BUDGET_GUARD
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten()
+}
+
+tokio::task_local! {
+    /// CR-B2 — side-channel that carries the msgpack bytes
+    /// `ShamirDbHandler::execute` already serialized (to shrink the RI-15
+    /// reservation to the actual size) out to `RequestHandler::handle`, so
+    /// the SAME response is never serialized a second time for the wire.
+    ///
+    /// Mirrors [`PENDING_RESPONSE_BUDGET_GUARD`]'s exact scoping: both live
+    /// in the same per-request dispatch task, scoped together by
+    /// [`run_with_guard_slot`], so this is never shared across concurrent
+    /// requests.
+    pub(crate) static PENDING_SERIALIZED_RESPONSE: RefCell<Option<Vec<u8>>>;
+}
+
+/// Called from inside `ShamirDbHandler::execute` right after serializing the
+/// final `DbResponse` (whether success or error) to measure its actual size
+/// for the RI-15 shrink step. Overwrites any previously stashed bytes for
+/// this request (there is at most one response per dispatched request).
+///
+/// Outside a [`run_with_guard_slot`] scope this is a silent no-op — the
+/// bytes are simply dropped, and the caller falls back to serializing fresh
+/// (see [`take_stashed_serialized_response`]).
+pub(crate) fn stash_serialized_response(bytes: Vec<u8>) {
+    let _ = PENDING_SERIALIZED_RESPONSE.try_with(|cell| {
+        *cell.borrow_mut() = Some(bytes);
+    });
+}
+
+/// Called from `RequestHandler::handle` right before it would otherwise
+/// serialize `response` fresh for the wire. Returns the bytes
+/// `ShamirDbHandler::execute` already produced for this SAME response value
+/// — or `None` when the request never went through `execute`'s stash point
+/// (`Ping`, `CreateScramUser`, cursor ops, etc.), in which case the caller
+/// falls through to its existing fresh-serialize path.
+pub(crate) fn take_stashed_serialized_response() -> Option<Vec<u8>> {
+    PENDING_SERIALIZED_RESPONSE
         .try_with(|cell| cell.borrow_mut().take())
         .ok()
         .flatten()

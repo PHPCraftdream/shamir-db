@@ -75,7 +75,7 @@ use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
 
-use crate::byte_budget::{stash_guard, ByteBudget};
+use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudget};
 
 // Wire DTOs are defined once in `shamir-query-types::wire` so that the
 // SDK (`shamir-client`) and the server share the same definition. Re-
@@ -440,6 +440,18 @@ impl RequestHandler for ShamirDbHandler {
                 }
             };
 
+            // CR-B2: `ShamirDbHandler::execute` already serialized this
+            // exact `response` value once (to shrink its upfront RI-15
+            // reservation down to the actual size) and stashed those bytes
+            // via `stash_serialized_response`. Reuse them here instead of
+            // encoding a second time — every OTHER dispatch arm above
+            // (`Ping`, `ChangePassword*`, cursor ops, etc.) never stashes
+            // anything, so this naturally falls through to the fresh
+            // serialize for them.
+            if let Some(bytes) = crate::byte_budget::take_stashed_serialized_response() {
+                return Ok(bytes);
+            }
+
             rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
         })
     }
@@ -531,9 +543,32 @@ impl ShamirDbHandler {
             };
         }
 
+        // RI-15 (CR-B2) — reserve an upfront, pessimistic estimate from the
+        // global in-flight response-byte budget BEFORE execution begins,
+        // using `batch.limits.max_result_size` (already clamped to the
+        // server-side cap a few lines above) as the estimate. This is what
+        // actually bounds EXECUTION-time memory (not just write-path
+        // residency): N concurrent requests can no longer all run to
+        // completion and materialize their full result before any of them
+        // is throttled — the (N+1)-th request now blocks HERE, before
+        // `execute_as` ever runs, once the budget is saturated.
+        //
+        // Deliberately placed AFTER every cheap, budget-free fast-reject
+        // above (version check, admin gate, read-only gate, HMAC gate) —
+        // those should stay free of any budget interaction. The guard is
+        // held locally for the rest of this function and shrunk to the
+        // ACTUAL serialized size once the final response is known (see the
+        // single tail below), rather than stashed immediately: stashing
+        // happens exactly once, at the end, same as before this change.
+        let mut budget_guard = if self.byte_budget.cap().is_some() {
+            Some(self.byte_budget.acquire(batch.limits.max_result_size).await)
+        } else {
+            None
+        };
+
         let actor = session_actor(session);
         let exec_result = self.db.execute_as(actor.clone(), db_name, &batch).await;
-        match exec_result {
+        let final_response = match exec_result {
             Ok(mut response) => {
                 // Slow-query logging: WARN line for batches whose total
                 // execution time exceeds the configured threshold. Useful
@@ -561,41 +596,70 @@ impl ShamirDbHandler {
                     actor.clone(),
                 );
 
-                // RI-15 — global in-flight response-byte budget. Measures
-                // the ACTUAL serialized size of this response (not the
-                // `max_result_size_bytes` upper bound — reserving the cap
-                // upfront would under-utilize the budget by the
-                // cap-to-actual ratio) and acquires that many bytes from
-                // the server-wide budget. When the budget is unbounded
-                // (`ByteBudget::unbounded`, the default) `acquire` returns
-                // instantly without serializing anything.
-                //
-                // The guard is stashed in a task-local
-                // (`byte_budget::stash_guard`) rather than returned from
-                // this function: `execute`'s return type is `DbResponse`
-                // (asserted on directly by tests) and the caller,
-                // `RequestHandler::handle`, has a fixed
-                // `Result<Vec<u8>, String>` signature owned by
-                // `shamir-connect`. `connection::request_loop` retrieves the
-                // guard with `byte_budget::take_stashed_guard` right after
-                // the dispatch future resolves and rides it inside
-                // `WriterMsg::{Reply,ReplyAndClose}` so the release happens
-                // in the writer task, after the socket write completes —
-                // never in this dispatch task.
-                if self.byte_budget.cap().is_some() {
-                    if let Ok(bytes) = rmp_serde::to_vec_named(&response) {
-                        let guard = self.byte_budget.acquire(bytes.len()).await;
-                        stash_guard(guard);
-                    }
-                }
-
                 DbResponse::Batch { response }
             }
             Err(e) => DbResponse::Error {
                 code: error_code(&e).to_string(),
                 message: e.to_string(),
             },
+        };
+
+        // RI-15 (CR-B2) — single convergence point for BOTH the success and
+        // error paths: serialize the final `DbResponse` envelope exactly
+        // ONCE, shrink the upfront reservation down to that actual size
+        // (an error response's tiny actual size still needs its pessimistic
+        // over-reservation narrowed back down), then stash both the guard
+        // and the already-serialized bytes so `RequestHandler::handle`
+        // reuses them instead of encoding the SAME response a second time.
+        //
+        // The guard is stashed in a task-local (`byte_budget::stash_guard`)
+        // rather than returned from this function: `execute`'s return type
+        // is `DbResponse` (asserted on directly by tests) and the caller,
+        // `RequestHandler::handle`, has a fixed `Result<Vec<u8>, String>`
+        // signature owned by `shamir-connect`. `connection::request_loop`
+        // retrieves the guard with `byte_budget::take_stashed_guard` right
+        // after the dispatch future resolves and rides it inside
+        // `WriterMsg::{Reply,ReplyAndClose}` so the release happens in the
+        // writer task, after the socket write completes — never in this
+        // dispatch task.
+        if budget_guard.is_some() || self.byte_budget.cap().is_some() {
+            if let Ok(bytes) = rmp_serde::to_vec_named(&final_response) {
+                if let Some(guard) = budget_guard.as_mut() {
+                    // Overshoot edge case: the final `DbResponse` envelope
+                    // can serialize a handful of bytes LARGER than the raw
+                    // `max_result_size` estimate reserved above (enum
+                    // discriminator framing on top of the inner payload) —
+                    // `shrink_to` is a no-op in that case, so absorb the
+                    // (bounded) shortfall via `grow_unchecked` instead of
+                    // under-reserving.
+                    if bytes.len() >= guard.bytes_reserved() {
+                        guard.grow_unchecked(bytes.len() - guard.bytes_reserved());
+                    } else {
+                        guard.shrink_to(bytes.len());
+                    }
+                } else {
+                    // No upfront guard existed (budget became active only
+                    // after execution started — a boot-time-fixed config in
+                    // practice, but defend against the theoretical race
+                    // rather than silently skip accounting): fall back to
+                    // acquiring for the actual size now, same as the
+                    // pre-CR-B2 behavior.
+                    budget_guard = Some(self.byte_budget.acquire(bytes.len()).await);
+                }
+                if let Some(guard) = budget_guard {
+                    stash_guard(guard);
+                }
+                stash_serialized_response(bytes);
+            } else if let Some(guard) = budget_guard {
+                // Serialization failed: nothing to shrink to or reuse —
+                // release the upfront reservation as-is (mirrors the
+                // pre-CR-B2 behavior of simply skipping the acquire on a
+                // serialize failure).
+                stash_guard(guard);
+            }
         }
+
+        final_response
     }
 
     /// Walk through `batch.queries` and record CreateTable/DropTable ops in

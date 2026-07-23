@@ -105,7 +105,7 @@ use shamir_query_types::wire::CursorId;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
-use crate::byte_budget::stash_guard;
+use crate::byte_budget::{stash_guard, ByteBudgetGuard};
 use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
 
 use super::handler::{session_actor, DbResponse, ShamirDbHandler};
@@ -189,15 +189,56 @@ fn error_response(e: &BatchError) -> DbResponse {
     }
 }
 
-/// CR-A5: gate a cursor page against BOTH the per-page byte-size cap
-/// (`query_limits.max_result_size_bytes`) and the RI-15 global in-flight
+/// CR-B2: reserve an upfront, pessimistic slice of the RI-15 global
+/// in-flight response-byte budget BEFORE running the pinned-version read for
+/// a cursor page, using `handler.query_limits.max_result_size_bytes` (the
+/// natural upper bound for one page — `CursorPageTooLarge` already rejects
+/// anything past it) as the estimate.
+///
+/// Returns `None` when there is no natural upfront estimate to reserve
+/// against — either the RI-15 budget is unbounded (nothing to gate) or the
+/// per-page size cap itself is inactive (`usize::MAX`, e.g. some unit-test
+/// configs): inventing an estimate out of nothing in that case would be
+/// over-engineering an unbounded case (mirrors the brief's own CR-A4
+/// precedent for not fabricating bounds that don't exist). Callers fall
+/// back to [`enforce_page_budget`]'s existing post-hoc-only acquire in that
+/// case.
+async fn reserve_page_budget_upfront(handler: &ShamirDbHandler) -> Option<ByteBudgetGuard> {
+    let budget_active = handler.byte_budget.cap().is_some();
+    let cap_active = handler.query_limits.max_result_size_bytes < usize::MAX;
+    if !budget_active || !cap_active {
+        return None;
+    }
+    Some(
+        handler
+            .byte_budget
+            .acquire(handler.query_limits.max_result_size_bytes)
+            .await,
+    )
+}
+
+/// CR-A5 (+ CR-B2): gate a cursor page against BOTH the per-page byte-size
+/// cap (`query_limits.max_result_size_bytes`) and the RI-15 global in-flight
 /// response-byte budget, mirroring `ShamirDbHandler::execute`'s exact block
 /// (`handler.rs`'s `DbRequest::Execute` path) — measure the serialized
 /// `page` ONCE (matching `execute()`'s choice to measure the payload alone,
 /// i.e. `BatchResponse`/here `QueryResult`, not the full `DbResponse`
-/// envelope), then either reject (too large — no budget acquired, there is
-/// nothing to write) or acquire from `self.byte_budget` and stash the guard
-/// for the writer task to release after the socket write completes.
+/// envelope), then either reject (too large — no budget acquired/held,
+/// there is nothing to write) or finalize the budget reservation and stash
+/// the guard for the writer task to release after the socket write
+/// completes.
+///
+/// `upfront_guard` is whatever [`reserve_page_budget_upfront`] already
+/// reserved before the page was built (`Some` when both gates were active
+/// at that point) — this function SHRINKS it down to the actual serialized
+/// size rather than acquiring fresh. When `upfront_guard` is `None` (the
+/// per-page cap was inactive, so there was no natural upfront estimate),
+/// this falls back to the pre-CR-B2 post-hoc-only acquire.
+///
+/// The too-large rejection check itself is unchanged by CR-B2: it still
+/// runs only after the real page is built (it inherently needs the actual
+/// size) — the upfront reserve only affects WHEN the RI-15 budget is
+/// acquired, never the `CursorPageTooLarge` rejection logic.
 ///
 /// Returns `Err(too_large_error)` when the page must be rejected; `Ok(())`
 /// when the caller may proceed to return the `CursorPage` response (a guard
@@ -205,6 +246,7 @@ fn error_response(e: &BatchError) -> DbResponse {
 async fn enforce_page_budget(
     handler: &ShamirDbHandler,
     page: &QueryResult,
+    upfront_guard: Option<ByteBudgetGuard>,
 ) -> Result<(), BatchError> {
     // Only serialize when at least one of the two gates is actually active —
     // an unbounded budget AND an effectively-unlimited size cap (the UNIT
@@ -220,11 +262,16 @@ async fn enforce_page_budget(
         // Mirrors `execute()`: a serialization failure here is swallowed
         // (the `if let Ok(...)` in `execute()` silently skips the acquire
         // on `Err`) rather than treated as a hard error — the response
-        // still goes out, just without budget accounting for it.
+        // still goes out, just without budget accounting for it. Any
+        // upfront reservation is simply dropped as-is (releasing the
+        // pessimistic estimate untouched).
         return Ok(());
     };
 
     if cap_active && bytes.len() > handler.query_limits.max_result_size_bytes {
+        // Rejected — no budget is acquired/held for a page that is never
+        // going out over the wire. Drop any upfront reservation (releases
+        // it back to the budget via `ByteBudgetGuard::Drop`).
         return Err(BatchError::CursorPageTooLarge {
             size: bytes.len(),
             max: handler.query_limits.max_result_size_bytes,
@@ -232,7 +279,26 @@ async fn enforce_page_budget(
     }
 
     if budget_active {
-        let guard = handler.byte_budget.acquire(bytes.len()).await;
+        let guard = match upfront_guard {
+            Some(mut guard) => {
+                // Overshoot edge case (CR-B2, mirrors `execute()`'s
+                // handling): the per-page cap and the actual serialized
+                // size are two independently-configured numbers, so in
+                // principle `bytes.len()` could exceed what was reserved
+                // upfront (e.g. an operator changed the cap between the
+                // upfront reserve and this point in a hot-reload scenario) —
+                // guard against that with `grow_unchecked` rather than
+                // assume `shrink_to`'s no-op-on-grow branch is always safe
+                // to silently under-reserve through.
+                if bytes.len() >= guard.bytes_reserved() {
+                    guard.grow_unchecked(bytes.len() - guard.bytes_reserved());
+                } else {
+                    guard.shrink_to(bytes.len());
+                }
+                guard
+            }
+            None => handler.byte_budget.acquire(bytes.len()).await,
+        };
         stash_guard(guard);
     }
 
@@ -694,6 +760,15 @@ impl ShamirDbHandler {
             at: At::Version(pinned_version),
         };
 
+        // CR-B2: reserve an upfront, pessimistic slice of the RI-15 budget
+        // BEFORE running the pinned-version read below — this is what
+        // actually bounds execution-time memory for a cursor page, not
+        // just write-path residency. `None` when there's no natural
+        // upfront estimate (unbounded budget or inactive per-page cap);
+        // `enforce_page_budget` falls back to its post-hoc-only acquire in
+        // that case.
+        let budget_guard = reserve_page_budget_upfront(self).await;
+
         let page = match table
             .read_with_encoding(&first_query, &ctx, Default::default())
             .await
@@ -702,15 +777,17 @@ impl ShamirDbHandler {
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
 
-        // CR-A5: gate the page against the per-page byte-size cap and the
-        // RI-15 global byte budget BEFORE deciding whether to register the
-        // cursor — a rejected page must not mint a registered cursor (there
-        // is nothing to `FetchNext` against; the client never receives this
-        // page's bytes at all), and this covers BOTH success returns below
-        // (the CR-A2 "exhausted first page, not registered" early return and
-        // the normal registered return) since both hand the SAME `page` back
-        // over the wire.
-        if let Err(e) = enforce_page_budget(self, &page).await {
+        // CR-A5 (+ CR-B2): gate the page against the per-page byte-size cap
+        // and the RI-15 global byte budget BEFORE deciding whether to
+        // register the cursor — a rejected page must not mint a registered
+        // cursor (there is nothing to `FetchNext` against; the client never
+        // receives this page's bytes at all), and this covers BOTH success
+        // returns below (the CR-A2 "exhausted first page, not registered"
+        // early return and the normal registered return) since both hand
+        // the SAME `page` back over the wire. `budget_guard` (reserved
+        // upfront, before the read above) is shrunk to the actual size here
+        // rather than acquired fresh.
+        if let Err(e) = enforce_page_budget(self, &page, budget_guard).await {
             return error_response(&e);
         }
 
@@ -896,6 +973,15 @@ impl ShamirDbHandler {
         // ORDER BY field was absent from a page's projection) falls back
         // to the row-count bookmark for THIS call only, matching the
         // pre-CR-A4 "can't build a seek from this page" safety net.
+        // CR-B2: reserve an upfront, pessimistic slice of the RI-15 budget
+        // BEFORE running the pinned-version read below (either branch of
+        // the match) — bounds execution-time memory for this page, not
+        // just write-path residency. `None` when there's no natural
+        // upfront estimate (unbounded budget or inactive per-page cap);
+        // `enforce_page_budget` falls back to its post-hoc-only acquire in
+        // that case.
+        let budget_guard = reserve_page_budget_upfront(self).await;
+
         let (page, new_seek_key, new_tie_skip, has_more, new_offset);
         match (state.mode, state.seek_key.clone()) {
             (PaginationMode::Keyset, Some(seek_key)) => {
@@ -950,13 +1036,15 @@ impl ShamirDbHandler {
             }
         }
 
-        // CR-A5: gate BEFORE mutating the cursor's bookmark state
+        // CR-A5 (+ CR-B2): gate BEFORE mutating the cursor's bookmark state
         // (seek_key/offset/exhausted) or removing it from the registry on
         // exhaustion — a rejected page must leave the cursor exactly as it
         // was before this call, so the client can retry `FetchNext` (e.g.
         // with a smaller `page_size`) against an untouched bookmark instead
         // of one that silently advanced past records it never received.
-        if let Err(e) = enforce_page_budget(self, &page).await {
+        // `budget_guard` (reserved upfront, before the read above) is
+        // shrunk to the actual size here rather than acquired fresh.
+        if let Err(e) = enforce_page_budget(self, &page, budget_guard).await {
             drop(state);
             return error_response(&e);
         }

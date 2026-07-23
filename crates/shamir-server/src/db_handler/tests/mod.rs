@@ -1,4 +1,5 @@
 pub mod byte_budget_exhaustion_tests;
+pub mod byte_budget_upfront_reserve_tests;
 pub mod cursor_byte_budget_tests;
 pub mod cursor_handler_tests;
 pub mod node_mode_tests;

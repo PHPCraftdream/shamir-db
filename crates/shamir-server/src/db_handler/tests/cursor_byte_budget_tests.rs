@@ -270,6 +270,146 @@ async fn cursor_page_guard_released_on_simulated_write_error_recovers_budget() {
 }
 
 // ---------------------------------------------------------------------------
+// CR-B2 — upfront-reserve-then-shrink parity for the cursor path
+// (`enforce_page_budget` via `reserve_page_budget_upfront`).
+// ---------------------------------------------------------------------------
+
+/// With an ACTIVE per-page size cap (`max_result_size_bytes` <
+/// `usize::MAX`), `FetchNext` reserves upfront using that cap as the
+/// pessimistic estimate BEFORE running the pinned-version read for the
+/// page — mirrors `byte_budget_upfront_reserve_tests`'s proof for the
+/// `Execute` path, exercised through `FetchNext` instead.
+///
+/// A budget cap sized for exactly ONE page's upfront estimate: a second,
+/// concurrent `FetchNext` must block (its execution, not just its write)
+/// until the first page's guard is released — proving the reservation
+/// happens before the page is built, not after.
+#[tokio::test]
+async fn fetch_next_upfront_reserve_blocks_second_page_before_it_completes() {
+    let one_page = measure_one_page_size(50, 2).await;
+    assert!(one_page > 0, "sanity: page must be non-empty");
+
+    // Tight cap close to the actual page size (not a loose multiple) so the
+    // upfront estimate and the actual size stay close together — same
+    // rationale as `byte_budget_upfront_reserve_tests`'s cap sizing.
+    let max_result_size_bytes = one_page + one_page / 10;
+    let budget = ByteBudget::new(Some(max_result_size_bytes));
+    let query_limits = QueryLimitsCap {
+        max_result_size_bytes,
+        ..QueryLimitsCap::UNLIMITED
+    };
+    let handler = Arc::new(build_handler(50, budget.clone(), query_limits).await);
+
+    // Open the cursor first (its own first page must fit the cap too, since
+    // CreateCursor goes through the identical `enforce_page_budget` gate).
+    let session = alice_session();
+    let (resp0, guard0) = send_with_guard(&handler, &session, create_cursor_req(2)).await;
+    let cursor_id = match resp0 {
+        DbResponse::CursorPage {
+            cursor_id,
+            has_more,
+            ..
+        } => {
+            assert!(has_more, "48 of 50 rows remain after the first page");
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+    drop(guard0);
+    assert_eq!(
+        budget.used(),
+        0,
+        "the first page's guard must be released before the blocking assertions below"
+    );
+
+    // First FetchNext: hold its guard WITHOUT dropping it (simulates a page
+    // still in flight on the write path).
+    let (resp1, guard1) = send_with_guard(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    assert!(matches!(resp1, DbResponse::CursorPage { .. }));
+    let guard1 = guard1.expect("bounded budget must stash a guard");
+    assert!(
+        budget.used() > 0,
+        "first FetchNext's (shrunk) reservation must still be held"
+    );
+
+    // A second, concurrent FetchNext must now be blocked — its execution
+    // cannot proceed because the upfront acquire for its own page-size
+    // estimate cannot fit alongside the first (still-held) reservation.
+    let handler_clone = Arc::clone(&handler);
+    let second = tokio::spawn(async move {
+        let session = alice_session();
+        send_with_guard(&handler_clone, &session, fetch_next_req(cursor_id, 2)).await
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !second.is_finished(),
+        "second FetchNext's EXECUTION must be blocked at the upfront acquire — the R-2 proof \
+         applied to the cursor path: without the fix, `enforce_page_budget` only acquires AFTER \
+         the page is built, so this task would already have completed regardless of the tiny cap"
+    );
+
+    // Releasing the first guard frees enough room for the second's upfront
+    // reservation to proceed.
+    drop(guard1);
+
+    let (resp2, guard2) = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("second FetchNext must unblock once the first guard is released")
+        .expect("dispatch task must not panic");
+    assert!(matches!(resp2, DbResponse::CursorPage { .. }));
+    let guard2 = guard2.expect("bounded budget must stash a guard");
+    drop(guard2);
+    assert_eq!(budget.used(), 0);
+}
+
+/// After a `FetchNext` completes, `budget.used()` reflects the ACTUAL page
+/// size, not the (larger) upfront `max_result_size_bytes` estimate — proves
+/// `enforce_page_budget`'s `shrink_to` call ran end-to-end.
+#[tokio::test]
+async fn fetch_next_shrinks_upfront_reservation_to_actual_page_size() {
+    let one_page = measure_one_page_size(50, 2).await;
+
+    // A deliberately generous cap — much bigger than the actual 2-row page
+    // — so the upfront estimate and the actual size are clearly
+    // distinguishable.
+    let max_result_size_bytes = one_page * 20;
+    let budget = ByteBudget::new(Some(max_result_size_bytes * 2));
+    let query_limits = QueryLimitsCap {
+        max_result_size_bytes,
+        ..QueryLimitsCap::UNLIMITED
+    };
+    let handler = build_handler(50, budget.clone(), query_limits).await;
+
+    let session = alice_session();
+    let (resp0, guard0) = send_with_guard(&handler, &session, create_cursor_req(2)).await;
+    let cursor_id = match resp0 {
+        DbResponse::CursorPage { cursor_id, .. } => cursor_id,
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+    drop(guard0);
+    assert_eq!(budget.used(), 0);
+
+    let (resp1, guard1) = send_with_guard(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    assert!(matches!(resp1, DbResponse::CursorPage { .. }));
+    let guard1 = guard1.expect("bounded budget must stash a guard");
+
+    let used = budget.used();
+    assert!(
+        used < max_result_size_bytes,
+        "budget.used() ({used}) must reflect the SHRUNK actual page size, not the upfront \
+         estimate ({max_result_size_bytes})"
+    );
+    assert!(
+        used + 16 >= one_page,
+        "budget.used() ({used}) must be roughly the actual page size ({one_page})"
+    );
+
+    drop(guard1);
+    assert_eq!(budget.used(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // Per-page byte-size cap (`query_limits.max_result_size_bytes`).
 // ---------------------------------------------------------------------------
 
